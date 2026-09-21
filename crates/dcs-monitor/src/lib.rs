@@ -1063,6 +1063,9 @@ impl<'d> Monitor<'d> {
         for (index, receipt) in peer.take_superseded_commands() {
             recorder.note_settled(Some(index), receipt, peer.tick());
         }
+        for (prior, index, receipt) in peer.take_rehomed_receipts() {
+            recorder.note_rehomed(prior, index, receipt, peer.tick());
+        }
         // An adopted checkpoint carries the active's receipt log —
         // refresh the store's mirror so `GET /receipts` stays current
         // before the next scan publishes.
@@ -1097,6 +1100,9 @@ impl<'d> Monitor<'d> {
         }
         for (index, receipt) in peer.take_superseded_commands() {
             recorder.note_settled(Some(index), receipt, peer.tick());
+        }
+        for (prior, index, receipt) in peer.take_rehomed_receipts() {
+            recorder.note_rehomed(prior, index, receipt, peer.tick());
         }
         self.store.sync_receipts(peer.receipts());
         result
@@ -1299,6 +1305,7 @@ impl<'d> Monitor<'d> {
                                 },
                             },
                             actor,
+                            submission: None,
                         };
                         recorder.note_settled(None, receipt.clone(), peer.tick());
                         receipt
@@ -1445,6 +1452,9 @@ impl<'d> Monitor<'d> {
                 }
                 for (index, receipt) in peer.take_superseded_commands() {
                     recorder.note_settled(Some(index), receipt, peer.tick());
+                }
+                for (prior, index, receipt) in peer.take_rehomed_receipts() {
+                    recorder.note_rehomed(prior, index, receipt, peer.tick());
                 }
                 self.store.sync_receipts(peer.receipts());
             }
@@ -1651,9 +1661,14 @@ fn track_and_record(
     }
     // Pending commands an adopted checkpoint abandoned — the demoted
     // run's suspended queue the tracked line never carried — settle
-    // `superseded` here rather than vanishing from the audit.
+    // `superseded` here rather than vanishing from the audit. Settled
+    // receipts the adoption displaced by index collision re-key their
+    // recorded settles onto the index the served window now carries.
     for (index, receipt) in peer.take_superseded_commands() {
         recorder.note_settled(Some(index), receipt, peer.tick());
+    }
+    for (prior, index, receipt) in peer.take_rehomed_receipts() {
+        recorder.note_rehomed(prior, index, receipt, peer.tick());
     }
     store.sync_receipts(peer.receipts());
     report

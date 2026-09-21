@@ -52,7 +52,7 @@ mod state;
 mod telemetry;
 
 pub use carryover::{CarriedPoint, CarryoverReport, DroppedElement, RevertedParameter};
-pub use command::{Command, CommandError, CommandOutcome, CommandReceipt};
+pub use command::{Command, CommandError, CommandOutcome, CommandReceipt, SubmissionId};
 pub use descriptor::{
     CommandDecl, ComponentDescriptor, EventDecl, ParameterDescriptor, ParameterRange,
     PortDescriptor, PortRole,

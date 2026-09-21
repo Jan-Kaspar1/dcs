@@ -184,6 +184,7 @@ fn an_attributed_command_settles_into_an_attributed_receipt_and_journal_entry() 
                     apply_tick: Tick(2)
                 },
                 actor: Some("operator-7".to_string()),
+                submission: None,
             }
         );
 
@@ -196,6 +197,7 @@ fn an_attributed_command_settles_into_an_attributed_receipt_and_journal_entry() 
                 command,
                 outcome: CommandOutcome::Applied { tick: Tick(2) },
                 actor: Some("operator-7".to_string()),
+                submission: None,
             }]
         );
         // The receipt log carries the same attribution.
@@ -301,6 +303,7 @@ fn a_not_active_rejection_stamps_the_actor_identically() {
                     },
                 },
                 actor: Some("operator-7".to_string()),
+                submission: None,
             }
         );
         // The refusal never entered the executor's receipt log, but the

@@ -1004,9 +1004,15 @@ fn main() -> ExitCode {
     // the source's cold restart — a fresh mint — from its own demotion's
     // tracking reset on the uninterrupted line. A `--state-file` resume
     // below adopts the file's generation instead: the resumed run
-    // continues the line it persisted.
+    // continues the line it persisted. The submission origin mints
+    // alongside but is never adopted: it names this run as the minter
+    // of the receipts its command admissions produce, so the redundant
+    // pair's submissions stay distinct however their absolute receipt
+    // indices collide across the promote/fence window.
     let mut executor = match assemble(&model, &registry(), io) {
-        Ok(executor) => executor.with_generation(mint_generation()),
+        Ok(executor) => executor
+            .with_generation(mint_generation())
+            .with_submission_origin(mint_generation()),
         Err(error) => return fail(error),
     };
 
@@ -1275,6 +1281,12 @@ fn main() -> ExitCode {
                                 "standby: pending command superseded at tick {}: {:?}",
                                 peer.tick().0,
                                 receipt.command
+                            );
+                        }
+                        for (prior, index, receipt) in peer.take_rehomed_receipts() {
+                            eprintln!(
+                                "standby: settled receipt displaced by a submission-index collision moved from index {} to {}: {:?}",
+                                prior, index, receipt.command
                             );
                         }
                         let scanned = peer.scan();

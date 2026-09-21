@@ -131,6 +131,18 @@ impl PeerRig {
     /// tracking source — the configured `--peer`/`--standby` half of
     /// the follow-peer contract a demotion tracks.
     fn start_tracking(role: Role, source: Option<SocketAddr>) -> Self {
+        Self::start_with(role, source, None)
+    }
+
+    /// [`start_tracking`](Self::start_tracking) with the executor
+    /// minting receipt identities under `origin` — the per-run
+    /// submission nonce that keeps the pair's split mints
+    /// distinguishable when their absolute receipt indices collide.
+    fn start_seeded(role: Role, origin: u64, source: Option<SocketAddr>) -> Self {
+        Self::start_with(role, source, Some(origin))
+    }
+
+    fn start_with(role: Role, source: Option<SocketAddr>, origin: Option<u64>) -> Self {
         let driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
             (PointId(10), Value::Float(0.0)),
             (PointId(20), Value::Float(0.0)),
@@ -141,6 +153,10 @@ impl PeerRig {
             .with_point(PointId(20), Direction::Out, ValueKind::Float)
             .with_point(PointId(30), Direction::Out, ValueKind::Float);
         let executor = Executor::new(driver, map, vec![Box::new(Scale)]).unwrap();
+        let executor = match origin {
+            Some(origin) => executor.with_submission_origin(origin),
+            None => executor,
+        };
         let peer = match role {
             Role::Active => Peer::active(executor, None),
             _ => Peer::standby(executor, None),
@@ -324,6 +340,7 @@ fn commands_route_only_to_the_peer_reporting_active() {
                 apply_tick: Tick(2)
             },
             actor: None,
+            submission: None,
         }]
     );
     assert!(standby.client.receipts().unwrap().is_empty());
@@ -756,4 +773,160 @@ fn page_carries_the_pair_view_and_answers_cross_origin_role_reads() {
     );
 
     active.stop();
+}
+
+/// QA finding `receipt-index-collision-displaces-settled-receipt`
+/// (#775): the promote/fence window's split mint — the demoting peer
+/// and its successor each admitting a command at the same absolute
+/// index — must not silently overwrite the displaced receipt in the
+/// served `/receipts` audit. The demoted peer's adoption re-mints it
+/// past the adopted window's high-water with its command, actor, and
+/// terminal `superseded` verdict intact, and its settle journals
+/// exactly once.
+#[test]
+fn an_index_collision_keeps_the_displaced_receipt_in_the_served_audit() {
+    // B is the converged standby tracking A; both mint receipt
+    // identities under their own origins, so the window's split mint
+    // stays distinguishable on either side.
+    let a = PeerRig::start_seeded(Role::Active, 11, None);
+    let b = PeerRig::start_seeded(Role::Standby, 22, Some(a.addr));
+    b.monitor
+        .apply_checkpoint(&a.client.checkpoint().unwrap())
+        .unwrap();
+
+    // The reproduction's order: B's promote pulls A's pre-admission
+    // checkpoint — carrying nothing — then the raced command lands on
+    // the still-field-owning A at index 0 and suspends at the demotion.
+    assert_eq!(b.client.promote().unwrap().role, Role::Promoting);
+    b.client.advance(1).unwrap();
+    assert_eq!(b.client.role().unwrap().role, Role::Active);
+
+    let raced = write_value(10, ValueKind::Float, Value::Float(5.0));
+    let receipt = a.client.command_as(&raced, Some("op-a")).unwrap();
+    assert!(
+        matches!(receipt.outcome, CommandOutcome::Accepted { .. }),
+        "{receipt:?}"
+    );
+
+    // The successor's own admission mints at the same index — the
+    // diverged `attempts` counters meet only at convergence.
+    let successor = write_value(10, ValueKind::Float, Value::Float(9.0));
+    b.client.command_as(&successor, Some("op-b")).unwrap();
+    b.client.advance(1).unwrap();
+    assert_eq!(b.client.receipts().unwrap().len(), 1);
+
+    a.client.demote().unwrap();
+    a.monitor
+        .apply_checkpoint(&b.client.checkpoint().unwrap())
+        .unwrap();
+    a.client.advance(1).unwrap();
+
+    // Both submissions are served: the successor's at the contested
+    // index 0, the displaced one re-minted to index 1 with its command,
+    // actor, and terminal `superseded` verdict intact.
+    let receipts = a.client.receipts().unwrap();
+    assert_eq!(receipts.len(), 2, "{receipts:?}");
+    assert_eq!(receipts[0].command, successor);
+    assert_eq!(receipts[0].actor.as_deref(), Some("op-b"));
+    assert!(matches!(
+        receipts[0].outcome,
+        CommandOutcome::Applied { .. }
+    ));
+    assert_eq!(receipts[1].command, raced);
+    assert_eq!(receipts[1].actor.as_deref(), Some("op-a"));
+    assert!(matches!(
+        receipts[1].outcome,
+        CommandOutcome::Rejected {
+            reason: CommandError::Superseded { .. }
+        }
+    ));
+    assert_ne!(receipts[0].submission, receipts[1].submission);
+
+    // The displaced settle journaled exactly once — the re-home re-keys
+    // the recorded emission rather than re-emitting it.
+    let settles: Vec<_> = a
+        .client
+        .journal(0)
+        .unwrap()
+        .into_iter()
+        .filter(|entry| {
+            matches!(&entry.event, JournalEvent::CommandSettled { receipt } if receipt.command == raced)
+        })
+        .collect();
+    assert_eq!(settles.len(), 1, "{settles:?}");
+
+    // And it stays served: further scans and adoptions never drop it.
+    a.monitor
+        .apply_checkpoint(&b.client.checkpoint().unwrap())
+        .unwrap();
+    a.client.advance(1).unwrap();
+    let receipts = a.client.receipts().unwrap();
+    assert_eq!(receipts.len(), 2, "{receipts:?}");
+    assert_eq!(receipts[1].command, raced);
+
+    a.stop();
+    b.stop();
+}
+
+/// The consolidated #776 case over the served endpoints: the demoting
+/// peer's suspended admission and the successor's carry the *same*
+/// command — payload equality must not merge them. The suspended
+/// submission settles `superseded` under its own actor and identity,
+/// served beside the successor's applied receipt.
+#[test]
+fn an_equal_command_collision_keeps_both_submissions_in_the_served_audit() {
+    let a = PeerRig::start_seeded(Role::Active, 11, None);
+    let b = PeerRig::start_seeded(Role::Standby, 22, Some(a.addr));
+    b.monitor
+        .apply_checkpoint(&a.client.checkpoint().unwrap())
+        .unwrap();
+
+    assert_eq!(b.client.promote().unwrap().role, Role::Promoting);
+    b.client.advance(1).unwrap();
+
+    // Same command on both sides of the window, minted at index 0 by
+    // each run under its own identity and actor.
+    let command = write_value(10, ValueKind::Float, Value::Float(5.0));
+    a.client.command_as(&command, Some("op-a")).unwrap();
+    b.client.command_as(&command, Some("op-b")).unwrap();
+    b.client.advance(1).unwrap();
+
+    a.client.demote().unwrap();
+    a.monitor
+        .apply_checkpoint(&b.client.checkpoint().unwrap())
+        .unwrap();
+    a.client.advance(1).unwrap();
+
+    // The equal payloads never merged: index 0 is the successor's
+    // applied record, index 1 the suspended submission's superseded
+    // one — actors and identities distinguishable throughout.
+    let receipts = a.client.receipts().unwrap();
+    assert_eq!(receipts.len(), 2, "{receipts:?}");
+    assert_eq!(receipts[0].command, command);
+    assert_eq!(receipts[0].actor.as_deref(), Some("op-b"));
+    assert!(matches!(
+        receipts[0].outcome,
+        CommandOutcome::Applied { .. }
+    ));
+    assert_eq!(receipts[1].command, command);
+    assert_eq!(receipts[1].actor.as_deref(), Some("op-a"));
+    assert!(matches!(
+        receipts[1].outcome,
+        CommandOutcome::Rejected {
+            reason: CommandError::Superseded { .. }
+        }
+    ));
+
+    // Each settle journaled exactly once under its own identity.
+    let journal = a.client.journal(0).unwrap();
+    let settles: Vec<_> = journal
+        .iter()
+        .filter(|entry| {
+            matches!(&entry.event, JournalEvent::CommandSettled { receipt } if receipt.command == command)
+        })
+        .collect();
+    assert_eq!(settles.len(), 2, "{settles:?}");
+
+    a.stop();
+    b.stop();
 }

@@ -17,8 +17,8 @@ use dcs_core::{
     CommandQueueDiagnostics, CommandReceipt, CommandVerdict, ComponentCommands,
     ComponentDiagnostics, ComponentParameters, CyclicIoDriver, Direction, DroppedElement,
     EmittedEvent, ForcedPoint, IoDriver, IoError, IoFault, IoHealth, ModelFingerprint, PointId,
-    PointTelemetry, Quality, QualityReason, RevertedParameter, Sample, StateMap, TelemetrySnapshot,
-    Tick, Value, ValueKind,
+    PointTelemetry, Quality, QualityReason, RevertedParameter, Sample, StateMap, SubmissionId,
+    TelemetrySnapshot, Tick, Value, ValueKind,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -795,6 +795,27 @@ pub struct Executor<'d> {
     /// evicted entries is [`receipt_base`](Executor::receipt_base) —
     /// `attempts` minus the retained length.
     receipts: Vec<CommandReceipt>,
+    /// The run's own submission-mint nonce — the value the assembling
+    /// shell stamps through
+    /// [`with_submission_origin`](Executor::with_submission_origin),
+    /// prefixed onto every receipt this run mints so the redundant
+    /// pair's admissions stay distinct however equal their commands or
+    /// however their absolute indices collide. `None` mints
+    /// unidentified receipts — the unminted test/legacy shape.
+    submission_origin: Option<u64>,
+    /// This run's own mint order — the `seq` half of the
+    /// [`SubmissionId`](dcs_core::SubmissionId) the next minted receipt
+    /// takes. Run-local, never checkpointed: a minted receipt carries
+    /// its identity, and a fresh run mints under its own origin.
+    submission_seq: u64,
+    /// Receipts the most recent checkpoint adoption displaced by
+    /// submission-index collision and re-minted past the adopted
+    /// window's high-water — `(prior index, new index, receipt as
+    /// re-minted)` — drained through
+    /// [`take_displaced_receipts`](Self::take_displaced_receipts) so the
+    /// settle journal can reconcile the move. See
+    /// [`adopt_receipts`](Self::adopt_receipts).
+    displaced_receipts: Vec<(u64, u64, CommandReceipt)>,
     /// The declared receipt-log bound — construction configuration set
     /// through [`with_receipt_log_capacity`](Executor::with_receipt_log_capacity),
     /// not run state: checkpoints do not carry it.
@@ -971,6 +992,9 @@ impl<'d> Executor<'d> {
             command_capacity: DEFAULT_COMMAND_QUEUE_CAPACITY,
             command_admission: CommandAdmissionCounts::default(),
             receipts: Vec::new(),
+            submission_origin: None,
+            submission_seq: 0,
+            displaced_receipts: Vec::new(),
             receipt_capacity: DEFAULT_RECEIPT_LOG_CAPACITY,
             emitted: Vec::new(),
             command_verdicts: Vec::new(),
@@ -1015,6 +1039,28 @@ impl<'d> Executor<'d> {
     /// source begins a new one.
     pub fn with_generation(mut self, generation: u64) -> Self {
         self.generation = Some(generation);
+        self
+    }
+
+    /// Records this run's submission-mint origin — the nonce every
+    /// receipt this run mints carries in its
+    /// [`submission`](dcs_core::CommandReceipt::submission) identity.
+    ///
+    /// The running process's shell mints it
+    /// ([`mint_generation`](crate::mint_generation)) at startup, exactly
+    /// like the checkpoint generation: each process boot is a new
+    /// minting run, so the nonce is supplied per run, never derived —
+    /// and unlike the generation it is *not* adopted with a checkpoint,
+    /// because identity here means "which run admitted the submission",
+    /// not "which line the state belongs to". With the pair minting
+    /// under distinct origins, the promote/fence window's split mint —
+    /// both peers assigning the same absolute index to different
+    /// commands — stays distinguishable on either side, and a carried
+    /// receipt is provably the same submission whatever its index. The
+    /// default `None` mints unidentified receipts — the deterministic
+    /// test/legacy shape — which reconcile on command and actor alone.
+    pub fn with_submission_origin(mut self, origin: u64) -> Self {
+        self.submission_origin = Some(origin);
         self
     }
 
@@ -1378,10 +1424,20 @@ impl<'d> Executor<'d> {
             },
         };
         let accepted = matches!(outcome, CommandOutcome::Accepted { .. });
+        // The mint identity is stamped at admission — before the
+        // outcome is even known — because it names the submission, not
+        // its verdict: the receipt carries it unchanged through the
+        // boundary, the checkpoint, and any collision re-home.
+        let submission = self.submission_origin.map(|origin| {
+            let seq = self.submission_seq;
+            self.submission_seq += 1;
+            SubmissionId { origin, seq }
+        });
         let receipt = CommandReceipt {
             command,
             outcome,
             actor,
+            submission,
         };
         self.receipts.push(receipt.clone());
         if accepted {
@@ -1790,6 +1846,25 @@ impl<'d> Executor<'d> {
     /// sits past the adopted high-water — evictions the source never
     /// saw opening a gap the log cannot span — cannot be restored and
     /// drops with the rest of the abandoned window.
+    /// The covered stretch carries one more rule, because an absolute
+    /// index is not a submission identity: inside the promote/fence
+    /// window the demoting peer and its successor can each mint a
+    /// receipt at the same index for a different submission, the
+    /// per-peer `attempts` counters converging only here. A covered
+    /// entry whose adopted counterpart is the *same* submission —
+    /// [`CommandReceipt::same_submission`] — is the line's verdict on
+    /// this run's own record and adopts silently. One whose counterpart
+    /// is a *different* submission was minted on the abandoned branch,
+    /// not adjudicated by the line — the successor's high-water passed
+    /// its index, never its identity — so it re-mints past the adopted
+    /// window's end rather than being silently displaced by the
+    /// colliding receipt. A displaced entry still `Accepted` settles
+    /// `Rejected` carrying [`CommandError::Superseded`] at the re-mint:
+    /// the line demonstrably reached that index without it. The move is
+    /// reported through
+    /// [`take_displaced_receipts`](Self::take_displaced_receipts) so the
+    /// settle journal attributes the already-journaled verdict to the
+    /// receipt's new index instead of emitting it again.
     fn adopt_receipts(&mut self, checkpoint: &Checkpoint) {
         // The adopted window's end in the submission sequence — the
         // high-water a prior receipt's index measures against. Indices
@@ -1797,12 +1872,50 @@ impl<'d> Executor<'d> {
         // while the run's window reaches back to meet it: a prior base
         // above the mark leaves a gap no restoration can span.
         let adopted_end = checkpoint.receipt_base() + checkpoint.receipts.len() as u64;
-        let uncovered: Vec<CommandReceipt> = if adopted_end >= self.receipt_base() {
-            let skip = (adopted_end - self.receipt_base()).min(self.receipts.len() as u64) as usize;
-            self.receipts[skip..].to_vec()
-        } else {
-            Vec::new()
-        };
+        let checkpoint_base = checkpoint.receipt_base();
+        let self_base = self.receipt_base();
+        self.displaced_receipts.clear();
+        let abandoned = std::mem::take(&mut self.receipts);
+        let (covered, mut uncovered): (Vec<CommandReceipt>, Vec<CommandReceipt>) =
+            if adopted_end >= self_base {
+                let covered_len = ((adopted_end - self_base).min(abandoned.len() as u64)) as usize;
+                let (covered, uncovered) = abandoned.split_at(covered_len);
+                (covered.to_vec(), uncovered.to_vec())
+            } else {
+                // A prior base above the adopted high-water leaves a
+                // gap no restoration can span — the whole abandoned
+                // window drops, matching the uncovered rule.
+                (Vec::new(), Vec::new())
+            };
+        // Split the covered stretch by submission identity: entries the
+        // adopted window carries as the same submission adopt silently;
+        // entries it displaced with a different submission re-mint past
+        // the window, in index order. Entries below the adopted base
+        // have no counterpart — the source already evicted that stretch
+        // — and drop with the abandoned prefix.
+        let mut displaced: Vec<(u64, CommandReceipt)> = Vec::new();
+        for (position, receipt) in covered.into_iter().enumerate() {
+            let index = self_base + position as u64;
+            if index < checkpoint_base {
+                continue;
+            }
+            let adopted = &checkpoint.receipts[(index - checkpoint_base) as usize];
+            if adopted.same_submission(&receipt) {
+                continue;
+            }
+            // The adopted window may already carry this same
+            // submission re-minted at a later index — the line's own
+            // collision resolution from the other side's carry — in
+            // which case the local copy is a duplicate, not a
+            // displacement: adopt the line's record and drop it.
+            if !checkpoint
+                .receipts
+                .iter()
+                .any(|adopted| adopted.same_submission(&receipt))
+            {
+                displaced.push((index, receipt));
+            }
+        }
         self.receipts.clone_from(&checkpoint.receipts);
         // The adopted log is re-trimmed to this run's own bound: a
         // checkpoint captured under a looser capacity cannot grow this
@@ -1828,7 +1941,7 @@ impl<'d> Executor<'d> {
             .command_admission
             .high_water
             .max(self.pending_commands.len());
-        if !uncovered.is_empty() {
+        if !uncovered.is_empty() || !displaced.is_empty() {
             // The restored suffix lands after the queue rebuild on
             // purpose: its `Accepted` entries are suspended state the
             // tracked line has not adjudicated, not carried commands
@@ -1837,10 +1950,42 @@ impl<'d> Executor<'d> {
             // this log still holds — keeping `receipt_base` honest and
             // the served checkpoint carrying them for a successor's
             // carry.
-            self.command_admission.attempts = adopted_end + uncovered.len() as u64;
-            self.receipts.extend(uncovered);
+            self.command_admission.attempts =
+                adopted_end + (uncovered.len() + displaced.len()) as u64;
+            // The displaced receipts re-mint at the adopted window's
+            // end, ahead of the uncovered suffix — they are the
+            // earlier submissions. A still-`Accepted` entry settles
+            // `superseded` here — the line passed its index carrying a
+            // different submission — and the report pairs its prior
+            // index with the new one for the settle journal.
+            for (next_index, (prior, mut receipt)) in (adopted_end..).zip(displaced) {
+                if matches!(receipt.outcome, CommandOutcome::Accepted { .. }) {
+                    receipt.outcome = CommandOutcome::Rejected {
+                        reason: CommandError::Superseded {
+                            point: receipt.command.point(),
+                        },
+                    };
+                }
+                self.displaced_receipts
+                    .push((prior, next_index, receipt.clone()));
+                self.receipts.push(receipt);
+            }
+            self.receipts.append(&mut uncovered);
             self.trim_receipts();
         }
+    }
+
+    /// Drains the receipts the most recent checkpoint adoption displaced
+    /// by submission-index collision — `(prior index, new index,
+    /// receipt as re-minted past the adopted window's high-water)`.
+    ///
+    /// [`Peer`](crate::Peer) reconciles them into the settle journal:
+    /// an entry that was still `Accepted` settled `superseded` at the
+    /// re-mint — that verdict is news — while an already-settled entry's
+    /// verdict was journaled under its prior index and only re-marks
+    /// against the window diff at the new one.
+    pub fn take_displaced_receipts(&mut self) -> Vec<(u64, u64, CommandReceipt)> {
+        std::mem::take(&mut self.displaced_receipts)
     }
 
     /// Adopts the admissions a checkpoint's receipt log carries past
@@ -1868,6 +2013,17 @@ impl<'d> Executor<'d> {
     /// numbering gap the `attempts` counters report, not a recoverable
     /// stretch. The admission counters measuring the adopted log
     /// converge with it.
+    ///
+    /// The overlapping stretch obeys the same submission-identity rule
+    /// [`adopt_receipts`](Self::adopt_receipts) does, mirrored: this run
+    /// is the continuing line here, so an overlap position whose
+    /// incoming receipt is a *different* identified submission — the
+    /// predecessor's mint colliding with this run's own at one index —
+    /// re-mints the incoming receipt past the adopted tail instead of
+    /// skipping it, a still-`Accepted` one queueing to settle like any
+    /// carried command. Unidentified receipts keep the verbatim
+    /// overlap-wins rule — without a mint identity an equal command
+    /// cannot be told from the same submission seen twice.
     pub fn carry_pending_commands(&mut self, checkpoint: &Checkpoint) {
         let self_end = self.receipt_base() + self.receipts.len() as u64;
         let checkpoint_base = checkpoint.receipt_base();
@@ -1875,12 +2031,33 @@ impl<'d> Executor<'d> {
         if checkpoint_end <= self_end {
             return;
         }
+        // Incoming receipts the overlap shows colliding with this run's
+        // own at their index — identified submissions this log does not
+        // already carry anywhere — re-mint ahead of the tail: they are
+        // the earlier submissions, and a pending one still owes the
+        // promoted run a boundary.
+        let overlap = self_end.min(checkpoint_end);
+        let mut collided = Vec::new();
+        for index in checkpoint_base.max(self.receipt_base())..overlap {
+            let incoming = &checkpoint.receipts[(index - checkpoint_base) as usize];
+            if incoming.submission.is_some()
+                && !self
+                    .receipts
+                    .iter()
+                    .any(|receipt| receipt.same_submission(incoming))
+            {
+                collided.push(incoming.clone());
+            }
+        }
         let tail = self_end.max(checkpoint_base);
         let skipped = (tail - checkpoint_base) as usize;
         let base_len = self.receipts.len();
         self.receipts
             .extend(checkpoint.receipts[skipped..].iter().cloned());
+        let collided_len = collided.len() as u64;
+        self.receipts.extend(collided);
         self.command_admission = checkpoint.command_admission;
+        self.command_admission.attempts += collided_len;
         // Bound the union before the adopted `Accepted` entries queue:
         // the trim may reach into the tail's own settled prefix, so the
         // surviving adopted entries start at `base_len - evicted`.
@@ -4210,6 +4387,7 @@ mod tests {
                     apply_tick: Tick(1)
                 },
                 actor: Some("operator-7".to_string()),
+                submission: None,
             }
         );
         executor.scan();
@@ -4248,6 +4426,7 @@ mod tests {
                     apply_tick: Tick(1)
                 },
                 actor: None,
+                submission: None,
             }
         );
         // Queued, not yet applied: the driver still holds the old value.
@@ -5912,6 +6091,7 @@ mod tests {
                     apply_tick: Tick(2)
                 },
                 actor: None,
+                submission: None,
             }
         );
         // Queued, not yet applied: the component still runs the old gain.
@@ -8885,6 +9065,7 @@ mod tests {
                     apply_tick: Tick(1)
                 },
                 actor: None,
+                submission: None,
             }
         );
         // Queued, not yet applied: the count still reports its start.

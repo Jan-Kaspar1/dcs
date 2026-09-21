@@ -198,7 +198,15 @@ pub struct Checkpoint {
     /// queue's admission bound: carried run state is not new admission,
     /// so a command taken over between its submission boundary and its
     /// applying scan is not lost, and a queue restored at or over the
-    /// bound admits nothing new until a scan drains it.
+    /// bound admits nothing new until a scan drains it. One more
+    /// exception names the window's split mint: inside the
+    /// promote/fence gap the demoting peer and its successor can each
+    /// mint a receipt at the same absolute index — the per-peer
+    /// `attempts` counters converge only here — so adoption reconciles
+    /// covered entries by submission identity
+    /// ([`CommandReceipt::same_submission`]), re-minting a displaced
+    /// receipt past the adopted window rather than letting the
+    /// colliding entry overwrite it.
     /// Absent from checkpoints written before the section existed;
     /// defaults to empty.
     #[serde(default)]

@@ -1346,6 +1346,7 @@ mod tests {
                         tick: Tick(applied),
                     },
                     actor: None,
+                    submission: None,
                 },
             },
         }
