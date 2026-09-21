@@ -151,7 +151,15 @@
 //! /snapshot`'s parameters section serving each alarm's declared
 //! `priority`/`class`/`response_ticks` live — before and after the
 //! documented `demote`/`promote` switch, and the pair's launch roles
-//! restored — and the `upgrade` stage,
+//! restored — the pair contract's claim-fencing leg, which attaches a
+//! dedicated third sim-net client to the settled pair's spawned plant
+//! and exercises the standing writer claim's whole lifecycle: fenced
+//! `write`/`step` probes plus the same mutations through the shipped
+//! `dcs-plant-ctl`, the `ensure_writer`/`release_writer` verbs under
+//! foreign and owner tokens, and a rogue `claim_writer` resolving per
+//! the settled contract — its preempt's journaled `field_claim_lost`
+//! and in-place demotion on the superseded owner, then the pair
+//! restored to its launch roles — and the `upgrade` stage,
 //! which repins the materialized tree to the checkout's `HEAD`
 //! (seeded into the stand-in beside the recorded rev) and re-runs the
 //! full pipeline under the repin.
@@ -179,6 +187,7 @@
 //! `oos-failed`/`oos-nondeterministic`,
 //! `power-trip-failed`/`power-trip-nondeterministic`,
 //! `alarm-rationalization-failed`/`alarm-rationalization-nondeterministic`,
+//! `claim-fencing-failed`/`claim-fencing-nondeterministic`,
 //! and the `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
@@ -210,9 +219,9 @@ fn target_dir() -> PathBuf {
 }
 
 /// Ensures the released tooling's local stand-ins — `dcs-model`,
-/// `dcs-controller`, `dcs-plant-server`, `dcs-ctl`, and
-/// `dcs-alarm-report` — are built for the check's `DCS_TOOLS`
-/// substitution.
+/// `dcs-controller`, `dcs-plant-server`, `dcs-ctl`,
+/// `dcs-alarm-report`, and the plant-side `dcs-plant-ctl` — are built
+/// for the check's `DCS_TOOLS` substitution.
 fn build_tools() -> PathBuf {
     let output = Command::new(CARGO)
         .args([
@@ -226,6 +235,8 @@ fn build_tools() -> PathBuf {
             "dcs-plant",
             "-p",
             "dcs-monitor",
+            "-p",
+            "dcs-sim-net",
         ])
         .current_dir(root())
         .output()
