@@ -415,8 +415,8 @@ mod tests {
         // First lifetime: two journaled entries land in the file behind
         // the run-1 boundary marker.
         let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
-        recorder.note_settled(receipt(10, 1), Tick(1));
-        recorder.note_settled(receipt(11, 2), Tick(2));
+        recorder.note_settled(None, receipt(10, 1), Tick(1));
+        recorder.note_settled(None, receipt(11, 2), Tick(2));
         assert_eq!(
             records(&path),
             vec![
@@ -475,7 +475,7 @@ mod tests {
                 ),
             ]
         );
-        recorder.note_settled(receipt(12, 1), Tick(1));
+        recorder.note_settled(None, receipt(12, 1), Tick(1));
         let entries = recorder.journal(0);
         assert_eq!(entries.last().unwrap().seq, 4);
 
@@ -559,7 +559,7 @@ mod tests {
 
         let mut recorder = crate::recorder::Recorder::new(config(&path, 2), Tick::ZERO).unwrap();
         for index in 0..3_u64 {
-            recorder.note_settled(receipt(10, index + 1), Tick(index + 1));
+            recorder.note_settled(None, receipt(10, index + 1), Tick(index + 1));
         }
         drop(recorder);
 
@@ -577,7 +577,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![3, 4]
         );
-        recorder.note_settled(receipt(10, 41), Tick(41));
+        recorder.note_settled(None, receipt(10, 41), Tick(41));
         assert_eq!(recorder.journal(3).last().unwrap().seq, 5);
         assert_eq!(
             records(&path)[4],
@@ -595,7 +595,7 @@ mod tests {
         let path = dir.join("journal.jsonl");
 
         let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
-        recorder.note_settled(receipt(10, 1), Tick(1));
+        recorder.note_settled(None, receipt(10, 1), Tick(1));
         drop(recorder);
 
         // A torn trailing record — the crash-mid-write shape — and an
@@ -635,7 +635,7 @@ mod tests {
         // The first writer binds and journals, holding the file's
         // writer lock for its lifetime.
         let mut first = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
-        first.note_settled(receipt(10, 1), Tick(1));
+        first.note_settled(None, receipt(10, 1), Tick(1));
 
         // The misconfiguration — a second writer on the same path —
         // fails its bind naming the file and the live-holder conflict
@@ -653,10 +653,10 @@ mod tests {
         // the lock releasing with its descriptor — the next opener
         // replays the single-writer file and continues the seq domain
         // across the run boundary.
-        first.note_settled(receipt(11, 2), Tick(2));
+        first.note_settled(None, receipt(11, 2), Tick(2));
         drop(first);
         let mut second = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
-        second.note_settled(receipt(12, 3), Tick(3));
+        second.note_settled(None, receipt(12, 3), Tick(3));
         assert_eq!(second.journal(0).last().unwrap().seq, 4);
         let data = read_journal_file(&path).unwrap();
         assert_eq!(
@@ -692,7 +692,7 @@ mod tests {
         let path = dir.join("journal.jsonl");
         let mut recorder =
             crate::recorder::Recorder::new(MonitorConfig::default(), Tick::ZERO).unwrap();
-        recorder.note_settled(receipt(10, 1), Tick(1));
+        recorder.note_settled(None, receipt(10, 1), Tick(1));
         assert_eq!(recorder.journal(0).len(), 1);
         assert!(!path.exists());
         let _ = std::fs::remove_dir_all(&dir);
