@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -97,6 +98,8 @@ class ReconcileTests(unittest.TestCase):
         self.assertTrue(any(a[0] == 'rm' and 'dead0' in a for a in calls))
 
 
+@unittest.skipUnless(os.name == 'posix',
+                     'runner.cycle serializes through a POSIX flock')
 class CycleTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
