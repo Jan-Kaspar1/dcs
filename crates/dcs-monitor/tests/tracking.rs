@@ -6,9 +6,9 @@
 //! monitored loop's `track_cycle` does.
 
 use dcs_core::{
-    ComponentDescriptor, Direction, Divergence, EmittedEvent, EventDecl, EventField,
-    EventFieldKind, EventRetention, EventValue, IoDriver, IoError, JournalEvent, PointId, Role,
-    Sample, StandbySync, StateMap, SwitchError, Tick, Value, ValueKind,
+    CommandOutcome, ComponentDescriptor, Direction, Divergence, EmittedEvent, EventDecl,
+    EventField, EventFieldKind, EventRetention, EventValue, IoDriver, IoError, JournalEvent,
+    PointId, Role, Sample, StandbySync, StateMap, SwitchError, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorClient};
@@ -1420,4 +1420,191 @@ fn a_tracking_standbys_resources_answer_the_same_routed_events() {
     // The parity itself: the standby's `events` is the same record —
     // same seqs, ticks, payloads, and retention marks.
     assert_eq!(events(&standby.standby.client), expected);
+}
+
+/// The settle-audit rig's executor: one writable internal `In` point —
+/// the held operator value the raced admission writes; the QA model's
+/// command targets are all internal, and an image-carried point keeps
+/// the exercise off the field.
+fn held_executor(driver: &'static StubDriver) -> Executor<'static> {
+    Executor::new(
+        driver,
+        PointMap::new().with_writable_internal(
+            PointId(40),
+            Direction::In,
+            ValueKind::Bool,
+            Value::Bool(false),
+        ),
+        Vec::new(),
+    )
+    .unwrap()
+}
+
+/// The journal's `command_settled` entries for `command`, as
+/// `(entry tick, outcome)` pairs in seq order — the per-admission
+/// settle list the uniqueness contract counts.
+fn settles(client: &MonitorClient, command: &dcs_core::Command) -> Vec<(u64, CommandOutcome)> {
+    client
+        .journal(0)
+        .unwrap()
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            JournalEvent::CommandSettled { receipt } if &receipt.command == command => {
+                Some((entry.tick.0, receipt.outcome.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// QA finding `tracking-peer-double-journals-command-settle` (#688):
+/// a checkpoint pulled while the admission is still `Accepted`
+/// re-queues the receipt on the tracking peer, whose quiesced scan
+/// must carry it — never mint a local `Applied` the covering adoption
+/// then overwrites with the line's verdict. On the reported build the
+/// pair of settles journaled local tick first, line tick second —
+/// two `command_settled` entries for one admission, the journal's
+/// ticks going backwards. Replayed end to end on the driven pair:
+/// the command submits between the active's scans, the standby's next
+/// cycle adopts it pending, the active settles it on the line, and
+/// the covering pull must journal the single settle — one per peer.
+#[test]
+fn a_tracking_peer_journals_one_settle_per_admission() {
+    use dcs_core::Command;
+    let (standby, active) = DrivenStandby::start_with(None, held_executor);
+
+    // Converge the standby on the line, then race the admission: the
+    // write submits between the active's scans, so the standby's next
+    // pull adopts the receipt still `Accepted`.
+    active.client.advance(3).unwrap();
+    standby.standby.client.advance(1).unwrap();
+    assert!(matches!(
+        standby.standby.client.role().unwrap().sync,
+        Some(StandbySync::Tracking { .. })
+    ));
+    let command = Command::WriteValue {
+        point: PointId(40),
+        kind: ValueKind::Bool,
+        value: Value::Bool(true),
+    };
+    let receipt = active.client.command(&command).unwrap();
+    assert_eq!(
+        receipt.outcome,
+        CommandOutcome::Accepted {
+            apply_tick: Tick(4)
+        }
+    );
+
+    // The raced pull: the standby's cycle adopts the pending receipt
+    // and the quiesced scan carries it — on the reported build this
+    // scan minted `Applied{local}` and journaled the phantom first
+    // settle.
+    standby.standby.client.advance(1).unwrap();
+    assert!(
+        matches!(
+            standby.standby.client.receipts().unwrap()[0].outcome,
+            CommandOutcome::Accepted { .. }
+        ),
+        "the carried admission stays pending on the tracking peer"
+    );
+    assert_eq!(settles(&standby.standby.client, &command), vec![]);
+
+    // The line settles the admission; the covering pull adopts the
+    // verdict — the one terminal outcome the admission ever gets.
+    active.client.advance(1).unwrap();
+    standby.standby.client.advance(1).unwrap();
+    assert_eq!(
+        settles(&standby.standby.client, &command),
+        vec![(4, CommandOutcome::Applied { tick: Tick(4) })],
+        "one admission journals one settle on the tracking peer"
+    );
+    assert_eq!(
+        settles(&active.client, &command),
+        vec![(4, CommandOutcome::Applied { tick: Tick(4) })],
+        "one admission journals one settle on the field owner"
+    );
+
+    // The journal's attribution never walks backwards — the phantom
+    // pair's local-then-line ordering regressed the tick.
+    let journal = standby.standby.client.journal(0).unwrap();
+    let ticks: Vec<u64> = journal.iter().map(|entry| entry.tick.0).collect();
+    assert!(
+        ticks.windows(2).all(|pair| pair[0] <= pair[1]),
+        "the journal's ticks must be non-decreasing: {ticks:?}"
+    );
+}
+
+/// The finding's demoted-peer half: the same raced admission observed
+/// from the peer that *was* the field owner. The demote suspends its
+/// pending receipt, the promote boundary's final sync carries it onto
+/// the successor still `Accepted`, and the demoted peer's tracking
+/// pull lands that checkpoint before the successor's applying scan —
+/// the window in which the reported build minted a local `Applied`
+/// the covering adoption then re-settled at the line's tick.
+#[test]
+fn a_demoted_peer_journals_one_settle_per_carried_admission() {
+    use dcs_core::Command;
+    let (standby, active) = DrivenStandby::start_with(None, held_executor);
+
+    active.client.advance(3).unwrap();
+    standby.standby.client.advance(1).unwrap();
+    assert!(matches!(
+        standby.standby.client.role().unwrap().sync,
+        Some(StandbySync::Tracking { .. })
+    ));
+
+    // The raced admission: accepted on the field owner, still pending
+    // when the documented demote-then-promote runs.
+    let command = Command::WriteValue {
+        point: PointId(40),
+        kind: ValueKind::Bool,
+        value: Value::Bool(true),
+    };
+    let receipt = active.client.command(&command).unwrap();
+    assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+    assert_eq!(active.client.demote().unwrap().role, Role::Demoting);
+    assert_eq!(
+        standby.standby.client.promote().unwrap().role,
+        Role::Promoting
+    );
+
+    // The demoted peer's first tracking pull lands the successor's
+    // checkpoint while the carried admission is still `Accepted` —
+    // suspended entries re-queue under the adoption, but the quiesced
+    // scan must carry them, never mint a local `Applied`.
+    active.client.advance(1).unwrap();
+    assert_eq!(active.client.role().unwrap().role, Role::Standby);
+    assert!(
+        matches!(
+            active.client.receipts().unwrap()[0].outcome,
+            CommandOutcome::Accepted { .. }
+        ),
+        "the carried admission stays pending on the demoted peer"
+    );
+    assert_eq!(settles(&active.client, &command), vec![]);
+
+    // The promoted peer's first field-owning scan settles the carried
+    // admission on the line; the demoted peer's covering pull adopts
+    // the verdict — one terminal outcome, journaled once per peer.
+    standby.standby.client.advance(1).unwrap();
+    active.client.advance(1).unwrap();
+    let line = settles(&standby.standby.client, &command);
+    assert_eq!(line.len(), 1, "{line:?}");
+    assert!(
+        matches!(line[0].1, CommandOutcome::Applied { .. }),
+        "{line:?}"
+    );
+    assert_eq!(
+        settles(&active.client, &command),
+        line,
+        "one admission journals one settle on the demoted peer too"
+    );
+
+    // Tick monotonicity on the demoted peer's journal as well.
+    let journal = active.client.journal(0).unwrap();
+    let ticks: Vec<u64> = journal.iter().map(|entry| entry.tick.0).collect();
+    assert!(
+        ticks.windows(2).all(|pair| pair[0] <= pair[1]),
+        "the journal's ticks must be non-decreasing: {ticks:?}"
+    );
 }

@@ -575,6 +575,35 @@
 #                restored; two passes produce identical digests
 #                (alarm-rationalization-failed,
 #                alarm-rationalization-nondeterministic)
+#                The stage's claim-fencing leg, ci/claim_fencing.py on
+#                the same declared deployment — the consumer-side
+#                mirror of the lane's standing field-claim scenario
+#                (WW-ENG-003, WW-OPS-003): with the pair settled and a
+#                field-owning peer holding the plant's writer claim —
+#                the launched active's startup claim where the release
+#                records its owner token, else the documented switch
+#                stands the promoted peer's claim up first — a
+#                dedicated third sim-net attachment's write and step
+#                answer the named fencing refusal — the same mutations
+#                driven through the shipped dcs-plant-ctl exiting
+#                nonzero on the refusal while its unfenced reads
+#                answer — and the field owner's own writes keep
+#                landing; the lifecycle verbs answer per contract
+#                where the release speaks them — a foreign token's
+#                ensure_writer refused fenced, the owner's token
+#                answering claimed_shared with a write landing under
+#                the shared hold, release_writer dropping only the
+#                caller's hold with the standing claim still fencing
+#                probes, and a holder-of-nothing's release a harmless
+#                done; and a rogue claim_writer resolving per the
+#                settled contract, never silently — a refusal leaving
+#                the claim and owner untouched, the unconditional
+#                preempt journaling field_claim_lost on the superseded
+#                owner and demoting it in place with its monitor
+#                serving, then the leg re-promoting the demoted owner
+#                so the pair's launch roles and the claim's owner
+#                stand unchanged; two passes produce identical digests
+#                (claim-fencing-failed, claim-fencing-nondeterministic)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -622,11 +651,11 @@
 #   DCS_UPGRADE  set to 0 to skip the upgrade stage — the stage's own
 #                repinned re-run uses this internally.
 #   DCS_TOOLS    a directory holding prebuilt `dcs-model`,
-#                `dcs-controller`, `dcs-plant-server`, `dcs-ctl`, and
-#                `dcs-alarm-report` binaries. When unset, the check
-#                installs them from $DCS_REMOTE at $DCS_REV — the
-#                contract's `cargo install --git` mechanism — into a
-#                scratch root.
+#                `dcs-controller`, `dcs-plant-server`, `dcs-plant-ctl`,
+#                `dcs-ctl`, and `dcs-alarm-report` binaries. When
+#                unset, the check installs them from $DCS_REMOTE at
+#                $DCS_REV — the contract's `cargo install --git`
+#                mechanism — into a scratch root.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -668,17 +697,19 @@ ensure_tools() {
     local dir
     dir="$(mktemp -d)"
     if ! cargo install --quiet --git "$DCS_REMOTE" --rev "$1" \
-            dcs-model dcs-controller dcs-plant dcs-monitor --root "$dir"; then
+            dcs-model dcs-controller dcs-plant dcs-monitor dcs-sim-net \
+            --root "$dir"; then
         rm -rf "$dir"
         return 1
     fi
     # The delivered binary set — the `dcs-monitor` package ships both
-    # operator tools, `dcs-ctl` and `dcs-alarm-report`; a revision
+    # operator tools, `dcs-ctl` and `dcs-alarm-report`, and
+    # `dcs-sim-net` ships the plant-side `dcs-plant-ctl`; a revision
     # whose tooling predates one fails the install rather than the
     # stage that invokes it.
     local bin
     for bin in dcs-model dcs-controller dcs-plant-server dcs-ctl \
-            dcs-alarm-report; do
+            dcs-alarm-report dcs-plant-ctl; do
         if [ ! -x "$dir/bin/$bin" ]; then
             rm -rf "$dir"
             return 1
@@ -2330,6 +2361,63 @@ for tamper in dropped-record rewritten-field; do
     echo "  $tamper: reported, alarm-rationalization-failed"
 done
 
+# The pair contract's claim-fencing leg, on the same manifest-declared
+# deployment — the consumer-side mirror of the lane's standing
+# field-claim scenario: ci/claim_fencing.py settles the pair with a
+# field-owning peer holding the spawned plant's writer claim — the
+# launched active's startup claim where the release records its owner
+# token, else the documented switch stands the promoted peer's claim up
+# first — then attaches a dedicated third sim-net client whose write
+# and step must answer the named fencing refusal — the same mutations
+# driven through the shipped dcs-plant-ctl exiting nonzero — while the
+# field owner's writes keep landing; exercises the lifecycle verbs
+# where the release speaks them — a foreign token's ensure_writer
+# refused fenced, the owner's token answering claimed_shared with a
+# write landing under the shared hold, release_writer dropping only the
+# caller's hold with the standing claim still fencing probes, and a
+# holder-of-nothing's release a harmless done; then drives a rogue
+# claim_writer, which must resolve per the settled contract — never
+# silently: a preempt's evidence is the superseded owner's journaled
+# field_claim_lost and in-place demotion with its monitor serving,
+# after which the leg re-promotes the demoted owner so the pair's
+# launch roles and the claim's owner stand unchanged. Two passes must
+# produce identical digests.
+run_claim_fencing() {
+    python3 ci/claim_fencing.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --plant-ctl "$TOOLS/dcs-plant-ctl" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_claim_fencing)" \
+    || fail "claim-fencing-failed: the claim-fencing leg did not hold — its evidence lines are above"
+SECOND="$(run_claim_fencing)" \
+    || fail "claim-fencing-failed: the claim-fencing leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "claim-fencing-nondeterministic: two claim-fencing passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: a probe attachment writing through the claim, a
+# foreign ensure_writer granted, and a rogue claim succeeding with no
+# supersession evidence must each surface the named diagnostic — never
+# a silently unmatched pass.
+for tamper in write-through foreign-ensure-granted rogue-silent; do
+    if out="$(run_claim_fencing --tamper "$tamper" 2>&1)"; then
+        fail "claim-fencing-unchecked: a $tamper case passed the claim-fencing leg"
+    fi
+    case "$tamper" in
+        write-through) expected="was not refused fenced" ;;
+        foreign-ensure-granted) expected="a foreign token's ensure_writer was not refused" ;;
+        rogue-silent) expected="the rogue claim answered" ;;
+    esac
+    [[ "$out" == *"$expected"* ]] \
+        || fail "claim-fencing-unchecked: the $tamper case did not report its named diagnostic: $out"
+    echo "  $tamper: reported, claim-fencing-failed"
+done
+
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
@@ -2337,7 +2425,7 @@ echo "== consumers =="
 # platform checkout.
 for file in ci/alarm_rationalization.py ci/alarm_validation.py \
         ci/availability.py \
-        ci/burst_order.py ci/command_switch.py \
+        ci/burst_order.py ci/claim_fencing.py ci/command_switch.py \
         ci/consumers.py \
         ci/ctl.py ci/demote_pending.py ci/deploy_rig.py \
         ci/divergence.py ci/failover.py \
