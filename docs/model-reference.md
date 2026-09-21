@@ -205,34 +205,48 @@ availability: every bound `In` port's adapted `write_value:<port>`,
 ### `stale_after_ticks` and input freshness
 
 `stale_after_ticks` declares how fresh a field `in` point's samples must
-stay: the number of executor scan ticks a driver-stamped sample tick may
-lag before the point's data is stale (decision 45). The budget lives in
-the point map assembly produces, and the *executor's input phase*
-applies the rule — each scan, for a budgeted field `in` point, it
-compares the tick the driver returned on the sample against the scan
-tick before re-stamping:
+stay: the number of executor scan ticks the point's driver-returned
+report may go unchanged before the point's data is stale (decision 45).
+The budget lives in the point map assembly produces, and the *executor's
+input phase* applies the rule in the run's own tick domain — each scan,
+for a budgeted field `in` point, it compares the sample the driver
+returned against the report last observed on that point:
 
-- a lag within the budget leaves the driver-returned quality untouched;
-- a lag exceeding it merges `Uncertain(Stale)` by the worst-of rule, so
-  a driver-reported `Bad` or worse-named `Uncertain` is never improved,
-  while a held `Good` value degrades to `Uncertain(Stale)` until the
-  first sample inside the budget returns it to `Good`;
+- a changed report — value, quality, or stamp — is fresh evidence: the
+  observation age restarts at the current scan tick and the
+  driver-returned quality lands untouched;
+- a report unchanged for more scan ticks than the budget merges
+  `Uncertain(Stale)` by the worst-of rule, so a driver-reported `Bad`
+  or worse-named `Uncertain` is never improved, while a held `Good`
+  value degrades to `Uncertain(Stale)` until the next changed report
+  returns it to `Good`;
 - the landed image sample always carries the scan tick — the executor
-  is the only timestamp authority; the driver tick is freshness
-  evidence, never an image timestamp;
+  is the only timestamp authority; the driver-returned sample is
+  freshness evidence, never an image timestamp;
 - a failed read is not a stale sample: the documented `Bad` mapping and
   last-known-value behavior stand, and a forced point never reads the
   driver, so `Substituted` stands too.
 
-A budget of `0` requires a sample stamped at the current scan tick —
-the strictest declaration, for sources expected to refresh every scan.
-The sim bank, the remote plant, and the sim-bus register bank all stamp
-their writes with a device tick the driver protocols carry, so field
-devices integrated through them supply freshness evidence without
-protocol changes. A driver whose samples carry no usable freshness
-signal — one that stamps every read with the current tick, or a fixed
-tick — simply makes the declaration inert or always-stale; declare the
-field only where the source distinguishes fresh samples from held ones.
+Judging the report's age in scan ticks — never subtracting the driver
+stamp — is what keeps the verdict consistent across drivers whose
+stamps live in a different domain: a remote driver's `Sample::tick`
+carries the plant server's step tick, which a paused or demoted field
+owner leaves frozen while the run keeps ticking. A lag computed across
+the two domains would read a stopped-then-resumed field as stale
+forever, and a run resumed behind the driver's domain as fresh forever;
+change-tracking marks both correctly — stale while the report holds,
+the driver's own quality the scan it moves again.
+
+A budget of `0` requires a changed report every scan — the strictest
+declaration, for sources expected to refresh every scan. The sim bank,
+the remote plant, and the sim-bus register bank all stamp their writes
+with a device tick the driver protocols carry, so field devices
+integrated through them supply freshness evidence without protocol
+changes. A driver whose samples carry no usable freshness signal — one
+that returns a changed report every read, or one whose report never
+varies — simply makes the declaration inert or always-stale; declare
+the field only where the source distinguishes fresh samples from held
+ones.
 
 ### `journaled` and the durable transition record
 

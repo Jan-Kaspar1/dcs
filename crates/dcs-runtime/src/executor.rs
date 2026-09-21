@@ -50,8 +50,8 @@ pub struct PointSpec {
     /// `Some(budget)` on a field `In` point asks the input phase to land
     /// the image sample as
     /// [`Quality::Uncertain`]`(`[`QualityReason::Stale`]`)` when the
-    /// driver-returned sample's tick lags the scan tick by more than
-    /// `budget` ticks; `None` disables the check, and the budget is
+    /// driver-returned sample has not changed in more than `budget`
+    /// scan ticks; `None` disables the check, and the budget is
     /// inert on internal points (never driver-read) and `Out` points
     /// (never read).
     pub stale_after_ticks: Option<u64>,
@@ -370,6 +370,26 @@ impl fmt::Display for WiringError {
 
 impl std::error::Error for WiringError {}
 
+/// One budgeted field `In` point's freshness evidence: the driver
+/// sample last read and the scan tick at which that observation last
+/// changed — the run-domain record the `stale_after_ticks` budget
+/// measures, so a driver stamping in its own tick domain still yields
+/// a lag inside the run's.
+#[derive(Debug, Clone, Copy)]
+struct Freshness {
+    /// The sample the last successful read returned — the change
+    /// marker: a fresh acquisition re-stamps it, so an unchanged
+    /// report is held data aging under the budget.
+    observed: Sample,
+    /// The scan tick `observed` last changed at — or, on the first
+    /// observation, the earlier of that tick and the driver's own
+    /// stamp: a stamp already behind the scan tick is aged evidence
+    /// the run trusts only as far as the stamp claims, while a stamp
+    /// in a domain running ahead of the run seeds at the observation
+    /// itself — the freshest thing the run has seen.
+    since: Tick,
+}
+
 /// Runtime diagnostics for one registered component.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComponentStatus {
@@ -585,8 +605,10 @@ pub const DEFAULT_RECEIPT_LOG_CAPACITY: usize = 1024;
 ///    marked [`Quality::Bad`] rather than aborting the scan, and a
 ///    `stale_after_ticks` budget on the point merges
 ///    [`Quality::Uncertain`]`(`[`QualityReason::Stale`]`)` onto a sample
-///    whose driver-stamped tick lags the scan tick past the budget —
-///    over a cyclic driver that stamp is the producing exchange's
+///    whose driver report has not changed within the budget — the lag
+///    measured in scan ticks, so a driver stamping in a foreign tick
+///    domain still ages held data and releases fresh data correctly;
+///    over a cyclic driver the stamp is the producing exchange's
 ///    acquisition tick, so the budget measures exchange freshness —
 ///    and every internal link routes its `Out` point's image
 ///    sample onto its `In` point, so a port-to-port carrier delivers the
@@ -793,6 +815,13 @@ pub struct Executor<'d> {
     /// field stays `None` here — [`snapshot`](Executor::snapshot) fills
     /// it from the driver's `diagnostics` hook at reporting time.
     io_health: IoHealth,
+    /// Per-point freshness evidence for field `In` points carrying a
+    /// `stale_after_ticks` budget — the driver sample last observed and
+    /// the scan tick that observation last changed, kept in the run's
+    /// own tick domain so a driver stamping in a foreign domain (a
+    /// remote plant's, say) cannot strand the verdict. Run-local
+    /// observation state: checkpoints neither carry nor reset it.
+    freshness: HashMap<PointId, Freshness>,
     /// The first point whose output write the shared field fenced —
     /// answered [`IoError::Fenced`] — during the most recent scan:
     /// `None` before the first scan and on scans with no fenced write.
@@ -942,6 +971,7 @@ impl<'d> Executor<'d> {
             command_verdicts: Vec::new(),
             forces: BTreeMap::new(),
             io_health: IoHealth::default(),
+            freshness: HashMap::new(),
             fenced_write: None,
             model_fingerprint: None,
             generation: None,
@@ -2568,15 +2598,20 @@ impl<'d> Executor<'d> {
     /// keep their image value untouched.
     ///
     /// A field `In` point carrying a `stale_after_ticks` budget gets the
-    /// freshness check before the re-stamp: when the tick the driver's
-    /// sample carries lags the scan tick by more than the budget, the
+    /// freshness check before the re-stamp: when the sample the driver
+    /// returns has not changed in more than `budget` scan ticks, the
     /// landed sample's quality merges
     /// [`Quality::Uncertain`]`(`[`QualityReason::Stale`]`)` — the
     /// worst-of merge, so a driver-reported `Bad` or worse-named
-    /// `Uncertain` is never improved to `Stale`, and the first sample
-    /// inside the budget again returns the driver's own quality. The
-    /// driver tick is freshness evidence only; the image stamp stays the
-    /// scan tick either way.
+    /// `Uncertain` is never improved to `Stale`, and the first changed
+    /// sample inside the budget again returns the driver's own quality.
+    /// The lag is measured in the run's own tick domain — the scans
+    /// since the driver report last changed — not against the stamp the
+    /// sample carries: a remote driver stamps in the plant's tick
+    /// domain, whose offset from the scan tick a stopped-then-resumed
+    /// field leaves permanently lagging, so a cross-domain comparison
+    /// would latch stale on fresh data. The image stamp stays the scan
+    /// tick either way.
     ///
     /// A forced `In` point skips both channels: the driver is not read
     /// — so a field fault on a forced point counts no failed read —
@@ -2602,14 +2637,34 @@ impl<'d> Executor<'d> {
             let sample = match self.driver.read(point) {
                 Ok(sample) => {
                     self.io_health.consecutive_failures = 0;
-                    // Freshness is judged on the driver-stamped tick —
-                    // evidence only, never the image's timestamp — before
-                    // the scan tick is stamped on.
+                    // Freshness is judged in the run's own tick domain —
+                    // the driver-returned sample is change evidence,
+                    // never the image's timestamp: a remote driver
+                    // stamps in the plant's tick domain, whose offset
+                    // from the scan tick a stopped-then-resumed field
+                    // leaves permanently lagging, so comparing the two
+                    // domains directly would latch stale on fresh data.
                     let quality = match spec.stale_after_ticks {
-                        Some(budget) if tick.0.saturating_sub(sample.tick.0) > budget => sample
-                            .quality
-                            .merge(Quality::Uncertain(QualityReason::Stale)),
-                        _ => sample.quality,
+                        Some(budget) => {
+                            let freshness = self.freshness.entry(point).or_insert(Freshness {
+                                observed: sample,
+                                since: sample.tick.min(tick),
+                            });
+                            if freshness.observed != sample {
+                                *freshness = Freshness {
+                                    observed: sample,
+                                    since: tick,
+                                };
+                            }
+                            if tick.0.saturating_sub(freshness.since.0) > budget {
+                                sample
+                                    .quality
+                                    .merge(Quality::Uncertain(QualityReason::Stale))
+                            } else {
+                                sample.quality
+                            }
+                        }
+                        None => sample.quality,
                     };
                     Sample {
                         quality,
@@ -3671,6 +3726,159 @@ mod tests {
         executor.run(10);
         let sample = executor.snapshot().points[0].sample.unwrap();
         assert_eq!(sample, Sample::good(Value::Float(0.0), Tick(10)));
+    }
+
+    #[test]
+    fn resumed_stamp_advances_clear_stale_despite_a_domain_lag() {
+        // The QA finding's shape: the driver stamps in a tick domain
+        // that a stopped-then-resumed field leaves permanently lagging
+        // the run's — each unstepped window adds its length to the gap.
+        // Freshness must follow the report's *change*, not the stamp's
+        // offset: a lag measured across the two domains would read
+        // `scan_tick - stamp` past the budget forever and latch stale
+        // on data arriving every scan.
+        let driver = StubDriver::new(&[float(10)], &[]);
+        let mut executor = Executor::new(
+            &driver,
+            stale_map(PointId(10), 2),
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        // The field owner steps: the stamp advances every scan and the
+        // two domains stay aligned — every read lands fresh.
+        for tick in 1..=4 {
+            stamp(
+                &driver,
+                10,
+                Sample::good(Value::Float(tick as f64), Tick(tick)),
+            );
+            executor.scan();
+            assert_eq!(
+                executor.snapshot().points[0].sample.unwrap().quality,
+                Quality::Good
+            );
+        }
+
+        // The unstepped window — the pause/demote the run ticks through:
+        // the driver report stops changing at its tick 4 and the point
+        // ages to stale past its budget.
+        executor.run(2);
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap().quality,
+            Quality::Good
+        );
+        executor.scan();
+        let sample = executor.snapshot().points[0].sample.unwrap();
+        assert_eq!(sample.quality, Quality::Uncertain(QualityReason::Stale));
+        assert_eq!(sample.tick, Tick(7));
+
+        // The field resumes stepping — the driver domain resumes at its
+        // own tick 5, now four behind the run's: a cross-domain lag
+        // reads 4 > 2 and would stay stale forever, but the changed
+        // report is fresh evidence and the driver's own quality lands.
+        stamp(&driver, 10, Sample::good(Value::Float(9.0), Tick(5)));
+        executor.scan();
+        let sample = executor.snapshot().points[0].sample.unwrap();
+        assert_eq!(sample, Sample::good(Value::Float(9.0), Tick(8)));
+
+        // And stays fresh while the resumed domain keeps advancing
+        // behind the run's — the permanent gap is not the lag the
+        // budget measures.
+        stamp(&driver, 10, Sample::good(Value::Float(9.0), Tick(6)));
+        executor.run(2);
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap().quality,
+            Quality::Good
+        );
+    }
+
+    #[test]
+    fn a_run_started_behind_the_driver_domain_still_marks_stale() {
+        // The finding's symmetric edge: a run whose tick sits behind
+        // the driver's stamp domain — a resume at a persisted tick the
+        // field has already advanced past — used to saturate the lag at
+        // zero and never mark stale. Judged in the run's domain, a
+        // stalled driver report ages exactly like a lagging one.
+        let driver = StubDriver::new(&[float(10)], &[]);
+        let mut executor = Executor::new(
+            &driver,
+            stale_map(PointId(10), 2),
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        // The driver domain runs ahead — stamps near its tick 100 while
+        // the run is at 1 — and keeps advancing: fresh every scan.
+        for offset in 0..3 {
+            stamp(
+                &driver,
+                10,
+                Sample::good(Value::Float(7.0), Tick(100 + offset)),
+            );
+            executor.scan();
+            assert_eq!(
+                executor.snapshot().points[0].sample.unwrap().quality,
+                Quality::Good
+            );
+        }
+
+        // The driver stalls at its tick 102: the run's own lag accrues
+        // and the point presents stale past the budget — the verdict a
+        // stamp-domain comparison could never reach from behind.
+        executor.run(3);
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap().quality,
+            Quality::Uncertain(QualityReason::Stale)
+        );
+
+        // A report that resumes advancing clears it again — still ahead
+        // of the run's domain, still the driver's own quality.
+        stamp(&driver, 10, Sample::good(Value::Float(8.0), Tick(140)));
+        executor.scan();
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap(),
+            Sample::good(Value::Float(8.0), Tick(7))
+        );
+    }
+
+    #[test]
+    fn a_changed_value_at_a_held_stamp_counts_as_fresh_evidence() {
+        // Freshness follows the driver *report*, not the stamp alone: a
+        // field write while the driver's tick is frozen changes the
+        // report without moving its stamp — new evidence the run counts.
+        let driver = StubDriver::new(&[float(10)], &[]);
+        let mut executor = Executor::new(
+            &driver,
+            stale_map(PointId(10), 2),
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        // The held tick-0 report ages to stale.
+        executor.run(3);
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap().quality,
+            Quality::Uncertain(QualityReason::Stale)
+        );
+
+        // A changed report at the same stamp is fresh anyway — the
+        // driver's domain told the run nothing new could arrive.
+        stamp(&driver, 10, Sample::good(Value::Float(9.0), Tick(0)));
+        executor.scan();
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap(),
+            Sample::good(Value::Float(9.0), Tick(4))
+        );
     }
 
     #[test]
