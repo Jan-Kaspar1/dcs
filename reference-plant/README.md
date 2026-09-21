@@ -190,6 +190,16 @@ ci/staging.py          the pair contract's staging leg — the emitted
                        rise through the declared crossings, the
                        high-level annunciation, the bounded staging
                        response, and the declared de-stage order
+ci/oos.py              the pair contract's out-of-service leg — a
+                       receipted maintenance inhibit on the duty
+                       pump's declared `oos` point excluding it from
+                       availability and handing `duty` to the sibling
+                       on the deployed pair, the managed alarms
+                       reporting their declared
+                       `out_of_service`/`suppressed` states with
+                       `alarm` still reporting process truth mid-OOS,
+                       and the false write returning the pump to
+                       availability and the duty rotation
 ci/power_trip.py       the pair contract's power-fail interlock leg —
                        the station power-fail contact driven through
                        the plant protocol on the settled pair under a
@@ -972,6 +982,49 @@ The leg's doctored cases — an expectation asserting the wrong demand
 at the `lag_start` crossing, and one asserting the lag start landed
 inside a shortened delay bound — must each report the named
 diagnostic rather than pass silently.
+
+The stage's out-of-service leg — `ci/oos.py` on the same declared
+deployment — then proves the per-pump maintenance inhibit the emitted
+model declares actually excludes the machine on the customer pair
+(WW-ENG-003, WW-OPS-001, WW-ALM-002). With the pair converged and
+tracking at an idle assigned-duty baseline — `duty` naming the pump
+whose `oos` the leg drives, so the handover's only cause is the
+exclusion — the leg submits the attributed receipted `write_value`
+hold through the active's `POST /command` and asserts the in-service
+cone falls: the `oos-ok` inversion through the `oos-ok-avail-in`
+availability leg and the `oos-ok-guard-in` demand guard alike, the
+aggregated `avail` and its delivered `avail-in` copy dropping, and
+`duty` handing to the sibling inside the declared wiring bound while
+`staged` reports only the available count. Each managed per-pump
+alarm reports the states its declared lifecycle bindings select — the
+fault alarm `out_of_service` and `suppressed` through its declared
+`oos`/`suppress` inputs, the unbound thermal/moisture kinds and the
+sibling's whole set untouched, the precedence read off the served
+descriptors rather than assumed — while the sibling serves the next
+demand with the held pump's `cmd` staying released through the whole
+cycle. An injected non-Good on the held pump's run contact through
+the plant protocol's unfenced surface then proves `alarm` still
+reports process truth mid-OOS while suppression withholds the
+`unacknowledged` annunciation; the receipted false write returns the
+pump — the in-service leg reopening, `avail` rejoining, and
+suppression's release re-annunciating the outlasted trip as a fresh
+`unacknowledged` before the cleared contact returns the condition
+with the latch standing for the receipted `ack` — and the next
+completed cycle's declared alternate-each-cycle rotation hands `duty`
+back, the manual return proven as a return to service. The field
+owner's durable journal file must carry every managed transition as
+ordered `point_changed` entries beside the attributed `applied`
+settlements — the journaled edges measuring the declared wiring bound
+from write to avail drop and from release to rejoin — the served
+`GET /journal` answering the same record, the peers' adopted receipt
+logs one identical log, and the pair's controller roles unmoved
+throughout: a maintenance hold is a plant event, not a failover. A
+violated contract fails `oos-failed`; two passes must produce the
+identical `oos-digest`, a divergence failing `oos-nondeterministic`.
+The leg's doctored cases — an expectation asserting the held-out pump
+keeps `duty`, and one asserting the managed alarms never report their
+declared states — must each report the named diagnostic rather than
+pass silently (`oos-unchecked`).
 
 The stage's power-fail interlock leg — `ci/power_trip.py` on the
 same declared deployment — then proves the station protection-layer

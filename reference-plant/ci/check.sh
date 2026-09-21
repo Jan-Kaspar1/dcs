@@ -459,6 +459,37 @@
 #                record the served journal answers identically; two
 #                passes produce identical digests
 #                (staging-failed, staging-nondeterministic)
+#                The stage's out-of-service leg, ci/oos.py on the
+#                same declared deployment — the consumer-side proof
+#                that a receipted maintenance inhibit on the duty
+#                pump's declared writable journaled oos point
+#                excludes it on the customer-owned pair (WW-ENG-003,
+#                WW-OPS-001, WW-ALM-002): with the pair tracking at
+#                an idle assigned-duty baseline — duty naming the
+#                pump whose oos the leg drives — the attributed
+#                write drops the in-service cone (oos-ok through
+#                oos-ok-avail-in and oos-ok-guard-in), the aggregated
+#                avail and its delivered copy, handing duty to the
+#                sibling inside the declared wiring bound with staged
+#                reporting the available count and the held pump's
+#                command released for the whole of the sibling's
+#                service; each managed per-pump alarm reports the
+#                out_of_service/suppressed states its declared
+#                lifecycle bindings select — the bound fault alarm,
+#                the unbound thermal/moisture kinds and the sibling's
+#                set untouched — while a mid-OOS run-contact fault
+#                still asserts alarm as process truth with the
+#                unacknowledged latch withheld; the false write
+#                returns the pump to availability and re-annunciates
+#                the outlasted trip on suppression's release, the
+#                receipted ack settles the latch, and the next
+#                completed cycle's declared rotation hands duty back;
+#                every managed transition journaled as ordered
+#                point_changed entries beside the attributed receipts
+#                with the tick-domain ordering the declared bound
+#                measures, and the pair's roles unmoved throughout;
+#                two passes produce identical digests (oos-failed,
+#                oos-nondeterministic)
 #                The stage's power-fail interlock leg,
 #                ci/power_trip.py on the same declared deployment:
 #                with the pair settled and the group holding a full
@@ -1952,6 +1983,56 @@ for tamper in wrong-demand immediate-lag; do
     echo "  $tamper: reported, staging-failed"
 done
 
+# The pair contract's out-of-service leg, on the same
+# manifest-declared deployment: ci/oos.py settles the pair at an idle
+# assigned-duty baseline, submits the attributed receipted write on the
+# duty pump's declared oos point, and asserts the exclusion — the
+# in-service cone and the aggregated availability dropping, duty
+# handing to the sibling inside the declared wiring bound, staged
+# reporting the available count, the held pump's command staying
+# released while the sibling serves the demand — then each managed
+# per-pump alarm reporting the states its declared lifecycle bindings
+# select, a mid-OOS run-contact fault asserting alarm as process truth
+# with the unacknowledged latch withheld, the false write returning the
+# pump to availability and re-annunciating the outlasted trip, the
+# receipted ack settling the latch, and the next cycle's rotation
+# handing duty back — every managed transition journaled beside the
+# attributed receipts and the pair's roles unmoved throughout. Two
+# passes must produce identical digests.
+run_oos() {
+    python3 ci/oos.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_oos)" \
+    || fail "oos-failed: the pump out-of-service leg did not hold — its evidence lines are above"
+SECOND="$(run_oos)" \
+    || fail "oos-failed: the pump out-of-service leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "oos-nondeterministic: two out-of-service passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: a leg asserting the held-out pump keeps duty —
+# the honest handover to the sibling failing it — and a leg asserting
+# the managed alarms never report their declared states must each
+# surface the named diagnostic rather than passing silently.
+for tamper in keeps-duty managed-silent; do
+    if out="$(run_oos --tamper "$tamper" 2>&1)"; then
+        fail "oos-unchecked: a $tamper case passed the out-of-service leg"
+    fi
+    case "$tamper" in
+        keeps-duty) expected="expected the held-out pump to keep duty" ;;
+        managed-silent) expected="expected them never to report" ;;
+    esac
+    [[ "$out" == *"$expected"* ]] \
+        || fail "oos-unchecked: the $tamper case did not report its named diagnostic: $out"
+    echo "  $tamper: reported, oos-failed"
+done
+
 # The pair contract's power-fail interlock leg, on the same
 # manifest-declared deployment: ci/power_trip.py converges the pair
 # and drives the simulated well until the pump group holds a full
@@ -2014,7 +2095,7 @@ for file in ci/availability.py ci/burst_order.py ci/command_switch.py \
         ci/ctl.py ci/deploy_rig.py ci/divergence.py ci/failover.py \
         ci/force_carryover.py ci/force_release.py ci/handover.py \
         ci/managed_carryover.py ci/managed_lifecycle.py \
-        ci/negotiation.py ci/pair.py \
+        ci/negotiation.py ci/oos.py ci/pair.py \
         ci/peer_announce.py ci/power_trip.py \
         ci/refusal.py ci/report.py ci/restart.py \
         ci/schema_conformance.py ci/simulate.py ci/staging.py \
