@@ -518,6 +518,24 @@
 #                driven scan sequence and the pair's roles unchanged;
 #                two passes produce identical digests
 #                (power-trip-failed, power-trip-nondeterministic)
+#                The stage's monitor-starvation leg,
+#                ci/monitor_starvation.py on the same declared
+#                deployment: with the armed pair settled — the
+#                standby's --auto-promote carrying the manifest's
+#                failover_budget — the saturating set of
+#                incomplete-body connections held against the field
+#                owner's monitor leaves the serving lane answering
+#                GET /role, /snapshot, and /checkpoint inside the
+#                declared per-request bound on both peers, the
+#                standby's per-scan checkpoint pulls landing through
+#                a window one pull wider than the armed miss budget —
+#                no promoting/active transition and no
+#                field_claim_lost on either durable journal — and the
+#                field's writer claim fencing foreign probes; closing
+#                the set restores driven scans and a receipted command
+#                with the pair's roles unchanged; two passes produce
+#                identical digests (monitor-starvation-failed,
+#                monitor-starvation-nondeterministic)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -2132,6 +2150,58 @@ for tamper in commands-standing availability-holds; do
     echo "  $tamper: reported, power-trip-failed"
 done
 
+# The pair contract's monitor-starvation leg, on the same
+# manifest-declared deployment: ci/monitor_starvation.py converges the
+# armed pair — the standby's --auto-promote carrying the declared
+# failover_budget — then holds the saturating set of incomplete-body
+# connections against the field owner's monitor, the stalled-client
+# shape that pinned every worker before the lane split (WW-ENG-003,
+# WW-FND-004). Through the hold the serving lane must keep answering
+# GET /role, /snapshot, and /checkpoint inside the declared
+# per-request bound on both peers, the standby's per-scan checkpoint
+# pulls must keep landing — the window running one driven pull past
+# the armed budget, so a starved heartbeat produces the spurious
+# self-promotion inside it — a foreign attachment's field probe must
+# stay fenced, and neither durable journal may carry role_changed or
+# field_claim_lost. Closing the set must free the submission lane: a
+# driven POST /scan on the flooded owner answering again and a
+# receipted kind-declared command settling applied into both peers'
+# adopted log, the pair's roles unchanged. Two passes must produce
+# identical digests.
+run_starvation() {
+    python3 ci/monitor_starvation.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_starvation)" \
+    || fail "monitor-starvation-failed: the monitor-starvation leg did not hold — its evidence lines are above"
+SECOND="$(run_starvation)" \
+    || fail "monitor-starvation-failed: the monitor-starvation leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "monitor-starvation-nondeterministic: two monitor-starvation passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: a leg whose liveness reads starve — the declared
+# bound doctored to zero — and one whose armed standby reports a role
+# change mid-hold must each surface the named diagnostic — never a
+# silently unexercised contract.
+for tamper in starved-reads peer-transition; do
+    if out="$(run_starvation --tamper "$tamper" 2>&1)"; then
+        fail "monitor-starvation-unchecked: a $tamper case passed the starvation leg"
+    fi
+    case "$tamper" in
+        starved-reads) expected="never answered inside the declared" ;;
+        peer-transition) expected="moved to role" ;;
+    esac
+    [[ "$out" == *"$expected"* ]] \
+        || fail "monitor-starvation-unchecked: the $tamper case did not report its named diagnostic: $out"
+    echo "  $tamper: reported, monitor-starvation-failed"
+done
+
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
@@ -2143,6 +2213,7 @@ for file in ci/alarm_validation.py ci/availability.py \
         ci/ctl.py ci/deploy_rig.py ci/divergence.py ci/failover.py \
         ci/force_carryover.py ci/force_release.py ci/handover.py \
         ci/managed_carryover.py ci/managed_lifecycle.py \
+        ci/monitor_starvation.py \
         ci/negotiation.py ci/oos.py ci/pair.py \
         ci/peer_announce.py ci/power_trip.py \
         ci/refusal.py ci/report.py ci/restart.py \
