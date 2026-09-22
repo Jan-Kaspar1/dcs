@@ -185,9 +185,15 @@ only. Per point kind:
 - a writable *field* `in` point's command write is forwarded to the
   driver at the scan boundary and the same scan's input phase reads it
   back — documented operator substitution of the input image, holding
-  until the field side asserts a different value;
+  until the field side asserts a different value; while the point is
+  forced the write still reaches the driver, which holds it for the
+  release to observe;
 - a writable *internal* `in` point takes the write in the image and
-  holds it until the next command — the common setpoint target.
+  holds it until the next command — the common setpoint target; while
+  the point is forced the write refuses with
+  `CommandError::PointForced`, because the image the force owns is the
+  point's only store — a staged value could never land. Release the
+  force, then write.
 
 A channel-bound `writable` point is part of the operator surface worth
 reviewing, so lint flags it (`writable_field_point`); writable internal
@@ -409,10 +415,11 @@ one fixed-arity kind. `bool-latching-alarm` keeps `latching-alarm`'s
 `in`/`ack`/`alarm`/`unacknowledged` vocabulary exactly, with `in` a
 `Bool`: `alarm` follows the input directly — no hysteresis and no
 standing-limit parameter — and
-`unacknowledged` latches the input's false-to-true edge, clearing while
-the model-wired writable `ack` point reads `true` under the same
-level-sensitive, ack-dominates rule (a held `ack` suppresses a fresh
-latch). Both outputs carry the worst of the two inputs' qualities.
+`unacknowledged` latches the input's false-to-true edge, clearing on
+the model-wired writable `ack` point's rising edge under the same
+consumed-pulse rule — a held `ack` level acknowledges once and cannot
+pre-acknowledge a later trip. Both outputs carry the worst of the two
+inputs' qualities.
 `crates/dcs-assembly/fixtures/bool_latching_alarm.json` is the recorded
 composition — a `motor`'s `fault` output carried through a declared
 internal point pair into `in`; per-port semantics live beside

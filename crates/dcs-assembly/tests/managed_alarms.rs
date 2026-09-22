@@ -283,6 +283,99 @@ fn the_operator_commands_drive_the_managed_lifecycle() {
     assert!(flag(&executor, FAULT_UNACK), "released fresh — latched");
 }
 
+/// The QA-781 reproduction at the receipted-command level: an `ack`
+/// write that lands while the alarm stands clear and is never released
+/// cannot pre-acknowledge the trip arriving after it — the consumed
+/// edge acknowledged nothing, so the latch lands and no managed state
+/// names a withholding.
+#[test]
+fn a_held_ack_write_cannot_pre_acknowledge_a_driven_trip() {
+    let model = model();
+    let driver = sim_driver(&model).unwrap();
+    let mut executor = build_executor(&model, &driver);
+
+    // The defect's client shape: a receipted ack write applied while
+    // clear, held true with no release ever following.
+    let receipt = executor.submit_command(write_value(FAULT_ACK, Value::Bool(true)));
+    assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+    executor.scan();
+    assert!(!flag(&executor, FAULT_ALARM));
+    assert!(!flag(&executor, FAULT_UNACK));
+
+    // The driven trip still annunciates — the held level's spent edge
+    // gates nothing.
+    driver.write(FAULT, Value::Bool(true)).unwrap();
+    executor.scan();
+    assert!(flag(&executor, FAULT_ALARM));
+    assert!(
+        flag(&executor, FAULT_UNACK),
+        "the held ack cannot pre-acknowledge the fresh trip"
+    );
+    assert!(!flag(&executor, FAULT_SUPPRESSED));
+    assert!(!flag(&executor, FAULT_SHELVED));
+    assert!(!flag(&executor, FAULT_OOS_FLAG));
+
+    // Releasing `ack` mid-trip leaves the latch standing — no
+    // annunciation is created or destroyed by the release — and a
+    // second pulse acknowledges the standing alarm.
+    executor.submit_command(write_value(FAULT_ACK, Value::Bool(false)));
+    executor.scan();
+    assert!(flag(&executor, FAULT_ALARM));
+    assert!(flag(&executor, FAULT_UNACK));
+    executor.submit_command(write_value(FAULT_ACK, Value::Bool(true)));
+    executor.scan();
+    assert!(flag(&executor, FAULT_ALARM));
+    assert!(!flag(&executor, FAULT_UNACK));
+}
+
+/// The observed `ack` level rides the checkpoint with the latch: a
+/// standby promoted while `ack` stands held over a fresh latch must
+/// not read the carried `true` as a new edge clearing it.
+#[test]
+fn a_checkpoint_carries_the_consumed_ack_baseline() {
+    let model = model();
+    let driver_a = sim_driver(&model).unwrap();
+    let mut active = build_executor(&model, &driver_a);
+
+    // Trip, acknowledge, clear, then hold `ack` true — and trip again
+    // under the held level so a standing latch coexists with `ack`
+    // reading `true`.
+    driver_a.write(FAULT, Value::Bool(true)).unwrap();
+    active.scan();
+    active.submit_command(write_value(FAULT_ACK, Value::Bool(true)));
+    active.scan();
+    active.submit_command(write_value(FAULT_ACK, Value::Bool(false)));
+    driver_a.write(FAULT, Value::Bool(false)).unwrap();
+    active.scan();
+    active.submit_command(write_value(FAULT_ACK, Value::Bool(true)));
+    active.scan();
+    driver_a.write(FAULT, Value::Bool(true)).unwrap();
+    active.scan();
+    assert!(flag(&active, FAULT_ALARM));
+    assert!(flag(&active, FAULT_UNACK), "the held ack's edge is spent");
+
+    let checkpoint = active.checkpoint();
+    let driver_b = sim_driver(&model).unwrap();
+    let mut standby = build_executor(&model, &driver_b);
+    standby.apply(&checkpoint).unwrap();
+
+    // The carried internal point reads `ack` true; the carried
+    // baseline means the standby scans no phantom edge, so the latch
+    // survives promotion and behaves identically after it.
+    assert!(flag(&standby, FAULT_UNACK), "the latch rode along");
+    standby.scan();
+    active.scan();
+    assert!(
+        flag(&standby, FAULT_UNACK),
+        "a phantom restore edge would have cleared the carried latch"
+    );
+    assert!(flag(&active, FAULT_UNACK));
+    assert_eq!(
+        serde_json::to_string(&active.snapshot()).unwrap(),
+        serde_json::to_string(&standby.snapshot()).unwrap()
+    );
+}
+
 /// The Float sibling takes the same lifecycle on the level input.
 #[test]
 fn the_float_sibling_shelves_and_suppresses_identically() {

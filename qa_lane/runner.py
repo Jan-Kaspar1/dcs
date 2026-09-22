@@ -25,7 +25,6 @@ runtime stage keeps the debian:bookworm-slim + uid 10001 + entrypoint
 contract. CI image pinning does not exist yet; this is the documented
 build choice until it does.
 """
-import fcntl
 import json
 import os
 import platform
@@ -652,6 +651,9 @@ def _set_blocked(st, reason, detail, log):
 def cycle(cfg, log=print):
     """One supervisor pass: reconcile, gate, reclaim, then run the
     newest queued revision."""
+    # Lazy: the lane is POSIX-only, but the module must stay importable on
+    # Windows so the repository test suite can collect it there.
+    import fcntl
     state_dir = Path(cfg['state_dir'])
     state_dir.mkdir(parents=True, exist_ok=True)
     lock = (state_dir / 'lock').open('a')

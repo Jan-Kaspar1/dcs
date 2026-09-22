@@ -42,7 +42,7 @@ use dcs_core::{
     JournalEvent, PointId, Quality, Role, TelemetrySnapshot, Tick, Value,
 };
 use dcs_runtime::{Executor, ResolutionReport, SourceRestart};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -140,10 +140,11 @@ pub(super) struct Recorder {
     /// against; observations the served window no longer covers leave
     /// on each record, keeping the map bounded with the log.
     receipt_outcomes: HashMap<u64, CommandReceipt>,
-    /// The terminal receipts this run already journaled per absolute
-    /// submission index, kept for receipts the served window no longer
-    /// covers — `receipt_outcomes` dropping an observation on eviction
-    /// must not turn journaled state back into unseen state: checkpoint
+    /// The terminal receipts already journaled — or already accounted
+    /// against the replayed file — per absolute submission index, kept
+    /// for receipts the served window no longer covers:
+    /// `receipt_outcomes` dropping an observation on eviction must not
+    /// turn journaled state back into unseen state: checkpoint
     /// adoption can re-admit the same receipt at the same index after
     /// the window moved, and this map is what keeps that re-admission
     /// from re-journaling a settle the run already emitted. The
@@ -160,6 +161,27 @@ pub(super) struct Recorder {
     /// couple of window spans behind the served window — entries lower
     /// than that can never re-enter and evict lowest-index first.
     journaled_settles: BTreeMap<u64, Vec<CommandReceipt>>,
+    /// The settled receipts the replayed journal file already carries,
+    /// keyed by their serialized form and counted — the whole record's
+    /// fold like `replayed_qualities`, a multiset because identical
+    /// receipts can settle distinct submissions. The file is the run's
+    /// own audit record: a receipt this run did not itself submit —
+    /// adopted inside a checkpoint or drained superseded by one —
+    /// whose settlement the file already holds accounts against this
+    /// count rather than journaling the one settlement a second time
+    /// across the run boundary. The index-keyed dedup cannot reach
+    /// these records: the journaled entry carries no submission index,
+    /// and a restart's `journaled_settles` begins empty.
+    replayed_settled: HashMap<Vec<u8>, usize>,
+    /// The submission indices this run's own
+    /// [`note_command`](Self::note_command) marked — the receipts that
+    /// entered through this run's command path rather than a
+    /// checkpoint's adoption. Their settlement is this run's news even
+    /// when byte-identical to a journaled one, so `replayed_settled`
+    /// accounting never reaches them. Retained for the run's lifetime —
+    /// an evicted index re-admitted inside an adopted window keeps its
+    /// provenance — and bounded by the run's own submission count.
+    local_receipts: HashSet<u64>,
     /// Per-component `step_errors` counts at the last record, in scan
     /// order — what step-failure entries diff against.
     step_counts: Vec<u64>,
@@ -211,6 +233,14 @@ impl Recorder {
             replayed_values: replay.values,
             receipt_outcomes: HashMap::new(),
             journaled_settles: BTreeMap::new(),
+            replayed_settled: replay
+                .settled
+                .iter()
+                .fold(HashMap::new(), |mut counts, receipt| {
+                    *counts.entry(settled_key(receipt)).or_insert(0) += 1;
+                    counts
+                }),
+            local_receipts: HashSet::new(),
             step_counts: Vec::new(),
             sink,
         };
@@ -244,7 +274,11 @@ impl Recorder {
     ///
     /// A command refused at submission is already final and is journaled
     /// at the run's current tick; an accepted one is marked observed and
-    /// the next record journals the outcome its boundary settled.
+    /// the next record journals the outcome its boundary settled. The
+    /// index is also marked local: the receipt entered through this
+    /// run's own command path, so the replayed journal's settled fold
+    /// never suppresses its settlement — however byte-identical a
+    /// journaled receipt may be, this run's submission is its own news.
     pub(super) fn note_command(&mut self, receipt_index: u64, receipt: CommandReceipt, tick: Tick) {
         match receipt.outcome {
             CommandOutcome::Accepted { .. } => {}
@@ -257,6 +291,7 @@ impl Recorder {
                 );
             }
         }
+        self.local_receipts.insert(receipt_index);
         self.observe(receipt_index, receipt);
     }
 
@@ -277,6 +312,19 @@ impl Recorder {
             if self.receipt_outcomes.get(&index) == Some(&receipt)
                 || self.settle_journaled(index, &receipt)
             {
+                return;
+            }
+            // A drain the replayed file already recorded — the same
+            // superseded settlement an earlier lifetime emitted —
+            // accounts against the fold instead of journaling again;
+            // a locally submitted index's drain is always this run's
+            // news. Marking the index keeps a repeated drain on the
+            // shared dedup rather than spending the fold twice.
+            if !self.local_receipts.contains(&index) && self.take_replayed_settled(&receipt) {
+                self.journaled_settles
+                    .entry(index)
+                    .or_default()
+                    .push(receipt);
                 return;
             }
             self.journaled_settles
@@ -303,6 +351,24 @@ impl Recorder {
     /// surface here before ever passing `note_command`.
     fn observe(&mut self, index: u64, receipt: CommandReceipt) {
         self.receipt_outcomes.insert(index, receipt);
+    }
+
+    /// Accounts one settled receipt against the fold the replayed
+    /// journal file seeded: when the file already records the receipt's
+    /// settlement, consumes one recorded instance and answers `true` —
+    /// re-observing it must not journal the one settlement a second
+    /// time. Answers `false` when the file holds none, so the caller
+    /// journals the settlement as this run's news.
+    fn take_replayed_settled(&mut self, receipt: &CommandReceipt) -> bool {
+        let key = settled_key(receipt);
+        let Some(remaining) = self.replayed_settled.get_mut(&key) else {
+            return false;
+        };
+        *remaining -= 1;
+        if *remaining == 0 {
+            self.replayed_settled.remove(&key);
+        }
+        true
     }
 
     /// Journals a reported-role transition at `tick` — a promotion or
@@ -401,6 +467,16 @@ impl Recorder {
         let base = executor.receipt_base();
         for (offset, receipt) in executor.receipts().iter().enumerate() {
             self.observe(base + offset as u64, receipt.clone());
+            // A restored receipt already settled stands in the journaled
+            // file this run replayed — account it against the fold so its
+            // remaining counts name only settlements no restored receipt
+            // covers.
+            if matches!(
+                receipt.outcome,
+                CommandOutcome::Applied { .. } | CommandOutcome::Rejected { .. }
+            ) {
+                self.take_replayed_settled(receipt);
+            }
         }
         let snapshot = executor.snapshot();
         let journaled = |point: PointId| {
@@ -493,26 +569,34 @@ impl Recorder {
             // The same terminal receipt already journaled for the
             // index — however the window moved between the
             // observations — does not journal again: each admission's
-            // settle emits once per journal.
+            // settle emits once per journal. A settled receipt this
+            // run did not itself submit accounts the same way against
+            // the replayed file's fold: the durable record is the
+            // pair's one command audit trail across the run boundary,
+            // so a restart onto a checkpoint whose receipt window did
+            // not cover a journaled settlement — a missing
+            // `--state-file`, an evicted settled prefix — must not
+            // re-record it.
+            let journaled = matches!(
+                receipt.outcome,
+                CommandOutcome::Applied { .. } | CommandOutcome::Rejected { .. }
+            ) && (self.settle_journaled(index, receipt)
+                || (!self.local_receipts.contains(&index) && self.take_replayed_settled(receipt)));
             match receipt.outcome {
                 CommandOutcome::Accepted { .. } => {}
-                CommandOutcome::Applied { tick } if !self.settle_journaled(index, receipt) => {
-                    self.push(
-                        tick,
-                        JournalEvent::CommandSettled {
-                            receipt: receipt.clone(),
-                        },
-                    );
-                }
-                CommandOutcome::Rejected { .. } if !self.settle_journaled(index, receipt) => {
-                    self.push(
-                        scan_tick,
-                        JournalEvent::CommandSettled {
-                            receipt: receipt.clone(),
-                        },
-                    );
-                }
-                _ => {}
+                _ if journaled => {}
+                CommandOutcome::Applied { tick } => self.push(
+                    tick,
+                    JournalEvent::CommandSettled {
+                        receipt: receipt.clone(),
+                    },
+                ),
+                CommandOutcome::Rejected { .. } => self.push(
+                    scan_tick,
+                    JournalEvent::CommandSettled {
+                        receipt: receipt.clone(),
+                    },
+                ),
             }
             self.observe(index, receipt.clone());
         }
@@ -656,4 +740,12 @@ impl Recorder {
         self.next_seq += 1;
         self.store.push_journal(entry);
     }
+}
+
+/// The identity a journaled `command_settled` receipt and an observed
+/// receipt share — the receipt's serialized form: byte-identical
+/// receipts name the same recorded settlement, so the replayed file's
+/// fold keys on the same bytes it appended.
+fn settled_key(receipt: &CommandReceipt) -> Vec<u8> {
+    serde_json::to_vec(receipt).expect("a CommandReceipt serializes")
 }
