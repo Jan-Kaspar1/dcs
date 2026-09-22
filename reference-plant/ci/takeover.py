@@ -28,13 +28,19 @@ pair legs do. The run:
 - writes `p101-hand`, asserting the pump runs on the operator demand
   while the declared thermal/moisture guards still gate it — the
   health carriers standing inside the availability aggregation that
-  keeps the pump out of the group's roster — then drives the
-  protection layer's reported run state through the plant protocol's
-  unfenced `inject_fault` surface, asserting the defeat: the motor's
-  proven command/feedback `fault` asserting beside its managed alarm's
-  standing and unacknowledged flags, each transition journaled; the
-  fault then clears through `clear_fault` and the latch releases
-  through a receipted `ack` write;
+  keeps the pump out of the group's roster;
+- holds the `hand` demand while the running pump draws the well to
+  the declared low-level cutoff — the defect this leg regressed
+  against: the protection interlock trips, the delivered command
+  releases while `mode`/`hand` still stand, and the recovered level
+  lets the held demand re-engage through the declared
+  `min_off_ticks` holdout;
+- drives the protection layer's reported run state through the plant
+  protocol's unfenced `inject_fault` surface, asserting the defeat:
+  the motor's proven command/feedback `fault` asserting beside its
+  managed alarm's standing and unacknowledged flags, each transition
+  journaled; the fault then clears through `clear_fault` and the
+  latch releases through a receipted `ack` write;
 - writes `p101-oos`, asserting the maintenance inhibit: the in-service
   guard cuts the hand request off the motor's command path, and the
   fault alarm's managed `out_of_service`/`suppressed` states
@@ -83,6 +89,10 @@ Abort = pair.Abort
 # submissions declare.
 DEMAND_BOUND = 24
 SETTLE_BOUND = 16
+# The dry-run recovery lands on the dynamics' refill rate, not a
+# carrier crossing — the well refills on inflow alone while the
+# tripped interlock holds the demand off.
+RECOVERY_BOUND = 32
 ACTOR = "ci-takeover"
 
 # The signal names resolving the leg's point ids out of the emitted
@@ -99,6 +109,9 @@ SIGNALS = {
     "auto": "p101-auto",
     "oos_ok": "p101-oos-ok",
     "fault": "p101-fault",
+    "below_cutoff": "below-cutoff",
+    "protect_tripped": "p101-protect-tripped",
+    "protections_ok": "p101-protections-ok",
     "thermal_ok": "p101-thermal-ok",
     "moisture_ok": "p101-moisture-ok",
     "avail": "p101-avail",
@@ -194,13 +207,13 @@ def run_ticks(rig, failures, count):
     return owner
 
 
-def drive_until(rig, failures, condition):
+def drive_until(rig, failures, condition, bound=SETTLE_BOUND):
     """Driven pair ticks until `condition(owner_snapshot)` holds —
-    returns the satisfying snapshot, or None when SETTLE_BOUND scans
-    pass without it landing. The carried-point seam crosses one hop
-    per scan, so each receipted write's declared effect takes a few
-    scans to arrive; the bound names a landing that never did."""
-    for _ in range(SETTLE_BOUND):
+    returns the satisfying snapshot, or None when `bound` scans pass
+    without it landing. The carried-point seam crosses one hop per
+    scan, so each receipted write's declared effect takes a few scans
+    to arrive; the bound names a landing that never did."""
+    for _ in range(bound):
         owner = tick(rig, failures)
         if condition(owner):
             return owner
@@ -493,6 +506,72 @@ def takeover_pass(args, tamper):
             }
         )
 
+        # The manual-mode protection contract — the defect this leg
+        # regressed against: the held `hand` demand cannot run the
+        # well dry. The running pump draws the level to the declared
+        # cutoff, the protection interlock trips, and the delivered
+        # command releases while `mode`/`hand` still stand — where
+        # before this fix the hand path carried no protection wiring
+        # past the in-service guard.
+        owner = drive_until(
+            rig,
+            failures,
+            lambda snapshot: value(snapshot, points["below_cutoff"])
+            == {"bool": True}
+            and value(snapshot, points["protect_tripped"]) == {"bool": True}
+            and value(snapshot, points["cmd"]) == {"bool": False},
+        )
+        if owner is None:
+            owner = tick(rig, failures)
+            failures.append(
+                f"the hand-running pump never released on the "
+                f"low-level cutoff — below-cutoff reads "
+                f"{value(owner, points['below_cutoff'])}, the "
+                f"protection trip "
+                f"{value(owner, points['protect_tripped'])}, the "
+                f"delivered command {value(owner, points['cmd'])}"
+            )
+            raise Abort
+        digest_entries.append(
+            {
+                "phase": "protection-trip",
+                "below_cutoff": value(owner, points["below_cutoff"]),
+                "tripped": value(owner, points["protect_tripped"]),
+                "cmd": value(owner, points["cmd"]),
+            }
+        )
+        # The declared recovery: the refilled well untrips the
+        # interlock and the held `hand` demand re-engages through the
+        # `min_off_ticks` holdout — never inside it. The refill runs
+        # on inflow alone, so the landing takes longer than a carrier
+        # crossing.
+        owner = drive_until(
+            rig,
+            failures,
+            lambda snapshot: value(snapshot, points["protections_ok"])
+            == {"bool": True}
+            and value(snapshot, points["cmd"]) == {"bool": True}
+            and value(snapshot, points["run"]) == {"bool": True},
+            bound=RECOVERY_BOUND,
+        )
+        if owner is None:
+            owner = tick(rig, failures)
+            failures.append(
+                f"the recovered well never let the held demand "
+                f"re-engage — protections-ok reads "
+                f"{value(owner, points['protections_ok'])}, the "
+                f"delivered command {value(owner, points['cmd'])}, "
+                f"the run feedback {value(owner, points['run'])}"
+            )
+            raise Abort
+        digest_entries.append(
+            {
+                "phase": "protection-restore",
+                "protections_ok": value(owner, points["protections_ok"]),
+                "cmd": value(owner, points["cmd"]),
+            }
+        )
+
         # The protection input through the plant protocol: an injected
         # non-Good on the run contact defeats the feedback's proof —
         # the motor's `fault` asserts and its managed alarm
@@ -706,6 +785,24 @@ def takeover_pass(args, tamper):
             # The operator demand: the hand write's settlement.
             [
                 ("settled", points["hand"], {"bool": True}, "applied", ACTOR),
+                ("changed", points["run"], {"bool": True}),
+            ],
+            # The dry-run protection: the well drawing to the declared
+            # cutoff trips the interlock and releases the delivered
+            # command and its proven run — while `mode`/`hand` still
+            # stand.
+            [
+                ("changed", points["below_cutoff"], {"bool": True}),
+                ("changed", points["protect_tripped"], {"bool": True}),
+                ("changed", points["protections_ok"], {"bool": False}),
+                ("changed", points["run"], {"bool": False}),
+            ],
+            # The recovery: the refilled well untrips the interlock
+            # and the held demand re-engages through the holdout.
+            [
+                ("changed", points["below_cutoff"], {"bool": False}),
+                ("changed", points["protect_tripped"], {"bool": False}),
+                ("changed", points["protections_ok"], {"bool": True}),
                 ("changed", points["run"], {"bool": True}),
             ],
             # The protection input's defeat: the injected quality, the

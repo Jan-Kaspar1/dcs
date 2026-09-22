@@ -181,22 +181,15 @@ def check_document(controller, path):
     return run.returncode == 0, run.stdout + run.stderr
 
 
-def served_misses(model, monitor):
+def record_misses(model, signals, snapshot):
     """Named divergences between the emitted document's alarm record
-    and the served surface: `GET /signals`' components section must
-    carry each managed alarm instance's `rationalization` block and
-    `GET /snapshot`'s parameters section must report its
+    and an already-fetched pair of served sections: the signal
+    index's components section must carry each managed alarm
+    instance's `rationalization` block verbatim and the snapshot's
+    parameters section must report its
     `priority`/`class`/`response_ticks` live with the declared
     values."""
     failures = []
-    try:
-        signals = simulate.http(f"{monitor}/signals")
-    except Exception as error:
-        return [f"GET /signals answered {error!r}"]
-    try:
-        snapshot = simulate.http(f"{monitor}/snapshot")
-    except Exception as error:
-        return failures + [f"GET /snapshot answered {error!r}"]
     served_components = {
         entry.get("name"): entry for entry in signals.get("components", [])
     }
@@ -228,6 +221,20 @@ def served_misses(model, monitor):
                     f"{declared.get(key)!r}"
                 )
     return failures
+
+
+def served_misses(model, monitor):
+    """The served half over HTTP: the monitor's `GET /signals` and
+    `GET /snapshot` fetched, then `record_misses` over them."""
+    try:
+        signals = simulate.http(f"{monitor}/signals")
+    except Exception as error:
+        return [f"GET /signals answered {error!r}"]
+    try:
+        snapshot = simulate.http(f"{monitor}/snapshot")
+    except Exception as error:
+        return [f"GET /snapshot answered {error!r}"]
+    return record_misses(model, signals, snapshot)
 
 
 def run_pass(args, tamper):

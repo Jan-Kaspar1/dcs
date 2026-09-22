@@ -319,6 +319,85 @@
           "command": {
             "write_value": {
               "kind": "bool",
+              "point": 332,
+              "value": {
+                "bool": true
+              }
+            }
+          }
+        },
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 333,
+              "value": {
+                "bool": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "101": {
+          "bool": false
+        },
+        "214": {
+          "bool": true
+        },
+        "332": {
+          "bool": true
+        },
+        "356": {
+          "bool": true
+        },
+        "358": {
+          "bool": false
+        },
+        "41": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [
+        "accepted",
+        "accepted"
+      ],
+      "name": "manual-held-below-cutoff",
+      "plant": [],
+      "scans": 3
+    },
+    {
+      "commands": [],
+      "expect": {
+        "101": {
+          "bool": false
+        },
+        "1036": {
+          "bool": true
+        },
+        "210": {
+          "int": 1
+        },
+        "227": {
+          "bool": true
+        },
+        "353": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [],
+      "name": "duty-hands-over",
+      "plant": [],
+      "scans": 3
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
               "point": 1011,
               "value": {
                 "bool": true
@@ -420,13 +499,159 @@
       "scans": 1
     },
     {
+      "commands": [],
+      "expect": {
+        "101": {
+          "bool": true
+        },
+        "356": {
+          "bool": false
+        },
+        "358": {
+          "bool": true
+        },
+        "41": {
+          "bool": true
+        }
+      },
+      "expect_receipts": [],
+      "name": "hand-runs-on-refill",
+      "plant": [],
+      "scans": 5
+    },
+    {
+      "commands": [],
+      "expect": {
+        "101": {
+          "bool": false
+        },
+        "1033": {
+          "bool": true
+        },
+        "1034": {
+          "bool": false
+        },
+        "1036": {
+          "bool": true
+        },
+        "1053": {
+          "bool": true
+        },
+        "1054": {
+          "bool": true
+        },
+        "217": {
+          "bool": true
+        },
+        "225": {
+          "bool": true
+        },
+        "356": {
+          "bool": true
+        },
+        "41": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [],
+      "name": "power-fail-quality-trips-hand",
+      "plant": [
+        {
+          "fault": {
+            "quality": {
+              "bad": "device_fault"
+            }
+          },
+          "op": "inject_fault",
+          "point": 14
+        }
+      ],
+      "scans": 5
+    },
+    {
       "commands": [
         {
           "actor": "ci-scenario",
           "command": {
             "write_value": {
               "kind": "bool",
-              "point": 324,
+              "point": 1050,
+              "value": {
+                "bool": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "1053": {
+          "bool": true
+        },
+        "1054": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [
+        "accepted"
+      ],
+      "name": "power-fail-acknowledged",
+      "plant": [],
+      "scans": 1
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 333,
+              "value": {
+                "bool": false
+              }
+            }
+          }
+        },
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 332,
+              "value": {
+                "bool": false
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "101": {
+          "bool": false
+        },
+        "332": {
+          "bool": false
+        },
+        "41": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [
+        "accepted",
+        "accepted"
+      ],
+      "name": "hand-released-under-power-trip",
+      "plant": [],
+      "scans": 2
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 332,
               "value": {
                 "bool": true
               }
@@ -438,7 +663,7 @@
           "command": {
             "write_value": {
               "kind": "bool",
-              "point": 325,
+              "point": 333,
               "value": {
                 "bool": true
               }
@@ -448,28 +673,31 @@
       ],
       "expect": {
         "101": {
+          "bool": false
+        },
+        "225": {
           "bool": true
         },
-        "210": {
-          "int": 1
-        },
-        "324": {
+        "332": {
           "bool": true
         },
-        "345": {
+        "356": {
+          "bool": true
+        },
+        "358": {
           "bool": false
         },
         "41": {
-          "bool": true
+          "bool": false
         }
       },
       "expect_receipts": [
         "accepted",
         "accepted"
       ],
-      "name": "manual-takeover-hands-duty-over",
+      "name": "hand-resubmitted-under-power-trip",
       "plant": [],
-      "scans": 6
+      "scans": 4
     },
     {
       "commands": [
@@ -478,7 +706,185 @@
           "command": {
             "write_value": {
               "kind": "bool",
-              "point": 326,
+              "point": 1050,
+              "value": {
+                "bool": false
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "101": {
+          "bool": false
+        },
+        "1053": {
+          "bool": false
+        },
+        "225": {
+          "bool": false
+        },
+        "356": {
+          "bool": false
+        },
+        "41": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [
+        "accepted"
+      ],
+      "name": "power-restored-holdout-holds",
+      "plant": [
+        {
+          "op": "clear_fault",
+          "point": 14
+        }
+      ],
+      "scans": 4
+    },
+    {
+      "commands": [],
+      "expect": {
+        "101": {
+          "bool": true
+        },
+        "358": {
+          "bool": true
+        },
+        "41": {
+          "bool": true
+        }
+      },
+      "expect_receipts": [],
+      "name": "hand-resumes-after-holdout",
+      "plant": [],
+      "scans": 5
+    },
+    {
+      "commands": [],
+      "expect": {
+        "101": {
+          "bool": false
+        },
+        "1103": {
+          "bool": true
+        },
+        "1104": {
+          "bool": true
+        },
+        "356": {
+          "bool": true
+        },
+        "41": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [],
+      "name": "thermal-bad-quality-trips-hand",
+      "plant": [
+        {
+          "fault": {
+            "quality": {
+              "bad": "device_fault"
+            }
+          },
+          "op": "inject_fault",
+          "point": 61
+        }
+      ],
+      "scans": 5
+    },
+    {
+      "commands": [],
+      "expect": {
+        "1103": {
+          "bool": false
+        },
+        "1104": {
+          "bool": true
+        },
+        "356": {
+          "bool": false
+        },
+        "358": {
+          "bool": true
+        }
+      },
+      "expect_receipts": [],
+      "name": "thermal-cleared-protection-stands",
+      "plant": [
+        {
+          "op": "clear_fault",
+          "point": 61
+        }
+      ],
+      "scans": 7
+    },
+    {
+      "commands": [],
+      "expect": {
+        "101": {
+          "bool": false
+        },
+        "1113": {
+          "bool": true
+        },
+        "1114": {
+          "bool": true
+        },
+        "356": {
+          "bool": true
+        },
+        "41": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [],
+      "name": "moisture-disconnected-trips-hand",
+      "plant": [
+        {
+          "fault": "disconnected",
+          "op": "inject_fault",
+          "point": 81
+        }
+      ],
+      "scans": 5
+    },
+    {
+      "commands": [],
+      "expect": {
+        "101": {
+          "bool": true
+        },
+        "1113": {
+          "bool": false
+        },
+        "356": {
+          "bool": false
+        },
+        "41": {
+          "bool": true
+        }
+      },
+      "expect_receipts": [],
+      "name": "moisture-reconnected-hand-resumes",
+      "plant": [
+        {
+          "op": "clear_fault",
+          "point": 81
+        }
+      ],
+      "scans": 12
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 334,
               "value": {
                 "bool": true
               }
@@ -493,7 +899,7 @@
         "1097": {
           "bool": true
         },
-        "345": {
+        "353": {
           "bool": false
         },
         "41": {
@@ -505,7 +911,7 @@
       ],
       "name": "out-of-service-inhibits",
       "plant": [],
-      "scans": 4
+      "scans": 6
     },
     {
       "commands": [],
@@ -522,7 +928,7 @@
         "1097": {
           "bool": true
         },
-        "336": {
+        "344": {
           "bool": true
         }
       },
@@ -548,7 +954,7 @@
           "command": {
             "write_value": {
               "kind": "bool",
-              "point": 326,
+              "point": 334,
               "value": {
                 "bool": false
               }
@@ -583,7 +989,7 @@
         "1094": {
           "bool": true
         },
-        "336": {
+        "344": {
           "bool": false
         }
       },
@@ -643,7 +1049,7 @@
           "command": {
             "write_value": {
               "kind": "bool",
-              "point": 324,
+              "point": 332,
               "value": {
                 "bool": false
               }
@@ -655,7 +1061,7 @@
           "command": {
             "write_value": {
               "kind": "bool",
-              "point": 325,
+              "point": 333,
               "value": {
                 "bool": false
               }
@@ -667,10 +1073,10 @@
         "210": {
           "int": 1
         },
-        "324": {
+        "332": {
           "bool": false
         },
-        "345": {
+        "353": {
           "bool": true
         }
       },

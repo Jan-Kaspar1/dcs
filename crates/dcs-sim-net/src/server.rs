@@ -101,6 +101,48 @@ fn release_hold(writer: &Mutex<Option<WriterClaim>>, connection: u64) {
     }
 }
 
+/// The unconditional claim grant [`PlantRequest::ClaimWriter`] and the
+/// unrefused half of [`PlantRequest::ClaimWriterUnlessHeld`] share:
+/// preempts whichever owner held the claim. Claiming the standing
+/// owner joins this attachment to the claim's holders — flagged
+/// `ClaimedShared` when another live attachment already holds the
+/// token: the token cannot tell one owner's second attachment from a
+/// second process reusing it, and the second case silently defeats the
+/// single-writer fencing a promotion relies on, so the grant reports
+/// the sharing rather than hiding it.
+fn grant_writer_claim(shared: &Shared, owner: u64, connection: u64) -> PlantResponse {
+    let mut writer = shared.writer.lock().unwrap();
+    grant_writer_claim_locked(&mut writer, owner, connection)
+}
+
+/// The locked half of [`grant_writer_claim`], also invoked from inside
+/// the conditional claim's guard once its refusal check passed.
+fn grant_writer_claim_locked(
+    writer: &mut Option<WriterClaim>,
+    owner: u64,
+    connection: u64,
+) -> PlantResponse {
+    let shared_claim = writer
+        .as_ref()
+        .is_some_and(|claim| claim.shared_with(owner, connection));
+    match writer.as_mut() {
+        Some(claim) if claim.owner == owner => {
+            claim.holders.insert(connection);
+        }
+        _ => {
+            *writer = Some(WriterClaim {
+                owner,
+                holders: HashSet::from([connection]),
+            });
+        }
+    }
+    if shared_claim {
+        PlantResponse::ClaimedShared { owner }
+    } else {
+        PlantResponse::Done
+    }
+}
+
 /// One client connection's request loop: read a line, dispatch it, write
 /// the response. Ends when the peer goes away, the link fails, the peer
 /// violates the message bound, or the server stops.
@@ -231,32 +273,30 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
         PlantRequest::ClaimWriter { owner } => {
             // The grant preempts unconditionally: the promoted standby's
             // claim must beat the old owner's, wherever it still lives.
-            // Claiming the standing owner joins this attachment to the
-            // claim's holders — flagged `ClaimedShared` when another
-            // live attachment already holds the token: the token cannot
-            // tell one owner's second attachment from a second process
-            // reusing it, and the second case silently defeats the
-            // single-writer fencing a promotion relies on, so the grant
-            // reports the sharing rather than hiding it.
+            grant_writer_claim(shared, owner, connection)
+        }
+        PlantRequest::ClaimWriterUnlessHeld { owner } => {
+            // The startup grant: a launched controller takes the field
+            // from a dead owner — the claim's never-release rule leaves
+            // a crashed owner's token standing with an empty holder
+            // set, the exact recovery case — but never from a live
+            // incumbent. Preempting an owner still attached and writing
+            // is the stale-checkpoint takeover: the restarted run's
+            // older state would silently roll back commands the
+            // incumbent receipted and applied, so the request is
+            // refused and the incumbent keeps the field.
             let mut writer = shared.writer.lock().unwrap();
-            let shared_claim = writer
-                .as_ref()
-                .is_some_and(|claim| claim.shared_with(owner, connection));
-            match writer.as_mut() {
-                Some(claim) if claim.owner == owner => {
-                    claim.holders.insert(connection);
+            match writer.as_ref() {
+                Some(claim) if claim.owner != owner && !claim.holders.is_empty() => {
+                    PlantResponse::Error {
+                        error: PlantError::Fenced {
+                            detail: "a live attachment holds the field's write-ownership \
+                                 claim"
+                                .to_string(),
+                        },
+                    }
                 }
-                _ => {
-                    *writer = Some(WriterClaim {
-                        owner,
-                        holders: HashSet::from([connection]),
-                    });
-                }
-            }
-            if shared_claim {
-                PlantResponse::ClaimedShared { owner }
-            } else {
-                PlantResponse::Done
+                _ => grant_writer_claim_locked(&mut writer, owner, connection),
             }
         }
         PlantRequest::EnsureWriter { owner } => {

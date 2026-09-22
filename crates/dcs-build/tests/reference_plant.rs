@@ -67,7 +67,11 @@
 //! peer's served `diverged` report naming the perturbed output, its
 //! promote refused `not_converged` with no field hand-off, the
 //! active's writes/receipts/journal undisturbed, and a write-free
-//! control window reconverging and promoting normally — the `consumers`
+//! control window reconverging and promoting normally — plus the pair
+//! contract's emit-identical leg: with the standby tracking, the
+//! sequencer's counted `step_completed` emissions must serve
+//! identical routed event records through both peers'
+//! `GET /resources` views — the `consumers`
 //! stage, which replays that driven run under each consumer schedule
 //! (no UI, polling, a stalled reader, churn, malformed/flooded
 //! traffic, a UI
@@ -143,7 +147,23 @@
 //! `power-fail` alarm annunciating with journaled evidence, the
 //! receipted `power-fail-ack` clearing the latch mid-condition, and
 //! the released contact re-staging the demand inside the declared
-//! bounds with the pair's roles unchanged — and the `upgrade` stage,
+//! bounds with the pair's roles unchanged — the pair contract's
+//! alarm-rationalization leg, which asserts the emitted model's
+//! managed alarm instances' declared-once record verbatim on both
+//! peers' served surfaces — `GET /signals`' components section
+//! carrying each instance's `rationalization` block, `GET
+//! /snapshot`'s parameters section serving each alarm's declared
+//! `priority`/`class`/`response_ticks` live — before and after the
+//! documented `demote`/`promote` switch, and the pair's launch roles
+//! restored — the pair contract's claim-fencing leg, which attaches a
+//! dedicated third sim-net client to the settled pair's spawned plant
+//! and exercises the standing writer claim's whole lifecycle: fenced
+//! `write`/`step` probes plus the same mutations through the shipped
+//! `dcs-plant-ctl`, the `ensure_writer`/`release_writer` verbs under
+//! foreign and owner tokens, and a rogue `claim_writer` resolving per
+//! the settled contract — its preempt's journaled `field_claim_lost`
+//! and in-place demotion on the superseded owner, then the pair
+//! restored to its launch roles — and the `upgrade` stage,
 //! which repins the materialized tree to the checkout's `HEAD`
 //! (seeded into the stand-in beside the recorded rev) and re-runs the
 //! full pipeline under the repin.
@@ -166,11 +186,8 @@
 //! `divergence-missed`/`divergence-nondeterministic`,
 //! `report-failed`/`report-nondeterministic`,
 //! `managed-lifecycle-failed`/`managed-lifecycle-nondeterministic`,
-//! `carry-failed`/`carry-nondeterministic`,
-//! `staging-failed`/`staging-nondeterministic`,
-//! `oos-failed`/`oos-nondeterministic`,
-//! `power-trip-failed`/`power-trip-nondeterministic`,
-//! and the `surface-mismatch` paths
+//! `event-parity-failed`/`event-parity-nondeterministic`, and
+//! the `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
 
@@ -201,9 +218,9 @@ fn target_dir() -> PathBuf {
 }
 
 /// Ensures the released tooling's local stand-ins — `dcs-model`,
-/// `dcs-controller`, `dcs-plant-server`, `dcs-ctl`, and
-/// `dcs-alarm-report` — are built for the check's `DCS_TOOLS`
-/// substitution.
+/// `dcs-controller`, `dcs-plant-server`, `dcs-ctl`,
+/// `dcs-alarm-report`, and the plant-side `dcs-plant-ctl` — are built
+/// for the check's `DCS_TOOLS` substitution.
 fn build_tools() -> PathBuf {
     let output = Command::new(CARGO)
         .args([
@@ -217,6 +234,8 @@ fn build_tools() -> PathBuf {
             "dcs-plant",
             "-p",
             "dcs-monitor",
+            "-p",
+            "dcs-sim-net",
         ])
         .current_dir(root())
         .output()
@@ -723,6 +742,31 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
             "the demote-pending leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
+    // The pair contract's demote-follow reconvergence leg ran and
+    // held: under the manifest's declared 0.0.0.0 listen binds, both
+    // documented switch directions left the demoted peer reconverged
+    // to tracking on the successor's dialable announced source, the
+    // tracking held across the pull train, and the launch roles
+    // restored — its digest line reports the evidence, and the
+    // self-addressed announce case reported its named diagnostic.
+    let reconvergence_line = stdout
+        .lines()
+        .find(|line| line.contains("demote-reconvergence-digest"))
+        .unwrap_or_else(|| panic!("the demote-reconvergence leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "tracking its announced successor",
+        "pulls",
+        "roles restored",
+    ] {
+        assert!(
+            reconvergence_line.contains(phrase),
+            "the demote-reconvergence digest names no '{phrase}' evidence: {reconvergence_line}"
+        );
+    }
+    assert!(
+        stdout.contains("self-announce: reported, demote-reconvergence-failed"),
+        "the demote-reconvergence leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
     // The pair contract's managed-lifecycle leg ran and held: the
     // emitted model's managed-alarm surface exercised end to end on
     // the deployed pair — the field-driven activation, the attributed
@@ -753,133 +797,29 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
             "the managed-lifecycle leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
-    // The pair contract's managed run-state carryover leg ran and
-    // held: the managed alarm kinds' checkpointed run state carried
-    // across the promotion — the mid-shelve countdown releasing at
-    // its continued expiry rather than a restarted bound, the wired
-    // out-of-service standing with evaluation held — its digest line
-    // reports the evidence, and each doctored expectation reported
-    // its named diagnostic.
-    let carry_line = stdout
+    // The pair contract's emit-identical event-parity leg ran and
+    // held: the counted step_completed set served identical routed
+    // event records through both peers' GET /resources views while
+    // the standby reported tracking — its digest line reports the
+    // evidence — and each doctored case reported its named
+    // diagnostic.
+    let parity_line = stdout
         .lines()
-        .find(|line| line.contains("carry-digest"))
-        .unwrap_or_else(|| panic!("the managed-carryover leg reported no digest:\n{stdout}"));
+        .find(|line| line.contains("event-parity-digest"))
+        .unwrap_or_else(|| panic!("the event-parity leg reported no digest:\n{stdout}"));
     for phrase in [
-        "shelved at tick",
-        "switched at tick",
-        "released at tick",
-        "declared bound",
-        "out-of-service held",
-        "roles restored at tick",
-        "journal entries",
+        "counted step_completed records identical on both peers",
+        "the standby tracking",
     ] {
         assert!(
-            carry_line.contains(phrase),
-            "the managed-carryover digest names no '{phrase}' evidence: {carry_line}"
+            parity_line.contains(phrase),
+            "the event-parity digest names no '{phrase}' evidence: {parity_line}"
         );
     }
-    for tamper in ["restarted-bound", "dropped-oos"] {
+    for tamper in ["dropped-event-record", "reattributed-event-record"] {
         assert!(
-            stdout.contains(&format!("{tamper}: reported, carry-failed")),
-            "the managed-carryover leg's {tamper} case did not report its named diagnostic:\n{stdout}"
-        );
-    }
-    // The pair contract's staging leg ran and held: the out-of-service
-    // holds let the declared inflow raise the level unopposed through
-    // the emitted threshold chain's declared crossings — the demand
-    // staging 0→1→2, the high crossing annunciating the managed
-    // high-level alarm with journaled evidence — the releases staging
-    // the group inside the declared start delay, and the staged pumps
-    // drawing the level down through the declared de-stage order — its
-    // digest line reports the evidence, and each doctored expectation
-    // reported its named diagnostic.
-    let staging_line = stdout
-        .lines()
-        .find(|line| line.contains("staging-digest"))
-        .unwrap_or_else(|| panic!("the staging leg reported no digest:\n{stdout}"));
-    for phrase in [
-        "demand 1 at tick",
-        "2 at tick",
-        "high annunciated at tick",
-        "staged at tick",
-        "pumped down by tick",
-    ] {
-        assert!(
-            staging_line.contains(phrase),
-            "the staging digest names no '{phrase}' evidence: {staging_line}"
-        );
-    }
-    for tamper in ["wrong-demand", "immediate-lag"] {
-        assert!(
-            stdout.contains(&format!("{tamper}: reported, staging-failed")),
-            "the staging leg's {tamper} case did not report its named diagnostic:\n{stdout}"
-        );
-    }
-    // The pair contract's per-pump out-of-service leg ran and held:
-    // the receipted `oos` write on the duty pump dropped its
-    // availability and handed `duty` to the sibling inside the
-    // declared wiring bound, the managed alarms reported the states
-    // their declared lifecycle bindings select with `alarm` still
-    // reporting process truth mid-OOS, and the false write returned
-    // the pump to availability and the duty rotation — its digest
-    // line reports the evidence, and each doctored expectation
-    // reported its named diagnostic.
-    let oos_line = stdout
-        .lines()
-        .find(|line| line.contains("oos-digest"))
-        .unwrap_or_else(|| panic!("the out-of-service leg reported no digest:\n{stdout}"));
-    for phrase in [
-        "duty handed to the sibling at tick",
-        "managed states at tick",
-        "served at tick",
-        "returned at tick",
-        "acknowledged at tick",
-        "rejoined at tick",
-        "roles unmoved through tick",
-        "journal entries",
-    ] {
-        assert!(
-            oos_line.contains(phrase),
-            "the out-of-service digest names no '{phrase}' evidence: {oos_line}"
-        );
-    }
-    for tamper in ["keeps-duty", "managed-silent"] {
-        assert!(
-            stdout.contains(&format!("{tamper}: reported, oos-failed")),
-            "the out-of-service leg's {tamper} case did not report its named diagnostic:\n{stdout}"
-        );
-    }
-    // The pair contract's power-fail interlock leg ran and held: the
-    // driven `power-fail` contact dropped `power-ok` and both pumps'
-    // availability, the motor commands released while the chain's
-    // demand still stood, `none-available` and the managed `power-fail`
-    // alarm annunciated with journaled evidence, the receipted
-    // `power-fail-ack` cleared the latch mid-condition, and the
-    // released contact re-staged the standing demand inside the
-    // declared bounds — its digest line reports the evidence, and each
-    // doctored expectation reported its named diagnostic.
-    let power_trip_line = stdout
-        .lines()
-        .find(|line| line.contains("power-trip-digest"))
-        .unwrap_or_else(|| panic!("the power-fail interlock leg reported no digest:\n{stdout}"));
-    for phrase in [
-        "tracking by tick",
-        "full demand at tick",
-        "tripped at tick",
-        "acknowledged at tick",
-        "permissives returned at tick",
-        "re-staged by tick",
-        "run continued to tick",
-    ] {
-        assert!(
-            power_trip_line.contains(phrase),
-            "the power-trip digest names no '{phrase}' evidence: {power_trip_line}"
-        );
-    }
-    for tamper in ["commands-standing", "availability-holds"] {
-        assert!(
-            stdout.contains(&format!("{tamper}: reported, power-trip-failed")),
-            "the power-fail interlock leg's {tamper} case did not report its named diagnostic:\n{stdout}"
+            stdout.contains(&format!("{tamper}: reported, event-parity-failed")),
+            "the event-parity leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
     assert!(

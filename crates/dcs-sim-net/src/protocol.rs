@@ -106,6 +106,23 @@ pub enum PlantRequest {
         /// The ownership token the claim asserts.
         owner: u64,
     },
+    /// The launched-controller half of the write-ownership claim: takes
+    /// the claim for `owner` only while no *live* attachment holds a
+    /// different owner's claim — the grant a controller's startup
+    /// activation asserts. A claim left standing by a dead owner — its
+    /// holder set empty — is still preempted, so the restart-as-active
+    /// recovery of a crashed owner keeps working; a claim a live
+    /// different-owner attachment holds is refused
+    /// [`PlantError::Fenced`], so a controller restarted onto stale
+    /// state cannot seize the field from the incumbent and silently
+    /// roll back commands it receipted and applied. A granted request
+    /// binds `owner` to this connection exactly as `claim_writer` does
+    /// — including the [`PlantResponse::ClaimedShared`] flag when the
+    /// token is already held by another live attachment.
+    ClaimWriterUnlessHeld {
+        /// The ownership token the claim asserts.
+        owner: u64,
+    },
     /// The re-attach half of the write-ownership claim: takes the claim
     /// for `owner` only while the field is unclaimed or the standing
     /// claim already names `owner` — the conditional grant a
@@ -244,14 +261,21 @@ pub enum PlantError {
 /// [`io::ErrorKind::InvalidData`] means the line exceeded `max` — a
 /// protocol violation the caller answers by dropping the connection. Other
 /// errors are ordinary I/O failures, `WouldBlock`/`TimedOut` included when
-/// the stream carries a read timeout.
+/// the stream carries a read timeout. An interrupted wait
+/// ([`io::ErrorKind::Interrupted`]) is retried, not reported: a caught
+/// signal is not link trouble — the process can field `SIGCHLD` from
+/// spawned helpers while a request is in flight, and that must not drop
+/// the connection.
 pub(crate) fn read_message(
     reader: &mut BufReader<TcpStream>,
     max: usize,
 ) -> io::Result<Option<Vec<u8>>> {
     let mut line = Vec::with_capacity(128);
     loop {
-        let chunk = reader.fill_buf()?;
+        let chunk = match reader.fill_buf() {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            other => other?,
+        };
         if chunk.is_empty() {
             return Ok(None);
         }
@@ -315,6 +339,7 @@ mod tests {
             PlantRequest::ClearFault { point: PointId(4) },
             PlantRequest::ListPoints,
             PlantRequest::ClaimWriter { owner: 42 },
+            PlantRequest::ClaimWriterUnlessHeld { owner: 44 },
             PlantRequest::EnsureWriter { owner: 43 },
             PlantRequest::ReleaseWriter,
         ];
@@ -348,6 +373,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&PlantRequest::ClaimWriter { owner: 42 }).unwrap(),
             r#"{"op":"claim_writer","owner":42}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PlantRequest::ClaimWriterUnlessHeld { owner: 44 }).unwrap(),
+            r#"{"op":"claim_writer_unless_held","owner":44}"#
         );
         assert_eq!(
             serde_json::to_string(&PlantRequest::EnsureWriter { owner: 43 }).unwrap(),

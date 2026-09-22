@@ -51,7 +51,7 @@
 //! with the holder's file descriptor, so an ordinary restart —
 //! including a killed process's — re-acquires it immediately.
 
-use dcs_core::{JournalEntry, JournalEvent, PointId, Quality, Tick, Value};
+use dcs_core::{CommandReceipt, JournalEntry, JournalEvent, PointId, Quality, Tick, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions, TryLockError};
@@ -173,12 +173,14 @@ pub(super) enum JournalRecord {
 
 /// What a replayed file yields: the retained journal tail for the
 /// in-memory ring, the `seq` the next appended entry takes, the number
-/// of process lifetimes the file already records, and the file's last
-/// recorded observation per point — the whole record's fold, not just
+/// of process lifetimes the file already records, the file's last
+/// recorded observation per point, and every settled receipt its
+/// `command_settled` entries carry — the whole record's fold, not just
 /// the retained tail's, so a resumed run's recorder can diff its first
 /// scan against the state the journal itself last carried instead of
-/// re-recording the standing census as first observations. The default
-/// is the cold start: no entries, `seq` numbering from 1.
+/// re-recording the standing census as first observations or
+/// re-journaling a settlement the file already holds. The default is
+/// the cold start: no entries, `seq` numbering from 1.
 #[derive(Debug)]
 pub(super) struct Replay {
     /// The file's last `capacity` entries, oldest first.
@@ -197,6 +199,15 @@ pub(super) struct Replay {
     pub qualities: HashMap<PointId, Quality>,
     /// The last value each journaled point's transitions recorded.
     pub values: HashMap<PointId, Value>,
+    /// Every receipt the file's `command_settled` entries carry, in
+    /// journaled order — a fold over the whole record, evicted tail
+    /// included, so identical receipts settling distinct submissions
+    /// stay counted separately. A resumed run's recorder accounts an
+    /// adopted or restored receipt's settlement against this list
+    /// rather than re-recording the one settlement across the run
+    /// boundary — the durable file is the run's one command audit
+    /// trail.
+    pub settled: Vec<CommandReceipt>,
 }
 
 impl Default for Replay {
@@ -208,6 +219,7 @@ impl Default for Replay {
             runs: 0,
             qualities: HashMap::new(),
             values: HashMap::new(),
+            settled: Vec::new(),
         }
     }
 }
@@ -337,6 +349,9 @@ fn replay(file: File, path: &Path, capacity: usize) -> io::Result<Replay> {
                     JournalEvent::PointChanged { point, to, .. } => {
                         replayed.values.insert(*point, *to);
                     }
+                    JournalEvent::CommandSettled { receipt } => {
+                        replayed.settled.push(receipt.clone());
+                    }
                     _ => {}
                 }
                 replayed.entries.push_back(*entry);
@@ -415,8 +430,8 @@ mod tests {
         // First lifetime: two journaled entries land in the file behind
         // the run-1 boundary marker.
         let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
-        recorder.note_settled(receipt(10, 1), Tick(1));
-        recorder.note_settled(receipt(11, 2), Tick(2));
+        recorder.note_settled(None, receipt(10, 1), Tick(1));
+        recorder.note_settled(None, receipt(11, 2), Tick(2));
         assert_eq!(
             records(&path),
             vec![
@@ -475,7 +490,7 @@ mod tests {
                 ),
             ]
         );
-        recorder.note_settled(receipt(12, 1), Tick(1));
+        recorder.note_settled(None, receipt(12, 1), Tick(1));
         let entries = recorder.journal(0);
         assert_eq!(entries.last().unwrap().seq, 4);
 
@@ -559,7 +574,7 @@ mod tests {
 
         let mut recorder = crate::recorder::Recorder::new(config(&path, 2), Tick::ZERO).unwrap();
         for index in 0..3_u64 {
-            recorder.note_settled(receipt(10, index + 1), Tick(index + 1));
+            recorder.note_settled(None, receipt(10, index + 1), Tick(index + 1));
         }
         drop(recorder);
 
@@ -577,7 +592,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![3, 4]
         );
-        recorder.note_settled(receipt(10, 41), Tick(41));
+        recorder.note_settled(None, receipt(10, 41), Tick(41));
         assert_eq!(recorder.journal(3).last().unwrap().seq, 5);
         assert_eq!(
             records(&path)[4],
@@ -595,7 +610,7 @@ mod tests {
         let path = dir.join("journal.jsonl");
 
         let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
-        recorder.note_settled(receipt(10, 1), Tick(1));
+        recorder.note_settled(None, receipt(10, 1), Tick(1));
         drop(recorder);
 
         // A torn trailing record — the crash-mid-write shape — and an
@@ -635,7 +650,7 @@ mod tests {
         // The first writer binds and journals, holding the file's
         // writer lock for its lifetime.
         let mut first = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
-        first.note_settled(receipt(10, 1), Tick(1));
+        first.note_settled(None, receipt(10, 1), Tick(1));
 
         // The misconfiguration — a second writer on the same path —
         // fails its bind naming the file and the live-holder conflict
@@ -653,10 +668,10 @@ mod tests {
         // the lock releasing with its descriptor — the next opener
         // replays the single-writer file and continues the seq domain
         // across the run boundary.
-        first.note_settled(receipt(11, 2), Tick(2));
+        first.note_settled(None, receipt(11, 2), Tick(2));
         drop(first);
         let mut second = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
-        second.note_settled(receipt(12, 3), Tick(3));
+        second.note_settled(None, receipt(12, 3), Tick(3));
         assert_eq!(second.journal(0).last().unwrap().seq, 4);
         let data = read_journal_file(&path).unwrap();
         assert_eq!(
@@ -692,7 +707,7 @@ mod tests {
         let path = dir.join("journal.jsonl");
         let mut recorder =
             crate::recorder::Recorder::new(MonitorConfig::default(), Tick::ZERO).unwrap();
-        recorder.note_settled(receipt(10, 1), Tick(1));
+        recorder.note_settled(None, receipt(10, 1), Tick(1));
         assert_eq!(recorder.journal(0).len(), 1);
         assert!(!path.exists());
         let _ = std::fs::remove_dir_all(&dir);

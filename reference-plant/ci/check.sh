@@ -429,6 +429,26 @@
 #                restored; two passes produce identical digests
 #                (demote-pending-failed,
 #                demote-pending-nondeterministic)
+#                The stage's demote-reconvergence leg,
+#                ci/demote_reconvergence.py on the same declared
+#                deployment — the consumer-side exercise of the
+#                demote-follow tracking-source contract the
+#                #616/#618/#619/#620 defect fixes settle
+#                (WW-ENG-003, WW-LCM-001): each controller bound on
+#                the manifest's declared 0.0.0.0 listen host — the
+#                wildcard bind shape the defect family recorded
+#                verbatim — the pair converged and the documented
+#                demote/promote switch run in both directions, each
+#                demoted peer reconverging tracking on the source its
+#                successor's announced pulls resolved dialable —
+#                never the wildcard, never its own address, never a
+#                foreign endpoint — holding it across a driven pull
+#                train with snapshots, adopted receipt logs, and
+#                journaled role transitions consistent and no
+#                restart-like journal boundary, the launch roles
+#                restored; two passes produce identical digests
+#                (demote-reconvergence-failed,
+#                demote-reconvergence-nondeterministic)
 #                The stage's managed-lifecycle leg,
 #                ci/managed_lifecycle.py on the same declared
 #                deployment: with the pair tracking, the emitted
@@ -622,11 +642,11 @@
 #   DCS_UPGRADE  set to 0 to skip the upgrade stage — the stage's own
 #                repinned re-run uses this internally.
 #   DCS_TOOLS    a directory holding prebuilt `dcs-model`,
-#                `dcs-controller`, `dcs-plant-server`, `dcs-ctl`, and
-#                `dcs-alarm-report` binaries. When unset, the check
-#                installs them from $DCS_REMOTE at $DCS_REV — the
-#                contract's `cargo install --git` mechanism — into a
-#                scratch root.
+#                `dcs-controller`, `dcs-plant-server`, `dcs-plant-ctl`,
+#                `dcs-ctl`, and `dcs-alarm-report` binaries. When
+#                unset, the check installs them from $DCS_REMOTE at
+#                $DCS_REV — the contract's `cargo install --git`
+#                mechanism — into a scratch root.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -668,17 +688,19 @@ ensure_tools() {
     local dir
     dir="$(mktemp -d)"
     if ! cargo install --quiet --git "$DCS_REMOTE" --rev "$1" \
-            dcs-model dcs-controller dcs-plant dcs-monitor --root "$dir"; then
+            dcs-model dcs-controller dcs-plant dcs-monitor dcs-sim-net \
+            --root "$dir"; then
         rm -rf "$dir"
         return 1
     fi
     # The delivered binary set — the `dcs-monitor` package ships both
-    # operator tools, `dcs-ctl` and `dcs-alarm-report`; a revision
+    # operator tools, `dcs-ctl` and `dcs-alarm-report`, and
+    # `dcs-sim-net` ships the plant-side `dcs-plant-ctl`; a revision
     # whose tooling predates one fails the install rather than the
     # stage that invokes it.
     local bin
     for bin in dcs-model dcs-controller dcs-plant-server dcs-ctl \
-            dcs-alarm-report; do
+            dcs-alarm-report dcs-plant-ctl; do
         if [ ! -x "$dir/bin/$bin" ]; then
             rm -rf "$dir"
             return 1
@@ -1664,13 +1686,16 @@ echo "  $FIRST"
 
 # The doctored case: a crafted announce naming the pulling
 # connection's own source — a closed local port — lands exactly as it
-# would on a controller whose acceptance check regressed, stranding
-# the demoted peer unsynchronized; the leg must surface the named
-# diagnostic — never a silently poisoned pass.
+# would on a controller whose acceptance check regressed. The
+# hardened contract answers it at the demote: the planted hint names
+# an endpoint no checkpoint pull can verify, so `POST /demote`
+# refuses `no_tracking_source` rather than stranding the demoted
+# peer on the dead pull; the leg must surface the named diagnostic —
+# never a silently poisoned pass.
 if out="$(run_peer_announce --tamper landed-announce 2>&1)"; then
     fail "peer-announce-unchecked: a landed foreign announce passed the peer-announce leg"
 fi
-[[ "$out" == *"never reconverged"* ]] \
+[[ "$out" == *"no_tracking_source"* ]] \
     || fail "peer-announce-unchecked: the landed-announce case did not report its named diagnostic: $out"
 echo "  landed-announce: reported, peer-announce-failed"
 
@@ -2034,6 +2059,55 @@ for tamper in phantom-applied unaudited-drop; do
     echo "  $tamper: reported, demote-pending-failed"
 done
 
+# The pair contract's demote-follow reconvergence leg, on the same
+# manifest-declared deployment: ci/demote_reconvergence.py binds each
+# controller's --listen on the manifest's declared 0.0.0.0 host — the
+# wildcard bind shape the #616/#618/#619/#620 defect fixes settle —
+# converges the pair, and runs the documented demote/promote switch
+# in both directions: the launched active demotes onto the tracking
+# source the standby's wildcard-announcing pulls recorded — resolved
+# to the dialable peer address, never the wildcard, never the demoted
+# peer's own address, never a foreign endpoint — reconverging
+# tracking and holding it across a driven pull train, then the
+# reverse switch restores the launch roles and the second demoted
+# peer holds the same way. Served snapshots and adopted receipt logs
+# stay identical throughout, each durable journal file carries its
+# own role_changed transitions under the single cold-start boundary,
+# and the declared persistence files hold the run's final tick. Two
+# passes must produce identical digests.
+run_demote_reconvergence() {
+    python3 ci/demote_reconvergence.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_demote_reconvergence)" \
+    || fail "demote-reconvergence-failed: the demote-reconvergence leg did not hold — its evidence lines are above"
+SECOND="$(run_demote_reconvergence)" \
+    || fail "demote-reconvergence-failed: the demote-reconvergence leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "demote-reconvergence-nondeterministic: two demote-reconvergence passes produced different digests"
+echo "  $FIRST"
+
+# The doctored case: a crafted ?peer= announce naming the field
+# owner's own monitor address — a claim the pulling connection's own
+# source proves, so it lands exactly as a self-claim — plants a
+# self-addressed demotion hint: the self-pin defect shape this leg
+# exists to catch. The demotion's verify pull reads the owner's own
+# document — the replayable own-document shape an announced demotion
+# now refuses — so POST /demote answers 409 no_tracking_source and
+# the leg must report the refusal rather than let a self-pinned
+# demotion proceed.
+if out="$(run_demote_reconvergence --tamper self-announce 2>&1)"; then
+    fail "demote-reconvergence-unchecked: a self-addressed announce passed the demote-reconvergence leg"
+fi
+[[ "$out" == *"no_tracking_source"* ]] \
+    || fail "demote-reconvergence-unchecked: the self-announce case did not report its named diagnostic: $out"
+echo "  self-announce: reported, demote-reconvergence-failed"
+
 # The pair contract's managed-alarm lifecycle leg, on the same
 # manifest-declared deployment: ci/managed_lifecycle.py converges the
 # pair and exercises the emitted model's declared managed-alarm
@@ -2082,122 +2156,21 @@ for tamper in expect-applied expect-standing; do
     echo "  $tamper: reported, managed-lifecycle-failed"
 done
 
-# The pair contract's managed run-state carryover leg, on the same
-# manifest-declared deployment: ci/managed_carryover.py converges the
-# pair, puts the per-pump fault alarm out of service through its wired
-# oos point and trips it suppressed, shelves the declared shelvable
-# alarm through its writable journaled shelve point mid-run, and lands
-# the documented demote/promote inside the declared max_shelve_ticks
-# bound — the promoted peer asserting shelved stands carried and
-# releases at the tick the continued countdown expires rather than a
-# bound restarted at the switch, out_of_service and suppressed
-# standing with evaluation held, and both durable journals' ordered
-# records continuous across the switch — then restores every driven
-# input and the pair's roles. Two passes must produce identical
-# digests.
-run_managed_carryover() {
-    python3 ci/managed_carryover.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_managed_carryover)" \
-    || fail "carry-failed: the managed run-state carryover leg did not hold — its evidence lines are above"
-SECOND="$(run_managed_carryover)" \
-    || fail "carry-failed: the managed run-state carryover leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "carry-nondeterministic: two managed-carryover passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a leg expecting the promoted peer to expire the
-# shelve a fresh bound after the switch — the countdown restarted —
-# and a leg expecting the promoted peer to have dropped the carried
-# out-of-service must each surface the named diagnostic rather than
-# passing silently.
-for tamper in restarted-bound dropped-oos; do
-    if out="$(run_managed_carryover --tamper "$tamper" 2>&1)"; then
-        fail "carry-unchecked: a $tamper case passed the managed-carryover leg"
-    fi
-    case "$tamper" in
-        restarted-bound) expected="expected the restarted bound's expiry" ;;
-        dropped-oos) expected="expected the dropped carry" ;;
-    esac
-    [[ "$out" == *"$expected"* ]] \
-        || fail "carry-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, carry-failed"
-done
-
-# The pair contract's staging leg, on the same manifest-declared
-# deployment: ci/staging.py holds both pumps out of service through
-# receipted writes on their declared oos points so the declared inflow
-# raises the wet-well level unopposed — the active's monitor asserting
-# the emitted threshold chain's demand moves 0→1→2 only at the
-# declared start/lag_start crossings with duty_call/lag_call
-# reporting, the high crossing annunciating the managed high-level
-# alarm with journaled evidence — then the releases restore the driven
-# inputs and the standing demand stages the group, the lag answering
-# inside the declared start_delay_ticks with each pump's cmd/run field
-# outputs proving the start, before the staged pumps draw the level
-# down through the declared de-stage order — the lag's run releasing
-# before the duty's — to the below-cutoff floor; the receipted ack
-# clears the alarm's latch, every driven input is restored, the pair's
-# roles are unchanged, and the durable journal is audited for the
-# ordered record. Two passes must produce identical digests.
-run_staging() {
-    python3 ci/staging.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_staging)" \
-    || fail "staging-failed: the staging leg did not hold — its evidence lines are above"
-SECOND="$(run_staging)" \
-    || fail "staging-failed: the staging leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "staging-nondeterministic: two staging passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a leg asserting the wrong demand at the
-# lag_start crossing and a leg asserting the lag start landed inside
-# a shortened delay bound must each surface the named diagnostic —
-# never a silently unexercised contract.
-for tamper in wrong-demand immediate-lag; do
-    if out="$(run_staging --tamper "$tamper" 2>&1)"; then
-        fail "staging-unchecked: a $tamper case passed the staging leg"
-    fi
-    case "$tamper" in
-        wrong-demand) expected="expected the demand at 1" ;;
-        immediate-lag) expected="outside the declared start_delay_ticks bound" ;;
-    esac
-    [[ "$out" == *"$expected"* ]] \
-        || fail "staging-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, staging-failed"
-done
-
-# The pair contract's out-of-service leg, on the same
-# manifest-declared deployment: ci/oos.py settles the pair at an idle
-# assigned-duty baseline, submits the attributed receipted write on the
-# duty pump's declared oos point, and asserts the exclusion — the
-# in-service cone and the aggregated availability dropping, duty
-# handing to the sibling inside the declared wiring bound, staged
-# reporting the available count, the held pump's command staying
-# released while the sibling serves the demand — then each managed
-# per-pump alarm reporting the states its declared lifecycle bindings
-# select, a mid-OOS run-contact fault asserting alarm as process truth
-# with the unacknowledged latch withheld, the false write returning the
-# pump to availability and re-annunciating the outlasted trip, the
-# receipted ack settling the latch, and the next cycle's rotation
-# handing duty back — every managed transition journaled beside the
-# attributed receipts and the pair's roles unmoved throughout. Two
+# The pair contract's emit-identical event-parity leg, on the same
+# manifest-declared deployment — decision 84's parity rule proven on
+# the consumer's deployed pair: ci/event_parity.py converges the
+# declared standby to tracking, drives the emitted model's sequencer
+# through the field owner's receipted path — the `run` write refused
+# `not_active` at the standby's role boundary — until the counted
+# `step_completed` set stands, then asserts both peers' GET /resources
+# views collect the same routed `event_emitted` records: identical
+# outer and inner component attribution, declared identities, ordered
+# fields, tick, and retention, the stream-local seqs excluded, while
+# the standby still reports tracking. A UI consumer failing its event
+# feed over between the peers must meet no gap in attribution. Two
 # passes must produce identical digests.
-run_oos() {
-    python3 ci/oos.py \
+run_event_parity() {
+    python3 ci/event_parity.py \
         --plant-server "$TOOLS/dcs-plant-server" \
         --controller "$TOOLS/dcs-controller" \
         --model model/plant.json \
@@ -2205,81 +2178,24 @@ run_oos() {
         --scenario ci/scenario.json \
         --manifest deploy/manifest.json "$@"
 }
-FIRST="$(run_oos)" \
-    || fail "oos-failed: the pump out-of-service leg did not hold — its evidence lines are above"
-SECOND="$(run_oos)" \
-    || fail "oos-failed: the pump out-of-service leg did not hold — its evidence lines are above"
+FIRST="$(run_event_parity)" \
+    || fail "event-parity-failed: the standby event-parity leg did not hold — its evidence lines are above"
+SECOND="$(run_event_parity)" \
+    || fail "event-parity-failed: the standby event-parity leg did not hold — its evidence lines are above"
 [ "$FIRST" = "$SECOND" ] \
-    || fail "oos-nondeterministic: two out-of-service passes produced different digests"
+    || fail "event-parity-nondeterministic: two event-parity passes produced different digests"
 echo "  $FIRST"
 
-# The doctored cases: a leg asserting the held-out pump keeps duty —
-# the honest handover to the sibling failing it — and a leg asserting
-# the managed alarms never report their declared states must each
-# surface the named diagnostic rather than passing silently.
-for tamper in keeps-duty managed-silent; do
-    if out="$(run_oos --tamper "$tamper" 2>&1)"; then
-        fail "oos-unchecked: a $tamper case passed the out-of-service leg"
+# The doctored cases: a standby whose served record set is missing an
+# emission or carries one re-attributed must surface the named
+# diagnostic — never a silently hollow or diverged parity pass.
+for tamper in dropped-event-record reattributed-event-record; do
+    if out="$(run_event_parity --tamper "$tamper" 2>&1)"; then
+        fail "event-parity-unchecked: the $tamper case passed the parity leg"
     fi
-    case "$tamper" in
-        keeps-duty) expected="expected the held-out pump to keep duty" ;;
-        managed-silent) expected="expected them never to report" ;;
-    esac
-    [[ "$out" == *"$expected"* ]] \
-        || fail "oos-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, oos-failed"
-done
-
-# The pair contract's power-fail interlock leg, on the same
-# manifest-declared deployment: ci/power_trip.py converges the pair
-# and drives the simulated well until the pump group holds a full
-# demand — both pumps staged and running — then drives the station
-# power-fail contact through the plant protocol's field write, the
-# emitted model's protection-layer wiring (power-fail → power-ok →
-# each pump's power-ok-in feeding avail_i) dropping every pump's
-# availability while the chain's demand still stands: the motor
-# commands release, none-available annunciates, and the managed
-# power-fail alarm's alarm/unacknowledged assert with journaled
-# point_changed evidence. A receipted power-fail-ack must clear the
-# latch while the condition still stands; the released contact then
-# returns power-ok and both availability legs and re-stages the
-# standing demand inside the declared min_off_ticks/start_delay_ticks
-# bounds — no motor command re-asserting inside its holdout, the
-# lag's start inside the declared delay, the field outputs moving
-# only on the driven scan sequence, and the pair's roles unchanged.
-# Two passes must produce identical digests.
-run_power_trip() {
-    python3 ci/power_trip.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_power_trip)" \
-    || fail "power-trip-failed: the power-fail interlock leg did not hold — its evidence lines are above"
-SECOND="$(run_power_trip)" \
-    || fail "power-trip-failed: the power-fail interlock leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "power-trip-nondeterministic: two power-trip passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a leg asserting the motor commands still stand
-# under the driven power-fail, and one asserting the pumps'
-# availability never dropped, must each surface the named diagnostic
-# — never a silently untripped interlock.
-for tamper in commands-standing availability-holds; do
-    if out="$(run_power_trip --tamper "$tamper" 2>&1)"; then
-        fail "power-trip-unchecked: a $tamper case passed the power-trip leg"
-    fi
-    case "$tamper" in
-        commands-standing) expected="expected the commands standing" ;;
-        availability-holds) expected="expected availability still reporting" ;;
-    esac
-    [[ "$out" == *"$expected"* ]] \
-        || fail "power-trip-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, power-trip-failed"
+    [[ "$out" == *"event-parity-failed"* ]] \
+        || fail "event-parity-unchecked: the $tamper case did not report event-parity-failed: $out"
+    echo "  $tamper: reported, event-parity-failed"
 done
 
 # The pair contract's monitor-starvation leg, on the same
@@ -2339,8 +2255,9 @@ echo "== consumers =="
 # stage's driver and the README's consumer obligations name only
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
-for file in ci/alarm_validation.py ci/availability.py \
-        ci/burst_order.py ci/command_switch.py \
+for file in ci/alarm_rationalization.py ci/alarm_validation.py \
+        ci/availability.py \
+        ci/burst_order.py ci/claim_fencing.py ci/command_switch.py \
         ci/consumers.py \
         ci/ctl.py ci/demote_pending.py ci/deploy_rig.py \
         ci/divergence.py ci/failover.py \

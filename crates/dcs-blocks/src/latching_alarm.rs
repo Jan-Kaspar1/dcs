@@ -27,14 +27,19 @@ use dcs_runtime::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepErr
 /// **Acknowledgment rule:** `unacknowledged` latches on a fresh trip —
 /// a scan whose evaluated limit state becomes `High` or `Low` from a
 /// *different* state, a direct high-to-low transition included — and
-/// clears on every scan `ack` reads `true`, even while the alarm still
-/// stands. `ack` is level-sensitive and dominates: a trip arriving on a
-/// scan whose `ack` reads `true` does not latch, so a permanently
-/// asserted `ack` point suppresses the flag entirely — the operator
-/// point, typically a writable internal point the page commands, should
-/// be pulsed or written `false` between acknowledgments. Acknowledging
-/// never clears `alarm`: the limit state stands until hysteresis clears
-/// it, and an alarm that trips again after acknowledgment latches again.
+/// clears on the scan `ack` reads `true` after reading `false`, the
+/// acknowledgment's rising edge, even while the alarm still stands.
+/// The edge is consumed: a held `ack` level clears the latch once and
+/// cannot pre-acknowledge a later trip — a fresh trip arriving while
+/// `ack` still stands latches normally, and one landing on the edge's
+/// own scan latches too, the pulse having acknowledged what stood
+/// before it. An `ack` left asserted therefore hides nothing;
+/// acknowledging again takes a `false` write first. The operator
+/// point, typically a writable internal point the page commands,
+/// acknowledges by writing `true` and re-arms by writing `false`.
+/// Acknowledging never clears `alarm`: the limit state stands until
+/// hysteresis clears it, and an alarm that trips again after
+/// acknowledgment latches again.
 ///
 /// Both outputs carry the worst of the two inputs' qualities, so a
 /// degraded measurement or a degraded `ack` marks the indications it
@@ -62,8 +67,13 @@ pub struct LatchingAlarm {
     limits: AlarmLimits,
     rationalization: Rationalization,
     state: Alarm,
-    /// The acknowledgment latch: set on a fresh trip, cleared while
-    /// `ack` reads `true`.
+    /// The `ack` level observed on the previous scan — the baseline
+    /// the acknowledgment's rising edge is detected against. `false`
+    /// before the first scan, so a `true` first read is an
+    /// acknowledgment.
+    ack_seen: bool,
+    /// The acknowledgment latch: set on a fresh trip, cleared on
+    /// `ack`'s rising edge.
     latched: bool,
 }
 
@@ -94,6 +104,7 @@ impl LatchingAlarm {
             unacknowledged,
             rationalization,
             state: Alarm::Clear,
+            ack_seen: false,
             latched: false,
         })
     }
@@ -145,7 +156,9 @@ impl Component for LatchingAlarm {
         let previous = self.state;
         self.state = previous.evaluate(pv, self.limits);
         let fresh_trip = self.state != Alarm::Clear && self.state != previous;
-        self.latched = (self.latched || fresh_trip) && !ack.value;
+        let acknowledged = ack.value && !self.ack_seen;
+        self.ack_seen = ack.value;
+        self.latched = (self.latched && !acknowledged) || fresh_trip;
         let mut quality = sample.quality.merge(ack.quality);
         if pv.is_nan() {
             quality = quality.merge(Quality::Bad(QualityReason::DeviceFault));
@@ -217,13 +230,16 @@ impl Component for LatchingAlarm {
         parameters
     }
 
-    /// Captures the limit state, the acknowledgment latch — so a
-    /// tracking standby inherits unacknowledged alarms — and the tuned
+    /// Captures the limit state, the observed `ack` level — so a
+    /// standby tracking a held `ack` does not read a phantom
+    /// acknowledgment edge — the acknowledgment latch — so a tracking
+    /// standby inherits unacknowledged alarms — and the tuned
     /// parameters, sharing [`AlarmMonitor`](crate::AlarmMonitor)'s
     /// `state` encoding.
     fn capture_state(&self) -> StateMap {
         let mut state = self.report_parameters();
         state.insert("state", Value::Int(self.state.code()));
+        state.insert("ack", Value::Bool(self.ack_seen));
         state.insert("unacknowledged", Value::Bool(self.latched));
         state
     }
@@ -233,6 +249,7 @@ impl Component for LatchingAlarm {
             &self.name,
             &[
                 "state",
+                "ack",
                 "unacknowledged",
                 "low_limit",
                 "high_limit",
@@ -254,6 +271,10 @@ impl Component for LatchingAlarm {
         self.limits = limits;
         self.rationalization = Rationalization::restore(&self.name, state)?;
         self.state = restored;
+        // `ack` is absent from checkpoints predating the field; a held
+        // level then reads as an edge on the first restored scan — the
+        // same clearing the older level-rule applied every scan.
+        self.ack_seen = state.optional_bool(&self.name, "ack")?.unwrap_or(false);
         self.latched = latched;
         Ok(())
     }
@@ -429,25 +450,62 @@ mod tests {
     }
 
     #[test]
-    fn held_ack_dominates_a_simultaneous_trip() {
+    fn an_ack_held_since_before_the_trip_does_not_disarm_the_latch() {
         let mut block = component();
         let io = io();
 
-        // Documented rule: a scan whose `ack` reads true does not latch,
-        // a trip arriving that scan included — a permanently asserted
-        // ack suppresses the flag while `alarm` still reports the trip.
+        // The QA finding's reproduction: `ack` written `true` while the
+        // alarm stands clear and never released. Under the consumed-
+        // edge rule the edge cleared an empty latch, so the later trip
+        // still annunciates.
+        step(&mut block, &io, 50.0, true, 1);
+        assert!(!alarmed(&io));
+        assert!(!unacknowledged(&io));
+
+        step(&mut block, &io, 95.0, true, 2);
+        assert!(alarmed(&io));
+        assert!(
+            unacknowledged(&io),
+            "the held ack cannot pre-acknowledge the fresh trip"
+        );
+
+        // Releasing `ack` while the trip stands leaves the latch
+        // standing; a second pulse acknowledges it.
+        step(&mut block, &io, 95.0, false, 3);
+        assert!(alarmed(&io));
+        assert!(unacknowledged(&io));
+        step(&mut block, &io, 95.0, true, 4);
+        assert!(alarmed(&io));
+        assert!(!unacknowledged(&io));
+    }
+
+    #[test]
+    fn a_fresh_trip_latches_even_on_the_ack_edge_scan() {
+        let mut block = component();
+        let io = io();
+
+        // A trip and the acknowledgment edge arriving on one scan: the
+        // pulse acknowledged what stood before it, so the fresh trip
+        // latches rather than passing silently.
         step(&mut block, &io, 95.0, true, 1);
         assert!(alarmed(&io));
-        assert!(!unacknowledged(&io));
+        assert!(unacknowledged(&io));
 
-        // Releasing ack while the alarm stands re-latches nothing.
-        step(&mut block, &io, 95.0, false, 2);
+        // The held `ack` consumes nothing further — the latch stands.
+        step(&mut block, &io, 95.0, true, 2);
+        assert!(alarmed(&io));
+        assert!(unacknowledged(&io));
+
+        // Releasing and re-asserting `ack` is the next acknowledgment.
+        step(&mut block, &io, 95.0, false, 3);
+        assert!(unacknowledged(&io));
+        step(&mut block, &io, 95.0, true, 4);
         assert!(alarmed(&io));
         assert!(!unacknowledged(&io));
 
-        // A fresh trip — here the direct high-to-low transition —
-        // latches once ack no longer stands.
-        step(&mut block, &io, 5.0, false, 3);
+        // A fresh trip after acknowledgment — the direct high-to-low
+        // transition — latches again.
+        step(&mut block, &io, 5.0, false, 5);
         assert!(alarmed(&io));
         assert!(unacknowledged(&io));
     }

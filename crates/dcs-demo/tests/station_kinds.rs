@@ -367,11 +367,11 @@ fn driven_runs_across_kinds_produce_identical_snapshots_and_journals() {
     // The failover selected the backup measurement while the primary
     // stood Bad.
     assert!(
-        (39..=47).all(|scan| bool_at(at(scan), points::BACKUP_ACTIVE)),
+        (63..=71).all(|scan| bool_at(at(scan), points::BACKUP_ACTIVE)),
         "backup_active must stand while the primary is Bad"
     );
     assert_eq!(
-        point_sample(at(40), points::LEVEL_PRIMARY)
+        point_sample(at(64), points::LEVEL_PRIMARY)
             .as_ref()
             .map(|s| s.quality),
         Some(bad)
@@ -382,11 +382,11 @@ fn driven_runs_across_kinds_produce_identical_snapshots_and_journals() {
     // fault's whole standing without `backup_active` ever rising, the
     // standby-loss annunciation the composition alarms.
     assert!(
-        (49..=56).all(|scan| bool_at(at(scan), points::BACKUP_UNHEALTHY)),
+        (73..=80).all(|scan| bool_at(at(scan), points::BACKUP_UNHEALTHY)),
         "backup_unhealthy must stand while the unused backup is Bad"
     );
     assert!(
-        (48..=57).all(|scan| !bool_at(at(scan), points::BACKUP_ACTIVE)),
+        (72..=81).all(|scan| !bool_at(at(scan), points::BACKUP_ACTIVE)),
         "the primary keeps serving — backup_active must stay down"
     );
 }
@@ -395,23 +395,24 @@ fn driven_runs_across_kinds_produce_identical_snapshots_and_journals() {
 fn the_command_register_drains_the_level_only_while_it_stands() {
     // The closed loop over registers: the manual-takeover phase holds
     // pump 1's command asserted by the operator's `hand` request while
-    // the group stands down — the well refills on the declared inflow
-    // alone, so the hand-driven command is the field's only draw. Each
+    // the group stands down — the well parks mid-band on the declared
+    // inflow, so the hand-driven command is the field's only draw. Each
     // explicit field step then drains the level by the pump's draw less
-    // the inflow, and releasing the request stops the drain on the next
-    // step.
+    // the inflow, until the dry-run protection releases the command —
+    // the declared protections persist into manual mode.
     let bus = station_kinds::run_bus().expect("the bus run completes");
     let level = |scan: u64| float_at(&bus.snapshots[scan as usize - 1], points::LEVEL_PRIMARY);
     let p101_cmd = |scan: u64| bool_at(&bus.snapshots[scan as usize - 1], points::cmd(0));
     let p102_cmd = |scan: u64| bool_at(&bus.snapshots[scan as usize - 1], points::cmd(1));
 
-    // `hand` applies at scan 29 and releases at 33; the three
-    // port-to-port gate hops between the request point and the motor
-    // turn that into the command register standing at scans 32–35 —
-    // and only it: the group has no demand, so p102's register stays
-    // down. Every step in the window drains the level, the draw (−1.0)
-    // outweighing the declared inflow (0.6).
-    for scan in 32..=35 {
+    // `hand` applies at scan 46; the `min_off_ticks` holdout on the
+    // restored `protections-ok` carrier plus the port-to-port gate hops
+    // between the request point and the motor turn that into the
+    // command register standing at scans 50–56 — and only it: the
+    // group has no demand, so p102's register stays down. Every step
+    // in the window drains the level, the draw (−1.0) outweighing the
+    // parked inflow (0.1).
+    for scan in 50..=56 {
         assert!(p101_cmd(scan), "p101-cmd must stand at scan {scan}");
         assert!(!p102_cmd(scan), "p102-cmd must be down at scan {scan}");
         assert!(
@@ -421,11 +422,17 @@ fn the_command_register_drains_the_level_only_while_it_stands() {
             level(scan + 1)
         );
     }
-    // With the request released the register drops at scan 36 and the
-    // same explicit steps let the inflow refill the well — the level
-    // stops draining and climbs.
-    for scan in 36..=37 {
+    // At scan 57 the register drops while the operator's `mode`/`hand`
+    // requests still stand — the dry-run cutoff tripped the protection
+    // interlock and released the delivered command — and the restored
+    // inflow lets the same explicit steps refill the well.
+    for scan in 57..=58 {
         assert!(!p101_cmd(scan), "p101-cmd must be down at scan {scan}");
+        assert!(
+            bool_at(&bus.snapshots[scan as usize - 1], points::mode(0))
+                && bool_at(&bus.snapshots[scan as usize - 1], points::hand(0)),
+            "the hand request still stands at scan {scan} — the protection released the command"
+        );
         assert!(
             level(scan + 1) > level(scan),
             "the level must climb once the command releases: scan {scan}: {} -> {}",
