@@ -153,11 +153,20 @@
 //! the serving side cannot tell the puller's monitor port from any
 //! other port its connection's source claims, so `POST /demote`
 //! toward an announced-only source first pulls one checkpoint from it
-//! and proceeds only when that checkpoint continues this run's line —
-//! journaling the adopted source and pinning it, so a later `?peer=`
-//! rewrite cannot redirect the demoted peer's pulls — while a dead,
-//! unreachable, or forged hint refuses `no_tracking_source` like an
-//! absent one. Either way the demoted instance pulls, applies, and
+//! and proceeds only when that checkpoint continues this run's line in
+//! a way this run's own public `/checkpoint` could not have answered —
+//! a field-owning document not ahead of this run's tick is replayable,
+//! not a successor — journaling the adopted source and pinning it, so
+//! a later `?peer=` rewrite cannot redirect the demoted peer's pulls —
+//! while a dead, unreachable, replayed, or forged hint refuses
+//! `no_tracking_source` like an absent one. When both peers launch
+//! with the same `--pair-token`, the verify pull and every checkpoint
+//! the adopted source later serves must additionally carry the keyed
+//! `line_proof` only a peer holding the token produces — bound to the
+//! pull's nonce and the served document — so an endpoint that merely
+//! replays or fabricates this line's checkpoints can neither arm the
+//! demotion nor feed the demoted peer forged state. Either way the
+//! demoted instance pulls, applies, and
 //! reconverges like any standby, and a later `POST /promote` fails
 //! back without a restart. A field owner with neither — nothing
 //! configured and no peer ever announced — refuses `POST /demote`
@@ -551,6 +560,17 @@ struct Options {
     /// misconfiguration the plant server flags `claimed_shared` and
     /// this instance warns about.
     owner_token: Option<u64>,
+    /// The pair's shared tracking secret — both peers launch with the
+    /// same token, hashed to the key the monitor's `?prove=`
+    /// checkpoint answers sign and its announced-source pulls verify:
+    /// an announced demotion and every checkpoint the adopted source
+    /// later serves must carry the keyed line proof only a peer
+    /// holding the token can produce, so an endpoint that merely
+    /// replays or fabricates this line's checkpoints can neither arm
+    /// the demotion nor feed the demoted peer forged state. `None`
+    /// keeps the unkeyed contract: announced demotions verify on the
+    /// document checks alone.
+    pair_token: Option<String>,
 }
 
 const USAGE: &str = "\
@@ -558,6 +578,7 @@ Usage: dcs-controller <model-file> [--check] [--ticks N] [--scan-ms MS]
                       [--dt T] [--listen ADDR] [--standby ADDR]
                       [--peer ADDR] [--remote ADDR] [--driven]
                       [--auto-promote N] [--owner-token N] [--revised]
+                      [--pair-token TOKEN]
                       [--state-file PATH] [--journal-file PATH]
 
 Loads and validates the plant model, resolves its devices through the
@@ -627,6 +648,18 @@ controller scan.
                   step the shared plant, defeating single-writer fencing;
                   the plant server flags such duplicate-owner claims and
                   this instance warns on a shared grant
+  --pair-token TOKEN
+                  the pair's shared tracking secret — launch both peers
+                  of a redundant pair with the same TOKEN. The monitor
+                  then signs its /checkpoint answers to ?prove= pulls
+                  with the keyed line proof, and an announced-source
+                  demotion plus every checkpoint the adopted source
+                  later serves must return the matching proof — an
+                  endpoint that only replays or fabricates this line's
+                  checkpoints can neither arm the demotion nor feed the
+                  demoted peer forged state. Requires --listen; unset,
+                  announced demotions verify on the document checks
+                  alone
   --state-file PATH
                   persist the run's checkpoint to PATH at the end of
                   every scan cycle and at each accepted command's
@@ -674,6 +707,7 @@ impl Options {
         let mut state_file = None;
         let mut journal_file = None;
         let mut owner_token = None;
+        let mut pair_token = None;
         let mut args = args;
         while let Some(arg) = args.next() {
             let mut value = |flag: &str| {
@@ -727,6 +761,7 @@ impl Options {
                             .map_err(|error| format!("invalid --owner-token value: {error}"))?,
                     );
                 }
+                "--pair-token" => pair_token = Some(value("--pair-token")?),
                 "-h" | "--help" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -758,6 +793,7 @@ impl Options {
                 ("--state-file", state_file.is_some()),
                 ("--journal-file", journal_file.is_some()),
                 ("--owner-token", owner_token.is_some()),
+                ("--pair-token", pair_token.is_some()),
             ] {
                 if present {
                     rejected.push(flag);
@@ -832,6 +868,12 @@ impl Options {
                     .to_string(),
             );
         }
+        if pair_token.is_some() && listen.is_none() {
+            return Err(
+                "--pair-token requires --listen: the line proofs it keys live on the monitor"
+                    .to_string(),
+            );
+        }
         Ok(Self {
             model,
             check,
@@ -848,6 +890,7 @@ impl Options {
             state_file,
             journal_file,
             owner_token,
+            pair_token,
         })
     }
 }
@@ -855,6 +898,18 @@ impl Options {
 fn fail(message: impl std::fmt::Display) -> ExitCode {
     eprintln!("error: {message}");
     ExitCode::FAILURE
+}
+
+/// Installs the pair's shared tracking secret on the monitor when the
+/// deployment declared one — `--pair-token` hashed to the key the
+/// monitor's `?prove=` checkpoint answers sign and its adopted-source
+/// pulls verify. `None` keeps the run unkeyed: `?prove=` answers stay
+/// plain and announced demotions verify on the document checks alone.
+fn keyed_monitor<'d>(monitor: Monitor<'d>, options: &Options) -> Monitor<'d> {
+    match &options.pair_token {
+        Some(token) => monitor.with_pair_key(dcs_monitor::pair_key(token)),
+        None => monitor,
+    }
 }
 
 /// Resolves `addr` — `host:port` — for [`MonitorClient`], which wants a
@@ -1198,6 +1253,7 @@ fn main() -> ExitCode {
                     return fail(format!("cannot bind monitor on {addr}: {error}"));
                 }
             };
+        let monitor = keyed_monitor(monitor, &options);
         let monitor = match command_persist(&options) {
             Some(persist) => monitor.with_command_persist(persist),
             None => monitor,
@@ -1264,6 +1320,7 @@ fn main() -> ExitCode {
                         return fail(format!("cannot bind monitor on {addr}: {error}"));
                     }
                 };
+                let monitor = keyed_monitor(monitor, &options);
                 let monitor = match command_persist(&options) {
                     Some(persist) => monitor.with_command_persist(persist),
                     None => monitor,
@@ -1396,6 +1453,7 @@ fn main() -> ExitCode {
                         return fail(format!("cannot bind monitor on {addr}: {error}"));
                     }
                 };
+                let monitor = keyed_monitor(monitor, &options);
                 let monitor = match command_persist(&options) {
                     Some(persist) => monitor.with_command_persist(persist),
                     None => monitor,
@@ -1521,10 +1579,17 @@ fn tracked_cycle(
 ) -> Tick {
     if let Some(source) = monitor.tracking_source() {
         if puller.as_ref().map(|(bound, _)| *bound) != Some(source) {
-            *puller = Some((
-                source,
-                CheckpointPuller::new(source, Some(monitor.local_addr())),
-            ));
+            let announce = Some(monitor.local_addr());
+            // A source a keyed run adopted through an announced
+            // demotion must keep proving every checkpoint it serves —
+            // an endpoint that only replays or fabricates this line's
+            // documents feeds the demoted peer nothing. A configured
+            // source — or an unkeyed run — pulls unproven, as before.
+            let fresh = match monitor.pull_proof_key(source) {
+                Some(key) => CheckpointPuller::with_pair_proof(source, announce, key),
+                None => CheckpointPuller::new(source, announce),
+            };
+            *puller = Some((source, fresh));
         }
         let report = monitor.track_cycle(|| puller.as_mut().unwrap().1.poll());
         report_tracking(&report, source);

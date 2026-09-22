@@ -1026,8 +1026,10 @@ identical `demote-reconvergence-digest`, a divergence failing
 `demote-reconvergence-nondeterministic`. The leg's doctored case —
 a crafted `?peer=` announce naming the field owner's own monitor
 address, landing on the pulling connection's own source exactly as
-a self-claim — must surface the self-addressed adoption's named
-evidence rather than pass silently.
+a self-claim — plants a self-addressed demotion hint whose verify
+pull reads the owner's own document: the replayable own-document
+shape an announced demotion refuses, so `POST /demote` must answer
+`409 no_tracking_source` rather than adopt the self-pin.
 
 The stage's managed-lifecycle leg — `ci/managed_lifecycle.py` on the
 same declared deployment — then exercises the emitted model's whole

@@ -68,6 +68,23 @@ fn missing_model_file_is_a_usage_error() {
 }
 
 #[test]
+fn pair_token_requires_the_monitor_it_keys() {
+    // The keyed line proofs live on the monitor's /checkpoint endpoint,
+    // so the token means nothing without --listen.
+    let output = run(&[TANK_LOOP, "--ticks", "5", "--pair-token", "secret"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("--pair-token requires --listen"),
+        "{stderr}"
+    );
+
+    // --check only assembles the model; the monitor flags do not apply.
+    let output = run(&[TANK_LOOP, "--check", "--pair-token", "secret"]);
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
 fn driven_requires_listen_and_excludes_pacing() {
     // --driven needs the monitor the requests arrive through.
     let output = run(&[TANK_LOOP, "--driven"]);
