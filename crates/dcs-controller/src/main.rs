@@ -149,9 +149,26 @@
 //! peer's checkpoint source is therefore resolved per scan cycle: the
 //! configured `--peer ADDR` when given — "active now, but here is my
 //! peer for later" — else the address the tracking peer announced
-//! through its pulls. Either way the demoted instance pulls, applies,
-//! and reconverges like any standby, and a later `POST /promote`
-//! fails back without a restart. A field owner with neither — nothing
+//! through its pulls. The announced fallback is a hint, not a proof:
+//! the serving side cannot tell the puller's monitor port from any
+//! other port its connection's source claims, so `POST /demote`
+//! toward an announced-only source first pulls one checkpoint from it
+//! and proceeds only when that checkpoint continues this run's line in
+//! a way this run's own public `/checkpoint` could not have answered —
+//! a field-owning document not ahead of this run's tick is replayable,
+//! not a successor — journaling the adopted source and pinning it, so
+//! a later `?peer=` rewrite cannot redirect the demoted peer's pulls —
+//! while a dead, unreachable, replayed, or forged hint refuses
+//! `no_tracking_source` like an absent one. When both peers launch
+//! with the same `--pair-token`, the verify pull and every checkpoint
+//! the adopted source later serves must additionally carry the keyed
+//! `line_proof` only a peer holding the token produces — bound to the
+//! pull's nonce and the served document — so an endpoint that merely
+//! replays or fabricates this line's checkpoints can neither arm the
+//! demotion nor feed the demoted peer forged state. Either way the
+//! demoted instance pulls, applies, and
+//! reconverges like any standby, and a later `POST /promote` fails
+//! back without a restart. A field owner with neither — nothing
 //! configured and no peer ever announced — refuses `POST /demote`
 //! outright (`no_tracking_source`) rather than silently marooning
 //! itself.
@@ -225,12 +242,17 @@
 //! `not_converged` and no checkpoint will ever arrive to change that.
 //! The recorded recovery is restart-as-active: relaunch the controller
 //! on the same model without `--standby`, and the launched active's
-//! unconditional startup claim preempts the dead owner's token — a
-//! surviving `--state-file` resumes the run at its last persisted
+//! conditional startup grant preempts the dead owner's standing token —
+//! a surviving `--state-file` resumes the run at its last persisted
 //! cycle, and the standby reconverges on the new active's checkpoint
-//! stream where its tracking source resolves. There is deliberately no
-//! force-promote and no operator claim-release: a standby that never
-//! proved it tracks the field is never a writer.
+//! stream where its tracking source resolves. The grant is conditional
+//! precisely so the same launch cannot take a *live* incumbent's field:
+//! a controller restarting into a pair cannot prove its resumed state is
+//! current with the incumbent's, so a live different-owner claim refuses
+//! the start — the named remedy is rejoining as `--standby`, whose
+//! tracking pulls adopt the incumbent's state rather than reverting it.
+//! There is deliberately no force-promote and no operator claim-release:
+//! a standby that never proved it tracks the field is never a writer.
 //!
 //! The monitoring page presents the pair as one logical controller: open
 //! it on either peer's `--listen` address and pass the other peer's
@@ -361,6 +383,63 @@ impl Driver {
         }
     }
 
+    /// The launched-controller counterpart of
+    /// [`claim_writer`](Self::claim_writer) — run once at startup
+    /// activation: takes the field's write-ownership under `owner` only
+    /// where no *live* attachment holds a different owner's claim —
+    /// `Ok(true)` — answering `Ok(false)` where a live incumbent
+    /// stands. A restarted controller cannot prove its resumed state is
+    /// current with that incumbent's — a stale `--state-file` would
+    /// silently roll back commands the incumbent receipted and applied —
+    /// while a claim a dead owner left standing is still preempted,
+    /// the restart-as-active recovery path. A purely local simulated
+    /// model has no shared field to claim and answers `Ok(true)`
+    /// vacuously; field kinds that cannot distinguish live holders
+    /// fall back to the unconditional claim.
+    fn claim_writer_unless_held(&self, owner: u64) -> Result<bool, String> {
+        match self {
+            Self::Remote(remote) => match remote.claim_writer_unless_held(owner) {
+                Ok(ClaimGrant::Exclusive) => Ok(true),
+                Ok(ClaimGrant::Shared) => {
+                    eprintln!(
+                        "warning: field write-ownership claim for owner token {owner} is \
+                         shared with another live attachment — expected only for a \
+                         deliberate same-owner attachment; a second controller pinned to \
+                         the same --owner-token defeats single-writer fencing"
+                    );
+                    Ok(true)
+                }
+                Err(RemoteError::Fenced) => Ok(false),
+                Err(error) => Err(format!("plant write-ownership claim failed: {error}")),
+            },
+            Self::Local(fanout) => fanout
+                .claim_field_writer_unless_held(owner)
+                .map_err(|error| format!("plant write-ownership claim failed: {error}")),
+        }
+    }
+
+    /// The conditional counterpart of [`claim_writer`](Self::claim_writer)
+    /// — the orphan-cycle probe a demoted ex-owner runs while the
+    /// tracked line reports no field owner: re-arms the claim under
+    /// `owner` only where the field stands unclaimed or already names
+    /// the token — `Ok(true)` — refusing `Ok(false)` while a different
+    /// owner stands, so a released claim re-arms instead of leaving the
+    /// field open to a foreign grab and no probe ever preempts. A
+    /// purely local simulated model has no shared field to claim and
+    /// answers `Ok(true)` vacuously.
+    fn ensure_writer(&self, owner: u64) -> Result<bool, String> {
+        match self {
+            Self::Remote(remote) => match remote.ensure_writer(owner) {
+                Ok(_) => Ok(true),
+                Err(RemoteError::Fenced) => Ok(false),
+                Err(error) => Err(format!("plant write-ownership re-arm failed: {error}")),
+            },
+            Self::Local(fanout) => fanout
+                .ensure_field_writer(owner)
+                .map_err(|error| format!("plant write-ownership re-arm failed: {error}")),
+        }
+    }
+
     /// The field-facing devices that cannot arbitrate a single writer —
     /// automatic failover is honest only when this is empty: a fenced
     /// old peer's writes must actually stop at the field. A `--remote`
@@ -481,6 +560,17 @@ struct Options {
     /// misconfiguration the plant server flags `claimed_shared` and
     /// this instance warns about.
     owner_token: Option<u64>,
+    /// The pair's shared tracking secret — both peers launch with the
+    /// same token, hashed to the key the monitor's `?prove=`
+    /// checkpoint answers sign and its announced-source pulls verify:
+    /// an announced demotion and every checkpoint the adopted source
+    /// later serves must carry the keyed line proof only a peer
+    /// holding the token can produce, so an endpoint that merely
+    /// replays or fabricates this line's checkpoints can neither arm
+    /// the demotion nor feed the demoted peer forged state. `None`
+    /// keeps the unkeyed contract: announced demotions verify on the
+    /// document checks alone.
+    pair_token: Option<String>,
 }
 
 const USAGE: &str = "\
@@ -488,6 +578,7 @@ Usage: dcs-controller <model-file> [--check] [--ticks N] [--scan-ms MS]
                       [--dt T] [--listen ADDR] [--standby ADDR]
                       [--peer ADDR] [--remote ADDR] [--driven]
                       [--auto-promote N] [--owner-token N] [--revised]
+                      [--pair-token TOKEN]
                       [--state-file PATH] [--journal-file PATH]
 
 Loads and validates the plant model, resolves its devices through the
@@ -557,6 +648,18 @@ controller scan.
                   step the shared plant, defeating single-writer fencing;
                   the plant server flags such duplicate-owner claims and
                   this instance warns on a shared grant
+  --pair-token TOKEN
+                  the pair's shared tracking secret — launch both peers
+                  of a redundant pair with the same TOKEN. The monitor
+                  then signs its /checkpoint answers to ?prove= pulls
+                  with the keyed line proof, and an announced-source
+                  demotion plus every checkpoint the adopted source
+                  later serves must return the matching proof — an
+                  endpoint that only replays or fabricates this line's
+                  checkpoints can neither arm the demotion nor feed the
+                  demoted peer forged state. Requires --listen; unset,
+                  announced demotions verify on the document checks
+                  alone
   --state-file PATH
                   persist the run's checkpoint to PATH at the end of
                   every scan cycle and at each accepted command's
@@ -604,6 +707,7 @@ impl Options {
         let mut state_file = None;
         let mut journal_file = None;
         let mut owner_token = None;
+        let mut pair_token = None;
         let mut args = args;
         while let Some(arg) = args.next() {
             let mut value = |flag: &str| {
@@ -657,6 +761,7 @@ impl Options {
                             .map_err(|error| format!("invalid --owner-token value: {error}"))?,
                     );
                 }
+                "--pair-token" => pair_token = Some(value("--pair-token")?),
                 "-h" | "--help" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -688,6 +793,7 @@ impl Options {
                 ("--state-file", state_file.is_some()),
                 ("--journal-file", journal_file.is_some()),
                 ("--owner-token", owner_token.is_some()),
+                ("--pair-token", pair_token.is_some()),
             ] {
                 if present {
                     rejected.push(flag);
@@ -762,6 +868,12 @@ impl Options {
                     .to_string(),
             );
         }
+        if pair_token.is_some() && listen.is_none() {
+            return Err(
+                "--pair-token requires --listen: the line proofs it keys live on the monitor"
+                    .to_string(),
+            );
+        }
         Ok(Self {
             model,
             check,
@@ -778,6 +890,7 @@ impl Options {
             state_file,
             journal_file,
             owner_token,
+            pair_token,
         })
     }
 }
@@ -785,6 +898,18 @@ impl Options {
 fn fail(message: impl std::fmt::Display) -> ExitCode {
     eprintln!("error: {message}");
     ExitCode::FAILURE
+}
+
+/// Installs the pair's shared tracking secret on the monitor when the
+/// deployment declared one — `--pair-token` hashed to the key the
+/// monitor's `?prove=` checkpoint answers sign and its adopted-source
+/// pulls verify. `None` keeps the run unkeyed: `?prove=` answers stay
+/// plain and announced demotions verify on the document checks alone.
+fn keyed_monitor<'d>(monitor: Monitor<'d>, options: &Options) -> Monitor<'d> {
+    match &options.pair_token {
+        Some(token) => monitor.with_pair_key(dcs_monitor::pair_key(token)),
+        None => monitor,
+    }
 }
 
 /// Resolves `addr` — `host:port` — for [`MonitorClient`], which wants a
@@ -1058,7 +1183,12 @@ fn main() -> ExitCode {
     // every fallible startup step — journal replay, monitor bind,
     // peer-address resolution — has proven this process can serve; a
     // starter that fails earlier leaves no stale claim fencing the
-    // field's standing owner.
+    // field's standing owner. The activation's own claim is the
+    // conditional startup grant: it preempts a dead owner's standing
+    // claim — the restart-as-active recovery — but refuses while a
+    // *live* incumbent holds the field, so a controller restarting
+    // onto a stale checkpoint cannot seize the field and silently roll
+    // back commands the incumbent receipted and applied.
     let owner = options.owner_token.unwrap_or_else(owner_token);
     let peer = match &options.standby {
         Some(_) => Peer::standby(executor, gate.as_ref()),
@@ -1066,7 +1196,9 @@ fn main() -> ExitCode {
     };
     let peer = peer
         .with_field_claim(|| driver.claim_writer(owner))
-        .with_field_release(|| driver.release_claim());
+        .with_field_release(|| driver.release_claim())
+        .with_field_ensure(|| driver.ensure_writer(owner))
+        .with_field_startup_claim(|| driver.claim_writer_unless_held(owner));
     let peer = match options.auto_promote {
         Some(budget) => peer.with_failover(budget),
         None => peer,
@@ -1121,6 +1253,7 @@ fn main() -> ExitCode {
                     return fail(format!("cannot bind monitor on {addr}: {error}"));
                 }
             };
+        let monitor = keyed_monitor(monitor, &options);
         let monitor = match command_persist(&options) {
             Some(persist) => monitor.with_command_persist(persist),
             None => monitor,
@@ -1144,14 +1277,16 @@ fn main() -> ExitCode {
             monitor.note_reinitialized(report.as_ref().clone());
         }
         // A launched active owns the field from startup: activation
-        // runs the same claim-then-lift sequence a promotion does —
-        // the plant's single-writer claim under this instance's token
-        // first, the gate second — deferred to here, after every
-        // fallible local startup step (the track address resolved, the
-        // journal replayed, the monitor bound), so a starter that
-        // cannot serve never lands the preemptive claim on the field's
-        // standing owner. A claim the field refuses is a named startup
-        // failure, not an unfenced run.
+        // runs the claim-then-lift sequence — the conditional startup
+        // grant under this instance's token first, the gate second —
+        // deferred to here, after every fallible local startup step
+        // (the track address resolved, the journal replayed, the
+        // monitor bound), so a starter that cannot serve never lands a
+        // claim on the field's standing owner. The grant preempts a
+        // dead owner's claim but refuses a live incumbent's, and a
+        // refused grant is a named startup failure, not an unfenced
+        // run: the incumbent's receipted state is never silently
+        // reverted by a stale restart.
         if options.standby.is_none() {
             if let Err(error) = monitor.activate() {
                 return fail(format!("{error}"));
@@ -1185,6 +1320,7 @@ fn main() -> ExitCode {
                         return fail(format!("cannot bind monitor on {addr}: {error}"));
                     }
                 };
+                let monitor = keyed_monitor(monitor, &options);
                 let monitor = match command_persist(&options) {
                     Some(persist) => monitor.with_command_persist(persist),
                     None => monitor,
@@ -1248,6 +1384,12 @@ fn main() -> ExitCode {
                         for reinitialized in peer.take_reinitializations() {
                             eprintln!("standby: {reinitialized}");
                         }
+                        for orphan in peer.take_orphans() {
+                            eprintln!(
+                                "standby: the tracked line has no field owner — orphaned at tick {} (aligned to {})",
+                                orphan.tick.0, orphan.aligned.0
+                            );
+                        }
                         for restart in peer.take_source_restarts() {
                             eprintln!(
                                 "standby: checkpoint stream regressed at tick {} — the source restarted or was replaced; resumed from its tick {} (was aligned to {:?})",
@@ -1262,7 +1404,7 @@ fn main() -> ExitCode {
                                 change.from, change.to, change.tick.0
                             );
                         }
-                        for receipt in peer.take_superseded_commands() {
+                        for (_index, receipt) in peer.take_superseded_commands() {
                             eprintln!(
                                 "standby: pending command superseded at tick {}: {:?}",
                                 peer.tick().0,
@@ -1319,6 +1461,7 @@ fn main() -> ExitCode {
                         return fail(format!("cannot bind monitor on {addr}: {error}"));
                     }
                 };
+                let monitor = keyed_monitor(monitor, &options);
                 let monitor = match command_persist(&options) {
                     Some(persist) => monitor.with_command_persist(persist),
                     None => monitor,
@@ -1341,12 +1484,13 @@ fn main() -> ExitCode {
                     monitor.note_reinitialized(report.as_ref().clone());
                 }
                 // The launched active's deferred startup activation —
-                // the same claim-then-lift sequence the driven path
-                // runs: the preemptive field claim lands only now, the
-                // journal replayed, the monitor bound, and the peer
-                // address resolved, so a startup that failed earlier
-                // left no stale claim fencing the field's standing
-                // owner. A claim the field refuses is a named startup
+                // the same conditional-grant sequence the driven path
+                // runs: the claim lands only now, the journal replayed,
+                // the monitor bound, and the peer address resolved, so
+                // a startup that failed earlier left no stale claim
+                // fencing the field's standing owner. The grant
+                // preempts a dead owner's claim but refuses a live
+                // incumbent's — a refused grant is a named startup
                 // failure, not an unfenced run.
                 if let Err(error) = monitor.activate() {
                     return fail(format!("{error}"));
@@ -1373,10 +1517,12 @@ fn main() -> ExitCode {
             }
             None => {
                 // The launched active's startup activation — the same
-                // claim-then-lift sequence the monitored paths defer to
-                // their last startup step: nothing fallible stands
-                // between here and the scan loop, so the preemptive
-                // claim runs only now that startup can no longer abort.
+                // conditional-grant sequence the monitored paths defer
+                // to their last startup step: nothing fallible stands
+                // between here and the scan loop, so the claim runs
+                // only now that startup can no longer abort — and a
+                // live incumbent's claim refuses it rather than being
+                // preempted by a stale restart.
                 if let Err(error) = peer.activate() {
                     return fail(format!("{error}"));
                 }
@@ -1441,10 +1587,17 @@ fn tracked_cycle(
 ) -> Tick {
     if let Some(source) = monitor.tracking_source() {
         if puller.as_ref().map(|(bound, _)| *bound) != Some(source) {
-            *puller = Some((
-                source,
-                CheckpointPuller::new(source, Some(monitor.local_addr())),
-            ));
+            let announce = Some(monitor.local_addr());
+            // A source a keyed run adopted through an announced
+            // demotion must keep proving every checkpoint it serves —
+            // an endpoint that only replays or fabricates this line's
+            // documents feeds the demoted peer nothing. A configured
+            // source — or an unkeyed run — pulls unproven, as before.
+            let fresh = match monitor.pull_proof_key(source) {
+                Some(key) => CheckpointPuller::with_pair_proof(source, announce, key),
+                None => CheckpointPuller::new(source, announce),
+            };
+            *puller = Some((source, fresh));
         }
         let report = monitor.track_cycle(|| puller.as_mut().unwrap().1.poll());
         report_tracking(&report, source);

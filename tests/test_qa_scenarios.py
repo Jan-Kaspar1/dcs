@@ -4166,7 +4166,8 @@ class BackupHealthFeed:
     output's last image on the alarm's `in` carrier, the selector
     drives backup_unhealthy off the plant-served backup quality, and
     the latching alarm stands on `in`, holds unacknowledged on its
-    edge latch, and ack-dominates — so the carrier delay means the
+    edge latch, and consumes ack on its rising edge — so the carrier
+    delay means the
     full annunciation lands a scan behind the injected fault.
     Declared-journaled points record point_changed; the carrier does
     not. Fault flags stage each named failure the issue calls out."""
@@ -4205,6 +4206,7 @@ class BackupHealthFeed:
         self.journal = []
         self.pending = []
         self.ack = False
+        self.ack_seen = False   # the last-observed ack level
         self.state = False      # the alarm's tracked `in`
         self.latched = False    # the unacknowledged latch
         self.ever_faulted = False
@@ -4286,7 +4288,9 @@ class BackupHealthFeed:
         condition = self.values[self.CARRIER]
         fresh = condition and not self.state
         self.state = condition
-        self.latched = (self.latched or fresh) and not self.ack
+        acknowledged = self.ack and not self.ack_seen
+        self.ack_seen = self.ack
+        self.latched = (self.latched and not acknowledged) or fresh
         self._drive(self.ALARM, condition and not self.mute_alarm)
         self._drive(self.UNACK, self.latched and not self.mute_latch)
         if degraded and self.journals_role and not self._role_journaled:
@@ -4617,7 +4621,7 @@ class SourceFailoverFeed:
     the primary's served quality degrades, the chain advances its
     held demand on the failover-fed level under the declared
     setpoints, and the alarm stands on `in`, latches unacknowledged on
-    the edge, and releases it while ack reads true. Declared-journaled
+    the edge, and releases it on ack's rising edge. Declared-journaled
     points record point_changed; the carriers do not. Fault flags
     stage each named failure the issue calls out."""
 
@@ -4671,6 +4675,7 @@ class SourceFailoverFeed:
         self.journal = []
         self.pending = []
         self.ack = False
+        self.ack_seen = False   # the last-observed ack level
         self.state = False      # the alarm's tracked `in`
         self.latched = False    # the unacknowledged latch
         self.ever_faulted = False
@@ -4812,11 +4817,13 @@ class SourceFailoverFeed:
         self._drive(self.HIGH_LEVEL,
                     bool(trusted and level >= self.HIGH))
         # The wired managed alarm: `in` is the flag's carrier, the
-        # latch holds until ack reads true.
+        # latch holds until ack's rising edge.
         condition = self.values[self.CARRIER]
         fresh = condition and not self.state
         self.state = condition
-        self.latched = (self.latched or fresh) and not self.ack
+        acknowledged = self.ack and not self.ack_seen
+        self.ack_seen = self.ack
+        self.latched = (self.latched and not acknowledged) or fresh
         if self.unlatches_on_clear and not condition:
             self.latched = False
         self._drive(self.ALARM, condition and not self.mute_alarm)
@@ -6249,6 +6256,13 @@ class LagStagingTests(unittest.TestCase):
         self.assertEqual(
             order.index(scenarios.scenario_demote_settle_uniqueness)
             + 1,
+            order.index(scenarios.scenario_demote_pending_command))
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_pending_command)
+            + 1,
+            order.index(scenarios.scenario_demote_reconvergence))
+        self.assertLess(
+            order.index(scenarios.scenario_demote_reconvergence),
             order.index(scenarios.scenario_parameter_tune_carryover))
         self.assertIs(verify.case_function('lag-staging'),
                       scenarios.scenario_lag_staging)
@@ -13633,16 +13647,19 @@ class DemoteSettlePeer:
 
 
 class DemoteSettleFeed:
-    """A stubbed pair for the demote-settle-uniqueness leg: ctrl-a owns
-    the field at launch, ctrl-b tracks. Every endpoint call is one
-    scan — the owner applies its pending admissions at the boundary
-    and journals their settlements, the demote closes the gate so a
-    still-accepted admission suspends, the promote's final-sync
-    transfer carries the demoted log across, and a tracking peer's
-    adoption journals the line's verdict — applied for the admissions
-    the carry landed, superseded for the ones the adopted window
-    passed. Doctor flags stage each named defect the issue calls
-    out."""
+    """A stubbed pair for the demote-settle-uniqueness leg — shared by
+    the demote-pending-command leg: ctrl-a owns the field at launch,
+    ctrl-b tracks. Every endpoint call is one scan — the owner applies
+    its pending admissions at the boundary and journals their
+    settlements, the demote closes the gate so a still-accepted
+    admission suspends, the promote's final-sync transfer carries the
+    demoted log across, and a tracking peer's adoption journals the
+    line's verdict — applied for the admissions the carry landed,
+    superseded for the ones the adopted window passed. Doctor flags
+    stage each named defect the issue calls out. An optional
+    `journal_files` mapping (ctx keys 'active'/'standby' to paths)
+    mirrors every journaled event into real --journal-file records for
+    the demote-pending leg's durable audit."""
 
     POINTS = (302, 300, 301, 332, 333, 334)
     SIGNALS = [{'point': point,
@@ -13651,11 +13668,24 @@ class DemoteSettleFeed:
                 'direction': 'in', 'value_type': 'bool',
                 'writable': True} for point in POINTS]
 
-    def __init__(self):
+    def __init__(self, journal_files=None):
         self.a = DemoteSettlePeer('a')
         self.a.role = 'active'
         self.b = DemoteSettlePeer('b')
         self.b.tracking = True
+        # The demote-pending leg's durable audit reads each endpoint's
+        # --journal-file: peer 'a' serves ctx key 'active', peer 'b'
+        # ctx key 'standby'. A feed without paths mirrors nothing —
+        # the demote-settle-uniqueness leg never reads the files.
+        self.journal_paths = {}
+        for peer, key in ((self.a, 'active'), (self.b, 'standby')):
+            path = (journal_files or {}).get(key)
+            if path is not None:
+                path = Path(path)
+                path.write_text(
+                    json.dumps({'run_boundary': {'run': 1,
+                                                 'tick': 0}}) + '\n')
+                self.journal_paths[peer.name] = path
         # The doctors staging each named defect.
         self.double_settle = False    # an admission journals applied
                                       # AND superseded
@@ -13689,6 +13719,13 @@ class DemoteSettleFeed:
         peer.journal.append({'seq': peer.next_seq, 'tick': peer.tick,
                              'event': event})
         peer.next_seq += 1
+        path = self.journal_paths.get(peer.name)
+        if path is not None:
+            with path.open('a') as stream:
+                stream.write(json.dumps(
+                    {'entry': {'seq': peer.journal[-1]['seq'],
+                               'tick': peer.tick,
+                               'event': event}}) + '\n')
 
     def _settle(self, peer, receipt):
         """One receipt's terminal journaling — the recorder's
@@ -13935,6 +13972,13 @@ class DemoteSettleTests(unittest.TestCase):
         self.assertEqual(
             order.index(scenarios.scenario_demote_settle_uniqueness)
             + 1,
+            order.index(scenarios.scenario_demote_pending_command))
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_pending_command)
+            + 1,
+            order.index(scenarios.scenario_demote_reconvergence))
+        self.assertLess(
+            order.index(scenarios.scenario_demote_reconvergence),
             order.index(scenarios.scenario_parameter_tune_carryover))
         self.assertIs(
             verify.case_function('demote-settle-uniqueness'),
@@ -14069,6 +14113,570 @@ class DemoteSettleTests(unittest.TestCase):
             evidence.mkdir()
             self.evidence = evidence
             record = self.run_scenario(feed=feed)
+            runs.append((record, {p.name: p.read_text()
+                                  for p in evidence.iterdir()}))
+        self.assertEqual(runs[0], runs[1])
+
+
+class DemotePendingTests(unittest.TestCase):
+    """The demote-pending-command leg against the stubbed pair: one
+    receipted write admitted on the field owner, demoted inside its
+    pending window, settling exactly once — applied through the
+    carry or the named superseded rejection with the settle on the
+    durable record. A clean rig passes with identical digests and
+    evidence, each doctored loss shape reports its named diagnostic,
+    and an unreachable peer is inconclusive."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.journal_a = Path(self.tmp.name) / 'a' / 'journal.jsonl'
+        self.journal_b = Path(self.tmp.name) / 'b' / 'journal.jsonl'
+        self.journal_a.parent.mkdir(parents=True)
+        self.journal_b.parent.mkdir(parents=True)
+        self.feed = DemoteSettleFeed(
+            {'active': str(self.journal_a),
+             'standby': str(self.journal_b)})
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_scenario(self, feed=None, **ctx_overrides):
+        feed = feed or self.feed
+        ctx = {'active': 'http://ctrl-a:1',
+               'standby': 'http://ctrl-b:2',
+               'evidence_dir': str(self.evidence),
+               'journal_files': {'active': str(self.journal_a),
+                                 'standby': str(self.journal_b)}}
+        ctx.update(ctx_overrides)
+        with patch.object(scenarios, 'http_json', feed.http_json), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'DEMOTE_PENDING_SETTLE', 2.0), \
+                patch.object(scenarios, 'DEMOTE_PENDING_AUDIT', 2.0), \
+                patch.object(scenarios, 'DEMOTE_PENDING_POLL', 0.001):
+            return scenarios.scenario_demote_pending_command(ctx)
+
+    def test_registered(self):
+        order = list(scenarios.SCENARIOS)
+        # The restored pre-switch window behind the demote-settle
+        # case — the settled tracking pair ahead of the tune case's
+        # a->b switch.
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_settle_uniqueness)
+            + 1,
+            order.index(scenarios.scenario_demote_pending_command))
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_pending_command)
+            + 1,
+            order.index(scenarios.scenario_demote_reconvergence))
+        self.assertLess(
+            order.index(scenarios.scenario_demote_reconvergence),
+            order.index(scenarios.scenario_parameter_tune_carryover))
+        self.assertIs(
+            verify.case_function('demote-pending-command'),
+            scenarios.scenario_demote_pending_command)
+
+    def test_clean_pair_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        for name in ('demote-pending-signals.json',
+                     'demote-pending-pass-1.json',
+                     'demote-pending-pass-2.json'):
+            self.assertTrue((self.evidence / name).is_file(), name)
+        passes = [json.loads((self.evidence / name).read_text())
+                  for name in ('demote-pending-pass-1.json',
+                               'demote-pending-pass-2.json')]
+        self.assertEqual(passes[0]['digest'], passes[1]['digest'])
+        self.assertEqual(passes[0]['digest']['outcomes'], 'single')
+        self.assertEqual(passes[0]['digest']['admissions'], 1)
+        # Two passes switch twice: the pair ends on its entry layout.
+        self.assertEqual(self.feed.a.role, 'active')
+        self.assertEqual(self.feed.b.role, 'standby')
+        # The durable record mirrors the served single outcome on
+        # each pass.
+        for passed in passes:
+            durable = passed['durable']
+            self.assertEqual(set(durable), {'active', 'standby'})
+            outcomes = {scenarios._outcome_key(receipt)
+                        for entries in durable.values()
+                        for receipt in entries}
+            self.assertEqual(len(outcomes), 1, outcomes)
+        report.validate_scenario(record)
+
+    def test_superseded_admission_is_a_legal_single_outcome(self):
+        self.feed.drop_carry = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        passed = json.loads(
+            (self.evidence / 'demote-pending-pass-1.json').read_text())
+        outcomes = {
+            scenarios._outcome_key(receipt)
+            for audit in (passed['audit'],)
+            if audit['window']
+            for entries in audit['window']['journaled'].values()
+            for receipt in entries}
+        self.assertIn('rejected:superseded', outcomes, outcomes)
+        report.validate_scenario(record)
+
+    def test_phantom_application_reports_nondeterministic(self):
+        self.feed.drop_carry = True
+        self.feed.phantom_apply = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-pending-nondeterministic'),
+            record['detail'])
+        self.assertIn('application the journal never settled',
+                      record['detail'])
+        report.validate_scenario(record)
+
+    def test_vanished_admission_reports_failed(self):
+        self.feed.drop_admission = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-pending-failed'), record['detail'])
+        self.assertIn('terminal journaled outcome', record['detail'])
+        report.validate_scenario(record)
+
+    def test_double_settled_admission_reports_nondeterministic(self):
+        self.feed.double_settle = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-pending-nondeterministic'),
+            record['detail'])
+        report.validate_scenario(record)
+
+    def test_diverged_logs_report_nondeterministic(self):
+        self.feed.diverge_logs = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-pending-nondeterministic'),
+            record['detail'])
+        self.assertIn('adopted log', record['detail'])
+        report.validate_scenario(record)
+
+    def test_refused_demote_reports_failed(self):
+        self.feed.demote_refused = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-pending-failed'), record['detail'])
+        self.assertIn('demote', record['detail'])
+        report.validate_scenario(record)
+
+    def test_refused_promote_reports_failed(self):
+        self.feed.promote_refused = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-pending-failed'), record['detail'])
+        self.assertIn('promote', record['detail'])
+        report.validate_scenario(record)
+
+    def test_no_active_reports_failed(self):
+        self.feed.no_active = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('no peer reports role=active', record['detail'])
+        report.validate_scenario(record)
+
+    def test_unconverged_pair_reports_inconclusive(self):
+        self.feed.no_tracking = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('tracking standby', record['detail'])
+        report.validate_scenario(record)
+
+    def test_unreachable_peer_reports_inconclusive(self):
+        self.feed.unreachable = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('unreachable', record['detail'])
+        report.validate_scenario(record)
+
+    def test_missing_journal_files_reports_inconclusive(self):
+        record = self.run_scenario(journal_files={})
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('journal-file', record['detail'])
+        report.validate_scenario(record)
+
+    def test_diverging_digests_report_nondeterministic(self):
+        passes = iter([({'outcomes': 'single', 'admissions': 1}, {}, {}),
+                       ({'outcomes': 'diverged', 'admissions': 1},
+                        {}, {})])
+        with patch.object(scenarios, '_demote_pending_pass',
+                          lambda *a: next(passes)):
+            record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-pending-nondeterministic'),
+            record['detail'])
+        self.assertIn('digests diverged', record['detail'])
+        report.validate_scenario(record)
+
+    def test_two_runs_produce_identical_evidence(self):
+        runs = []
+        for _ in range(2):
+            run_dir = Path(self.tmp.name) / ('run' + str(len(runs)))
+            evidence = run_dir / 'evidence'
+            evidence.mkdir(parents=True)
+            journal_a = run_dir / 'a' / 'journal.jsonl'
+            journal_b = run_dir / 'b' / 'journal.jsonl'
+            journal_a.parent.mkdir(parents=True)
+            journal_b.parent.mkdir(parents=True)
+            feed = DemoteSettleFeed(
+                {'active': str(journal_a),
+                 'standby': str(journal_b)})
+            record = self.run_scenario(
+                feed=feed, evidence_dir=str(evidence),
+                journal_files={'active': str(journal_a),
+                               'standby': str(journal_b)})
+            runs.append((record, {p.name: p.read_text()
+                                  for p in evidence.iterdir()}))
+        self.assertEqual(runs[0], runs[1])
+
+
+class ReconvergenceFeed:
+    """A stubbed pair for the demote-reconvergence scenario. ctrl-a is
+    the launched active — no configured tracking source, so its
+    post-demotion pulls resolve `announced`, the monitor address
+    ctrl-b's checkpoint pulls recorded on it; ctrl-b tracks through
+    its configured --standby, `configured`. Every request on a peer is
+    one completed scan on that peer — call-count keyed, never
+    wall-clock, so two passes emit identical evidence. Doctor flags
+    stage the rig shapes the issue names: no announce ever recorded
+    (the demote answers no_tracking_source), the wildcard bind
+    recorded verbatim, a demoted peer that never reconverges, a
+    recorded source that re-poisons on every pull, a promote the
+    reconverged peer cannot take, and a second process lifetime
+    landing mid-leg — the restart signature a --journal-file's run
+    boundaries carry."""
+
+    def __init__(self, journal_a=None, journal_b=None):
+        self.tick = {'a': 0, 'b': 0}
+        self.role = {'a': 'active', 'b': 'standby'}
+        self.sync = {'a': 'unsynchronized', 'b': 'tracking'}
+        self.track_left = {'a': 0, 'b': 0}
+        self.seq = {'a': 1, 'b': 1}
+        self.paths = {}
+        for name, path in (('a', journal_a), ('b', journal_b)):
+            if path is not None:
+                path = Path(path)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                self._append(path,
+                             {'run_boundary': {'run': 1, 'tick': 0}})
+                self.paths[name] = path
+        # The checkpoint source each demoted peer's pulls resolve to:
+        # ctrl-a's is the announce its monitor recorded — a dialable
+        # peer address healthy, the announced 0.0.0.0 bind on the
+        # doctored rig; ctrl-b's is its configured --standby, always
+        # dialable.
+        self.announced = '172.22.0.3:8081'
+        self.configured = '172.22.0.2:8080'
+        self.no_source = False        # no announce ever recorded —
+                                      # the demote refuses
+        self.wildcard = False         # the recorded announce is the
+                                      # wildcard bind
+        self.never_tracks = False     # the demoted peer never
+                                      # reconverges
+        self.re_poison = False        # every pull re-poisons the
+                                      # recorded source
+        self.promote_refused = False  # the reconverged peer cannot
+                                      # promote back
+        self.restart_marker = False   # the fail-back needs a restart
+        self.unreachable = False      # ctrl-b's monitor never answers
+
+    def _append(self, path, record):
+        with path.open('a') as stream:
+            stream.write(json.dumps(record) + '\n')
+
+    def _entry(self, name, event):
+        entry = {'seq': self.seq[name], 'tick': self.tick[name],
+                 'event': event}
+        self.seq[name] += 1
+        path = self.paths.get(name)
+        if path is not None:
+            self._append(path, {'entry': entry})
+
+    def _resolved(self, name):
+        """The sync a demoted peer's completed pulls produce: tracking
+        on a dialable source, or the degraded detail the doctored
+        rig's recorded source fetches."""
+        source = self.configured if name == 'b' else (
+            '0.0.0.0:8081' if self.wildcard else self.announced)
+        if self.never_tracks or (name == 'a' and self.wildcard):
+            return 'fetch from ' + source + ': connection refused'
+        return 'tracking'
+
+    def _scan(self, name):
+        """One completed scan: a pending role transition settles, and a
+        demoted peer's pull train counts down to its resolved sync."""
+        self.tick[name] += 1
+        if self.role[name] == 'demoting':
+            self.role[name] = 'standby'
+            self.sync[name] = 'unsynchronized'
+            self.track_left[name] = 2
+            self._entry(name, {'role_changed': {'from': 'demoting',
+                                                'to': 'standby'}})
+        elif self.role[name] == 'promoting':
+            self.role[name] = 'active'
+            self._entry(name, {'role_changed': {'from': 'promoting',
+                                                'to': 'active'}})
+        elif self.role[name] == 'standby':
+            if self.track_left[name]:
+                self.track_left[name] -= 1
+                if self.track_left[name] == 0:
+                    self.sync[name] = self._resolved(name)
+            elif self.re_poison and name == 'a' \
+                    and self.sync[name] == 'tracking':
+                # The defect family's re-poison: every pull rewrites
+                # the recorded source to the announced wildcard bind.
+                self.sync[name] = ('fetch from 0.0.0.0:8081: '
+                                   'connection refused')
+
+    def _role_report(self, name):
+        report = {'role': self.role[name], 'tick': self.tick[name]}
+        if self.role[name] != 'active':
+            sync = self.sync[name]
+            if sync == 'tracking':
+                report['sync'] = {'tracking': {'aligned':
+                                               self.tick[name]}}
+            elif sync == 'unsynchronized':
+                report['sync'] = {'unsynchronized': {}}
+            else:
+                report['sync'] = {'degraded': {'detail': sync}}
+        return report
+
+    def _raise(self, code, body):
+        raise urllib.error.HTTPError(
+            'http://pair', code, 'refused', None,
+            io.BytesIO(json.dumps(body).encode()))
+
+    def http_json(self, method, url, body=None, timeout=10):
+        name = 'a' if 'ctrl-a' in url else 'b'
+        if self.unreachable and name == 'b':
+            raise urllib.error.URLError('unreachable')
+        path = '/' + url.split('/', 3)[3]
+        self._scan(name)
+        if (method, path) == ('GET', '/role'):
+            return 200, self._role_report(name)
+        if (method, path) == ('POST', '/demote'):
+            if self.role[name] != 'active':
+                self._raise(409, {'not_active': {}})
+            if name == 'a' and self.no_source:
+                # The launched active recorded no announce — it has
+                # nothing to track, so the demote refuses.
+                self._raise(409, {'no_tracking_source': {}})
+            self.role[name] = 'demoting'
+            self._entry(name, {'role_changed': {'from': 'active',
+                                                'to': 'demoting'}})
+            return 200, self._role_report(name)
+        if (method, path) == ('POST', '/promote'):
+            if self.role[name] == 'active':
+                self._raise(409, {'already_active': {}})
+            if self.promote_refused or self.role[name] != 'standby' \
+                    or self.sync[name] != 'tracking':
+                self._raise(409, {'not_converged': {
+                    'sync': self._role_report(name).get('sync')}})
+            if self.restart_marker and name == 'a':
+                # The doctored fail-back: the reconverged peer takes
+                # the field again only inside a second process
+                # lifetime — the run boundary the durable journal
+                # carries.
+                self._append(self.paths['a'],
+                             {'run_boundary': {'run': 2,
+                                               'tick': self.tick['a']}})
+            self.role[name] = 'promoting'
+            self._entry(name, {'role_changed': {'from': 'standby',
+                                                'to': 'promoting'}})
+            return 200, self._role_report(name)
+        raise AssertionError('unexpected request %s %s'
+                             % (method, url))
+
+
+class DemoteReconvergenceTests(unittest.TestCase):
+    """The demote-reconvergence leg against the stubbed pair: the
+    launched active's announced tracking source is the dialable peer
+    address — never the wildcard bind — reconverging to tracking on
+    the promoted successor and holding it across the pull train, then
+    failing back through the documented switch with launch roles
+    restored, no restart marker, and identical digests across two
+    passes. Each doctored rig shape reports a named diagnostic; an
+    unreachable peer is inconclusive."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.journal_a = Path(self.tmp.name) / 'a' / 'journal.jsonl'
+        self.journal_b = Path(self.tmp.name) / 'b' / 'journal.jsonl'
+        self.feed = ReconvergenceFeed(
+            journal_a=self.journal_a, journal_b=self.journal_b)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_scenario(self, feed=None, **ctx_overrides):
+        feed = feed or self.feed
+        ctx = {'active': 'http://ctrl-a:1',
+               'standby': 'http://ctrl-b:2',
+               'evidence_dir': str(self.evidence),
+               'journal_files': {'active': str(self.journal_a),
+                                 'standby': str(self.journal_b)}}
+        ctx.update(ctx_overrides)
+        with patch.object(scenarios, 'http_json', feed.http_json), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios,
+                             'DEMOTE_RECONVERGENCE_SETTLE', 2.0), \
+                patch.object(scenarios, 'DEMOTE_RECONVERGENCE_HOLD', 5), \
+                patch.object(scenarios,
+                             'DEMOTE_RECONVERGENCE_POLL', 0.001):
+            return scenarios.scenario_demote_reconvergence(ctx)
+
+    def test_registered(self):
+        order = list(scenarios.SCENARIOS)
+        # The announced-source leg sits behind the demote-pending case
+        # — the settled launch pair ahead of the tune case's a->b
+        # switch.
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_pending_command)
+            + 1,
+            order.index(scenarios.scenario_demote_reconvergence))
+        self.assertLess(
+            order.index(scenarios.scenario_demote_reconvergence),
+            order.index(scenarios.scenario_parameter_tune_carryover))
+        self.assertIs(
+            verify.case_function('demote-reconvergence'),
+            scenarios.scenario_demote_reconvergence)
+
+    def test_clean_pair_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        for name in ('demote-reconvergence-pass-1.json',
+                     'demote-reconvergence-pass-2.json'):
+            self.assertTrue((self.evidence / name).is_file(), name)
+        passes = [json.loads(
+            (self.evidence / name).read_text())
+            for name in ('demote-reconvergence-pass-1.json',
+                         'demote-reconvergence-pass-2.json')]
+        self.assertEqual(passes[0]['digest'], passes[1]['digest'])
+        self.assertTrue(passes[0]['digest']['reconverged'])
+        self.assertTrue(passes[0]['digest']['failback'])
+        self.assertEqual(passes[0]['digest']['boundary_growth'], 0)
+        # Two passes switch twice: the pair ends on its launch layout.
+        self.assertEqual(self.feed.role['a'], 'active')
+        self.assertEqual(self.feed.role['b'], 'standby')
+        report.validate_scenario(record)
+
+    def test_swapped_entry_layout_restores_and_passes(self):
+        self.feed.role = {'a': 'standby', 'b': 'active'}
+        self.feed.sync = {'a': 'tracking', 'b': 'unsynchronized'}
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        self.assertEqual(self.feed.role['a'], 'active')
+        self.assertEqual(self.feed.role['b'], 'standby')
+        report.validate_scenario(record)
+
+    def test_wildcard_source_reports_named_diagnostic(self):
+        self.feed.wildcard = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-reconvergence-'), record['detail'])
+        self.assertIn('wildcard', record['detail'])
+        report.validate_scenario(record)
+
+    def test_no_source_reports_failed(self):
+        self.feed.no_source = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-reconvergence-failed'), record['detail'])
+        self.assertIn('no_tracking_source', record['detail'])
+        report.validate_scenario(record)
+
+    def test_never_reconverges_reports_failed(self):
+        self.feed.never_tracks = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-reconvergence-failed'), record['detail'])
+        report.validate_scenario(record)
+
+    def test_re_poisoning_reports_nondeterministic(self):
+        self.feed.re_poison = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-reconvergence-'), record['detail'])
+        self.assertIn('pull', record['detail'])
+        report.validate_scenario(record)
+
+    def test_refused_failback_reports_failed(self):
+        self.feed.promote_refused = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-reconvergence-failed'), record['detail'])
+        self.assertIn('promote', record['detail'])
+        report.validate_scenario(record)
+
+    def test_restart_marker_reports_nondeterministic(self):
+        self.feed.restart_marker = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-reconvergence-nondeterministic'), record['detail'])
+        self.assertIn('run boundary', record['detail'])
+        report.validate_scenario(record)
+
+    def test_missing_journal_files_reports_inconclusive(self):
+        record = self.run_scenario(journal_files={})
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('journal-file', record['detail'])
+        report.validate_scenario(record)
+
+    def test_unreachable_peer_reports_inconclusive(self):
+        self.feed.unreachable = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('unreachable', record['detail'])
+        report.validate_scenario(record)
+
+    def test_diverging_digests_report_nondeterministic(self):
+        passes = iter([({'reconverged': True, 'failback': True,
+                         'wildcard_sightings': 0,
+                         'boundary_growth': 0}, {}, {'pass': 1}),
+                       ({'reconverged': True, 'failback': True,
+                         'wildcard_sightings': 1,
+                         'boundary_growth': 0}, {}, {'pass': 2})])
+        with patch.object(scenarios, '_demote_reconvergence_pass',
+                          lambda *a: next(passes)):
+            record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-reconvergence-nondeterministic'), record['detail'])
+        self.assertIn('digests diverged', record['detail'])
+        report.validate_scenario(record)
+
+    def test_two_runs_produce_identical_evidence(self):
+        runs = []
+        for _ in range(2):
+            run_dir = Path(self.tmp.name) / ('run' + str(len(runs)))
+            evidence = run_dir / 'evidence'
+            evidence.mkdir(parents=True)
+            journal_a = run_dir / 'a' / 'journal.jsonl'
+            journal_b = run_dir / 'b' / 'journal.jsonl'
+            feed = ReconvergenceFeed(journal_a=journal_a,
+                                     journal_b=journal_b)
+            record = self.run_scenario(
+                feed=feed, evidence_dir=str(evidence),
+                journal_files={'active': str(journal_a),
+                               'standby': str(journal_b)})
             runs.append((record, {p.name: p.read_text()
                                   for p in evidence.iterdir()}))
         self.assertEqual(runs[0], runs[1])
@@ -15473,6 +16081,407 @@ class PowerTripTests(unittest.TestCase):
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertIn('power-trip-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+
+class TrackingAuthPeer:
+    """One endpoint of the tracking-source pair: role, tracking
+    posture, its tick clock, and the served journal."""
+
+    def __init__(self, name, role):
+        self.name = name
+        self.role = role        # active | standby | demoting | promoting
+        self.tracking = role == 'standby'
+        self.misdirected = False
+        self.tick = 0
+        self.journal = []
+        self.next_seq = 1
+
+
+class TrackingAuthFeed:
+    """A stubbed pair for the tracking-source-auth leg: ctrl-a owns
+    the field at launch, ctrl-b tracks. Every monitor call is one
+    scan — the tracking peer's per-scan pull announces its own
+    monitor address on the owner, recorded as the demotion's
+    unverified hint; the owner's warm restart drops every recorded
+    hint and pinned adoption. `GET /checkpoint?peer=` lands the hint
+    only when it names the driver's proven source — the wildcard
+    `0.0.0.0` resolving to it, a foreign IP refused — and
+    `POST /demote` on the unconfigured owner verifies the hinted
+    endpoint: only the genuine peer address continues the line, so it
+    journals `tracking_source_adopted` naming the source and pins it
+    for the demoted peer's pulls; anything else refuses the named
+    `no_tracking_source`. The peer's demotion rides its configured
+    source — it adopts no announce and journals none. Doctor flags
+    stage each named defect the issue calls out."""
+
+    GATEWAY = '172.18.0.1'         # the driver's proven source — what
+                                   # the rig's gateway DNAT leaves on
+                                   # the pulling connection
+    PEER_ADDR = '172.19.0.3:8081'  # ctrl-b's wildcard announce
+                                   # resolved on the rig bridge
+    CRAFTED = '10.255.255.1:9'     # a fabricated endpoint — never a
+                                   # verifiable source on the rig
+
+    def __init__(self):
+        self.a = TrackingAuthPeer('a', 'active')
+        self.b = TrackingAuthPeer('b', 'standby')
+        self.announced = {'a': self.PEER_ADDR, 'b': None}
+        self.adopted = {'a': None, 'b': None}
+        self.stopped = {'a': False, 'b': False}
+        # The doctors staging each named defect.
+        self.fabricated_arms = False      # any landed hint arms the
+                                          # demote — the #684 defect
+        self.drop_adoption = False        # the verified demote
+                                          # journals no adoption entry
+        self.adopt_crafted = False        # the adoption entry names a
+                                          # fabricated endpoint
+        self.redirect_moves = False       # the post-adoption rewrite
+                                          # redirects the pulls
+        self.peer_adopts = False          # the configured-source
+                                          # demote journals an
+                                          # adoption
+        self.never_tracks = False         # the peer never reconverges
+        self.owner_never_returns = False  # the warm-restarted owner
+                                          # stays down
+        self.checkpoint_refused = False   # the checkpoint read stops
+                                          # answering
+        self.demote_refused = False       # every demote refused
+        self.unreachable = False          # neither monitor answers
+
+    def _peers(self):
+        return {'a': self.a, 'b': self.b}
+
+    def _other(self, peer):
+        return self.b if peer.name == 'a' else self.a
+
+    def _mark(self, peer, event):
+        peer.journal.append({'seq': peer.next_seq, 'tick': peer.tick,
+                             'event': event})
+        peer.next_seq += 1
+
+    def _advance(self, peer):
+        """One completed scan: a pending role transition settles."""
+        peer.tick += 1
+        if peer.role == 'demoting':
+            peer.role = 'standby'
+            peer.tracking = True
+            self._mark(peer, {'role_changed': {'from': 'demoting',
+                                               'to': 'standby'}})
+        elif peer.role == 'promoting':
+            peer.role = 'active'
+            self._mark(peer, {'role_changed': {'from': 'promoting',
+                                               'to': 'active'}})
+
+    def _pulls(self):
+        """The tracking peer's per-scan pull lands the genuine
+        announce on its source — every converged pull re-announces."""
+        if self.b.role == 'standby' and self.b.tracking \
+                and not self.stopped['b']:
+            self.announced['a'] = self.PEER_ADDR
+        if self.a.role == 'standby' and self.a.tracking \
+                and not self.stopped['a']:
+            self.announced['b'] = '172.19.0.2:8080'
+
+    def _announce(self, peer, hint):
+        """The acceptance check: the hint must name the pulling
+        connection's own source — a wildcard resolves to it; a
+        foreign IP never lands."""
+        host, _, port = hint.rpartition(':')
+        if host == '0.0.0.0':
+            self.announced[peer.name] = self.GATEWAY + ':' + port
+        elif host == self.GATEWAY:
+            self.announced[peer.name] = hint
+        # The redirect defect: a rewrite after the verified adoption
+        # moves the demoted peer's pulls off the pinned source.
+        if self.redirect_moves \
+                and self.adopted[peer.name] is not None:
+            self.adopted[peer.name] = self.announced[peer.name]
+            peer.misdirected = True
+
+    def _raise(self, code, body):
+        raise urllib.error.HTTPError(
+            'http://pair', code, 'refused', None,
+            io.BytesIO(json.dumps(body).encode()))
+
+    def stop_controller(self, name):
+        self.stopped[{'active': 'a', 'standby': 'b'}[name]] = True
+
+    def start_controller(self, name):
+        self.stopped[{'active': 'a', 'standby': 'b'}[name]] = False
+
+    def restart_controller(self, name):
+        """The warm restart: every recorded announce hint and pinned
+        adoption drops with the process — the truly unsourced
+        instance the leg needs."""
+        key = {'active': 'a', 'standby': 'b'}[name]
+        self.announced[key] = None
+        self.adopted[key] = None
+        if self.owner_never_returns and key == 'a':
+            self.stopped['a'] = True
+
+    def http_json(self, method, url, body=None, timeout=10):
+        host = url.split('://', 1)[1].split(':')[0]
+        peer = self._peers()[host.split('-', 1)[1]]
+        if self.unreachable or self.stopped[peer.name]:
+            raise urllib.error.URLError('unreachable')
+        path = '/' + url.split('/', 3)[3]
+        route, _, query = path.partition('?')
+        self._pulls()
+        self._advance(peer)
+        if (method, route) == ('GET', '/checkpoint'):
+            if self.checkpoint_refused:
+                self._raise(500, 'unavailable')
+            hint = query.split('=', 1)[1] if '=' in query else None
+            if hint:
+                self._announce(peer, hint)
+            return 200, {'tick': peer.tick,
+                         'model_fingerprint': 'fp',
+                         'generation': 7}
+        if (method, route) == ('GET', '/role'):
+            report = {'role': peer.role, 'tick': peer.tick}
+            if peer.role == 'standby':
+                sync = {'tracking': {'aligned': peer.tick}}
+                if peer.misdirected:
+                    sync = {'degraded': {'detail': 'fetch failed'}}
+                elif not peer.tracking or self.never_tracks:
+                    sync = {'unsynchronized': {}}
+                report['sync'] = sync
+            return 200, report
+        if (method, route) == ('GET', '/journal'):
+            since = int(query.split('=', 1)[1]) if '=' in query else 0
+            return 200, [dict(entry) for entry in peer.journal
+                         if entry['seq'] > since]
+        if (method, route) == ('POST', '/demote'):
+            if peer.role != 'active' or self.demote_refused:
+                self._raise(409, {'not_active': {}})
+            if peer.name == 'a':
+                # The announced-only demotion: the recorded hint must
+                # verify — only the genuine peer's checkpoint
+                # continues the line.
+                hint = self.announced['a']
+                verified = hint == self.PEER_ADDR \
+                    or self.fabricated_arms and hint is not None
+                if not verified:
+                    self._raise(409, 'no_tracking_source')
+                source = self.CRAFTED if self.adopt_crafted else hint
+                if not self.drop_adoption:
+                    self._mark(peer, {'tracking_source_adopted':
+                                      {'source': source}})
+                self.adopted['a'] = source
+                peer.role = 'demoting'
+                return 200, {'role': 'demoting', 'tick': peer.tick}
+            # The configured-source demotion adopts no announce.
+            if self.peer_adopts:
+                self._mark(peer, {'tracking_source_adopted':
+                                  {'source': self.PEER_ADDR}})
+            peer.role = 'demoting'
+            return 200, {'role': 'demoting', 'tick': peer.tick}
+        if (method, route) == ('POST', '/promote'):
+            if peer.role == 'active':
+                self._raise(409, {'already_active': {}})
+            if not peer.tracking or self.never_tracks:
+                self._raise(409, {'not_converged': {
+                    'sync': {'unsynchronized': {}}}})
+            peer.misdirected = False
+            peer.role = 'promoting'
+            return 200, {'role': 'promoting', 'tick': peer.tick}
+        raise AssertionError('unexpected request %s %s'
+                             % (method, url))
+
+
+class TrackingSourceAuthTests(unittest.TestCase):
+    """The tracking-source-auth leg against the stubbed pair: the
+    unsourced-instance window's crafted announces and refused demotes,
+    the verified adoption's journaled-by-name entry, the pinned
+    redirect, and the restore to the entry layout. A clean rig passes
+    with identical digests and evidence; each doctored defect reports
+    its named diagnostic; an unreachable rig is inconclusive."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.feed = TrackingAuthFeed()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_scenario(self, feed=None, **ctx_overrides):
+        feed = feed or self.feed
+        ctx = {'active': 'http://ctrl-a:1',
+               'standby': 'http://ctrl-b:2',
+               'evidence_dir': str(self.evidence),
+               'stop_controller': feed.stop_controller,
+               'start_controller': feed.start_controller,
+               'restart_controller': feed.restart_controller}
+        ctx.update(ctx_overrides)
+        with patch.object(scenarios, 'http_json', feed.http_json), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'AUTH_SETTLE', 2.0), \
+                patch.object(scenarios, 'AUTH_DEADLINE', 2.0), \
+                patch.object(scenarios, 'AUTH_POLL', 0.001):
+            return scenarios.scenario_tracking_source_auth(ctx)
+
+    def test_registered(self):
+        order = list(scenarios.SCENARIOS)
+        # The settled pre-switch window behind the demote-reconvergence
+        # case — ahead of the tune case's a->b switch.
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_reconvergence)
+            + 1,
+            order.index(scenarios.scenario_tracking_source_auth))
+        self.assertEqual(
+            order.index(scenarios.scenario_tracking_source_auth) + 1,
+            order.index(scenarios.scenario_parameter_tune_carryover))
+        self.assertIs(
+            verify.case_function('tracking-source-auth'),
+            scenarios.scenario_tracking_source_auth)
+
+    def test_clean_pair_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        for name in ('tracking-source-auth-pass-1.json',
+                     'tracking-source-auth-pass-2.json'):
+            self.assertTrue((self.evidence / name).is_file(), name)
+        refs = sorted(entry['ref'] for entry in record['evidence'])
+        self.assertEqual(refs, ['evidence/tracking-source-auth-pass-1.json',
+                               'evidence/tracking-source-auth-pass-2.json'])
+        passes = [json.loads((self.evidence / name).read_text())
+                  for name in ('tracking-source-auth-pass-1.json',
+                               'tracking-source-auth-pass-2.json')]
+        self.assertEqual(passes[0]['digest'], passes[1]['digest'])
+        digest = passes[0]['digest']
+        # Every crafted variant met the named refusal; the genuine
+        # announce verified, journaled by name, and pinned.
+        for leg in ('unsourced', 'foreign', 'fabricated'):
+            self.assertEqual(digest[leg], 'no_tracking_source', digest)
+        self.assertEqual(digest['forged'],
+                         'no_tracking_source/unreached', digest)
+        self.assertEqual(digest['announces'], 'answered', digest)
+        self.assertEqual(digest['adoption'], 'journaled', digest)
+        self.assertEqual(digest['redirect'], 'pinned', digest)
+        self.assertEqual(digest['peer_adoption'], 'absent', digest)
+        self.assertEqual(digest['roles'], 'restored', digest)
+        # The verified demotion journaled the announced peer by name.
+        self.assertEqual(passes[0]['adopted'],
+                         [TrackingAuthFeed.PEER_ADDR])
+        # Two passes leave the pair on its entry layout.
+        self.assertEqual(self.feed.a.role, 'active')
+        self.assertEqual(self.feed.b.role, 'standby')
+        report.validate_scenario(record)
+
+    def test_fabricated_source_armed_reports_nondeterministic(self):
+        self.feed.fabricated_arms = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'tracking-source-auth-nondeterministic'),
+            record['detail'])
+        self.assertIn('armed', record['detail'])
+        report.validate_scenario(record)
+
+    def test_dropped_adoption_entry_reports_failed(self):
+        self.feed.drop_adoption = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'tracking-source-auth-failed'), record['detail'])
+        self.assertIn('tracking_source_adopted', record['detail'])
+        report.validate_scenario(record)
+
+    def test_crafted_adoption_reports_nondeterministic(self):
+        self.feed.adopt_crafted = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'tracking-source-auth-nondeterministic'),
+            record['detail'])
+        self.assertIn('crafted', record['detail'])
+        report.validate_scenario(record)
+
+    def test_moved_redirect_reports_nondeterministic(self):
+        self.feed.redirect_moves = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'tracking-source-auth-nondeterministic'),
+            record['detail'])
+        self.assertIn('pinned adoption', record['detail'])
+        report.validate_scenario(record)
+
+    def test_peer_adoption_reports_nondeterministic(self):
+        self.feed.peer_adopts = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'tracking-source-auth-nondeterministic'),
+            record['detail'])
+        self.assertIn('configured-source', record['detail'])
+        report.validate_scenario(record)
+
+    def test_refused_demotes_report_failed(self):
+        self.feed.demote_refused = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'tracking-source-auth-failed'), record['detail'])
+        self.assertIn('no_tracking_source', record['detail'])
+        report.validate_scenario(record)
+
+    def test_missing_checkpoint_reports_failed(self):
+        self.feed.checkpoint_refused = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'tracking-source-auth-failed'), record['detail'])
+        report.validate_scenario(record)
+
+    def test_unconverged_peer_reports_failed(self):
+        self.feed.never_tracks = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'tracking-source-auth-failed'), record['detail'])
+        self.assertIn('tracking standby', record['detail'])
+        report.validate_scenario(record)
+
+    def test_owner_never_returns_reports_failed(self):
+        self.feed.owner_never_returns = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'tracking-source-auth-failed'), record['detail'])
+        self.assertIn('never reported active', record['detail'])
+        report.validate_scenario(record)
+
+    def test_unreachable_rig_reports_inconclusive(self):
+        self.feed.unreachable = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('unreachable', record['detail'])
+        report.validate_scenario(record)
+
+    def test_no_lifecycle_actions_reports_inconclusive(self):
+        record = self.run_scenario(stop_controller=None,
+                                 start_controller=None,
+                                 restart_controller=None)
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('lifecycle', record['detail'])
+        report.validate_scenario(record)
+
+    def test_diverging_digests_report_nondeterministic(self):
+        passes = iter([({'unsourced': 'no_tracking_source'}, {},
+                        {'pass': 1}),
+                       ({'unsourced': 'armed'}, {}, {'pass': 2})])
+        with patch.object(scenarios, '_tracking_source_auth_pass',
+                          lambda *a: next(passes)):
+            record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'tracking-source-auth-nondeterministic'),
+            record['detail'])
+        self.assertIn('digests diverged', record['detail'])
         report.validate_scenario(record)
 
 

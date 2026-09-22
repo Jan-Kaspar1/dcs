@@ -185,9 +185,15 @@ only. Per point kind:
 - a writable *field* `in` point's command write is forwarded to the
   driver at the scan boundary and the same scan's input phase reads it
   back — documented operator substitution of the input image, holding
-  until the field side asserts a different value;
+  until the field side asserts a different value; while the point is
+  forced the write still reaches the driver, which holds it for the
+  release to observe;
 - a writable *internal* `in` point takes the write in the image and
-  holds it until the next command — the common setpoint target.
+  holds it until the next command — the common setpoint target; while
+  the point is forced the write refuses with
+  `CommandError::PointForced`, because the image the force owns is the
+  point's only store — a staged value could never land. Release the
+  force, then write.
 
 A channel-bound `writable` point is part of the operator surface worth
 reviewing, so lint flags it (`writable_field_point`); writable internal
@@ -205,34 +211,48 @@ availability: every bound `In` port's adapted `write_value:<port>`,
 ### `stale_after_ticks` and input freshness
 
 `stale_after_ticks` declares how fresh a field `in` point's samples must
-stay: the number of executor scan ticks a driver-stamped sample tick may
-lag before the point's data is stale (decision 45). The budget lives in
-the point map assembly produces, and the *executor's input phase*
-applies the rule — each scan, for a budgeted field `in` point, it
-compares the tick the driver returned on the sample against the scan
-tick before re-stamping:
+stay: the number of executor scan ticks the point's driver-returned
+report may go unchanged before the point's data is stale (decision 45).
+The budget lives in the point map assembly produces, and the *executor's
+input phase* applies the rule in the run's own tick domain — each scan,
+for a budgeted field `in` point, it compares the sample the driver
+returned against the report last observed on that point:
 
-- a lag within the budget leaves the driver-returned quality untouched;
-- a lag exceeding it merges `Uncertain(Stale)` by the worst-of rule, so
-  a driver-reported `Bad` or worse-named `Uncertain` is never improved,
-  while a held `Good` value degrades to `Uncertain(Stale)` until the
-  first sample inside the budget returns it to `Good`;
+- a changed report — value, quality, or stamp — is fresh evidence: the
+  observation age restarts at the current scan tick and the
+  driver-returned quality lands untouched;
+- a report unchanged for more scan ticks than the budget merges
+  `Uncertain(Stale)` by the worst-of rule, so a driver-reported `Bad`
+  or worse-named `Uncertain` is never improved, while a held `Good`
+  value degrades to `Uncertain(Stale)` until the next changed report
+  returns it to `Good`;
 - the landed image sample always carries the scan tick — the executor
-  is the only timestamp authority; the driver tick is freshness
-  evidence, never an image timestamp;
+  is the only timestamp authority; the driver-returned sample is
+  freshness evidence, never an image timestamp;
 - a failed read is not a stale sample: the documented `Bad` mapping and
   last-known-value behavior stand, and a forced point never reads the
   driver, so `Substituted` stands too.
 
-A budget of `0` requires a sample stamped at the current scan tick —
-the strictest declaration, for sources expected to refresh every scan.
-The sim bank, the remote plant, and the sim-bus register bank all stamp
-their writes with a device tick the driver protocols carry, so field
-devices integrated through them supply freshness evidence without
-protocol changes. A driver whose samples carry no usable freshness
-signal — one that stamps every read with the current tick, or a fixed
-tick — simply makes the declaration inert or always-stale; declare the
-field only where the source distinguishes fresh samples from held ones.
+Judging the report's age in scan ticks — never subtracting the driver
+stamp — is what keeps the verdict consistent across drivers whose
+stamps live in a different domain: a remote driver's `Sample::tick`
+carries the plant server's step tick, which a paused or demoted field
+owner leaves frozen while the run keeps ticking. A lag computed across
+the two domains would read a stopped-then-resumed field as stale
+forever, and a run resumed behind the driver's domain as fresh forever;
+change-tracking marks both correctly — stale while the report holds,
+the driver's own quality the scan it moves again.
+
+A budget of `0` requires a changed report every scan — the strictest
+declaration, for sources expected to refresh every scan. The sim bank,
+the remote plant, and the sim-bus register bank all stamp their writes
+with a device tick the driver protocols carry, so field devices
+integrated through them supply freshness evidence without protocol
+changes. A driver whose samples carry no usable freshness signal — one
+that returns a changed report every read, or one whose report never
+varies — simply makes the declaration inert or always-stale; declare
+the field only where the source distinguishes fresh samples from held
+ones.
 
 ### `journaled` and the durable transition record
 
@@ -395,10 +415,11 @@ one fixed-arity kind. `bool-latching-alarm` keeps `latching-alarm`'s
 `in`/`ack`/`alarm`/`unacknowledged` vocabulary exactly, with `in` a
 `Bool`: `alarm` follows the input directly — no hysteresis and no
 standing-limit parameter — and
-`unacknowledged` latches the input's false-to-true edge, clearing while
-the model-wired writable `ack` point reads `true` under the same
-level-sensitive, ack-dominates rule (a held `ack` suppresses a fresh
-latch). Both outputs carry the worst of the two inputs' qualities.
+`unacknowledged` latches the input's false-to-true edge, clearing on
+the model-wired writable `ack` point's rising edge under the same
+consumed-pulse rule — a held `ack` level acknowledges once and cannot
+pre-acknowledge a later trip. Both outputs carry the worst of the two
+inputs' qualities.
 `crates/dcs-assembly/fixtures/bool_latching_alarm.json` is the recorded
 composition — a `motor`'s `fault` output carried through a declared
 internal point pair into `in`; per-port semantics live beside
@@ -443,9 +464,12 @@ instance declares only where the model wires one, and the `Int`
 commands ride the receipted `WriteValue` path: a `true` level requests
 the state, `false` returns it manually — out-of-service has no
 automatic return. Shelving asserts `shelved` while the request stands
-inside the bound, counts the request's asserting scan as the first,
-and drops at `max_shelve_ticks` even while the request still stands —
-a re-shelve requires the request to cycle through `false`. A zero
+inside the bound, counts the request's asserting scan as the first —
+aging the request from its sample's line stamp, the admitting run's
+`apply_tick`, which a receipt-carried replay on a promoted peer
+preserves — and drops at `max_shelve_ticks` even while the request
+still stands — a re-shelve requires the request to cycle through
+`false`. A zero
 `max_shelve_ticks` declares never-shelvable; an unbound or unwritable
 `shelve` point rejects stronger still, `NotWritable` at submission.
 `suppress` binds declared wiring — designed or state-based — asserting
@@ -459,7 +483,11 @@ normally, a trip mid-OOS evaluates and latches, and an unbound
 managed input reports its flag standing-clear. The shelve-expiry
 countdown, the out-of-service state, and the suppression state all
 ride `capture_state`, so a tracking standby promoted mid-shelve
-continues the remaining bound identically.
+continues the remaining bound identically — including across a
+promotion whose final-sync checkpoint predates the write's
+application, where the carried write replays under its original
+schedule stamp rather than restarting the countdown at the replay
+scan.
 `crates/dcs-assembly/fixtures/managed_alarms.json` is the recorded
 composition — three instances covering the full surface, a
 bound-but-unwritable `shelve`, and an unbound `suppress`; per-port

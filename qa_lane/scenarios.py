@@ -40,7 +40,13 @@ controller stop/start actions ctx['stop_controller']/
 ctx['start_controller'] carry — the rig launches controllers with
 --restart no, so a stopped container holds a real down-window — and
 reads both peers' --journal-file paths for the refusal and
-non-interference audits.
+non-interference audits. The tracking-source-auth scenario drives the
+same controller lifecycle seam to open the announced-only demotion
+window — the tracking peer stopped, the field owner warm-restarted so
+no announce is recorded — probes the `GET /checkpoint?peer=` contract
+with crafted announce hints and a forged-checkpoint server bound on
+the scenario host, and audits the served journals for the adoption
+entries every verified source owes.
 
 The field-fault, backup-health, and unavailable-fallback cases
 inject and clear per-point faults on the shared simulated field
@@ -18445,6 +18451,1459 @@ def scenario_demote_settle_uniqueness(ctx):
 
 
 # --------------------------------------------------------------------
+# The demote-boundary pending-command settlement contract (WW-LCM-001's
+# continuity clause, WW-FND-004's receipted-command clause) pinned on
+# the rig the #625 defect was demonstrated on: demote() suspends the
+# peer's accepted-pending commands (suspend_pending_commands), so a
+# command admitted on the active and demoted past before its applying
+# scan settles exactly once — carried into the successor's adoption to
+# apply, or settled Rejected{superseded} with its journaled audit
+# entry. Never either loss shape the QA run reproduced: a phantom
+# command_settled{applied} journaled on the fenced quiesced image and
+# erased a tick later, or a silent receipt-log replacement dropping
+# the pending command unaudited — the same audit family as the
+# promote-boundary (#527) and restart-gap (#533) fixes, on the
+# boundary that batch missed. The leg admits one receipted write on
+# the field owner, issues the documented demote on its heels — inside
+# the admission-to-application window — then audits the admission
+# against both peers' served journals, adopted receipt logs, served
+# images, and durable --journal-file records: exactly one
+# command_settled outcome — applied through the carry with its value
+# landing, or the named superseded rejection journaled — no applied
+# settle minted by a quiesced scan, no pending command vanishing
+# without a settle entry. The named diagnostics are
+# demote-pending-failed — the contract never performed: a refused
+# switch step, an admission refused or never reaching a terminal
+# journaled outcome — and demote-pending-nondeterministic — the run
+# produced an outcome the contract declares impossible: two terminal
+# outcomes on one admission, a peer journaling the settle twice, the
+# durable record disagreeing with the served journals, diverged
+# adopted logs, a phantom application, or two passes disagreeing. Two
+# passes — two switches, so the entry role layout restores by
+# construction — produce identical digests.
+
+DEMOTE_PENDING_SETTLE = 45    # bound on each demote/promote and the
+                              # pair's reconvergence
+DEMOTE_PENDING_AUDIT = 30     # bound on the admission's terminal
+                              # journaled outcome
+DEMOTE_PENDING_POLL = 0.4     # wait cadence inside the leg
+
+
+def _durable_settled(path, admission):
+    """The command_settled receipts a `--journal-file` carries for the
+    pending admission — None while the file cannot be read."""
+    try:
+        items = _journal_entries(path)
+    except (OSError, ValueError):
+        return None
+    return [receipt for receipt in
+            (_journal_settled(item) for item in items)
+            if _admission_hit(receipt, admission)]
+
+
+def _demote_pending_pass(ctx, number, entry_owner, point):
+    """One pending-command pass: admit a single receipted write on the
+    field-owning peer, demote on its heels, promote the converged
+    peer, then audit the admission — exactly one journaled terminal
+    outcome across the served and durable records, the same single
+    outcome in both peers' adopted logs, at most one image
+    application. Returns (digest, violations, evidence): the digest is
+    the pass's normalized verdict record, identical across clean
+    passes — direction-free, so the two passes' opposite switches
+    still agree."""
+    violations = {}
+    evidence = {'entry_owner': entry_owner, 'point': point}
+    admission = None
+
+    def note(key, diagnostic, detail):
+        violations.setdefault(key, (diagnostic, detail))
+
+    def failed(key, detail):
+        note(key, 'demote-pending-failed', detail)
+
+    def nondet(key, detail):
+        note(key, 'demote-pending-nondeterministic', detail)
+
+    deadline = time.monotonic() + DEMOTE_PENDING_SETTLE
+    owner = wait_for(lambda: _pair_active(ctx), deadline,
+                     interval=DEMOTE_PENDING_POLL)
+    if owner not in ('active', 'standby'):
+        failed('owner', 'no launched peer reports role=active — the '
+               'pending command has no field owner')
+        return {'outcomes': 'diverged', 'admissions': 0}, violations, \
+            evidence
+    peer = 'standby' if owner == 'active' else 'active'
+    evidence['owner'], evidence['peer'] = owner, peer
+    base, peer_base = ctx[owner], ctx[peer]
+    if wait_for(lambda: _tracking_standby(ctx, peer), deadline,
+                interval=DEMOTE_PENDING_POLL) is None:
+        failed('tracking', peer + ' is not a tracking standby — the '
+               'demote/promote has no converged target')
+        return {'outcomes': 'diverged', 'admissions': 0}, violations, \
+            evidence
+    snapshot = _try_snapshot(ctx, base) or {}
+    baseline = _point_value(snapshot, point)
+    if not isinstance(baseline, bool):
+        baseline = False
+    admission = {
+        'point': point, 'value': not baseline, 'baseline': baseline,
+        'command': {'write_value': {'point': point, 'kind': 'bool',
+                                    'value': {'bool': not baseline}}},
+        'actor': 'qa-lane-settle-pending-' + str(number),
+        'demoted': owner, 'promoted': peer}
+    evidence['admission'] = {
+        'actor': admission['actor'], 'point': point,
+        'value': admission['value'], 'baseline': baseline,
+        'demoted': owner, 'promoted': peer}
+    try:
+        floors = {}
+        for name in ('active', 'standby'):
+            _, journal = http_json('GET', ctx[name] + '/journal')
+            entries = _journal_list(journal)
+            floors[name] = (entries[-1].get('seq') or 0) \
+                if entries else 0
+    except Exception as exc:
+        failed('floors', 'a peer\'s journal floor never served: '
+               + str(exc)[:200])
+        return {'outcomes': 'diverged', 'admissions': 0}, violations, \
+            evidence
+    journals = ctx.get('journal_files') or {}
+    if journals.get('active') is None \
+            or journals.get('standby') is None:
+        failed('journals', 'the run context carries no journal-file '
+               'path for the pair')
+        return {'outcomes': 'diverged', 'admissions': 0}, violations, \
+            evidence
+    # The pending window: the receipted submission lands on the
+    # still-active owner, the documented demote on its heels — before
+    # the submission's applying scan.
+    try:
+        status, receipt = http_json(
+            'POST', base + '/command',
+            {'command': admission['command'],
+             'actor': admission['actor']})
+    except Exception as exc:
+        failed('submit', 'the pending submission never answered: '
+               + str(exc)[:200])
+        return {'outcomes': 'diverged', 'admissions': 0}, violations, \
+            evidence
+    evidence['submission'] = {'status': status, 'receipt': receipt}
+    if status != 200 or _outcome_key(receipt) != 'accepted':
+        failed('admission', 'the pending command was not admitted '
+               'accepted: ' + str(status) + ' '
+               + json.dumps(receipt)[:300])
+        return {'outcomes': 'diverged', 'admissions': 0}, violations, \
+            evidence
+    status, demote = _settle_call(base + '/demote')
+    evidence['demote'] = {'status': status, 'body': demote}
+    if status != 200:
+        failed('demote', 'the field owner\'s demote answered '
+               + str(status) + ': ' + json.dumps(demote)[:300])
+        return {'outcomes': 'diverged', 'admissions': 0}, violations, \
+            evidence
+    # The converged peer promotes — the documented order, mid-
+    # transition refusals retried inside the settle bound.
+    promoted, last = None, None
+    while time.monotonic() < deadline and promoted is None:
+        status, body = _settle_call(peer_base + '/promote')
+        if status == 200:
+            promoted = body
+        else:
+            last = (status, body)
+            time.sleep(DEMOTE_PENDING_POLL)
+    evidence['promote'] = {'body': promoted, 'last_refusal': last}
+    if promoted is None:
+        failed('promote', 'the converged peer\'s promote never '
+               'succeeded: ' + json.dumps(last)[:300])
+        return {'outcomes': 'diverged', 'admissions': 1}, violations, \
+            evidence
+    # The switch settles: the promoted peer reports active, the
+    # demoted one reconverges tracking behind it — the adopted line
+    # the audit reads.
+    settled = wait_for(
+        lambda: (_pair_active(ctx) == peer or None)
+        and _tracking_standby(ctx, owner),
+        deadline, interval=DEMOTE_PENDING_POLL)
+    evidence['settled'] = settled
+    if settled is None:
+        failed('settle', 'the switch never settled: the promoted '
+               'peer\'s role or the demoted peer\'s reconvergence '
+               'missed the bound')
+        return {'outcomes': 'diverged', 'admissions': 1}, violations, \
+            evidence
+    # The served audit: the admission resolves to exactly one terminal
+    # outcome — applied through the carry or the named superseded
+    # rejection — journaled once, carried identically in both peers'
+    # adopted logs, and applied to the image at most once.
+    window = wait_for(
+        lambda: (lambda w: w if w is not None
+                 and _settle_resolved(w, admission)
+                 else None)(
+            _settle_window(ctx, admission, floors)),
+        time.monotonic() + DEMOTE_PENDING_AUDIT,
+        interval=DEMOTE_PENDING_POLL)
+    evidence['audit'] = {'actor': admission['actor'], 'window': window}
+    if window is None:
+        failed('settled-' + admission['actor'],
+               'admission ' + str(admission['actor'])
+               + ' (point ' + str(admission['point'])
+               + ') never reached a terminal journaled outcome inside '
+               + str(DEMOTE_PENDING_AUDIT) + 's')
+        return {'outcomes': 'diverged', 'admissions': 1}, violations, \
+            evidence
+
+    def served_note(key, _diagnostic, detail):
+        note(key, 'demote-pending-nondeterministic', detail)
+
+    verdict = _settle_judge(window, admission, served_note,
+                            check_image=True)
+    outcome = next(iter(
+        _outcome_key(receipt)
+        for entries in window['journaled'].values()
+        for receipt in entries), None)
+    # The durable audit: both peers' --journal-file records must carry
+    # the same single outcome the served journals settled — the
+    # demoted peer once either way, the promoted peer once only when
+    # the line applied it. A phantom applied on the fenced image, or
+    # a pending command the replacement dropped unaudited, surfaces
+    # here as a second outcome, a count miss, or a served/durable
+    # disagreement no wait can heal.
+    durable = {}
+    for name in ('active', 'standby'):
+        durable[name] = _durable_settled(journals[name], admission)
+        if durable[name] is None:
+            failed('durable-' + name, 'the ' + name + ' journal file '
+                   'never served the admission: '
+                   + str(journals[name])[:200])
+            return {'outcomes': 'diverged', 'admissions': 1}, \
+                violations, evidence
+    evidence['durable'] = {
+        name: receipts for name, receipts in durable.items()}
+    durable_outcomes = {_outcome_key(receipt)
+                        for entries in durable.values()
+                        for receipt in entries}
+    if len(durable_outcomes) != 1:
+        nondet('durable-outcome-' + admission['actor'],
+               'admission ' + str(admission['actor']) + ' durable-'
+               'journaled ' + json.dumps(sorted(durable_outcomes))
+               + ' — one admission, never more than one terminal '
+               'outcome')
+        verdict = 'diverged'
+    elif next(iter(durable_outcomes)) != outcome:
+        nondet('durable-mismatch-' + admission['actor'],
+               'admission ' + str(admission['actor']) + ' durable-'
+               'journaled ' + next(iter(durable_outcomes))
+               + ' where the served journals settled ' + str(outcome))
+        verdict = 'diverged'
+    else:
+        for name in ('active', 'standby'):
+            count = len(durable[name])
+            want = (1 if (name == admission['demoted']
+                          or outcome == 'applied') else 0)
+            if count != want:
+                verdict = 'diverged'
+                nondet('durable-journal-' + admission['actor'] + '-'
+                       + name,
+                       'admission ' + str(admission['actor'])
+                       + ' durable-journaled ' + str(count)
+                       + ' command_settled records on ' + name
+                       + ' — the contract settles exactly '
+                       + str(want) + ' there')
+    evidence['digest'] = {
+        'outcomes': 'single'
+                    if verdict == 'single' and not violations
+                    else 'diverged',
+        'admissions': 1}
+    return evidence['digest'], violations, evidence
+
+
+def scenario_demote_pending_command(ctx):
+    """Admit one receipted write on the active, demote inside its
+    pending window, and prove the suspended command settles exactly
+    once — the #625 contract's rig replay: the admission either rides
+    the successor's adoption to apply, or settles the named
+    superseded rejection with its journaled audit — never a phantom
+    applied on the fenced quiesced image, never a silent unaudited
+    drop."""
+    case = Case(
+        'demote-pending-command',
+        'Pending command settles once across demote',
+        'against the deployed pair, one receipted writable-point '
+        'write admitted on the field-owning peer and demoted past '
+        'inside its pending window settles exactly once per pass — '
+        'applied through the successor\'s carry with its value '
+        'landing, or the named superseded rejection with the settle '
+        'journaled on the durable record — no quiesced scan journals '
+        'a phantom command_settled{applied}, no pending command '
+        'vanishes without a settle entry, the pair returns to its '
+        'entry role layout, and two passes produce identical digests')
+    try:
+        if ctx.get('active') is None or ctx.get('standby') is None:
+            return case.finish('inconclusive', 'the run context '
+                               'carries only one endpoint — the pair '
+                               'the pending command needs is absent')
+        for name in ('active', 'standby'):
+            try:
+                _role(ctx, ctx[name])
+            except Exception as exc:
+                return case.finish('inconclusive', name + '\'s '
+                                   'monitor is unreachable: '
+                                   + str(exc)[:200])
+        deadline = time.monotonic() + DEMOTE_PENDING_SETTLE
+        owner = wait_for(lambda: _pair_active(ctx), deadline,
+                         interval=DEMOTE_PENDING_POLL)
+        if owner is None:
+            return case.finish('failed', 'demote-pending-failed: no '
+                               'peer reports role=active')
+        peer = 'standby' if owner == 'active' else 'active'
+        if wait_for(lambda: _tracking_standby(ctx, peer), deadline,
+                    interval=DEMOTE_PENDING_POLL) is None:
+            return case.finish('inconclusive', 'the pair has no '
+                               'tracking standby — the demote/promote '
+                               'has no converged target')
+        case.observe('field owner: ' + owner + ' (' + ctx[owner]
+                     + '); demoting the pending command against '
+                     + peer)
+        _, signals = http_json('GET', ctx[owner] + '/signals')
+        ref = save_evidence(ctx['evidence_dir'],
+                            'demote-pending-signals.json', signals)
+        case.evidence('file', ref, 'SignalIndex naming the pending '
+                      'writable point')
+        points = _writable_bool_points(signals, 2)
+        if not points:
+            return case.finish('inconclusive', 'the model declares '
+                               'no writable bool in-point for the '
+                               'pending command')
+        journals = ctx.get('journal_files') or {}
+        if journals.get('active') is None \
+                or journals.get('standby') is None:
+            return case.finish('inconclusive', 'the run context '
+                               'carries no journal-file paths for the '
+                               'pair')
+        digests = []
+        try:
+            for number in (1, 2):
+                point = points[(number - 1) % len(points)]
+                digest, violations, evidence = _demote_pending_pass(
+                    ctx, number, owner, point)
+                ref = save_evidence(
+                    ctx['evidence_dir'],
+                    'demote-pending-pass-' + str(number) + '.json',
+                    evidence)
+                case.evidence('file', ref, 'pending-command pass '
+                              + str(number) + ' — the submission, '
+                              'the switch answers, the served and '
+                              'durable audit, and the normalized '
+                              'digest')
+                if violations:
+                    diagnostic = 'demote-pending-failed' \
+                        if any(name
+                               == 'demote-pending-failed'
+                               for name, _ in violations.values()) \
+                        else \
+                        'demote-pending-nondeterministic'
+                    return case.finish(
+                        'failed', diagnostic + ': ' + '; '.join(
+                            detail for _, detail in
+                            list(violations.values())[:4]))
+                digests.append(digest)
+        finally:
+            # The pair's entry layout for the cases behind this one —
+            # two passes switch twice and restore it by construction;
+            # a mid-pass exit gets the documented order run again,
+            # best-effort.
+            current = _pair_active(ctx)
+            other = 'standby' if owner == 'active' else 'active'
+            if current != owner \
+                    and _tracking_standby(ctx, owner) is not None:
+                try:
+                    if current is not None:
+                        _settle_call(ctx[current] + '/demote')
+                    _settle_call(ctx[owner] + '/promote')
+                    wait_for(
+                        lambda: (_pair_active(ctx) == owner or None)
+                        and _tracking_standby(ctx, other),
+                        time.monotonic() + DEMOTE_PENDING_SETTLE,
+                        interval=DEMOTE_PENDING_POLL)
+                    case.observe('cleanup: restored the entry role '
+                                 'layout')
+                except Exception as exc:
+                    case.observe('cleanup: role restore failed: '
+                                 + str(exc)[:200])
+        if digests[0] != digests[1]:
+            return case.finish(
+                'failed', 'demote-pending-nondeterministic: '
+                'the two passes\' digests diverged: '
+                + json.dumps(digests[0], sort_keys=True) + ' vs '
+                + json.dumps(digests[1], sort_keys=True))
+        case.observe('two pending-command passes, identical digests')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+# --------------------------------------------------------------------
+# The demoted-peer tracking-source contract under the wildcard-bind
+# deployment — WW-OPS-003's hot-swap clause, the follow-peer half the
+# #616/#618/#619/#620 fixes settle. Every monitor binds --listen
+# 0.0.0.0, so the tracking source a launched active records from the
+# standby's `?peer=` announces must resolve to the pull connection's
+# proven source — a dialable peer address — never the announced
+# wildcard bind that would dial the demoted peer's own stack. The
+# defect family recorded the wildcard verbatim: the demoted peer
+# looping back to itself, every pull re-poisoning the recorded source,
+# or stranding permanently unsynchronized so fail-back needed a
+# restart. On the settled runtime the demoted peer announces a
+# dialable source, follows its successor, reconverges to tracking,
+# holds it across the pull train, and promotes back through the
+# documented switch with launch roles restored and no journal run
+# boundary — a restart's signature — on either --journal-file. The
+# wire surface naming the recorded source is the `degraded` sync
+# detail's "fetch from <addr>: <error>", which the leg audits on every
+# served report for a wildcard, self-addressed, or foreign target.
+# Named diagnostics: demote-reconvergence-failed for the contract
+# never performing — a refused switch step or a settle missing the
+# bound — and demote-reconvergence-nondeterministic for an outcome the
+# contract declares impossible: a non-peer tracking source served,
+# tracking lost across the pull train, a run boundary landing, a
+# residual degraded marker, or two passes disagreeing.
+
+DEMOTE_RECONVERGENCE_SETTLE = 60  # bound on the whole pass: every
+                                # switch's settle and the demoted
+                                # peer's reconvergence
+DEMOTE_RECONVERGENCE_HOLD = 5     # consecutive tracking polls the
+                                # reconverged peer must hold — the
+                                # pull train a re-poisoning source
+                                # cannot survive
+DEMOTE_RECONVERGENCE_POLL = 0.4   # wait cadence inside the leg
+
+# The launched pair's monitor ports on the rig bridge
+# (runner._start_rig's --listen pair): a demoted peer's recorded
+# tracking source must name the successor's port — its own port is
+# the self-pin, an unspecified host the wildcard bind.
+RECONVERGENCE_PORTS = {'active': '8080', 'standby': '8081'}
+
+
+def _fetch_source(detail):
+    """The pull target a `degraded` detail names — the 'fetch from
+    <addr>: <error>' string a failed checkpoint pull reports — or
+    None when the detail names no source."""
+    if not isinstance(detail, str) or 'fetch from ' not in detail:
+        return None
+    source = detail.split('fetch from ', 1)[1].split(': ', 1)[0]
+    return source or None
+
+
+def _source_kind(source, demoted):
+    """Classify the tracking source a degraded detail names: 'wildcard'
+    for an unspecified bind address — the announced --listen 0.0.0.0
+    the defect family recorded verbatim — 'self' for the demoted
+    peer's own monitor port, 'peer' for the successor's, 'foreign'
+    for anything else. Only 'peer' is a dialable contract answer."""
+    if '0.0.0.0' in source or '[::]' in source:
+        return 'wildcard'
+    port = source.rsplit(':', 1)[-1]
+    if port == RECONVERGENCE_PORTS[demoted]:
+        return 'self'
+    successor = 'standby' if demoted == 'active' else 'active'
+    return 'peer' if port == RECONVERGENCE_PORTS[successor] \
+        else 'foreign'
+
+
+def _tracking_report(report):
+    """Whether a served RoleReport is a tracking standby — the
+    promotable posture a documented switch needs."""
+    return isinstance(report, dict) \
+        and report.get('role') == 'standby' \
+        and 'tracking' in (report.get('sync') or {})
+
+
+def _reconvergence_switch(ctx, demote, promote, deadline, watch):
+    """One documented demote-then-promote switch: POST /demote on the
+    field owner, POST /promote on the converged peer — mid-transition
+    refusals retried inside the bound — then the settle: the promoted
+    peer reports active and the demoted one reports standby tracking,
+    every polled report audited through watch(name, report). Returns
+    the failure detail, or None on settle."""
+    status, body = _settle_call(ctx[demote] + '/demote')
+    if status != 200:
+        return 'demote on ' + demote + ' answered ' + str(status) \
+               + ': ' + json.dumps(body)[:300]
+    promoted, last = None, None
+    while time.monotonic() < deadline and promoted is None:
+        status, body = _settle_call(ctx[promote] + '/promote')
+        if status == 200:
+            promoted = body
+        else:
+            last = (status, body)
+            time.sleep(DEMOTE_RECONVERGENCE_POLL)
+    if promoted is None:
+        return 'promote on ' + promote + ' never succeeded inside ' \
+               'the bound: ' + json.dumps(last)[:300]
+    reports, settled = {}, None
+    while time.monotonic() < deadline and settled is None:
+        for name in (demote, promote):
+            report = _try_role(ctx, ctx[name])
+            if report is not None:
+                watch(name, report)
+                reports[name] = report
+        if (reports.get(promote) or {}).get('role') == 'active' \
+                and _tracking_report(reports.get(demote)):
+            settled = reports
+        else:
+            time.sleep(DEMOTE_RECONVERGENCE_POLL)
+    if settled is None:
+        return 'the switch never settled: ' \
+               + json.dumps(reports, sort_keys=True)[:400]
+    return None
+
+
+def _demote_reconvergence_pass(ctx, number, journals):
+    """One demote/reconverge/fail-back pass on the launched pair:
+    demote ctrl-a — the launched active, whose only tracking source
+    is the monitor address the standby's checkpoint pulls announced —
+    promote the tracking peer, watch the demoted peer reconverge
+    tracking on a dialable successor and hold it across the pull
+    train, then run the same switch back and prove the launch roles
+    restore with no journal run boundary and no residual degraded
+    marker. Returns (digest, violations, evidence): the digest is the
+    pass's normalized verdict record, identical across clean passes."""
+    violations = {}
+    sources = {'active': set(), 'standby': set()}
+    evidence = {'pass': number}
+
+    def note(key, diagnostic, detail):
+        violations.setdefault(key, (diagnostic, detail))
+
+    def failed(key, detail):
+        note(key, 'demote-reconvergence-failed', detail)
+
+    def nondet(key, detail):
+        note(key, 'demote-reconvergence-nondeterministic', detail)
+
+    def bail():
+        evidence['sources'] = {name: sorted(items)
+                               for name, items in sources.items()}
+        return {'reconverged': False, 'failback': False,
+                'wildcard_sightings': 0, 'boundary_growth': 0}, \
+            violations, evidence
+
+    def watch(name, report):
+        """Audit one served RoleReport mid-leg: a wildcard inside the
+        sync state is an announced bind address recorded as a
+        tracking source, and a degraded detail's named pull target
+        must be the successor's dialable monitor address — both
+        verdict inputs, never just evidence."""
+        sync = report.get('sync') or {}
+        text = json.dumps(sync)
+        if '0.0.0.0' in text or '[::]' in text:
+            nondet('wildcard-' + name,
+                   name + ' reports a wildcard tracking source: '
+                   + text[:250] + ' — an announced --listen 0.0.0.0 '
+                   'bind is undialable')
+        source = _fetch_source(
+            (sync.get('degraded') or {}).get('detail'))
+        if source is not None:
+            sources[name].add(source)
+            kind = _source_kind(source, name)
+            if kind != 'peer':
+                nondet(kind + '-source-' + name,
+                       name + ' tracks a ' + kind + ' source '
+                       + source + ' — the recorded announce must be '
+                       'the successor\'s dialable monitor address')
+
+    deadline = time.monotonic() + DEMOTE_RECONVERGENCE_SETTLE
+    bounds = {}
+    for name in ('active', 'standby'):
+        try:
+            bounds[name] = len(_journal_file_runs(journals[name]))
+        except (OSError, ValueError) as exc:
+            failed('journal-' + name, 'the ' + name + ' journal file '
+                   'is unreadable: ' + str(exc)[:200])
+            return bail()
+    owner = wait_for(lambda: _pair_active(ctx), deadline,
+                     interval=DEMOTE_RECONVERGENCE_POLL)
+    evidence['entry_owner'] = owner
+    if owner is None:
+        failed('owner', 'no launched peer reports role=active — the '
+               'announced-source leg has no field owner')
+        return bail()
+    if owner != 'active':
+        # The announced-source leg demotes the launched active — the
+        # only peer whose tracking source is a recorded announce (the
+        # other's is its configured --standby). A pair settled the
+        # other way gets the documented restore first — itself the
+        # fail-back the contract guarantees.
+        detail = _reconvergence_switch(ctx, owner, 'active', deadline,
+                                       watch)
+        evidence['entry_restore'] = detail or 'settled'
+        if detail is not None:
+            failed('entry-restore', 'the pair cannot reach the '
+                   'launch roles the announced-source leg needs: '
+                   + detail)
+            return bail()
+    # The announced-source half: demote the launched active and
+    # promote the tracking peer — the demoted peer's post-demotion
+    # pulls resolve only the recorded announce, so its reconvergence
+    # proves the announce dialable while watch() audits every served
+    # target.
+    detail = _reconvergence_switch(ctx, 'active', 'standby', deadline,
+                                   watch)
+    evidence['forward'] = detail or 'settled'
+    if detail is not None:
+        failed('forward', 'the demote/promote forward switch: '
+               + detail)
+        return bail()
+    # The pull train: repeated polls are repeated pulls — a source
+    # re-poisoning on each pull drops the peer out of tracking; the
+    # contract holds it.
+    held = []
+    while time.monotonic() < deadline \
+            and len(held) < DEMOTE_RECONVERGENCE_HOLD:
+        report = _try_role(ctx, ctx['active'])
+        if report is not None:
+            watch('active', report)
+            held.append(report)
+        time.sleep(DEMOTE_RECONVERGENCE_POLL)
+    evidence['hold'] = held
+    if not held:
+        failed('hold', 'the demoted peer\'s monitor served no report '
+               'across the pull-train window')
+        return bail()
+    if not all(_tracking_report(report) for report in held):
+        nondet('hold', 'the reconverged peer dropped out of tracking '
+               'across repeated pulls: ' + json.dumps(
+                   [report.get('sync') for report in held])[:400])
+        return bail()
+    # Fail-back through the same documented switch: demote the
+    # successor, promote the reconverged peer — the contract's
+    # no-restart promise — restoring the launch roles.
+    detail = _reconvergence_switch(ctx, 'standby', 'active', deadline,
+                                   watch)
+    evidence['failback'] = detail or 'settled'
+    if detail is not None:
+        failed('failback', 'the fail-back switch: ' + detail)
+        return bail()
+    growth = {}
+    for name in ('active', 'standby'):
+        try:
+            growth[name] = len(_journal_file_runs(journals[name])) \
+                - bounds[name]
+        except (OSError, ValueError) as exc:
+            failed('journal-' + name, 'the ' + name + ' journal file '
+                   'is unreadable after the switch: ' + str(exc)[:200])
+            return bail()
+    evidence['boundary_growth'] = growth
+    if any(growth.values()):
+        nondet('restart', 'a journal file gained a run boundary — a '
+               'peer process restarted inside the switch: '
+               + json.dumps(growth, sort_keys=True))
+    # The restored pair's markers: launch roles — ctrl-a active,
+    # ctrl-b tracking — with no residual degraded sync on either
+    # served report.
+    final = {name: _try_role(ctx, ctx[name])
+             for name in ('active', 'standby')}
+    evidence['final'] = final
+    if not _tracking_report(final['standby']) \
+            or (final['active'] or {}).get('role') != 'active':
+        failed('restored', 'the launch roles did not restore: '
+               + json.dumps(final, sort_keys=True)[:400])
+        return bail()
+    for name, report in final.items():
+        if 'degraded' in (report.get('sync') or {}):
+            nondet('residual-' + name, name + ' still reports a '
+                   'degraded marker after restore: '
+                   + json.dumps(report.get('sync'))[:250])
+    evidence['sources'] = {name: sorted(items)
+                           for name, items in sources.items()}
+    evidence['digest'] = {
+        'reconverged': True, 'failback': True,
+        'wildcard_sightings': sum(
+            1 for key in violations if key.startswith('wildcard')),
+        'boundary_growth': sum(growth.values())}
+    return evidence['digest'], violations, evidence
+
+
+def scenario_demote_reconvergence(ctx):
+    """Demote the launched active, prove its announced tracking source
+    a dialable peer address through reconvergence on the successor,
+    and fail back through the documented switch — launch roles
+    restored, no restart, no residual degraded marker."""
+    case = Case(
+        'demote-reconvergence',
+        'Demoted launched-active tracks its announced successor and '
+        'fails back',
+        'on the deployed pair, POST /demote on the launched active '
+        'leaves it tracking the monitor address the standby\'s '
+        'checkpoint pulls announced — a dialable peer address, never '
+        'the announced 0.0.0.0 bind — reconverging to tracking on the '
+        'promoted successor and holding it across repeated pulls; the '
+        'documented switch then promotes it back with no process '
+        'restart and no residual degraded marker, the launch roles '
+        'restored for the cases behind, and two passes produce '
+        'identical digests')
+    try:
+        if ctx.get('active') is None or ctx.get('standby') is None:
+            return case.finish('inconclusive', 'the run context '
+                               'carries only one endpoint — the pair '
+                               'the announced-source leg needs is '
+                               'absent')
+        for name in ('active', 'standby'):
+            try:
+                _role(ctx, ctx[name])
+            except Exception as exc:
+                return case.finish('inconclusive', name + '\'s '
+                                   'monitor is unreachable: '
+                                   + str(exc)[:200])
+        journals = ctx.get('journal_files') or {}
+        if journals.get('active') is None \
+                or journals.get('standby') is None:
+            return case.finish('inconclusive', 'the run context '
+                               'carries no journal-file paths for the '
+                               'pair')
+        digests = []
+        try:
+            for number in (1, 2):
+                digest, violations, evidence = \
+                    _demote_reconvergence_pass(ctx, number, journals)
+                ref = save_evidence(
+                    ctx['evidence_dir'],
+                    'demote-reconvergence-pass-' + str(number)
+                    + '.json', evidence)
+                case.evidence('file', ref, 'demote/reconverge/'
+                              'fail-back pass ' + str(number)
+                              + ' — the switch answers, the audited '
+                              'tracking sources, the boundary diff, '
+                              'and the normalized digest')
+                if violations:
+                    diagnostic = 'demote-reconvergence-failed' \
+                        if any(name == 'demote-reconvergence-failed'
+                               for name, _ in violations.values()) \
+                        else 'demote-reconvergence-nondeterministic'
+                    return case.finish(
+                        'failed', diagnostic + ': ' + '; '.join(
+                            detail for _, detail in
+                            list(violations.values())[:4]))
+                digests.append(digest)
+        finally:
+            # The pair's launch roles for the cases behind — ctrl-a
+            # owns the field; two passes switch twice and restore it
+            # by construction. A mid-pass exit gets the documented
+            # order run again, best-effort.
+            current = _pair_active(ctx)
+            if current != 'active' \
+                    and _tracking_standby(ctx, 'active') is not None:
+                try:
+                    if current is not None:
+                        _settle_call(ctx[current] + '/demote')
+                    _settle_call(ctx['active'] + '/promote')
+                    wait_for(
+                        lambda:
+                        (_pair_active(ctx) == 'active' or None)
+                        and _tracking_standby(ctx, 'standby'),
+                        time.monotonic() + DEMOTE_RECONVERGENCE_SETTLE,
+                        interval=DEMOTE_RECONVERGENCE_POLL)
+                    case.observe('cleanup: restored the launch role '
+                                 'layout')
+                except Exception as exc:
+                    case.observe('cleanup: role restore failed: '
+                                 + str(exc)[:200])
+        if digests[0] != digests[1]:
+            return case.finish(
+                'failed', 'demote-reconvergence-nondeterministic: '
+                'the two passes\' digests diverged: '
+                + json.dumps(digests[0], sort_keys=True) + ' vs '
+                + json.dumps(digests[1], sort_keys=True))
+        case.observe('two demote/reconvergence passes, identical '
+                     'digests')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+# --------------------------------------------------------------------
+# The tracking-source announcement authenticity contract on the
+# deployed pair (WW-LCM-001's takeover-integrity clause, decision 12's
+# checkpoint-pull tracking — the #684 fix this lane verifies per
+# revision): `GET /checkpoint?peer=` is a tracking peer announcing its
+# own monitor address so a demoted field owner knows where to follow.
+# The settled contract the leg drives: the serving monitor records an
+# announce only when it names the pulling connection's own source —
+# a wildcard-bound puller's `0.0.0.0` resolves to that proven source —
+# and a recorded hint stays unverified until a demotion proves it:
+# `POST /demote` toward an announced-only source pulls one checkpoint
+# from the hint first, refuses the named `no_tracking_source` unless
+# it continues this run's line, and on verification pins the adopted
+# source as the demoted peer's tracking target and journals it by
+# name — `tracking_source_adopted` — so an accepted source is never
+# silent. The leg opens the window the defect was demonstrated in:
+# with the tracking peer's container held down the field owner
+# warm-restarts into a truly unsourced instance — no configured peer,
+# no recorded announce — where each crafted variant must meet the
+# named refusal: the bare guard first, then a foreign-source announce
+# that can never land, a fabricated same-source hint whose dead
+# endpoint cannot verify, and a live forged-checkpoint endpoint the
+# demotion must never adopt. The peer's return re-lands the genuine
+# announce on every pull, so the legitimate demotion verifies it,
+# journals the adoption naming it, and pins it — and a post-adoption
+# rewrite cannot redirect the pinned pulls. The switch then restores
+# the entry role layout for the cases behind this one. Named
+# diagnostics: tracking-source-auth-failed — the contract never
+# performed: an unanswered surface, a demote that missed the named
+# refusal, the verified adoption that never journaled; and
+# tracking-source-auth-nondeterministic — the run produced a result
+# the contract declares impossible: a crafted hint arming or silently
+# redirecting the source, an adoption naming a fabricated endpoint, a
+# configured-source demotion journaling an announced adoption, or two
+# passes disagreeing.
+
+AUTH_SETTLE = 45      # bound on role/tracking settles and the
+                      # controller lifecycle waits the window needs
+AUTH_POLL = 0.4       # wait cadence inside the leg
+AUTH_DEADLINE = 20    # bound on a crafted read, a demote answer, or
+                      # the adoption entry landing in the served
+                      # journal
+AUTH_WATCH = 4        # polls proving the pinned adoption ignores the
+                      # redirect announce — one per witnessed pull
+AUTH_FOREIGN = '10.255.255.1'
+                      # the crafted announce's foreign source IP —
+                      # never the pulling connection's own address, so
+                      # the acceptance check must refuse it
+
+
+def _closed_port():
+    """A TCP port nothing on the scenario host answers — an ephemeral
+    bind released before the crafted hint names it."""
+    stream = socket.socket()
+    try:
+        stream.bind(('0.0.0.0', 0))
+        return stream.getsockname()[1]
+    finally:
+        stream.close()
+
+
+def _checkpoint_announce(ctx, base, hint):
+    """One crafted `GET /checkpoint?peer=<hint>` against `base`. The
+    read itself is unconditional — a refused announce is ignored, so
+    the endpoint still answers the serving peer's own checkpoint.
+    Returns the served body."""
+    _, checkpoint = http_json('GET', base + '/checkpoint?peer=' + hint,
+                              timeout=AUTH_DEADLINE)
+    return checkpoint
+
+
+def _forged_checkpoint_server(document):
+    """A live forged-checkpoint endpoint bound on the scenario host:
+    every connection is drained and answered with `document` — this
+    run's own checkpoint with the tick jumped past the demotion's skew
+    bound — until closed. Returns (port, hits, close): `hits` records
+    each answered pull — the enforced rig's egress policy drops every
+    container-originated connection toward the host, so on the lane
+    the hint is unreachable and the demotion's refusal is the same
+    either way; the served count stays in evidence."""
+    body = json.dumps(document).encode()
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(('0.0.0.0', 0))
+    listener.listen(8)
+    hits = []
+    closing = threading.Event()
+
+    def serve():
+        listener.settimeout(0.2)
+        while not closing.is_set():
+            try:
+                conn, addr = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            try:
+                conn.settimeout(2)
+                conn.recv(65536)
+                hits.append(addr[0] + ':' + str(addr[1]))
+                conn.sendall(
+                    b'HTTP/1.1 200 OK\r\nContent-Type: application/json'
+                    b'\r\nContent-Length: ' + str(len(body)).encode()
+                    + b'\r\n\r\n' + body)
+            except OSError:
+                pass
+            finally:
+                conn.close()
+
+    worker = threading.Thread(target=serve, daemon=True)
+    worker.start()
+
+    def close():
+        closing.set()
+        listener.close()
+        worker.join(2)
+
+    return listener.getsockname()[1], hits, close
+
+
+def _journal_adoptions(payload):
+    """Every source a served journal payload's
+    `tracking_source_adopted` entries name — the demotion's audit
+    record of the endpoint the run moved onto."""
+    return [event['tracking_source_adopted']['source']
+            for entry in _journal_list(payload)
+            for event in [entry.get('event') or {}]
+            if isinstance(event.get('tracking_source_adopted'), dict)
+            and event['tracking_source_adopted'].get('source')]
+
+
+def _refusal_named(body, name):
+    """Whether a refused control-plane call's decoded body is the
+    named `SwitchError` — a bare string for the unit variants, an
+    object keyed on the name for the carrying ones."""
+    return body == name \
+        or isinstance(body, dict) and name in body
+
+
+def _tracking_source_auth_pass(ctx, owner, peer):
+    """One tracking-source-auth pass against the pair: the
+    unsourced-instance window's crafted announces and refused demotes,
+    the converged pair's verified adoption, the redirect probe on the
+    pinned source, and the restore to the entry layout. Returns
+    (digest, violations, evidence): `digest` is the pass's normalized
+    verdict record — identical across clean passes; `violations` is
+    {key: (diagnostic, detail)} in first-seen order."""
+    base, peer_base = ctx[owner], ctx[peer]
+    # The peer container's announced monitor port — what its
+    # wildcard-bound pulls resolve to on the owner's monitor.
+    peer_port = {'standby': 8081, 'active': 8080}[peer]
+    violations = {}
+    evidence = {'owner': owner, 'peer': peer, 'demotes': [],
+                'announces': []}
+    verdicts = {}
+    state = {'peer_stopped': False, 'switched': False}
+    forged_close, forged_hits = None, []
+
+    def note(key, diagnostic, detail):
+        violations.setdefault(key, (diagnostic, detail))
+
+    def failed(key, detail):
+        note(key, 'tracking-source-auth-failed', detail)
+
+    def impossible(key, detail):
+        note(key, 'tracking-source-auth-nondeterministic', detail)
+
+    def demote(url):
+        try:
+            return _settle_call(url + '/demote')
+        except Exception as exc:
+            return None, str(exc)[:150]
+
+    def expect_refusal(leg):
+        """The contract's named answer for a hint that cannot verify —
+        409 `no_tracking_source` — with the impossible outcome
+        separated from the unperformed one. Returns the digest
+        verdict. Once a variant has armed the demotion the owner no
+        longer holds the field — later probes would only echo
+        `not_active` — so the leg skips them."""
+        if any(key.startswith('armed-') for key in violations):
+            evidence['demotes'].append({'leg': leg, 'status': None,
+                                        'body': 'skipped'})
+            return 'skipped'
+        status, body = demote(base)
+        evidence['demotes'].append({'leg': leg, 'status': status,
+                                    'body': body})
+        if status == 200:
+            impossible('armed-' + leg, 'the ' + leg + ' variant armed '
+                       'the demotion — an unproven tracking source '
+                       'moved the run')
+            return 'armed'
+        if status != 409 or not _refusal_named(body,
+                                               'no_tracking_source'):
+            failed('refusal-' + leg, 'the ' + leg + ' demote answered '
+                   + str(status) + ' ' + json.dumps(body)[:200]
+                   + ' — not the named no_tracking_source')
+            return 'other'
+        return 'no_tracking_source'
+
+    def craft(leg, hint):
+        """Drive one announce variant; the read must still answer the
+        owner's own checkpoint — a refused announce is ignored, never
+        an error."""
+        try:
+            served = _checkpoint_announce(ctx, base, hint)
+        except Exception as exc:
+            failed('read-' + leg, 'the crafted ' + leg
+                   + ' announce\'s checkpoint read never answered: '
+                   + str(exc)[:150])
+            return
+        matched = isinstance(served, dict) \
+            and isinstance(served.get('tick'), int) \
+            and served.get('model_fingerprint') == fingerprint
+        evidence['announces'].append(
+            {'leg': leg, 'hint': hint,
+             'tick': served.get('tick')
+             if isinstance(served, dict) else None,
+             'matched': matched})
+        if not matched:
+            impossible('answered-' + leg, 'the crafted ' + leg
+                       + ' announce was answered by a checkpoint that '
+                       'is not the serving peer\'s own: '
+                       + json.dumps(served)[:200])
+
+    def tracking(name):
+        return _tracking_standby(ctx, name)
+
+    def aligned(report):
+        return (((report or {}).get('sync') or {})
+                .get('tracking') or {}).get('aligned')
+
+    try:
+        # The audit floors: every journal assertion the leg makes
+        # reads only what landed after them.
+        floors = {}
+        for name in (owner, peer):
+            try:
+                _, journal = http_json('GET', ctx[name] + '/journal',
+                                       timeout=AUTH_DEADLINE)
+            except Exception as exc:
+                failed('floor-' + name, name + '\'s journal floor '
+                       'never served: ' + str(exc)[:200])
+                return None, violations, evidence
+            entries = _journal_list(journal)
+            floors[name] = entries[-1].get('seq') or 0 \
+                if entries else 0
+
+        # The converged pair: the tracking peer's per-scan pulls
+        # announce its own monitor address on the owner — the genuine
+        # hint the legitimate demotion later verifies.
+        if wait_for(lambda: tracking(peer),
+                    time.monotonic() + AUTH_SETTLE,
+                    interval=AUTH_POLL) is None:
+            failed('converged', peer + ' is not a tracking standby — '
+                   'the legitimate announce never lands the '
+                   'follow-peer source')
+            return None, violations, evidence
+
+        # The baseline checkpoint: the fingerprint every crafted read
+        # must echo, and the document the forged endpoint serves with
+        # its tick jumped past the demotion's skew bound.
+        try:
+            _, baseline = http_json('GET', base + '/checkpoint',
+                                    timeout=AUTH_DEADLINE)
+        except Exception as exc:
+            failed('baseline', 'the field owner\'s checkpoint never '
+                   'served: ' + str(exc)[:200])
+            return None, violations, evidence
+        fingerprint = baseline.get('model_fingerprint')
+        forged = dict(baseline)
+        forged['tick'] = (baseline.get('tick') or 0) + 100000
+        forged_port, forged_hits, forged_close = \
+            _forged_checkpoint_server(forged)
+        crafted = {'foreign': AUTH_FOREIGN + ':'
+                   + str(_closed_port()),
+                   'dead': '0.0.0.0:' + str(_closed_port()),
+                   'forged': '0.0.0.0:' + str(forged_port),
+                   'redirect': '0.0.0.0:' + str(_closed_port())}
+        evidence['crafted'] = dict(crafted)
+        evidence['forged_checkpoint'] = {
+            'tick': forged['tick'],
+            'generation': forged.get('generation')}
+
+        # ---- the unsourced-instance window ----
+        # The tracking peer held down stops the per-scan announces;
+        # the warm-restarted owner records none — no configured peer,
+        # no recorded hint: the instance the fabrication was
+        # demonstrated against.
+        try:
+            ctx['stop_controller'](peer)
+            state['peer_stopped'] = True
+            ctx['restart_controller'](owner)
+        except Exception as exc:
+            failed('window', 'the unsourced-instance induction never '
+                   'completed: ' + str(exc)[:200])
+            return None, violations, evidence
+        back = wait_for(
+            lambda: (r.get('role') == 'active' and r or None)
+            if (r := _try_role(ctx, base)) else None,
+            time.monotonic() + AUTH_SETTLE, interval=AUTH_POLL)
+        if back is None:
+            failed('owner-return', 'the restarted field owner never '
+                   'reported active — the window has no demote '
+                   'target')
+            return None, violations, evidence
+        peer_up = False
+        for _ in range(3):
+            if _try_role(ctx, peer_base) is not None:
+                peer_up = True
+            time.sleep(AUTH_POLL)
+        if peer_up:
+            failed('window-held', 'the stopped peer still answered — '
+                   'the unsourced window never opened')
+            return None, violations, evidence
+
+        # Leg 1 — the bare guard: nothing configured, nothing
+        # announced; the demotion must refuse by name rather than
+        # strand the peer unsynchronized.
+        verdicts['unsourced'] = expect_refusal('unsourced')
+        # Leg 2 — the foreign-source announce: an address the pulling
+        # connection is not — the acceptance check refuses it, the
+        # recorded hint stays empty, the demotion still refuses.
+        craft('foreign', crafted['foreign'])
+        verdicts['foreign'] = expect_refusal('foreign')
+        # Leg 3 — the fabricated same-source hint: the wildcard names
+        # the connection's proven source with a dead port — it lands,
+        # but the demotion's verify pull finds nothing that continues
+        # the line.
+        craft('fabricated', crafted['dead'])
+        verdicts['fabricated'] = expect_refusal('fabricated')
+        # Leg 4 — the forged-checkpoint endpoint: a live server
+        # answering this line's checkpoint at a jumped tick — refused
+        # by name whatever of it the egress policy leaves reachable.
+        craft('forged', crafted['forged'])
+        verdicts['forged'] = expect_refusal('forged')
+        verdicts['forged'] += '/served' if forged_hits \
+            else '/unreached'
+        evidence['forged_hits'] = list(forged_hits)
+
+        # The refused legs must leave the journal silent — no
+        # adoption, no role change — and the owner still owns.
+        try:
+            _, journal = http_json('GET', base + '/journal?since='
+                                   + str(floors[owner]),
+                                   timeout=AUTH_DEADLINE)
+        except Exception as exc:
+            journal = None
+            failed('journal-window', 'the owner\'s journal never '
+                   'served after the refused legs: '
+                   + str(exc)[:150])
+        if journal is not None:
+            moved = [entry for entry in _journal_list(journal)
+                     if 'tracking_source_adopted'
+                     in (entry.get('event') or {})
+                     or 'role_changed' in (entry.get('event') or {})]
+            if moved:
+                impossible('journaled-crafted', 'a refused leg '
+                           'journaled ' + json.dumps(moved[0])[:200])
+        report = _try_role(ctx, base)
+        if (report or {}).get('role') != 'active':
+            impossible('owner-moved', 'the field owner reports role '
+                       + str((report or {}).get('role'))
+                       + ' after the refused legs')
+        if violations:
+            return None, violations, evidence
+
+        # ---- the converged pair returns ----
+        try:
+            ctx['start_controller'](peer)
+        except Exception as exc:
+            failed('peer-start', 'the tracking peer\'s restart never '
+                   'completed: ' + str(exc)[:200])
+            return None, violations, evidence
+        state['peer_stopped'] = False
+        # A tracking report already proves a pull landed — and every
+        # pull announces — but an advancing alignment proves the
+        # stream the demotion verifies is the peer's live one.
+        first = wait_for(lambda: tracking(peer),
+                         time.monotonic() + AUTH_SETTLE,
+                         interval=AUTH_POLL)
+        start_aligned = aligned(first)
+        second = None
+        if start_aligned is not None:
+            second = wait_for(
+                lambda: (lambda r: r
+                         if aligned(r) is not None
+                         and aligned(r) > start_aligned
+                         else None)(tracking(peer)),
+                time.monotonic() + AUTH_SETTLE, interval=AUTH_POLL)
+        if first is None or second is None:
+            failed('peer-return', 'the returned peer never '
+                   'reconverged tracking — its pulls never re-landed '
+                   'the genuine announce')
+            return None, violations, evidence
+
+        # Leg 5 — a foreign announce against the established hint,
+        # then the legitimate demotion: the foreign claim lands
+        # nothing, so the demotion verifies the peer's announced
+        # source, journals the adoption naming it, and pins it.
+        craft('foreign-established',
+              AUTH_FOREIGN + ':' + str(_closed_port()))
+        status, body = demote(base)
+        evidence['demotes'].append({'leg': 'legitimate',
+                                    'status': status, 'body': body})
+        if status != 200:
+            if status == 409 \
+                    and _refusal_named(body, 'no_tracking_source'):
+                impossible('foreign-landed', 'the foreign announce '
+                           'moved the recorded tracking source — the '
+                           'legitimate demotion refused '
+                           'no_tracking_source')
+            else:
+                failed('demote-legitimate', 'the announced peer\'s '
+                       'demote answered ' + str(status) + ' '
+                       + json.dumps(body)[:200])
+            return None, violations, evidence
+        state['switched'] = True
+
+        # The adopted source must land a journal-visible entry naming
+        # it — the audit that keeps an accepted source never silent.
+        def adoption():
+            try:
+                _, journal = http_json('GET', base + '/journal?since='
+                                       + str(floors[owner]),
+                                       timeout=AUTH_DEADLINE)
+            except Exception:
+                return None
+            return _journal_adoptions(journal) or None
+        adopted = wait_for(adoption, time.monotonic() + AUTH_DEADLINE,
+                           interval=AUTH_POLL)
+        evidence['adopted'] = adopted
+        if not adopted:
+            failed('adoption-unjournaled', 'the verified announced '
+                   'demotion journaled no tracking_source_adopted '
+                   'entry')
+            verdicts['adoption'] = 'missing'
+        else:
+            source = adopted[-1]
+            _, _, source_port = str(source).rpartition(':')
+            crafted_ports = {hint.rsplit(':', 1)[1]
+                             for hint in crafted.values()}
+            if str(source).startswith(AUTH_FOREIGN) \
+                    or str(source).startswith('0.0.0.0') \
+                    or source_port in crafted_ports \
+                    or source_port != str(peer_port):
+                impossible('adopted-crafted', 'the adoption entry '
+                           'names ' + str(source) + ' — a crafted '
+                           'hint, not the announced peer\'s :'
+                           + str(peer_port))
+                verdicts['adoption'] = 'crafted'
+            else:
+                verdicts['adoption'] = 'journaled'
+        # The demoted peer reconverges on the adopted source.
+        if wait_for(lambda: tracking(owner),
+                    time.monotonic() + AUTH_SETTLE,
+                    interval=AUTH_POLL) is None:
+            failed('reconverged', 'the demoted owner never '
+                   'reconverged tracking on the adopted source')
+            return None, violations, evidence
+
+        # The documented promote: the converged peer takes the field.
+        try:
+            status, body = _settle_call(peer_base + '/promote')
+        except Exception as exc:
+            status, body = None, str(exc)[:150]
+        evidence['demotes'].append({'leg': 'peer-promote',
+                                    'status': status, 'body': body})
+        if status != 200:
+            failed('promote', 'the converged peer\'s promote answered '
+                   + str(status) + ' ' + json.dumps(body)[:200])
+            return None, violations, evidence
+        promoted = wait_for(
+            lambda: (r.get('role') == 'active' and r or None)
+            if (r := _try_role(ctx, peer_base)) else None,
+            time.monotonic() + AUTH_SETTLE, interval=AUTH_POLL)
+        if promoted is None:
+            failed('promote-settle', 'the promoted peer never '
+                   'settled active')
+            return None, violations, evidence
+
+        # Leg 6 — the redirect hint against the established tracking
+        # peer: the rewrite lands like any same-source claim, but the
+        # demotion's verified adoption is pinned — the pulls keep
+        # reaching the proven successor.
+        craft('redirect', crafted['redirect'])
+        watch, redirected = [], False
+        previous = None
+        for _ in range(AUTH_WATCH):
+            report = tracking(owner)
+            current = aligned(report)
+            watch.append({'role': (report or {}).get('role'),
+                          'aligned': current})
+            if (report or {}).get('role') != 'standby' \
+                    or current is None \
+                    or previous is not None and current < previous:
+                redirected = True
+            previous = current
+            time.sleep(AUTH_POLL)
+        evidence['redirect_watch'] = watch
+        verdicts['redirect'] = 'moved' if redirected else 'pinned'
+        if redirected:
+            impossible('redirected', 'the demoted peer\'s tracking '
+                       'moved off the pinned adoption after the '
+                       'rewrite: ' + json.dumps(watch))
+        if violations:
+            return None, violations, evidence
+
+        # ---- the restore: the configured-source demotion and the
+        # documented promote put the entry layout back ----
+        status, body = demote(peer_base)
+        evidence['demotes'].append({'leg': 'restore-demote',
+                                    'status': status, 'body': body})
+        if status != 200:
+            failed('restore-demote', 'the restore demote answered '
+                   + str(status) + ' ' + json.dumps(body)[:200])
+            return None, violations, evidence
+        try:
+            status, body = _settle_call(base + '/promote')
+        except Exception as exc:
+            status, body = None, str(exc)[:150]
+        evidence['demotes'].append({'leg': 'restore-promote',
+                                    'status': status, 'body': body})
+        if status != 200:
+            failed('restore-promote', 'the restore promote answered '
+                   + str(status) + ' ' + json.dumps(body)[:200])
+            return None, violations, evidence
+
+        def settled():
+            owner_report = _try_role(ctx, base)
+            if (owner_report or {}).get('role') != 'active':
+                return None
+            return tracking(peer)
+        if wait_for(settled, time.monotonic() + AUTH_SETTLE,
+                    interval=AUTH_POLL) is None:
+            failed('restore-settle', 'the pair did not settle back '
+                   'to its entry role assignment')
+            return None, violations, evidence
+        state['switched'] = False
+        # The configured-source demotion adopts no announce: nothing
+        # journaled by name is the audit's other half — accepted
+        # sources journal, configured ones need none.
+        try:
+            _, journal = http_json('GET', peer_base
+                                   + '/journal?since='
+                                   + str(floors[peer]),
+                                   timeout=AUTH_DEADLINE)
+            peer_adoptions = _journal_adoptions(journal)
+        except Exception as exc:
+            peer_adoptions = []
+            verdicts['peer_adoption'] = 'unread'
+            failed('journal-peer', 'the peer\'s journal never served '
+                   'the restore audit: ' + str(exc)[:150])
+        else:
+            verdicts['peer_adoption'] = 'journaled' \
+                if peer_adoptions else 'absent'
+            if peer_adoptions:
+                impossible('peer-adopted', 'the configured-source '
+                           'demotion journaled an announced adoption: '
+                           + json.dumps(peer_adoptions))
+    finally:
+        if forged_close is not None:
+            forged_close()
+        # Whatever the legs left behind — a stopped peer or a
+        # switched pair — put it back for the passes and the cases
+        # behind this one, best-effort.
+        if state['peer_stopped']:
+            try:
+                ctx['start_controller'](peer)
+            except Exception:
+                pass
+        if state['switched']:
+            try:
+                _settle_call(peer_base + '/demote')
+                _settle_call(base + '/promote')
+            except Exception:
+                pass
+    verdicts['announces'] = 'answered' \
+        if evidence['announces'] \
+        and all(item['matched'] for item in evidence['announces']) \
+        else 'missed'
+    verdicts.setdefault('adoption', 'missing')
+    verdicts.setdefault('redirect', 'unproven')
+    verdicts.setdefault('peer_adoption', 'unread')
+    verdicts['roles'] = 'switched' if state['switched'] else 'restored'
+    evidence['digest'] = verdicts
+    return verdicts, violations, evidence
+
+
+def scenario_tracking_source_auth(ctx):
+    """Assert the tracking-source announcement authenticity contract
+    on the deployed pair (WW-LCM-001's takeover-integrity clause,
+    decision 12's checkpoint-pull tracking — the #684 fix this lane
+    verifies per revision): against a truly unsourced field owner —
+    the tracking peer's container held down, the owner warm-restarted
+    so no announce is recorded — every crafted `?peer=` variant must
+    meet the demotion's named `no_tracking_source` refusal: the bare
+    guard, a foreign-source claim that never lands, a fabricated
+    same-source hint, and a live forged-checkpoint endpoint. The
+    converged pair's legitimate announces keep tracking healthy — the
+    verified demotion adopts the peer's announced source, journals it
+    by name, pins it against a redirect rewrite, and the pair switches
+    and comes back. Two passes, identical digests — the rig's network
+    is fresh each run so the compare stays within it."""
+    case = Case('tracking-source-auth',
+                'tracking-source announcement authenticity',
+                'http')
+    try:
+        if not all(ctx.get(action)
+                   for action in ('stop_controller',
+                                  'start_controller',
+                                  'restart_controller')):
+            return case.finish(
+                'inconclusive', 'the run context carries no '
+                'controller lifecycle actions — the unsourced '
+                'window cannot open')
+        deadline = time.monotonic() + AUTH_SETTLE
+        if _try_role(ctx, ctx['active']) is None \
+                and _try_role(ctx, ctx['standby']) is None:
+            return case.finish(
+                'inconclusive', 'neither peer\'s monitor answers — '
+                'the rig is unreachable')
+        owner = wait_for(lambda: _pair_active(ctx), deadline)
+        if owner is None:
+            return case.finish('failed', 'no peer reports '
+                               'role=active')
+        if owner != 'active':
+            # The announced-only demotion exists only on ctrl-a —
+            # the unconfigured field owner. Put the canonical layout
+            # back before the leg.
+            try:
+                _settle_call(ctx['standby'] + '/demote')
+                _settle_call(ctx['active'] + '/promote')
+            except Exception:
+                pass
+            restored = wait_for(
+                lambda: (_pair_active(ctx) == 'active' or None)
+                and _tracking_standby(ctx, 'standby'),
+                time.monotonic() + AUTH_SETTLE, interval=AUTH_POLL)
+            if not restored:
+                return case.finish(
+                    'inconclusive', 'the pair is switched — ctrl-b '
+                    'owns the field — and could not be restored to '
+                    'the announced-demotion layout')
+            case.observe('restored ctrl-a as field owner before '
+                         'the leg')
+        digests = []
+        for number in (1, 2):
+            digest, violations, evidence = \
+                _tracking_source_auth_pass(ctx, 'active', 'standby')
+            ref = save_evidence(
+                ctx['evidence_dir'],
+                'tracking-source-auth-pass-' + str(number) + '.json',
+                evidence)
+            case.evidence('file', ref, 'tracking-source-auth pass '
+                          + str(number) + ' — the crafted announces, '
+                          'the demote answers, the adoption audit, '
+                          'and the normalized digest')
+            if violations:
+                diagnostic = 'tracking-source-auth-failed' \
+                    if any(name == 'tracking-source-auth-failed'
+                           for name, _ in violations.values()) \
+                    else 'tracking-source-auth-nondeterministic'
+                return case.finish(
+                    'failed', diagnostic + ': ' + '; '.join(
+                        detail for _, detail in
+                        list(violations.values())[:4]))
+            digests.append(digest)
+        if digests[0] != digests[1]:
+            return case.finish(
+                'failed', 'tracking-source-auth-nondeterministic: '
+                'the two passes\' digests diverged: '
+                + json.dumps(digests[0], sort_keys=True) + ' vs '
+                + json.dumps(digests[1], sort_keys=True))
+        case.observe('two tracking-source-auth passes, identical '
+                     'digests')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+# --------------------------------------------------------------------
 # Decision 70's declared-once alarm rationalization record on the
 # deployed pair (WW-ALM-001's master-alarm-database clause, WW-OPS-002's
 # bounded retune path). Every managed alarm instance in the rig model
@@ -18945,7 +20404,17 @@ def scenario_alarm_rationalization(ctx):
 # that window: it races receipted submissions against the documented
 # demote on whichever peer owns the field, cycles the switch twice per
 # pass, and lands the pair back on the launch roles before the tune
-# case's a->b switch. The
+# case's a->b switch. The demote-pending-command case shares that
+# window: it admits one receipted write on the field owner, demotes
+# inside the pending window, audits the single settle on the served
+# and durable records, and — two passes switching twice — lands the
+# pair back on the launch roles before the tune case's a->b switch.
+# The demote-reconvergence case shares that window: it demotes the
+# launched active, audits the announced tracking source and the
+# reconvergence it drives, fails back through the same documented
+# switch, and — two passes switching twice — lands the pair back on
+# the launch roles before the tune case's a->b switch.
+# The
 # parameter-tune case also runs ahead of the
 # failover leg: only ctrl-b tracks (its --standby source is ctrl-a),
 # so a tuned value can cross a checkpoint only from ctrl-a to ctrl-b,
@@ -19010,6 +20479,9 @@ SCENARIOS = (scenario_controller_active, scenario_standby_tracking,
              scenario_lag_staging,
              scenario_standby_loss,
              scenario_demote_settle_uniqueness,
+             scenario_demote_pending_command,
+             scenario_demote_reconvergence,
+             scenario_tracking_source_auth,
              scenario_parameter_tune_carryover, scenario_failover,
              scenario_checkpoint_negotiation,
              scenario_doomed_startup_claim,

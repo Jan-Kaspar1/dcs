@@ -33,4 +33,28 @@ Pharmaceutical and chemical batch control is a later product phase. Foundation c
 
 Every product issue cites one or more stable requirement IDs from `docs/requirements/`. A pure enabler may use `ENABLER`, but its scope must state which requirement or milestone it unlocks. If a requirement lacks enough evidence to write observable acceptance criteria, the planner creates a research issue first. Research issues update `docs/research/` and the applicable requirements file; implementation follows in a later planning pass.
 
+## Product areas and investment allocation
+
+Every open managed issue belongs to exactly one product area. The area names the
+capability receiving the investment; it is independent of the crate being edited,
+the validation venue, and the worker concurrency group. A reference-plant or rig
+acceptance leg therefore inherits the capability it proves. Use `verification`
+only when the deliverable is QA, simulation, or conformance machinery itself.
+
+| Area | Target | Investment boundary |
+| --- | ---: | --- |
+| `engineering` | 15% | Engineering model, SDK, composition, and authoring experience |
+| `control-runtime` | 15% | Deterministic execution, commands, state, and scan semantics |
+| `high-availability` | 15% | Redundancy, failover, convergence, and ownership integrity |
+| `field-connectivity` | 10% | Drivers, fieldbuses, cyclic exchange, and physical I/O |
+| `operations` | 10% | Operator UI, monitoring, history, and runtime observability |
+| `alarms-diagnostics` | 10% | Alarm lifecycle, diagnostics, attribution, and event evidence |
+| `library` | 10% | Reusable control blocks, equipment modules, and process patterns |
+| `deployment-lifecycle` | 5% | Packaging, release, upgrade, compatibility, and rollout |
+| `verification` | 5% | Test infrastructure, conformance, simulation, and QA machinery |
+| `delivery-platform` | 5% | Agent factory, CI, repository automation, and contributor flow |
+
+Priority remains authoritative. Within one priority, dispatch favors areas below
+their rolling target; targets guide portfolio balance and never manufacture work.
+
 The planner keeps the sequence above visible in `docs/plan.md`, checks current code and issues before proposing work, and favors a narrow vertical slice through the reference application over disconnected library breadth. `WW-ENG-003`, `WW-FND-003`, and `WW-FND-004` are implemented, so the sequencing authority is the pre-pilot tranche `docs/plan.md` records: its ordered milestones and its deferral list, whose recorded deferrals are not re-proposed until their named revisit conditions fire. Already-started slices and concrete reliability or hardware prerequisites may finish.

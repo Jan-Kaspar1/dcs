@@ -246,7 +246,16 @@ impl BusDriver {
         timeout: Duration,
         points: &[PointRegister],
     ) -> std::io::Result<Self> {
-        let stream = TcpStream::connect(addr)?;
+        let stream = loop {
+            match TcpStream::connect(&addr) {
+                // An interrupted connect attempt is abandoned with its
+                // socket and retried fresh — a caught signal (e.g. a
+                // spawned helper's `SIGCHLD`) is not a reachability
+                // verdict on the address.
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                other => break other?,
+            }
+        };
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
         // Requests are small and answered immediately; coalescing delays

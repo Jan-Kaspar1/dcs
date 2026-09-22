@@ -32,7 +32,12 @@
 //! `JournalEvent::SourceRestarted` — from its own tracking-state reset:
 //! a demoted peer's first pull on its uninterrupted successor regresses
 //! in tick but names the generation the demoted run's own captures
-//! stamped, which is no restart. The `driver`
+//! stamped, which is no restart. The `source_owns_field` stamp — set by
+//! the serving peer, absent on a bare executor's capture — lets a
+//! tracking peer name the mutual-standby wedge: a checkpoint applied
+//! cleanly from a run owning no field writes means the tracked line
+//! has no field owner, and the puller reports `orphaned` rather than a
+//! healthy `tracking`. The `driver`
 //! section is simulation-specific:
 //! on live hardware the standby's driver observes the actual process
 //! through its own channels rather than reconstructing captured field
@@ -213,6 +218,34 @@ pub struct Checkpoint {
     /// was, and [`receipt_base`](Self::receipt_base) resolves to 0.
     #[serde(default)]
     pub command_admission: CommandAdmissionCounts,
+    /// Whether the run serving this checkpoint owns field writes —
+    /// stamped by the serving [`Peer`](crate::Peer) at capture, not by
+    /// the executor, which has no role view. `Some(true)` marks a
+    /// field-owning source — `active` or `promoting`; `Some(false)`
+    /// marks a serving run that writes nothing — the stamp a tracking
+    /// peer reads to name the mutual-standby wedge: a cleanly applied
+    /// checkpoint whose serving run owns no field writes means the
+    /// tracked line has no field owner, and the puller reports
+    /// [`StandbySync::Orphaned`](dcs_core::StandbySync) instead of a
+    /// converged `tracking` that only looks healthy. `None` — every
+    /// checkpoint a bare executor captures, and everything a
+    /// pre-stamping build wrote — carries no ownership claim, so an
+    /// apply treats it as owner-produced exactly as it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_owns_field: Option<bool>,
+    /// The keyed line proof a serving monitor injects into this
+    /// document's wire form on a `?prove=` pull — response decoration,
+    /// never run state: [`Executor::checkpoint`](crate::Executor::checkpoint)
+    /// never sets it, [`Executor::restore`](crate::Executor::restore)
+    /// ignores it, and it is absent on every captured checkpoint and
+    /// every response to an unproven pull. A pulling peer compares it
+    /// against the proof it computes over the received document and
+    /// its request's nonce under the pair's shared key, so a checkpoint
+    /// served by an endpoint that merely replays or fabricates this
+    /// line's documents — without holding the key — cannot masquerade
+    /// as a tracked peer's production.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_proof: Option<u64>,
 }
 
 /// Mints a fresh checkpoint-stream generation — the value a run's
