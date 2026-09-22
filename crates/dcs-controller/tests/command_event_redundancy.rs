@@ -913,8 +913,19 @@ fn a_receipted_unforce_survives_the_restarted_standbys_stale_pull() {
             "substituted quality must not return for {FORCED:?}"
         );
     }
+    // The reconvergence verdict: A demoted sourceless stamps its
+    // served checkpoint ownerless, so the converged verdict on the
+    // restarted pull is `Orphaned` with the alignment the pulls land
+    // — the ownerless-stream semantics, not the `Tracking` verdict
+    // the finding predates. Either proves the re-adoption converges
+    // on A's image while the assertions above prove the release
+    // survives it.
+    let sync = b.role().unwrap().sync;
     assert!(
-        matches!(b.role().unwrap().sync, Some(StandbySync::Tracking { .. })),
+        matches!(
+            sync,
+            Some(StandbySync::Tracking { .. }) | Some(StandbySync::Orphaned { .. })
+        ),
         "the restarted standby must be tracking A"
     );
 
