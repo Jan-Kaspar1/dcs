@@ -74,12 +74,15 @@
 //! The run length is [`TOTAL_SCANS`]: level climbs on the declared
 //! inflow, the chain stages duty then lag and the pumps drain the well
 //! back through `stop`; the level alarms trip, latch, and acknowledge;
-//! while the well refills with the group stood down, a manual takeover
-//! hand-drives `p101` — the command register standing while the level
-//! measurably drains, then released; a `Bad` primary flips the
-//! failover to the backup measurement; a `Bad` backup on its own —
-//! the issue-#502 reproduction — raises the `backup-unhealthy`
-//! annunciation while the primary keeps serving; sustained `Bad` run contacts
+//! while the recovered well parks mid-band with the group stood down,
+//! a manual takeover hand-drives `p101` — the command register
+//! standing once the protection holdout passes the operator's held
+//! request, draining the level to the dry-run cutoff where the
+//! protection interlock releases it, then released; a `Bad` primary
+//! flips the failover to the backup measurement; a `Bad` backup on
+//! its own — the issue-#502 reproduction — raises the
+//! `backup-unhealthy` annunciation while the primary keeps serving;
+//! sustained `Bad` run contacts
 //! prove the motor faults and drop both pumps from the group;
 //! out-of-service blocks a hand start; power-fail drops every pump's
 //! availability; a thermal contact trips its per-pump alarm.
@@ -140,7 +143,7 @@ pub const BUS_ADDRESS_PLACEHOLDER: &str = "__BUS_ADDR__";
 pub const SCAN_PERIOD: f64 = 1.0;
 
 /// The run's documented length in scans.
-pub const TOTAL_SCANS: u64 = 115;
+pub const TOTAL_SCANS: u64 = 135;
 
 /// The station's point ids — the checked-in document's fixed blocks,
 /// named for the scenario and its tests.
@@ -296,17 +299,35 @@ pub fn field_ops() -> BTreeMap<u64, Vec<FieldOp>> {
                 value: Value::Float(0.6),
             }],
         ),
+        // The recovered well parks mid-band: the cutoff cleared, the
+        // start setpoint unreached — the group stands down while the
+        // manual-takeover leg's hand-driven pump has the well to
+        // itself.
+        (
+            41,
+            vec![Write {
+                point: points::INFLOW,
+                value: Value::Float(0.1),
+            }],
+        ),
+        (
+            57,
+            vec![Write {
+                point: points::INFLOW,
+                value: Value::Float(0.6),
+            }],
+        ),
         // The primary level transmitter goes Bad — the failover
         // switches to the backup and raises its alarm.
         (
-            38,
+            62,
             vec![Inject {
                 point: points::LEVEL_PRIMARY,
                 quality: bad,
             }],
         ),
         (
-            47,
+            71,
             vec![Clear {
                 point: points::LEVEL_PRIMARY,
             }],
@@ -316,14 +337,14 @@ pub fn field_ops() -> BTreeMap<u64, Vec<FieldOp>> {
         // and the `backup-unhealthy` carrier and alarm annunciate the
         // standby already lost.
         (
-            48,
+            72,
             vec![Inject {
                 point: points::LEVEL_BACKUP,
                 quality: bad,
             }],
         ),
         (
-            56,
+            80,
             vec![Clear {
                 point: points::LEVEL_BACKUP,
             }],
@@ -331,41 +352,41 @@ pub fn field_ops() -> BTreeMap<u64, Vec<FieldOp>> {
         // Both run contacts go Bad while their pumps run: the motors
         // prove the fault and the group drops the pumps.
         (
-            62,
+            86,
             vec![Inject {
                 point: points::run(0),
                 quality: bad,
             }],
         ),
         (
-            64,
+            88,
             vec![Inject {
                 point: points::run(1),
                 quality: bad,
             }],
         ),
         (
-            74,
+            98,
             vec![Clear {
                 point: points::run(0),
             }],
         ),
         (
-            75,
+            99,
             vec![Clear {
                 point: points::run(1),
             }],
         ),
         // Station power fails: every pump's availability drops.
         (
-            88,
+            112,
             vec![Write {
                 point: points::POWER_FAIL,
                 value: Value::Bool(true),
             }],
         ),
         (
-            96,
+            120,
             vec![Write {
                 point: points::POWER_FAIL,
                 value: Value::Bool(false),
@@ -373,14 +394,14 @@ pub fn field_ops() -> BTreeMap<u64, Vec<FieldOp>> {
         ),
         // A per-pump field contact: pump 1's thermal overload.
         (
-            98,
+            122,
             vec![Write {
                 point: points::thermal(0),
                 value: Value::Bool(true),
             }],
         ),
         (
-            104,
+            128,
             vec![Write {
                 point: points::thermal(0),
                 value: Value::Bool(false),
@@ -406,59 +427,59 @@ pub fn actions() -> Vec<OperatorAction> {
         },
     };
     vec![
-        // Manual takeover on pump 1 while the refilling well has the
-        // group stood down: `mode` selects hand, the operator's `hand`
-        // request is then the only request reaching the motor — the
-        // command register stands alone, drains the level, and its
-        // release hands the pump back to auto. The request propagates
-        // through three port-to-port gate hops, so `hand` applied at
-        // scan 29 asserts the command register at scan 32 and its
-        // release at scan 33 drops it at scan 36.
-        write(27, points::mode(0), true),
         // Acknowledge the level alarms and the startup none-available
-        // latch; the hand request rides the same tick; release the
-        // acks two scans later.
+        // latch; release the acks two scans later.
         write(29, points::LAH_ACK, true),
         write(29, points::LAL_ACK, true),
         write(29, points::NA_ACK, true),
-        write(29, points::hand(0), true),
         write(31, points::LAH_ACK, false),
         write(31, points::LAL_ACK, false),
         write(31, points::NA_ACK, false),
-        write(33, points::hand(0), false),
-        write(34, points::mode(0), false),
+        // Manual takeover on pump 1 while the parked well has the
+        // group stood down: `mode` selects hand, the operator's `hand`
+        // request passes the protection holdout once `protections-ok`
+        // has stood `min_off_ticks`, and the command register stands
+        // alone — the field's only draw — draining the level to the
+        // dry-run cutoff, where the protection interlock releases the
+        // delivered command while `mode`/`hand` still stand; the
+        // operator then releases the request and hands the pump back
+        // to auto.
+        write(44, points::mode(0), true),
+        write(46, points::hand(0), true),
+        write(60, points::hand(0), false),
+        write(61, points::mode(0), false),
         // Acknowledge and release the backup-active alarm the failover
         // raised.
-        write(44, points::BA_ACK, true),
-        write(46, points::BA_ACK, false),
+        write(68, points::BA_ACK, true),
+        write(70, points::BA_ACK, false),
         // Acknowledge and release the backup-unhealthy alarm the
         // standby leg raised — the failover stayed on the primary.
-        write(58, points::BUH_ACK, true),
-        write(60, points::BUH_ACK, false),
+        write(82, points::BUH_ACK, true),
+        write(84, points::BUH_ACK, false),
         // Acknowledge the motor-fault, all-faulted, and none-available
         // latches the run-contact failures raised.
-        write(71, points::fault_ack(0), true),
-        write(71, points::AF_ACK, true),
-        write(71, points::NA_ACK, true),
-        write(73, points::fault_ack(0), false),
-        write(73, points::AF_ACK, false),
-        write(73, points::NA_ACK, false),
+        write(95, points::fault_ack(0), true),
+        write(95, points::AF_ACK, true),
+        write(95, points::NA_ACK, true),
+        write(97, points::fault_ack(0), false),
+        write(97, points::AF_ACK, false),
+        write(97, points::NA_ACK, false),
         // Out of service: even an operator's hand request cannot start
         // pump 2 — the guard blocks it.
-        write(79, points::out_of_service(1), true),
-        write(80, points::mode(1), true),
-        write(81, points::hand(1), true),
-        write(84, points::hand(1), false),
-        write(84, points::mode(1), false),
-        write(85, points::out_of_service(1), false),
+        write(103, points::out_of_service(1), true),
+        write(104, points::mode(1), true),
+        write(105, points::hand(1), true),
+        write(108, points::hand(1), false),
+        write(108, points::mode(1), false),
+        write(109, points::out_of_service(1), false),
         // Acknowledge the power-fail and none-available latches, release.
-        write(94, points::PW_ACK, true),
-        write(94, points::NA_ACK, true),
-        write(96, points::PW_ACK, false),
-        write(96, points::NA_ACK, false),
+        write(118, points::PW_ACK, true),
+        write(118, points::NA_ACK, true),
+        write(120, points::PW_ACK, false),
+        write(120, points::NA_ACK, false),
         // Acknowledge pump 1's thermal alarm, then release.
-        write(103, points::thermal_ack(0), true),
-        write(105, points::thermal_ack(0), false),
+        write(127, points::thermal_ack(0), true),
+        write(129, points::thermal_ack(0), false),
     ]
 }
 

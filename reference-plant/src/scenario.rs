@@ -18,10 +18,18 @@
 //! `NotWritable`, the receipted ack clearing the latch, the shelvable
 //! low-level alarm's request standing inside its bound, a failed
 //! primary instrument failing the selected measurement over to the
-//! backup and back, manual takeover steering a pump independent of the
-//! group — and handing its duty designation to the standby — the
-//! out-of-service declaration suppressing a faulted pump's alarm, and
-//! the pumped-down all-stop rotating duty for the next cycle.
+//! backup and back, the pumped-down all-stop rotating duty for the
+//! next cycle — and the manual-takeover contract: the operator's `hand`
+//! demand held out while the dry-run cutoff stands, the duty
+//! designation handed to the standby and the `none-available`
+//! annunciation suppressed as designed state, the degraded power-fail
+//! contact tripping the running hand command while its causal alarm
+//! annunciates on the same quality-aware reading, the holdout
+//! delaying the restart after the protections stand clear again, the
+//! thermal and moisture contacts failing safe on bad quality and
+//! disconnection, the out-of-service declaration suppressing a
+//! faulted pump's alarm, and the restore returning the pump to the
+//! group's roster.
 
 use crate::station::{points, StationLayout};
 use serde_json::{json, Map, Value};
@@ -54,6 +62,12 @@ fn inject_bad(point: u64) -> Value {
 /// A `dcs-plant-server` protocol request clearing `point`'s fault.
 fn clear(point: u64) -> Value {
     json!({"op": "clear_fault", "point": point})
+}
+
+/// A `dcs-plant-server` protocol request disconnecting `point` — the
+/// field-side wiring loss a protection input must fail safe on.
+fn disconnect(point: u64) -> Value {
+    json!({"op": "inject_fault", "point": point, "fault": "disconnected"})
 }
 
 /// The `expect` map's `{ "<point id>": <expectation> }` shape — an
@@ -108,9 +122,14 @@ pub fn scenario(layout: &StationLayout) -> Value {
     let below_cutoff = layout.below_cutoff.0;
     let backup_active = layout.backup_active.0;
     let level_sel = layout.level_selected.0;
+    let none_available = layout.none_available.0;
+    let power_tripped = layout.power_tripped.0;
+    let any_manual = layout.any_manual.0;
     let lah = layout.high_level_alarm;
     let lal = layout.low_level_alarm;
     let backup_alarm = layout.backup_active_alarm;
+    let none_alarm = layout.none_available_alarm;
+    let power_alarm = layout.power_fail_alarm;
     let pump0 = layout.pumps[0];
     let pump1 = layout.pumps[1];
     json!({
@@ -260,6 +279,38 @@ pub fn scenario(layout: &StationLayout) -> Value {
                 (lal.alarm.0, json!({"bool": true})),
                 (lal.unacknowledged.0, json!({"bool": true})),
             ])),
+            // Manual takeover while the dry-run cutoff stands: `mode`
+            // and `hand` are accepted as operator demands, but the
+            // protection interlock's standing `below_cutoff` trip keeps
+            // the command path closed — the hand request cannot run
+            // the well dry.
+            leg(
+                "manual-held-below-cutoff",
+                vec![write(pump1.mode.0, true), write(pump1.hand.0, true)],
+                vec![json!("accepted"), json!("accepted")],
+                vec![],
+                3,
+                expect(&[
+                    (pump1.mode.0, json!({"bool": true})),
+                    (pump1.cmd.0, json!({"bool": false})),
+                    (pump1.run.0, json!({"bool": false})),
+                    (pump1.protect_tripped.0, json!({"bool": true})),
+                    (pump1.protections_ok.0, json!({"bool": false})),
+                    (below_cutoff, json!({"bool": true})),
+                ]),
+            ),
+            // The manual selection still drops the pump from the
+            // group's roster — the duty designation hands to pump 1 —
+            // and the any-manual carrier suppresses the `none-available`
+            // annunciation: the roster loss is the operator's declared
+            // intent, not an unexpected fault.
+            quiet("duty-hands-over", 3, expect(&[
+                (duty, json!({"int": 1})),
+                (pump1.avail.0, json!({"bool": false})),
+                (any_manual, json!({"bool": true})),
+                (none_alarm.suppressed.0, json!({"bool": true})),
+                (pump1.cmd.0, json!({"bool": false})),
+            ])),
             // The shelvable nuisance case: the low-level alarm's shelve
             // request is a writable point — the command is accepted and
             // `shelved` asserts inside the declared bound while the
@@ -303,34 +354,146 @@ pub fn scenario(layout: &StationLayout) -> Value {
                 1,
                 expect(&[]),
             ),
-            // Manual takeover of the duty holder: `mode` selects the
-            // operator's `hand` request over the group's — pump 2 runs
-            // on hand with no demand standing — and its manual state
-            // drops it from the availability aggregation, so the group
-            // hands the duty designation to pump 1.
+            // The protections stood clear for `min_off_ticks`: the
+            // holdout passes the hand request through and the pump runs
+            // on the operator demand — the refill having lifted the
+            // dry-run trip.
+            quiet("hand-runs-on-refill", 5, expect(&[
+                (pump1.protect_tripped.0, json!({"bool": false})),
+                (pump1.protections_ok.0, json!({"bool": true})),
+                (pump1.cmd.0, json!({"bool": true})),
+                (pump1.run.0, json!({"bool": true})),
+            ])),
+            // The degraded power-fail contact while the pump runs on
+            // hand — the finding's case: the contact's `Bad` quality
+            // trips the station power interlock and the pump's
+            // protection interlock alike, the delivered command
+            // releases, and the causal power-fail alarm annunciates on
+            // the same quality-aware reading the command path tripped
+            // on — never a clean false. The availability collapse the
+            // `none-available` rollup reports stays suppressed under
+            // the standing manual selection.
             leg(
-                "manual-takeover-hands-duty-over",
-                vec![write(pump1.mode.0, true), write(pump1.hand.0, true)],
-                vec![json!("accepted"), json!("accepted")],
+                "power-fail-quality-trips-hand",
                 vec![],
-                6,
+                vec![],
+                vec![inject_bad(points::POWER_FAIL.0)],
+                5,
                 expect(&[
-                    (pump1.mode.0, json!({"bool": true})),
-                    (pump1.cmd.0, json!({"bool": true})),
-                    (pump1.run.0, json!({"bool": true})),
-                    (pump1.avail.0, json!({"bool": false})),
-                    (duty, json!({"int": 1})),
+                    (pump1.cmd.0, json!({"bool": false})),
+                    (pump1.run.0, json!({"bool": false})),
+                    (pump1.protect_tripped.0, json!({"bool": true})),
+                    (power_tripped, json!({"bool": true})),
+                    (power_alarm.alarm.0, json!({"bool": true})),
+                    (power_alarm.unacknowledged.0, json!({"bool": true})),
+                    (none_available, json!({"bool": true})),
+                    (none_alarm.alarm.0, json!({"bool": true})),
+                    (none_alarm.suppressed.0, json!({"bool": true})),
+                    (none_alarm.unacknowledged.0, json!({"bool": false})),
                 ]),
             ),
-            // Out of service: the guard cuts the pump's command path —
-            // the hand request no longer reaches the motor — and the
-            // pump stays out of the group's roster.
+            // The receipted ack clears the power-fail latch while the
+            // contact still reports the trip — the alarm keeps
+            // reporting process truth.
+            leg(
+                "power-fail-acknowledged",
+                vec![write(power_alarm.ack.0, true)],
+                vec![json!("accepted")],
+                vec![],
+                1,
+                expect(&[
+                    (power_alarm.unacknowledged.0, json!({"bool": false})),
+                    (power_alarm.alarm.0, json!({"bool": true})),
+                ]),
+            ),
+            // The contact reads healthy again: the power trip and the
+            // pump's protection trip clear, the alarm follows the
+            // condition down, and the holdout keeps the hand leg out —
+            // no command re-asserts inside `min_off_ticks`.
+            leg(
+                "power-restored-holdout-holds",
+                vec![write(power_alarm.ack.0, false)],
+                vec![json!("accepted")],
+                vec![clear(points::POWER_FAIL.0)],
+                4,
+                expect(&[
+                    (power_tripped, json!({"bool": false})),
+                    (power_alarm.alarm.0, json!({"bool": false})),
+                    (pump1.protect_tripped.0, json!({"bool": false})),
+                    (pump1.cmd.0, json!({"bool": false})),
+                    (pump1.run.0, json!({"bool": false})),
+                ]),
+            ),
+            // The holdout elapsed: the held hand request passes
+            // through and the pump runs on the operator demand again.
+            quiet("hand-resumes-after-holdout", 5, expect(&[
+                (pump1.protections_ok.0, json!({"bool": true})),
+                (pump1.cmd.0, json!({"bool": true})),
+                (pump1.run.0, json!({"bool": true})),
+            ])),
+            // A degraded thermal contact fails safe the same way —
+            // the untrusted trip input trips the protection interlock
+            // and the delivered command releases.
+            leg(
+                "thermal-bad-quality-trips-hand",
+                vec![],
+                vec![],
+                vec![inject_bad(points::thermal(1).0)],
+                5,
+                expect(&[
+                    (pump1.cmd.0, json!({"bool": false})),
+                    (pump1.run.0, json!({"bool": false})),
+                    (pump1.protect_tripped.0, json!({"bool": true})),
+                ]),
+            ),
+            leg(
+                "thermal-cleared-protection-stands",
+                vec![],
+                vec![],
+                vec![clear(points::thermal(1).0)],
+                7,
+                expect(&[
+                    (pump1.protect_tripped.0, json!({"bool": false})),
+                    (pump1.protections_ok.0, json!({"bool": true})),
+                ]),
+            ),
+            // A disconnected moisture contact is the same fail-safe
+            // case: the lost input reads untrusted and the interlock
+            // trips.
+            leg(
+                "moisture-disconnected-trips-hand",
+                vec![],
+                vec![],
+                vec![disconnect(points::moisture(1).0)],
+                5,
+                expect(&[
+                    (pump1.cmd.0, json!({"bool": false})),
+                    (pump1.run.0, json!({"bool": false})),
+                    (pump1.protect_tripped.0, json!({"bool": true})),
+                ]),
+            ),
+            leg(
+                "moisture-reconnected-hand-resumes",
+                vec![],
+                vec![],
+                vec![clear(points::moisture(1).0)],
+                12,
+                expect(&[
+                    (pump1.protect_tripped.0, json!({"bool": false})),
+                    (pump1.cmd.0, json!({"bool": true})),
+                    (pump1.run.0, json!({"bool": true})),
+                ]),
+            ),
+            // Out of service: the interlock's permissive drops and the
+            // guard cuts the pump's command path — the hand request no
+            // longer reaches the motor — and the pump stays out of the
+            // group's roster.
             leg(
                 "out-of-service-inhibits",
                 vec![write(pump1.out_of_service.0, true)],
                 vec![json!("accepted")],
                 vec![],
-                4,
+                6,
                 expect(&[
                     (pump1.cmd.0, json!({"bool": false})),
                     (pump1.run.0, json!({"bool": false})),

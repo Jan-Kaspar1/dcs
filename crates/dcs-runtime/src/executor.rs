@@ -542,6 +542,46 @@ enum Resolved {
     },
 }
 
+/// The rollback record for one effect a command boundary staged: the
+/// pre-boundary state [`Executor::supersede_commands`] returns when the
+/// boundary's run turns out superseded. Every state a command mutates
+/// is run state the checkpoints keep carrying — the image's internal
+/// `In` samples, the force set, a component's captured state — so a
+/// `Rejected`/`Superseded` receipt is honest only while the abandoned
+/// run also unwrote the effect: without the rollback the mutation rode
+/// the demoted peer's quiesced checkpoints into the tracking successor
+/// while the journal claimed it never landed.
+#[derive(Debug)]
+enum BoundaryUndo {
+    /// An internal `In` point's image sample as the boundary found it —
+    /// staged by a `WriteValue` or by the force pair's image re-stamps.
+    Image {
+        point: PointId,
+        prior: Option<Sample>,
+    },
+    /// A point's `forces` entry as the boundary found it — `None` where
+    /// no force stood — staged by `ForcePoint`/`UnforcePoint`.
+    Force {
+        point: PointId,
+        prior: Option<Value>,
+    },
+    /// A field `In` point's last-observed sample as the boundary's
+    /// image held it, for a `WriteValue` the driver accepted: the
+    /// compensating write-back a superseded boundary attempts —
+    /// best-effort, since a field the claim arbitration fenced may
+    /// refuse it, leaving the plant's own record to speak.
+    FieldWrite {
+        point: PointId,
+        prior: Option<Sample>,
+    },
+    /// The component at this scan-order index, captured before the
+    /// boundary's first `SetParameter`/`Invoke` touched it — the
+    /// checkpoint vocabulary's own state, restored through the same
+    /// [`restore_state`](Component::restore_state) contract a tracking
+    /// apply relies on.
+    Component { index: usize, state: StateMap },
+}
+
 /// The default bound on the pending-command queue — how many accepted
 /// commands may wait for their scan boundary before
 /// [`Executor::submit_command`] refuses further admissions with
@@ -835,6 +875,16 @@ pub struct Executor<'d> {
     /// did not see the abandoned scan's fencing. [`Peer`](crate::Peer)
     /// reads it to journal the claim loss a degraded scan still carries.
     fenced_write: Option<PointId>,
+    /// The rollback records for the commands the most recent command
+    /// boundary applied — one [`BoundaryUndo`] per staged effect, in
+    /// application order. A scan product like `emitted`: cleared when
+    /// the next scan starts and by a checkpoint apply. Only
+    /// [`supersede_commands`](Self::supersede_commands) consumes it —
+    /// the fencing path replays it in reverse so the abandoned run's
+    /// state, and every checkpoint it keeps serving, agree with the
+    /// `Rejected`/`Superseded` receipts: the line never made the
+    /// change.
+    boundary_undo: Vec<BoundaryUndo>,
     /// The fingerprint of the model this run was assembled from, when
     /// the assembling layer supplied one: stamped into every checkpoint
     /// and the value a restored checkpoint's fingerprint must equal.
@@ -978,6 +1028,7 @@ impl<'d> Executor<'d> {
             io_health: IoHealth::default(),
             freshness: HashMap::new(),
             fenced_write: None,
+            boundary_undo: Vec::new(),
             model_fingerprint: None,
             generation: None,
             tick: Tick::ZERO,
@@ -1490,6 +1541,7 @@ impl<'d> Executor<'d> {
 
         self.emitted.clear();
         self.fenced_write = None;
+        self.boundary_undo.clear();
         self.apply_commands(tick);
         self.exchange_image(tick);
         self.read_inputs(tick);
@@ -1516,6 +1568,7 @@ impl<'d> Executor<'d> {
 
         self.emitted.clear();
         self.fenced_write = None;
+        self.boundary_undo.clear();
         self.exchange_image(tick);
         self.read_inputs(tick);
         self.step_components(tick);
@@ -1755,6 +1808,7 @@ impl<'d> Executor<'d> {
         self.emitted.clear();
         self.command_verdicts.clear();
         self.fenced_write = None;
+        self.boundary_undo.clear();
         self.adopt_receipts(checkpoint);
         Ok(())
     }
@@ -2456,16 +2510,35 @@ impl<'d> Executor<'d> {
                         .get(point)
                         .is_some_and(|spec| spec.internal.is_some());
                     if internal {
+                        self.boundary_undo.push(BoundaryUndo::Image {
+                            point,
+                            prior: self.image.borrow().get(&point).copied(),
+                        });
                         self.image
                             .borrow_mut()
                             .insert(point, Sample::good(value, tick));
                         CommandOutcome::Applied { tick }
                     } else {
+                        // The image still holds the last-observed field
+                        // sample at the boundary head — this scan's
+                        // input phase has not run yet — which is the
+                        // prior a supersede's write-back restores. A
+                        // forced point's image holds the substituted
+                        // value instead — the field's own value went
+                        // unobserved — so no write-back can honestly
+                        // claim a prior.
+                        let prior = if self.forces.contains_key(&point) {
+                            None
+                        } else {
+                            self.image.borrow().get(&point).copied()
+                        };
                         match self.driver.write(point, value) {
                             Err(error) => CommandOutcome::Rejected {
                                 reason: CommandError::DriverRejected { point, error },
                             },
                             Ok(()) => {
+                                self.boundary_undo
+                                    .push(BoundaryUndo::FieldWrite { point, prior });
                                 self.image
                                     .borrow_mut()
                                     .insert(point, Sample::good(value, tick));
@@ -2478,19 +2551,45 @@ impl<'d> Executor<'d> {
                     component,
                     name,
                     value,
-                }) => match self.components[component]
-                    .component
-                    .apply_parameter(&name, value)
-                {
-                    Ok(()) => CommandOutcome::Applied { tick },
-                    Err(reason) => CommandOutcome::Rejected { reason },
-                },
+                }) => {
+                    self.note_component_undo(component);
+                    match self.components[component]
+                        .component
+                        .apply_parameter(&name, value)
+                    {
+                        Ok(()) => CommandOutcome::Applied { tick },
+                        Err(reason) => CommandOutcome::Rejected { reason },
+                    }
+                }
                 Ok(Resolved::Force { point, value }) => {
+                    self.boundary_undo.push(BoundaryUndo::Force {
+                        point,
+                        prior: self.forces.get(&point).copied(),
+                    });
+                    // The force's image effect lands at this scan's
+                    // input phase — the rollback owes the pre-scan
+                    // sample to a held internal point, whose image no
+                    // later channel rewrites.
+                    if self
+                        .map
+                        .get(point)
+                        .is_some_and(|spec| spec.internal.is_some())
+                    {
+                        self.boundary_undo.push(BoundaryUndo::Image {
+                            point,
+                            prior: self.image.borrow().get(&point).copied(),
+                        });
+                    }
                     self.forces.insert(point, value);
                     CommandOutcome::Applied { tick }
                 }
                 Ok(Resolved::Unforce { point }) => {
-                    if self.forces.remove(&point).is_some()
+                    let removed = self.forces.remove(&point);
+                    self.boundary_undo.push(BoundaryUndo::Force {
+                        point,
+                        prior: removed,
+                    });
+                    if removed.is_some()
                         && self
                             .map
                             .get(point)
@@ -2504,6 +2603,8 @@ impl<'d> Executor<'d> {
                         // nothing here; this scan's input phase reads
                         // the driver again.
                         let held = self.image.borrow().get(&point).copied();
+                        self.boundary_undo
+                            .push(BoundaryUndo::Image { point, prior: held });
                         if let Some(sample) = held {
                             self.image
                                 .borrow_mut()
@@ -2516,19 +2617,22 @@ impl<'d> Executor<'d> {
                     component,
                     command,
                     arguments,
-                }) => match self.components[component]
-                    .component
-                    .invoke_command(&command, &arguments)
-                {
-                    Ok(()) => CommandOutcome::Applied { tick },
-                    Err(reason) => CommandOutcome::Rejected {
-                        reason: CommandError::CommandRefused {
-                            component: self.components[component].component.name().to_string(),
-                            command,
-                            reason,
+                }) => {
+                    self.note_component_undo(component);
+                    match self.components[component]
+                        .component
+                        .invoke_command(&command, &arguments)
+                    {
+                        Ok(()) => CommandOutcome::Applied { tick },
+                        Err(reason) => CommandOutcome::Rejected {
+                            reason: CommandError::CommandRefused {
+                                component: self.components[component].component.name().to_string(),
+                                command,
+                                reason,
+                            },
                         },
-                    },
-                },
+                    }
+                }
             };
         }
         // Settlements landed: the entries the boundary just resolved
@@ -2536,6 +2640,21 @@ impl<'d> Executor<'d> {
         // the log returns to its bound at the boundary rather than
         // waiting for a later submission to shrink it.
         self.trim_receipts();
+    }
+
+    /// Captures the component at `index` for the boundary's rollback
+    /// record — once per boundary per component, before the first
+    /// command touches it — so [`supersede_commands`](Self::supersede_commands)
+    /// can return every mutation the abandoned boundary staged.
+    fn note_component_undo(&mut self, index: usize) {
+        if self.boundary_undo.iter().any(
+            |undo| matches!(undo, BoundaryUndo::Component { index: captured, .. } if *captured == index),
+        ) {
+            return;
+        }
+        let state = self.components[index].component.capture_state();
+        self.boundary_undo
+            .push(BoundaryUndo::Component { index, state });
     }
 
     /// Reconciles the commands a superseded run must not report applied.
@@ -2551,6 +2670,20 @@ impl<'d> Executor<'d> {
     /// boundaries — applied while the run still owned the field — stand,
     /// as do the boundary's own refusals (a field-point write the fence
     /// already answered `DriverRejected`).
+    ///
+    /// The receipt rewrite is only half the reconciliation: the state
+    /// those commands mutated is run state — internal `In` image
+    /// samples, the force set, component state — and this demoted run
+    /// keeps serving it in quiesced checkpoints a tracking successor
+    /// adopts. A `Rejected`/`Superseded` receipt means the surviving
+    /// line never made the change, so the boundary's staged effects
+    /// replay back out in reverse application order — the rollback
+    /// records [`apply_commands`](Self::apply_commands) captured — and
+    /// the checkpoints this run serves from here carry the
+    /// pre-boundary state. A field-side write the driver accepted gets
+    /// a best-effort compensating write-back: the field's own claim
+    /// arbitration may refuse it — the claim is already lost — which is
+    /// the plant keeping its own record of what landed.
     pub fn supersede_commands(&mut self, tick: Tick) {
         while let Some(index) = self.pending_commands.pop_front() {
             self.receipts[index].outcome = CommandOutcome::Rejected {
@@ -2566,6 +2699,45 @@ impl<'d> Executor<'d> {
                         point: receipt.command.point(),
                     },
                 };
+            }
+        }
+        // Unstage what the superseded boundary staged — reverse
+        // application order, so a chain of writes to one point unwinds
+        // to the sample the boundary found. The records belong to this
+        // tick's boundary alone: `scan` clears the list each cycle and
+        // `apply_commands` is the only producer.
+        for undo in self.boundary_undo.drain(..).rev() {
+            match undo {
+                BoundaryUndo::Image { point, prior } => {
+                    let mut image = self.image.borrow_mut();
+                    match prior {
+                        Some(sample) => {
+                            image.insert(point, sample);
+                        }
+                        None => {
+                            image.remove(&point);
+                        }
+                    }
+                }
+                BoundaryUndo::Force { point, prior } => match prior {
+                    Some(value) => {
+                        self.forces.insert(point, value);
+                    }
+                    None => {
+                        self.forces.remove(&point);
+                    }
+                },
+                BoundaryUndo::FieldWrite { point, prior } => {
+                    if let Some(sample) = prior {
+                        let _ = self.driver.write(point, sample.value);
+                    }
+                }
+                BoundaryUndo::Component { index, state } => {
+                    // A state map the component captured from itself
+                    // restores cleanly — the same contract `apply`'s
+                    // rollback relies on.
+                    let _ = self.components[index].component.restore_state(&state);
+                }
             }
         }
         self.trim_receipts();

@@ -1710,7 +1710,14 @@ impl<'d> Peer<'d> {
     /// `Applied` settlements `Rejected` with
     /// [`CommandError::Superseded`](dcs_core::CommandError::Superseded)
     /// before the journaled `CommandSettled` would echo a phantom
-    /// application.
+    /// application. The receipt rewrite alone is not the whole
+    /// reconciliation: the effects those commands staged — internal
+    /// `In` image samples, the force set, component state — are run
+    /// state this demoted peer keeps serving in quiesced checkpoints
+    /// a tracking successor adopts, so the supersede also rolls the
+    /// boundary's mutations back to the pre-boundary state. A
+    /// `Rejected`/`Superseded` receipt means the surviving line never
+    /// made the change — the served state must agree.
     ///
     /// A scan that does not own the field runs quiesced
     /// ([`Executor::scan_quiesced`]): it still reads, steps, writes
@@ -1743,8 +1750,10 @@ impl<'d> Peer<'d> {
             // to `standby`. The fenced scan ran under the lifted gate,
             // so it does not settle the transition — the first
             // quiesced scan does. Commands the fenced boundary applied
-            // reconcile first: the image they changed is the abandoned
-            // run's, so they settle superseded rather than applied.
+            // reconcile first: they settle superseded rather than
+            // applied — and their staged mutations roll back out, so
+            // the checkpoints this demoted run keeps serving carry
+            // the pre-boundary state the receipt claims.
             self.executor.supersede_commands(tick);
             self.demote().expect("a field-owning peer demotes");
             return tick;
@@ -2607,6 +2616,12 @@ mod tests {
             field_write.outcome,
             CommandOutcome::Accepted { .. }
         ));
+        let force = peer.submit_command(Command::ForcePoint {
+            point: HELD,
+            kind: ValueKind::Float,
+            value: Value::Float(5.0),
+        });
+        assert!(matches!(force.outcome, CommandOutcome::Accepted { .. }));
 
         // The detection scan: the boundary applies the queued commands
         // onto the image, then the field write meets the fence and the
@@ -2632,6 +2647,12 @@ mod tests {
                 }
             }
         );
+        assert_eq!(
+            peer.receipts()[3].outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::Superseded { point: Some(HELD) }
+            }
+        );
         // The earlier boundary's settlement stands: it applied while
         // the peer owned the field.
         assert_eq!(
@@ -2639,11 +2660,56 @@ mod tests {
             CommandOutcome::Applied { tick: Tick(1) }
         );
 
+        // The receipts' `Rejected`/`Superseded` is the surviving line's
+        // truth too — the QA finding
+        // `superseded-receipt-internal-write-persists`: the boundary's
+        // staged mutations rolled back out with the receipt rewrite, so
+        // the held point shows the last *owned* boundary's value and
+        // the force set is empty, not the substituted pin.
+        assert_eq!(
+            peer.executor().sample(HELD),
+            Some(Sample::good(Value::Float(2.0), Tick(1))),
+            "the superseded write must not persist on the demoted image"
+        );
+        assert!(
+            peer.snapshot().forces.is_empty(),
+            "the superseded force must not persist on the demoted run"
+        );
+
+        // The finding's propagation leg: a tracking peer adopting the
+        // state this demoted run keeps serving inherits no trace of the
+        // write — the superseded mutation cannot ride the quiesced
+        // checkpoints onto the promoted line.
+        let tracking_field =
+            StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let tracking_gate = WriteGate::closed(&tracking_field);
+        let mut successor = Peer::standby(
+            Executor::new(
+                &tracking_gate,
+                loop_map().with_writable_internal(
+                    HELD,
+                    Direction::In,
+                    ValueKind::Float,
+                    Value::Float(0.0),
+                ),
+                vec![Box::new(PassThrough)],
+            )
+            .unwrap(),
+            Some(&tracking_gate),
+        );
+        successor.apply(&peer.checkpoint()).unwrap();
+        assert_eq!(
+            successor.executor().sample(HELD),
+            Some(Sample::good(Value::Float(2.0), Tick(1))),
+            "the adopted line must not carry the superseded write"
+        );
+        assert!(successor.snapshot().forces.is_empty());
+
         // The demoted peer's next quiesced boundary settles no strays —
         // the pending queue was drained by the reconciliation.
         assert_eq!(peer.scan(), Tick(3));
         assert_eq!(peer.role(), Role::Standby);
-        assert_eq!(peer.receipts().len(), 3);
+        assert_eq!(peer.receipts().len(), 4);
     }
 
     /// A read-biasing driver wrapper: adds `offset` to `Float` reads of
