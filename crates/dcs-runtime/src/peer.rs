@@ -99,6 +99,18 @@
 //! role changes — the survivable quiesced state the demote path
 //! defines, not a dead process.
 //!
+//! The startup half is narrower than the promotion half: where
+//! [`with_field_startup_claim`](Peer::with_field_startup_claim)
+//! installed the conditional grant, `activate` takes the field only
+//! while no *live* attachment holds a different owner's claim — a dead
+//! owner's standing claim still preempts, the restart-as-active
+//! recovery path — and refuses the start while a live incumbent
+//! stands. A controller restarting into a pair cannot prove its
+//! resumed state is current with that incumbent's: its stale
+//! checkpoint would silently roll back commands the incumbent
+//! receipted and applied, so the takeover is refused rather than
+//! ridden out.
+//!
 //! A cleanly applying checkpoint does not prove the tracked line has a
 //! field owner: two peers can pull each other — the demoted ex-owner
 //! tracking its successor, a restarted successor tracking back — and
@@ -231,6 +243,17 @@ pub struct Peer<'d> {
     /// names this run's token, so a released claim re-arms without ever
     /// preempting a standing owner.
     ensure: Option<Ensure<'d>>,
+    /// The claim's startup counterpart — the conditional grant a
+    /// launched active's [`activate`](Self::activate) asserts in place
+    /// of the unconditional [`Claim`]: takes the field's write-ownership
+    /// under this run's token only where no *live* incumbent holds a
+    /// different owner's, refusing the start where one does. A
+    /// restarted controller cannot prove its resumed state is current
+    /// with that incumbent's — a stale `--state-file` would silently
+    /// roll back commands the incumbent receipted and applied — while
+    /// a claim a dead owner left standing is still preempted, the
+    /// restart-as-active recovery path.
+    startup_claim: Option<StartupClaim<'d>>,
     /// Orphan detections not yet consumed for journaling — one
     /// [`OrphanReport`] per transition into [`StandbySync::Orphaned`].
     pending_orphans: Vec<OrphanReport>,
@@ -316,6 +339,26 @@ struct Ensure<'d>(Box<dyn Fn() -> Result<bool, String> + Send + Sync + 'd>);
 impl fmt::Debug for Ensure<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("field ensure")
+    }
+}
+
+/// The conditional counterpart of [`Claim`] a launched active's
+/// [`activate`](Peer::activate) runs at startup: takes the field's
+/// write-ownership under this run's token only where no *live*
+/// attachment holds a different owner's claim — `Ok(true)` — answering
+/// `Ok(false)` where a live incumbent stands and `Err` where the field
+/// could not be asked. A restarted controller cannot prove its resumed
+/// state is current with a live incumbent's — preempting it would
+/// silently roll back commands the incumbent receipted and applied —
+/// so the start refuses rather than taking the field; a claim a dead
+/// owner left standing is still preempted, the restart-as-active
+/// recovery path. A peer built without the hook claims unconditionally,
+/// the pre-hook contract.
+struct StartupClaim<'d>(Box<dyn Fn() -> Result<bool, String> + Send + Sync + 'd>);
+
+impl fmt::Debug for StartupClaim<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("field startup claim")
     }
 }
 
@@ -526,6 +569,7 @@ impl<'d> Peer<'d> {
             release: None,
             was_owner: false,
             ensure: None,
+            startup_claim: None,
             pending_orphans: Vec::new(),
             revision: false,
             pending_reinits: Vec::new(),
@@ -578,6 +622,29 @@ impl<'d> Peer<'d> {
         ensure: impl Fn() -> Result<bool, String> + Send + Sync + 'd,
     ) -> Self {
         self.ensure = Some(Ensure(Box::new(ensure)));
+        self
+    }
+
+    /// Arms the claim's startup counterpart — run once by
+    /// [`activate`](Self::activate) in place of the unconditional
+    /// [`with_field_claim`](Self::with_field_claim) hook: `claim` takes
+    /// the field's write-ownership under this run's token only where no
+    /// *live* attachment holds a different owner's claim — `Ok(true)` —
+    /// answering `Ok(false)` where a live incumbent stands. A restarted
+    /// controller cannot prove its resumed state is current with that
+    /// incumbent's — a stale checkpoint would silently roll back
+    /// commands the incumbent receipted and applied — so `Ok(false)`
+    /// refuses the start as [`SwitchError::FieldClaimFailed`] with the
+    /// gate still closed. A claim a dead owner left standing is still
+    /// preempted, the restart-as-active recovery path. A peer built
+    /// without the hook claims unconditionally at activation, the
+    /// pre-hook contract; promotions keep the unconditional claim
+    /// either way — a deliberate takeover, not a stale restart.
+    pub fn with_field_startup_claim(
+        mut self,
+        claim: impl Fn() -> Result<bool, String> + Send + Sync + 'd,
+    ) -> Self {
+        self.startup_claim = Some(StartupClaim(Box::new(claim)));
         self
     }
 
@@ -634,6 +701,7 @@ impl<'d> Peer<'d> {
             release: None,
             was_owner: false,
             ensure: None,
+            startup_claim: None,
             pending_orphans: Vec::new(),
             revision: false,
             pending_reinits: Vec::new(),
@@ -645,24 +713,50 @@ impl<'d> Peer<'d> {
     }
 
     /// Starts field ownership on a launched-active peer — the startup
-    /// half of the claim contract: takes the field-ownership claim
-    /// [`with_field_claim`](Self::with_field_claim) installed, then
-    /// lifts the gate, in the same order a promotion runs them. The
-    /// caller runs it once at startup, after the claim hook is
+    /// half of the claim contract: takes the field-ownership claim,
+    /// then lifts the gate, in the same order a promotion runs them.
+    /// The caller runs it once at startup, after the claim hook is
     /// installed and before the first scan; until it runs the gate
     /// stays closed — a launched active that cannot take the plant's
     /// single-writer claim does not run unfenced.
     ///
+    /// Where [`with_field_startup_claim`](Self::with_field_startup_claim)
+    /// installed the conditional startup grant, it runs in place of the
+    /// unconditional claim: the field's arbitration grants it while no
+    /// *live* incumbent holds a different owner's claim — a dead owner's
+    /// standing claim still preempts, the restart-as-active recovery
+    /// path — and refuses it while a live incumbent stands, so a
+    /// controller restarted onto a stale checkpoint cannot seize the
+    /// field and silently roll back commands the incumbent receipted
+    /// and applied.
+    ///
     /// Only a launched `active` activates — any other role is refused
-    /// with [`SwitchError::NotActive`] — and a failed claim refuses the
-    /// start as [`SwitchError::FieldClaimFailed`] with the gate still
-    /// closed. On a peer carrying no claim hook — a private field — the
-    /// gate simply lifts.
+    /// with [`SwitchError::NotActive`] — and a refused or failed claim
+    /// refuses the start as [`SwitchError::FieldClaimFailed`] with the
+    /// gate still closed. On a peer carrying no claim hook — a private
+    /// field — the gate simply lifts.
     pub fn activate(&mut self) -> Result<(), SwitchError> {
         if self.role != Role::Active {
             return Err(SwitchError::NotActive);
         }
-        self.lift_gate()
+        if let Some(startup) = &self.startup_claim {
+            match startup.0() {
+                Ok(true) => {
+                    self.open_gate();
+                    Ok(())
+                }
+                Ok(false) => Err(SwitchError::FieldClaimFailed {
+                    detail: "a live peer holds the field's write-ownership claim — a \
+                             controller restarting into a pair cannot prove its resumed \
+                             state is current with the incumbent's and must not preempt \
+                             it; rejoin as a standby instead"
+                        .to_string(),
+                }),
+                Err(detail) => Err(SwitchError::FieldClaimFailed { detail }),
+            }
+        } else {
+            self.lift_gate()
+        }
     }
 
     /// The currently reported role.
@@ -1813,6 +1907,13 @@ impl<'d> Peer<'d> {
         if let Some(claim) = &self.claim {
             claim.0().map_err(|detail| SwitchError::FieldClaimFailed { detail })?;
         }
+        self.open_gate();
+        Ok(())
+    }
+
+    /// The gate-lift every granted claim ends in — the startup grant's
+    /// and the promotion claim's shared tail.
+    fn open_gate(&mut self) {
         if let Some(gate) = self.gate {
             gate.open();
         }
@@ -1823,7 +1924,6 @@ impl<'d> Peer<'d> {
         // conditional re-arm probes on: only a peer that owned the
         // claim re-arms it once released.
         self.was_owner = true;
-        Ok(())
     }
 
     /// The reported-role change bookkeeping: `from` is the previously

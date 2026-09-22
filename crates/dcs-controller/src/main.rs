@@ -369,6 +369,41 @@ impl Driver {
         }
     }
 
+    /// The launched-controller counterpart of
+    /// [`claim_writer`](Self::claim_writer) — run once at startup
+    /// activation: takes the field's write-ownership under `owner` only
+    /// where no *live* attachment holds a different owner's claim —
+    /// `Ok(true)` — answering `Ok(false)` where a live incumbent
+    /// stands. A restarted controller cannot prove its resumed state is
+    /// current with that incumbent's — a stale `--state-file` would
+    /// silently roll back commands the incumbent receipted and applied —
+    /// while a claim a dead owner left standing is still preempted,
+    /// the restart-as-active recovery path. A purely local simulated
+    /// model has no shared field to claim and answers `Ok(true)`
+    /// vacuously; field kinds that cannot distinguish live holders
+    /// fall back to the unconditional claim.
+    fn claim_writer_unless_held(&self, owner: u64) -> Result<bool, String> {
+        match self {
+            Self::Remote(remote) => match remote.claim_writer_unless_held(owner) {
+                Ok(ClaimGrant::Exclusive) => Ok(true),
+                Ok(ClaimGrant::Shared) => {
+                    eprintln!(
+                        "warning: field write-ownership claim for owner token {owner} is \
+                         shared with another live attachment — expected only for a \
+                         deliberate same-owner attachment; a second controller pinned to \
+                         the same --owner-token defeats single-writer fencing"
+                    );
+                    Ok(true)
+                }
+                Err(RemoteError::Fenced) => Ok(false),
+                Err(error) => Err(format!("plant write-ownership claim failed: {error}")),
+            },
+            Self::Local(fanout) => fanout
+                .claim_field_writer_unless_held(owner)
+                .map_err(|error| format!("plant write-ownership claim failed: {error}")),
+        }
+    }
+
     /// The conditional counterpart of [`claim_writer`](Self::claim_writer)
     /// — the orphan-cycle probe a demoted ex-owner runs while the
     /// tracked line reports no field owner: re-arms the claim under
@@ -1088,7 +1123,12 @@ fn main() -> ExitCode {
     // every fallible startup step — journal replay, monitor bind,
     // peer-address resolution — has proven this process can serve; a
     // starter that fails earlier leaves no stale claim fencing the
-    // field's standing owner.
+    // field's standing owner. The activation's own claim is the
+    // conditional startup grant: it preempts a dead owner's standing
+    // claim — the restart-as-active recovery — but refuses while a
+    // *live* incumbent holds the field, so a controller restarting
+    // onto a stale checkpoint cannot seize the field and silently roll
+    // back commands the incumbent receipted and applied.
     let owner = options.owner_token.unwrap_or_else(owner_token);
     let peer = match &options.standby {
         Some(_) => Peer::standby(executor, gate.as_ref()),
@@ -1097,7 +1137,8 @@ fn main() -> ExitCode {
     let peer = peer
         .with_field_claim(|| driver.claim_writer(owner))
         .with_field_release(|| driver.release_claim())
-        .with_field_ensure(|| driver.ensure_writer(owner));
+        .with_field_ensure(|| driver.ensure_writer(owner))
+        .with_field_startup_claim(|| driver.claim_writer_unless_held(owner));
     let peer = match options.auto_promote {
         Some(budget) => peer.with_failover(budget),
         None => peer,
@@ -1175,14 +1216,16 @@ fn main() -> ExitCode {
             monitor.note_reinitialized(report.as_ref().clone());
         }
         // A launched active owns the field from startup: activation
-        // runs the same claim-then-lift sequence a promotion does —
-        // the plant's single-writer claim under this instance's token
-        // first, the gate second — deferred to here, after every
-        // fallible local startup step (the track address resolved, the
-        // journal replayed, the monitor bound), so a starter that
-        // cannot serve never lands the preemptive claim on the field's
-        // standing owner. A claim the field refuses is a named startup
-        // failure, not an unfenced run.
+        // runs the claim-then-lift sequence — the conditional startup
+        // grant under this instance's token first, the gate second —
+        // deferred to here, after every fallible local startup step
+        // (the track address resolved, the journal replayed, the
+        // monitor bound), so a starter that cannot serve never lands a
+        // claim on the field's standing owner. The grant preempts a
+        // dead owner's claim but refuses a live incumbent's, and a
+        // refused grant is a named startup failure, not an unfenced
+        // run: the incumbent's receipted state is never silently
+        // reverted by a stale restart.
         if options.standby.is_none() {
             if let Err(error) = monitor.activate() {
                 return fail(format!("{error}"));
@@ -1370,12 +1413,13 @@ fn main() -> ExitCode {
                     monitor.note_reinitialized(report.as_ref().clone());
                 }
                 // The launched active's deferred startup activation —
-                // the same claim-then-lift sequence the driven path
-                // runs: the preemptive field claim lands only now, the
-                // journal replayed, the monitor bound, and the peer
-                // address resolved, so a startup that failed earlier
-                // left no stale claim fencing the field's standing
-                // owner. A claim the field refuses is a named startup
+                // the same conditional-grant sequence the driven path
+                // runs: the claim lands only now, the journal replayed,
+                // the monitor bound, and the peer address resolved, so
+                // a startup that failed earlier left no stale claim
+                // fencing the field's standing owner. The grant
+                // preempts a dead owner's claim but refuses a live
+                // incumbent's — a refused grant is a named startup
                 // failure, not an unfenced run.
                 if let Err(error) = monitor.activate() {
                     return fail(format!("{error}"));
@@ -1402,10 +1446,12 @@ fn main() -> ExitCode {
             }
             None => {
                 // The launched active's startup activation — the same
-                // claim-then-lift sequence the monitored paths defer to
-                // their last startup step: nothing fallible stands
-                // between here and the scan loop, so the preemptive
-                // claim runs only now that startup can no longer abort.
+                // conditional-grant sequence the monitored paths defer
+                // to their last startup step: nothing fallible stands
+                // between here and the scan loop, so the claim runs
+                // only now that startup can no longer abort — and a
+                // live incumbent's claim refuses it rather than being
+                // preempted by a stale restart.
                 if let Err(error) = peer.activate() {
                     return fail(format!("{error}"));
                 }
