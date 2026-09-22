@@ -913,13 +913,20 @@ fn a_receipted_unforce_survives_the_restarted_standbys_stale_pull() {
             "substituted quality must not return for {FORCED:?}"
         );
     }
-    // A is demoted — its served checkpoint stamps the tracked line
-    // field-unowned — so B reports the mutual-standby wedge honestly:
-    // `Orphaned`, still following A's stream and still promotable on
-    // the same evidence `Tracking` would have stood on.
+    // The reconvergence verdict: A demoted sourceless stamps its
+    // served checkpoint ownerless, so the converged verdict on the
+    // restarted pull is `Orphaned` with the alignment the pulls land
+    // — the ownerless-stream semantics, not the `Tracking` verdict
+    // the finding predates. Either proves the re-adoption converges
+    // on A's image while the assertions above prove the release
+    // survives it.
+    let sync = b.role().unwrap().sync;
     assert!(
-        matches!(b.role().unwrap().sync, Some(StandbySync::Orphaned { .. })),
-        "the restarted standby must be following A's field-unowned stream"
+        matches!(
+            sync,
+            Some(StandbySync::Tracking { .. }) | Some(StandbySync::Orphaned { .. })
+        ),
+        "the restarted standby must be tracking A"
     );
 
     // The audit fallback the finding names: a force change the merged

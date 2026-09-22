@@ -104,16 +104,26 @@ ci/tune_carryover.py   the pair contract's tune-carryover leg — a
                        applied with a fresh receipt, and the pair's
                        roles restored
 ci/force_release.py    the pair contract's force-release leg — a
-                       receipted force substituted at
-                       Uncertain(Substituted) across scans on the
-                       settled pair, the receipted unforce releasing
-                       it at its apply tick with the live value
-                       resumed and the forced set cleared, the
-                       released state carried through the switch and
-                       the launch roles restored, and every
-                       transition journaled on the durable record
-                       with the standby's adopted log answering the
-                       same receipts
+                        receipted force substituted at
+                        Uncertain(Substituted) across scans on the
+                        settled pair, the receipted unforce releasing
+                        it at its apply tick with the live value
+                        resumed and the forced set cleared, the
+                        released state carried through the switch and
+                        the launch roles restored, and every
+                        transition journaled on the durable record
+                        with the standby's adopted log answering the
+                        same receipts
+ci/stale_checkpoint.py  the pair contract's stale-checkpoint leg — a
+                        receipted force carried through the switch
+                        and receipted-released on the new active,
+                        then the tracking peer restarted onto its
+                        declared state/journal files so it re-adopts:
+                        the released force must not re-stand, the
+                        live value keeps serving unforced, the
+                        adopted log preserves the unforce settlement,
+                        and no phantom force receipt journals on
+                        either peer, with the launch roles restored
 ci/burst_order.py      the pair contract's alarm-burst leg — a
                        deterministic consequential cascade driven
                        through the plant protocol on the settled pair,
@@ -701,6 +711,31 @@ answers the same settled receipts throughout. A violated contract
 fails `force-release-failed`; two passes must produce the identical
 `force-release-digest`, a divergence failing
 `force-release-nondeterministic`.
+
+The stage's stale-checkpoint leg — `ci/stale_checkpoint.py` on the
+same declared deployment — then pins the receipted-command
+contract's adoption rule on the customer's pair (WW-ENG-003,
+WW-LCM-001): with the pair tracking, a receipted `force_point` on
+the declared writable internal `In` point through the active's
+receipted path — the honest internal target per the
+force-carryover convention — settling `applied` with the
+`Uncertain(Substituted)` stamp, the documented switch carrying the
+force onto the promoted peer, and a receipted `unforce_point` on
+the new active settling `applied` with the emptied `forces` entry
+and the journaled release on both peers' adopted records. The
+tracking peer then restarts onto its declared
+`--state-file`/`--journal-file` — the field owner driven through
+the downtime, the resumed peer reconverging to `tracking` inside
+the declared window — driving a staler-image adoption per the
+reproduction shape, and the leg asserts the force does not
+re-stand: the served `forces` stays empty, the point's live value
+keeps serving unforced, the adopted receipt log preserves the
+unforce settlement exactly once, and no phantom force receipt
+appears on either peer's served or durable journal — before the
+pair's launch roles restore. A violated contract fails
+`stale-checkpoint-failed`; two passes must produce the identical
+`stale-checkpoint-digest`, a divergence failing
+`stale-checkpoint-nondeterministic`.
 
 The stage's alarm-burst leg — `ci/burst_order.py` on the same declared
 deployment — then proves the durable ordered transition record keeps

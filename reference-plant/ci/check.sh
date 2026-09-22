@@ -236,6 +236,30 @@
 #                produce identical digests
 #                (force-release-failed,
 #                force-release-nondeterministic)
+#                The stage's stale-checkpoint leg,
+#                ci/stale_checkpoint.py on the same declared
+#                deployment — the consumer-side pin for the
+#                receipted-command contract's adoption rule (WW-ENG-003,
+#                WW-LCM-001): with the pair settled and tracking, a
+#                receipted force_point on the declared writable
+#                internal In point through the active's receipted path
+#                — asserting the applied settle and the
+#                substituted-quality stamp — the documented switch
+#                run with the promoted peer asserted still carrying the
+#                force, a receipted unforce_point through the new
+#                active asserting the applied settle, the emptied
+#                forces entry, and the journaled release on both peers'
+#                adopted records — then the tracking peer restarted
+#                onto its declared --state-file/--journal-file so it
+#                re-adopts, driving a staler-image adoption per the
+#                reproduction shape, asserting the force does not
+#                re-stand: the served forces stays empty, the point's
+#                live value keeps serving unforced, the adopted receipt
+#                log preserves the unforce settlement, and no phantom
+#                force receipt appears on either peer's journal; the
+#                pair's launch roles restored; two passes produce
+#                identical digests (stale-checkpoint-failed,
+#                stale-checkpoint-nondeterministic)
 #                The stage's burst-order leg, ci/burst_order.py on the
 #                same declared deployment: with the pair tracking and
 #                the pump group holding a full demand, the emitted
@@ -1607,6 +1631,53 @@ for tamper in expect-standing unjournaled-release; do
     echo "  $tamper: reported, force-release-failed"
 done
 
+# The pair contract's stale-checkpoint leg, on the same
+# manifest-declared deployment: ci/stale_checkpoint.py converges the
+# pair, submits a receipted force_point on the declared writable
+# internal In point through the active's POST /command — the emitted
+# model marks only internal In points writable, so the leg's p101-hand
+# is the honest target per the force-carryover convention — asserting
+# the applied settlement and the Uncertain(Substituted) sample, issues
+# the demote/promote switch asserting the promoted peer still carries
+# the force, submits a receipted unforce_point on the new active
+# asserting the applied settlement, the emptied forces set, and the
+# journaled release on both peers' adopted records, then restarts the
+# tracking peer onto its declared --state-file/--journal-file — the
+# field owner driven through the downtime, the resumed peer
+# reconverging to tracking inside the declared window — and asserts
+# the re-adoption never re-stands the released force: the served
+# forces stays empty, the point's live value keeps serving unforced,
+# the adopted receipt log preserves the unforce settlement exactly
+# once, and no phantom force receipt appears on either peer's served
+# or durable journal. The leg then restores the pair's launch roles.
+# Two passes must produce identical digests.
+run_stale_checkpoint() {
+    python3 ci/stale_checkpoint.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_stale_checkpoint)" \
+    || fail "stale-checkpoint-failed: the stale-checkpoint leg did not hold — its evidence lines are above"
+SECOND="$(run_stale_checkpoint)" \
+    || fail "stale-checkpoint-failed: the stale-checkpoint leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "stale-checkpoint-nondeterministic: two stale-checkpoint passes produced different digests"
+echo "  $FIRST"
+
+# The doctored case: a re-adoption expectation left standing — the
+# substitution asserted still badged after the tracker's restart —
+# must surface the named diagnostic rather than pass silently.
+if out="$(run_stale_checkpoint --tamper expect-standing 2>&1)"; then
+    fail "stale-checkpoint-unchecked: an expect-standing passed the stale-checkpoint leg"
+fi
+[[ "$out" == *"expected the substitution still standing"* ]] \
+    || fail "stale-checkpoint-unchecked: the expect-standing case did not report its named diagnostic: $out"
+echo "  expect-standing: reported, stale-checkpoint-failed"
+
 # The pair contract's alarm-burst leg, on the same manifest-declared
 # deployment: ci/burst_order.py converges the pair and drives the
 # simulated well until the pump group holds a full demand — both pumps
@@ -2268,7 +2339,7 @@ for file in ci/alarm_rationalization.py ci/alarm_validation.py \
         ci/peer_announce.py ci/power_trip.py \
         ci/refusal.py ci/report.py ci/restart.py \
         ci/schema_conformance.py ci/simulate.py ci/staging.py \
-        ci/standby_restart.py ci/startup_claim.py \
+        ci/stale_checkpoint.py ci/standby_restart.py ci/startup_claim.py \
         ci/takeover.py ci/tune_carryover.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
