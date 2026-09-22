@@ -106,6 +106,23 @@ pub enum PlantRequest {
         /// The ownership token the claim asserts.
         owner: u64,
     },
+    /// The launched-controller half of the write-ownership claim: takes
+    /// the claim for `owner` only while no *live* attachment holds a
+    /// different owner's claim — the grant a controller's startup
+    /// activation asserts. A claim left standing by a dead owner — its
+    /// holder set empty — is still preempted, so the restart-as-active
+    /// recovery of a crashed owner keeps working; a claim a live
+    /// different-owner attachment holds is refused
+    /// [`PlantError::Fenced`], so a controller restarted onto stale
+    /// state cannot seize the field from the incumbent and silently
+    /// roll back commands it receipted and applied. A granted request
+    /// binds `owner` to this connection exactly as `claim_writer` does
+    /// — including the [`PlantResponse::ClaimedShared`] flag when the
+    /// token is already held by another live attachment.
+    ClaimWriterUnlessHeld {
+        /// The ownership token the claim asserts.
+        owner: u64,
+    },
     /// The re-attach half of the write-ownership claim: takes the claim
     /// for `owner` only while the field is unclaimed or the standing
     /// claim already names `owner` — the conditional grant a
@@ -322,6 +339,7 @@ mod tests {
             PlantRequest::ClearFault { point: PointId(4) },
             PlantRequest::ListPoints,
             PlantRequest::ClaimWriter { owner: 42 },
+            PlantRequest::ClaimWriterUnlessHeld { owner: 44 },
             PlantRequest::EnsureWriter { owner: 43 },
             PlantRequest::ReleaseWriter,
         ];
@@ -355,6 +373,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&PlantRequest::ClaimWriter { owner: 42 }).unwrap(),
             r#"{"op":"claim_writer","owner":42}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PlantRequest::ClaimWriterUnlessHeld { owner: 44 }).unwrap(),
+            r#"{"op":"claim_writer_unless_held","owner":44}"#
         );
         assert_eq!(
             serde_json::to_string(&PlantRequest::EnsureWriter { owner: 43 }).unwrap(),

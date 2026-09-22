@@ -590,7 +590,7 @@ A factory returns one of two `DeviceDriver` contributions:
   initial value). The fragment merges with every other `Sim` contribution
   and the synthesized internal points into one `SimDriver` backend, so a
   model can mix many `sim*` devices freely.
-- `DeviceDriver::Backend(DeviceBackend { io, step, claim, release, ensure, inspect, field_facing })` — a
+- `DeviceDriver::Backend(DeviceBackend { io, step, claim, release, ensure, startup_claim, inspect, field_facing })` — a
   self-contained backend. `io` is the point-facing driver; `step` is an
   optional `StepHook` (`Fn(f64) -> Result<Tick, dcs_assembly::StepError>`)
   advancing the backend's simulated plant one `dt` per `FanoutDriver::step` —
@@ -619,6 +619,20 @@ A factory returns one of two `DeviceDriver` contributions:
   installs the plant server's `ensure_writer`; a kind whose claim dies
   with its connection — `sim-bus`, `sim-cyclic` — leaves it `None`, its
   arbitration carrying no conditional grant to probe.
+  `startup_claim` is an optional `StartupClaimHook`
+  (`Fn(u64) -> Result<bool, dcs_assembly::StepError>`) — the
+  launched-controller counterpart of `claim` a started active's
+  activation asserts once: `FanoutDriver::claim_field_writer_unless_held`
+  runs it to take the field only where no *live* attachment holds a
+  different owner's claim — `Ok(true)` — refusing `Ok(false)` while a
+  live incumbent stands, so a controller restarted onto a stale
+  checkpoint cannot preempt it and silently roll back commands the
+  incumbent receipted and applied. A claim a dead owner left standing
+  still preempts — the restart-as-active recovery path. `sim-tcp`
+  installs the plant server's `claim_writer_unless_held`; a kind whose
+  arbitration cannot distinguish live holders leaves it `None` and the
+  fan-out falls back to the unconditional `claim` for it, the pre-hook
+  behavior.
   `inspect` is an optional
   `Option<Arc<dyn Any + Send + Sync>>` typed handle the factory installs when
   the backend exposes more than the `IoDriver` surface — `sim-scripted`
@@ -803,6 +817,7 @@ fn memory_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         claim: None,
         release: None,
         ensure: None,
+        startup_claim: None,
         inspect: None,
         field_facing: false,
     }))
@@ -1274,6 +1289,7 @@ fn demo_bus(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         claim: None,
         release: None,
         ensure: None,
+        startup_claim: None,
         inspect: Some(inspect),
         field_facing: true,
     }))
