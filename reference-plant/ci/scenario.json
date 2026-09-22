@@ -767,6 +767,12 @@
         "101": {
           "bool": false
         },
+        "1103": {
+          "bool": true
+        },
+        "1104": {
+          "bool": true
+        },
         "356": {
           "bool": true
         },
@@ -792,6 +798,12 @@
     {
       "commands": [],
       "expect": {
+        "1103": {
+          "bool": false
+        },
+        "1104": {
+          "bool": true
+        },
         "356": {
           "bool": false
         },
@@ -814,6 +826,12 @@
       "expect": {
         "101": {
           "bool": false
+        },
+        "1113": {
+          "bool": true
+        },
+        "1114": {
+          "bool": true
         },
         "356": {
           "bool": true
@@ -838,6 +856,9 @@
       "expect": {
         "101": {
           "bool": true
+        },
+        "1113": {
+          "bool": false
         },
         "356": {
           "bool": false
