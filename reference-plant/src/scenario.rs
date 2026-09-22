@@ -24,7 +24,9 @@
 //! designation handed to the standby and the `none-available`
 //! annunciation suppressed as designed state, the degraded power-fail
 //! contact tripping the running hand command while its causal alarm
-//! annunciates on the same quality-aware reading, the holdout
+//! annunciates on the same quality-aware reading, a fresh receipted
+//! `mode`+`hand` request resubmitted under the standing power trip
+//! held out of the field command, the holdout
 //! delaying the restart after the protections stand clear again, the
 //! thermal and moisture contacts failing safe on bad quality and
 //! disconnection, the out-of-service declaration suppressing a
@@ -404,6 +406,39 @@ pub fn scenario(layout: &StationLayout) -> Value {
                 expect(&[
                     (power_alarm.unacknowledged.0, json!({"bool": false})),
                     (power_alarm.alarm.0, json!({"bool": true})),
+                ]),
+            ),
+            // Issue #801's reproduction on the receipted path: the
+            // operator releases the standing `hand`/`mode` and
+            // re-submits them while the power trip still stands — a
+            // fresh manual run request the command guard must hold
+            // out: the field command and its run feedback stay
+            // de-energized with `protect-tripped` up.
+            leg(
+                "hand-released-under-power-trip",
+                vec![write(pump1.hand.0, false), write(pump1.mode.0, false)],
+                vec![json!("accepted"), json!("accepted")],
+                vec![],
+                2,
+                expect(&[
+                    (pump1.mode.0, json!({"bool": false})),
+                    (pump1.cmd.0, json!({"bool": false})),
+                    (pump1.run.0, json!({"bool": false})),
+                ]),
+            ),
+            leg(
+                "hand-resubmitted-under-power-trip",
+                vec![write(pump1.mode.0, true), write(pump1.hand.0, true)],
+                vec![json!("accepted"), json!("accepted")],
+                vec![],
+                4,
+                expect(&[
+                    (pump1.mode.0, json!({"bool": true})),
+                    (pump1.cmd.0, json!({"bool": false})),
+                    (pump1.run.0, json!({"bool": false})),
+                    (pump1.protect_tripped.0, json!({"bool": true})),
+                    (pump1.protections_ok.0, json!({"bool": false})),
+                    (power_tripped, json!({"bool": true})),
                 ]),
             ),
             // The contact reads healthy again: the power trip and the
