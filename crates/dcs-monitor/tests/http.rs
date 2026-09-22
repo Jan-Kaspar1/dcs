@@ -876,16 +876,17 @@ fn the_pages_pair_fault_kinds_match_the_versioned_contract() {
             "peer_unreachable",
             "standby_degraded",
             "standby_diverged",
+            "standby_orphaned",
             "standby_unsynchronized_past_grace",
         ]
     );
-    assert_eq!(PAIR_FAULT_KINDS_VERSION, 1);
+    assert_eq!(PAIR_FAULT_KINDS_VERSION, 2);
 
     with_monitor(|_driver, client| {
         let page = client.page().unwrap();
         let compact: String = page.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(
-            compact.contains("constPAIR_FAULT_KINDS_VERSION=1;"),
+            compact.contains("constPAIR_FAULT_KINDS_VERSION=2;"),
             "page lacks the version constant"
         );
         assert!(

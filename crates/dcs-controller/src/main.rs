@@ -369,6 +369,28 @@ impl Driver {
         }
     }
 
+    /// The conditional counterpart of [`claim_writer`](Self::claim_writer)
+    /// — the orphan-cycle probe a demoted ex-owner runs while the
+    /// tracked line reports no field owner: re-arms the claim under
+    /// `owner` only where the field stands unclaimed or already names
+    /// the token — `Ok(true)` — refusing `Ok(false)` while a different
+    /// owner stands, so a released claim re-arms instead of leaving the
+    /// field open to a foreign grab and no probe ever preempts. A
+    /// purely local simulated model has no shared field to claim and
+    /// answers `Ok(true)` vacuously.
+    fn ensure_writer(&self, owner: u64) -> Result<bool, String> {
+        match self {
+            Self::Remote(remote) => match remote.ensure_writer(owner) {
+                Ok(_) => Ok(true),
+                Err(RemoteError::Fenced) => Ok(false),
+                Err(error) => Err(format!("plant write-ownership re-arm failed: {error}")),
+            },
+            Self::Local(fanout) => fanout
+                .ensure_field_writer(owner)
+                .map_err(|error| format!("plant write-ownership re-arm failed: {error}")),
+        }
+    }
+
     /// The field-facing devices that cannot arbitrate a single writer —
     /// automatic failover is honest only when this is empty: a fenced
     /// old peer's writes must actually stop at the field. A `--remote`
@@ -1074,7 +1096,8 @@ fn main() -> ExitCode {
     };
     let peer = peer
         .with_field_claim(|| driver.claim_writer(owner))
-        .with_field_release(|| driver.release_claim());
+        .with_field_release(|| driver.release_claim())
+        .with_field_ensure(|| driver.ensure_writer(owner));
     let peer = match options.auto_promote {
         Some(budget) => peer.with_failover(budget),
         None => peer,
@@ -1255,6 +1278,12 @@ fn main() -> ExitCode {
                         }
                         for reinitialized in peer.take_reinitializations() {
                             eprintln!("standby: {reinitialized}");
+                        }
+                        for orphan in peer.take_orphans() {
+                            eprintln!(
+                                "standby: the tracked line has no field owner — orphaned at tick {} (aligned to {})",
+                                orphan.tick.0, orphan.aligned.0
+                            );
                         }
                         for restart in peer.take_source_restarts() {
                             eprintln!(

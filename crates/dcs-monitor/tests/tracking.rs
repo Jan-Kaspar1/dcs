@@ -623,15 +623,30 @@ fn a_spoofed_peer_announce_cannot_redirect_the_demotion_tracking_source() {
     // Demotion follows the recorded real source: the demoted peer's
     // tracking pull converges against the standby that announced
     // itself — a pull toward the planted address would have reported
-    // `degraded` naming it.
+    // `degraded` naming it. The successor still owns nothing — the
+    // demote→promote gap is an unowned line — so the honest interim
+    // verdict is `orphaned` until its promotion claims the field.
     assert_eq!(active.client.demote().unwrap().role, Role::Demoting);
     active.client.advance(1).unwrap();
     let report = active.client.role().unwrap();
     assert_eq!(report.role, Role::Standby);
     assert!(
-        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        matches!(report.sync, Some(StandbySync::Orphaned { .. })),
         "the demoted peer tracks its announced successor, not the \
          spoofed address: {report:?}"
+    );
+    assert_eq!(
+        standby.standby.client.promote().unwrap().role,
+        Role::Promoting
+    );
+    standby.standby.client.advance(1).unwrap();
+    active.client.advance(1).unwrap();
+    assert!(
+        matches!(
+            active.client.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the demoted peer reconverges once the successor owns the field"
     );
 
     // A field owner whose only "announce" was the spoofed one keeps
@@ -710,14 +725,16 @@ fn a_wildcard_bound_peers_announce_tracks_a_routable_source() {
 
     // Demotion follows the resolved source: the pull reaches the
     // announcing peer — not the demoted peer's own loopback where
-    // nothing listens on that port — so the demoted standby
-    // reconverges and stays promotable.
+    // nothing listens on that port — so the demoted standby converges
+    // and stays promotable. The resolved successor owns nothing until
+    // promoted, so the pull's honest verdict is `orphaned` — which
+    // promotes on the same convergence `tracking` proves.
     assert_eq!(active.client.demote().unwrap().role, Role::Demoting);
     active.client.advance(1).unwrap();
     let report = active.client.role().unwrap();
     assert_eq!(report.role, Role::Standby);
     assert!(
-        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        matches!(report.sync, Some(StandbySync::Orphaned { .. })),
         "the demoted peer reconverges on the resolved source: {report:?}"
     );
     assert_eq!(active.client.promote().unwrap().role, Role::Promoting);
@@ -1031,12 +1048,15 @@ fn demote_toward_a_verified_announced_source_journals_the_adopted_source() {
     );
 
     // And the demoted peer reconverges on that successor instead of
-    // stranding, staying promotable for fail-back.
+    // stranding, staying promotable for fail-back. The adopted source
+    // owns nothing until promoted, so the honest verdict while the
+    // field stands unclaimed is `orphaned` — promotable on the same
+    // convergence `tracking` proves.
     active.client.advance(1).unwrap();
     let report = active.client.role().unwrap();
     assert_eq!(report.role, Role::Standby);
     assert!(
-        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        matches!(report.sync, Some(StandbySync::Orphaned { .. })),
         "the demoted peer reconverges on the adopted source: {report:?}"
     );
     assert_eq!(active.client.promote().unwrap().role, Role::Promoting);
@@ -1129,14 +1149,17 @@ fn a_reannounce_cannot_redirect_the_demoted_peers_tracking() {
     assert_eq!(active.monitor.tracking_source(), Some(successor));
 
     // The demoted peer keeps tracking the adopted successor: it
-    // reconverges on the real stream instead of adopting the hostile
+    // converges on the real stream instead of adopting the hostile
     // port's forged tick domain — the alignment, not just the
-    // convergence, proves which endpoint the pulls reached.
+    // convergence, proves which endpoint the pulls reached. The pinned
+    // successor owns nothing, so the verdict is `orphaned`; the forged
+    // stream — cloned from the then-owner's checkpoint — would have
+    // read `tracking` at the forged tick.
     standby.standby.client.advance(1).unwrap();
     active.client.advance(1).unwrap();
     let report = active.client.role().unwrap();
     assert!(
-        matches!(report.sync, Some(StandbySync::Tracking { aligned }) if aligned != forged.tick),
+        matches!(report.sync, Some(StandbySync::Orphaned { aligned }) if aligned != forged.tick),
         "the demoted peer tracks the pinned adoption, not the rewrite: {report:?}"
     );
     assert!(
