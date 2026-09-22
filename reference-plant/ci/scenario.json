@@ -605,6 +605,107 @@
           "command": {
             "write_value": {
               "kind": "bool",
+              "point": 333,
+              "value": {
+                "bool": false
+              }
+            }
+          }
+        },
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 332,
+              "value": {
+                "bool": false
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "101": {
+          "bool": false
+        },
+        "332": {
+          "bool": false
+        },
+        "41": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [
+        "accepted",
+        "accepted"
+      ],
+      "name": "hand-released-under-power-trip",
+      "plant": [],
+      "scans": 2
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 332,
+              "value": {
+                "bool": true
+              }
+            }
+          }
+        },
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 333,
+              "value": {
+                "bool": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "101": {
+          "bool": false
+        },
+        "225": {
+          "bool": true
+        },
+        "332": {
+          "bool": true
+        },
+        "356": {
+          "bool": true
+        },
+        "358": {
+          "bool": false
+        },
+        "41": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [
+        "accepted",
+        "accepted"
+      ],
+      "name": "hand-resubmitted-under-power-trip",
+      "plant": [],
+      "scans": 4
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
               "point": 1050,
               "value": {
                 "bool": false
