@@ -537,6 +537,29 @@ impl RemoteDriver {
         Ok(grant)
     }
 
+    /// The launched-controller half of [`claim_writer`](Self::claim_writer):
+    /// takes the claim for `owner` only while no *live* attachment holds a
+    /// different owner's claim — the grant a controller's startup
+    /// activation asserts. A claim a dead owner left standing — its holder
+    /// set empty — is still preempted, so the restart-as-active recovery
+    /// of a crashed owner keeps working; a live different-owner's claim is
+    /// refused [`RemoteError::Fenced`], so a controller restarted onto
+    /// stale state cannot seize the field from the incumbent and silently
+    /// roll back the commands it receipted and applied.
+    ///
+    /// A granted token is recorded exactly as `claim_writer` records it;
+    /// a refused one records nothing — this attachment holds no claim.
+    pub fn claim_writer_unless_held(&self, owner: u64) -> Result<ClaimGrant, RemoteError> {
+        let grant = match self.request(&PlantRequest::ClaimWriterUnlessHeld { owner })? {
+            PlantResponse::Done => ClaimGrant::Exclusive,
+            PlantResponse::ClaimedShared { .. } => ClaimGrant::Shared,
+            PlantResponse::Error { error } => return Err(self.fail(error.into())),
+            _ => return Err(self.protocol_violation()),
+        };
+        self.connection.lock().unwrap().owner = Some(owner);
+        Ok(grant)
+    }
+
     /// The conditional counterpart of [`claim_writer`](Self::claim_writer):
     /// granted while the field is unclaimed or the standing claim already
     /// names `owner` — the re-arm a field owner asserts after its

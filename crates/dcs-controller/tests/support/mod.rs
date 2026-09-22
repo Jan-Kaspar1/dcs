@@ -98,7 +98,10 @@ fn spawn_inner(
     let addr = loop {
         let mut line = String::new();
         if stderr.read_line(&mut line).unwrap() == 0 {
-            panic!("{} exited before reporting its address", binary.display());
+            panic!(
+                "{} exited before reporting its address; stderr so far: {preamble:?}",
+                binary.display()
+            );
         }
         match parse(line.trim()) {
             Some(addr) => break addr,

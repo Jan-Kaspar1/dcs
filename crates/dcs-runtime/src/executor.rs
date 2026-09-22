@@ -2504,6 +2504,16 @@ impl<'d> Executor<'d> {
     fn apply_commands(&mut self, tick: Tick) {
         while let Some(index) = self.pending_commands.pop_front() {
             let command = self.receipts[index].command.clone();
+            // The schedule the admitting line set: a queued entry is
+            // still `Accepted`, and a carried one replays on the
+            // promoted run scans after its `apply_tick`. An internal
+            // point's image sample keeps that stamp — the held value's
+            // line time — so consumers aging a standing request measure
+            // the operator-visible window rather than the handover lag.
+            let scheduled = match self.receipts[index].outcome {
+                CommandOutcome::Accepted { apply_tick } => apply_tick.min(tick),
+                _ => tick,
+            };
             self.receipts[index].outcome = match self.check_command(&command) {
                 Err(reason) => CommandOutcome::Rejected { reason },
                 Ok(Resolved::Write { point, value }) => {
@@ -2518,7 +2528,7 @@ impl<'d> Executor<'d> {
                         });
                         self.image
                             .borrow_mut()
-                            .insert(point, Sample::good(value, tick));
+                            .insert(point, Sample::good(value, scheduled));
                         CommandOutcome::Applied { tick }
                     } else {
                         // The image still holds the last-observed field
