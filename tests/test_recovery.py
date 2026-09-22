@@ -12,7 +12,7 @@ from agent_pool.supervisor import Supervisor
 def issue(number=1, group='core', dependencies=()):
     item = dict(key=f'issue-{number}', title=f'Task {number}', scope='s', acceptance='a',
                 tests='t', dependencies=list(dependencies), priority=2,
-                milestone='m', group=group)
+                milestone='m', group=group, area='control-runtime')
     return dict(number=number, title=item['title'], body=planning.body(item),
                 state='OPEN', labels=[{'name': 'agent:ready'}])
 

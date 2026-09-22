@@ -3,7 +3,7 @@ from agent_pool.planning import validate, body, metadata, prompt
 
 class PlanningTests(unittest.TestCase):
     def item(self):
-        return dict(key='model-contract',title='Define model',scope='Types',acceptance='Compiles',tests='Unit tests',dependencies=[],priority=1,milestone='Foundation',group='model')
+        return dict(key='model-contract',title='Define model',scope='Types',acceptance='Compiles',tests='Unit tests',dependencies=[],priority=1,milestone='Foundation',group='model',area='engineering')
 
     def test_roundtrip(self):
         item=self.item()
@@ -47,6 +47,11 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(metadata(body(item))['improvement'],'deepen-executor')
         item['improvement']='Not A Key!'
         with self.assertRaises(ValueError): validate({'issues':[item]})
+    def test_rejects_unknown_area(self):
+        item = self.item()
+        item['area'] = 'water'
+        with self.assertRaisesRegex(ValueError, 'product area'):
+            validate({'issues': [item]})
 
     def test_dispositions(self):
         ok={'key':'deepen-executor','decision':'defer','reason':'needs decision','revisit':'after #19'}
@@ -72,6 +77,10 @@ class PlanningTests(unittest.TestCase):
         self.assertIn('directory that remains inside this workspace is only staging', text)
         self.assertIn('Platform fixtures are conformance evidence', text)
         self.assertIn('`WW-FND-003` and `WW-FND-004` as the next foundation tranche', text)
+        self.assertIn('exactly one area', text)
+        self.assertIn('library', text)
+        self.assertIn('validation venue', text)
+        self.assertIn('current allocation', text.lower())
         self.assertIn('additive shared block-interface schema first', text)
         self.assertIn('named typed commands and events', text)
         self.assertIn('immutable bounded read publication outside the executor lock', text)
