@@ -686,16 +686,17 @@ def burst_pass(args, tamper):
                 ("changed", points["backup_alarm"], true),
                 ("changed", points["backup_unack"], true),
             ],
-            # The consequential drive: the power-fail contact and its
-            # alarm's annunciation.
+            # The consequential drive: the power-fail contact, its
+            # alarm's annunciation, and the permissive collapse — both
+            # pumps' availability drops and none-available annunciates.
+            # The cause and its collapse land inside the same window:
+            # the alarm's condition rides the station power interlock's
+            # `tripped` — the quality-aware reading the permissives
+            # trip on — so the record may carry either side first.
             [
                 ("changed", points["power_fail"], true),
                 ("changed", points["power_alarm"], true),
                 ("changed", points["power_unack"], true),
-            ],
-            # The permissive collapse: both pumps' availability drops
-            # and none-available annunciates.
-            [
                 ("changed", points["avail_1"], false),
                 ("changed", points["avail_2"], false),
                 ("changed", points["none_available"], true),

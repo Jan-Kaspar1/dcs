@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -35,6 +36,8 @@ def fake_docker_ok(*args, **kw):
     return Result('')
 
 
+@unittest.skipUnless(os.name == 'posix',
+                     'runner.cycle serializes through a POSIX flock')
 class OwnershipGateTests(unittest.TestCase):
     """Failed teardown must block the next cycle with a named error."""
 

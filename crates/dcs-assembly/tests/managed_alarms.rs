@@ -283,6 +283,99 @@ fn the_operator_commands_drive_the_managed_lifecycle() {
     assert!(flag(&executor, FAULT_UNACK), "released fresh — latched");
 }
 
+/// The QA-781 reproduction at the receipted-command level: an `ack`
+/// write that lands while the alarm stands clear and is never released
+/// cannot pre-acknowledge the trip arriving after it — the consumed
+/// edge acknowledged nothing, so the latch lands and no managed state
+/// names a withholding.
+#[test]
+fn a_held_ack_write_cannot_pre_acknowledge_a_driven_trip() {
+    let model = model();
+    let driver = sim_driver(&model).unwrap();
+    let mut executor = build_executor(&model, &driver);
+
+    // The defect's client shape: a receipted ack write applied while
+    // clear, held true with no release ever following.
+    let receipt = executor.submit_command(write_value(FAULT_ACK, Value::Bool(true)));
+    assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+    executor.scan();
+    assert!(!flag(&executor, FAULT_ALARM));
+    assert!(!flag(&executor, FAULT_UNACK));
+
+    // The driven trip still annunciates — the held level's spent edge
+    // gates nothing.
+    driver.write(FAULT, Value::Bool(true)).unwrap();
+    executor.scan();
+    assert!(flag(&executor, FAULT_ALARM));
+    assert!(
+        flag(&executor, FAULT_UNACK),
+        "the held ack cannot pre-acknowledge the fresh trip"
+    );
+    assert!(!flag(&executor, FAULT_SUPPRESSED));
+    assert!(!flag(&executor, FAULT_SHELVED));
+    assert!(!flag(&executor, FAULT_OOS_FLAG));
+
+    // Releasing `ack` mid-trip leaves the latch standing — no
+    // annunciation is created or destroyed by the release — and a
+    // second pulse acknowledges the standing alarm.
+    executor.submit_command(write_value(FAULT_ACK, Value::Bool(false)));
+    executor.scan();
+    assert!(flag(&executor, FAULT_ALARM));
+    assert!(flag(&executor, FAULT_UNACK));
+    executor.submit_command(write_value(FAULT_ACK, Value::Bool(true)));
+    executor.scan();
+    assert!(flag(&executor, FAULT_ALARM));
+    assert!(!flag(&executor, FAULT_UNACK));
+}
+
+/// The observed `ack` level rides the checkpoint with the latch: a
+/// standby promoted while `ack` stands held over a fresh latch must
+/// not read the carried `true` as a new edge clearing it.
+#[test]
+fn a_checkpoint_carries_the_consumed_ack_baseline() {
+    let model = model();
+    let driver_a = sim_driver(&model).unwrap();
+    let mut active = build_executor(&model, &driver_a);
+
+    // Trip, acknowledge, clear, then hold `ack` true — and trip again
+    // under the held level so a standing latch coexists with `ack`
+    // reading `true`.
+    driver_a.write(FAULT, Value::Bool(true)).unwrap();
+    active.scan();
+    active.submit_command(write_value(FAULT_ACK, Value::Bool(true)));
+    active.scan();
+    active.submit_command(write_value(FAULT_ACK, Value::Bool(false)));
+    driver_a.write(FAULT, Value::Bool(false)).unwrap();
+    active.scan();
+    active.submit_command(write_value(FAULT_ACK, Value::Bool(true)));
+    active.scan();
+    driver_a.write(FAULT, Value::Bool(true)).unwrap();
+    active.scan();
+    assert!(flag(&active, FAULT_ALARM));
+    assert!(flag(&active, FAULT_UNACK), "the held ack's edge is spent");
+
+    let checkpoint = active.checkpoint();
+    let driver_b = sim_driver(&model).unwrap();
+    let mut standby = build_executor(&model, &driver_b);
+    standby.apply(&checkpoint).unwrap();
+
+    // The carried internal point reads `ack` true; the carried
+    // baseline means the standby scans no phantom edge, so the latch
+    // survives promotion and behaves identically after it.
+    assert!(flag(&standby, FAULT_UNACK), "the latch rode along");
+    standby.scan();
+    active.scan();
+    assert!(
+        flag(&standby, FAULT_UNACK),
+        "a phantom restore edge would have cleared the carried latch"
+    );
+    assert!(flag(&active, FAULT_UNACK));
+    assert_eq!(
+        serde_json::to_string(&active.snapshot()).unwrap(),
+        serde_json::to_string(&standby.snapshot()).unwrap()
+    );
+}
+
 /// The Float sibling takes the same lifecycle on the level input.
 #[test]
 fn the_float_sibling_shelves_and_suppresses_identically() {
@@ -414,6 +507,70 @@ fn checkpointed_standby_mid_shelve_continues_identically() {
     assert_eq!(
         serde_json::to_string(&active.snapshot()).unwrap(),
         serde_json::to_string(&standby.snapshot()).unwrap()
+    );
+}
+
+/// QA finding `shelve-bound-restarts-on-stale-final-sync-promotion` at
+/// the executor seam: the standby's tracking line outruns the
+/// checkpoint the promote boundary hands it, so the stale carry
+/// delivers only the receipt log's tail — the shelve write the active
+/// admitted and applied meanwhile. The promoted run's first field-owning
+/// scan replays it stamped with the tick the line scheduled it for, and
+/// `max_shelve_ticks` bounds the operator-visible window the pair
+/// serves instead of restarting the countdown.
+#[test]
+fn a_carried_shelve_write_serves_the_bounds_remainder_past_the_handover() {
+    let model = model();
+    let driver_a = sim_driver(&model).unwrap();
+    let mut active = build_executor(&model, &driver_a);
+    let driver_b = sim_driver(&model).unwrap();
+    let mut standby = build_executor(&model, &driver_b);
+
+    // Both at tick 1; the shelve write admits on the active for tick 2,
+    // and the pre-apply checkpoint is what the handover later carries.
+    active.scan();
+    standby.scan();
+    let receipt = active.submit_command(write_value(FAULT_SHELVE, Value::Bool(true)));
+    let CommandOutcome::Accepted { apply_tick } = receipt.outcome else {
+        panic!("the shelve write must be accepted: {receipt:?}")
+    };
+    let carried = active.checkpoint();
+    assert_eq!(carried.tick, dcs_core::Tick(1));
+    assert_eq!(apply_tick, dcs_core::Tick(2));
+
+    // The line applies the write and counts its three bound scans —
+    // ticks 2, 3, 4 — while the standby, its pull withheld, quiesces
+    // past the capture it is about to be handed.
+    active.scan();
+    active.scan();
+    active.scan();
+    assert!(flag(&active, FAULT_SHELVED), "the bound's last scan");
+    active.scan();
+    assert!(!flag(&active, FAULT_SHELVED), "bound 3 expired on the line");
+
+    for _ in 0..2 {
+        standby.scan_quiesced();
+    }
+    assert_eq!(standby.tick(), dcs_core::Tick(3));
+    standby.carry_pending_commands(&carried);
+
+    // The promoted run's first field-owning scan replays the carried
+    // write — stamped with the schedule the line admitted, not the
+    // replay tick — so the restored `shelve_elapsed` of 0 seeds at the
+    // request's line age: the standby serves the bound's last scan,
+    // then expires, and the pair's window stays 2..=4.
+    standby.scan();
+    assert_eq!(standby.tick(), dcs_core::Tick(4));
+    assert_eq!(
+        standby.sample(FAULT_SHELVE).map(|sample| sample.tick),
+        Some(apply_tick),
+        "the carried write keeps the line's schedule as its stamp"
+    );
+    assert!(flag(&standby, FAULT_SHELVED), "the bound's remainder");
+    standby.scan();
+    assert!(
+        !flag(&standby, FAULT_SHELVED),
+        "the replayed write cannot restart the bound"
     );
 }
 

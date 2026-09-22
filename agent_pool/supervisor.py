@@ -1,5 +1,4 @@
 """Persistent local planner, dispatcher, and serialized integration loop."""
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -13,6 +12,7 @@ from .state import State
 from .admission import Admission, classify
 from .github import GitHub, GitHubError
 from .runtime import Runtime
+from . import areas
 from . import findings as findings_lane
 from . import planning
 from . import review as review_lane
@@ -955,7 +955,8 @@ Repair context: {repair}
                 if not set(resolved) <= numbers:
                     raise ValueError('Planner referenced nonexistent dependencies')
                 published = dict(item, dependencies=resolved)
-                number = self.github.create_issue(item['title'], planning.body(published), ['agent:ready', f"priority:P{item['priority']}"], item['key'])
+                number = self.github.create_issue(item['title'], planning.body(published),
+                    ['agent:ready', f"priority:P{item['priority']}", areas.label(item['area'])], item['key'])
                 created[item['key']] = number
                 known[item['key']] = number
                 numbers.add(number)
@@ -977,7 +978,9 @@ Repair context: {repair}
             clone = self.runtime.prepare_clone('coordinator')
             output = clone / '.dcs-agent' / f'proposal-{int(now)}.json'
             output.parent.mkdir(parents=True, exist_ok=True)
-            process = self.runtime.spawn('planner-' + str(int(now)), clone, planning.prompt(issues, prs, output, self.planner_review_input(), self.state.get('planner_feedback')), model=self.models[0])
+            allocation = areas.Allocation.from_inventory(issues, self.state.jobs())
+            process = self.runtime.spawn('planner-' + str(int(now)), clone, planning.prompt(
+                issues, prs, output, self.planner_review_input(), self.state.get('planner_feedback'), allocation.summary()), model=self.models[0])
         except Exception:
             self.admission.release('planner')
             raise
@@ -1014,11 +1017,25 @@ Repair context: {repair}
                 continue
             labels = [l['name'] for l in issue.get('labels', [])]
             want = f"priority:P{meta.get('priority', 3)}"
+            # Older managed issues may have their area only as a GitHub
+            # label. Preserve and honor that classification until their
+            # metadata is migrated; future proposals store both.
+            area = meta.get('area') or areas.issue_area(issue)
+            wanted_area = areas.label(area) if area else None
             wrong = [l for l in labels if l.startswith('priority:P') and l != want]
-            if wrong or (want not in labels and 'agent:ready' in labels):
+            wrong_areas = [l for l in labels if wanted_area and
+                           l.startswith('area:') and l != wanted_area]
+            add = []
+            if want not in labels and 'agent:ready' in labels:
+                add.append(want)
+            if wanted_area and wanted_area not in labels:
+                add.append(wanted_area)
+            if wrong or wrong_areas or add:
                 self.github.update_issue(issue['number'],
-                                         add_labels=[] if want in labels else [want],
-                                         remove_labels=wrong)
+                                         add_labels=add,
+                                         remove_labels=wrong + wrong_areas)
+        self.state.set('area_allocation', areas.Allocation.from_inventory(
+            issues, self.state.jobs()).summary())
 
     def retries(self, issues):
         if self.state.paused():
@@ -1042,18 +1059,30 @@ Repair context: {repair}
         capacity = self.state.capacity()
         if self.slots_used() >= capacity:
             return
+        allocation = areas.Allocation.from_inventory(issues, self.state.jobs())
+        self.state.set('area_allocation', allocation.summary())
         closed = {i['number'] for i in issues if i.get('state') == 'CLOSED'}
-        def priority(issue):
+        def rank(issue):
             try:
-                return planning.metadata(issue.get('body', '')).get('priority', 3), issue['number']
+                meta = planning.metadata(issue.get('body', ''))
+                area = meta.get('area') or areas.issue_area(issue)
+                return (meta.get('priority', 3),
+                        allocation.score(area) if area else float('inf'),
+                        issue['number'])
             except (ValueError, KeyError):
-                return 4, issue['number']
-        for issue in sorted(issues, key=priority):
+                return 4, float('inf'), issue['number']
+        candidates = list(issues)
+        while candidates:
+            issue = min(candidates, key=rank)
+            candidates.remove(issue)
             if issue.get('state') != 'OPEN' or self.state.job(issue['number']):
                 continue
             if 'agent:ready' not in [l['name'] for l in issue.get('labels', [])]:
                 continue
             meta = planning.metadata(issue['body'])
+            area = meta.get('area') or areas.issue_area(issue)
+            if not area:
+                continue
             if not set(meta['dependencies']) <= closed:
                 continue
             improvement = meta.get('improvement')
@@ -1076,12 +1105,17 @@ Repair context: {repair}
                 continue
             if improvement and not active_improvement:
                 self.state.set('review:active_improvement', improvement)
+            allocation.note(area)
+            self.state.set('area_allocation', allocation.summary())
             try:
                 self.launch(job, issue)
             except Exception as exc:
                 self.block(job, str(exc))
 
     def run(self):
+        # Lazy: the supervisor is POSIX-only, but the module must stay
+        # importable on Windows so the repository test suite can collect it.
+        import fcntl
         with (self.root / 'supervisor.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             signal.signal(signal.SIGTERM, lambda *_: setattr(self, 'stopping', True))

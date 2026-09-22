@@ -1499,7 +1499,24 @@ fn run_verification(tag: &str) -> Outcome {
         UI_RESTART_TICKS / 2,
         true,
     );
-    let after = read_ui_seen(&ui_seen_b).expect("the restarted UI process never rejoined");
+    // The restarted process's own observation is the evidence, and on
+    // a loaded runner its first polls can all land inside the phase —
+    // the seen file then trails the run's advance. Wait for the file
+    // to record a publication past what the first incarnation saw
+    // rather than reading a poll that predates it.
+    let deadline = Instant::now();
+    let after = loop {
+        if let Some(seen) = read_ui_seen(&ui_seen_b)
+            && seen["published"].as_u64() > before["published"].as_u64()
+        {
+            break seen;
+        }
+        assert!(
+            deadline.elapsed() < Duration::from_secs(10),
+            "the restarted UI process never observed a freshness advance"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
     drop(ui);
     // The restart's evidence — the `ui_evidence_failures` shape:
     // neither incarnation met a fault, the restarted process read the
@@ -1693,15 +1710,30 @@ fn run_verification(tag: &str) -> Outcome {
         checkpoints,
         receipts: standby.receipts().unwrap(),
         emitted: emitted(&standby),
-        journals: [
-            active.journal(0).unwrap(),
-            standby.journal(0).unwrap(),
-            reference.journal(0).unwrap(),
-            read_journal_file(&active_journal).unwrap().entries,
-            read_journal_file(&standby_journal).unwrap().entries,
-            read_journal_file(&reference_journal).unwrap().entries,
-        ]
-        .into(),
+        journals: {
+            let mut journals: Vec<Vec<JournalEntry>> = [
+                active.journal(0).unwrap(),
+                standby.journal(0).unwrap(),
+                reference.journal(0).unwrap(),
+                read_journal_file(&active_journal).unwrap().entries,
+                read_journal_file(&standby_journal).unwrap().entries,
+                read_journal_file(&reference_journal).unwrap().entries,
+            ]
+            .into();
+            // The adopted-source entry names the peer's monitor
+            // address — its ephemeral listen port run-unique by
+            // nature — so the identical-runs comparison masks the
+            // port while keeping the event's presence, `seq`, `tick`,
+            // and named host.
+            for journal in &mut journals {
+                for entry in journal {
+                    if let JournalEvent::TrackingSourceAdopted { source } = &mut entry.event {
+                        source.set_port(0);
+                    }
+                }
+            }
+            journals
+        },
     }
 }
 

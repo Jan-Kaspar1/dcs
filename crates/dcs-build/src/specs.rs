@@ -1104,7 +1104,7 @@ impl Spec for LatchingAlarmSpec {
 /// Spec for the `bool-latching-alarm` kind: the two-flag alarm
 /// lifecycle for Bool-sourced conditions — `latching-alarm`'s Bool
 /// sibling, where `alarm` follows `in` and `unacknowledged` latches a
-/// fresh assertion until `ack` reads `true`.
+/// fresh assertion until `ack`'s rising edge consumes it.
 ///
 /// Ports mirror the descriptor: `in` (`In`, `Bool`), `ack` (`In`,
 /// `Bool`), `alarm` (`Out`, `Bool`), `unacknowledged` (`Out`, `Bool`).

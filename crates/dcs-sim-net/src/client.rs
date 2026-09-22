@@ -213,7 +213,17 @@ impl Connection {
 fn connect_stream(addresses: &[SocketAddr], timeout: Duration) -> std::io::Result<TcpStream> {
     let mut failure = std::io::Error::new(std::io::ErrorKind::NotFound, "no plant server address");
     for &address in addresses {
-        match TcpStream::connect_timeout(&address, timeout) {
+        let attempt = loop {
+            match TcpStream::connect_timeout(&address, timeout) {
+                // An interrupted connect attempt is abandoned with its
+                // socket and retried fresh — a caught signal (e.g. a
+                // spawned helper's `SIGCHLD`) is not a reachability
+                // verdict on the address.
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                other => break other,
+            }
+        };
+        match attempt {
             Ok(stream) => {
                 stream.set_read_timeout(Some(timeout))?;
                 stream.set_write_timeout(Some(timeout))?;
@@ -518,6 +528,29 @@ impl RemoteDriver {
     /// fencing promotion relies on.
     pub fn claim_writer(&self, owner: u64) -> Result<ClaimGrant, RemoteError> {
         let grant = match self.request(&PlantRequest::ClaimWriter { owner })? {
+            PlantResponse::Done => ClaimGrant::Exclusive,
+            PlantResponse::ClaimedShared { .. } => ClaimGrant::Shared,
+            PlantResponse::Error { error } => return Err(self.fail(error.into())),
+            _ => return Err(self.protocol_violation()),
+        };
+        self.connection.lock().unwrap().owner = Some(owner);
+        Ok(grant)
+    }
+
+    /// The launched-controller half of [`claim_writer`](Self::claim_writer):
+    /// takes the claim for `owner` only while no *live* attachment holds a
+    /// different owner's claim — the grant a controller's startup
+    /// activation asserts. A claim a dead owner left standing — its holder
+    /// set empty — is still preempted, so the restart-as-active recovery
+    /// of a crashed owner keeps working; a live different-owner's claim is
+    /// refused [`RemoteError::Fenced`], so a controller restarted onto
+    /// stale state cannot seize the field from the incumbent and silently
+    /// roll back the commands it receipted and applied.
+    ///
+    /// A granted token is recorded exactly as `claim_writer` records it;
+    /// a refused one records nothing — this attachment holds no claim.
+    pub fn claim_writer_unless_held(&self, owner: u64) -> Result<ClaimGrant, RemoteError> {
+        let grant = match self.request(&PlantRequest::ClaimWriterUnlessHeld { owner })? {
             PlantResponse::Done => ClaimGrant::Exclusive,
             PlantResponse::ClaimedShared { .. } => ClaimGrant::Shared,
             PlantResponse::Error { error } => return Err(self.fail(error.into())),

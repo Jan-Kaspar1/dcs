@@ -40,7 +40,13 @@ controller stop/start actions ctx['stop_controller']/
 ctx['start_controller'] carry — the rig launches controllers with
 --restart no, so a stopped container holds a real down-window — and
 reads both peers' --journal-file paths for the refusal and
-non-interference audits.
+non-interference audits. The tracking-source-auth scenario drives the
+same controller lifecycle seam to open the announced-only demotion
+window — the tracking peer stopped, the field owner warm-restarted so
+no announce is recorded — probes the `GET /checkpoint?peer=` contract
+with crafted announce hints and a forged-checkpoint server bound on
+the scenario host, and audits the served journals for the adoption
+entries every verified source owes.
 
 The field-fault, backup-health, and unavailable-fallback cases
 inject and clear per-point faults on the shared simulated field
