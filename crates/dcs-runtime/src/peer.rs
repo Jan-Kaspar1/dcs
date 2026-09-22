@@ -2329,6 +2329,87 @@ mod tests {
         assert_eq!(standby.activate(), Err(SwitchError::NotActive));
     }
 
+    /// Where the conditional startup grant is installed it runs in
+    /// place of the unconditional claim at activation — a grant takes
+    /// the field and lifts the gate exactly as the claim does, while
+    /// the unconditional hook stays promotion's alone.
+    #[test]
+    fn the_startup_grant_replaces_the_unconditional_claim_at_activation() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let claimed = AtomicBool::new(false);
+        let granted = AtomicBool::new(false);
+        let mut peer = Peer::active(executor(&gate), Some(&gate))
+            .with_field_claim(|| {
+                claimed.store(true, Ordering::Relaxed);
+                Ok(())
+            })
+            .with_field_startup_claim(|| {
+                granted.store(true, Ordering::Relaxed);
+                Ok(true)
+            });
+
+        peer.activate().unwrap();
+        assert!(granted.load(Ordering::Relaxed));
+        assert!(
+            !claimed.load(Ordering::Relaxed),
+            "the unconditional claim must not run at startup"
+        );
+        assert!(gate.is_open());
+        assert!(peer.owns_field());
+    }
+
+    /// A live incumbent's standing claim refuses the startup grant —
+    /// the stale-checkpoint takeover the grant exists to prevent: the
+    /// launch fails `FieldClaimFailed` naming the live holder and the
+    /// standby-rejoin remedy, the gate stays closed, and the
+    /// unconditional preempt hook never ran.
+    #[test]
+    fn a_live_incumbent_refuses_the_startup_grant() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let claimed = AtomicBool::new(false);
+        let mut peer = Peer::active(executor(&gate), Some(&gate))
+            .with_field_claim(|| {
+                claimed.store(true, Ordering::Relaxed);
+                Ok(())
+            })
+            .with_field_startup_claim(|| Ok(false));
+
+        let error = peer.activate().unwrap_err();
+        let SwitchError::FieldClaimFailed { detail } = error else {
+            panic!("the refused grant must fail named: {error:?}");
+        };
+        assert!(
+            detail.contains("live peer") && detail.contains("standby"),
+            "the refusal must name the live incumbent and the remedy: {detail}"
+        );
+        assert!(!gate.is_open());
+        assert!(
+            !claimed.load(Ordering::Relaxed),
+            "a refused startup grant must not fall back to preempting"
+        );
+    }
+
+    /// A startup grant the field could not answer fails the activation
+    /// with the backend's own detail — the same `FieldClaimFailed` a
+    /// refused unconditional claim produces.
+    #[test]
+    fn a_failed_startup_grant_refuses_the_activation() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::active(executor(&gate), Some(&gate))
+            .with_field_startup_claim(|| Err("field unreachable".to_string()));
+
+        assert_eq!(
+            peer.activate(),
+            Err(SwitchError::FieldClaimFailed {
+                detail: "field unreachable".to_string()
+            })
+        );
+        assert!(!gate.is_open());
+    }
+
     /// A write the shared field fenced — its answer to a preempted
     /// claim — demotes the owning peer in place rather than failing its
     /// scan: the gate re-closes, the reported role walks `demoting` to

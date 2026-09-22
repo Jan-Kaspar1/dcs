@@ -233,12 +233,17 @@
 //! `not_converged` and no checkpoint will ever arrive to change that.
 //! The recorded recovery is restart-as-active: relaunch the controller
 //! on the same model without `--standby`, and the launched active's
-//! unconditional startup claim preempts the dead owner's token — a
-//! surviving `--state-file` resumes the run at its last persisted
+//! conditional startup grant preempts the dead owner's standing token —
+//! a surviving `--state-file` resumes the run at its last persisted
 //! cycle, and the standby reconverges on the new active's checkpoint
-//! stream where its tracking source resolves. There is deliberately no
-//! force-promote and no operator claim-release: a standby that never
-//! proved it tracks the field is never a writer.
+//! stream where its tracking source resolves. The grant is conditional
+//! precisely so the same launch cannot take a *live* incumbent's field:
+//! a controller restarting into a pair cannot prove its resumed state is
+//! current with the incumbent's, so a live different-owner claim refuses
+//! the start — the named remedy is rejoining as `--standby`, whose
+//! tracking pulls adopt the incumbent's state rather than reverting it.
+//! There is deliberately no force-promote and no operator claim-release:
+//! a standby that never proved it tracks the field is never a writer.
 //!
 //! The monitoring page presents the pair as one logical controller: open
 //! it on either peer's `--listen` address and pass the other peer's
