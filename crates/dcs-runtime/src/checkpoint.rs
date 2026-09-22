@@ -233,6 +233,19 @@ pub struct Checkpoint {
     /// apply treats it as owner-produced exactly as it always did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_owns_field: Option<bool>,
+    /// The keyed line proof a serving monitor injects into this
+    /// document's wire form on a `?prove=` pull — response decoration,
+    /// never run state: [`Executor::checkpoint`](crate::Executor::checkpoint)
+    /// never sets it, [`Executor::restore`](crate::Executor::restore)
+    /// ignores it, and it is absent on every captured checkpoint and
+    /// every response to an unproven pull. A pulling peer compares it
+    /// against the proof it computes over the received document and
+    /// its request's nonce under the pair's shared key, so a checkpoint
+    /// served by an endpoint that merely replays or fabricates this
+    /// line's documents — without holding the key — cannot masquerade
+    /// as a tracked peer's production.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_proof: Option<u64>,
 }
 
 /// Mints a fresh checkpoint-stream generation — the value a run's

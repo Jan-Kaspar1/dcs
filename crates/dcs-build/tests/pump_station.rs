@@ -1081,6 +1081,10 @@ fn hand_command_holds_the_declared_protections() {
         "the power trip must release the hand command"
     );
     assert!(
+        drive_until(&mut executor, &driver, 4, |e| !point_bool(e, pump.run)),
+        "the power trip must stop the hand-running pump"
+    );
+    assert!(
         drive_until(&mut executor, &driver, 8, |e| point_bool(
             e,
             layout.power_fail_alarm.alarm
@@ -1102,6 +1106,52 @@ fn hand_command_holds_the_declared_protections() {
         &executor,
         layout.none_available_alarm.unacknowledged
     ));
+
+    // Issue #801's reproduction: a *fresh* `mode`+`hand` request
+    // submitted while the power trip stands is receipted as the
+    // operator's demand, but the standing protection trip holds the
+    // command guard closed — the field command never energizes and
+    // the run loopback settles de-energized.
+    let other = &layout.pumps[1];
+    write(
+        &mut executor,
+        other.mode,
+        ValueKind::Bool,
+        Value::Bool(true),
+    );
+    write(
+        &mut executor,
+        other.hand,
+        ValueKind::Bool,
+        Value::Bool(true),
+    );
+    for _ in 0..4 {
+        executor.scan();
+        assert!(
+            !point_bool(&executor, other.cmd),
+            "a hand request submitted during the power trip must not drive the command"
+        );
+        driver.step(DT).unwrap();
+    }
+    assert!(point_bool(&executor, other.protect_tripped));
+    assert!(!point_bool(&executor, other.protections_ok));
+    assert!(
+        drive_until(&mut executor, &driver, 4, |e| !point_bool(e, other.run)),
+        "a hand request submitted during the power trip must not run the pump"
+    );
+    write(
+        &mut executor,
+        other.hand,
+        ValueKind::Bool,
+        Value::Bool(false),
+    );
+    write(
+        &mut executor,
+        other.mode,
+        ValueKind::Bool,
+        Value::Bool(false),
+    );
+
     sim.write(layout.power_fail, Value::Bool(false)).unwrap();
     assert!(
         drive_until(&mut executor, &driver, 12, |e| point_bool(e, pump.cmd)),

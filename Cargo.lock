@@ -470,6 +470,7 @@ dependencies = [
  "dcs-runtime",
  "serde",
  "serde_json",
+ "sha2",
  "tiny_http",
 ]
 

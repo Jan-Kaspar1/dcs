@@ -72,6 +72,13 @@ services:
       - "100"
       - --listen
       - 0.0.0.0:8080
+      # The pair's shared tracking secret: both peers carry the same
+      # token so announced-source demotions and the adopted source's
+      # checkpoints carry the keyed line proof — an endpoint that
+      # merely replays or fabricates this line's documents can neither
+      # arm the demotion nor feed the demoted peer.
+      - --pair-token
+      - dcs-rig-pair
 
   ctrl-b:
     image: dcs-controller
@@ -100,6 +107,8 @@ services:
       - "100"
       - --listen
       - 0.0.0.0:8081
+      - --pair-token
+      - dcs-rig-pair
 
 networks:
   dcs-rig:

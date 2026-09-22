@@ -2125,13 +2125,15 @@ echo "  $FIRST"
 # owner's own monitor address — a claim the pulling connection's own
 # source proves, so it lands exactly as a self-claim — plants a
 # self-addressed demotion hint: the self-pin defect shape this leg
-# exists to catch. The demotion adopts the peer's own address, and
-# the leg's adopted-source audit must surface the named evidence
-# rather than letting a self-pinned demotion pass silently.
+# exists to catch. The demotion's verify pull reads the owner's own
+# document — the replayable own-document shape an announced demotion
+# now refuses — so POST /demote answers 409 no_tracking_source and
+# the leg must report the refusal rather than let a self-pinned
+# demotion proceed.
 if out="$(run_demote_reconvergence --tamper self-announce 2>&1)"; then
     fail "demote-reconvergence-unchecked: a self-addressed announce passed the demote-reconvergence leg"
 fi
-[[ "$out" == *"a self tracking source"* ]] \
+[[ "$out" == *"no_tracking_source"* ]] \
     || fail "demote-reconvergence-unchecked: the self-announce case did not report its named diagnostic: $out"
 echo "  self-announce: reported, demote-reconvergence-failed"
 

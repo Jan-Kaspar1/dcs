@@ -154,7 +154,12 @@ pass. The standby (`ctrl-b`) pulls a checkpoint per scan from the
 active's monitoring address (`--standby ctrl-a:8080`), scans
 output-quiesced behind its write gate, and promotes through
 `POST /promote` on its own monitor — or self-promotes with
-`--auto-promote N`. In a cross-host rig the same commands hold with the
+`--auto-promote N`. Launching both peers with the same
+`--pair-token TOKEN` adds the keyed tracking contract: announced-source
+demotions and every checkpoint the adopted source serves must carry the
+token-keyed `line_proof`, so an endpoint that merely replays or
+fabricates the line's checkpoints can neither arm a demotion nor feed
+the demoted peer forged state. In a cross-host rig the same commands hold with the
 plant's published `host:port` in place of `dcs-plant:9001` and the
 active's published monitoring address in place of `ctrl-a:8080`.
 Alternatively the model can declare `sim-tcp` devices whose
