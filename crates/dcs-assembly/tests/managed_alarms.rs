@@ -510,6 +510,70 @@ fn checkpointed_standby_mid_shelve_continues_identically() {
     );
 }
 
+/// QA finding `shelve-bound-restarts-on-stale-final-sync-promotion` at
+/// the executor seam: the standby's tracking line outruns the
+/// checkpoint the promote boundary hands it, so the stale carry
+/// delivers only the receipt log's tail — the shelve write the active
+/// admitted and applied meanwhile. The promoted run's first field-owning
+/// scan replays it stamped with the tick the line scheduled it for, and
+/// `max_shelve_ticks` bounds the operator-visible window the pair
+/// serves instead of restarting the countdown.
+#[test]
+fn a_carried_shelve_write_serves_the_bounds_remainder_past_the_handover() {
+    let model = model();
+    let driver_a = sim_driver(&model).unwrap();
+    let mut active = build_executor(&model, &driver_a);
+    let driver_b = sim_driver(&model).unwrap();
+    let mut standby = build_executor(&model, &driver_b);
+
+    // Both at tick 1; the shelve write admits on the active for tick 2,
+    // and the pre-apply checkpoint is what the handover later carries.
+    active.scan();
+    standby.scan();
+    let receipt = active.submit_command(write_value(FAULT_SHELVE, Value::Bool(true)));
+    let CommandOutcome::Accepted { apply_tick } = receipt.outcome else {
+        panic!("the shelve write must be accepted: {receipt:?}")
+    };
+    let carried = active.checkpoint();
+    assert_eq!(carried.tick, dcs_core::Tick(1));
+    assert_eq!(apply_tick, dcs_core::Tick(2));
+
+    // The line applies the write and counts its three bound scans —
+    // ticks 2, 3, 4 — while the standby, its pull withheld, quiesces
+    // past the capture it is about to be handed.
+    active.scan();
+    active.scan();
+    active.scan();
+    assert!(flag(&active, FAULT_SHELVED), "the bound's last scan");
+    active.scan();
+    assert!(!flag(&active, FAULT_SHELVED), "bound 3 expired on the line");
+
+    for _ in 0..2 {
+        standby.scan_quiesced();
+    }
+    assert_eq!(standby.tick(), dcs_core::Tick(3));
+    standby.carry_pending_commands(&carried);
+
+    // The promoted run's first field-owning scan replays the carried
+    // write — stamped with the schedule the line admitted, not the
+    // replay tick — so the restored `shelve_elapsed` of 0 seeds at the
+    // request's line age: the standby serves the bound's last scan,
+    // then expires, and the pair's window stays 2..=4.
+    standby.scan();
+    assert_eq!(standby.tick(), dcs_core::Tick(4));
+    assert_eq!(
+        standby.sample(FAULT_SHELVE).map(|sample| sample.tick),
+        Some(apply_tick),
+        "the carried write keeps the line's schedule as its stamp"
+    );
+    assert!(flag(&standby, FAULT_SHELVED), "the bound's remainder");
+    standby.scan();
+    assert!(
+        !flag(&standby, FAULT_SHELVED),
+        "the replayed write cannot restart the bound"
+    );
+}
+
 #[test]
 fn identical_scripted_runs_produce_identical_snapshots() {
     let run = || {
