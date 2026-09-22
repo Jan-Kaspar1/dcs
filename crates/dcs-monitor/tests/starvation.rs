@@ -216,22 +216,10 @@ impl Rig {
     /// large response the reproduction pinned every serving worker
     /// with.
     fn deep_history() -> Self {
-        let mut points: Vec<(PointId, Value)> = vec![
-            (PointId(10), Value::Float(0.0)),
-            (PointId(20), Value::Float(0.0)),
-            (PointId(30), Value::Float(0.0)),
-        ];
-        points.extend((0..HISTORY_POINTS).map(|index| (PointId(1000 + index), Value::Float(0.0))));
-        let driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&points)));
-        let mut map = point_map();
-        for index in 0..HISTORY_POINTS {
-            map = map.with_point(PointId(1000 + index), Direction::In, ValueKind::Float);
-        }
-        let executor = Executor::new(driver, map, vec![Box::new(Scale)]).unwrap();
-        let rig = Self::start(
+        Self::deep_history_rig(
             Monitor::bind_with(
                 "127.0.0.1:0",
-                executor,
+                deep_history_executor(),
                 signal_index(),
                 MonitorConfig {
                     history_capacity: HISTORY_SCANS as usize,
@@ -239,12 +227,55 @@ impl Rig {
                 },
             )
             .unwrap(),
-        );
+        )
+    }
+
+    /// As [`deep_history`](Self::deep_history) on a field-owning peer —
+    /// the wedge sitting on the very monitor an operator's switchover
+    /// request targets.
+    fn deep_history_active() -> Self {
+        Self::deep_history_rig(
+            Monitor::bind_peer_with(
+                "127.0.0.1:0",
+                Peer::active(deep_history_executor(), None),
+                signal_index(),
+                MonitorConfig {
+                    history_capacity: HISTORY_SCANS as usize,
+                    ..MonitorConfig::default()
+                },
+            )
+            .unwrap(),
+        )
+    }
+
+    /// Serves `monitor` and runs `HISTORY_SCANS` paced scans against
+    /// it, so its `/history?since=0` answers ~20MB — the undrained
+    /// large response the reproduction pinned every serving worker
+    /// with.
+    fn deep_history_rig(monitor: Monitor<'static>) -> Self {
+        let rig = Self::start(monitor);
         for _ in 0..HISTORY_SCANS {
             rig.monitor.paced_scan();
         }
         rig
     }
+}
+
+/// The deep-history fixture's executor: `HISTORY_POINTS` extra field
+/// inputs beside the model's three, each sampled once a scan.
+fn deep_history_executor() -> Executor<'static> {
+    let mut points: Vec<(PointId, Value)> = vec![
+        (PointId(10), Value::Float(0.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ];
+    points.extend((0..HISTORY_POINTS).map(|index| (PointId(1000 + index), Value::Float(0.0))));
+    let driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&points)));
+    let mut map = point_map();
+    for index in 0..HISTORY_POINTS {
+        map = map.with_point(PointId(1000 + index), Direction::In, ValueKind::Float);
+    }
+    Executor::new(driver, map, vec![Box::new(Scale)]).unwrap()
 }
 
 impl Drop for Rig {
@@ -607,6 +638,126 @@ fn undrained_responses_never_starve_the_pair_liveness_reads() {
 
     streams.clear();
     assert_recovery(rig.addr);
+}
+
+/// The finding's actuation half: the same four undrained answers that
+/// pin the serving lane once held the switchover endpoints on it —
+/// `POST /promote` and `POST /demote` queued behind the pinned workers
+/// and an operator's role change waited out the wedge, silently. The
+/// control lane keeps them answering through it: the refusals below
+/// are the reproduction's own baseline answers — a lone field owner
+/// demotes to `no_tracking_source` and promotes to `already_active` —
+/// served inside the bound the wedge blew through.
+#[test]
+fn undrained_responses_never_starve_role_actuation() {
+    let rig = Rig::deep_history();
+    let mut streams = starve_on_undrained_history(rig.addr);
+    thread::sleep(Duration::from_millis(250));
+
+    let client = MonitorClient::with_timeout(rig.addr, ANSWER_BOUND);
+    for (path, refusal) in [
+        ("/demote", "no_tracking_source"),
+        ("/promote", "already_active"),
+    ] {
+        let (status, body) = client.request("POST", path, None).unwrap_or_else(|error| {
+            panic!("POST {path} starved behind undrained responses: {error}")
+        });
+        assert_eq!(status, 409, "POST {path} answered {status}: {body}");
+        assert!(
+            body.contains(refusal),
+            "POST {path} refused with an unexpected body: {body}"
+        );
+    }
+
+    // The pin is real: a serving-lane read still starves behind the
+    // undrained writes, so the actuation answers above rode the split.
+    assert!(
+        MonitorClient::with_timeout(rig.addr, Duration::from_millis(750))
+            .snapshot()
+            .is_err(),
+        "GET /snapshot answered — the serving lane was never pinned"
+    );
+
+    streams.clear();
+    assert_recovery(rig.addr);
+}
+
+/// The finding end to end: the wedge sits on the very monitor the
+/// operator switches over — the active's. Its standby keeps pulling
+/// checkpoints through the heartbeat lane, the demote's hint
+/// verification makes the same pull, and both role changes execute
+/// inside the bound the serving lane could not meet.
+#[test]
+fn a_wedged_active_still_demotes_and_its_standby_promotes() {
+    let active = Rig::deep_history_active();
+    let standby = Rig::peer(
+        standby_peer(3),
+        Some(Driven {
+            track: Some(active.addr),
+            after_scan: None,
+        }),
+    );
+    for _ in 0..3 {
+        active.monitor.paced_scan();
+    }
+    // Converged and announced: the standby's tracking pull both
+    // converges it and records its monitor address on the active —
+    // the demotion's announced tracking source.
+    standby.client.advance(1).unwrap();
+    match standby.client.role().unwrap() {
+        report
+            if report.role == Role::Standby
+                && matches!(report.sync, Some(StandbySync::Tracking { .. })) => {}
+        report => panic!("the standby never converged: {report:?}"),
+    }
+
+    // The reproduction's wedge, on the active's own monitor.
+    let mut streams = starve_on_undrained_history(active.addr);
+    thread::sleep(Duration::from_millis(250));
+
+    // The operator's demote executes through it: the hint
+    // verification's checkpoint pull against the standby is answered
+    // on its own lane, the gate closes at the request's boundary, and
+    // the report returns inside the bound — where on the serving lane
+    // the request queued behind dead readers indefinitely.
+    let active_client = MonitorClient::with_timeout(active.addr, ANSWER_BOUND);
+    let report = active_client
+        .demote()
+        .expect("POST /demote starved behind undrained responses");
+    assert_eq!(report.role, Role::Demoting);
+    // The standby's promote completes the switchover: its final-sync
+    // pull against the wedged active rides the heartbeat lane the
+    // same wedge cannot reach.
+    let report = MonitorClient::with_timeout(standby.addr, ANSWER_BOUND)
+        .promote()
+        .expect("POST /promote starved behind undrained responses");
+    assert_eq!(report.role, Role::Promoting);
+
+    // The pin is real: a bulk read on the active's monitor still
+    // starves behind the undrained writes, so the role changes above
+    // rode the control lane.
+    assert!(
+        MonitorClient::with_timeout(active.addr, Duration::from_millis(750))
+            .snapshot()
+            .is_err(),
+        "GET /snapshot answered — the serving lane was never pinned"
+    );
+
+    streams.clear();
+
+    // The switchover settles: the promoted peer's next scan reports
+    // settled active, and the demoted peer tracks its successor — the
+    // adopted source the demotion pinned — reconverging on its next
+    // driven scan.
+    standby.client.advance(1).unwrap();
+    assert_eq!(standby.client.role().unwrap().role, Role::Active);
+    active_client.advance(1).unwrap();
+    let report = active_client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted peer never reconverged on its successor: {report:?}"
+    );
 }
 
 /// The flood half of the finding: while the serving workers sit pinned
