@@ -2,7 +2,7 @@
 //!
 //! [`Monitor`] exposes a [`dcs_runtime::Executor`] over `tiny_http` — a
 //! small synchronous HTTP server, so no async runtime is involved.
-//! Requests dispatch across four worker lanes: a command lane for
+//! Requests dispatch across five worker lanes: a command lane for
 //! `POST /command` — one worker draining a queue deep enough to hold
 //! the pipelined wave the bounded-ingress contract must answer, so
 //! every submission takes its receipted settlement or the named
@@ -11,19 +11,26 @@
 //! `POST /scan`, plus any request still carrying a body the client
 //! owes (dropping its live reader drains the remainder, the same
 //! unbounded wait) — a heartbeat lane for the pair-liveness reads,
-//! `GET /checkpoint` and `GET /role`, and a serving lane for
-//! everything else. A client that stalls mid-body pins at most the
-//! command worker or the small submission pool, so request-body
-//! traffic can never impersonate a dead active. The serving lane still holds one
-//! client-paced wait the body quarantine cannot reach: the response
-//! write itself — tiny_http exposes no socket timeout, so a client
-//! that never reads a large response pins its worker in `respond`
-//! for as long as the connection stays open, and enough wedged
-//! connections would pin every serving worker. The heartbeat lane is
-//! the quarantine for that wait: the standby's checkpoint pulls and
-//! the pair view's role reads answer from it even while every serving
-//! worker sits blocked mid-body to a dead consumer, so a wedged
-//! read-side connection can never impersonate a dead active either.
+//! `GET /checkpoint` and `GET /role`, a control lane for the bodiless
+//! switchover POSTs, `POST /promote` and `POST /demote`, and a
+//! serving lane for everything else. A client that stalls mid-body
+//! pins at most the command worker or the small submission pool, so
+//! request-body traffic can never impersonate a dead active. The
+//! serving lane still holds one client-paced wait the body quarantine
+//! cannot reach: the response write itself — tiny_http exposes no
+//! socket timeout, so a client that never reads a large response pins
+//! its worker in `respond` for as long as the connection stays open,
+//! and enough wedged connections pin every serving worker. The
+//! heartbeat lane is the liveness half of the quarantine for that
+//! wait: the standby's checkpoint pulls and the pair view's role
+//! reads answer from it even while every serving worker sits blocked
+//! mid-write to a dead consumer, so a wedged read-side connection can
+//! never impersonate a dead active either. The control lane is the
+//! actuation half: the switchover endpoints answer from their own
+//! small pool, so an operator's promote or demote during an incident —
+//! exactly when consoles wedge — never queues silently behind four
+//! dead connections, the starvation the serving lane's bulk reads
+//! remain exposed to by design.
 //! Within a lane a request whose handling legitimately waits on the
 //! network — a driven `POST /scan` batch's per-scan checkpoint pull, a
 //! promotion's final-sync fetch — stalls only its own worker instead
@@ -518,20 +525,19 @@ const MAX_ANNOUNCED_AHEAD: u64 = 32;
 
 /// The worker count [`Monitor::serve`] dispatches the serving lane
 /// across — every request that cannot hold a worker on a client-paced
-/// wait and is not a pair-liveness read: the bulk GETs, the
-/// `POST /promote`/`POST /demote` role changes, and the `404`s.
-/// tiny_http queues accepted requests internally; a dispatcher routes
-/// each onto this lane's own queue, and each worker handles one end to
-/// end. The pool exists so a request whose work legitimately waits on
-/// the network — a promotion's final-sync fetch — stalls only its own
-/// worker while every other endpoint keeps answering; control-plane
-/// mutations still serialize on the shared lock, the pool only
-/// choosing which request waits on it next. The response write is the
-/// one client-paced wait left on this lane: a consumer that never
-/// reads a large answer pins its worker in `respond` until the
-/// connection dies — tiny_http exposes no socket timeout to bound it —
-/// so wedged readers can still starve the bulk reads, exactly the
-/// residual the heartbeat lane quarantines the pair's liveness from.
+/// wait and is neither a pair-liveness read nor a switchover action:
+/// the bulk GETs and the `404`s. tiny_http queues accepted requests
+/// internally; a dispatcher routes each onto this lane's own queue,
+/// and each worker handles one end to end. The pool exists so a
+/// request whose work legitimately takes a moment — a large read's
+/// serialization — stalls only its own worker while every other
+/// endpoint keeps answering. The response write is the one
+/// client-paced wait left on this lane: a consumer that never reads a
+/// large answer pins its worker in `respond` until the connection
+/// dies — tiny_http exposes no socket timeout to bound it — so wedged
+/// readers can still starve the bulk reads, exactly the residual the
+/// heartbeat lane quarantines the pair's liveness from and the
+/// control lane quarantines its actuation from.
 const SERVE_WORKERS: usize = 4;
 
 /// The worker count serving the heartbeat lane — `GET /checkpoint` and
@@ -547,6 +553,29 @@ const SERVE_WORKERS: usize = 4;
 /// spend both, which is why the lane's queue is bounded and its
 /// overflow is refused rather than queued without limit.
 const HEARTBEAT_WORKERS: usize = 2;
+
+/// The worker count serving the control lane — `POST /promote` and
+/// `POST /demote`, the switchover actuation a redundant pair's
+/// failover concludes with. They are control-plane mutations, not
+/// bulk reads, so they cannot ride the serving lane the
+/// undrained-response residual still starves: four dead connections
+/// holding large answers would pin every serving worker and an
+/// operator's promote or demote — issued during an incident, exactly
+/// when consoles wedge — would queue behind them indefinitely. They
+/// cannot ride the heartbeat lane either: `switchover` carries a
+/// bounded network wait the liveness contract excludes — a
+/// promotion's final-sync fetch and a demotion's hint verification,
+/// each under [`CHECKPOINT_PULL_TIMEOUT`] — and unauthenticated
+/// control POSTs beside the heartbeat reads would be a new way to
+/// spend the lane the pair measures life by. A lane of their own
+/// keeps both halves of failover — detection and actuation —
+/// answerable through the wedge. Two workers, the heartbeat lane's
+/// sizing: the role changes still serialize on the shared lock, and
+/// the only client-paced wait here is the response write — a small
+/// answer, so a write blocks only for a client that left earlier
+/// pipelined responses unread past its buffers, which one spare
+/// worker absorbs.
+const CONTROL_WORKERS: usize = 2;
 
 /// The worker count serving the submission lane — `POST /scan`, the
 /// one remaining handler that reads a request body once `POST
@@ -907,7 +936,7 @@ impl<'d> Monitor<'d> {
     ///
     /// Blocking: run this on a dedicated thread. One dispatcher drains
     /// tiny_http's internal queue and routes each request onto one of
-    /// four lanes. [`command_request`] wins first — `POST /command`
+    /// five lanes. [`command_request`] wins first — `POST /command`
     /// takes the dedicated command lane, the receipted-ingress path
     /// the bounded-admission contract owns: every submission must
     /// answer with a settlement or the named `queue_full` rejection,
@@ -920,10 +949,12 @@ impl<'d> Monitor<'d> {
     /// client owes, whose dropped reader drains the rest the same
     /// way) go to the submission lane's [`SUBMIT_WORKERS`] workers,
     /// whatever their path: a stalled-body `GET /checkpoint` must not
-    /// pin a heartbeat worker either. Bodiless pair-liveness reads —
-    /// `GET /checkpoint`, `GET /role` — go to the heartbeat lane's
-    /// [`HEARTBEAT_WORKERS`] workers; everything else to the serving
-    /// lane's [`SERVE_WORKERS`].
+    /// pin a heartbeat worker either, nor a bodied `POST /promote` a
+    /// control one. Bodiless pair-liveness reads — `GET /checkpoint`,
+    /// `GET /role` — go to the heartbeat lane's [`HEARTBEAT_WORKERS`]
+    /// workers, and the bodiless switchover POSTs — `POST /promote`,
+    /// `POST /demote` — to the control lane's [`CONTROL_WORKERS`];
+    /// everything else goes to the serving lane's [`SERVE_WORKERS`].
     ///
     /// The split exists because serving holds two waits no handler can
     /// bound: the body read and the response write — tiny_http exposes
@@ -934,7 +965,11 @@ impl<'d> Monitor<'d> {
     /// pair-liveness reads keeps the standby heartbeat and the role
     /// surface answering through an undrained-response flood — a
     /// wedged reader can starve the bulk GETs but can never
-    /// impersonate a dead active. Every lane's queue is bounded — the
+    /// impersonate a dead active. The control lane closes the same
+    /// gap on the actuation side: a role change queued behind serving
+    /// workers pinned by dead readers would wait out the wedge
+    /// silently, so the switchover endpoints answer from a pool the
+    /// bulk reads can never reach. Every lane's queue is bounded — the
     /// command lane by its [`command_lane_depth`] wave, the rest by
     /// [`LANE_QUEUE_DEPTH`]; a non-command overflow is refused `503`
     /// by the refuse worker rather than queueing without limit, while
@@ -958,6 +993,7 @@ impl<'d> Monitor<'d> {
         let submissions = Lane::new();
         let commands = Lane::with_depth(command_depth);
         let heartbeat = Lane::new();
+        let control = Lane::new();
         let served = Lane::new();
         let refused = Lane::new();
         std::thread::scope(|scope| {
@@ -969,6 +1005,8 @@ impl<'d> Monitor<'d> {
                         &submissions
                     } else if pair_liveness(&request) {
                         &heartbeat
+                    } else if role_change(&request) {
+                        &control
                     } else {
                         &served
                     };
@@ -993,6 +1031,7 @@ impl<'d> Monitor<'d> {
                 submissions.close();
                 commands.close();
                 heartbeat.close();
+                control.close();
                 served.close();
                 refused.close();
             });
@@ -1006,6 +1045,14 @@ impl<'d> Monitor<'d> {
             }
             for _ in 0..HEARTBEAT_WORKERS {
                 let lane = &heartbeat;
+                scope.spawn(move || {
+                    while let Some(request) = lane.pop() {
+                        self.handle(request);
+                    }
+                });
+            }
+            for _ in 0..CONTROL_WORKERS {
+                let lane = &control;
                 scope.spawn(move || {
                     while let Some(request) = lane.pop() {
                         self.handle(request);
@@ -1728,7 +1775,7 @@ fn command_request(request: &Request) -> bool {
 /// Everything else — plain GETs and the bounded control-plane POSTs,
 /// including a `GET /role` whose client never promised a body — is
 /// answered without ever waiting on the client and belongs on the
-/// heartbeat or serving lane.
+/// heartbeat, control, or serving lane.
 fn submission(request: &Request) -> bool {
     let reads_body = request.method() == &Method::Post
         && matches!(
@@ -1756,6 +1803,24 @@ fn pair_liveness(request: &Request) -> bool {
         && matches!(
             request.url().split('?').next(),
             Some("/checkpoint") | Some("/role")
+        )
+}
+
+/// Whether the request is a switchover action — `POST /promote` or
+/// `POST /demote` — [`Monitor::serve`]'s routing step after
+/// [`pair_liveness`]. Role changes are the pair's control-plane
+/// actuation, not bulk reads: they take the dedicated control lane so
+/// an operator's promote or demote — issued during an incident,
+/// exactly when consoles wedge — never queues behind serving workers
+/// pinned by undrained responses. Only bodiless ones reach this
+/// routing: a switchover request still owing the client body bytes
+/// already went to the submission lane, where its drain quarantine
+/// belongs. The query string is ignored.
+fn role_change(request: &Request) -> bool {
+    request.method() == &Method::Post
+        && matches!(
+            request.url().split('?').next(),
+            Some("/promote") | Some("/demote")
         )
 }
 
