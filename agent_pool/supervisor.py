@@ -1017,9 +1017,14 @@ Repair context: {repair}
                 continue
             labels = [l['name'] for l in issue.get('labels', [])]
             want = f"priority:P{meta.get('priority', 3)}"
-            wanted_area = areas.label(meta['area']) if meta.get('area') else None
+            # Older managed issues may have their area only as a GitHub
+            # label. Preserve and honor that classification until their
+            # metadata is migrated; future proposals store both.
+            area = meta.get('area') or areas.issue_area(issue)
+            wanted_area = areas.label(area) if area else None
             wrong = [l for l in labels if l.startswith('priority:P') and l != want]
-            wrong_areas = [l for l in labels if l.startswith('area:') and l != wanted_area]
+            wrong_areas = [l for l in labels if wanted_area and
+                           l.startswith('area:') and l != wanted_area]
             add = []
             if want not in labels and 'agent:ready' in labels:
                 add.append(want)
@@ -1060,7 +1065,10 @@ Repair context: {repair}
         def rank(issue):
             try:
                 meta = planning.metadata(issue.get('body', ''))
-                return meta.get('priority', 3), allocation.score(meta['area']), issue['number']
+                area = meta.get('area') or areas.issue_area(issue)
+                return (meta.get('priority', 3),
+                        allocation.score(area) if area else float('inf'),
+                        issue['number'])
             except (ValueError, KeyError):
                 return 4, float('inf'), issue['number']
         candidates = list(issues)
@@ -1072,7 +1080,8 @@ Repair context: {repair}
             if 'agent:ready' not in [l['name'] for l in issue.get('labels', [])]:
                 continue
             meta = planning.metadata(issue['body'])
-            if not meta.get('area'):
+            area = meta.get('area') or areas.issue_area(issue)
+            if not area:
                 continue
             if not set(meta['dependencies']) <= closed:
                 continue
@@ -1096,7 +1105,7 @@ Repair context: {repair}
                 continue
             if improvement and not active_improvement:
                 self.state.set('review:active_improvement', improvement)
-            allocation.note(meta['area'])
+            allocation.note(area)
             self.state.set('area_allocation', allocation.summary())
             try:
                 self.launch(job, issue)
