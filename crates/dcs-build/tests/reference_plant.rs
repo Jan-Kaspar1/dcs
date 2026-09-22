@@ -67,7 +67,11 @@
 //! peer's served `diverged` report naming the perturbed output, its
 //! promote refused `not_converged` with no field hand-off, the
 //! active's writes/receipts/journal undisturbed, and a write-free
-//! control window reconverging and promoting normally — the `consumers`
+//! control window reconverging and promoting normally — plus the pair
+//! contract's emit-identical leg: with the standby tracking, the
+//! sequencer's counted `step_completed` emissions must serve
+//! identical routed event records through both peers'
+//! `GET /resources` views — the `consumers`
 //! stage, which replays that driven run under each consumer schedule
 //! (no UI, polling, a stalled reader, churn, malformed/flooded
 //! traffic, a UI
@@ -182,13 +186,8 @@
 //! `divergence-missed`/`divergence-nondeterministic`,
 //! `report-failed`/`report-nondeterministic`,
 //! `managed-lifecycle-failed`/`managed-lifecycle-nondeterministic`,
-//! `carry-failed`/`carry-nondeterministic`,
-//! `staging-failed`/`staging-nondeterministic`,
-//! `oos-failed`/`oos-nondeterministic`,
-//! `power-trip-failed`/`power-trip-nondeterministic`,
-//! `alarm-rationalization-failed`/`alarm-rationalization-nondeterministic`,
-//! `claim-fencing-failed`/`claim-fencing-nondeterministic`,
-//! and the `surface-mismatch` paths
+//! `event-parity-failed`/`event-parity-nondeterministic`, and
+//! the `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
 
@@ -798,192 +797,29 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
             "the managed-lifecycle leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
-    // The pair contract's managed run-state carryover leg ran and
-    // held: the managed alarm kinds' checkpointed run state carried
-    // across the promotion — the mid-shelve countdown releasing at
-    // its continued expiry rather than a restarted bound, the wired
-    // out-of-service standing with evaluation held — its digest line
-    // reports the evidence, and each doctored expectation reported
-    // its named diagnostic.
-    let carry_line = stdout
+    // The pair contract's emit-identical event-parity leg ran and
+    // held: the counted step_completed set served identical routed
+    // event records through both peers' GET /resources views while
+    // the standby reported tracking — its digest line reports the
+    // evidence — and each doctored case reported its named
+    // diagnostic.
+    let parity_line = stdout
         .lines()
-        .find(|line| line.contains("carry-digest"))
-        .unwrap_or_else(|| panic!("the managed-carryover leg reported no digest:\n{stdout}"));
+        .find(|line| line.contains("event-parity-digest"))
+        .unwrap_or_else(|| panic!("the event-parity leg reported no digest:\n{stdout}"));
     for phrase in [
-        "shelved at tick",
-        "switched at tick",
-        "released at tick",
-        "declared bound",
-        "out-of-service held",
-        "roles restored at tick",
-        "journal entries",
+        "counted step_completed records identical on both peers",
+        "the standby tracking",
     ] {
         assert!(
-            carry_line.contains(phrase),
-            "the managed-carryover digest names no '{phrase}' evidence: {carry_line}"
+            parity_line.contains(phrase),
+            "the event-parity digest names no '{phrase}' evidence: {parity_line}"
         );
     }
-    for tamper in ["restarted-bound", "dropped-oos"] {
+    for tamper in ["dropped-event-record", "reattributed-event-record"] {
         assert!(
-            stdout.contains(&format!("{tamper}: reported, carry-failed")),
-            "the managed-carryover leg's {tamper} case did not report its named diagnostic:\n{stdout}"
-        );
-    }
-    // The pair contract's staging leg ran and held: the out-of-service
-    // holds let the declared inflow raise the level unopposed through
-    // the emitted threshold chain's declared crossings — the demand
-    // staging 0→1→2, the high crossing annunciating the managed
-    // high-level alarm with journaled evidence — the releases staging
-    // the group inside the declared start delay, and the staged pumps
-    // drawing the level down through the declared de-stage order — its
-    // digest line reports the evidence, and each doctored expectation
-    // reported its named diagnostic.
-    let staging_line = stdout
-        .lines()
-        .find(|line| line.contains("staging-digest"))
-        .unwrap_or_else(|| panic!("the staging leg reported no digest:\n{stdout}"));
-    for phrase in [
-        "demand 1 at tick",
-        "2 at tick",
-        "high annunciated at tick",
-        "staged at tick",
-        "pumped down by tick",
-    ] {
-        assert!(
-            staging_line.contains(phrase),
-            "the staging digest names no '{phrase}' evidence: {staging_line}"
-        );
-    }
-    for tamper in ["wrong-demand", "immediate-lag"] {
-        assert!(
-            stdout.contains(&format!("{tamper}: reported, staging-failed")),
-            "the staging leg's {tamper} case did not report its named diagnostic:\n{stdout}"
-        );
-    }
-    // The pair contract's per-pump out-of-service leg ran and held:
-    // the receipted `oos` write on the duty pump dropped its
-    // availability and handed `duty` to the sibling inside the
-    // declared wiring bound, the managed alarms reported the states
-    // their declared lifecycle bindings select with `alarm` still
-    // reporting process truth mid-OOS, and the false write returned
-    // the pump to availability and the duty rotation — its digest
-    // line reports the evidence, and each doctored expectation
-    // reported its named diagnostic.
-    let oos_line = stdout
-        .lines()
-        .find(|line| line.contains("oos-digest"))
-        .unwrap_or_else(|| panic!("the out-of-service leg reported no digest:\n{stdout}"));
-    for phrase in [
-        "duty handed to the sibling at tick",
-        "managed states at tick",
-        "served at tick",
-        "returned at tick",
-        "acknowledged at tick",
-        "rejoined at tick",
-        "roles unmoved through tick",
-        "journal entries",
-    ] {
-        assert!(
-            oos_line.contains(phrase),
-            "the out-of-service digest names no '{phrase}' evidence: {oos_line}"
-        );
-    }
-    for tamper in ["keeps-duty", "managed-silent"] {
-        assert!(
-            stdout.contains(&format!("{tamper}: reported, oos-failed")),
-            "the out-of-service leg's {tamper} case did not report its named diagnostic:\n{stdout}"
-        );
-    }
-    // The pair contract's power-fail interlock leg ran and held: the
-    // driven `power-fail` contact dropped `power-ok` and both pumps'
-    // availability, the motor commands released while the chain's
-    // demand still stood, `none-available` and the managed `power-fail`
-    // alarm annunciated with journaled evidence, the receipted
-    // `power-fail-ack` cleared the latch mid-condition, and the
-    // released contact re-staged the standing demand inside the
-    // declared bounds — its digest line reports the evidence, and each
-    // doctored expectation reported its named diagnostic.
-    let power_trip_line = stdout
-        .lines()
-        .find(|line| line.contains("power-trip-digest"))
-        .unwrap_or_else(|| panic!("the power-fail interlock leg reported no digest:\n{stdout}"));
-    for phrase in [
-        "tracking by tick",
-        "full demand at tick",
-        "tripped at tick",
-        "acknowledged at tick",
-        "permissives returned at tick",
-        "re-staged by tick",
-        "run continued to tick",
-    ] {
-        assert!(
-            power_trip_line.contains(phrase),
-            "the power-trip digest names no '{phrase}' evidence: {power_trip_line}"
-        );
-    }
-    for tamper in ["commands-standing", "availability-holds"] {
-        assert!(
-            stdout.contains(&format!("{tamper}: reported, power-trip-failed")),
-            "the power-fail interlock leg's {tamper} case did not report its named diagnostic:\n{stdout}"
-        );
-    }
-    // The pair contract's alarm-rationalization leg ran and held: the
-    // emitted model's managed alarm instances' declared record served
-    // verbatim on both peers — the signal index's components section
-    // and the snapshot's parameters section — before and after the
-    // documented switch, and the pair's launch roles restored — its
-    // digest line reports the evidence, and each doctored served
-    // record reported its named diagnostic.
-    let rationalization_line = stdout
-        .lines()
-        .find(|line| line.contains("alarm-rationalization-digest"))
-        .unwrap_or_else(|| panic!("the alarm-rationalization leg reported no digest:\n{stdout}"));
-    for phrase in [
-        "managed alarm instances served verbatim on both peers",
-        "tracking by tick",
-        "switched at tick",
-        "unchanged across the switch",
-        "roles restored at tick",
-    ] {
-        assert!(
-            rationalization_line.contains(phrase),
-            "the alarm-rationalization digest names no '{phrase}' evidence: {rationalization_line}"
-        );
-    }
-    for tamper in ["dropped-record", "rewritten-field"] {
-        assert!(
-            stdout.contains(&format!("{tamper}: reported, alarm-rationalization-failed")),
-            "the alarm-rationalization leg's {tamper} case did not report its named diagnostic:\n{stdout}"
-        );
-    }
-    // The pair contract's claim-fencing leg ran and held: the
-    // dedicated third sim-net attachment's write and step probes
-    // fenced under the standing claim — the same mutations through
-    // the shipped dcs-plant-ctl exiting nonzero — while the field
-    // owner's writes kept landing, the lifecycle verbs answered per
-    // contract under foreign and owner tokens, the rogue claim's
-    // settled answer never passed silently, and the pair restored
-    // its launch roles — its digest line reports the evidence, and
-    // each doctored case reported its named diagnostic.
-    let fencing_line = stdout
-        .lines()
-        .find(|line| line.contains("claim-fencing-digest"))
-        .unwrap_or_else(|| panic!("the claim-fencing leg reported no digest:\n{stdout}"));
-    for phrase in [
-        "tracking by tick",
-        "claim surface",
-        "the rogue claim",
-        "run ended at tick",
-    ] {
-        assert!(
-            fencing_line.contains(phrase),
-            "the claim-fencing digest names no '{phrase}' evidence: {fencing_line}"
-        );
-    }
-    for tamper in ["write-through", "foreign-ensure-granted", "rogue-silent"] {
-        assert!(
-            stdout.contains(&format!("{tamper}: reported, claim-fencing-failed")),
-            "the claim-fencing leg's {tamper} case did not report its named diagnostic:\n{stdout}"
+            stdout.contains(&format!("{tamper}: reported, event-parity-failed")),
+            "the event-parity leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
     assert!(

@@ -479,151 +479,19 @@
 #                inputs restored; two passes produce identical digests
 #                (managed-lifecycle-failed,
 #                managed-lifecycle-nondeterministic)
-#                The stage's managed-carryover leg,
-#                ci/managed_carryover.py on the same declared
-#                deployment — the consumer-side proof that the managed
-#                alarm kinds' checkpointed run state carries across a
-#                takeover on the customer-owned pair (WW-ENG-003,
-#                WW-ALM-002, WW-LCM-001): with the pair tracking, a
-#                per-pump fault alarm put out of service through its
-#                wired oos point and tripped suppressed so its alarm
-#                reports process truth with the latch withheld, and
-#                the shelvable low-level alarm shelved mid-run through
-#                its writable journaled shelve point, the documented
-#                demote/promote landing inside the declared
-#                max_shelve_ticks bound — the promoted peer asserting
-#                shelved still stands and releases at the tick the
-#                continued countdown expires, never a bound restarted
-#                at the switch, out_of_service and suppressed standing
-#                with evaluation held, every written point carried,
-#                and both durable journals' ordered records continuous
-#                across the switch — then every driven input and the
-#                pair's roles restored; two passes produce identical
-#                digests (carry-failed, carry-nondeterministic)
-#                The stage's staging leg, ci/staging.py on the same
-#                declared deployment — the consumer-side proof that
-#                the deployed pair stages and de-stages on level
-#                through the emitted model's declared setpoint chain
-#                (WW-ENG-003, WW-CTL-001, WW-CTL-002): both pumps held
-#                out of service through receipted write_value on their
-#                declared writable oos points so the declared inflow
-#                raises the wet-well level unopposed, the active's
-#                monitor asserting demand moves 0→1→2 only at the
-#                chain's own declared start/lag_start crossings with
-#                duty_call/lag_call reporting and the group's staged
-#                count and motor commands held at zero, the high
-#                crossing annunciating the managed high-level alarm
-#                with the journaled evidence; the releases restoring
-#                the driven inputs so the standing demand stages the
-#                group — the duty pump first, the lag inside the
-#                declared start_delay_ticks, each pump's cmd/run field
-#                outputs proving the delivered start — then the staged
-#                pumps drawing the level down through the declared
-#                de-stage order, the lag's run releasing before the
-#                duty's and the journaled transitions landing in the
-#                same order down to the below-cutoff floor; the
-#                receipted ack clearing the alarm's latch, every
-#                driven input restored, the pair's roles unchanged,
-#                and the durable journal audited for the ordered
-#                record the served journal answers identically; two
-#                passes produce identical digests
-#                (staging-failed, staging-nondeterministic)
-#                The stage's out-of-service leg, ci/oos.py on the
-#                same declared deployment — the consumer-side proof
-#                that a receipted maintenance inhibit on the duty
-#                pump's declared writable journaled oos point
-#                excludes it on the customer-owned pair (WW-ENG-003,
-#                WW-OPS-001, WW-ALM-002): with the pair tracking at
-#                an idle assigned-duty baseline — duty naming the
-#                pump whose oos the leg drives — the attributed
-#                write drops the in-service cone (oos-ok through
-#                oos-ok-avail-in and oos-ok-guard-in), the aggregated
-#                avail and its delivered copy, handing duty to the
-#                sibling inside the declared wiring bound with staged
-#                reporting the available count and the held pump's
-#                command released for the whole of the sibling's
-#                service; each managed per-pump alarm reports the
-#                out_of_service/suppressed states its declared
-#                lifecycle bindings select — the bound fault alarm,
-#                the unbound thermal/moisture kinds and the sibling's
-#                set untouched — while a mid-OOS run-contact fault
-#                still asserts alarm as process truth with the
-#                unacknowledged latch withheld; the false write
-#                returns the pump to availability and re-annunciates
-#                the outlasted trip on suppression's release, the
-#                receipted ack settles the latch, and the next
-#                completed cycle's declared rotation hands duty back;
-#                every managed transition journaled as ordered
-#                point_changed entries beside the attributed receipts
-#                with the tick-domain ordering the declared bound
-#                measures, and the pair's roles unmoved throughout;
-#                two passes produce identical digests (oos-failed,
-#                oos-nondeterministic)
-#                The stage's power-fail interlock leg,
-#                ci/power_trip.py on the same declared deployment:
-#                with the pair settled and the group holding a full
-#                duty demand, the station power-fail contact driven
-#                through the plant protocol drops `power-ok` and both
-#                pumps' availability aggregates — the motor commands
-#                releasing while the chain's `demand` still stands,
-#                `none-available` annunciating, and the managed
-#                `power-fail` alarm's `alarm`/`unacknowledged`
-#                asserting with journaled `point_changed` evidence;
-#                a receipted `power-fail-ack` clears the latch while
-#                the condition stands, and the released contact
-#                returns the permissives and re-stages the demand
-#                inside the declared `min_off_ticks`/`start_delay_ticks`
-#                bounds with the field outputs moving only on the
-#                driven scan sequence and the pair's roles unchanged;
-#                two passes produce identical digests
-#                (power-trip-failed, power-trip-nondeterministic)
-#                The stage's alarm-rationalization leg,
-#                ci/alarm_rationalization.py on the same declared
-#                deployment — the declared-once half of decision 70's
-#                contract at the consumer boundary (WW-ENG-003,
-#                WW-ALM-001): the emitted model's managed alarm
-#                instances' declared record asserted verbatim on both
-#                peers' served surfaces — GET /signals' components
-#                section carrying each instance's rationalization
-#                block, GET /snapshot's parameters section serving
-#                each alarm's declared priority/class/response_ticks
-#                live — then the documented demote/promote switch and
-#                the same audit again on the switched pair, the single
-#                declaration reaching the operator boundary unchanged
-#                on whichever peer serves; mismatches or a dropped
-#                record fail by instance name, the pair's launch roles
-#                restored; two passes produce identical digests
-#                (alarm-rationalization-failed,
-#                alarm-rationalization-nondeterministic)
-#                The stage's claim-fencing leg, ci/claim_fencing.py on
-#                the same declared deployment — the consumer-side
-#                mirror of the lane's standing field-claim scenario
-#                (WW-ENG-003, WW-OPS-003): with the pair settled and a
-#                field-owning peer holding the plant's writer claim —
-#                the launched active's startup claim where the release
-#                records its owner token, else the documented switch
-#                stands the promoted peer's claim up first — a
-#                dedicated third sim-net attachment's write and step
-#                answer the named fencing refusal — the same mutations
-#                driven through the shipped dcs-plant-ctl exiting
-#                nonzero on the refusal while its unfenced reads
-#                answer — and the field owner's own writes keep
-#                landing; the lifecycle verbs answer per contract
-#                where the release speaks them — a foreign token's
-#                ensure_writer refused fenced, the owner's token
-#                answering claimed_shared with a write landing under
-#                the shared hold, release_writer dropping only the
-#                caller's hold with the standing claim still fencing
-#                probes, and a holder-of-nothing's release a harmless
-#                done; and a rogue claim_writer resolving per the
-#                settled contract, never silently — a refusal leaving
-#                the claim and owner untouched, the unconditional
-#                preempt journaling field_claim_lost on the superseded
-#                owner and demoting it in place with its monitor
-#                serving, then the leg re-promoting the demoted owner
-#                so the pair's launch roles and the claim's owner
-#                stand unchanged; two passes produce identical digests
-#                (claim-fencing-failed, claim-fencing-nondeterministic)
+#                The stage's emit-identical event-parity leg,
+#                ci/event_parity.py on the same declared deployment:
+#                with the pair tracking, the emitted model's sequencer
+#                is driven through the field owner's receipted path —
+#                the `run` write refused `not_active` at the standby's
+#                role boundary — until the counted `step_completed`
+#                set stands, then both peers' `GET /resources` views
+#                must collect the same routed `event_emitted` records:
+#                identical component attribution, declared identities,
+#                ordered fields, tick, and retention, the stream-local
+#                seqs excluded, the standby still tracking; two passes
+#                produce identical digests (event-parity-failed,
+#                event-parity-nondeterministic)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -2185,122 +2053,21 @@ for tamper in expect-applied expect-standing; do
     echo "  $tamper: reported, managed-lifecycle-failed"
 done
 
-# The pair contract's managed run-state carryover leg, on the same
-# manifest-declared deployment: ci/managed_carryover.py converges the
-# pair, puts the per-pump fault alarm out of service through its wired
-# oos point and trips it suppressed, shelves the declared shelvable
-# alarm through its writable journaled shelve point mid-run, and lands
-# the documented demote/promote inside the declared max_shelve_ticks
-# bound — the promoted peer asserting shelved stands carried and
-# releases at the tick the continued countdown expires rather than a
-# bound restarted at the switch, out_of_service and suppressed
-# standing with evaluation held, and both durable journals' ordered
-# records continuous across the switch — then restores every driven
-# input and the pair's roles. Two passes must produce identical
-# digests.
-run_managed_carryover() {
-    python3 ci/managed_carryover.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_managed_carryover)" \
-    || fail "carry-failed: the managed run-state carryover leg did not hold — its evidence lines are above"
-SECOND="$(run_managed_carryover)" \
-    || fail "carry-failed: the managed run-state carryover leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "carry-nondeterministic: two managed-carryover passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a leg expecting the promoted peer to expire the
-# shelve a fresh bound after the switch — the countdown restarted —
-# and a leg expecting the promoted peer to have dropped the carried
-# out-of-service must each surface the named diagnostic rather than
-# passing silently.
-for tamper in restarted-bound dropped-oos; do
-    if out="$(run_managed_carryover --tamper "$tamper" 2>&1)"; then
-        fail "carry-unchecked: a $tamper case passed the managed-carryover leg"
-    fi
-    case "$tamper" in
-        restarted-bound) expected="expected the restarted bound's expiry" ;;
-        dropped-oos) expected="expected the dropped carry" ;;
-    esac
-    [[ "$out" == *"$expected"* ]] \
-        || fail "carry-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, carry-failed"
-done
-
-# The pair contract's staging leg, on the same manifest-declared
-# deployment: ci/staging.py holds both pumps out of service through
-# receipted writes on their declared oos points so the declared inflow
-# raises the wet-well level unopposed — the active's monitor asserting
-# the emitted threshold chain's demand moves 0→1→2 only at the
-# declared start/lag_start crossings with duty_call/lag_call
-# reporting, the high crossing annunciating the managed high-level
-# alarm with journaled evidence — then the releases restore the driven
-# inputs and the standing demand stages the group, the lag answering
-# inside the declared start_delay_ticks with each pump's cmd/run field
-# outputs proving the start, before the staged pumps draw the level
-# down through the declared de-stage order — the lag's run releasing
-# before the duty's — to the below-cutoff floor; the receipted ack
-# clears the alarm's latch, every driven input is restored, the pair's
-# roles are unchanged, and the durable journal is audited for the
-# ordered record. Two passes must produce identical digests.
-run_staging() {
-    python3 ci/staging.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_staging)" \
-    || fail "staging-failed: the staging leg did not hold — its evidence lines are above"
-SECOND="$(run_staging)" \
-    || fail "staging-failed: the staging leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "staging-nondeterministic: two staging passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a leg asserting the wrong demand at the
-# lag_start crossing and a leg asserting the lag start landed inside
-# a shortened delay bound must each surface the named diagnostic —
-# never a silently unexercised contract.
-for tamper in wrong-demand immediate-lag; do
-    if out="$(run_staging --tamper "$tamper" 2>&1)"; then
-        fail "staging-unchecked: a $tamper case passed the staging leg"
-    fi
-    case "$tamper" in
-        wrong-demand) expected="expected the demand at 1" ;;
-        immediate-lag) expected="outside the declared start_delay_ticks bound" ;;
-    esac
-    [[ "$out" == *"$expected"* ]] \
-        || fail "staging-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, staging-failed"
-done
-
-# The pair contract's out-of-service leg, on the same
-# manifest-declared deployment: ci/oos.py settles the pair at an idle
-# assigned-duty baseline, submits the attributed receipted write on the
-# duty pump's declared oos point, and asserts the exclusion — the
-# in-service cone and the aggregated availability dropping, duty
-# handing to the sibling inside the declared wiring bound, staged
-# reporting the available count, the held pump's command staying
-# released while the sibling serves the demand — then each managed
-# per-pump alarm reporting the states its declared lifecycle bindings
-# select, a mid-OOS run-contact fault asserting alarm as process truth
-# with the unacknowledged latch withheld, the false write returning the
-# pump to availability and re-annunciating the outlasted trip, the
-# receipted ack settling the latch, and the next cycle's rotation
-# handing duty back — every managed transition journaled beside the
-# attributed receipts and the pair's roles unmoved throughout. Two
+# The pair contract's emit-identical event-parity leg, on the same
+# manifest-declared deployment — decision 84's parity rule proven on
+# the consumer's deployed pair: ci/event_parity.py converges the
+# declared standby to tracking, drives the emitted model's sequencer
+# through the field owner's receipted path — the `run` write refused
+# `not_active` at the standby's role boundary — until the counted
+# `step_completed` set stands, then asserts both peers' GET /resources
+# views collect the same routed `event_emitted` records: identical
+# outer and inner component attribution, declared identities, ordered
+# fields, tick, and retention, the stream-local seqs excluded, while
+# the standby still reports tracking. A UI consumer failing its event
+# feed over between the peers must meet no gap in attribution. Two
 # passes must produce identical digests.
-run_oos() {
-    python3 ci/oos.py \
+run_event_parity() {
+    python3 ci/event_parity.py \
         --plant-server "$TOOLS/dcs-plant-server" \
         --controller "$TOOLS/dcs-controller" \
         --model model/plant.json \
@@ -2308,183 +2075,24 @@ run_oos() {
         --scenario ci/scenario.json \
         --manifest deploy/manifest.json "$@"
 }
-FIRST="$(run_oos)" \
-    || fail "oos-failed: the pump out-of-service leg did not hold — its evidence lines are above"
-SECOND="$(run_oos)" \
-    || fail "oos-failed: the pump out-of-service leg did not hold — its evidence lines are above"
+FIRST="$(run_event_parity)" \
+    || fail "event-parity-failed: the standby event-parity leg did not hold — its evidence lines are above"
+SECOND="$(run_event_parity)" \
+    || fail "event-parity-failed: the standby event-parity leg did not hold — its evidence lines are above"
 [ "$FIRST" = "$SECOND" ] \
-    || fail "oos-nondeterministic: two out-of-service passes produced different digests"
+    || fail "event-parity-nondeterministic: two event-parity passes produced different digests"
 echo "  $FIRST"
 
-# The doctored cases: a leg asserting the held-out pump keeps duty —
-# the honest handover to the sibling failing it — and a leg asserting
-# the managed alarms never report their declared states must each
-# surface the named diagnostic rather than passing silently.
-for tamper in keeps-duty managed-silent; do
-    if out="$(run_oos --tamper "$tamper" 2>&1)"; then
-        fail "oos-unchecked: a $tamper case passed the out-of-service leg"
+# The doctored cases: a standby whose served record set is missing an
+# emission or carries one re-attributed must surface the named
+# diagnostic — never a silently hollow or diverged parity pass.
+for tamper in dropped-event-record reattributed-event-record; do
+    if out="$(run_event_parity --tamper "$tamper" 2>&1)"; then
+        fail "event-parity-unchecked: the $tamper case passed the parity leg"
     fi
-    case "$tamper" in
-        keeps-duty) expected="expected the held-out pump to keep duty" ;;
-        managed-silent) expected="expected them never to report" ;;
-    esac
-    [[ "$out" == *"$expected"* ]] \
-        || fail "oos-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, oos-failed"
-done
-
-# The pair contract's power-fail interlock leg, on the same
-# manifest-declared deployment: ci/power_trip.py converges the pair
-# and drives the simulated well until the pump group holds a full
-# demand — both pumps staged and running — then drives the station
-# power-fail contact through the plant protocol's field write, the
-# emitted model's protection-layer wiring (power-fail → power-ok →
-# each pump's power-ok-in feeding avail_i) dropping every pump's
-# availability while the chain's demand still stands: the motor
-# commands release, none-available annunciates, and the managed
-# power-fail alarm's alarm/unacknowledged assert with journaled
-# point_changed evidence. A receipted power-fail-ack must clear the
-# latch while the condition still stands; the released contact then
-# returns power-ok and both availability legs and re-stages the
-# standing demand inside the declared min_off_ticks/start_delay_ticks
-# bounds — no motor command re-asserting inside its holdout, the
-# lag's start inside the declared delay, the field outputs moving
-# only on the driven scan sequence, and the pair's roles unchanged.
-# Two passes must produce identical digests.
-run_power_trip() {
-    python3 ci/power_trip.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_power_trip)" \
-    || fail "power-trip-failed: the power-fail interlock leg did not hold — its evidence lines are above"
-SECOND="$(run_power_trip)" \
-    || fail "power-trip-failed: the power-fail interlock leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "power-trip-nondeterministic: two power-trip passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a leg asserting the motor commands still stand
-# under the driven power-fail, and one asserting the pumps'
-# availability never dropped, must each surface the named diagnostic
-# — never a silently untripped interlock.
-for tamper in commands-standing availability-holds; do
-    if out="$(run_power_trip --tamper "$tamper" 2>&1)"; then
-        fail "power-trip-unchecked: a $tamper case passed the power-trip leg"
-    fi
-    case "$tamper" in
-        commands-standing) expected="expected the commands standing" ;;
-        availability-holds) expected="expected availability still reporting" ;;
-    esac
-    [[ "$out" == *"$expected"* ]] \
-        || fail "power-trip-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, power-trip-failed"
-done
-
-# The pair contract's alarm-rationalization leg, on the same
-# manifest-declared deployment — the declared-once half of decision
-# 70's contract at the consumer boundary: ci/alarm_rationalization.py
-# converges the pair and audits both peers' served surfaces against
-# the emitted model's managed-alarm record — GET /signals' components
-# section carrying each instance's declared rationalization block
-# verbatim, GET /snapshot's parameters section serving each alarm's
-# declared priority/class/response_ticks live — then issues the
-# documented demote/promote switch and re-audits both peers: the
-# single declared record reaching the operator boundary unchanged on
-# whichever peer serves. Two passes must produce identical digests.
-run_alarm_rationalization() {
-    python3 ci/alarm_rationalization.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_alarm_rationalization)" \
-    || fail "alarm-rationalization-failed: the alarm-rationalization leg did not hold — its evidence lines are above"
-SECOND="$(run_alarm_rationalization)" \
-    || fail "alarm-rationalization-failed: the alarm-rationalization leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "alarm-rationalization-nondeterministic: two alarm-rationalization passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a served record dropping a managed alarm's
-# component record and parameter report, and one rewriting a declared
-# field's served value, must each surface the named diagnostic by
-# instance name — never a silently unmatched pass.
-for tamper in dropped-record rewritten-field; do
-    if out="$(run_alarm_rationalization --tamper "$tamper" 2>&1)"; then
-        fail "alarm-rationalization-unchecked: a $tamper case passed the alarm-rationalization leg"
-    fi
-    case "$tamper" in
-        dropped-record) expected="is declared but not served" ;;
-        rewritten-field) expected="served rationalization=" ;;
-    esac
-    [[ "$out" == *"$expected"* ]] \
-        || fail "alarm-rationalization-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, alarm-rationalization-failed"
-done
-
-# The pair contract's claim-fencing leg, on the same manifest-declared
-# deployment — the consumer-side mirror of the lane's standing
-# field-claim scenario: ci/claim_fencing.py settles the pair with a
-# field-owning peer holding the spawned plant's writer claim — the
-# launched active's startup claim where the release records its owner
-# token, else the documented switch stands the promoted peer's claim up
-# first — then attaches a dedicated third sim-net client whose write
-# and step must answer the named fencing refusal — the same mutations
-# driven through the shipped dcs-plant-ctl exiting nonzero — while the
-# field owner's writes keep landing; exercises the lifecycle verbs
-# where the release speaks them — a foreign token's ensure_writer
-# refused fenced, the owner's token answering claimed_shared with a
-# write landing under the shared hold, release_writer dropping only the
-# caller's hold with the standing claim still fencing probes, and a
-# holder-of-nothing's release a harmless done; then drives a rogue
-# claim_writer, which must resolve per the settled contract — never
-# silently: a preempt's evidence is the superseded owner's journaled
-# field_claim_lost and in-place demotion with its monitor serving,
-# after which the leg re-promotes the demoted owner so the pair's
-# launch roles and the claim's owner stand unchanged. Two passes must
-# produce identical digests.
-run_claim_fencing() {
-    python3 ci/claim_fencing.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --plant-ctl "$TOOLS/dcs-plant-ctl" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_claim_fencing)" \
-    || fail "claim-fencing-failed: the claim-fencing leg did not hold — its evidence lines are above"
-SECOND="$(run_claim_fencing)" \
-    || fail "claim-fencing-failed: the claim-fencing leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "claim-fencing-nondeterministic: two claim-fencing passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a probe attachment writing through the claim, a
-# foreign ensure_writer granted, and a rogue claim succeeding with no
-# supersession evidence must each surface the named diagnostic — never
-# a silently unmatched pass.
-for tamper in write-through foreign-ensure-granted rogue-silent; do
-    if out="$(run_claim_fencing --tamper "$tamper" 2>&1)"; then
-        fail "claim-fencing-unchecked: a $tamper case passed the claim-fencing leg"
-    fi
-    case "$tamper" in
-        write-through) expected="was not refused fenced" ;;
-        foreign-ensure-granted) expected="a foreign token's ensure_writer was not refused" ;;
-        rogue-silent) expected="the rogue claim answered" ;;
-    esac
-    [[ "$out" == *"$expected"* ]] \
-        || fail "claim-fencing-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, claim-fencing-failed"
+    [[ "$out" == *"event-parity-failed"* ]] \
+        || fail "event-parity-unchecked: the $tamper case did not report event-parity-failed: $out"
+    echo "  $tamper: reported, event-parity-failed"
 done
 
 echo "== consumers =="
@@ -2496,13 +2104,10 @@ for file in ci/alarm_rationalization.py ci/alarm_validation.py \
         ci/availability.py \
         ci/burst_order.py ci/claim_fencing.py ci/command_switch.py \
         ci/consumers.py \
-        ci/ctl.py ci/demote_pending.py ci/demote_reconvergence.py \
-        ci/deploy_rig.py \
-        ci/divergence.py ci/failover.py \
-        ci/force_carryover.py ci/force_release.py ci/handover.py \
-        ci/managed_carryover.py ci/managed_lifecycle.py \
-        ci/negotiation.py ci/oos.py ci/pair.py \
-        ci/peer_announce.py ci/power_trip.py \
+        ci/ctl.py ci/deploy_rig.py ci/divergence.py ci/event_parity.py \
+        ci/failover.py \
+        ci/force_carryover.py ci/force_release.py \
+        ci/managed_lifecycle.py ci/pair.py ci/peer_announce.py \
         ci/refusal.py ci/report.py ci/restart.py \
         ci/schema_conformance.py ci/simulate.py ci/staging.py \
         ci/standby_restart.py ci/startup_claim.py \
