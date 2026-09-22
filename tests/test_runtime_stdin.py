@@ -20,13 +20,22 @@ from agent_pool.runtime import Runtime, atomic_json, runner
 posix_only = unittest.skipUnless(os.name == 'posix', 'agent_pool runtime is Linux/WSL only')
 
 # Multi-megabyte prompt: exceeds per-string MAX_ARG_STRLEN (128 KiB) and the
-# typical 2 MiB ARG_MAX budget, so placing it in argv would raise E2BIG.
+# platform's ARG_MAX budget — sized dynamically because the limit varies by
+# host (2 MiB here, 4 MiB on the CI runner) — so placing it in argv would
+# raise E2BIG.
 LARGE_PREFIX = 'stdin-regression-marker-814-'
-LARGE_SIZE = 3 * 1024 * 1024
+
+
+def arg_max():
+    try:
+        return os.sysconf('SC_ARG_MAX')
+    except (AttributeError, ValueError, OSError):
+        return 2 * 1024 * 1024
 
 
 def large_prompt():
-    padding = LARGE_SIZE - len(LARGE_PREFIX) - len('-tail')
+    size = arg_max() + 1024 * 1024
+    padding = size - len(LARGE_PREFIX) - len('-tail')
     return LARGE_PREFIX + 'X' * padding + '-tail'
 
 
@@ -75,11 +84,7 @@ class OpenCodeStdinTests(unittest.TestCase):
     @posix_only
     def test_large_prompt_exceeds_arg_limit_but_spawns_without_argv_prompt(self):
         prompt = large_prompt()
-        try:
-            arg_max = os.sysconf('SC_ARG_MAX')
-        except (AttributeError, ValueError, OSError):
-            arg_max = 2 * 1024 * 1024
-        self.assertGreater(len(prompt.encode()), arg_max,
+        self.assertGreater(len(prompt.encode()), arg_max(),
                            'fixture must exceed the platform argument limit')
         clone = self.runtime.prepare_clone('worker-01')
         self.runtime.opencode = '/bin/true'
