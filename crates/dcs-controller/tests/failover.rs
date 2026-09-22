@@ -1380,6 +1380,159 @@ fn a_fenced_peer_supersedes_commands_accepted_before_its_detection_scan() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The QA finding `superseded-receipt-internal-write-persists` — the
+/// reproduction's ordering, which the fenced-commands test above does
+/// not cover: here the field claim is preempted *before* the command's
+/// apply scan and the tracking peer is still following the demoted run
+/// when it pulls the post-fence checkpoint. The `rejected`/`superseded`
+/// receipt means the surviving line never made the change, so the
+/// reconciled contract rolls the fenced boundary's staged mutations
+/// back: the demoted run's quiesced checkpoints carry the pre-boundary
+/// state, and the promoted line's image must not carry the write.
+#[test]
+fn a_superseded_internal_write_never_reaches_the_promoted_line() {
+    let dir = std::env::temp_dir().join(format!("dcs-superseded-persist-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    // The same writable internal point the fenced-commands test uses —
+    // the QA finding's `power-fail-ack` stand-in.
+    let mut document = sim_tcp_document(MODEL_SOURCE, pair_plant.addr, SimTcp::PerDevice);
+    document["io_points"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": HELD.0,
+            "direction": "in",
+            "value_type": "bool",
+            "initial": { "bool": false },
+            "writable": true,
+        }));
+    let pair_model = write_model(&dir, "pair.json", &document).0;
+
+    // The setpoint lands before the controllers spawn: the launched
+    // active's startup claim fences this attachment from boot.
+    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.ensure_writer(SEED).unwrap();
+    field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    field.release_writer().unwrap();
+    let active_process = spawn_controller(&pair_model, &[], DT);
+    let standby_process = spawn_controller(
+        &pair_model,
+        &["--standby".to_string(), active_process.addr.to_string()],
+        DT,
+    );
+    let active = MonitorClient::new(active_process.addr);
+    let standby = MonitorClient::new(standby_process.addr);
+
+    for _ in 0..N {
+        standby.advance(1).unwrap();
+        active.advance(1).unwrap();
+    }
+    assert!(
+        matches!(
+            standby.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby never converged: {:?}",
+        standby.role().unwrap()
+    );
+
+    // The finding's fencing driver: a rogue claim preempts the active's
+    // — the peer still reports `active` and accepts commands until its
+    // detection scan.
+    let rogue = RemoteDriver::connect(pair_plant.addr).unwrap();
+    rogue.claim_writer(0xdead_beef).unwrap();
+    let held_write = Command::WriteValue {
+        point: HELD,
+        kind: ValueKind::Bool,
+        value: Value::Bool(true),
+    };
+    let receipt = active.command(&held_write).unwrap();
+    assert!(
+        matches!(receipt.outcome, CommandOutcome::Accepted { .. }),
+        "the window must receipt accepted: {receipt:?}"
+    );
+
+    // The detection scan: the boundary applies the write onto the
+    // superseded image, the field write meets the fence, and the
+    // demotion runs — settling the receipt `rejected`/`superseded` and
+    // rolling the staged mutation back out.
+    let fenced = active.advance(1).unwrap();
+    assert_eq!(
+        fenced.io_health.last_error.map(|fault| fault.error),
+        Some(IoError::Fenced(VALVE)),
+        "the preempted owner's write must be refused fenced: {:?}",
+        fenced.io_health
+    );
+    assert_eq!(active.role().unwrap().role, Role::Demoting);
+    let outcome_of = |client: &MonitorClient, command: &Command| -> Option<CommandOutcome> {
+        client
+            .receipts()
+            .unwrap()
+            .iter()
+            .find(|receipt| receipt.command == *command)
+            .map(|receipt| receipt.outcome.clone())
+    };
+    assert_eq!(
+        outcome_of(&active, &held_write),
+        Some(CommandOutcome::Rejected {
+            reason: CommandError::Superseded { point: Some(HELD) }
+        }),
+        "the write must settle superseded, not applied"
+    );
+    // The reconciled state agrees with the receipt: the demoted run's
+    // own image no longer carries the write.
+    assert_eq!(
+        image_value(&active.snapshot().unwrap(), HELD),
+        Value::Bool(false),
+        "the superseded write must not persist on the demoted image"
+    );
+
+    // The propagation leg the defect rode: the standby is still
+    // tracking when it pulls the demoted run's post-fence checkpoint —
+    // orphaned by the `source_owns_field` stamp, still promotable —
+    // then takes the field.
+    standby.advance(1).unwrap();
+    assert!(
+        matches!(
+            standby.role().unwrap().sync,
+            Some(StandbySync::Orphaned { .. })
+        ),
+        "tracking a field-less source must report orphaned: {:?}",
+        standby.role().unwrap()
+    );
+    standby.promote().unwrap();
+    let owner = standby.advance(1).unwrap();
+    assert_eq!(standby.role().unwrap().role, Role::Active);
+
+    // The reconciled contract's assertion: the promoted line does not
+    // carry the value its receipt claims was never applied.
+    assert_eq!(
+        image_value(&owner, HELD),
+        Value::Bool(false),
+        "the promoted line must not carry the superseded write"
+    );
+    // Receipt-log parity on the surviving peer: the adoption carried
+    // the same `rejected`/`superseded` record — one verdict, one state.
+    assert_eq!(
+        outcome_of(&standby, &held_write),
+        Some(CommandOutcome::Rejected {
+            reason: CommandError::Superseded { point: Some(HELD) }
+        }),
+        "the promoted peer's adopted log must carry the same superseded record"
+    );
+    // The promoted owner's writes reach the field the rogue held —
+    // the takeover itself is unaffected by the reconciliation.
+    assert_eq!(
+        rogue.read(VALVE).unwrap().value,
+        image_value(&owner, VALVE),
+        "the promoted peer's write must reach the field the rogue held"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The QA finding `tracking-apply-rewinds-run-tick-on-source-restart`,
 /// on the driven failover rig: the documented switchover promotes the
 /// standby; the launched active is then killed and respawned cold — no
