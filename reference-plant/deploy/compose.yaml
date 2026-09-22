@@ -86,7 +86,7 @@ services:
       - ../model/plant.json:/model/plant.json:ro
       - ctrl-a-data:/var/tmp
     environment:
-      DCS_MODEL_FINGERPRINT: "cfadf0f3c4136c44"
+      DCS_MODEL_FINGERPRINT: "d8ce9853f85259ac"
     command:
       - /model/plant.json
       - --remote
@@ -116,7 +116,7 @@ services:
       - ../model/plant.json:/model/plant.json:ro
       - ctrl-b-data:/var/tmp
     environment:
-      DCS_MODEL_FINGERPRINT: "cfadf0f3c4136c44"
+      DCS_MODEL_FINGERPRINT: "d8ce9853f85259ac"
     command:
       - /model/plant.json
       - --remote
