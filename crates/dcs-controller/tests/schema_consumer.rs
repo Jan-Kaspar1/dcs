@@ -103,7 +103,7 @@ use std::time::{Duration, Instant};
 
 mod support;
 
-use support::{SimTcp, controller_model, spawn_controller, spawn_plant};
+use support::{SimTcp, audit, controller_model, spawn_controller, spawn_plant};
 
 /// The showcase plant model the plant servers load — the #69 fixture.
 const PLANT_MODEL: &str = concat!(
@@ -264,11 +264,16 @@ fn settlements_of(client: &MonitorClient, command: &Command) -> Vec<(u64, Comman
 /// differ only in the plant address, and each process mints its own
 /// generation at boot, so the rest of the transferable state — tick,
 /// component states, output and internal images, forces, receipts,
-/// admission counters — must serialize identically.
+/// admission counters — must serialize identically. The receipts
+/// pass through [`audit`] for the same reason: a minted `submission`
+/// names its run, not the line.
 fn checkpoint_digest(client: &MonitorClient) -> Vec<u8> {
     let mut checkpoint: Checkpoint = client.checkpoint().unwrap();
     checkpoint.model_fingerprint = None;
     checkpoint.generation = None;
+    for receipt in &mut checkpoint.receipts {
+        receipt.submission = None;
+    }
     serde_json::to_vec(&checkpoint).unwrap()
 }
 
@@ -403,8 +408,8 @@ fn leg_boundary(
         "{name}: consumer traffic changed the checkpoint"
     );
     assert_eq!(
-        owner.receipts().unwrap(),
-        reference.receipts().unwrap(),
+        audit(owner.receipts().unwrap()),
+        audit(reference.receipts().unwrap()),
         "{name}: consumer traffic changed the receipt log"
     );
     checkpoints.push(owner_checkpoint);
@@ -1673,7 +1678,10 @@ fn run_verification(tag: &str) -> Outcome {
         stream[0].0 < stream[1].0,
         "the emitted-event sequence continues monotonically across the promotion"
     );
-    assert_eq!(standby.receipts().unwrap(), reference.receipts().unwrap());
+    assert_eq!(
+        audit(standby.receipts().unwrap()),
+        audit(reference.receipts().unwrap())
+    );
     for client in [&active, &standby, &reference] {
         let journal = client.journal(0).unwrap();
         let settled = journal
@@ -1691,7 +1699,7 @@ fn run_verification(tag: &str) -> Outcome {
         field: trace,
         stages,
         checkpoints,
-        receipts: standby.receipts().unwrap(),
+        receipts: audit(standby.receipts().unwrap()),
         emitted: emitted(&standby),
         journals: {
             let mut journals: Vec<Vec<JournalEntry>> = [
@@ -1707,11 +1715,15 @@ fn run_verification(tag: &str) -> Outcome {
             // address — its ephemeral listen port run-unique by
             // nature — so the identical-runs comparison masks the
             // port while keeping the event's presence, `seq`, `tick`,
-            // and named host.
+            // and named host. A settlement's `submission` names the
+            // minting run (#775) — run-unique by the same nature — so
+            // it masks out beside the port.
             for journal in &mut journals {
                 for entry in journal {
-                    if let JournalEvent::TrackingSourceAdopted { source } = &mut entry.event {
-                        source.set_port(0);
+                    match &mut entry.event {
+                        JournalEvent::TrackingSourceAdopted { source } => source.set_port(0),
+                        JournalEvent::CommandSettled { receipt } => receipt.submission = None,
+                        _ => {}
                     }
                 }
             }

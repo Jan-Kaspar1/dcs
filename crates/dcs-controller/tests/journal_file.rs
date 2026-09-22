@@ -15,7 +15,7 @@ use std::process::Command as Process;
 
 mod support;
 
-use support::{Spawned, kill, listening_on, spawn};
+use support::{Spawned, kill, listening_on, scrub_submissions, spawn};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_dcs-controller");
 /// The shared tank loop: point 10 is a model-declared writable `In`
@@ -386,10 +386,12 @@ fn a_receipted_write_and_a_component_transition_journal_side_by_side() {
         before_restart[settled].event,
         dcs_core::JournalEvent::CommandSettled {
             receipt: dcs_core::CommandReceipt {
-                command: receipt.command,
+                command: receipt.command.clone(),
                 outcome: dcs_core::CommandOutcome::Applied { tick: Tick(2) },
                 actor: None,
-                submission: None,
+                // The journaled settle keeps the issued receipt's
+                // minted submission identity (#775).
+                submission: receipt.submission,
             },
         }
     );
@@ -537,8 +539,13 @@ fn identical_scripted_runs_produce_identical_files() {
         client.advance(2).unwrap();
         client.command(&setpoint_write()).unwrap();
         client.advance(1).unwrap();
-        let served = client.journal(0).unwrap();
-        let file = std::fs::read(&journal).unwrap();
+        let mut served = client.journal(0).unwrap();
+        let mut file = file_entries(&journal);
+        // Each run mints its own submission origins (#775) — the
+        // records compare after scrubbing, like the ephemeral ports
+        // the other digests mask.
+        scrub_submissions(&mut file);
+        scrub_submissions(&mut served);
         (file, served)
     };
 

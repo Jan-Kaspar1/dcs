@@ -36,7 +36,9 @@ use std::path::{Path, PathBuf};
 
 mod support;
 
-use support::{SimTcp, image_value, sim_tcp_document, spawn_controller, spawn_plant, write_model};
+use support::{
+    SimTcp, audit, image_value, sim_tcp_document, spawn_controller, spawn_plant, write_model,
+};
 
 /// The shared plant's model — the dcs-plant tank loop.
 const PLANT_MODEL: &str = concat!(
@@ -403,7 +405,10 @@ fn declared_commands_and_emitted_events_survive_promotion() {
         emitted_except_tick_4(&standby),
         emitted_except_tick_4(&reference)
     );
-    assert_eq!(standby.receipts().unwrap(), reference.receipts().unwrap());
+    assert_eq!(
+        audit(standby.receipts().unwrap()),
+        audit(reference.receipts().unwrap())
+    );
     assert_eq!(
         settlements_of(&standby, &invoke("reset", None)),
         settlements_of(&reference, &invoke("reset", None)),

@@ -91,8 +91,8 @@ use std::thread::{self, JoinHandle};
 mod support;
 
 use support::{
-    SimTcp, controller_model, image_sample, image_value, kill, pump, settled_receipts,
-    spawn_controller, spawn_controller_logged, spawn_plant,
+    SimTcp, canonicalize_origins, controller_model, image_sample, image_value, kill, pump,
+    settled_receipts, spawn_controller, spawn_controller_logged, spawn_plant,
 };
 
 /// The shared plant's model — the checked-in dosing-skid document
@@ -1446,7 +1446,10 @@ fn run_dosing(tag: &str) -> serde_json::Value {
                 command: receipt.command.clone(),
                 outcome: CommandOutcome::Applied { tick: apply_tick },
                 actor: Some(OPERATOR.to_string()),
-                submission: None,
+                // The journaled settle keeps the issued receipt's
+                // minted submission identity (#775) — unchanged
+                // through admission, settle, and the switch's carry.
+                submission: receipt.submission,
             }),
             "no journaled settle matches {receipt:?}"
         );
@@ -1626,7 +1629,7 @@ fn run_dosing(tag: &str) -> serde_json::Value {
     .collect();
     masks.sort_by_key(|mask| std::cmp::Reverse(mask.0.len()));
 
-    let digest = serde_json::json!({
+    let mut digest = serde_json::json!({
         "trace": trace,
         "journal": {
             "before_restart": before_restart,
@@ -1655,6 +1658,7 @@ fn run_dosing(tag: &str) -> serde_json::Value {
         "issued": issued,
         "final": masked(serde_json::to_value(&image).unwrap(), &masks),
     });
+    canonicalize_origins(&mut digest, &mut Vec::new());
 
     let _ = std::fs::remove_dir_all(&dir);
     digest

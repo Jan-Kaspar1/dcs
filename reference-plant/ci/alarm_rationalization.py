@@ -56,12 +56,12 @@ pass a served record that dropped or rewrote a declared field.
 """
 
 import argparse
-import hashlib
 import json
 import sys
 
 import alarm_validation
 import pair
+import simulate
 
 
 def eprint(*args):
@@ -348,9 +348,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"alarm-rationalization-digest {digest} — "
         f"{evidence['instances']} managed alarm instances served "

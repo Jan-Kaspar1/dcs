@@ -52,7 +52,6 @@ passing an unexercised contract.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -454,9 +453,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     point = digest_entries[2]["point"]
     print(
         f"refusal-digest {digest} — promote refused not_converged "

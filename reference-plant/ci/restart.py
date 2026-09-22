@@ -45,7 +45,6 @@ pass must exit nonzero carrying its evidence.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -395,11 +394,7 @@ def main():
         eprint(f"restart: {failure}")
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(
-            {"legs": entries, "evidence": evidence}, sort_keys=True
-        ).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest({"legs": entries, "evidence": evidence})
     print(
         f"restart-digest {digest} — resumed at tick "
         f"{evidence['resumed_tick']}, {evidence['journal_entries']} "
