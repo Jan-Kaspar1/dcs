@@ -25,8 +25,8 @@
 //!   run's for the stated tick count.
 
 use dcs_core::{
-    Command, CommandError, CommandOutcome, EmittedEvent, IoDriver, JournalEvent, PointId, Role,
-    StandbySync, Tick, Value, ValueKind,
+    Command, CommandError, CommandOutcome, EmittedEvent, IoDriver, JournalEvent, PointId, Quality,
+    QualityReason, Role, StandbySync, Tick, Value, ValueKind,
 };
 use dcs_monitor::MonitorClient;
 use dcs_sim_net::RemoteDriver;
@@ -36,7 +36,10 @@ use std::path::{Path, PathBuf};
 
 mod support;
 
-use support::{SimTcp, image_value, sim_tcp_document, spawn_controller, spawn_plant, write_model};
+use support::{
+    SimTcp, image_sample, image_value, kill, settled_receipts, sim_tcp_document, spawn_controller,
+    spawn_controller_logged, spawn_plant, write_model,
+};
 
 /// The shared plant's model — the dcs-plant tank loop.
 const PLANT_MODEL: &str = concat!(
@@ -774,6 +777,185 @@ fn a_stale_checkpoint_at_the_demote_boundary_cannot_supersede_the_raced_command(
         settlements_of(&active, &write)[0].1,
         CommandOutcome::Applied { .. }
     ));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// QA finding `stale-checkpoint-resurrects-receipted-unforce` (#639):
+/// the driven-pair reproduction. A forces a point, then demotes with
+/// its checkpoint fetch severed — no `--peer`, the announced-fallback
+/// analog — so its served image freezes on the force. B promotes,
+/// unforces the point (applied, journaled), and restarts onto its own
+/// persisted state; its first tracking pull then adopts A's staler
+/// checkpoint, whose force set predates the release. The applied
+/// `unforce` receipt in B's own log is durable truth: the force must
+/// not re-stand, no `Substituted` quality may return, and any
+/// force-set change the adoption did author must journal a receipt
+/// naming the adopting source.
+#[test]
+fn a_receipted_unforce_survives_the_restarted_standbys_stale_pull() {
+    let dir = std::env::temp_dir().join(format!("dcs-stale-unforce-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model = controller_model(&dir, "pair.json", pair_plant.addr);
+
+    // The tank loop's writable field `In` — the reproduction's forced
+    // point.
+    const FORCED: PointId = PointId(11);
+    let force = Command::ForcePoint {
+        point: FORCED,
+        kind: ValueKind::Float,
+        value: Value::Float(5.0),
+    };
+    let unforce = Command::UnforcePoint { point: FORCED };
+    let substituted = || Quality::Uncertain(QualityReason::Substituted);
+
+    let a_state = dir.join("a.state");
+    let a_journal = dir.join("a.journal");
+    let b_state = dir.join("b.state");
+    let b_journal = dir.join("b.journal");
+    let persistent = |state: &Path, journal: &Path| {
+        vec![
+            "--state-file".to_string(),
+            state.to_str().unwrap().to_string(),
+            "--journal-file".to_string(),
+            journal.to_str().unwrap().to_string(),
+        ]
+    };
+
+    // A is launched active without `--peer`: demoted, it tracks
+    // nothing — the severed fetch — so the checkpoint it keeps
+    // serving is the pre-release image.
+    let a_process = spawn_controller(&pair_model, &persistent(&a_state, &a_journal), DT);
+    let mut b_args = vec!["--standby".to_string(), a_process.addr.to_string()];
+    b_args.extend(persistent(&b_state, &b_journal));
+    let mut b_process = spawn_controller(&pair_model, &b_args, DT);
+    let a = MonitorClient::new(a_process.addr);
+    let b = MonitorClient::new(b_process.addr);
+
+    // Converge the pair, then force the point on A and let B adopt it.
+    for _ in 0..N {
+        b.advance(1).unwrap();
+        a.advance(1).unwrap();
+    }
+    let receipt = a.command(&force).unwrap();
+    assert!(
+        matches!(receipt.outcome, CommandOutcome::Accepted { .. }),
+        "{receipt:?}"
+    );
+    a.advance(1).unwrap();
+    let adopted = b.advance(1).unwrap();
+    assert!(
+        adopted.forces.iter().any(|forced| forced.point == FORCED),
+        "the standby must adopt the standing force: {:?}",
+        adopted.forces
+    );
+    assert_eq!(image_sample(&adopted, FORCED).quality, substituted());
+
+    // The severed switchover: A demotes and its served checkpoint
+    // freezes — it never observes the release. B promotes and owns
+    // the field from its next scan.
+    assert_eq!(a.demote().unwrap().role, Role::Demoting);
+    assert_eq!(b.promote().unwrap().role, Role::Promoting);
+    b.advance(1).unwrap();
+    assert_eq!(b.role().unwrap().role, Role::Active);
+
+    // The release applies on B and journals there — the durable truth
+    // the restart must not lose.
+    let receipt = b.command(&unforce).unwrap();
+    assert!(
+        matches!(receipt.outcome, CommandOutcome::Accepted { .. }),
+        "{receipt:?}"
+    );
+    let released = b.advance(1).unwrap();
+    assert!(
+        released.forces.is_empty(),
+        "the release must lift the force: {:?}",
+        released.forces
+    );
+    assert!(image_sample(&released, FORCED).quality.is_good());
+    let settled = settlements_of(&b, &unforce);
+    assert_eq!(settled.len(), 1, "{settled:?}");
+    assert!(
+        matches!(settled[0].1, CommandOutcome::Applied { .. }),
+        "the unforce must journal applied: {settled:?}"
+    );
+
+    // The restart: B resumes its persisted run — receipt log and
+    // released force set — then tracks A's stale image on its next
+    // driven scan.
+    kill(&mut b_process);
+    let (b_process, preamble) = spawn_controller_logged(&pair_model, &b_args, DT);
+    assert!(
+        preamble
+            .iter()
+            .any(|line| line.starts_with("resumed from state file")),
+        "the restart must resume B's persisted run: {preamble:?}"
+    );
+    let b = MonitorClient::new(b_process.addr);
+
+    // The defect's window: the tracking pull lands the stale image
+    // and the scans that follow it are where the `Substituted`
+    // quality silently returned. With the receipted release
+    // re-asserted over the adopted force set, neither happens.
+    for _ in 0..3 {
+        let snap = b.advance(1).unwrap();
+        assert!(
+            snap.forces.is_empty(),
+            "the receipted release is durable truth — the stale \
+             checkpoint must not resurrect the force: {:?}",
+            snap.forces
+        );
+        assert_ne!(
+            image_sample(&snap, FORCED).quality,
+            substituted(),
+            "substituted quality must not return for {FORCED:?}"
+        );
+    }
+    assert!(
+        matches!(b.role().unwrap().sync, Some(StandbySync::Tracking { .. })),
+        "the restarted standby must be tracking A"
+    );
+
+    // The audit fallback the finding names: a force change the merged
+    // receipt log cannot explain journals an `Applied` receipt whose
+    // actor names the adopting checkpoint. The fixed path leaves none
+    // — every post-restart force settlement on B must either not
+    // exist or carry that attribution.
+    let journal = b.journal(0).unwrap();
+    let last_boundary = journal
+        .iter()
+        .rposition(|entry| matches!(entry.event, JournalEvent::RunBoundary { .. }))
+        .expect("the restart journals a run boundary");
+    for entry in &journal[last_boundary..] {
+        if let JournalEvent::CommandSettled { receipt } = &entry.event
+            && matches!(
+                &receipt.command,
+                Command::ForcePoint { point, .. } | Command::UnforcePoint { point }
+                    if *point == FORCED
+            )
+        {
+            assert!(
+                receipt
+                    .actor
+                    .as_deref()
+                    .is_some_and(|actor| actor.starts_with("checkpoint")),
+                "a post-restart force change must journal naming the \
+                 adopting source: {receipt:?}"
+            );
+        }
+    }
+    // And the release itself survives the restart in the durable
+    // record — replayed, not re-settled.
+    assert_eq!(
+        settled_receipts(&journal)
+            .iter()
+            .filter(|receipt| receipt.command == unforce)
+            .count(),
+        1,
+        "the unforce must appear exactly once in B's durable journal: {journal:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

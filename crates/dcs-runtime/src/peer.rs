@@ -155,9 +155,9 @@ use crate::gate::WriteGate;
 use crate::revision::CarryoverError;
 use dcs_core::{
     CarryoverReport, Command, CommandError, CommandOutcome, CommandReceipt, Divergence, PointId,
-    Role, RoleReport, Sample, StandbySync, SwitchError, TelemetrySnapshot, Tick,
+    Role, RoleReport, Sample, StandbySync, SwitchError, TelemetrySnapshot, Tick, Value,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// A controller instance in a redundant pair: an [`Executor`] plus the
@@ -293,11 +293,14 @@ pub struct Peer<'d> {
     /// restoring the unreached tail suspended instead. A genuinely
     /// abandoned command can never apply here — the gate quiesces the
     /// run's writes — so it settles rejected rather than vanishing
-    /// unaudited or `applied` on an abandoned image. Each entry keeps
-    /// the receipt's absolute submission index beside it — the identity
-    /// the journal's settle dedup keys on, so a repeat drain of the
-    /// same adjudication never re-journals it.
-    pending_superseded: Vec<(u64, CommandReceipt)>,
+    /// unaudited or `applied` on an abandoned image.
+    pending_superseded: Vec<CommandReceipt>,
+    /// Force-set changes a checkpoint adoption made that no settled
+    /// receipt in the merged log accounts for — each queued as a
+    /// [`CommandReceipt`] whose actor names the adopting source, for
+    /// the journal. A receipted change — the force pair's own durable
+    /// audit — journals through the ordinary settle path instead.
+    pending_adoption_receipts: Vec<CommandReceipt>,
 }
 
 /// The field-side write-ownership claim a promotion runs before the
@@ -577,6 +580,7 @@ impl<'d> Peer<'d> {
             fencing_lost: false,
             pending_fencing: Vec::new(),
             pending_superseded: Vec::new(),
+            pending_adoption_receipts: Vec::new(),
         }
     }
 
@@ -709,6 +713,7 @@ impl<'d> Peer<'d> {
             fencing_lost: false,
             pending_fencing: Vec::new(),
             pending_superseded: Vec::new(),
+            pending_adoption_receipts: Vec::new(),
         }
     }
 
@@ -1136,6 +1141,10 @@ impl<'d> Peer<'d> {
         // are what the adoption below either covers, passes by, or
         // leaves unrestored behind its high-water.
         let pending = self.pending_accepted();
+        // The standing force set is the adoption audit's baseline: a
+        // force change the merged receipt log cannot account for is the
+        // adoption's own doing and journals naming the source.
+        let prior_forces = self.executor.forces().clone();
         let (offset, regressed) = self.stream_offset(checkpoint);
         // A regression is a source restart only when the stream's
         // generation provably differs from the run's own: a demoted
@@ -1161,6 +1170,7 @@ impl<'d> Peer<'d> {
         match applied {
             Ok(()) => {
                 self.note_abandoned_commands(pending);
+                self.note_adopted_forces(&prior_forces, checkpoint, landed);
                 self.tick_offset = offset;
                 if regressed {
                     // The staged image pairs its run tick against the
@@ -1426,6 +1436,53 @@ impl<'d> Peer<'d> {
         }
     }
 
+    /// Audits the force-set changes a successful adoption made: every
+    /// point whose standing force the adoption changed — stood up,
+    /// re-valued, or dropped — must trace to the merged receipt log,
+    /// the pair's one command audit. `Executor::adopt_receipts`
+    /// already re-asserts this run's unreached settled verdicts over
+    /// the adopted image, so what remains here is the residual the
+    /// receipted-command contract names: a change whose newest settled
+    /// verdict for the point does not produce the adopted state has
+    /// the adoption itself as its only cause, and it must not stand
+    /// silently — the QA finding's quality-only resurrection. Each
+    /// such change queues a [`CommandReceipt`] carrying the equivalent
+    /// force or release `Applied` at the landing tick, its `actor`
+    /// naming the adopting source, so the durable journal always
+    /// answers "who re-stood this force". Receipted changes journal
+    /// through the ordinary settle-diff path and queue nothing here.
+    fn note_adopted_forces(
+        &mut self,
+        prior: &BTreeMap<PointId, Value>,
+        checkpoint: &Checkpoint,
+        landed: Tick,
+    ) {
+        let post = self.executor.forces();
+        let changed: BTreeSet<PointId> = prior.keys().chain(post.keys()).copied().collect();
+        for point in changed {
+            let adopted = post.get(&point).copied();
+            if prior.get(&point).copied() == adopted {
+                continue;
+            }
+            if receipted_force_state(self.executor.receipts(), point) == Some(adopted) {
+                continue;
+            }
+            let command = match adopted {
+                Some(value) => Command::ForcePoint {
+                    point,
+                    kind: value.kind(),
+                    value,
+                },
+                None => Command::UnforcePoint { point },
+            };
+            self.pending_adoption_receipts.push(CommandReceipt {
+                command,
+                outcome: CommandOutcome::Applied { tick: landed },
+                actor: Some(adoption_actor(checkpoint)),
+            });
+        }
+    }
+
     /// Consumes one pulled checkpoint — the standby's transfer entry
     /// point, covering both convergence and the rolling model revision.
     ///
@@ -1497,6 +1554,10 @@ impl<'d> Peer<'d> {
         // The still-`Accepted` receipts this log holds are what the
         // crossing either carries or abandons, exactly as in `apply`.
         let pending = self.pending_accepted();
+        // The force-set adoption audit runs the same diff `apply`
+        // does — a carried force set answers to the merged receipt
+        // log, and an unbacked change journals naming the source.
+        let prior_forces = self.executor.forces().clone();
         let (offset, regressed) = self.stream_offset(checkpoint);
         // As in `apply`: the regression journals a `SourceRestart` only
         // when the stream's generation differs from the run's own — a
@@ -1518,6 +1579,7 @@ impl<'d> Peer<'d> {
         match applied {
             Ok(report) => {
                 self.note_abandoned_commands(pending);
+                self.note_adopted_forces(&prior_forces, checkpoint, landed);
                 self.tick_offset = offset;
                 if boundary {
                     self.pending_restarts.push(SourceRestart {
@@ -1845,6 +1907,17 @@ impl<'d> Peer<'d> {
         std::mem::take(&mut self.pending_superseded)
     }
 
+    /// Drains the adoption-audit receipts queued since the last call —
+    /// one [`CommandReceipt`] per force-set change a checkpoint
+    /// adoption made that no settled receipt accounts for, each
+    /// `Applied` at the landing tick with `actor` naming the adopting
+    /// checkpoint — for the settle journal the monitoring layer
+    /// records them into through `Recorder::note_settled`, beside the
+    /// superseded settlements.
+    pub fn take_adoption_receipts(&mut self) -> Vec<CommandReceipt> {
+        std::mem::take(&mut self.pending_adoption_receipts)
+    }
+
     /// Queues `command` for application at the next scan boundary —
     /// forwarded to the executor; [`accepts_commands`](Self::accepts_commands)
     /// is the role check callers apply first.
@@ -1946,6 +2019,40 @@ impl<'d> Peer<'d> {
     fn change(&mut self, tick: Tick, to: Role) {
         let from = std::mem::replace(&mut self.role, to);
         self.pending_changes.push(RoleChange { tick, from, to });
+    }
+}
+
+/// The force state `receipts`' newest *settled* verdict for `point`
+/// accounts for: `Some(Some(value))` an applied force standing,
+/// `Some(None)` an applied release, `None` no settled verdict at all.
+/// `Accepted` and `Rejected` entries move no force set and back
+/// nothing — the newest `Applied` verdict is the receipted truth a
+/// post-adoption force set must match to be considered commanded
+/// rather than resurrected.
+fn receipted_force_state(receipts: &[CommandReceipt], point: PointId) -> Option<Option<Value>> {
+    receipts.iter().rev().find_map(|receipt| {
+        if !matches!(receipt.outcome, CommandOutcome::Applied { .. }) {
+            return None;
+        }
+        match &receipt.command {
+            Command::ForcePoint {
+                point: p, value, ..
+            } if *p == point => Some(Some(*value)),
+            Command::UnforcePoint { point: p } if *p == point => Some(None),
+            _ => None,
+        }
+    })
+}
+
+/// The actor identity an adoption-audit receipt declares — the
+/// adopting source the receipted-command contract names: the pulled
+/// checkpoint's stream generation and capture tick, so the journal
+/// attributes a receiptless force change to the image it came from
+/// rather than to a command nobody issued.
+fn adoption_actor(checkpoint: &Checkpoint) -> String {
+    match checkpoint.generation {
+        Some(generation) => format!("checkpoint:{generation:x}@{}", checkpoint.tick.0),
+        None => format!("checkpoint@{}", checkpoint.tick.0),
     }
 }
 
@@ -4965,5 +5072,204 @@ mod tests {
             standby.receipts()[0].outcome,
             CommandOutcome::Applied { .. }
         ));
+    }
+
+    /// QA finding `stale-checkpoint-resurrects-receipted-unforce`
+    /// (#639): a standby restarting onto a staler peer's checkpoint
+    /// must not re-stand a force its own journal already receipted as
+    /// released. The applied `unforce` receipt is durable truth — the
+    /// adoption replays it over the adopted force set, the scan
+    /// reports the field's live value at `Good` quality, and no
+    /// adoption-audit receipt queues because the merged log already
+    /// accounts for the outcome.
+    #[test]
+    fn a_receipted_unforce_survives_adopting_a_stale_checkpoint() {
+        const POINT: PointId = PointId(10);
+        let map = || PointMap::new().with_writable_point(POINT, Direction::In, ValueKind::Float);
+        let force = || Command::ForcePoint {
+            point: POINT,
+            kind: ValueKind::Float,
+            value: Value::Float(5.0),
+        };
+
+        // The tracked peer forces the point; its served checkpoint
+        // freezes there — captured before the release could ever
+        // reach its journal.
+        let a_driver = StubDriver::new(POINT, Value::Float(1.0));
+        let a_gate = WriteGate::closed(&a_driver);
+        let mut a = Peer::active(
+            Executor::new(&a_gate, map(), Vec::new()).unwrap(),
+            Some(&a_gate),
+        );
+        a.activate().unwrap();
+        a.submit_command(force());
+        a.scan();
+        let stale = a.checkpoint();
+
+        // The standby adopts the force, promotes, and releases it —
+        // applied and journaled on its own run.
+        let b_driver = StubDriver::new(POINT, Value::Float(1.0));
+        let b_gate = WriteGate::closed(&b_driver);
+        let mut b = Peer::standby(
+            Executor::new(&b_gate, map(), Vec::new()).unwrap(),
+            Some(&b_gate),
+        );
+        b.apply(&stale).unwrap();
+        b.promote().unwrap();
+        b.scan();
+        b.submit_command(Command::UnforcePoint { point: POINT });
+        b.scan();
+        assert!(b.executor().forces().is_empty());
+        assert!(matches!(
+            b.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { .. }
+        ));
+
+        // The restart: a fresh peer resumes from the run's own state
+        // — the receipt log and the released force set carry — then
+        // tracks the stale image.
+        let resumed = Executor::restore(&b_gate, map(), Vec::new(), &b.checkpoint(), None).unwrap();
+        let mut restarted = Peer::standby(resumed, Some(&b_gate));
+        restarted.apply(&stale).unwrap();
+
+        // The adopted image's force set is already reverted by the
+        // journaled release: the resurrection never happens, so the
+        // audit queues nothing.
+        assert!(restarted.executor().forces().is_empty());
+        assert!(restarted.take_adoption_receipts().is_empty());
+
+        // And the scan reports the field's live value at `Good`
+        // quality — the silent `Substituted` return is the defect.
+        restarted.scan();
+        assert_eq!(
+            restarted.executor().sample(POINT),
+            Some(Sample::good(Value::Float(1.0), Tick(4)))
+        );
+        assert!(restarted.executor().snapshot().forces.is_empty());
+    }
+
+    /// The audit's positive half: a checkpoint whose force set stands
+    /// a force the merged receipt log cannot account for journals the
+    /// adoption itself — one `Applied` receipt whose `actor` names the
+    /// adopting checkpoint — rather than letting the change stand
+    /// silently.
+    #[test]
+    fn an_unbacked_adopted_force_journals_a_receipt_naming_the_source() {
+        use crate::checkpoint::CommandAdmissionCounts;
+        const POINT: PointId = PointId(10);
+        let map = || PointMap::new().with_writable_point(POINT, Direction::In, ValueKind::Float);
+
+        let a_driver = StubDriver::new(POINT, Value::Float(1.0));
+        let a_gate = WriteGate::closed(&a_driver);
+        let mut a = Peer::active(
+            Executor::new(&a_gate, map(), Vec::new()).unwrap(),
+            Some(&a_gate),
+        );
+        a.activate().unwrap();
+        a.submit_command(Command::ForcePoint {
+            point: POINT,
+            kind: ValueKind::Float,
+            value: Value::Float(5.0),
+        });
+        a.scan();
+        let mut checkpoint = a.checkpoint();
+        // The carried force loses its receipt: the merged log cannot
+        // account for the adopted state.
+        checkpoint.receipts.clear();
+        checkpoint.command_admission = CommandAdmissionCounts::default();
+
+        let b_driver = StubDriver::new(POINT, Value::Float(1.0));
+        let b_gate = WriteGate::closed(&b_driver);
+        let mut b = Peer::standby(
+            Executor::new(&b_gate, map(), Vec::new()).unwrap(),
+            Some(&b_gate),
+        );
+        b.apply(&checkpoint).unwrap();
+
+        assert_eq!(b.executor().forces()[&POINT], Value::Float(5.0));
+        assert_eq!(
+            b.take_adoption_receipts(),
+            vec![CommandReceipt {
+                command: Command::ForcePoint {
+                    point: POINT,
+                    kind: ValueKind::Float,
+                    value: Value::Float(5.0),
+                },
+                outcome: CommandOutcome::Applied { tick: Tick(1) },
+                actor: Some("checkpoint@1".to_string()),
+            }]
+        );
+        // The drain empties — one audit receipt per unbacked change.
+        assert!(b.take_adoption_receipts().is_empty());
+    }
+
+    /// The mirror image: an adoption that *drops* a standing force the
+    /// merged log still shows receipted journals the release the same
+    /// way — while a drop the adopted log's own `unforce` verdict
+    /// explains queues nothing.
+    #[test]
+    fn an_unbacked_dropped_force_journals_a_release_naming_the_source() {
+        const POINT: PointId = PointId(10);
+        let map = || PointMap::new().with_writable_point(POINT, Direction::In, ValueKind::Float);
+
+        let a_driver = StubDriver::new(POINT, Value::Float(1.0));
+        let a_gate = WriteGate::closed(&a_driver);
+        let mut a = Peer::active(
+            Executor::new(&a_gate, map(), Vec::new()).unwrap(),
+            Some(&a_gate),
+        );
+        a.activate().unwrap();
+        a.submit_command(Command::ForcePoint {
+            point: POINT,
+            kind: ValueKind::Float,
+            value: Value::Float(5.0),
+        });
+        a.scan();
+        let forced = a.checkpoint();
+
+        let b_driver = StubDriver::new(POINT, Value::Float(1.0));
+        let b_gate = WriteGate::closed(&b_driver);
+        let mut b = Peer::standby(
+            Executor::new(&b_gate, map(), Vec::new()).unwrap(),
+            Some(&b_gate),
+        );
+        // The backed adoption: the checkpoint's own force receipt
+        // explains the stood-up force — nothing queues.
+        b.apply(&forced).unwrap();
+        assert!(b.take_adoption_receipts().is_empty());
+
+        // The receipted release: the fresher checkpoint's `unforce`
+        // verdict explains the empty force set — nothing queues.
+        a.submit_command(Command::UnforcePoint { point: POINT });
+        a.scan();
+        b.apply(&a.checkpoint()).unwrap();
+        assert!(b.executor().forces().is_empty());
+        assert!(b.take_adoption_receipts().is_empty());
+
+        // The unbacked drop: a peer whose covered log still shows the
+        // force standing adopts a checkpoint whose force set drops it
+        // — the change has the adoption as its only cause, so it
+        // journals.
+        let c_driver = StubDriver::new(POINT, Value::Float(1.0));
+        let c_gate = WriteGate::closed(&c_driver);
+        let mut c = Peer::standby(
+            Executor::new(&c_gate, map(), Vec::new()).unwrap(),
+            Some(&c_gate),
+        );
+        c.apply(&forced).unwrap();
+        assert!(c.take_adoption_receipts().is_empty());
+        let mut dropped = forced.clone();
+        dropped.tick = Tick(2);
+        dropped.forces.clear();
+        c.apply(&dropped).unwrap();
+        assert!(c.executor().forces().is_empty());
+        assert_eq!(
+            c.take_adoption_receipts(),
+            vec![CommandReceipt {
+                command: Command::UnforcePoint { point: POINT },
+                outcome: CommandOutcome::Applied { tick: Tick(2) },
+                actor: Some("checkpoint@2".to_string()),
+            }]
+        );
     }
 }

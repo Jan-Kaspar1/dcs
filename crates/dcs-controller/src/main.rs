@@ -1411,6 +1411,14 @@ fn main() -> ExitCode {
                                 receipt.command
                             );
                         }
+                        for receipt in peer.take_adoption_receipts() {
+                            eprintln!(
+                                "standby: checkpoint adoption changed the force set at tick {}: {:?} (actor {:?})",
+                                peer.tick().0,
+                                receipt.command,
+                                receipt.actor
+                            );
+                        }
                         let scanned = peer.scan();
                         // Transitions the scan itself produced — a
                         // fenced write's claim loss and the demotion it
