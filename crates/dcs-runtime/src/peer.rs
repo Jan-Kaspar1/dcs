@@ -1098,28 +1098,34 @@ impl<'d> Peer<'d> {
                 // nothing wrote the field — so the staged evidence is
                 // discarded rather than consumed; the heartbeat counts
                 // the cycle as the miss it is (the tracked owner did
-                // not serve); and a peer not carrying a standing
-                // `Diverged` verdict reports `Orphaned`: surfaced, and
-                // still promotable — the run it would resume is the
-                // same proven-converged one `Tracking` would have
-                // stood on.
+                // not serve); and the peer reports `Orphaned`:
+                // surfaced, and still promotable — the run it would
+                // resume is the same proven-converged one `Tracking`
+                // would have stood on. A standing `Diverged` verdict
+                // the stamp supersedes outright: the mismatch it
+                // stands on is the ownerless condition itself — the
+                // field carries whatever the lost owner last wrote,
+                // no staged-vs-field comparison can ever clear it on
+                // an ownerless stream, and the promotion the verdict
+                // blocked is exactly the write that converges the
+                // field — so the orphan adjudication replaces it
+                // rather than wedging the pair on evidence the line
+                // can never resolve.
                 if checkpoint.source_owns_field == Some(false) {
                     self.staged = None;
                     if self.failover.is_some_and(|budget| self.misses > budget) {
                         self.converged = false;
                     }
-                    if !was_diverged {
-                        if !matches!(self.sync, StandbySync::Orphaned { .. }) {
-                            self.pending_orphans.push(OrphanReport {
-                                tick: landed,
-                                aligned: checkpoint.tick,
-                            });
-                        }
-                        self.sync = StandbySync::Orphaned {
+                    if !matches!(self.sync, StandbySync::Orphaned { .. }) {
+                        self.pending_orphans.push(OrphanReport {
+                            tick: landed,
                             aligned: checkpoint.tick,
-                        };
-                        self.converged = !self.failover.is_some_and(|budget| self.misses > budget);
+                        });
                     }
+                    self.sync = StandbySync::Orphaned {
+                        aligned: checkpoint.tick,
+                    };
+                    self.converged = !self.failover.is_some_and(|budget| self.misses > budget);
                     return Ok(());
                 }
                 // The field evidence this apply carries: a comparison
@@ -3436,6 +3442,75 @@ mod tests {
         assert!(gate.is_open());
         peer.scan();
         assert_eq!(peer.role(), Role::Active);
+    }
+
+    /// The QA finding
+    /// `demote-during-interlock-release-leaves-field-energized-and-
+    /// wedges-pair`: a demote inside a release-propagation window can
+    /// land a peer in `Diverged` on the last `Some(true)` checkpoint
+    /// the demoting owner served — the staged image computed the
+    /// released outputs while the field kept the last energized
+    /// write — before the ownerless stream began. An orphaned apply
+    /// must re-adjudicate that standing verdict rather than wedge on
+    /// it: the mismatch it stands on is the ownerless condition
+    /// itself, no comparison on an ownerless stream can ever clear
+    /// it, and the promotion it blocks is exactly the write that
+    /// converges the field.
+    #[test]
+    fn an_orphaned_apply_supersedes_a_standing_diverged_verdict() {
+        let field = StubDriver::field(&[(INPUT, Value::Float(2.0)), (OUTPUT, Value::Float(0.0))]);
+        let biased = BiasedDriver {
+            inner: &field,
+            point: INPUT,
+            offset: 5.0,
+            armed: AtomicBool::new(true),
+        };
+        let gate = WriteGate::closed(&biased);
+        let mut standby = Peer::standby(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        );
+        let mut active = Peer::active(
+            Executor::new(&field, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            None,
+        );
+
+        // Converge, then diverge on the same-tick compare — the staged
+        // image the skewed read produced against the field the owner
+        // last wrote.
+        active.scan();
+        standby.apply(&active.checkpoint()).unwrap();
+        standby.scan();
+        cycle(&mut active, &mut standby);
+        assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
+        standby.take_divergences();
+        assert!(matches!(
+            standby.promote(),
+            Err(SwitchError::NotConverged {
+                sync: StandbySync::Diverged { .. }
+            })
+        ));
+
+        // The line goes ownerless — the demoted owner keeps serving
+        // checkpoints stamped `source_owns_field: false`. The orphan
+        // adjudication replaces the diverged verdict it can never
+        // resolve, journaled as the transition it is — and the peer
+        // is promotable again: its promoted scans write the staged
+        // release the demotion abandoned.
+        active.scan();
+        let mut orphaned = active.checkpoint();
+        orphaned.source_owns_field = Some(false);
+        standby.apply(&orphaned).unwrap();
+        assert_eq!(
+            standby.sync_state(),
+            &StandbySync::Orphaned {
+                aligned: orphaned.tick,
+            }
+        );
+        assert_eq!(standby.take_orphans().len(), 1);
+        assert!(standby.take_resolutions().is_empty());
+        standby.promote().unwrap();
+        assert!(gate.is_open());
     }
 
     /// A field-owning source's checkpoint ends the orphan report: the
