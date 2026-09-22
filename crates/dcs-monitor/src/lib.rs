@@ -1324,7 +1324,7 @@ impl<'d> Monitor<'d> {
             recorder.note_settled(Some(index), receipt, peer.tick());
         }
         for receipt in peer.take_adoption_receipts() {
-            recorder.note_settled(receipt, peer.tick());
+            recorder.note_settled(None, receipt, peer.tick());
         }
         // An adopted checkpoint carries the active's receipt log —
         // refresh the store's mirror so `GET /receipts` stays current
@@ -1365,7 +1365,7 @@ impl<'d> Monitor<'d> {
             recorder.note_settled(Some(index), receipt, peer.tick());
         }
         for receipt in peer.take_adoption_receipts() {
-            recorder.note_settled(receipt, peer.tick());
+            recorder.note_settled(None, receipt, peer.tick());
         }
         self.store.sync_receipts(peer.receipts());
         result
@@ -1727,7 +1727,7 @@ impl<'d> Monitor<'d> {
                     recorder.note_settled(Some(index), receipt, peer.tick());
                 }
                 for receipt in peer.take_adoption_receipts() {
-                    recorder.note_settled(receipt, peer.tick());
+                    recorder.note_settled(None, receipt, peer.tick());
                 }
                 self.store.sync_receipts(peer.receipts());
             }
@@ -2069,7 +2069,7 @@ fn track_and_record(
     // journal here, each receipt's actor naming the adopting
     // checkpoint.
     for receipt in peer.take_adoption_receipts() {
-        recorder.note_settled(receipt, peer.tick());
+        recorder.note_settled(None, receipt, peer.tick());
     }
     store.sync_receipts(peer.receipts());
     report
