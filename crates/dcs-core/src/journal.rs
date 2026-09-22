@@ -19,6 +19,7 @@ use crate::role::{Divergence, Role};
 use crate::signal::{PointId, Quality, Tick, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 
 /// One typed value in an [`EmittedEvent`]'s payload — the value half
 /// of a declared [`EventField`](crate::EventField): the variant
@@ -159,9 +160,16 @@ pub enum JournalEvent {
     },
     /// A tracking peer's checkpoint source restarted or was replaced:
     /// the stream's tick fell below the run's last alignment — or,
-    /// before any alignment stood, below the run's own tick — a new
-    /// tick generation, not a continuation of the tracked line. The
-    /// peer adopted the checkpoint's state without rewinding its run
+    /// before any alignment stood, below the run's own tick — while the
+    /// checkpoint's generation stamp differs from the run's own, the
+    /// new tick generation that marks a cold-started or replaced source
+    /// rather than a continuation of the tracked line. A regression on
+    /// the run's own generation is the peer's tracking reset, not the
+    /// source's restart — a demoted peer's first pull on its
+    /// uninterrupted successor is the standing case — and journals
+    /// nothing; a stream that cannot name a generation keeps the
+    /// conservative verdict. The peer adopted the checkpoint's state
+    /// without rewinding its run
     /// tick: the entry's `tick` is the run tick the resync landed at,
     /// `was_aligned` the alignment the regression broke, and
     /// `resumed_at` the regressed checkpoint's own tick — where the new
@@ -170,8 +178,8 @@ pub enum JournalEvent {
     /// its own.
     SourceRestarted {
         /// The last applied checkpoint's tick before the regression —
-        /// `None` when the run had never aligned, the regression then
-        /// measured against the run's own tick.
+        /// `None` when the run had none — a demoted peer's first pull,
+        /// the regression then measured against the run's own tick.
         was_aligned: Option<Tick>,
         /// The regressed checkpoint's own tick — where the new
         /// generation's stream resumed.
@@ -203,6 +211,35 @@ pub enum JournalEvent {
     FieldClaimLost {
         /// The point whose write the field fenced.
         point: PointId,
+    },
+    /// A tracking peer's applied checkpoint stamped its serving run as
+    /// not owning field writes — the checkpoint's `source_owns_field`
+    /// stamp — meaning the tracked line has no field owner: the
+    /// mutual-standby wedge, where every peer reports a clean apply
+    /// while the field stands unwritten. The peer's reported sync moves
+    /// to [`StandbySync::Orphaned`](crate::StandbySync) and a peer that
+    /// once owned the field re-arms its claim conditionally — granted
+    /// only while the field is unclaimed or already names its own
+    /// token, never preempting a standing owner. One entry journals per
+    /// transition into the orphaned state, attributed to the tick the
+    /// orphaned apply landed at; `aligned` carries the applied
+    /// checkpoint's own tick — where the tracked line stood when the
+    /// observation landed.
+    FieldOrphaned {
+        /// The applied checkpoint's tick — the tracked line's position.
+        aligned: Tick,
+    },
+    /// A field owner demoted toward the address a tracking peer
+    /// announced through its `GET /checkpoint?peer=` pulls verified
+    /// that hint by pulling a checkpoint from it that continues this
+    /// run's line, and adopted it as the tracking source the demoted
+    /// peer now pulls. `source` names the adopted address — the audit
+    /// record of which endpoint an unauthenticated announce moved this
+    /// run onto, so a redirected or forged source is never adopted
+    /// silently. The entry's `tick` is the demotion boundary's tick.
+    TrackingSourceAdopted {
+        /// The adopted tracking source's monitor address.
+        source: SocketAddr,
     },
     /// A new process lifetime began — the served form of the journal
     /// file's run-boundary marker. A monitor bound over a journal file
@@ -429,15 +466,27 @@ mod tests {
             JournalEntry {
                 seq: 14,
                 tick: Tick(20),
+                event: JournalEvent::TrackingSourceAdopted {
+                    source: "127.0.0.1:8081".parse().unwrap(),
+                },
+            },
+            JournalEntry {
+                seq: 15,
+                tick: Tick(20),
                 event: JournalEvent::SourceRestarted {
                     was_aligned: None,
                     resumed_at: Tick(2),
                 },
             },
             JournalEntry {
-                seq: 15,
+                seq: 16,
                 tick: Tick(20),
                 event: JournalEvent::RunBoundary { run: 2 },
+            },
+            JournalEntry {
+                seq: 17,
+                tick: Tick(21),
+                event: JournalEvent::FieldOrphaned { aligned: Tick(20) },
             },
         ];
         let json = serde_json::to_string(&entries).unwrap();
@@ -456,7 +505,9 @@ mod tests {
         assert!(json.contains("\"reinitialized\""), "{json}");
         assert!(json.contains("\"event_emitted\""), "{json}");
         assert!(json.contains("\"field_claim_lost\""), "{json}");
+        assert!(json.contains("\"field_orphaned\""), "{json}");
         assert!(json.contains("\"source_restarted\""), "{json}");
+        assert!(json.contains("\"tracking_source_adopted\""), "{json}");
         assert!(json.contains("\"run_boundary\""), "{json}");
     }
 

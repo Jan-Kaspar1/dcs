@@ -307,6 +307,35 @@ def descriptor_mismatches(model, snapshot):
     return failures
 
 
+def parameter_report_misses(model, snapshot):
+    """Named differences between the emitted model's declared
+    parameter values and the parameters section the snapshot serves —
+    every component instance's declared parameters must report live
+    under its `<kind>:<id>` name with their declared values. Served
+    parameters the document does not declare — a kind's own declared
+    defaults the composition left implicit — are not failures."""
+    failures = []
+    reported = {
+        entry.get("name"): (entry.get("values") or {})
+        for entry in snapshot.get("parameters") or []
+    }
+    for instance in model["components"]:
+        name = f"{instance['kind']}:{instance['id']}"
+        declared = instance.get("parameters") or {}
+        values = reported.get(name)
+        if values is None:
+            if declared:
+                failures.append(f"component {name} serves no parameter report")
+            continue
+        for key, want in declared.items():
+            if values.get(key) != want:
+                failures.append(
+                    f"component {name}: parameter {key} serves "
+                    f"{values.get(key)!r}, declared {want!r}"
+                )
+    return failures
+
+
 def bound_points(model):
     """The `(component id, port name) -> point id` map the model's
     wiring resolves — the binding the served registry's `point`
@@ -880,6 +909,12 @@ def run_surface(monitor, model, schema_out=None):
             snapshot = None
     if snapshot is not None:
         failures += descriptor_mismatches(model, snapshot)
+        # The served parameters section reports every component's
+        # declared values live — the managed alarm kinds'
+        # priority/class/response_ticks among them, the numeric half
+        # of the record the components section's rationalization
+        # blocks carry the prose half of.
+        failures += parameter_report_misses(model, snapshot)
 
     # The consumer-visible record: `GET /journal` answers the run's
     # transitions — which must include each submitted declared
@@ -929,6 +964,7 @@ def run_surface(monitor, model, schema_out=None):
             {
                 "signals": served,
                 "descriptors": snapshot["descriptors"],
+                "parameters": snapshot["parameters"],
                 "schema": schema,
                 "journal": journal,
             },

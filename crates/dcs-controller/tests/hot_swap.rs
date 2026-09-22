@@ -29,10 +29,14 @@ use dcs_core::{
 use dcs_monitor::MonitorClient;
 use dcs_sim_net::RemoteDriver;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 mod support;
 
-use support::{SimTcp, controller_model, image_value, kill, spawn_controller, spawn_plant};
+use support::{
+    SimTcp, controller_model, image_value, kill, reachable, spawn_controller,
+    spawn_controller_paced, spawn_plant,
+};
 /// The shared plant's model — the dcs-plant tank loop: level raw (10)
 /// and setpoint (11) in, valve command (20) out, an analog-input scaling
 /// and a PID parameterized for dt 0.1.
@@ -407,6 +411,212 @@ fn a_demoted_launched_active_follows_its_successor_and_fails_back() {
         matches!(report.sync, Some(StandbySync::Tracking { .. })),
         "the twice-demoted peer must reconverge again: {report:?}"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The QA finding `source-restarted-journaled-on-demote-track`: a
+/// demoted peer's first tracking pull on its uninterrupted successor
+/// lands a checkpoint whose tick trails the demoted run's own — the
+/// demotion cleared the alignment the regression heuristic stood on —
+/// and the old code journaled `source_restarted` for it, attributing
+/// the peer's own tracking reset to the source. The successor's stream
+/// still names the generation the demoted run's own checkpoints
+/// stamped, so no source boundary crossed and the journal must carry
+/// no `SourceRestarted` — while the demoted peer still reconverges as
+/// a promotable tracking standby.
+///
+/// The induction is one extra owner scan between the last convergence
+/// pull and the demote: on the paced rig the running scan loop opens
+/// that same gap between the demote request and the demoted peer's
+/// first pull.
+#[test]
+fn a_demoted_peers_reconvergence_journals_no_source_restart() {
+    let dir = std::env::temp_dir().join(format!("dcs-demote-track-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        pair_plant.addr,
+        SimTcp::PerDevice,
+    )
+    .0;
+
+    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.ensure_writer(SEED).unwrap();
+    field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    field.release_writer().unwrap();
+
+    // The reproduction's launch shape: the active names no peer; the
+    // standby tracks it by `--standby`, announcing its own monitor on
+    // every pull so the demoted run knows where its successor lives.
+    let active_process = spawn_controller(&pair_model, &[], DT);
+    let standby_process = spawn_controller(
+        &pair_model,
+        &["--standby".to_string(), active_process.addr.to_string()],
+        DT,
+    );
+    let active = MonitorClient::new(active_process.addr);
+    let standby = MonitorClient::new(standby_process.addr);
+
+    for _ in 0..5 {
+        standby.advance(1).unwrap();
+        active.advance(1).unwrap();
+    }
+    assert!(
+        matches!(
+            standby.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby never converged"
+    );
+
+    // The owner runs one scan past what the standby last pulled — the
+    // tick lead the demoted run will hold over its successor's stream.
+    active.advance(1).unwrap();
+    active.demote().unwrap();
+
+    // The first tracking cycle against the successor: the pulled
+    // checkpoint's tick trails the demoted run's own — the regression —
+    // but the stream's generation is the run's own, so no
+    // `source_restarted` may journal. The role settles `standby`.
+    active.advance(1).unwrap();
+    standby.promote().unwrap();
+    standby.advance(1).unwrap();
+
+    for _ in 0..3 {
+        standby.advance(1).unwrap();
+        active.advance(1).unwrap();
+    }
+    let report = active.role().unwrap();
+    assert_eq!(report.role, Role::Standby, "{report:?}");
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted peer must reconverge on its successor: {report:?}"
+    );
+
+    // The defect's assertion: the demote-to-track transition is the
+    // peer's own tracking reset, so the journal names no source restart.
+    let journal = active.journal(0).unwrap();
+    assert!(
+        journal
+            .iter()
+            .all(|entry| !matches!(entry.event, JournalEvent::SourceRestarted { .. })),
+        "the demoted peer's journal must carry no source_restarted: {journal:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Polls `client.role()` until `expect` holds or `timeout` passes — the
+/// paced run's convergence wait: roles are observed, never driven, so
+/// the wall clock supplies the cadence. Returns the satisfying report;
+/// panics with the last one observed.
+fn wait_for_role(
+    client: &MonitorClient,
+    expect: impl Fn(&dcs_core::RoleReport) -> bool,
+    timeout: Duration,
+) -> dcs_core::RoleReport {
+    let deadline = Instant::now() + timeout;
+    let mut last = None;
+    while Instant::now() < deadline {
+        match client.role() {
+            Ok(report) if expect(&report) => return report,
+            Ok(report) => last = Some(report),
+            Err(_) => {}
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("role never satisfied within {timeout:?}: last report {last:?}");
+}
+
+/// The same QA reproduction under the deployment's own pacing — the
+/// shape the rig actually runs: `--scan-ms` wall-clock scans, wildcard
+/// `--listen` binds, and no `--driven` request boundary carrying the
+/// pull. The launched active names no peer; the tracking standby's
+/// `GET /checkpoint?peer=` pulls announce its wildcard-bound monitor —
+/// the serving side resolving `0.0.0.0` to the pull's proven source —
+/// and the demoted peer's paced tracking cycle follows that announced
+/// successor: `GET /role` leaves `unsynchronized` and `POST /promote`
+/// fails back without a process restart.
+#[test]
+fn a_paced_launched_active_demoted_follows_its_successor_and_fails_back() {
+    let dir = std::env::temp_dir().join(format!("dcs-paced-failback-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // The shared field both peers attach to through `--remote` — the
+    // rig's wiring, so the served plant model is the controller's own.
+    let plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+
+    // ctrl-a: the launched active — the reproduction's launch shape,
+    // no `--standby` and no `--peer` naming a peer anywhere.
+    let active_process = spawn_controller_paced(
+        Path::new(PLANT_MODEL),
+        &["--remote".to_string(), plant.addr.to_string()],
+        50,
+        "0.0.0.0:0",
+    );
+    let active_addr = reachable(active_process.addr);
+    // ctrl-b: the tracking standby, wildcard-bound like the rig's
+    // container deployment — every pull announces `0.0.0.0:<port>`.
+    let standby_process = spawn_controller_paced(
+        Path::new(PLANT_MODEL),
+        &[
+            "--remote".to_string(),
+            plant.addr.to_string(),
+            "--standby".to_string(),
+            active_addr.to_string(),
+        ],
+        50,
+        "0.0.0.0:0",
+    );
+    let active = MonitorClient::new(active_addr);
+    let standby = MonitorClient::new(reachable(standby_process.addr));
+
+    let tracking =
+        |report: &dcs_core::RoleReport| matches!(report.sync, Some(StandbySync::Tracking { .. }));
+    // The standby converges on the active's checkpoints — every pull
+    // also announcing its monitor to the active.
+    wait_for_role(&standby, tracking, Duration::from_secs(15));
+    assert_eq!(active.role().unwrap().role, Role::Active);
+
+    // The reproduction's bodyless `POST /demote`: accepted — the
+    // announced source is already known — then the documented order
+    // promotes the converged standby.
+    assert_eq!(active.demote().unwrap().role, Role::Demoting);
+    assert_eq!(standby.promote().unwrap().role, Role::Promoting);
+
+    // The demoted peer's paced tracking cycle pulls its successor's
+    // checkpoints — the announced source — and reconverges to
+    // `standby`/`tracking`: the permanently `unsynchronized` standby
+    // the finding reported, and the `not_converged` promote refusal it
+    // forced, are gone.
+    let report = wait_for_role(&active, tracking, Duration::from_secs(15));
+    assert_eq!(report.role, Role::Standby, "{report:?}");
+    assert_eq!(
+        wait_for_role(
+            &standby,
+            |r| r.role == Role::Active,
+            Duration::from_secs(15)
+        )
+        .role,
+        Role::Active
+    );
+
+    // Fail-back without a restart: demote the owner — its configured
+    // `--standby` target is its tracking source — and promote the
+    // reconverged original peer; exactly one writer throughout.
+    assert_eq!(standby.demote().unwrap().role, Role::Demoting);
+    assert_eq!(active.promote().unwrap().role, Role::Promoting);
+    assert_eq!(
+        wait_for_role(&active, |r| r.role == Role::Active, Duration::from_secs(15)).role,
+        Role::Active
+    );
+    let report = wait_for_role(&standby, tracking, Duration::from_secs(15));
+    assert_eq!(report.role, Role::Standby, "{report:?}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

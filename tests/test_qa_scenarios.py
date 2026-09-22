@@ -61,7 +61,14 @@ selection, whose all-bad state never engages the declared fallback,
 whose served output holds its last Good stamp or keeps controlling
 on untrusted data, whose recovered primary never re-selects, whose
 annunciation never clears, or whose rig never presents the leg's
-contract."""
+contract — and the alarm-rationalization audit: a served registry
+that drops an instance's record or prose block, a live parameter
+report that omits an instance or drifts off the declared
+priority/class/response_ticks, a durable journal silent on a
+standing alarm point, a reference and bound port that disagree, a
+retune refused or applied-but-never-served, a refused restore, a
+re-read that disagrees with the first, and the inconclusive cases
+when the served sections omit the records."""
 import copy
 import io
 import json
@@ -212,9 +219,15 @@ class Feed:
         # command_queue section reports: small so the test flood is tiny.
         self.capacity = 4
         self.bounded = True
+        self.attempts = 0         # lifetime submissions — the log's high-water
         self.full_rejections = 0
         self.high_water = 0
         self.flood_pending = set()  # receipt indices admitted on the flood channel
+        # The receipt log's retention bound: None keeps every receipt —
+        # a value evicts the settled prefix past the cap on each append,
+        # the served bounded-tail behavior the audit must correlate
+        # across.
+        self.receipt_cap = None
         # Fault injection for the named-failure cases.
         self.freeze = False           # scans stop advancing
         self.freeze_on_connect = False  # ... once a consumer holds one
@@ -232,6 +245,7 @@ class Feed:
     # precedes admission, and a queue at capacity takes the named
     # queue_full rejection — exactly one receipt per submission.
     def _admit(self, body, flood=False):
+        self.attempts += 1
         write = body['command']['write_value']
         depth = self._depth()
         if write['point'] == 10:
@@ -258,6 +272,19 @@ class Feed:
                        'actor': body.get('actor')}
             self._journal_entry()
         self.receipts.append(receipt)
+        if self.receipt_cap is not None:
+            # The bounded tail's eviction: the settled prefix past the
+            # cap leaves the window; pending receipts never evict.
+            excess = len(self.receipts) - self.receipt_cap
+            settled = next(
+                (i for i, entry in enumerate(self.receipts)
+                 if 'accepted' in entry['outcome']), len(self.receipts))
+            evicted = min(excess, settled)
+            if evicted > 0:
+                del self.receipts[:evicted]
+                self.flood_pending = {i - evicted
+                                      for i in self.flood_pending
+                                      if i >= evicted}
         return receipt
 
     # The plant half: one completed scan per measurement read, applying
@@ -309,13 +336,20 @@ class Feed:
                     'depth': min(self.window, published),
                     'window': self.window},
                 'command_queue': {
-                    'attempts': len(self.receipts),
+                    'attempts': self.attempts,
                     'full_rejections': self.full_rejections,
                     'capacity': self.capacity,
                     'depth': self._depth(),
                     'high_water': self.high_water}}
         if (method, route) == ('GET', '/receipts'):
             return 200, list(self.receipts)
+        if (method, route) == ('GET', '/checkpoint'):
+            return 200, {
+                'receipts': list(self.receipts),
+                'command_admission': {
+                    'attempts': self.attempts,
+                    'full_rejections': self.full_rejections,
+                    'high_water': self.high_water}}
         if (method, route) == ('GET', '/history'):
             params = dict(part.split('=', 1) for part in query.split('&'))
             point, since = int(params['point']), int(params['since'])
@@ -1818,6 +1852,421 @@ class EventRetentionTests(unittest.TestCase):
         self.feed.no_emissions = True
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'inconclusive', record)
+        report.validate_scenario(record)
+
+
+class RationalizationFeed:
+    """A stubbed field owner for the alarm-rationalization scenario.
+    ctrl-a is the settled active serving the rig's managed-alarm
+    record: /signals carries each instance's ComponentRecord — the
+    rationalization block beside the kind:id name — plus the standing
+    alarm points' Signal entries; /snapshot carries the bound-point
+    descriptors and the live parameter report; POST /command receipts
+    a set_parameter retune that applies at the next request; and the
+    run's journal file carries every standing point's first-observed
+    point_changed record — the durable record's real format, which the
+    feed writes itself. Fault flags stage each named miss the issue
+    calls out."""
+
+    # name -> (kind, declared (priority, class, response_ticks),
+    #          reference signal, alarm point) — the rig model's real
+    #   triples and identity joins for the pinned instances.
+    ALARMS = {
+        'managed-latching-alarm:5': (
+            'managed-latching-alarm', (1, 1, 30), 'lah-alarm', 1003),
+        'managed-bool-latching-alarm:11': (
+            'managed-bool-latching-alarm', (1, 1, 30),
+            'power-fail-alarm', 1053),
+        'managed-bool-latching-alarm:22': (
+            'managed-bool-latching-alarm', (2, 2, 60),
+            'p101-fault-alarm', 1073),
+        'managed-bool-latching-alarm:36': (
+            'managed-bool-latching-alarm', (2, 2, 60),
+            'p102-fault-alarm', 1103)}
+
+    def __init__(self, journal_path):
+        self.journal_path = Path(journal_path)
+        self.journal_written = False
+        self.tick = 0
+        self.receipts = []
+        self.posts = 0
+        self.signals_reads = 0
+        # name -> live {'priority', 'class', 'response_ticks'}
+        self.values = {name: {'priority': spec[1][0],
+                              'class': spec[1][1],
+                              'response_ticks': spec[1][2]}
+                       for name, spec in self.ALARMS.items()}
+        # Fault injection for the named-failure cases.
+        self.not_active = False       # no peer reports role=active
+        self.omit_components = False  # /signals drops the section
+        self.omit_parameters = False  # /snapshot drops the section
+        self.no_records = False       # no managed alarm either side
+        self.drop_record = False      # one instance unrecorded
+        self.drop_block = False       # one record loses its prose
+        self.drop_pin = False         # a pinned instance unserved
+        self.drop_param = False       # one instance unserved live
+        self.wrong_values = False     # the wet-well triple drifts
+        self.misbound = False         # an alarm port binds elsewhere
+        self.silent_journal = False   # a standing point unjournaled
+        self.refuse_tune = False      # every retune settles rejected
+        self.refuse_restore = False   # the restore settles rejected
+        self.never_serve = False      # the applied tune never serves
+        self.drift_reread = False     # the re-read disagrees
+
+    def _write_journal(self):
+        self.journal_written = True
+        records = [{'run_boundary': {'run': 1, 'tick': 0}}]
+        seq = 1
+        for name in sorted(self.ALARMS):
+            point = self.ALARMS[name][3]
+            if self.silent_journal and point == 1073:
+                continue
+            records.append({'entry': {'seq': seq, 'tick': 1,
+                                      'event': {'point_changed': {
+                                          'point': point,
+                                          'from': None,
+                                          'to': {'bool': False}}}}})
+            seq += 1
+        self.journal_path.write_text(
+            ''.join(json.dumps(record) + '\n' for record in records))
+
+    def _apply(self):
+        # The scan boundary's command phase: an accepted tune settles
+        # applied and the parameter report picks it up — unless the
+        # fault flag holds the report stale.
+        for receipt in self.receipts:
+            accepted = (receipt.get('outcome') or {}).get('accepted')
+            if accepted and self.tick >= accepted['apply_tick']:
+                tune = receipt['command']['set_parameter']
+                receipt['outcome'] = {'applied': {'tick': self.tick}}
+                if not self.never_serve:
+                    self.values[tune['component']][tune['name']] = \
+                        tune['value']['int']
+
+    def _signals(self):
+        self.signals_reads += 1
+        records = []
+        for name, spec in self.ALARMS.items():
+            if self.no_records or self.drop_pin \
+                    and name == 'managed-bool-latching-alarm:11' \
+                    or self.drop_record \
+                    and name == 'managed-bool-latching-alarm:36':
+                continue
+            block = None if self.drop_block \
+                and name == 'managed-bool-latching-alarm:22' else {
+                    'consequence': 'the ' + spec[2] + ' condition '
+                                   'stands unanswered',
+                    'required_action': 'answer it',
+                    'reference': spec[2]}
+            if self.drift_reread and self.signals_reads > 1 \
+                    and name == 'managed-latching-alarm:5' \
+                    and block is not None:
+                block = dict(block, consequence='a moved answer')
+            record = {'name': name, 'kind': spec[0]}
+            if block is not None:
+                record['rationalization'] = block
+            records.append(record)
+        points = [{'point': spec[3], 'signal': 11000 + spec[3],
+                   'name': spec[2], 'direction': 'out',
+                   'value_type': 'bool', 'writable': False}
+                  for name, spec in self.ALARMS.items()
+                  if not self.no_records]
+        body = {'points': points}
+        if not self.omit_components:
+            body['components'] = records
+        return 200, body
+
+    def _snapshot(self):
+        descriptors = [
+            {'name': name, 'kind': spec[0], 'label': name,
+             'ports': [{'name': 'alarm', 'direction': 'out',
+                        'kind': 'bool', 'role': 'status',
+                        'point': 9999 if self.misbound
+                        and name == 'managed-bool-latching-alarm:22'
+                        else spec[3]}],
+             'parameters': [{'name': 'priority', 'kind': 'int'},
+                            {'name': 'class', 'kind': 'int'},
+                            {'name': 'response_ticks', 'kind': 'int'}],
+             'commands': [], 'events': []}
+            for name, spec in self.ALARMS.items()
+            if not self.no_records and not (
+                self.drop_pin
+                and name == 'managed-bool-latching-alarm:11')]
+        parameters = []
+        for name in self.ALARMS:
+            if self.no_records or self.drop_pin \
+                    and name == 'managed-bool-latching-alarm:11' \
+                    or self.drop_param \
+                    and name == 'managed-bool-latching-alarm:36':
+                continue
+            values = dict(self.values[name])
+            if self.wrong_values \
+                    and name == 'managed-latching-alarm:5':
+                values['response_ticks'] = 99
+            parameters.append(
+                {'name': name,
+                 'values': {param: {'int': value}
+                            for param, value in values.items()}})
+        body = {'tick': self.tick, 'descriptors': descriptors}
+        if not self.omit_parameters:
+            body['parameters'] = parameters
+        return 200, body
+
+    def http_json(self, method, url, body=None, timeout=10):
+        host = url.split('/')[2]
+        path = '/' + url.split('/', 3)[3]
+        route, _, _query = path.partition('?')
+        self.tick += 1
+        if not self.journal_written:
+            self._write_journal()
+        self._apply()
+        if host != 'ctrl-a:1':
+            raise AssertionError('unexpected request %s %s'
+                                 % (method, url))
+        if (method, route) == ('GET', '/role'):
+            role = 'standby' if self.not_active else 'active'
+            return 200, {'role': role, 'tick': self.tick}
+        if (method, route) == ('GET', '/signals'):
+            return self._signals()
+        if (method, route) == ('GET', '/snapshot'):
+            return self._snapshot()
+        if (method, route) == ('GET', '/receipts'):
+            return 200, list(self.receipts)
+        if (method, route) == ('POST', '/command'):
+            self.posts += 1
+            command = body['command']
+            if self.refuse_tune \
+                    or self.refuse_restore and self.posts > 1:
+                receipt = {'command': command,
+                           'outcome': {'rejected': {'reason': {
+                               'validation': {'detail': 'refused'}}}},
+                           'actor': body.get('actor')}
+                self.receipts.append(receipt)
+                return 200, receipt
+            receipt = {'command': command,
+                       'outcome': {'accepted': {
+                           'apply_tick': self.tick + 1}},
+                       'actor': body.get('actor')}
+            self.receipts.append(receipt)
+            return 200, receipt
+        raise AssertionError('unexpected request %s %s' % (method, url))
+
+
+class AlarmRationalizationTests(unittest.TestCase):
+    """scenario_alarm_rationalization against the stubbed field owner:
+    the components-section coverage, the live parameter report, the
+    durable journal's identity join, the receipted retune-and-restore,
+    and the inconclusive cases when the served sections omit the
+    records."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.journal = Path(self.tmp.name) / 'controllers' / 'a' \
+            / 'journal.jsonl'
+        self.journal.parent.mkdir(parents=True)
+        self.feed = RationalizationFeed(self.journal)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_scenario(self, feed=None, journal=True):
+        feed = feed or self.feed
+        ctx = {'active': 'http://ctrl-a:1',
+               'evidence_dir': str(self.evidence)}
+        if journal:
+            ctx['journal_files'] = {'active': str(self.journal)}
+        with patch.object(scenarios, 'http_json', feed.http_json), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'RATIONALIZATION_SETTLE', 0.3), \
+                patch.object(scenarios,
+                             'RATIONALIZATION_DEADLINE', 0.5):
+            return scenarios.scenario_alarm_rationalization(ctx)
+
+    def test_registered(self):
+        self.assertIn(scenarios.scenario_alarm_rationalization,
+                      scenarios.SCENARIOS)
+        self.assertIs(
+            verify.case_function('alarm-rationalization'),
+            scenarios.scenario_alarm_rationalization)
+
+    def test_clean_feed_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        report.validate_scenario(record)
+        for entry in record['evidence']:
+            self.assertTrue((self.evidence.parent
+                             / entry['ref']).exists(), entry)
+
+    def test_two_runs_produce_identical_evidence(self):
+        # The deterministic-rerun contract: two runs against the same
+        # rig layout record the same report and the same evidence
+        # files — the feed's transitions are request-count keyed,
+        # never wall-clock.
+        runs = []
+        for _index in range(2):
+            for stale in self.evidence.iterdir():
+                stale.unlink()
+            feed = RationalizationFeed(self.journal)
+            record = self.run_scenario(feed=feed)
+            runs.append((record, {p.name: p.read_bytes()
+                                  for p in self.evidence.iterdir()}))
+        self.assertEqual(runs[0][0]['outcome'], 'passed', runs[0][0])
+        self.assertEqual(runs[0], runs[1])
+
+    def test_missing_rationalization_block_fails(self):
+        # One record's prose block never served — the record's
+        # declared-once half missing on the deployed surface.
+        self.feed.drop_block = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('rationalization-failed',
+                      record.get('detail', ''))
+        self.assertIn('rationalization block',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_record_set_disagreement_fails(self):
+        # The descriptor set carries an instance the components
+        # section never records — one record per managed alarm
+        # instance is the contract.
+        self.feed.drop_record = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('rationalization-failed',
+                      record.get('detail', ''))
+        self.assertIn('disagree', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_wrong_declared_values_fail(self):
+        # The wet-well alarm's served triple drifts off the declared
+        # 1/1/30 — a live-parameter miss, not a prose one.
+        self.feed.wrong_values = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('rationalization-failed',
+                      record.get('detail', ''))
+        self.assertIn('managed-latching-alarm:5',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unserved_parameter_entry_fails(self):
+        # One managed instance's live parameter report never lands.
+        self.feed.drop_param = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('rationalization-failed',
+                      record.get('detail', ''))
+        self.assertIn('parameters entry', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unjournaled_standing_point_fails(self):
+        # The durable record never names p101-fault-alarm's point —
+        # the identity join's journal half missing.
+        self.feed.silent_journal = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('rationalization-failed',
+                      record.get('detail', ''))
+        self.assertIn('point_changed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_misbound_alarm_point_fails(self):
+        # The reference signal and the bound alarm port disagree —
+        # the identity convention broken.
+        self.feed.misbound = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('rationalization-failed',
+                      record.get('detail', ''))
+        self.assertIn('alarm port binds', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_refused_retune_fails(self):
+        self.feed.refuse_tune = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('rationalization-failed',
+                      record.get('detail', ''))
+        self.assertIn('never settled applied',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unserved_retune_fails(self):
+        # The receipt settles applied but the parameter report never
+        # serves the tuned value — the served half of the tune broke.
+        self.feed.never_serve = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('rationalization-failed',
+                      record.get('detail', ''))
+        self.assertIn('never served', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_refused_restore_fails(self):
+        # The retune applies and serves but the restore is refused —
+        # the leg leaves the tuned value standing.
+        self.feed.refuse_restore = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('rationalization-failed',
+                      record.get('detail', ''))
+        self.assertIn('restore', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_drifted_reread_fails_nondeterministic(self):
+        # The re-read serves a different rationalization block — the
+        # same surface disagreeing with itself is the named
+        # nondeterministic miss.
+        self.feed.drift_reread = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('rationalization-nondeterministic',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_omitted_components_section_is_inconclusive(self):
+        self.feed.omit_components = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        report.validate_scenario(record)
+
+    def test_omitted_parameters_section_is_inconclusive(self):
+        self.feed.omit_parameters = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        report.validate_scenario(record)
+
+    def test_no_managed_records_is_inconclusive(self):
+        # Neither section carries a managed alarm — the deployed
+        # model is not the rig's rationalized set.
+        self.feed.no_records = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        report.validate_scenario(record)
+
+    def test_missing_pinned_instance_is_inconclusive(self):
+        # The served set agrees with itself but never carries a
+        # pinned instance — the deployed model is not the rig's.
+        self.feed.drop_pin = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('pinned', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_missing_journal_path_is_inconclusive(self):
+        record = self.run_scenario(journal=False)
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('journal-file path', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_no_active_peer_fails(self):
+        self.feed.not_active = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('no peer reports role=active',
+                      record.get('detail', ''))
         report.validate_scenario(record)
 
 
@@ -3717,7 +4166,8 @@ class BackupHealthFeed:
     output's last image on the alarm's `in` carrier, the selector
     drives backup_unhealthy off the plant-served backup quality, and
     the latching alarm stands on `in`, holds unacknowledged on its
-    edge latch, and ack-dominates — so the carrier delay means the
+    edge latch, and consumes ack on its rising edge — so the carrier
+    delay means the
     full annunciation lands a scan behind the injected fault.
     Declared-journaled points record point_changed; the carrier does
     not. Fault flags stage each named failure the issue calls out."""
@@ -3756,6 +4206,7 @@ class BackupHealthFeed:
         self.journal = []
         self.pending = []
         self.ack = False
+        self.ack_seen = False   # the last-observed ack level
         self.state = False      # the alarm's tracked `in`
         self.latched = False    # the unacknowledged latch
         self.ever_faulted = False
@@ -3837,7 +4288,9 @@ class BackupHealthFeed:
         condition = self.values[self.CARRIER]
         fresh = condition and not self.state
         self.state = condition
-        self.latched = (self.latched or fresh) and not self.ack
+        acknowledged = self.ack and not self.ack_seen
+        self.ack_seen = self.ack
+        self.latched = (self.latched and not acknowledged) or fresh
         self._drive(self.ALARM, condition and not self.mute_alarm)
         self._drive(self.UNACK, self.latched and not self.mute_latch)
         if degraded and self.journals_role and not self._role_journaled:
@@ -4168,7 +4621,7 @@ class SourceFailoverFeed:
     the primary's served quality degrades, the chain advances its
     held demand on the failover-fed level under the declared
     setpoints, and the alarm stands on `in`, latches unacknowledged on
-    the edge, and releases it while ack reads true. Declared-journaled
+    the edge, and releases it on ack's rising edge. Declared-journaled
     points record point_changed; the carriers do not. Fault flags
     stage each named failure the issue calls out."""
 
@@ -4222,6 +4675,7 @@ class SourceFailoverFeed:
         self.journal = []
         self.pending = []
         self.ack = False
+        self.ack_seen = False   # the last-observed ack level
         self.state = False      # the alarm's tracked `in`
         self.latched = False    # the unacknowledged latch
         self.ever_faulted = False
@@ -4363,11 +4817,13 @@ class SourceFailoverFeed:
         self._drive(self.HIGH_LEVEL,
                     bool(trusted and level >= self.HIGH))
         # The wired managed alarm: `in` is the flag's carrier, the
-        # latch holds until ack reads true.
+        # latch holds until ack's rising edge.
         condition = self.values[self.CARRIER]
         fresh = condition and not self.state
         self.state = condition
-        self.latched = (self.latched or fresh) and not self.ack
+        acknowledged = self.ack and not self.ack_seen
+        self.ack_seen = self.ack
+        self.latched = (self.latched and not acknowledged) or fresh
         if self.unlatches_on_clear and not condition:
             self.latched = False
         self._drive(self.ALARM, condition and not self.mute_alarm)
@@ -5800,6 +6256,13 @@ class LagStagingTests(unittest.TestCase):
         self.assertEqual(
             order.index(scenarios.scenario_demote_settle_uniqueness)
             + 1,
+            order.index(scenarios.scenario_demote_pending_command))
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_pending_command)
+            + 1,
+            order.index(scenarios.scenario_demote_reconvergence))
+        self.assertLess(
+            order.index(scenarios.scenario_demote_reconvergence),
             order.index(scenarios.scenario_parameter_tune_carryover))
         self.assertIs(verify.case_function('lag-staging'),
                       scenarios.scenario_lag_staging)
@@ -6064,6 +6527,819 @@ class LagStagingTests(unittest.TestCase):
         self.assertEqual(record['outcome'], 'inconclusive', record)
         self.assertIn('outputs never reported',
                       record.get('detail', ''))
+        report.validate_scenario(record)
+
+
+class OosPlantPeer(FakePlantPeer):
+    """The out-of-service rig's plant half: run contacts 40/41 loop
+    back the driven commands — the feed mirrors each commanded point
+    into the plant's stored value — and FakePlantPeer's quality
+    substitution carries the injected run fault the mid-OOS truth leg
+    proves with."""
+
+    def __init__(self):
+        super().__init__()
+        self.samples[41] = {'value': {'bool': False},
+                            'quality': 'good', 'tick': 0}
+
+
+class OosFeed:
+    """A stubbed monitor pair for the pump out-of-service scenario:
+    ctrl-a runs a tiny executor over the rig's writable `oos` points,
+    the in-service availability leg, the demand guard, the pump
+    group's exclusion/staging semantics, and the six managed bool
+    alarms; ctrl-b only reports its tracking standby role. Every
+    `http_json` call is one completed scan — the internal carriers
+    deliver last scan's image, so the oos-ok cone, the avail drop, the
+    duty handover, and the delivered suppression copy each land their
+    own carrier hop after the write, exactly like the deployed model.
+    Declared-journaled points record point_changed — the first
+    observed sample included — and every accepted command settles its
+    receipt at the next scan's boundary. Fault flags stage each named
+    failure the issue calls out."""
+
+    LEVEL, INFLOW = 200, 12
+    DEMAND, DEMAND_IN = 204, 205
+    DUTY, STAGED, NONE_AVAIL = 210, 211, 217
+    START_DELAY, MIN_OFF, MOTOR_FAULT_TICKS = 1, 2, 2
+    CUTOFF, STOP, START, LAG_START = 0.5, 1.0, 2.0, 3.0
+    RISE, DRAW = 0.2, 1.0       # the dynamics' ambient gain and draw
+    KINDS = ('fault', 'thermal', 'moisture')
+    JOURNALED = (40, 41, 217,
+                 300, 302, 312, 328, 332, 334, 344, 360,
+                 1073, 1074, 1075, 1076, 1077,
+                 1083, 1084, 1085, 1086, 1087,
+                 1093, 1094, 1095, 1096, 1097,
+                 1103, 1104, 1105, 1106, 1107,
+                 1113, 1114, 1115, 1116, 1117,
+                 1123, 1124, 1125, 1126, 1127)
+    WRITABLE = (300, 301, 302, 332, 333, 334,
+                1070, 1080, 1090, 1100, 1110, 1120)
+
+    @staticmethod
+    def base(index):
+        """The 0-based pump's internal point base — 300 + 32*i."""
+        return 300 + 32 * index
+
+    @staticmethod
+    def alarm_base(index, kind):
+        """Pump `index`'s `kind` alarm's ack point — the alarm region
+        lays out three managed alarms per pump on 10-point strides."""
+        return 1070 + 30 * index + 10 * kind
+
+    def __init__(self, plant):
+        self.plant = plant
+        self.tick = 0
+        self.seq = 1
+        self.journal = []
+        self.pending = []           # accepted commands awaiting apply
+        self.level = 0.8
+        self.demand_held = 0        # the threshold chain's held demand
+        self.duty_index = None      # the group's duty holder, 0-based
+        self.cursor = 0             # the rotation cursor
+        self.last_demand = 0
+        self.commanded = [False, False]
+        self.held_until = [0, 0]
+        self.last_start = None
+        self.disagree = [0, 0]      # motor fault accounting per pump
+        self.exclusion_wait = 0     # slow_handover's delaying counter
+        self.ever_held = [False, False]
+        self.alarms = {(index, kind): {'state': False,
+                                       'latched': False,
+                                       'prev_sup': False}
+                       for index in (0, 1) for kind in range(3)}
+        self.values = {200: 0.8, 12: 0.0, 204: 0, 205: 0,
+                       210: 0, 211: 0, 217: False}
+        for index in (0, 1):
+            base = self.base(index)
+            self.values.update({
+                40 + index: False, 100 + index: False,
+                base: False, base + 1: False, base + 2: False,
+                base + 3: False, base + 4: False,
+                base + 8: True, base + 9: True, base + 10: True,
+                base + 12: False, base + 13: False, base + 14: False,
+                base + 28: True, base + 29: True,
+                base + 30: False, base + 31: False})
+            for kind in range(3):
+                base_a = self.alarm_base(index, kind)
+                for offset in (0, 3, 4, 5, 6, 7):
+                    self.values[base_a + offset] = False
+        self.jseen = {}
+        self.history = {}
+        self.hseq = {}
+        # Fault injection for the named-failure cases.
+        self.no_active = False           # ctrl-a never reports active
+        self.no_tracking = False         # the peer never tracks
+        self.bare_signals = False        # the oos-leg wiring absent
+        self.no_descriptors = False      # snapshot serves none
+        self.non_alternate = False       # the group declares timed
+        self.avail_sticks = False        # avail never drops on the hold
+        self.duty_sticks = False         # duty never hands over
+        self.slow_handover = False       # duty lands past the bound
+        self.duty_before_avail = False   # duty moves before the drop
+        self.managed_mute = False        # the held fault alarm's flags
+                                         # never assert
+        self.flags_unserved = False      # managed flag points absent
+        self.thermal_suppress = False    # the thermal alarm declares
+                                         # suppress — precedence proof
+        self.suppress_annunciates = False  # the latch ignores suppress
+        self.held_recommands = False     # the held cmd re-asserts
+        self.no_return = False           # avail never rejoins
+        self.no_reannunciate = False     # suppression's release lands
+                                         # no fresh latch
+        self.never_rejoins = False       # the group never re-admits
+        self.fault_never = False         # the injected fault never
+                                         # proves
+        self.no_journal = False          # point_changed never lands
+        self.no_receipts = False         # command_settled never lands
+        self.write_refused = False       # the command path rejects
+        self.role_moves = False          # the pair's roles move
+
+    @staticmethod
+    def _wrap(value):
+        if isinstance(value, bool):
+            return {'bool': value}
+        if isinstance(value, int):
+            return {'int': value}
+        return {'float': value}
+
+    def _entry(self, event):
+        self.journal.append({'seq': self.seq, 'tick': self.tick,
+                             'event': event})
+        self.seq += 1
+
+    def _journal_values(self):
+        for point in self.JOURNALED:
+            value = self.values[point]
+            previous = self.jseen.get(point)
+            if point in self.jseen and previous == value:
+                continue
+            self.jseen[point] = value
+            if not self.no_journal:
+                self._entry({'point_changed': {
+                    'point': point,
+                    'from': (None if point not in self.jseen
+                             or previous is None
+                             else self._wrap(previous)),
+                    'to': self._wrap(value)}})
+
+    def _assign(self, available):
+        """The alternate-each-cycle policy: the next available pump in
+        rotation order takes duty and advances the cursor."""
+        for offset in range(2):
+            index = (self.cursor + offset) % 2
+            if available[index]:
+                self.duty_index = index
+                self.cursor = (index + 1) % 2
+                return
+        self.duty_index = None
+
+    def _step_group(self):
+        demand = self.values[self.DEMAND_IN]
+        demand_eff = demand if isinstance(demand, int) \
+            and not isinstance(demand, bool) else self.last_demand
+        demand_eff = max(0, min(2, demand_eff))
+        available = []
+        for index in (0, 1):
+            base = self.base(index)
+            ok = bool(self.values[base + 29]) \
+                and not bool(self.values[base + 13])
+            if self.never_rejoins and self.ever_held[index]:
+                ok = False
+            available.append(ok)
+        if self.duty_index is not None \
+                and not available[self.duty_index]:
+            # The exclusion hands duty over this scan — or slow_handover
+            # banks it past the declared wiring bound.
+            self.exclusion_wait += 1
+            if not self.duty_sticks \
+                    and (not self.slow_handover
+                         or self.exclusion_wait > 10):
+                self._assign(available)
+        else:
+            self.exclusion_wait = 0
+            if self.last_demand >= 1 and demand_eff == 0:
+                self._assign(available)      # cycle end: alternate
+        if self.duty_index is None:
+            self._assign(available)
+        self.values[self.NONE_AVAIL] = not any(available)
+        self.values[self.DUTY] = 0 if self.duty_index is None \
+            else self.duty_index + 1
+        lead = self.duty_index if self.duty_index is not None \
+            else self.cursor
+        targets = []
+        for offset in range(2):
+            if len(targets) >= demand_eff:
+                break
+            index = (lead + offset) % 2
+            if available[index] and (self.commanded[index]
+                                     or self.tick
+                                     >= self.held_until[index]):
+                targets.append(index)
+        commanded = [False, False]
+        for index in targets:
+            if self.commanded[index]:
+                commanded[index] = True
+            elif self.last_start is None \
+                    or self.tick >= self.last_start + self.START_DELAY:
+                commanded[index] = True
+                self.last_start = self.tick
+        for index in range(2):
+            if self.commanded[index] and not commanded[index]:
+                self.held_until[index] = self.tick + self.MIN_OFF
+            self.commanded[index] = commanded[index]
+        self.last_demand = demand_eff
+        for index in (0, 1):
+            self.values[self.base(index) + 3] = commanded[index]
+        self.values[self.STAGED] = sum(commanded)
+
+    def _step_alarms(self):
+        """Each managed bool alarm: state follows `in`, the latch arms
+        on a fresh assertion or a suppression release under a standing
+        condition, ack dominates, suppression withholds. The managed
+        flags report their bound inputs' delivered levels — the fault
+        alarm's `oos`/`suppress` bindings, plus the thermal alarm's
+        `suppress` when thermal_suppress declares it."""
+        for index in (0, 1):
+            base = self.base(index)
+            for kind, name in enumerate(self.KINDS):
+                base_a = self.alarm_base(index, kind)
+                state = self.alarms[(index, kind)]
+                if name == 'fault':
+                    inp = self.values[base + 14]     # fault-alarm-in
+                    oos_in = bool(self.values[base + 2])
+                    sup_in = bool(self.values[base + 31])
+                elif name == 'thermal':
+                    inp = False                       # the clear contact
+                    oos_in = False
+                    sup_in = bool(self.values[base + 31]) \
+                        if self.thermal_suppress else False
+                else:
+                    inp = oos_in = sup_in = False
+                if self.managed_mute and name == 'fault':
+                    oos_in = sup_in = False
+                suppressed = sup_in
+                fresh = bool(inp) and (
+                    not state['state']
+                    or (state['prev_sup'] and not self.no_reannunciate))
+                state['state'] = bool(inp)
+                state['latched'] = (state['latched'] or fresh) \
+                    and not self.values[base_a] \
+                    and not (suppressed
+                             and not self.suppress_annunciates)
+                state['prev_sup'] = suppressed
+                self.values[base_a + 3] = state['state']
+                self.values[base_a + 4] = state['latched']
+                self.values[base_a + 5] = False
+                self.values[base_a + 6] = suppressed
+                self.values[base_a + 7] = oos_in
+
+    def _scan(self):
+        self.tick += 1
+        pending, self.pending = self.pending, []
+        for receipt in pending:
+            write = receipt['command']['write_value']
+            receipt['outcome'] = {'applied': {'tick': self.tick}}
+            point = write['point']
+            self.values[point] = write['value']['bool']
+            if point in (302, 334) and write['value']['bool']:
+                index = 0 if point == 302 else 1
+                self.ever_held[index] = True
+                if self.duty_before_avail:
+                    self.duty_index = 1 - index
+            if not self.no_receipts:
+                self._entry({'command_settled':
+                             {'receipt': dict(receipt)}})
+        # The internal carriers deliver last scan's image.
+        for index in (0, 1):
+            base = self.base(index)
+            self.values[base + 9] = self.values[base + 8]
+            self.values[base + 10] = self.values[base + 8]
+            self.values[base + 29] = self.values[base + 28]
+            self.values[base + 31] = self.values[base + 30]
+            self.values[base + 14] = self.values[base + 12]
+            self.values[base + 13] = self.values[base + 12]
+            self.values[base + 4] = self.values[base + 3]
+        self.values[self.DEMAND_IN] = self.values[self.DEMAND]
+        # The combinational layer: the in-service inversion, the
+        # suppression copy, the guarded motor request, the fault
+        # accounting, and the availability gate.
+        for index in (0, 1):
+            base = self.base(index)
+            self.values[base + 8] = not self.values[base + 2]
+            self.values[base + 30] = self.values[base + 2]
+            request = (self.values[base + 4]
+                       and not self.values[base]) \
+                or (self.values[base + 1] and self.values[base])
+            drive = request and self.values[base + 10]
+            if self.held_recommands and self.values[base + 2]:
+                drive = True
+            self.values[100 + index] = drive
+            self.plant.samples[40 + index]['value'] = {'bool': drive}
+            served = self.plant.served(40 + index)
+            run = served['value'].get('bool')
+            self.values[40 + index] = bool(run)
+            good = served.get('quality') == 'good'
+            agree = run == drive and (good or self.fault_never)
+            self.disagree[index] = 0 if agree \
+                else self.disagree[index] + 1
+            self.values[base + 12] = \
+                self.disagree[index] >= self.MOTOR_FAULT_TICKS
+            avail = (not self.values[base]) \
+                and bool(self.values[base + 9])
+            if self.avail_sticks:
+                avail = True
+            if self.no_return and not self.values[base + 28]:
+                avail = False
+            self.values[base + 28] = avail
+        self._step_group()
+        # The threshold chain on the integrated level.
+        if self.level <= self.STOP:
+            self.demand_held = 0
+        elif self.demand_held == 2 and self.level <= self.START:
+            self.demand_held = 1
+        elif self.level >= self.LAG_START:
+            self.demand_held = 2
+        elif self.demand_held == 0 and self.level >= self.START:
+            self.demand_held = 1
+        self.values[self.DEMAND] = self.demand_held
+        self.values[self.LEVEL] = self.level
+        self.values[self.INFLOW] = 0.0
+        self._step_alarms()
+        self._journal_values()
+        for point, value in self.values.items():
+            quality = 'good'
+            if point in (40, 41):
+                quality = self.plant.served(point).get('quality',
+                                                       'good')
+            self.hseq[point] = self.hseq.get(point, 0) + 1
+            self.history.setdefault(point, []).append({
+                'seq': self.hseq[point],
+                'sample': {'value': self._wrap(value),
+                           'quality': quality, 'tick': self.tick}})
+        self.level += self.RISE \
+            - self.DRAW * sum(bool(self.values[100 + index])
+                              for index in (0, 1))
+
+    def _signals(self):
+        def sig(point, name, direction='out', value_type='bool',
+                writable=False):
+            return {'point': point, 'signal': 10000 + point,
+                    'name': name, 'direction': direction,
+                    'value_type': value_type, 'writable': writable}
+        points = [
+            sig(12, 'inflow', 'in', 'float'),
+            sig(200, 'level-selected', 'out', 'float'),
+            sig(204, 'demand', 'out', 'int'),
+            sig(205, 'demand-in', 'in', 'int'),
+            sig(210, 'duty', 'out', 'int'),
+            sig(211, 'staged', 'out', 'int'),
+            sig(217, 'none-available')]
+        for index, tag in ((0, 'p101'), (1, 'p102')):
+            base = self.base(index)
+            points += [
+                sig(40 + index, tag + '-run', 'in'),
+                sig(100 + index, tag + '-cmd'),
+                sig(base, tag + '-mode', 'in', writable=True),
+                sig(base + 1, tag + '-hand', 'in', writable=True),
+                sig(base + 2, tag + '-oos', 'in', writable=True),
+                sig(base + 8, tag + '-oos-ok'),
+                sig(base + 9, tag + '-oos-ok-avail-in', 'in'),
+                sig(base + 10, tag + '-oos-ok-guard-in', 'in'),
+                sig(base + 12, tag + '-fault'),
+                sig(base + 14, tag + '-fault-alarm-in', 'in'),
+                sig(base + 28, tag + '-avail'),
+                sig(base + 29, tag + '-avail-in', 'in'),
+                sig(base + 30, tag + '-fault-sup'),
+                sig(base + 31, tag + '-fault-sup-in', 'in')]
+            for kind, name in enumerate(self.KINDS):
+                base_a = self.alarm_base(index, kind)
+                points += [
+                    sig(base_a, tag + '-' + name + '-ack', 'in',
+                        writable=True),
+                    sig(base_a + 3, tag + '-' + name + '-alarm'),
+                    sig(base_a + 4,
+                        tag + '-' + name + '-unacknowledged'),
+                    sig(base_a + 5, tag + '-' + name + '-shelved'),
+                    sig(base_a + 6, tag + '-' + name + '-suppressed'),
+                    sig(base_a + 7,
+                        tag + '-' + name + '-out-of-service')]
+        return points
+
+    def _descriptors(self):
+        def port(name, point):
+            return {'name': name, 'point': point}
+        descriptors = [
+            {'name': 'group', 'kind': 'pump-group',
+             'ports': [port('demand', 205),
+                       port('avail_1', 329), port('avail_2', 361),
+                       port('fault_1', 313), port('fault_2', 345),
+                       port('cmd_1', 303), port('cmd_2', 335),
+                       port('run_1', 40), port('run_2', 41),
+                       port('duty', 210), port('staged', 211),
+                       port('none_available', 217)]}]
+        for index in (0, 1):
+            base = self.base(index)
+            for kind, name in enumerate(self.KINDS):
+                base_a = self.alarm_base(index, kind)
+                ins = 314 + 32 * index if name == 'fault' \
+                    else (60 + index if name == 'thermal'
+                          else 80 + index)
+                ports = [port('in', ins), port('ack', base_a),
+                         port('alarm', base_a + 3),
+                         port('unacknowledged', base_a + 4),
+                         port('shelved', base_a + 5),
+                         port('suppressed', base_a + 6),
+                         port('out_of_service', base_a + 7)]
+                if name == 'fault':
+                    ports += [port('oos', base + 2),
+                              port('suppress', base + 31)]
+                elif name == 'thermal' and self.thermal_suppress:
+                    ports.append(port('suppress', base + 31))
+                descriptors.append({
+                    'name': 'p10%d-%s-alarm' % (index + 1, name),
+                    'kind': 'managed-bool-latching-alarm',
+                    'ports': ports})
+        return descriptors
+
+    def _parameters(self):
+        return [{'name': 'group', 'values': {
+            'rotation': {'int': 1 if self.non_alternate else 0},
+            'start_delay_ticks': {'int': self.START_DELAY},
+            'restage_delay_ticks': {'int': 0},
+            'min_off_ticks': {'int': self.MIN_OFF}}}]
+
+    def _snapshot_body(self):
+        points = []
+        flag_points = set()
+        for index in (0, 1):
+            for kind in range(3):
+                base_a = self.alarm_base(index, kind)
+                flag_points.update(
+                    base_a + offset for offset in (3, 4, 5, 6, 7))
+        for point, value in sorted(self.values.items()):
+            if self.flags_unserved and point in flag_points:
+                continue
+            quality = 'good'
+            if point in (40, 41):
+                quality = self.plant.served(point).get('quality',
+                                                       'good')
+            points.append({
+                'point': point,
+                'direction': 'in',
+                'sample': {'value': self._wrap(value),
+                           'quality': quality, 'tick': self.tick}})
+        body = {'tick': self.tick, 'points': points,
+                'parameters': self._parameters()}
+        if not self.no_descriptors:
+            body['descriptors'] = self._descriptors()
+        return body
+
+    # The monitor channel — replaces scenarios.http_json.
+    def http_json(self, method, url, body=None, timeout=10):
+        host = url.split('/')[2]
+        path = '/' + url.split('/', 3)[3]
+        route, _, query = path.partition('?')
+        self._scan()
+        if (method, route) == ('GET', '/role'):
+            if host == 'ctrl-b:2':
+                sync = 'unsynchronized' if self.no_tracking \
+                    else {'tracking': {'aligned': self.tick}}
+                return 200, {'role': 'standby', 'tick': self.tick,
+                             'sync': sync}
+            if self.no_active \
+                    or (self.role_moves and any(self.ever_held)):
+                return 200, {'role': 'standby', 'tick': self.tick}
+            return 200, {'role': 'active', 'tick': self.tick}
+        if (method, route) == ('GET', '/signals'):
+            points = self._signals()
+            if self.bare_signals:
+                points = points[:1]
+            return 200, {'points': points}
+        if (method, route) == ('GET', '/snapshot'):
+            return 200, self._snapshot_body()
+        if (method, route) == ('GET', '/journal'):
+            since = int(query.split('=', 1)[1])
+            return 200, [entry for entry in self.journal
+                         if entry['seq'] > since]
+        if (method, route) == ('GET', '/history'):
+            params = {}
+            for pair in query.split('&'):
+                key, _, val = pair.partition('=')
+                params.setdefault(key, []).append(val)
+            since = int(params.get('since', ['0'])[0])
+            wanted = [int(point) for point in params.get('point', [])]
+            if not wanted:
+                wanted = sorted(self.history)
+            return 200, [
+                {'point': point,
+                 'samples': [sample for sample in
+                             self.history.get(point, [])
+                             if sample['seq'] > since]}
+                for point in wanted]
+        if (method, route) == ('POST', '/command'):
+            write = (body or {}).get('command', {}).get('write_value')
+            point = (write or {}).get('point')
+            if write and point in self.WRITABLE \
+                    and not self.write_refused:
+                receipt = {'command': body['command'],
+                           'outcome': {'accepted': {
+                               'apply_tick': self.tick + 1}},
+                           'actor': body.get('actor')}
+                self.pending.append(receipt)
+                return 200, receipt
+            return 200, {'command': (body or {}).get('command'),
+                         'outcome': {'rejected': {'reason': {
+                             'not_writable': {'point': point}}}},
+                         'actor': (body or {}).get('actor')}
+        raise AssertionError('unexpected request %s %s' % (method, url))
+
+
+class PumpOutOfServiceTests(unittest.TestCase):
+    """scenario_pump_out_of_service against the stubbed rig: the
+    feed's carrier-hop timing is call-count keyed so each run emits
+    identical evidence, and every fault flag stages a named
+    acceptance failure — the exclusion, the handover bound, the
+    command hold, the managed-state assertion and its precedence,
+    the mid-OOS truth leg, the manual return, the rejoin, the
+    journal contract, and the inconclusive paths."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.plant = OosPlantPeer()
+        self.feed = OosFeed(self.plant)
+
+    def tearDown(self):
+        self.plant.close()
+        self.tmp.cleanup()
+
+    def _ctx(self):
+        return {'active': 'http://ctrl-a:1',
+                'standby': 'http://ctrl-b:2',
+                'plant': self.plant.address,
+                'plant_ctl': self.plant.ctl,
+                'evidence_dir': str(self.evidence)}
+
+    def run_scenario(self, ctx=None, feed=None):
+        feed = feed or self.feed
+        with patch.object(scenarios, 'http_json', feed.http_json), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'OOS_POLL', 0.001), \
+                patch.object(scenarios, 'OOS_DEADLINE', 3.0), \
+                patch.object(scenarios, 'OOS_CYCLE_DEADLINE', 3.0):
+            return scenarios.scenario_pump_out_of_service(
+                ctx or self._ctx())
+
+    def test_registered_in_scenarios(self):
+        order = list(scenarios.SCENARIOS)
+        # The managed-state leg rides the same settled tracking window
+        # as the duty-rotation case, ahead of the force-carryover leg.
+        self.assertEqual(
+            order.index(scenarios.scenario_duty_rotation) + 1,
+            order.index(scenarios.scenario_pump_out_of_service))
+        self.assertIs(verify.case_function('pump-out-of-service'),
+                      scenarios.scenario_pump_out_of_service)
+
+    def test_clean_feed_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        report.validate_scenario(record)
+        for entry in record['evidence']:
+            self.assertTrue((self.evidence.parent
+                             / entry['ref']).exists(), entry)
+        # The documented restore: oos cleared, the ack input clear,
+        # the run fault lifted, both pumps available and uncommanded
+        # at idle.
+        self.assertEqual(self.feed.values[302], False)
+        self.assertEqual(self.feed.values[1070], False)
+        self.assertFalse(self.plant.faults.get(40))
+        self.assertTrue(self.feed.values[328])
+        self.assertTrue(self.feed.values[360])
+        # The receipted writes the leg submitted all settled applied.
+        writes = [entry for entry in self.feed.journal
+                  if 'command_settled' in entry.get('event', {})]
+        self.assertEqual(len(writes), 4)   # hold, release, ack, ack-off
+        for entry in writes:
+            receipt = entry['event']['command_settled']['receipt']
+            self.assertEqual(receipt.get('actor'), 'qa-lane')
+            self.assertIn('applied', receipt.get('outcome') or {})
+
+    def test_two_runs_produce_identical_evidence(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        first = {p.name: p.read_bytes()
+                 for p in self.evidence.iterdir()}
+        second_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(second_tmp.cleanup)
+        evidence2 = Path(second_tmp.name) / 'evidence'
+        evidence2.mkdir()
+        plant2 = OosPlantPeer()
+        self.addCleanup(plant2.close)
+        feed2 = OosFeed(plant2)
+        ctx2 = self._ctx()
+        ctx2['plant'] = plant2.address
+        ctx2['plant_ctl'] = plant2.ctl
+        ctx2['evidence_dir'] = str(evidence2)
+        record2 = self.run_scenario(ctx=ctx2, feed=feed2)
+        self.assertEqual(record2['outcome'], 'passed', record2)
+        second = {p.name: p.read_bytes() for p in evidence2.iterdir()}
+        self.assertEqual(set(first), set(second))
+        for name, data in first.items():
+            self.assertEqual(data, second[name], name)
+
+    def test_oos_exclusion_and_handover(self):
+        # The clean run's journaled record is the exclusion evidence:
+        # the attributed receipt beside the ordered point_changed
+        # entries — oos true->false, avail false->true, the managed
+        # flags' assert and release.
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        changes = {}
+        for entry in self.feed.journal:
+            change = entry.get('event', {}).get('point_changed')
+            if change:
+                changes.setdefault(change['point'], []).append(
+                    change['to'])
+        for point in (302, 328, 312, 1073, 1074, 1076, 1077):
+            seq = changes.get(point, [])
+            self.assertIn({'bool': True}, seq, point)
+            self.assertIn({'bool': False}, seq, point)
+        # The suppressed pump's thermal/moisture flags never moved.
+        for point in (1083, 1084, 1085, 1086, 1087,
+                      1093, 1094, 1095, 1096, 1097):
+            self.assertNotIn({'bool': True}, changes.get(point, []),
+                             point)
+
+    def test_avail_never_dropping_fails(self):
+        self.feed.avail_sticks = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('oos-failed', record.get('detail', ''))
+        self.assertIn('exclusion', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_duty_never_handing_over_fails(self):
+        self.feed.duty_sticks = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('oos-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_handover_beyond_the_bound_is_nondeterministic(self):
+        self.feed.slow_handover = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('oos-nondeterministic',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_duty_moving_before_the_drop_is_nondeterministic(self):
+        self.feed.duty_before_avail = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('oos-nondeterministic',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_held_command_reasserting_fails(self):
+        self.feed.held_recommands = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('oos-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_managed_flags_never_asserting_fails(self):
+        self.feed.managed_mute = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('oos-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_suppression_annunciating_fails(self):
+        # A latch that ignores the standing suppress annunciates the
+        # mid-OOS fault — the named-without-annunciating contract's
+        # breach.
+        self.feed.suppress_annunciates = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('oos-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_fault_never_proving_fails(self):
+        self.feed.fault_never = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('oos-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_avail_never_rejoining_fails(self):
+        self.feed.no_return = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('oos-failed', record.get('detail', ''))
+        self.assertIn('manual return', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_release_never_reannunciating_fails(self):
+        self.feed.no_reannunciate = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('oos-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_never_rejoining_rotation_fails(self):
+        self.feed.never_rejoins = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('oos-failed', record.get('detail', ''))
+        self.assertIn('rejoined the duty rotation',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unjournaled_transitions_fail(self):
+        self.feed.no_journal = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('oos-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unjournaled_receipts_fail(self):
+        self.feed.no_receipts = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('oos-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_refused_write_fails(self):
+        self.feed.write_refused = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('oos-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_moved_roles_fail(self):
+        self.feed.role_moves = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('oos-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_declared_thermal_suppress_passes(self):
+        # A thermal alarm declaring `suppress` bound to the delivered
+        # copy reports suppressed-but-not-out-of-service — the
+        # descriptor-driven precedence reading the scenario asserts.
+        self.feed.thermal_suppress = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        report.validate_scenario(record)
+
+    def test_no_active_is_failed(self):
+        self.feed.no_active = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('no peer reports role=active',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_no_tracking_pair_is_inconclusive(self):
+        self.feed.no_tracking = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('never settled', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_missing_wiring_is_inconclusive(self):
+        self.feed.bare_signals = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn("leg's wiring", record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_missing_descriptors_is_inconclusive(self):
+        self.feed.no_descriptors = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('pump-group', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_non_alternate_policy_is_inconclusive(self):
+        self.feed.non_alternate = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('alternate-each-cycle',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_managed_flags_never_reporting_is_inconclusive(self):
+        # The managed flag outputs absent from the served snapshot —
+        # the leg cannot see the states it must assert, so the case is
+        # inconclusive rather than failed.
+        self.feed.flags_unserved = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('never reported', record.get('detail', ''))
         report.validate_scenario(record)
 
 
@@ -6742,6 +8018,18 @@ class CommandAdmissionTests(unittest.TestCase):
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertIn('never settled applied', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_bounded_receipt_window_still_audits(self):
+        # The qa-20260917-035 reproduction: the receipt log's bounded
+        # tail rolls under the flood — settled receipts evict while
+        # submissions still land — so the settlement audit correlates
+        # absolute submission indexes against the window's high-water,
+        # not positions in the tail.
+        self.feed.receipt_cap = 8
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        self.assertGreater(self.feed.attempts, len(self.feed.receipts))
         report.validate_scenario(record)
 
 
@@ -11936,6 +13224,9 @@ class DutyRotationTests(unittest.TestCase):
             order.index(scenarios.scenario_duty_rotation))
         self.assertEqual(
             order.index(scenarios.scenario_duty_rotation) + 1,
+            order.index(scenarios.scenario_pump_out_of_service))
+        self.assertEqual(
+            order.index(scenarios.scenario_pump_out_of_service) + 1,
             order.index(scenarios.scenario_force_carryover))
         self.assertIs(verify.case_function('duty-rotation'),
                       scenarios.scenario_duty_rotation)
@@ -12356,16 +13647,19 @@ class DemoteSettlePeer:
 
 
 class DemoteSettleFeed:
-    """A stubbed pair for the demote-settle-uniqueness leg: ctrl-a owns
-    the field at launch, ctrl-b tracks. Every endpoint call is one
-    scan — the owner applies its pending admissions at the boundary
-    and journals their settlements, the demote closes the gate so a
-    still-accepted admission suspends, the promote's final-sync
-    transfer carries the demoted log across, and a tracking peer's
-    adoption journals the line's verdict — applied for the admissions
-    the carry landed, superseded for the ones the adopted window
-    passed. Doctor flags stage each named defect the issue calls
-    out."""
+    """A stubbed pair for the demote-settle-uniqueness leg — shared by
+    the demote-pending-command leg: ctrl-a owns the field at launch,
+    ctrl-b tracks. Every endpoint call is one scan — the owner applies
+    its pending admissions at the boundary and journals their
+    settlements, the demote closes the gate so a still-accepted
+    admission suspends, the promote's final-sync transfer carries the
+    demoted log across, and a tracking peer's adoption journals the
+    line's verdict — applied for the admissions the carry landed,
+    superseded for the ones the adopted window passed. Doctor flags
+    stage each named defect the issue calls out. An optional
+    `journal_files` mapping (ctx keys 'active'/'standby' to paths)
+    mirrors every journaled event into real --journal-file records for
+    the demote-pending leg's durable audit."""
 
     POINTS = (302, 300, 301, 332, 333, 334)
     SIGNALS = [{'point': point,
@@ -12374,11 +13668,24 @@ class DemoteSettleFeed:
                 'direction': 'in', 'value_type': 'bool',
                 'writable': True} for point in POINTS]
 
-    def __init__(self):
+    def __init__(self, journal_files=None):
         self.a = DemoteSettlePeer('a')
         self.a.role = 'active'
         self.b = DemoteSettlePeer('b')
         self.b.tracking = True
+        # The demote-pending leg's durable audit reads each endpoint's
+        # --journal-file: peer 'a' serves ctx key 'active', peer 'b'
+        # ctx key 'standby'. A feed without paths mirrors nothing —
+        # the demote-settle-uniqueness leg never reads the files.
+        self.journal_paths = {}
+        for peer, key in ((self.a, 'active'), (self.b, 'standby')):
+            path = (journal_files or {}).get(key)
+            if path is not None:
+                path = Path(path)
+                path.write_text(
+                    json.dumps({'run_boundary': {'run': 1,
+                                                 'tick': 0}}) + '\n')
+                self.journal_paths[peer.name] = path
         # The doctors staging each named defect.
         self.double_settle = False    # an admission journals applied
                                       # AND superseded
@@ -12412,6 +13719,13 @@ class DemoteSettleFeed:
         peer.journal.append({'seq': peer.next_seq, 'tick': peer.tick,
                              'event': event})
         peer.next_seq += 1
+        path = self.journal_paths.get(peer.name)
+        if path is not None:
+            with path.open('a') as stream:
+                stream.write(json.dumps(
+                    {'entry': {'seq': peer.journal[-1]['seq'],
+                               'tick': peer.tick,
+                               'event': event}}) + '\n')
 
     def _settle(self, peer, receipt):
         """One receipt's terminal journaling — the recorder's
@@ -12658,6 +13972,13 @@ class DemoteSettleTests(unittest.TestCase):
         self.assertEqual(
             order.index(scenarios.scenario_demote_settle_uniqueness)
             + 1,
+            order.index(scenarios.scenario_demote_pending_command))
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_pending_command)
+            + 1,
+            order.index(scenarios.scenario_demote_reconvergence))
+        self.assertLess(
+            order.index(scenarios.scenario_demote_reconvergence),
             order.index(scenarios.scenario_parameter_tune_carryover))
         self.assertIs(
             verify.case_function('demote-settle-uniqueness'),
@@ -12792,6 +14113,570 @@ class DemoteSettleTests(unittest.TestCase):
             evidence.mkdir()
             self.evidence = evidence
             record = self.run_scenario(feed=feed)
+            runs.append((record, {p.name: p.read_text()
+                                  for p in evidence.iterdir()}))
+        self.assertEqual(runs[0], runs[1])
+
+
+class DemotePendingTests(unittest.TestCase):
+    """The demote-pending-command leg against the stubbed pair: one
+    receipted write admitted on the field owner, demoted inside its
+    pending window, settling exactly once — applied through the
+    carry or the named superseded rejection with the settle on the
+    durable record. A clean rig passes with identical digests and
+    evidence, each doctored loss shape reports its named diagnostic,
+    and an unreachable peer is inconclusive."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.journal_a = Path(self.tmp.name) / 'a' / 'journal.jsonl'
+        self.journal_b = Path(self.tmp.name) / 'b' / 'journal.jsonl'
+        self.journal_a.parent.mkdir(parents=True)
+        self.journal_b.parent.mkdir(parents=True)
+        self.feed = DemoteSettleFeed(
+            {'active': str(self.journal_a),
+             'standby': str(self.journal_b)})
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_scenario(self, feed=None, **ctx_overrides):
+        feed = feed or self.feed
+        ctx = {'active': 'http://ctrl-a:1',
+               'standby': 'http://ctrl-b:2',
+               'evidence_dir': str(self.evidence),
+               'journal_files': {'active': str(self.journal_a),
+                                 'standby': str(self.journal_b)}}
+        ctx.update(ctx_overrides)
+        with patch.object(scenarios, 'http_json', feed.http_json), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'DEMOTE_PENDING_SETTLE', 2.0), \
+                patch.object(scenarios, 'DEMOTE_PENDING_AUDIT', 2.0), \
+                patch.object(scenarios, 'DEMOTE_PENDING_POLL', 0.001):
+            return scenarios.scenario_demote_pending_command(ctx)
+
+    def test_registered(self):
+        order = list(scenarios.SCENARIOS)
+        # The restored pre-switch window behind the demote-settle
+        # case — the settled tracking pair ahead of the tune case's
+        # a->b switch.
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_settle_uniqueness)
+            + 1,
+            order.index(scenarios.scenario_demote_pending_command))
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_pending_command)
+            + 1,
+            order.index(scenarios.scenario_demote_reconvergence))
+        self.assertLess(
+            order.index(scenarios.scenario_demote_reconvergence),
+            order.index(scenarios.scenario_parameter_tune_carryover))
+        self.assertIs(
+            verify.case_function('demote-pending-command'),
+            scenarios.scenario_demote_pending_command)
+
+    def test_clean_pair_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        for name in ('demote-pending-signals.json',
+                     'demote-pending-pass-1.json',
+                     'demote-pending-pass-2.json'):
+            self.assertTrue((self.evidence / name).is_file(), name)
+        passes = [json.loads((self.evidence / name).read_text())
+                  for name in ('demote-pending-pass-1.json',
+                               'demote-pending-pass-2.json')]
+        self.assertEqual(passes[0]['digest'], passes[1]['digest'])
+        self.assertEqual(passes[0]['digest']['outcomes'], 'single')
+        self.assertEqual(passes[0]['digest']['admissions'], 1)
+        # Two passes switch twice: the pair ends on its entry layout.
+        self.assertEqual(self.feed.a.role, 'active')
+        self.assertEqual(self.feed.b.role, 'standby')
+        # The durable record mirrors the served single outcome on
+        # each pass.
+        for passed in passes:
+            durable = passed['durable']
+            self.assertEqual(set(durable), {'active', 'standby'})
+            outcomes = {scenarios._outcome_key(receipt)
+                        for entries in durable.values()
+                        for receipt in entries}
+            self.assertEqual(len(outcomes), 1, outcomes)
+        report.validate_scenario(record)
+
+    def test_superseded_admission_is_a_legal_single_outcome(self):
+        self.feed.drop_carry = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        passed = json.loads(
+            (self.evidence / 'demote-pending-pass-1.json').read_text())
+        outcomes = {
+            scenarios._outcome_key(receipt)
+            for audit in (passed['audit'],)
+            if audit['window']
+            for entries in audit['window']['journaled'].values()
+            for receipt in entries}
+        self.assertIn('rejected:superseded', outcomes, outcomes)
+        report.validate_scenario(record)
+
+    def test_phantom_application_reports_nondeterministic(self):
+        self.feed.drop_carry = True
+        self.feed.phantom_apply = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-pending-nondeterministic'),
+            record['detail'])
+        self.assertIn('application the journal never settled',
+                      record['detail'])
+        report.validate_scenario(record)
+
+    def test_vanished_admission_reports_failed(self):
+        self.feed.drop_admission = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-pending-failed'), record['detail'])
+        self.assertIn('terminal journaled outcome', record['detail'])
+        report.validate_scenario(record)
+
+    def test_double_settled_admission_reports_nondeterministic(self):
+        self.feed.double_settle = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-pending-nondeterministic'),
+            record['detail'])
+        report.validate_scenario(record)
+
+    def test_diverged_logs_report_nondeterministic(self):
+        self.feed.diverge_logs = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-pending-nondeterministic'),
+            record['detail'])
+        self.assertIn('adopted log', record['detail'])
+        report.validate_scenario(record)
+
+    def test_refused_demote_reports_failed(self):
+        self.feed.demote_refused = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-pending-failed'), record['detail'])
+        self.assertIn('demote', record['detail'])
+        report.validate_scenario(record)
+
+    def test_refused_promote_reports_failed(self):
+        self.feed.promote_refused = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-pending-failed'), record['detail'])
+        self.assertIn('promote', record['detail'])
+        report.validate_scenario(record)
+
+    def test_no_active_reports_failed(self):
+        self.feed.no_active = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('no peer reports role=active', record['detail'])
+        report.validate_scenario(record)
+
+    def test_unconverged_pair_reports_inconclusive(self):
+        self.feed.no_tracking = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('tracking standby', record['detail'])
+        report.validate_scenario(record)
+
+    def test_unreachable_peer_reports_inconclusive(self):
+        self.feed.unreachable = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('unreachable', record['detail'])
+        report.validate_scenario(record)
+
+    def test_missing_journal_files_reports_inconclusive(self):
+        record = self.run_scenario(journal_files={})
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('journal-file', record['detail'])
+        report.validate_scenario(record)
+
+    def test_diverging_digests_report_nondeterministic(self):
+        passes = iter([({'outcomes': 'single', 'admissions': 1}, {}, {}),
+                       ({'outcomes': 'diverged', 'admissions': 1},
+                        {}, {})])
+        with patch.object(scenarios, '_demote_pending_pass',
+                          lambda *a: next(passes)):
+            record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-pending-nondeterministic'),
+            record['detail'])
+        self.assertIn('digests diverged', record['detail'])
+        report.validate_scenario(record)
+
+    def test_two_runs_produce_identical_evidence(self):
+        runs = []
+        for _ in range(2):
+            run_dir = Path(self.tmp.name) / ('run' + str(len(runs)))
+            evidence = run_dir / 'evidence'
+            evidence.mkdir(parents=True)
+            journal_a = run_dir / 'a' / 'journal.jsonl'
+            journal_b = run_dir / 'b' / 'journal.jsonl'
+            journal_a.parent.mkdir(parents=True)
+            journal_b.parent.mkdir(parents=True)
+            feed = DemoteSettleFeed(
+                {'active': str(journal_a),
+                 'standby': str(journal_b)})
+            record = self.run_scenario(
+                feed=feed, evidence_dir=str(evidence),
+                journal_files={'active': str(journal_a),
+                               'standby': str(journal_b)})
+            runs.append((record, {p.name: p.read_text()
+                                  for p in evidence.iterdir()}))
+        self.assertEqual(runs[0], runs[1])
+
+
+class ReconvergenceFeed:
+    """A stubbed pair for the demote-reconvergence scenario. ctrl-a is
+    the launched active — no configured tracking source, so its
+    post-demotion pulls resolve `announced`, the monitor address
+    ctrl-b's checkpoint pulls recorded on it; ctrl-b tracks through
+    its configured --standby, `configured`. Every request on a peer is
+    one completed scan on that peer — call-count keyed, never
+    wall-clock, so two passes emit identical evidence. Doctor flags
+    stage the rig shapes the issue names: no announce ever recorded
+    (the demote answers no_tracking_source), the wildcard bind
+    recorded verbatim, a demoted peer that never reconverges, a
+    recorded source that re-poisons on every pull, a promote the
+    reconverged peer cannot take, and a second process lifetime
+    landing mid-leg — the restart signature a --journal-file's run
+    boundaries carry."""
+
+    def __init__(self, journal_a=None, journal_b=None):
+        self.tick = {'a': 0, 'b': 0}
+        self.role = {'a': 'active', 'b': 'standby'}
+        self.sync = {'a': 'unsynchronized', 'b': 'tracking'}
+        self.track_left = {'a': 0, 'b': 0}
+        self.seq = {'a': 1, 'b': 1}
+        self.paths = {}
+        for name, path in (('a', journal_a), ('b', journal_b)):
+            if path is not None:
+                path = Path(path)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                self._append(path,
+                             {'run_boundary': {'run': 1, 'tick': 0}})
+                self.paths[name] = path
+        # The checkpoint source each demoted peer's pulls resolve to:
+        # ctrl-a's is the announce its monitor recorded — a dialable
+        # peer address healthy, the announced 0.0.0.0 bind on the
+        # doctored rig; ctrl-b's is its configured --standby, always
+        # dialable.
+        self.announced = '172.22.0.3:8081'
+        self.configured = '172.22.0.2:8080'
+        self.no_source = False        # no announce ever recorded —
+                                      # the demote refuses
+        self.wildcard = False         # the recorded announce is the
+                                      # wildcard bind
+        self.never_tracks = False     # the demoted peer never
+                                      # reconverges
+        self.re_poison = False        # every pull re-poisons the
+                                      # recorded source
+        self.promote_refused = False  # the reconverged peer cannot
+                                      # promote back
+        self.restart_marker = False   # the fail-back needs a restart
+        self.unreachable = False      # ctrl-b's monitor never answers
+
+    def _append(self, path, record):
+        with path.open('a') as stream:
+            stream.write(json.dumps(record) + '\n')
+
+    def _entry(self, name, event):
+        entry = {'seq': self.seq[name], 'tick': self.tick[name],
+                 'event': event}
+        self.seq[name] += 1
+        path = self.paths.get(name)
+        if path is not None:
+            self._append(path, {'entry': entry})
+
+    def _resolved(self, name):
+        """The sync a demoted peer's completed pulls produce: tracking
+        on a dialable source, or the degraded detail the doctored
+        rig's recorded source fetches."""
+        source = self.configured if name == 'b' else (
+            '0.0.0.0:8081' if self.wildcard else self.announced)
+        if self.never_tracks or (name == 'a' and self.wildcard):
+            return 'fetch from ' + source + ': connection refused'
+        return 'tracking'
+
+    def _scan(self, name):
+        """One completed scan: a pending role transition settles, and a
+        demoted peer's pull train counts down to its resolved sync."""
+        self.tick[name] += 1
+        if self.role[name] == 'demoting':
+            self.role[name] = 'standby'
+            self.sync[name] = 'unsynchronized'
+            self.track_left[name] = 2
+            self._entry(name, {'role_changed': {'from': 'demoting',
+                                                'to': 'standby'}})
+        elif self.role[name] == 'promoting':
+            self.role[name] = 'active'
+            self._entry(name, {'role_changed': {'from': 'promoting',
+                                                'to': 'active'}})
+        elif self.role[name] == 'standby':
+            if self.track_left[name]:
+                self.track_left[name] -= 1
+                if self.track_left[name] == 0:
+                    self.sync[name] = self._resolved(name)
+            elif self.re_poison and name == 'a' \
+                    and self.sync[name] == 'tracking':
+                # The defect family's re-poison: every pull rewrites
+                # the recorded source to the announced wildcard bind.
+                self.sync[name] = ('fetch from 0.0.0.0:8081: '
+                                   'connection refused')
+
+    def _role_report(self, name):
+        report = {'role': self.role[name], 'tick': self.tick[name]}
+        if self.role[name] != 'active':
+            sync = self.sync[name]
+            if sync == 'tracking':
+                report['sync'] = {'tracking': {'aligned':
+                                               self.tick[name]}}
+            elif sync == 'unsynchronized':
+                report['sync'] = {'unsynchronized': {}}
+            else:
+                report['sync'] = {'degraded': {'detail': sync}}
+        return report
+
+    def _raise(self, code, body):
+        raise urllib.error.HTTPError(
+            'http://pair', code, 'refused', None,
+            io.BytesIO(json.dumps(body).encode()))
+
+    def http_json(self, method, url, body=None, timeout=10):
+        name = 'a' if 'ctrl-a' in url else 'b'
+        if self.unreachable and name == 'b':
+            raise urllib.error.URLError('unreachable')
+        path = '/' + url.split('/', 3)[3]
+        self._scan(name)
+        if (method, path) == ('GET', '/role'):
+            return 200, self._role_report(name)
+        if (method, path) == ('POST', '/demote'):
+            if self.role[name] != 'active':
+                self._raise(409, {'not_active': {}})
+            if name == 'a' and self.no_source:
+                # The launched active recorded no announce — it has
+                # nothing to track, so the demote refuses.
+                self._raise(409, {'no_tracking_source': {}})
+            self.role[name] = 'demoting'
+            self._entry(name, {'role_changed': {'from': 'active',
+                                                'to': 'demoting'}})
+            return 200, self._role_report(name)
+        if (method, path) == ('POST', '/promote'):
+            if self.role[name] == 'active':
+                self._raise(409, {'already_active': {}})
+            if self.promote_refused or self.role[name] != 'standby' \
+                    or self.sync[name] != 'tracking':
+                self._raise(409, {'not_converged': {
+                    'sync': self._role_report(name).get('sync')}})
+            if self.restart_marker and name == 'a':
+                # The doctored fail-back: the reconverged peer takes
+                # the field again only inside a second process
+                # lifetime — the run boundary the durable journal
+                # carries.
+                self._append(self.paths['a'],
+                             {'run_boundary': {'run': 2,
+                                               'tick': self.tick['a']}})
+            self.role[name] = 'promoting'
+            self._entry(name, {'role_changed': {'from': 'standby',
+                                                'to': 'promoting'}})
+            return 200, self._role_report(name)
+        raise AssertionError('unexpected request %s %s'
+                             % (method, url))
+
+
+class DemoteReconvergenceTests(unittest.TestCase):
+    """The demote-reconvergence leg against the stubbed pair: the
+    launched active's announced tracking source is the dialable peer
+    address — never the wildcard bind — reconverging to tracking on
+    the promoted successor and holding it across the pull train, then
+    failing back through the documented switch with launch roles
+    restored, no restart marker, and identical digests across two
+    passes. Each doctored rig shape reports a named diagnostic; an
+    unreachable peer is inconclusive."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.journal_a = Path(self.tmp.name) / 'a' / 'journal.jsonl'
+        self.journal_b = Path(self.tmp.name) / 'b' / 'journal.jsonl'
+        self.feed = ReconvergenceFeed(
+            journal_a=self.journal_a, journal_b=self.journal_b)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_scenario(self, feed=None, **ctx_overrides):
+        feed = feed or self.feed
+        ctx = {'active': 'http://ctrl-a:1',
+               'standby': 'http://ctrl-b:2',
+               'evidence_dir': str(self.evidence),
+               'journal_files': {'active': str(self.journal_a),
+                                 'standby': str(self.journal_b)}}
+        ctx.update(ctx_overrides)
+        with patch.object(scenarios, 'http_json', feed.http_json), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios,
+                             'DEMOTE_RECONVERGENCE_SETTLE', 2.0), \
+                patch.object(scenarios, 'DEMOTE_RECONVERGENCE_HOLD', 5), \
+                patch.object(scenarios,
+                             'DEMOTE_RECONVERGENCE_POLL', 0.001):
+            return scenarios.scenario_demote_reconvergence(ctx)
+
+    def test_registered(self):
+        order = list(scenarios.SCENARIOS)
+        # The announced-source leg sits behind the demote-pending case
+        # — the settled launch pair ahead of the tune case's a->b
+        # switch.
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_pending_command)
+            + 1,
+            order.index(scenarios.scenario_demote_reconvergence))
+        self.assertLess(
+            order.index(scenarios.scenario_demote_reconvergence),
+            order.index(scenarios.scenario_parameter_tune_carryover))
+        self.assertIs(
+            verify.case_function('demote-reconvergence'),
+            scenarios.scenario_demote_reconvergence)
+
+    def test_clean_pair_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        for name in ('demote-reconvergence-pass-1.json',
+                     'demote-reconvergence-pass-2.json'):
+            self.assertTrue((self.evidence / name).is_file(), name)
+        passes = [json.loads(
+            (self.evidence / name).read_text())
+            for name in ('demote-reconvergence-pass-1.json',
+                         'demote-reconvergence-pass-2.json')]
+        self.assertEqual(passes[0]['digest'], passes[1]['digest'])
+        self.assertTrue(passes[0]['digest']['reconverged'])
+        self.assertTrue(passes[0]['digest']['failback'])
+        self.assertEqual(passes[0]['digest']['boundary_growth'], 0)
+        # Two passes switch twice: the pair ends on its launch layout.
+        self.assertEqual(self.feed.role['a'], 'active')
+        self.assertEqual(self.feed.role['b'], 'standby')
+        report.validate_scenario(record)
+
+    def test_swapped_entry_layout_restores_and_passes(self):
+        self.feed.role = {'a': 'standby', 'b': 'active'}
+        self.feed.sync = {'a': 'tracking', 'b': 'unsynchronized'}
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        self.assertEqual(self.feed.role['a'], 'active')
+        self.assertEqual(self.feed.role['b'], 'standby')
+        report.validate_scenario(record)
+
+    def test_wildcard_source_reports_named_diagnostic(self):
+        self.feed.wildcard = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-reconvergence-'), record['detail'])
+        self.assertIn('wildcard', record['detail'])
+        report.validate_scenario(record)
+
+    def test_no_source_reports_failed(self):
+        self.feed.no_source = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-reconvergence-failed'), record['detail'])
+        self.assertIn('no_tracking_source', record['detail'])
+        report.validate_scenario(record)
+
+    def test_never_reconverges_reports_failed(self):
+        self.feed.never_tracks = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-reconvergence-failed'), record['detail'])
+        report.validate_scenario(record)
+
+    def test_re_poisoning_reports_nondeterministic(self):
+        self.feed.re_poison = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-reconvergence-'), record['detail'])
+        self.assertIn('pull', record['detail'])
+        report.validate_scenario(record)
+
+    def test_refused_failback_reports_failed(self):
+        self.feed.promote_refused = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-reconvergence-failed'), record['detail'])
+        self.assertIn('promote', record['detail'])
+        report.validate_scenario(record)
+
+    def test_restart_marker_reports_nondeterministic(self):
+        self.feed.restart_marker = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-reconvergence-nondeterministic'), record['detail'])
+        self.assertIn('run boundary', record['detail'])
+        report.validate_scenario(record)
+
+    def test_missing_journal_files_reports_inconclusive(self):
+        record = self.run_scenario(journal_files={})
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('journal-file', record['detail'])
+        report.validate_scenario(record)
+
+    def test_unreachable_peer_reports_inconclusive(self):
+        self.feed.unreachable = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('unreachable', record['detail'])
+        report.validate_scenario(record)
+
+    def test_diverging_digests_report_nondeterministic(self):
+        passes = iter([({'reconverged': True, 'failback': True,
+                         'wildcard_sightings': 0,
+                         'boundary_growth': 0}, {}, {'pass': 1}),
+                       ({'reconverged': True, 'failback': True,
+                         'wildcard_sightings': 1,
+                         'boundary_growth': 0}, {}, {'pass': 2})])
+        with patch.object(scenarios, '_demote_reconvergence_pass',
+                          lambda *a: next(passes)):
+            record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'demote-reconvergence-nondeterministic'), record['detail'])
+        self.assertIn('digests diverged', record['detail'])
+        report.validate_scenario(record)
+
+    def test_two_runs_produce_identical_evidence(self):
+        runs = []
+        for _ in range(2):
+            run_dir = Path(self.tmp.name) / ('run' + str(len(runs)))
+            evidence = run_dir / 'evidence'
+            evidence.mkdir(parents=True)
+            journal_a = run_dir / 'a' / 'journal.jsonl'
+            journal_b = run_dir / 'b' / 'journal.jsonl'
+            feed = ReconvergenceFeed(journal_a=journal_a,
+                                     journal_b=journal_b)
+            record = self.run_scenario(
+                feed=feed, evidence_dir=str(evidence),
+                journal_files={'active': str(journal_a),
+                               'standby': str(journal_b)})
             runs.append((record, {p.name: p.read_text()
                                   for p in evidence.iterdir()}))
         self.assertEqual(runs[0], runs[1])
@@ -13299,6 +15184,1305 @@ class StandbyLossTests(unittest.TestCase):
             runs.append((record, {p.name: p.read_text()
                                   for p in evidence.iterdir()}))
         self.assertEqual(runs[0], runs[1])
+
+
+class PowerTripPlantPeer(StagingPlantPeer):
+    """The power-fail rig's plant half: StagingPlantPeer's shared-claim
+    write path with the rig seeded down to the journaled `power-fail`
+    field contact the scenario drives."""
+
+    def __init__(self, owner, tripped=False):
+        super().__init__(owner)
+        self.samples = {
+            120: {'value': {'bool': tripped}, 'quality': 'good',
+                  'tick': 0}}
+
+
+class PowerTripFeed:
+    """A stubbed monitor pair for the power-fail-trip scenario: a tiny
+    executor over the station's power-fail interlock chain — the
+    inverted power-ok feeding each pump's availability aggregation one
+    carrier hop per scan, the pump group's release-and-restage contract
+    with its declared holdouts, and the managed bool-latching alarm set
+    — against a real plant-protocol peer whose `power-fail` point the
+    scenario writes under the shared claim. Every `http_json` call is
+    one completed scan: the carriers deliver the last image one scan
+    later, the demand chain holds between its hysteresis bounds, the
+    group re-stages eligible pumps inside start_delay_ticks with the
+    min_off_ticks holdout banked on every stop, the bool alarms latch
+    on their fresh edge and clear under the receipted ack, and the run
+    contacts loop the field commands back one scan later.
+    Declared-journaled points record point_changed — the first observed
+    sample included — the carrier and staging points do not. Fault
+    flags stage each named failure the issue calls out."""
+
+    POWER_FAIL = 120
+    POWER_OK = 206
+    POK_IN1, POK_IN2 = 311, 343
+    AVAIL1, AVAIL2 = 328, 360
+    AVAIL_IN1, AVAIL_IN2 = 329, 361
+    CMD1, CMD2 = 100, 101
+    RUN1, RUN2 = 40, 41
+    MODE1, OOS1, MODE2, OOS2 = 300, 302, 332, 334
+    LEVEL, CHAIN_IN, LAH_IN = 200, 201, 202
+    DEMAND, DEMAND_IN = 204, 205
+    DUTY, STAGED = 210, 211
+    HIGH_LEVEL = 215
+    NONE_AVAIL, NONE_IN = 217, 220
+    NACK, NALARM, NUNACK = 1030, 1033, 1034
+    LACK, LALARM, LUNACK = 1000, 1003, 1004
+    ACK, ALARM, UNACK = 1050, 1053, 1054
+    SHELVED, SUPPRESSED, ALARM_OOS = 1055, 1056, 1057
+    JOURNALED = (40, 41, 120, 215, 217, 300, 302, 328, 332, 334, 360,
+                 1003, 1004, 1033, 1034, 1053, 1054, 1055, 1056, 1057)
+    INS = (10, 11, 12, 40, 41, 120, 201, 202, 205, 220, 300, 302, 311,
+           329, 332, 334, 343, 361, 1000, 1030, 1050)
+    # The declared setpoint chain, the staging bounds, and the well's
+    # integration — the same table the deployed model serves.
+    CUTOFF, STOP, START, LAG_START, HIGH = 0.5, 1.0, 2.0, 3.0, 4.0
+    START_DELAY, MIN_OFF, RESTAGE_DELAY = 1, 2, 0
+    BIAS, DRAW, DT = 0.2, -1.0, 0.1
+
+    SIGNALS = [
+        {'point': 10, 'signal': 10010, 'name': 'level-primary',
+         'direction': 'in', 'value_type': 'float', 'writable': False},
+        {'point': 11, 'signal': 10011, 'name': 'level-backup',
+         'direction': 'in', 'value_type': 'float', 'writable': False},
+        {'point': 12, 'signal': 10012, 'name': 'inflow',
+         'direction': 'in', 'value_type': 'float', 'writable': False},
+        {'point': 40, 'signal': 10040, 'name': 'p101-run',
+         'direction': 'in', 'value_type': 'bool', 'writable': False},
+        {'point': 41, 'signal': 10041, 'name': 'p102-run',
+         'direction': 'in', 'value_type': 'bool', 'writable': False},
+        {'point': 100, 'signal': 10100, 'name': 'p101-cmd',
+         'direction': 'out', 'value_type': 'bool', 'writable': False},
+        {'point': 101, 'signal': 10101, 'name': 'p102-cmd',
+         'direction': 'out', 'value_type': 'bool', 'writable': False},
+        {'point': 120, 'signal': 10120, 'name': 'power-fail',
+         'direction': 'in', 'value_type': 'bool', 'writable': False},
+        {'point': 200, 'signal': 10200, 'name': 'level-selected',
+         'direction': 'out', 'value_type': 'float', 'writable': False},
+        {'point': 201, 'signal': 10201, 'name': 'level-chain-in',
+         'direction': 'in', 'value_type': 'float', 'writable': False},
+        {'point': 202, 'signal': 10202, 'name': 'level-lah-in',
+         'direction': 'in', 'value_type': 'float', 'writable': False},
+        {'point': 204, 'signal': 10204, 'name': 'demand',
+         'direction': 'out', 'value_type': 'int', 'writable': False},
+        {'point': 205, 'signal': 10205, 'name': 'demand-in',
+         'direction': 'in', 'value_type': 'int', 'writable': False},
+        {'point': 206, 'signal': 10206, 'name': 'power-ok',
+         'direction': 'out', 'value_type': 'bool', 'writable': False},
+        {'point': 210, 'signal': 10210, 'name': 'duty',
+         'direction': 'out', 'value_type': 'int', 'writable': False},
+        {'point': 211, 'signal': 10211, 'name': 'staged',
+         'direction': 'out', 'value_type': 'int', 'writable': False},
+        {'point': 215, 'signal': 10215, 'name': 'high-level',
+         'direction': 'out', 'value_type': 'bool', 'writable': False},
+        {'point': 217, 'signal': 10217, 'name': 'none-available',
+         'direction': 'out', 'value_type': 'bool', 'writable': False},
+        {'point': 220, 'signal': 10220, 'name': 'none-available-in',
+         'direction': 'in', 'value_type': 'bool', 'writable': False},
+        {'point': 300, 'signal': 10300, 'name': 'p101-mode',
+         'direction': 'in', 'value_type': 'bool', 'writable': True},
+        {'point': 302, 'signal': 10302, 'name': 'p101-oos',
+         'direction': 'in', 'value_type': 'bool', 'writable': True},
+        {'point': 311, 'signal': 10311, 'name': 'p101-power-ok-in',
+         'direction': 'in', 'value_type': 'bool', 'writable': False},
+        {'point': 328, 'signal': 10328, 'name': 'p101-avail',
+         'direction': 'out', 'value_type': 'bool', 'writable': False},
+        {'point': 329, 'signal': 10329, 'name': 'p101-avail-in',
+         'direction': 'in', 'value_type': 'bool', 'writable': False},
+        {'point': 332, 'signal': 10332, 'name': 'p102-mode',
+         'direction': 'in', 'value_type': 'bool', 'writable': True},
+        {'point': 334, 'signal': 10334, 'name': 'p102-oos',
+         'direction': 'in', 'value_type': 'bool', 'writable': True},
+        {'point': 343, 'signal': 10343, 'name': 'p102-power-ok-in',
+         'direction': 'in', 'value_type': 'bool', 'writable': False},
+        {'point': 360, 'signal': 10360, 'name': 'p102-avail',
+         'direction': 'out', 'value_type': 'bool', 'writable': False},
+        {'point': 361, 'signal': 10361, 'name': 'p102-avail-in',
+         'direction': 'in', 'value_type': 'bool', 'writable': False},
+        {'point': 1000, 'signal': 11000, 'name': 'lah-ack',
+         'direction': 'in', 'value_type': 'bool', 'writable': True},
+        {'point': 1003, 'signal': 11003, 'name': 'lah-alarm',
+         'direction': 'out', 'value_type': 'bool', 'writable': False},
+        {'point': 1004, 'signal': 11004, 'name': 'lah-unacknowledged',
+         'direction': 'out', 'value_type': 'bool', 'writable': False},
+        {'point': 1030, 'signal': 11030, 'name': 'none-available-ack',
+         'direction': 'in', 'value_type': 'bool', 'writable': True},
+        {'point': 1033, 'signal': 11033, 'name': 'none-available-alarm',
+         'direction': 'out', 'value_type': 'bool', 'writable': False},
+        {'point': 1034, 'signal': 11034,
+         'name': 'none-available-unacknowledged', 'direction': 'out',
+         'value_type': 'bool', 'writable': False},
+        {'point': 1050, 'signal': 11050, 'name': 'power-fail-ack',
+         'direction': 'in', 'value_type': 'bool', 'writable': True},
+        {'point': 1053, 'signal': 11053, 'name': 'power-fail-alarm',
+         'direction': 'out', 'value_type': 'bool', 'writable': False},
+        {'point': 1054, 'signal': 11054,
+         'name': 'power-fail-unacknowledged', 'direction': 'out',
+         'value_type': 'bool', 'writable': False},
+        {'point': 1055, 'signal': 11055, 'name': 'power-fail-shelved',
+         'direction': 'out', 'value_type': 'bool', 'writable': False},
+        {'point': 1056, 'signal': 11056,
+         'name': 'power-fail-suppressed', 'direction': 'out',
+         'value_type': 'bool', 'writable': False},
+        {'point': 1057, 'signal': 11057,
+         'name': 'power-fail-out-of-service', 'direction': 'out',
+         'value_type': 'bool', 'writable': False}]
+
+    def __init__(self, plant):
+        self.plant = plant
+        self.tick = 0
+        self.seq = 1
+        self.journal = []
+        self.pending = []           # accepted commands awaiting boundary
+        self.level = 0.8
+        self.demand_held = 0        # the chain's held stage count
+        self.last_demand = 0        # the group's last Good demand
+        self.duty_index = None      # 0 | 1 | None
+        self.cursor = 0             # rotation cursor, 0-based
+        self.cmd = [False, False]   # commanded pumps, 0-based
+        self.held_until = [0, 0]    # banked stop holdouts
+        self.last_start = None      # tick the last start issued
+        self.pending_start = {}     # pump -> first target tick
+        self.alarm_state = False    # the power-fail alarm's tracked in
+        self.latched = False
+        self.none_state = False     # the none-available alarm's in
+        self.none_latched = False
+        self.lah_state = False
+        self.lah_latched = False
+        self._ok_dropped = False    # power-ok has dropped once
+        self.values = {
+            10: 0.8, 11: 0.8, 12: 0.0,
+            40: False, 41: False, 100: False, 101: False, 120: False,
+            200: 0.8, 201: 0.8, 202: 0.8,
+            204: 0, 205: 0, 206: True, 210: 0, 211: 0,
+            215: False, 217: False, 220: False,
+            300: False, 302: False, 311: True, 328: True, 329: True,
+            332: False, 334: False, 343: True, 360: True, 361: True,
+            1000: False, 1003: False, 1004: False,
+            1030: False, 1033: False, 1034: False,
+            1050: False, 1053: False, 1054: False,
+            1055: False, 1056: False, 1057: False}
+        self.jseen = {}             # last journaled value per point
+        self.history = {}           # point -> [{'seq','sample'}]
+        self.hseq = {}
+        self._role_journaled = False
+        self._demand_journaled = False
+        # Fault injection for the named-failure cases.
+        self.no_active = False         # ctrl-a never reports active
+        self.bare_signals = False      # the interlock wiring absent
+        self.bad_ack_signal = False    # power-fail-ack non-writable
+        self.bare_schema = False       # schema lacks the components
+        self.missing_power_ok = False  # 206 absent from the snapshot
+        self.ok_holds = False          # power-ok never drops
+        self.avail_holds = False       # availability never drops
+        self.cmd_holds = False         # the commands never release
+        self.never_none = False        # none-available never asserts
+        self.duty_holds = False        # duty never releases
+        self.demand_drops = False      # the chain stops calling
+        self.mute_alarm = False        # the alarm never stands
+        self.mute_unack = False        # the latch never latches
+        self.unack_stuck = False       # the latch never clears
+        self.ack_rejected = False      # the ack submission is refused
+        self.ack_never_applies = False # the accepted ack never settles
+        self.never_recovers = False    # power-ok never returns
+        self.slow_restage = False      # the re-stage lands beyond bound
+        self.early_restage = False     # a start lands in the outage
+        self.role_moves = False        # the trip reads as peer loss
+        self.journals_role = False     # a role_changed entry lands
+        self.journals_demand = False   # a non-journaled point journals
+        self.no_journal = False        # transitions never journal
+        self.moves_pump_state = False  # p1_oos flips mid-leg
+
+    @staticmethod
+    def _wrap(value):
+        if isinstance(value, bool):
+            return {'bool': value}
+        if isinstance(value, int):
+            return {'int': value}
+        return {'float': value}
+
+    def _entry(self, event):
+        self.journal.append({'seq': self.seq, 'tick': self.tick,
+                             'event': event})
+        self.seq += 1
+
+    def _journal_values(self):
+        """The recorder's per-scan diff over declared-journaled points:
+        the first observed sample lands `from: null` like the real
+        recorder's creation record."""
+        for point in self.JOURNALED:
+            value = self.values[point]
+            previous = self.jseen.get(point)
+            if point in self.jseen and previous == value:
+                continue
+            self.jseen[point] = value
+            if not self.no_journal:
+                self._entry({'point_changed': {
+                    'point': point,
+                    'from': (None if point not in self.jseen
+                             or previous is None
+                             else self._wrap(previous)),
+                    'to': self._wrap(value)}})
+
+    def _assign(self, avail):
+        """The rotation policy's pick — the next available pump in
+        rotation order after the last holder; none when nothing is."""
+        self.duty_index = None
+        for offset in range(2):
+            idx = (self.cursor + offset) % 2
+            if avail[idx]:
+                self.duty_index = idx
+                break
+        if self.duty_index is not None:
+            self.cursor = (self.duty_index + 1) % 2
+
+    # The pump group's step on the delivered inputs, mirroring the
+    # block: fail-safe availability reads, exclusion handing duty over
+    # the same scan, duty-first staging gated on the banked holdouts,
+    # each fresh start gated on start_delay_ticks since the last one.
+    def _step_group(self):
+        demand_in = self.values[self.DEMAND_IN]
+        demand_eff = self.last_demand
+        if isinstance(demand_in, int) and not isinstance(demand_in,
+                                                         bool):
+            demand_eff = max(0, min(2, demand_in))
+        avail = [bool(self.values[self.AVAIL_IN1]),
+                 bool(self.values[self.AVAIL_IN2])]
+        if self.duty_index is not None \
+                and not avail[self.duty_index]:
+            self._assign(avail)
+        elif self.last_demand >= 1 and demand_eff == 0:
+            self._assign(avail)
+        if self.duty_index is None:
+            self._assign(avail)
+        lead = self.duty_index if self.duty_index is not None \
+            else self.cursor
+        if self.cmd_holds and self.values[self.POWER_FAIL]:
+            # The interlock never releases the commands it holds.
+            targets = [idx for idx in range(2) if self.cmd[idx]]
+        else:
+            targets = []
+            for offset in range(2):
+                if len(targets) >= demand_eff:
+                    break
+                idx = (lead + offset) % 2
+                if (avail[idx] or self.early_restage) \
+                        and (self.cmd[idx] or self.early_restage
+                             or self.tick >= self.held_until[idx]):
+                    targets.append(idx)
+        new = [False, False]
+        for idx in targets:
+            if self.cmd[idx]:
+                new[idx] = True
+                continue
+            self.pending_start.setdefault(idx, self.tick)
+            if self.slow_restage \
+                    and self.tick < self.pending_start[idx] \
+                    + self.START_DELAY + 3:
+                continue
+            if self.last_start is None \
+                    or self.tick >= self.last_start + self.START_DELAY:
+                new[idx] = True
+                self.last_start = self.tick
+                self.pending_start.pop(idx, None)
+        for idx in range(2):
+            if self.cmd[idx] and not new[idx]:
+                hold = self.MIN_OFF
+                if avail[idx] and demand_eff > 0:
+                    hold = max(hold, self.RESTAGE_DELAY)
+                self.held_until[idx] = self.tick + hold
+            self.cmd[idx] = new[idx]
+            if idx not in targets:
+                self.pending_start.pop(idx, None)
+        self.last_demand = demand_eff
+        computed_duty = 0 if self.duty_index is None \
+            else self.duty_index + 1
+        # duty_holds keeps the last designation published — the output
+        # never drops its holder under the trip.
+        if self.duty_holds and computed_duty == 0 \
+                and self.values[self.DUTY] > 0:
+            computed_duty = self.values[self.DUTY]
+        self.values[self.DUTY] = computed_duty
+        self.values[self.STAGED] = int(sum(new))
+        self.values[self.CMD1], self.values[self.CMD2] = new
+        nav = not any(avail)
+        self.values[self.NONE_AVAIL] = False if self.never_none \
+            else nav
+
+    # One completed scan: boundary-settled commands first, then the
+    # carriers' one-scan delivery, the components in declared order —
+    # the field read, the availability aggregation, the threshold
+    # chain, the group, the alarm set — the journaled diffs, the
+    # per-point history append, and the dynamics step.
+    def _scan(self):
+        self.tick += 1
+        pending, self.pending = self.pending, []
+        for receipt in pending:
+            if self.ack_never_applies:
+                self.pending.append(receipt)
+                continue
+            write = receipt['command']['write_value']
+            receipt['outcome'] = {'applied': {'tick': self.tick}}
+            if write['point'] in (self.ACK, self.NACK, self.LACK,
+                                  self.MODE1, self.OOS1,
+                                  self.MODE2, self.OOS2):
+                self.values[write['point']] = \
+                    write['value']['bool']
+            if not self.no_journal:
+                self._entry({'command_settled': {'receipt':
+                                                 dict(receipt)}})
+        # The carriers deliver last tick's image.
+        prev_power_ok = self.values[self.POWER_OK]
+        prev_avail = (self.values[self.AVAIL1],
+                      self.values[self.AVAIL2])
+        prev_none = self.values[self.NONE_AVAIL]
+        prev_demand = self.values[self.DEMAND]
+        prev_selected = self.values[self.LEVEL]
+        prev_cmd = list(self.cmd)
+        # The field read: the driven contact, served same-scan.
+        pf = self.plant.samples[self.POWER_FAIL]['value'] \
+            .get('bool', False)
+        self.values[self.POWER_FAIL] = pf
+        if pf:
+            self._ok_dropped = True
+        ok = not pf
+        if self.ok_holds:
+            ok = True
+        if self.never_recovers and self._ok_dropped:
+            ok = False
+        self.values[self.POWER_OK] = ok
+        self.values[self.POK_IN1] = prev_power_ok
+        self.values[self.POK_IN2] = prev_power_ok
+        # The availability aggregation — in the fake the auto, oos,
+        # thermal, and moisture legs stand; power-ok-in is the only
+        # leg that can drop.
+        for avail_point, pok_in in ((self.AVAIL1, self.POK_IN1),
+                                    (self.AVAIL2, self.POK_IN2)):
+            gate = bool(self.values[pok_in])
+            self.values[avail_point] = True if self.avail_holds \
+                else gate
+        self.values[self.AVAIL_IN1] = prev_avail[0]
+        self.values[self.AVAIL_IN2] = prev_avail[1]
+        self.values[self.NONE_IN] = prev_none
+        self.values[self.DEMAND_IN] = prev_demand
+        self.values[self.CHAIN_IN] = prev_selected
+        self.values[self.LAH_IN] = prev_selected
+        self.values[self.RUN1] = prev_cmd[0]
+        self.values[self.RUN2] = prev_cmd[1]
+        self.values[self.LEVEL] = self.level
+        self.values[10] = self.level
+        self.values[11] = self.level
+        # The threshold chain holds its demand between the hysteresis
+        # bounds; a rig that stops calling under the outage is the
+        # named failure.
+        level_in = self.values[self.CHAIN_IN]
+        if self.demand_drops and pf:
+            self.demand_held = 0
+        elif level_in <= self.STOP:
+            self.demand_held = 0
+        elif self.demand_held == 2 and level_in <= self.START:
+            self.demand_held = 1
+        elif level_in >= self.LAG_START:
+            self.demand_held = 2
+        elif self.demand_held == 0 and level_in >= self.START:
+            self.demand_held = 1
+        self.values[self.DEMAND] = self.demand_held
+        self.values[self.HIGH_LEVEL] = level_in >= self.HIGH
+        self._step_group()
+        # The power-fail alarm reads the field contact directly — its
+        # two flags land the same scan the contact does — while the
+        # none-available alarm's input rides its own carrier.
+        for state_key, in_, ack_point, alarm_point, unack_point in (
+                ('alarm_state', pf, self.ACK, self.ALARM, self.UNACK),
+                ('none_state', self.values[self.NONE_IN], self.NACK,
+                 self.NALARM, self.NUNACK),
+                ('lah_state', self.values[self.LAH_IN] >= self.HIGH,
+                 self.LACK, self.LALARM, self.LUNACK)):
+            previous = getattr(self, state_key)
+            fresh = in_ and not previous
+            setattr(self, state_key, bool(in_))
+            latch_key = {'alarm_state': 'latched',
+                         'none_state': 'none_latched',
+                         'lah_state': 'lah_latched'}[state_key]
+            ack = self.values[ack_point]
+            if self.unack_stuck and latch_key == 'latched':
+                ack = False
+            setattr(self, latch_key,
+                    (getattr(self, latch_key) or fresh) and not ack)
+            self.values[alarm_point] = bool(in_)
+            self.values[unack_point] = getattr(self, latch_key)
+        if self.mute_alarm:
+            self.values[self.ALARM] = False
+        if self.mute_unack:
+            self.values[self.UNACK] = False
+        self._journal_values()
+        # Injected journal-contract violations.
+        if self.journals_role and self.values[self.ALARM] \
+                and not self._role_journaled:
+            self._role_journaled = True
+            self._entry({'role_changed': {'from': 'active',
+                                          'to': 'standby'}})
+        if self.journals_demand and self.values[self.ALARM] \
+                and not self._demand_journaled:
+            self._demand_journaled = True
+            self._entry({'point_changed': {
+                'point': self.DEMAND,
+                'from': {'int': 0},
+                'to': {'int': self.values[self.DEMAND]}}})
+        # Operator state the leg never drove must not move.
+        if self.moves_pump_state and self.values[self.ALARM]:
+            self.values[self.OOS1] = True
+        for point, value in self.values.items():
+            self.hseq[point] = self.hseq.get(point, 0) + 1
+            self.history.setdefault(point, []).append({
+                'seq': self.hseq[point],
+                'sample': {'value': self._wrap(value),
+                           'quality': 'good', 'tick': self.tick}})
+        # The plant's dynamics: the declared bias inflow plus each
+        # commanded pump's draw integrates into the well.
+        self.level += (self.BIAS + self.DRAW * sum(self.cmd)) * self.DT
+
+    def _parameters(self):
+        return [
+            {'name': 'select', 'values': {}},
+            {'name': 'chain', 'values': dict(
+                {key: {'float': value} for key, value in {
+                    'cutoff': self.CUTOFF, 'stop': self.STOP,
+                    'start': self.START, 'lag_start': self.LAG_START,
+                    'high': self.HIGH}.items()},
+                on_bad_demand={'int': 0})},
+            {'name': 'group', 'values': {
+                'rotation': {'int': 0},
+                'start_delay_ticks': {'int': self.START_DELAY},
+                'restage_delay_ticks': {'int': self.RESTAGE_DELAY},
+                'min_off_ticks': {'int': self.MIN_OFF}}},
+            {'name': 'power-alarm', 'values': {
+                'priority': {'int': 1}, 'class': {'int': 1},
+                'response_ticks': {'int': 2}}}]
+
+    @staticmethod
+    def _interface(kind, measurements=(), state=()):
+        return {'kind': kind,
+                'measurements': [{'name': name, 'point': point}
+                                 for name, point in measurements],
+                'state': [{'name': name, 'point': point}
+                          for name, point in state],
+                'configuration': [], 'commands': [], 'events': []}
+
+    def _schema(self):
+        if self.bare_schema:
+            return {'interfaces': [
+                {'name': 'chain',
+                 'interface': self._interface('threshold-chain')}]}
+        return {'interfaces': [
+            {'name': 'chain', 'interface': self._interface(
+                'threshold-chain', [('level', 201), ('demand', 204)])},
+            {'name': 'group', 'interface': self._interface(
+                'pump-group', [('demand', 205), ('staged', 211)],
+                [('duty', 210)])},
+            {'name': 'power-alarm', 'interface': self._interface(
+                'managed-bool-latching-alarm', [('in', 120)],
+                [('alarm', 1053), ('unacknowledged', 1054)])},
+            {'name': 'none-alarm', 'interface': self._interface(
+                'managed-bool-latching-alarm', [('in', 220)],
+                [('alarm', 1033), ('unacknowledged', 1034)])},
+            {'name': 'lah', 'interface': self._interface(
+                'managed-latching-alarm', [('in', 202)],
+                [('alarm', 1003), ('unacknowledged', 1004)])}]}
+
+    # The monitor channel — replaces scenarios.http_json.
+    def http_json(self, method, url, body=None, timeout=10):
+        host = url.split('/')[2]
+        path = '/' + url.split('/', 3)[3]
+        route, _, query = path.partition('?')
+        self._scan()
+        if (method, route) == ('GET', '/role'):
+            if host == 'ctrl-b:2':
+                return 200, {'role': 'standby', 'tick': self.tick,
+                             'sync': {'tracking': {'aligned':
+                                                   self.tick}}}
+            if self.no_active or (self.role_moves
+                                  and self.values[self.ALARM]):
+                return 200, {'role': 'standby', 'tick': self.tick}
+            return 200, {'role': 'active', 'tick': self.tick}
+        if (method, route) == ('GET', '/signals'):
+            points = list(self.SIGNALS)
+            if self.bad_ack_signal:
+                points = [dict(entry, writable=False)
+                          if entry['name'] == 'power-fail-ack'
+                          else entry for entry in points]
+            if self.bare_signals:
+                points = points[:1]
+            return 200, {'points': points}
+        if (method, route) == ('GET', '/schema'):
+            return 200, self._schema()
+        if (method, route) == ('GET', '/snapshot'):
+            points = []
+            for point, value in sorted(self.values.items()):
+                if self.missing_power_ok and point == self.POWER_OK:
+                    continue
+                points.append({
+                    'point': point,
+                    'direction': 'in' if point in self.INS else 'out',
+                    'sample': {'value': self._wrap(value),
+                               'quality': 'good',
+                               'tick': self.tick}})
+            return 200, {'tick': self.tick, 'points': points,
+                         'parameters': self._parameters()}
+        if (method, route) == ('GET', '/journal'):
+            since = int(query.split('=', 1)[1])
+            return 200, [entry for entry in self.journal
+                         if entry['seq'] > since]
+        if (method, route) == ('GET', '/history'):
+            params = {}
+            for pair in query.split('&'):
+                key, _, val = pair.partition('=')
+                params.setdefault(key, []).append(val)
+            since = int(params.get('since', ['0'])[0])
+            wanted = [int(point) for point in params.get('point', [])]
+            if not wanted:
+                wanted = sorted(self.history)
+            return 200, [
+                {'point': point,
+                 'samples': [sample for sample in
+                             self.history.get(point, [])
+                             if sample['seq'] > since]}
+                for point in wanted]
+        if (method, route) == ('POST', '/command'):
+            write = (body or {}).get('command', {}).get('write_value')
+            if write and write.get('point') in (
+                    self.ACK, self.NACK, self.LACK, self.MODE1,
+                    self.OOS1, self.MODE2, self.OOS2) \
+                    and not self.ack_rejected:
+                receipt = {'command': body['command'],
+                           'outcome': {'accepted': {
+                               'apply_tick': self.tick + 1}},
+                           'actor': body.get('actor')}
+                self.pending.append(receipt)
+                return 200, receipt
+            return 200, {'command': (body or {}).get('command'),
+                         'outcome': {'rejected': {'reason': {
+                             'not_writable': {
+                                 'point': (write or {})
+                                 .get('point')}}}},
+                         'actor': (body or {}).get('actor')}
+        raise AssertionError('unexpected request %s %s' % (method, url))
+
+
+class PowerTripTests(unittest.TestCase):
+    """scenario_power_fail_trip against the stubbed rig: the feed's
+    transitions are call-count keyed so each run emits identical
+    evidence, and every fault flag stages a named acceptance leg —
+    power-ok drop, availability loss, command release, the
+    none-available annunciation, the alarm lifecycle, the ack while
+    the condition stands, the bounded recovery, role stability — plus
+    the inconclusive paths."""
+
+    OWNER = 424243
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.plant = PowerTripPlantPeer(self.OWNER)
+        self.feed = PowerTripFeed(self.plant)
+
+    def tearDown(self):
+        self.plant.close()
+        self.tmp.cleanup()
+
+    def _ctx(self):
+        return {'active': 'http://ctrl-a:1',
+                'standby': 'http://ctrl-b:2',
+                'plant': self.plant.address,
+                'plant_ctl': self.plant.ctl,
+                'plant_owner': {'active': self.OWNER, 'standby': 424244},
+                'evidence_dir': str(self.evidence)}
+
+    def run_scenario(self, ctx=None, feed=None):
+        feed = feed or self.feed
+        with patch.object(scenarios, 'http_json', feed.http_json), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'POWER_TRIP_POLL', 0.001), \
+                patch.object(scenarios, 'POWER_TRIP_DEADLINE', 3.0):
+            return scenarios.scenario_power_fail_trip(
+                ctx or self._ctx())
+
+    def test_registered_in_scenarios(self):
+        order = list(scenarios.SCENARIOS)
+        # The self-contained cluster ahead of the schedule's closing
+        # observation case.
+        self.assertEqual(
+            order.index(scenarios.scenario_unavailable_fallback) + 1,
+            order.index(scenarios.scenario_power_fail_trip))
+        self.assertEqual(
+            order.index(scenarios.scenario_power_fail_trip) + 1,
+            order.index(scenarios.scenario_dcs_ctl))
+        self.assertIs(verify.case_function('power-fail-trip'),
+                      scenarios.scenario_power_fail_trip)
+
+    def test_clean_feed_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        report.validate_scenario(record)
+        for entry in record['evidence']:
+            self.assertTrue((self.evidence.parent
+                             / entry['ref']).exists(), entry)
+        # The documented request surface: the shared-claim attachment,
+        # a baseline read and a restore read, and the drive/release
+        # write pair.
+        ops = [request.get('op') for request in self.plant.requests]
+        self.assertIn('list_points', ops)
+        self.assertIn('ensure_writer', ops)
+        self.assertIn('read', ops)
+        self.assertEqual(ops.count('write'), 2)
+        # The driven contact restored, every latch re-armed, roles
+        # unmoved, and the group cycling on its own demand again.
+        self.assertEqual(
+            self.plant.samples[120]['value'], {'bool': False})
+        self.assertFalse(self.feed.latched)
+        self.assertFalse(self.feed.none_latched)
+        self.assertFalse(self.feed.values[self.feed.ACK])
+        self.assertFalse(self.feed.values[self.feed.NACK])
+        self.assertTrue(self.feed.values[self.feed.POWER_OK])
+
+    def test_two_runs_produce_identical_evidence(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        first = {p.name: p.read_bytes()
+                 for p in self.evidence.iterdir()}
+        second_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(second_tmp.cleanup)
+        evidence2 = Path(second_tmp.name) / 'evidence'
+        evidence2.mkdir()
+        plant2 = PowerTripPlantPeer(self.OWNER)
+        self.addCleanup(plant2.close)
+        feed2 = PowerTripFeed(plant2)
+        ctx2 = self._ctx()
+        ctx2['plant'] = plant2.address
+        ctx2['plant_ctl'] = plant2.ctl
+        ctx2['evidence_dir'] = str(evidence2)
+        record2 = self.run_scenario(ctx=ctx2, feed=feed2)
+        self.assertEqual(record2['outcome'], 'passed', record2)
+        second = {p.name: p.read_bytes() for p in evidence2.iterdir()}
+        self.assertEqual(set(first), set(second))
+        for name, data in first.items():
+            self.assertEqual(data, second[name], name)
+
+    def test_no_active_fails(self):
+        self.feed.no_active = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('no peer reports role=active',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_missing_wiring_is_inconclusive(self):
+        self.feed.bare_signals = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('lacks the power-fail interlock wiring',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unwritable_ack_is_inconclusive(self):
+        self.feed.bad_ack_signal = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('power-fail-ack', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_bare_schema_is_inconclusive(self):
+        self.feed.bare_schema = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('served schema lacks', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_refused_claim_is_inconclusive(self):
+        self.plant.refuse_claim = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('writer claim refused',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_standing_contact_is_inconclusive(self):
+        # The contact already stands: the drive's baseline read fails
+        # its precondition instead of touching the field.
+        self.plant.samples[120]['value'] = {'bool': True}
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('does not read false', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_power_ok_never_reports_is_inconclusive(self):
+        # The named inconclusive leg: the served snapshot never
+        # carries power-ok, so the baseline window never lands.
+        self.feed.missing_power_ok = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('power_ok', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_power_ok_never_drops_fails(self):
+        self.feed.ok_holds = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('power-trip-failed', record.get('detail', ''))
+        self.assertIn('tripped leg never landed',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_availability_never_drops_fails(self):
+        self.feed.avail_holds = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('power-trip-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_commands_never_release_fails(self):
+        self.feed.cmd_holds = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('power-trip-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_none_available_never_asserts_fails(self):
+        self.feed.never_none = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('power-trip-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_demand_drops_under_outage_fails(self):
+        self.feed.demand_drops = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('power-trip-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_duty_never_releases_fails(self):
+        self.feed.duty_holds = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('power-trip-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_mute_alarm_fails(self):
+        self.feed.mute_alarm = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('power-trip-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_mute_unack_fails(self):
+        self.feed.mute_unack = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('power-trip-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_ack_rejected_fails(self):
+        self.feed.ack_rejected = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('ack write was refused',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_ack_never_applies_fails(self):
+        self.feed.ack_never_applies = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('power-trip-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unack_stuck_fails(self):
+        self.feed.unack_stuck = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('power-trip-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_never_recovers_fails(self):
+        self.feed.never_recovers = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('power-trip-failed', record.get('detail', ''))
+        self.assertIn('recovered leg never landed',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_slow_restage_is_nondeterministic(self):
+        # The re-stage lands beyond the declared start_delay bound —
+        # the named nondeterminism the bound exists to catch.
+        self.feed.slow_restage = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('power-trip-nondeterministic',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_early_restage_is_nondeterministic(self):
+        # A start lands while the outage still stands — an output step
+        # outside the deterministic scan sequence.
+        self.feed.early_restage = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('power-trip-nondeterministic',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_journaled_role_change_is_nondeterministic(self):
+        self.feed.journals_role = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('power-trip-nondeterministic',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unjournaled_point_recording_is_nondeterministic(self):
+        self.feed.journals_demand = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('power-trip-nondeterministic',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_missing_journal_fails(self):
+        self.feed.no_journal = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('power-trip-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_role_moving_under_the_drive_fails(self):
+        self.feed.role_moves = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('power-trip-failed', record.get('detail', ''))
+        self.assertIn('active role moved', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_moved_pump_operator_state_fails(self):
+        self.feed.moves_pump_state = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('moved pump operator state',
+                      record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_restore_write_lying_fails(self):
+        self.plant.lying_restore = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('power-trip-failed', record.get('detail', ''))
+        report.validate_scenario(record)
+
+
+class TrackingAuthPeer:
+    """One endpoint of the tracking-source pair: role, tracking
+    posture, its tick clock, and the served journal."""
+
+    def __init__(self, name, role):
+        self.name = name
+        self.role = role        # active | standby | demoting | promoting
+        self.tracking = role == 'standby'
+        self.misdirected = False
+        self.tick = 0
+        self.journal = []
+        self.next_seq = 1
+
+
+class TrackingAuthFeed:
+    """A stubbed pair for the tracking-source-auth leg: ctrl-a owns
+    the field at launch, ctrl-b tracks. Every monitor call is one
+    scan — the tracking peer's per-scan pull announces its own
+    monitor address on the owner, recorded as the demotion's
+    unverified hint; the owner's warm restart drops every recorded
+    hint and pinned adoption. `GET /checkpoint?peer=` lands the hint
+    only when it names the driver's proven source — the wildcard
+    `0.0.0.0` resolving to it, a foreign IP refused — and
+    `POST /demote` on the unconfigured owner verifies the hinted
+    endpoint: only the genuine peer address continues the line, so it
+    journals `tracking_source_adopted` naming the source and pins it
+    for the demoted peer's pulls; anything else refuses the named
+    `no_tracking_source`. The peer's demotion rides its configured
+    source — it adopts no announce and journals none. Doctor flags
+    stage each named defect the issue calls out."""
+
+    GATEWAY = '172.18.0.1'         # the driver's proven source — what
+                                   # the rig's gateway DNAT leaves on
+                                   # the pulling connection
+    PEER_ADDR = '172.19.0.3:8081'  # ctrl-b's wildcard announce
+                                   # resolved on the rig bridge
+    CRAFTED = '10.255.255.1:9'     # a fabricated endpoint — never a
+                                   # verifiable source on the rig
+
+    def __init__(self):
+        self.a = TrackingAuthPeer('a', 'active')
+        self.b = TrackingAuthPeer('b', 'standby')
+        self.announced = {'a': self.PEER_ADDR, 'b': None}
+        self.adopted = {'a': None, 'b': None}
+        self.stopped = {'a': False, 'b': False}
+        # The doctors staging each named defect.
+        self.fabricated_arms = False      # any landed hint arms the
+                                          # demote — the #684 defect
+        self.drop_adoption = False        # the verified demote
+                                          # journals no adoption entry
+        self.adopt_crafted = False        # the adoption entry names a
+                                          # fabricated endpoint
+        self.redirect_moves = False       # the post-adoption rewrite
+                                          # redirects the pulls
+        self.peer_adopts = False          # the configured-source
+                                          # demote journals an
+                                          # adoption
+        self.never_tracks = False         # the peer never reconverges
+        self.owner_never_returns = False  # the warm-restarted owner
+                                          # stays down
+        self.checkpoint_refused = False   # the checkpoint read stops
+                                          # answering
+        self.demote_refused = False       # every demote refused
+        self.unreachable = False          # neither monitor answers
+
+    def _peers(self):
+        return {'a': self.a, 'b': self.b}
+
+    def _other(self, peer):
+        return self.b if peer.name == 'a' else self.a
+
+    def _mark(self, peer, event):
+        peer.journal.append({'seq': peer.next_seq, 'tick': peer.tick,
+                             'event': event})
+        peer.next_seq += 1
+
+    def _advance(self, peer):
+        """One completed scan: a pending role transition settles."""
+        peer.tick += 1
+        if peer.role == 'demoting':
+            peer.role = 'standby'
+            peer.tracking = True
+            self._mark(peer, {'role_changed': {'from': 'demoting',
+                                               'to': 'standby'}})
+        elif peer.role == 'promoting':
+            peer.role = 'active'
+            self._mark(peer, {'role_changed': {'from': 'promoting',
+                                               'to': 'active'}})
+
+    def _pulls(self):
+        """The tracking peer's per-scan pull lands the genuine
+        announce on its source — every converged pull re-announces."""
+        if self.b.role == 'standby' and self.b.tracking \
+                and not self.stopped['b']:
+            self.announced['a'] = self.PEER_ADDR
+        if self.a.role == 'standby' and self.a.tracking \
+                and not self.stopped['a']:
+            self.announced['b'] = '172.19.0.2:8080'
+
+    def _announce(self, peer, hint):
+        """The acceptance check: the hint must name the pulling
+        connection's own source — a wildcard resolves to it; a
+        foreign IP never lands."""
+        host, _, port = hint.rpartition(':')
+        if host == '0.0.0.0':
+            self.announced[peer.name] = self.GATEWAY + ':' + port
+        elif host == self.GATEWAY:
+            self.announced[peer.name] = hint
+        # The redirect defect: a rewrite after the verified adoption
+        # moves the demoted peer's pulls off the pinned source.
+        if self.redirect_moves \
+                and self.adopted[peer.name] is not None:
+            self.adopted[peer.name] = self.announced[peer.name]
+            peer.misdirected = True
+
+    def _raise(self, code, body):
+        raise urllib.error.HTTPError(
+            'http://pair', code, 'refused', None,
+            io.BytesIO(json.dumps(body).encode()))
+
+    def stop_controller(self, name):
+        self.stopped[{'active': 'a', 'standby': 'b'}[name]] = True
+
+    def start_controller(self, name):
+        self.stopped[{'active': 'a', 'standby': 'b'}[name]] = False
+
+    def restart_controller(self, name):
+        """The warm restart: every recorded announce hint and pinned
+        adoption drops with the process — the truly unsourced
+        instance the leg needs."""
+        key = {'active': 'a', 'standby': 'b'}[name]
+        self.announced[key] = None
+        self.adopted[key] = None
+        if self.owner_never_returns and key == 'a':
+            self.stopped['a'] = True
+
+    def http_json(self, method, url, body=None, timeout=10):
+        host = url.split('://', 1)[1].split(':')[0]
+        peer = self._peers()[host.split('-', 1)[1]]
+        if self.unreachable or self.stopped[peer.name]:
+            raise urllib.error.URLError('unreachable')
+        path = '/' + url.split('/', 3)[3]
+        route, _, query = path.partition('?')
+        self._pulls()
+        self._advance(peer)
+        if (method, route) == ('GET', '/checkpoint'):
+            if self.checkpoint_refused:
+                self._raise(500, 'unavailable')
+            hint = query.split('=', 1)[1] if '=' in query else None
+            if hint:
+                self._announce(peer, hint)
+            return 200, {'tick': peer.tick,
+                         'model_fingerprint': 'fp',
+                         'generation': 7}
+        if (method, route) == ('GET', '/role'):
+            report = {'role': peer.role, 'tick': peer.tick}
+            if peer.role == 'standby':
+                sync = {'tracking': {'aligned': peer.tick}}
+                if peer.misdirected:
+                    sync = {'degraded': {'detail': 'fetch failed'}}
+                elif not peer.tracking or self.never_tracks:
+                    sync = {'unsynchronized': {}}
+                report['sync'] = sync
+            return 200, report
+        if (method, route) == ('GET', '/journal'):
+            since = int(query.split('=', 1)[1]) if '=' in query else 0
+            return 200, [dict(entry) for entry in peer.journal
+                         if entry['seq'] > since]
+        if (method, route) == ('POST', '/demote'):
+            if peer.role != 'active' or self.demote_refused:
+                self._raise(409, {'not_active': {}})
+            if peer.name == 'a':
+                # The announced-only demotion: the recorded hint must
+                # verify — only the genuine peer's checkpoint
+                # continues the line.
+                hint = self.announced['a']
+                verified = hint == self.PEER_ADDR \
+                    or self.fabricated_arms and hint is not None
+                if not verified:
+                    self._raise(409, 'no_tracking_source')
+                source = self.CRAFTED if self.adopt_crafted else hint
+                if not self.drop_adoption:
+                    self._mark(peer, {'tracking_source_adopted':
+                                      {'source': source}})
+                self.adopted['a'] = source
+                peer.role = 'demoting'
+                return 200, {'role': 'demoting', 'tick': peer.tick}
+            # The configured-source demotion adopts no announce.
+            if self.peer_adopts:
+                self._mark(peer, {'tracking_source_adopted':
+                                  {'source': self.PEER_ADDR}})
+            peer.role = 'demoting'
+            return 200, {'role': 'demoting', 'tick': peer.tick}
+        if (method, route) == ('POST', '/promote'):
+            if peer.role == 'active':
+                self._raise(409, {'already_active': {}})
+            if not peer.tracking or self.never_tracks:
+                self._raise(409, {'not_converged': {
+                    'sync': {'unsynchronized': {}}}})
+            peer.misdirected = False
+            peer.role = 'promoting'
+            return 200, {'role': 'promoting', 'tick': peer.tick}
+        raise AssertionError('unexpected request %s %s'
+                             % (method, url))
+
+
+class TrackingSourceAuthTests(unittest.TestCase):
+    """The tracking-source-auth leg against the stubbed pair: the
+    unsourced-instance window's crafted announces and refused demotes,
+    the verified adoption's journaled-by-name entry, the pinned
+    redirect, and the restore to the entry layout. A clean rig passes
+    with identical digests and evidence; each doctored defect reports
+    its named diagnostic; an unreachable rig is inconclusive."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.evidence = Path(self.tmp.name) / 'evidence'
+        self.evidence.mkdir()
+        self.feed = TrackingAuthFeed()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_scenario(self, feed=None, **ctx_overrides):
+        feed = feed or self.feed
+        ctx = {'active': 'http://ctrl-a:1',
+               'standby': 'http://ctrl-b:2',
+               'evidence_dir': str(self.evidence),
+               'stop_controller': feed.stop_controller,
+               'start_controller': feed.start_controller,
+               'restart_controller': feed.restart_controller}
+        ctx.update(ctx_overrides)
+        with patch.object(scenarios, 'http_json', feed.http_json), \
+                patch.object(scenarios, 'POLL_INTERVAL', 0.001), \
+                patch.object(scenarios, 'AUTH_SETTLE', 2.0), \
+                patch.object(scenarios, 'AUTH_DEADLINE', 2.0), \
+                patch.object(scenarios, 'AUTH_POLL', 0.001):
+            return scenarios.scenario_tracking_source_auth(ctx)
+
+    def test_registered(self):
+        order = list(scenarios.SCENARIOS)
+        # The settled pre-switch window behind the demote-reconvergence
+        # case — ahead of the tune case's a->b switch.
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_reconvergence)
+            + 1,
+            order.index(scenarios.scenario_tracking_source_auth))
+        self.assertEqual(
+            order.index(scenarios.scenario_tracking_source_auth) + 1,
+            order.index(scenarios.scenario_parameter_tune_carryover))
+        self.assertIs(
+            verify.case_function('tracking-source-auth'),
+            scenarios.scenario_tracking_source_auth)
+
+    def test_clean_pair_passes_and_validates(self):
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        for name in ('tracking-source-auth-pass-1.json',
+                     'tracking-source-auth-pass-2.json'):
+            self.assertTrue((self.evidence / name).is_file(), name)
+        refs = sorted(entry['ref'] for entry in record['evidence'])
+        self.assertEqual(refs, ['evidence/tracking-source-auth-pass-1.json',
+                               'evidence/tracking-source-auth-pass-2.json'])
+        passes = [json.loads((self.evidence / name).read_text())
+                  for name in ('tracking-source-auth-pass-1.json',
+                               'tracking-source-auth-pass-2.json')]
+        self.assertEqual(passes[0]['digest'], passes[1]['digest'])
+        digest = passes[0]['digest']
+        # Every crafted variant met the named refusal; the genuine
+        # announce verified, journaled by name, and pinned.
+        for leg in ('unsourced', 'foreign', 'fabricated'):
+            self.assertEqual(digest[leg], 'no_tracking_source', digest)
+        self.assertEqual(digest['forged'],
+                         'no_tracking_source/unreached', digest)
+        self.assertEqual(digest['announces'], 'answered', digest)
+        self.assertEqual(digest['adoption'], 'journaled', digest)
+        self.assertEqual(digest['redirect'], 'pinned', digest)
+        self.assertEqual(digest['peer_adoption'], 'absent', digest)
+        self.assertEqual(digest['roles'], 'restored', digest)
+        # The verified demotion journaled the announced peer by name.
+        self.assertEqual(passes[0]['adopted'],
+                         [TrackingAuthFeed.PEER_ADDR])
+        # Two passes leave the pair on its entry layout.
+        self.assertEqual(self.feed.a.role, 'active')
+        self.assertEqual(self.feed.b.role, 'standby')
+        report.validate_scenario(record)
+
+    def test_fabricated_source_armed_reports_nondeterministic(self):
+        self.feed.fabricated_arms = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'tracking-source-auth-nondeterministic'),
+            record['detail'])
+        self.assertIn('armed', record['detail'])
+        report.validate_scenario(record)
+
+    def test_dropped_adoption_entry_reports_failed(self):
+        self.feed.drop_adoption = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'tracking-source-auth-failed'), record['detail'])
+        self.assertIn('tracking_source_adopted', record['detail'])
+        report.validate_scenario(record)
+
+    def test_crafted_adoption_reports_nondeterministic(self):
+        self.feed.adopt_crafted = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'tracking-source-auth-nondeterministic'),
+            record['detail'])
+        self.assertIn('crafted', record['detail'])
+        report.validate_scenario(record)
+
+    def test_moved_redirect_reports_nondeterministic(self):
+        self.feed.redirect_moves = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'tracking-source-auth-nondeterministic'),
+            record['detail'])
+        self.assertIn('pinned adoption', record['detail'])
+        report.validate_scenario(record)
+
+    def test_peer_adoption_reports_nondeterministic(self):
+        self.feed.peer_adopts = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'tracking-source-auth-nondeterministic'),
+            record['detail'])
+        self.assertIn('configured-source', record['detail'])
+        report.validate_scenario(record)
+
+    def test_refused_demotes_report_failed(self):
+        self.feed.demote_refused = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'tracking-source-auth-failed'), record['detail'])
+        self.assertIn('no_tracking_source', record['detail'])
+        report.validate_scenario(record)
+
+    def test_missing_checkpoint_reports_failed(self):
+        self.feed.checkpoint_refused = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'tracking-source-auth-failed'), record['detail'])
+        report.validate_scenario(record)
+
+    def test_unconverged_peer_reports_failed(self):
+        self.feed.never_tracks = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'tracking-source-auth-failed'), record['detail'])
+        self.assertIn('tracking standby', record['detail'])
+        report.validate_scenario(record)
+
+    def test_owner_never_returns_reports_failed(self):
+        self.feed.owner_never_returns = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'tracking-source-auth-failed'), record['detail'])
+        self.assertIn('never reported active', record['detail'])
+        report.validate_scenario(record)
+
+    def test_unreachable_rig_reports_inconclusive(self):
+        self.feed.unreachable = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('unreachable', record['detail'])
+        report.validate_scenario(record)
+
+    def test_no_lifecycle_actions_reports_inconclusive(self):
+        record = self.run_scenario(stop_controller=None,
+                                 start_controller=None,
+                                 restart_controller=None)
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('lifecycle', record['detail'])
+        report.validate_scenario(record)
+
+    def test_diverging_digests_report_nondeterministic(self):
+        passes = iter([({'unsourced': 'no_tracking_source'}, {},
+                        {'pass': 1}),
+                       ({'unsourced': 'armed'}, {}, {'pass': 2})])
+        with patch.object(scenarios, '_tracking_source_auth_pass',
+                          lambda *a: next(passes)):
+            record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'tracking-source-auth-nondeterministic'),
+            record['detail'])
+        self.assertIn('digests diverged', record['detail'])
+        report.validate_scenario(record)
 
 
 class PointAccessorTests(unittest.TestCase):

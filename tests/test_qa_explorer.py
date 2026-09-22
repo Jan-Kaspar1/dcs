@@ -2,6 +2,7 @@
 agent-result parsing, and the run's report/ledger paths — all covered
 with fakes, no Docker and no real Devin session."""
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,11 @@ from unittest.mock import patch
 
 from qa_lane import explorer, report as qa_report
 from qa_lane import runner, state as qa_state
+
+# Exploration runs resolve cfg['exploration_devin'] ('/bin/true') and the
+# agent spawn signals process groups; both are POSIX-only.
+posix_only = unittest.skipUnless(os.name == 'posix',
+                                 'exploration run fixtures are POSIX-only')
 
 SHA_A = 'a' * 40
 SHA_B = 'b' * 40
@@ -273,6 +279,7 @@ class ParseTests(Fixture):
 
 
 class RunTests(Fixture):
+    @posix_only
     def test_run_produces_failed_report_and_ledger(self):
         self.verdicted()
         src = Path(self.cfg['src_dir']) / SHA_A
@@ -336,6 +343,7 @@ class RunTests(Fixture):
                 report_doc['infrastructure_failures']]
         self.assertIn('preflight-source', keys)
 
+    @posix_only
     def test_run_without_result_document_is_inconclusive(self):
         self.verdicted()
         src = Path(self.cfg['src_dir']) / SHA_A

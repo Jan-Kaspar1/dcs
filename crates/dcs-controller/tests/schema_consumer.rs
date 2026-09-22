@@ -259,14 +259,16 @@ fn settlements_of(client: &MonitorClient, command: &Command) -> Vec<(u64, Comman
         .collect()
 }
 
-/// The checkpoint a client serves with its model fingerprint
-/// normalized out: the pair and reference models differ only in the
-/// plant address, so the rest of the transferable state — tick,
+/// The checkpoint a client serves with its model fingerprint and
+/// stream generation normalized out: the pair and reference models
+/// differ only in the plant address, and each process mints its own
+/// generation at boot, so the rest of the transferable state — tick,
 /// component states, output and internal images, forces, receipts,
 /// admission counters — must serialize identically.
 fn checkpoint_digest(client: &MonitorClient) -> Vec<u8> {
     let mut checkpoint: Checkpoint = client.checkpoint().unwrap();
     checkpoint.model_fingerprint = None;
+    checkpoint.generation = None;
     serde_json::to_vec(&checkpoint).unwrap()
 }
 
@@ -1708,15 +1710,30 @@ fn run_verification(tag: &str) -> Outcome {
         checkpoints,
         receipts: standby.receipts().unwrap(),
         emitted: emitted(&standby),
-        journals: [
-            active.journal(0).unwrap(),
-            standby.journal(0).unwrap(),
-            reference.journal(0).unwrap(),
-            read_journal_file(&active_journal).unwrap().entries,
-            read_journal_file(&standby_journal).unwrap().entries,
-            read_journal_file(&reference_journal).unwrap().entries,
-        ]
-        .into(),
+        journals: {
+            let mut journals: Vec<Vec<JournalEntry>> = [
+                active.journal(0).unwrap(),
+                standby.journal(0).unwrap(),
+                reference.journal(0).unwrap(),
+                read_journal_file(&active_journal).unwrap().entries,
+                read_journal_file(&standby_journal).unwrap().entries,
+                read_journal_file(&reference_journal).unwrap().entries,
+            ]
+            .into();
+            // The adopted-source entry names the peer's monitor
+            // address — its ephemeral listen port run-unique by
+            // nature — so the identical-runs comparison masks the
+            // port while keeping the event's presence, `seq`, `tick`,
+            // and named host.
+            for journal in &mut journals {
+                for entry in journal {
+                    if let JournalEvent::TrackingSourceAdopted { source } = &mut entry.event {
+                        source.set_port(0);
+                    }
+                }
+            }
+            journals
+        },
     }
 }
 

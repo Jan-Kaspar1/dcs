@@ -102,6 +102,19 @@ pub enum StandbySync {
         /// What the failed transfer reported, for diagnostics.
         detail: String,
     },
+    /// The last checkpoint applied cleanly but its serving run stamped
+    /// it not owning field writes — the tracked line has no field
+    /// owner: the mutual-standby wedge, where every peer can report a
+    /// clean apply while the field stands unwritten. The peer still
+    /// follows the stream — `aligned` advances as usual — but the
+    /// staged-output comparison has no honest `field` side to pair
+    /// with, so the run is promotable on the same evidence `tracking`
+    /// stands on: the run it would resume is the proven-converged one.
+    Orphaned {
+        /// The last applied checkpoint's tick — how far the run is known
+        /// to be aligned.
+        aligned: Tick,
+    },
     /// Checkpoints apply cleanly but the outputs the standby's own scan
     /// stages no longer match what the field carries — a converged peer
     /// whose takeover would write a different field than the active's.
@@ -139,6 +152,11 @@ impl fmt::Display for StandbySync {
             Self::Unsynchronized => f.write_str("unsynchronized"),
             Self::Tracking { aligned } => write!(f, "tracking (aligned at tick {})", aligned.0),
             Self::Degraded { detail } => write!(f, "degraded: {detail}"),
+            Self::Orphaned { aligned } => write!(
+                f,
+                "orphaned: the tracked line has no field owner (aligned at tick {})",
+                aligned.0
+            ),
             Self::Diverged { mismatches } => write!(
                 f,
                 "diverged: staged outputs mismatch the field at {}",
@@ -263,6 +281,11 @@ mod tests {
                 sync: Some(StandbySync::Degraded {
                     detail: "fetch failed".to_string(),
                 }),
+            },
+            RoleReport {
+                role: Role::Standby,
+                tick: Tick(38),
+                sync: Some(StandbySync::Orphaned { aligned: Tick(35) }),
             },
             RoleReport {
                 role: Role::Standby,

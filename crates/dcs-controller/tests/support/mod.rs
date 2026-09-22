@@ -98,7 +98,10 @@ fn spawn_inner(
     let addr = loop {
         let mut line = String::new();
         if stderr.read_line(&mut line).unwrap() == 0 {
-            panic!("{} exited before reporting its address", binary.display());
+            panic!(
+                "{} exited before reporting its address; stderr so far: {preamble:?}",
+                binary.display()
+            );
         }
         match parse(line.trim()) {
             Some(addr) => break addr,
@@ -191,6 +194,46 @@ pub fn spawn_controller_logged(model: &Path, extra: &[String], dt: &str) -> (Spa
         args.push(arg.to_string());
     }
     spawn_logged(Path::new(CONTROLLER), &args, listening_on)
+}
+
+/// A wall-clock-paced controller process on `model`: `--scan-ms` paces
+/// the scans and `--listen` serves the monitor on `listen` — the QA
+/// rig's deployment shape, where `0.0.0.0:0` binds the wildcard at an
+/// ephemeral port the way the container launch's `0.0.0.0:<port>` does.
+/// [`reachable`] maps the reported wildcard to the address clients dial.
+pub fn spawn_controller_paced(
+    model: &Path,
+    extra: &[String],
+    scan_ms: u64,
+    listen: &str,
+) -> Spawned {
+    let mut args = vec![model.to_str().unwrap().to_string()];
+    args.extend(extra.iter().cloned());
+    for arg in [
+        "--listen".to_string(),
+        listen.to_string(),
+        "--scan-ms".to_string(),
+        scan_ms.to_string(),
+    ] {
+        args.push(arg);
+    }
+    spawn_logged(Path::new(CONTROLLER), &args, listening_on).0
+}
+
+/// The dialable form of a bound address: a wildcard-bound monitor —
+/// `0.0.0.0`/`::`, every container deployment's `--listen` — is reached
+/// through loopback; connecting to the unspecified address itself is
+/// meaningless.
+pub fn reachable(bound: SocketAddr) -> SocketAddr {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    SocketAddr::new(
+        match bound.ip() {
+            IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ip => ip,
+        },
+        bound.port(),
+    )
 }
 
 /// How [`sim_tcp_document`] re-points a model's devices at a shared

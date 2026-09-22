@@ -80,7 +80,7 @@ mod revision;
 
 pub use checkpoint::{
     CHECKPOINT_FORMAT_VERSION, Checkpoint, CommandAdmissionCounts, RestoreError,
-    SUPPORTED_FORMAT_VERSIONS,
+    SUPPORTED_FORMAT_VERSIONS, mint_generation,
 };
 pub use component::{Component, ComponentIo, ComponentIoExt, IoRequirement, StepError};
 pub use divergence::{
@@ -92,5 +92,5 @@ pub use executor::{
     LinkError, PointMap, PointSpec, WiringError,
 };
 pub use gate::WriteGate;
-pub use peer::{ApplyError, Peer, RoleChange, SourceRestart, TrackReport, Transfer};
+pub use peer::{ApplyError, OrphanReport, Peer, RoleChange, SourceRestart, TrackReport, Transfer};
 pub use revision::CarryoverError;

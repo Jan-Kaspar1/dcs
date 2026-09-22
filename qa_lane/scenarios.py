@@ -40,7 +40,13 @@ controller stop/start actions ctx['stop_controller']/
 ctx['start_controller'] carry — the rig launches controllers with
 --restart no, so a stopped container holds a real down-window — and
 reads both peers' --journal-file paths for the refusal and
-non-interference audits.
+non-interference audits. The tracking-source-auth scenario drives the
+same controller lifecycle seam to open the announced-only demotion
+window — the tracking peer stopped, the field owner warm-restarted so
+no announce is recorded — probes the `GET /checkpoint?peer=` contract
+with crafted announce hints and a forged-checkpoint server bound on
+the scenario host, and audits the served journals for the adoption
+entries every verified source owes.
 
 The field-fault, backup-health, and unavailable-fallback cases
 inject and clear per-point faults on the shared simulated field
@@ -2266,8 +2272,7 @@ def scenario_parameter_tune_carryover(ctx):
         command = {'command': {'set_parameter': {
             'component': component, 'name': name,
             'value': {'float': tuned}}}, 'actor': 'qa-lane'}
-        _, before = http_json('GET', base + '/receipts')
-        index = len(_receipt_list(before))
+        index = _next_receipt_index(ctx, base)
         status, receipt = http_json('POST', base + '/command', command)
         ref = save_evidence(ctx['evidence_dir'],
                             'parameter-tune-submission.json',
@@ -6659,8 +6664,7 @@ def scenario_force_carryover(ctx):
         # The release on the new active: a settled `applied` receipt,
         # an empty forces list, and the held-value rule resuming at
         # Good — the force's last stamp persists as the held sample.
-        _, before = http_json('GET', peer_base + '/receipts')
-        index = len(_receipt_list(before))
+        index = _next_receipt_index(ctx, peer_base)
         unforce_body = {'point': target}
         status, receipt = http_json(
             'POST', peer_base + '/command',
@@ -7016,17 +7020,61 @@ def _outcome_key(receipt):
     return name
 
 
-def _settled_outcome(ctx, base, index):
-    """The outcome key of `receipts[index]` once it is final — None
-    while it still reads `accepted` or the log cannot be read."""
+def _receipt_window(ctx, base):
+    """The retained receipt tail and the absolute submission index of
+    its first entry — the (log, high-water) pair the bounded-log audit
+    correlates by.
+
+    `GET /receipts` serves the bounded tail alone; its place in the
+    submission sequence comes from the admission counters the
+    checkpoint carries beside the same log under one capture —
+    `command_admission.attempts` counts every submission and each
+    appends exactly one receipt, so `attempts - len(receipts)` is the
+    evicted prefix's length. A monitor whose checkpoint predates the
+    receipts section cannot speak for the log's place in the
+    sequence; the bare receipts read answers with base 0 — the
+    never-evicted log's genuine numbering.
+    """
     try:
-        _, body = http_json('GET', base + '/receipts')
+        _, body = http_json('GET', base + '/checkpoint')
+        carried = body.get('receipts')
+        if isinstance(carried, list):
+            receipts = _receipt_list(carried)
+            attempts = (body.get('command_admission') or {}) \
+                .get('attempts')
+            if isinstance(attempts, int) \
+                    and not isinstance(attempts, bool):
+                return receipts, max(0, attempts - len(receipts))
+            return receipts, 0
+    except Exception:
+        pass
+    _, body = http_json('GET', base + '/receipts')
+    return _receipt_list(body), 0
+
+
+def _next_receipt_index(ctx, base):
+    """The absolute submission index the next POST /command receipt
+    takes — the log's high-water `base + len(receipts)`."""
+    receipts, base_index = _receipt_window(ctx, base)
+    return base_index + len(receipts)
+
+
+def _settled_outcome(ctx, base, index):
+    """The outcome key of the receipt logged at absolute submission
+    `index` once its verdict is final — None while it still reads
+    `accepted` or the log cannot be read, 'evicted' when the bounded
+    tail already dropped the settled entry. `index` is the submission
+    sequence the window slides under — never a position in the tail."""
+    try:
+        receipts, base_index = _receipt_window(ctx, base)
     except Exception:
         return None
-    receipts = _receipt_list(body)
-    if len(receipts) <= index:
+    position = index - base_index
+    if position < 0:
+        return 'evicted'
+    if position >= len(receipts):
         return None
-    outcome = _outcome_key(receipts[index])
+    outcome = _outcome_key(receipts[position])
     return None if outcome == 'accepted' else outcome
 
 
@@ -7081,7 +7129,8 @@ class _Overlay:
                          '/checkpoint', '/role', '/signals', '/']
         # The command-flood leg's admission record: flood carries the
         # served bound and the probe point; submissions logs every
-        # (status, normalized outcome, receipt-log index) the flood met.
+        # (status, normalized outcome, absolute submission index) the
+        # flood met.
         self.flood = flood
         self.submissions = []
         self._receipts_base = None
@@ -7166,9 +7215,10 @@ class _Overlay:
 
     def _record_submission(self, status, receipt):
         """One flood submission's verdict: its HTTP status, its
-        receipt's normalized outcome, and the receipt-log index the
-        append-only log assigns it — every POST /command appends exactly
-        one receipt, in submission order."""
+        receipt's normalized outcome, and the absolute submission index
+        the log assigns it — every POST /command appends exactly one
+        receipt, in submission order, so the index counts from the
+        admission high-water the flood started at."""
         if status is not None:
             self.statuses.append(status)
         self.submissions.append({
@@ -7183,7 +7233,7 @@ class _Overlay:
                 self.base, [self._flood_command()] * count):
             self._record_submission(status, receipt)
 
-    def start(self):
+    def start(self, ctx):
         if self.kind == 'stalled-reader':
             # Issue the request, then go silent without reading a byte
             # of the response until the leg ends — the held-connection
@@ -7205,9 +7255,12 @@ class _Overlay:
             # served queue bound until the named queue_full rejection
             # appears — the whole batch lands inside one server read
             # buffer, faster than a scan boundary drains pending entries.
+            # The audit tracks each submission's absolute index — the
+            # receipt log is a bounded tail that can roll under the
+            # flood, so a position read at start would chase the window
+            # instead of the entry.
             try:
-                _, body = http_json('GET', self.base + '/receipts')
-                self._receipts_base = len(_receipt_list(body))
+                self._receipts_base = _next_receipt_index(ctx, self.base)
             except Exception as exc:
                 self.errors.append('receipts base: ' + str(exc)[:150])
             rounds = 0
@@ -7229,7 +7282,7 @@ class _Overlay:
             # admission path stays loaded through the leg's scan window.
             self._flood_burst(ADMISSION_TRICKLE)
 
-    def finish(self):
+    def finish(self, ctx):
         """Drains held resources and returns the leg's named evidence
         failures — interference that never happened, or a consumer that
         met a server fault."""
@@ -7321,22 +7374,28 @@ class _Overlay:
                                 'audited')
             elif not (no_receipt or http_errors or outside):
                 # Every admitted command's receipt must settle applied
-                # at its scan boundary — the receipt log is append-only
-                # and each submission's index is known.
+                # at its scan boundary. The receipt log is a bounded
+                # tail a flood can out-roll, so each submission is
+                # tracked by absolute index against the checkpoint's
+                # (log, high-water) pair; an index the window already
+                # passed is a settled entry the tail coalesced — pending
+                # receipts never evict.
                 pending = [submission['index']
                            for submission in self.submissions
                            if submission['outcome'] == 'accepted']
 
                 def drained():
                     try:
-                        _, body = http_json('GET',
-                                            self.base + '/receipts')
+                        receipts, base_index = _receipt_window(
+                            ctx, self.base)
                     except Exception:
                         return None
-                    receipts = _receipt_list(body)
                     for index in pending:
-                        if len(receipts) <= index \
-                                or _outcome_key(receipts[index]) \
+                        position = index - base_index
+                        if position < 0:
+                            continue
+                        if position >= len(receipts) \
+                                or _outcome_key(receipts[position]) \
                                 != 'applied':
                             return None
                     return True
@@ -7370,7 +7429,7 @@ def _consumer_leg(ctx, base, targets, overlay, want):
     h0 = _history_cursor(ctx, base, targets['watch'])
     deadline = time.monotonic() + LEG_DEADLINE
     try:
-        overlay.start()
+        overlay.start(ctx)
     except Exception as exc:
         overlay.errors.append('start: ' + str(exc)[:150])
     end = None
@@ -7390,14 +7449,13 @@ def _consumer_leg(ctx, base, targets, overlay, want):
     if end is None:
         failures.append('scan outputs stopped advancing under '
                         + overlay.kind + ' at tick ' + str(tick0))
-        failures += overlay.finish()
+        failures += overlay.finish(ctx)
         return None, failures
 
     # The leg's receipted probes: one writable write (the leg's
     # alternating value), one statically invalid write — the two
     # command-path outcomes every leg must reproduce identically.
-    _, receipts_body = http_json('GET', base + '/receipts')
-    index = len(_receipt_list(receipts_body))
+    index = _next_receipt_index(ctx, base)
     http_json('POST', base + '/command',
               {'command': {'write_value': {
                   'point': targets['write'], 'kind': 'bool',
@@ -7419,7 +7477,7 @@ def _consumer_leg(ctx, base, targets, overlay, want):
         'GET', base + '/history?point=' + str(targets['watch'])
         + '&since=' + str(h0))
     seqs = _history_seqs(history_body, targets['watch'])
-    failures += overlay.finish()
+    failures += overlay.finish(ctx)
 
     tick1 = end.get('tick') or 0
     published1 = _publication(end).get('published') or 0
@@ -10005,6 +10063,1189 @@ def scenario_unavailable_fallback(ctx):
 
 
 # --------------------------------------------------------------------
+# The station power-fail interlock trip and its declared recovery
+# (WW-OPS-001's interlock-trips clause, WW-CTL-002's recovery clause —
+# the demand-side leg the burst-order case's alarm-ordering drive left
+# open). `power-fail` is the journaled field contact wired into every
+# pump's availability aggregation — the inverted `power-ok` feeds each
+# pump's `power-ok-in` leg of `avail_i` — and straight into the managed
+# `power-fail-*` alarm's `in`. With the pair settled and the group
+# holding a duty demand — `duty` naming a pump, `demand` above zero, a
+# motor command standing — a plant-protocol write on the contact under
+# the active's shared writer claim must drop `power-ok`, strip both
+# pumps' availability, and release both motor commands while the
+# chain's demand still stands (the station keeps calling — no pump can
+# serve): `none-available` annunciates the all-out state, the managed
+# alarm stands unacknowledged, and every transition journals on its
+# declared-journaled point beside the `power-fail` transition itself.
+# The receipted `power-fail-ack` clears the latch while the condition
+# stands; the restore write then returns `power-ok` and the
+# availability legs, and the group re-stages the standing demand inside
+# the declared `start_delay_ticks`/`min_off_ticks` bounds with no
+# output step outside the deterministic scan sequence, and the pair's
+# roles never move. Functional misses name power-trip-failed;
+# ordering, bounds, and journal-contract violations name
+# power-trip-nondeterministic.
+
+POWER_TRIP_DEADLINE = 60  # bound on each leg's served transition — the
+                          # natural demand window spans a dozen scans
+                          # under the deployed dynamics' rates
+POWER_TRIP_POLL = 0.05    # transition-watch cadence — under the scan
+POWER_TRIP_ACTOR = 'qa-lane'
+
+
+def scenario_power_fail_trip(ctx):
+    """Trip the station power-fail interlock and prove the declared
+    recovery: the driven contact strips availability, releases both
+    motor commands while the demand stands, annunciates none-available
+    and the managed alarm's two flags, and the restore re-stages the
+    group inside the declared bounds — roles unmoved throughout."""
+    case = Case('power-fail-trip',
+                'Power-fail trips the group; the restore re-stages it',
+                'with the deployed pair settled and the pump group '
+                'holding a duty demand — duty naming a pump, demand '
+                'above zero, a motor command standing — a plant-'
+                'protocol write driving the journaled power-fail '
+                'contact true drops power-ok and both pumps\' '
+                'availability, releases p101-cmd/p102-cmd while the '
+                'chain\'s demand still stands, and asserts '
+                'none-available with the power-fail alarm standing '
+                'unacknowledged — every transition journaled on its '
+                'declared-journaled point beside the power-fail '
+                'transition itself; the receipted power-fail-ack '
+                'clears the latch while the condition stands; the '
+                'restore write returns power-ok and the availability '
+                'legs and the group re-stages the standing demand '
+                'inside the declared start_delay_ticks/min_off_ticks '
+                'bounds with no output step outside the deterministic '
+                'scan sequence; the pair\'s roles never move')
+    stream = None
+    restore_fail = None  # the field point while the drive stands
+    held_acks = []       # ack input points left standing true
+    submitted = []       # commands this case receipted
+    cleanup = {}         # {ack_point: unack_point} once resolved
+    live = {'base': None}
+    try:
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + 30)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        base = ctx[active]
+        live['base'] = base
+        peer = 'standby' if active == 'active' else 'active'
+        peer_base = ctx.get(peer)
+        peer_role0 = _try_role(ctx, peer_base) if peer_base else None
+        case.observe('settled pair: ' + active + ' active'
+                     + (', ' + peer + ' reporting '
+                        + json.dumps((peer_role0 or {}).get('role'))
+                        if peer_base else ', no second endpoint'))
+
+        _, signals = http_json('GET', base + '/signals')
+        ref = save_evidence(ctx['evidence_dir'],
+                            'power-trip-signals.json', signals)
+        case.evidence('file', ref, 'SignalIndex naming the power-fail '
+                      'interlock path')
+        names = {'power-fail': 'power_fail', 'power-ok': 'power_ok',
+                 'level-selected': 'level',
+                 'demand': 'demand', 'demand-in': 'demand_in',
+                 'duty': 'duty', 'staged': 'staged',
+                 'none-available': 'none_available',
+                 'none-available-in': 'none_in',
+                 'none-available-ack': 'none_ack',
+                 'none-available-alarm': 'none_alarm',
+                 'none-available-unacknowledged': 'none_unack',
+                 'power-fail-ack': 'ack',
+                 'power-fail-alarm': 'alarm',
+                 'power-fail-unacknowledged': 'unack',
+                 'power-fail-shelved': 'shelved',
+                 'power-fail-suppressed': 'suppressed',
+                 'power-fail-out-of-service': 'alarm_oos',
+                 'p101-cmd': 'cmd1', 'p102-cmd': 'cmd2',
+                 'p101-run': 'run1', 'p102-run': 'run2',
+                 'p101-avail': 'avail1', 'p102-avail': 'avail2',
+                 'p101-avail-in': 'avail_in1',
+                 'p102-avail-in': 'avail_in2',
+                 'p101-power-ok-in': 'pok_in1',
+                 'p102-power-ok-in': 'pok_in2',
+                 'p101-mode': 'p1_mode', 'p101-oos': 'p1_oos',
+                 'p102-mode': 'p2_mode', 'p102-oos': 'p2_oos'}
+        optional = {'lah-ack': 'lah_ack',
+                    'lah-unacknowledged': 'lah_unack'}
+        entries = {entry.get('name'): entry
+                   for entry in signals.get('points', [])
+                   if entry.get('name') in set(names) | set(optional)}
+        missing = sorted(set(names) - set(entries))
+        if missing:
+            return case.finish('inconclusive', 'the deployed model '
+                               'lacks the power-fail interlock '
+                               'wiring — no signals '
+                               + ', '.join(missing))
+        for key in ('power-fail-ack', 'none-available-ack'):
+            entry = entries[key]
+            if not entry.get('writable') \
+                    or entry.get('direction') != 'in' \
+                    or entry.get('value_type') != 'bool':
+                return case.finish('inconclusive', 'the ' + key
+                                   + ' point is not the alarm\'s '
+                                   'writable bool ack input: '
+                                   + json.dumps(entry)[:300])
+        resolved = dict(names)
+        resolved.update(optional)
+        points = {resolved[name]: entry.get('point')
+                  for name, entry in entries.items()}
+        case.observe('interlock path: '
+                     + json.dumps({name: entry.get('point')
+                                   for name, entry in
+                                   sorted(entries.items())},
+                                  sort_keys=True))
+        cleanup = {points['ack']: points['unack'],
+                   points['none_ack']: points['none_unack']}
+        if all(name in entries for name in optional):
+            cleanup[entries['lah-ack'].get('point')] = \
+                entries['lah-unacknowledged'].get('point')
+
+        _, schema = http_json('GET', base + '/schema')
+        snap0 = _snapshot(ctx, base)
+        chain_name = _component_instance(schema, 'threshold-chain')
+        group_name = _component_instance(schema, 'pump-group')
+        alarm_name = _component_instance(
+            schema, 'managed-bool-latching-alarm', points['alarm'])
+        if chain_name is None or group_name is None \
+                or alarm_name is None:
+            return case.finish('inconclusive', 'the served schema '
+                               'lacks the threshold-chain, pump-group, '
+                               'or the managed-bool-latching-alarm '
+                               'instance wired to the power-fail-alarm '
+                               'point')
+        start_delay = _parameter_value(snap0, group_name,
+                                       'start_delay_ticks')
+        min_off = _parameter_value(snap0, group_name, 'min_off_ticks')
+        start_set = _parameter_value(snap0, chain_name, 'start')
+        stop_set = _parameter_value(snap0, chain_name, 'stop')
+        ref = save_evidence(
+            ctx['evidence_dir'], 'power-trip-wiring.json',
+            {'points': {key: points[key] for key in sorted(points)},
+             'components': {'chain': chain_name, 'group': group_name,
+                            'alarm': alarm_name},
+             'start_delay_ticks': start_delay,
+             'min_off_ticks': min_off,
+             'start': start_set, 'stop': stop_set})
+        case.evidence('file', ref, 'the served interlock wiring and '
+                      'the declared staging bounds')
+        for name_, param in (('start_delay_ticks', start_delay),
+                             ('min_off_ticks', min_off)):
+            if not isinstance(param, int) or isinstance(param, bool) \
+                    or param < 0:
+                return case.finish('inconclusive', 'the pump group '
+                                   'serves no usable ' + name_ + ': '
+                                   + json.dumps(param))
+        for name_, param in (('start', start_set), ('stop', stop_set)):
+            if not isinstance(param, (int, float)) \
+                    or isinstance(param, bool) \
+                    or not math.isfinite(param):
+                return case.finish('inconclusive', 'the threshold '
+                                   'chain serves no usable ' + name_
+                                   + ' setpoint: ' + json.dumps(param))
+        if stop_set >= start_set:
+            return case.finish('inconclusive', 'the served setpoint '
+                               'chain is not ordered: stop '
+                               + json.dumps(stop_set) + ' >= start '
+                               + json.dumps(start_set))
+
+        if ctx.get('plant') is None:
+            return case.finish('inconclusive',
+                               'the run publishes no plant endpoint')
+        owner = (ctx.get('plant_owner') or {}).get(active)
+        if owner is None:
+            return case.finish('inconclusive', 'the run pins no '
+                               'plant-writer owner token for the '
+                               'settled active ' + str(active))
+        # The same claim seam as the lag-staging drive: the field
+        # census and the point reads ride the shipped dcs-plant-ctl,
+        # while the standing shared claim and the writes under it stay
+        # on the raw attachment — the tool exposes no ensure_writer
+        # under a chosen owner token.
+        stream = _plant_connect(ctx)
+        field = _field_inputs(ctx)
+        if points['power_fail'] not in field:
+            return case.finish('inconclusive', 'the power-fail '
+                               'signal\'s point '
+                               + str(points['power_fail'])
+                               + ' is not a field in-point the plant '
+                               'serves')
+        verdict = _plant_request(stream, {'op': 'ensure_writer',
+                                          'owner': owner})
+        if verdict.get('result') not in ('done', 'claimed_shared'):
+            return case.finish('inconclusive', 'the writer claim '
+                               'refused the shared attachment under '
+                               'the active\'s pinned token: '
+                               + json.dumps(verdict)[:300])
+        case.observe('plant protocol attached under ' + active
+                     + '\'s writer claim ('
+                     + str(verdict.get('result')) + ')')
+        baseline_fail = (_plant_read(ctx, points['power_fail'])
+                         .get('value') or {}).get('bool')
+        if baseline_fail is not False:
+            return case.finish('inconclusive', 'the power-fail '
+                               'contact does not read false ahead of '
+                               'the drive: '
+                               + json.dumps(baseline_fail))
+
+        last = {}
+        seen = set()
+
+        def value(key, snap):
+            """The served value of one named point — and the point's
+            presence, for the never-reported inconclusive split."""
+            sample = _point_sample(snap, points[key])
+            if sample is None:
+                return None
+            seen.add(key)
+            raw = sample.get('value')
+            if isinstance(raw, dict):
+                return next(iter(raw.values()), None)
+            return raw
+
+        def poll(cond, keys=()):
+            snap = _try_snapshot(ctx, base)
+            if snap is None:
+                return None
+            last['snap'] = snap
+            for key in keys:
+                if _point_sample(snap, points[key]) is not None:
+                    seen.add(key)
+            return snap if cond(snap) else None
+
+        def leg(name, cond, keys):
+            """One served-transition wait plus its evidence file. A
+            miss classifies inconclusive when an awaited output never
+            reported a sample, power-trip-failed when the served
+            values never landed the leg."""
+            hit = wait_for(lambda: poll(cond, keys),
+                           time.monotonic() + POWER_TRIP_DEADLINE,
+                           interval=POWER_TRIP_POLL)
+            snap = last.get('snap') or {}
+            ref = save_evidence(
+                ctx['evidence_dir'], 'power-trip-' + name + '.json',
+                {'tick': snap.get('tick'),
+                 'samples': {key: _point_sample(snap, points[key])
+                             for key in sorted(keys)}})
+            case.evidence('file', ref, 'the served ' + name + ' leg')
+            if hit:
+                return hit, None
+            unreported = sorted(key for key in keys if key not in seen)
+            if unreported:
+                return None, case.finish(
+                    'inconclusive', 'the ' + name + ' leg\'s outputs '
+                    'never reported on the served snapshot: '
+                    + ', '.join(unreported))
+            return None, case.finish(
+                'failed', 'power-trip-failed: the ' + name + ' leg '
+                'never landed; last served ' + json.dumps(
+                    {key: value(key, snap) for key in sorted(keys)},
+                    sort_keys=True)[:500])
+
+        # The drive precondition: the group holding a duty demand —
+        # duty naming a pump, demand above zero, that pump's command
+        # standing — caught early enough in the drain that the write's
+        # transit cannot outrun the cycle (the level must still clear
+        # the stop/start midpoint when the poll lands).
+        holding_keys = ('power_fail', 'power_ok', 'level', 'demand',
+                        'duty', 'staged', 'cmd1', 'cmd2', 'avail1',
+                        'avail2', 'none_available', 'alarm', 'unack',
+                        'shelved', 'suppressed', 'alarm_oos')
+
+        def holding(snap):
+            demand = value('demand', snap)
+            if not isinstance(demand, int) or isinstance(demand, bool) \
+                    or demand < 1:
+                return None
+            duty = value('duty', snap)
+            if duty not in (1, 2):
+                return None
+            staged = value('staged', snap)
+            if not isinstance(staged, int) or isinstance(staged, bool) \
+                    or staged < 1:
+                return None
+            if value('cmd1' if duty == 1 else 'cmd2', snap) is not True:
+                return None
+            level = value('level', snap)
+            if not isinstance(level, (int, float)) \
+                    or isinstance(level, bool) \
+                    or level < (start_set + stop_set) / 2.0:
+                return None
+            if value('power_fail', snap) is not False:
+                return None
+            for key in ('power_ok', 'avail1', 'avail2'):
+                if value(key, snap) is not True:
+                    return None
+            for key in ('none_available', 'alarm', 'unack', 'shelved',
+                        'suppressed', 'alarm_oos'):
+                if value(key, snap) is not False:
+                    return None
+            return snap
+
+        baseline = wait_for(lambda: poll(holding, holding_keys),
+                            time.monotonic() + POWER_TRIP_DEADLINE,
+                            interval=POWER_TRIP_POLL)
+        snap = last.get('snap') or {}
+        ref = save_evidence(
+            ctx['evidence_dir'], 'power-trip-baseline.json',
+            {'tick': snap.get('tick'), 'power_fail': baseline_fail,
+             'level': value('level', snap),
+             'demand': value('demand', snap),
+             'duty': value('duty', snap),
+             'staged': value('staged', snap)})
+        case.evidence('file', ref, 'the settled duty-demand baseline '
+                      'ahead of the drive')
+        if baseline is None:
+            unreported = sorted(key for key in holding_keys
+                                if key not in seen)
+            return case.finish(
+                'inconclusive', 'the settled duty-demand baseline '
+                'never landed'
+                + (': awaited points never reported on the served '
+                   'snapshot: ' + ', '.join(unreported)
+                   if unreported else ' — the deployed dynamics never '
+                   'presented the window'))
+        duty0 = value('duty', baseline)
+        pump0 = {key: value(key, baseline)
+                 for key in ('p1_mode', 'p1_oos', 'p2_mode', 'p2_oos')}
+        case.observe('the group holding a duty demand at tick '
+                     + str(baseline.get('tick')) + ': duty='
+                     + str(duty0) + ' demand='
+                     + str(value('demand', baseline)) + ' staged='
+                     + str(value('staged', baseline)))
+
+        # The journal floor ahead of the drive: this leg's records are
+        # the ones above it. The snapshot tick anchors the /history
+        # transition scan.
+        _, journal0 = http_json('GET', base + '/journal?since=0')
+        floor = max((entry.get('seq') or 0
+                     for entry in _journal_list(journal0)
+                     if isinstance(entry, dict)), default=0)
+        drive_tick = baseline.get('tick') or 0
+
+        # The trip: the journaled field contact driven true under the
+        # shared claim. The interlock's consequences ride the carriers
+        # — power-ok, the per-pump availability legs, then the group.
+        verdict = _plant_request(
+            stream, {'op': 'write', 'point': points['power_fail'],
+                     'value': {'bool': True}})
+        if verdict.get('result') != 'done':
+            return case.finish('failed', 'power-trip-failed: the '
+                               'power-fail write on point '
+                               + str(points['power_fail'])
+                               + ' was refused under the shared '
+                               'claim: ' + json.dumps(verdict)[:300])
+        restore_fail = points['power_fail']
+        case.observe('power-fail driven true on field point '
+                     + str(points['power_fail']))
+
+        trip_keys = ('power_fail', 'power_ok', 'avail1', 'avail2',
+                     'avail_in1', 'avail_in2', 'cmd1', 'cmd2', 'duty',
+                     'staged', 'demand', 'none_available', 'alarm',
+                     'unack', 'shelved', 'suppressed', 'alarm_oos')
+
+        def tripped(snap):
+            if value('power_fail', snap) is not True \
+                    or value('power_ok', snap) is not False:
+                return None
+            if value('avail1', snap) is not False \
+                    or value('avail2', snap) is not False:
+                return None
+            if value('cmd1', snap) is not False \
+                    or value('cmd2', snap) is not False:
+                return None
+            if value('staged', snap) != 0 or value('duty', snap) != 0:
+                return None
+            if value('none_available', snap) is not True:
+                return None
+            if value('alarm', snap) is not True \
+                    or value('unack', snap) is not True:
+                return None
+            for key in ('shelved', 'suppressed', 'alarm_oos'):
+                if value(key, snap) is not False:
+                    return None
+            demand = value('demand', snap)
+            if not isinstance(demand, int) or isinstance(demand, bool) \
+                    or demand < 1:
+                return None
+            return snap
+
+        hit, error = leg('tripped', tripped, trip_keys)
+        if error:
+            return error
+        case.observe('the interlock tripped at tick '
+                     + str(hit.get('tick')) + ': power-ok dropped, '
+                     'both availability legs down, both commands '
+                     'released with demand '
+                     + str(value('demand', hit)) + ' still standing — '
+                     'none-available and the alarm standing '
+                     'unacknowledged')
+        if _settled_active(ctx) != active:
+            return case.finish('failed', 'power-trip-failed: the '
+                               'active role moved under the power '
+                               'drive — a field trip is not peer loss')
+
+        # The durable half of the trip: each assertion lands its
+        # point_changed on a declared-journaled point beside the
+        # power-fail transition itself — while the pair journaled no
+        # role change and no non-journaled point records a transition.
+        asserted_want = {'power_fail': True, 'avail1': False,
+                         'avail2': False, 'none_available': True,
+                         'none_alarm': True, 'none_unack': True,
+                         'alarm': True, 'unack': True}
+        nonjournaled = {points[key] for key in
+                        ('power_ok', 'pok_in1', 'pok_in2', 'avail_in1',
+                         'avail_in2', 'cmd1', 'cmd2', 'demand',
+                         'demand_in', 'duty', 'staged', 'none_in',
+                         'ack', 'none_ack')}
+        found = {}
+        violations = {}
+
+        def journaled_asserts():
+            try:
+                _, journal = http_json('GET', base + '/journal?since='
+                                       + str(floor))
+            except Exception:
+                return None
+            last['journal'] = journal
+            changes = _journal_point_changes(journal)
+            for key, wanted in asserted_want.items():
+                if {'bool': wanted} in changes.get(points[key], []):
+                    found[key] = True
+            for entry in _journal_list(journal):
+                event = entry.get('event') or {}
+                if 'role_changed' in event:
+                    violations['role-change'] = \
+                        'a role_changed event journaled under the ' \
+                        'power-fail drive'
+                change = event.get('point_changed')
+                if isinstance(change, dict) \
+                        and change.get('point') in nonjournaled:
+                    violations['unjournaled-' + str(change['point'])] = \
+                        'the non-journaled point ' \
+                        + str(change['point']) \
+                        + ' journaled a transition'
+            if len(found) == len(asserted_want) or violations:
+                return journal
+            return None
+
+        wait_for(journaled_asserts,
+                 time.monotonic() + POWER_TRIP_DEADLINE,
+                 interval=POLL_INTERVAL)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'power-trip-journal.json',
+            {'floor': floor, 'asserted': sorted(found),
+             'violations': sorted(violations)})
+        case.evidence('file', ref, 'the journaled trip transitions '
+                      'above the pre-drive floor')
+        if violations:
+            return case.finish(
+                'failed', 'power-trip-nondeterministic: ' + '; '.join(
+                    violations[key] for key in sorted(violations)))
+        missing = [key for key in asserted_want if key not in found]
+        if missing:
+            return case.finish('failed', 'power-trip-failed: the '
+                               'served journal never recorded '
+                               'point_changed on: '
+                               + ', '.join(missing))
+        case.observe('journaled: the power-fail transition beside the '
+                     'availability drops, the all-out annunciation, '
+                     'and the alarm\'s two flags')
+
+        # The acknowledgment leg: a receipted write on the alarm's
+        # declared ack input clears the latch while the condition still
+        # stands — the managed alarm's ack-dominates rule — and the
+        # settlement journals attributed.
+        write = {'point': points['ack'], 'kind': 'bool',
+                 'value': {'bool': True}}
+        status, receipt = http_json(
+            'POST', base + '/command',
+            {'command': {'write_value': write},
+             'actor': POWER_TRIP_ACTOR})
+        ref = save_evidence(ctx['evidence_dir'],
+                            'power-trip-ack-receipt.json',
+                            {'status': status, 'body': receipt})
+        case.evidence('file', ref, 'the ack submission receipt')
+        outcome = (receipt or {}).get('outcome') or {}
+        if status != 200 or 'rejected' in outcome:
+            return case.finish('failed', 'power-trip-failed: the ack '
+                               'write was refused: ' + str(status)
+                               + ' ' + json.dumps(receipt)[:400])
+        held_acks.append(points['ack'])
+        submitted.append(write)
+
+        hit, error = leg(
+            'acknowledged',
+            lambda s: value('unack', s) is False
+            and value('alarm', s) is True
+            and value('power_fail', s) is True
+            and value('power_ok', s) is False
+            and value('avail1', s) is False
+            and value('avail2', s) is False,
+            ('power_fail', 'power_ok', 'avail1', 'avail2', 'alarm',
+             'unack'))
+        if error:
+            return error
+        case.observe('the settled ack cleared the unacknowledged '
+                     'latch at tick ' + str(hit.get('tick'))
+                     + ' while the condition stood — the alarm, the '
+                     'contact, and the stripped availability all '
+                     'unchanged')
+
+        settled = {}
+
+        def settled_journal():
+            try:
+                _, journal = http_json('GET', base + '/journal?since='
+                                       + str(floor))
+            except Exception:
+                return None
+            last['journal'] = journal
+            for receipt_ in _settled_receipts(journal):
+                if (receipt_.get('command') or {}).get('write_value') \
+                        == write:
+                    settled['receipt'] = receipt_
+            if {'bool': False} in _journal_point_changes(journal) \
+                    .get(points['unack'], []):
+                settled['unack_cleared'] = True
+            if 'receipt' in settled and 'unack_cleared' in settled:
+                return journal
+            return None
+
+        wait_for(settled_journal,
+                 time.monotonic() + POWER_TRIP_DEADLINE,
+                 interval=POLL_INTERVAL)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'power-trip-ack-journal.json',
+            {'receipt': settled.get('receipt'),
+             'unack_cleared': settled.get('unack_cleared')})
+        case.evidence('file', ref, 'the journaled ack settlement')
+        settled_receipt = settled.get('receipt')
+        if settled_receipt is None:
+            return case.finish('failed', 'power-trip-failed: the '
+                               'ack\'s CommandSettled never journaled')
+        if 'applied' not in (settled_receipt.get('outcome') or {}):
+            return case.finish('failed', 'power-trip-failed: the ack '
+                               'receipt did not settle applied: '
+                               + json.dumps(settled_receipt
+                                            .get('outcome'))[:200])
+        if settled_receipt.get('actor') != POWER_TRIP_ACTOR:
+            return case.finish('failed', 'power-trip-failed: the '
+                               'journaled ack receipt is '
+                               'unattributed: actor='
+                               + json.dumps(settled_receipt
+                                            .get('actor')))
+        if not settled.get('unack_cleared'):
+            return case.finish('failed', 'power-trip-failed: the '
+                               'unacknowledged flag\'s clearing never '
+                               'journaled')
+        case.observe('ack settled applied, journaled attributed to '
+                     + POWER_TRIP_ACTOR + ', unacknowledged cleared '
+                     'while the condition stood')
+
+        # Re-arm the ack input for the next trip before the restore
+        # write lands — a standing true would hold the latch clear.
+        restore = {'point': points['ack'], 'kind': 'bool',
+                   'value': {'bool': False}}
+        status, receipt = http_json(
+            'POST', base + '/command',
+            {'command': {'write_value': restore},
+             'actor': POWER_TRIP_ACTOR})
+        ref = save_evidence(ctx['evidence_dir'],
+                            'power-trip-ack-restored.json',
+                            {'status': status, 'body': receipt})
+        case.evidence('file', ref, 'the ack-restore receipt')
+        outcome = (receipt or {}).get('outcome') or {}
+        if status != 200 or 'rejected' in outcome:
+            return case.finish('failed', 'power-trip-failed: the ack '
+                               'restore write was refused: '
+                               + str(status) + ' '
+                               + json.dumps(receipt)[:400])
+        submitted.append(restore)
+        hit, error = leg('ack-released',
+                         lambda s: value('ack', s) is False
+                         and value('unack', s) is False,
+                         ('ack', 'unack'))
+        if error:
+            return error
+        held_acks.remove(points['ack'])
+
+        # The declared recovery: the contact released, power-ok and
+        # the availability legs return, and the group re-stages the
+        # standing demand inside the declared bounds.
+        verdict = _plant_request(
+            stream, {'op': 'write', 'point': points['power_fail'],
+                     'value': {'bool': False}})
+        if verdict.get('result') != 'done':
+            return case.finish('failed', 'power-trip-failed: the '
+                               'power-fail restore write was refused: '
+                               + json.dumps(verdict)[:300])
+        restore_fail = None
+        case.observe('power-fail released — the station power '
+                     'contact restored')
+
+        recovery_keys = ('power_fail', 'power_ok', 'avail1', 'avail2',
+                         'avail_in1', 'avail_in2', 'cmd1', 'cmd2',
+                         'duty', 'staged', 'demand', 'none_available',
+                         'alarm', 'unack')
+
+        def recovered(snap):
+            if value('power_fail', snap) is not False \
+                    or value('power_ok', snap) is not True:
+                return None
+            if value('avail1', snap) is not True \
+                    or value('avail2', snap) is not True:
+                return None
+            if value('none_available', snap) is not False:
+                return None
+            if value('alarm', snap) is not False \
+                    or value('unack', snap) is not False:
+                return None
+            duty = value('duty', snap)
+            if duty not in (1, 2):
+                return None
+            demand = value('demand', snap)
+            if not isinstance(demand, int) or isinstance(demand, bool) \
+                    or demand < 1:
+                return None
+            staged = value('staged', snap)
+            if not isinstance(staged, int) or isinstance(staged, bool) \
+                    or staged < min(demand, 2):
+                return None
+            if value('cmd1' if duty == 1 else 'cmd2', snap) is not True:
+                return None
+            return snap
+
+        hit, error = leg('recovered', recovered, recovery_keys)
+        if error:
+            return error
+        duty1 = value('duty', hit)
+        case.observe('the declared recovery at tick '
+                     + str(hit.get('tick')) + ': power-ok restored, '
+                     'both availability legs back, duty='
+                     + str(duty1) + ' re-staged the standing demand='
+                     + str(value('demand', hit)))
+
+        # The trip's consequential none-available alarm latched its own
+        # unacknowledged flag — clear it through the receipted path and
+        # re-arm the input, so the leg leaves the alarm set as found.
+        snap = _try_snapshot(ctx, base) or {}
+        if _point_value(snap, points['none_unack']) is True:
+            none_write = {'point': points['none_ack'], 'kind': 'bool',
+                          'value': {'bool': True}}
+            status, receipt = http_json(
+                'POST', base + '/command',
+                {'command': {'write_value': none_write},
+                 'actor': POWER_TRIP_ACTOR})
+            ref = save_evidence(ctx['evidence_dir'],
+                                'power-trip-none-ack.json',
+                                {'status': status, 'body': receipt})
+            case.evidence('file', ref, 'the none-available ack '
+                          'submission receipt')
+            outcome = (receipt or {}).get('outcome') or {}
+            if status != 200 or 'rejected' in outcome:
+                return case.finish('failed', 'power-trip-failed: the '
+                                   'none-available ack write was '
+                                   'refused: ' + str(status) + ' '
+                                   + json.dumps(receipt)[:400])
+            held_acks.append(points['none_ack'])
+            submitted.append(none_write)
+            hit, error = leg(
+                'none-acked',
+                lambda s: value('none_unack', s) is False,
+                ('none_alarm', 'none_unack'))
+            if error:
+                return error
+            none_restore = {'point': points['none_ack'], 'kind': 'bool',
+                            'value': {'bool': False}}
+            status, receipt = http_json(
+                'POST', base + '/command',
+                {'command': {'write_value': none_restore},
+                 'actor': POWER_TRIP_ACTOR})
+            outcome = (receipt or {}).get('outcome') or {}
+            if status != 200 or 'rejected' in outcome:
+                return case.finish('failed', 'power-trip-failed: the '
+                                   'none-available ack restore was '
+                                   'refused: ' + str(status) + ' '
+                                   + json.dumps(receipt)[:400])
+            submitted.append(none_restore)
+            hit, error = leg(
+                'none-ack-released',
+                lambda s: value('none_ack', s) is False
+                and value('none_unack', s) is False,
+                ('none_ack', 'none_unack'))
+            if error:
+                return error
+            held_acks.remove(points['none_ack'])
+            case.observe('the consequential none-available '
+                         'annunciation acknowledged and re-armed')
+
+        # The restore audit: the driven contact reads back its
+        # baseline, pump operator state the leg never drove is
+        # unchanged, and the pair's roles never moved.
+        restored = (_plant_read(ctx, points['power_fail'])
+                    .get('value') or {}).get('bool')
+        if restored is not False:
+            return case.finish('failed', 'power-trip-failed: the '
+                               'power-fail contact did not restore — '
+                               'it reads ' + json.dumps(restored)
+                               + ' against baseline false')
+        final = _try_snapshot(ctx, base) or {}
+        pump1 = {key: value(key, final)
+                 for key in ('p1_mode', 'p1_oos', 'p2_mode', 'p2_oos')}
+        moved = sorted(key for key in pump1
+                       if pump1[key] != pump0.get(key))
+        if moved:
+            return case.finish('failed', 'power-trip-failed: the leg '
+                               'moved pump operator state it never '
+                               'drove: ' + ', '.join(moved))
+        if _settled_active(ctx) != active:
+            return case.finish('failed', 'power-trip-failed: the '
+                               'active role moved during the leg')
+        if peer_base is not None:
+            report = _try_role(ctx, peer_base)
+            if report is None \
+                    or report.get('role') \
+                    != (peer_role0 or {}).get('role'):
+                return case.finish('failed', 'power-trip-failed: the '
+                                   'pair\'s roles moved during the '
+                                   'leg — ' + peer + ' reports '
+                                   + json.dumps(report))
+
+        # The journaled audit: every receipted command settled applied
+        # and attributed, and the declared-journaled points recorded
+        # the whole excursion — the contact, the availability legs, the
+        # all-out annunciation's own alarm lifecycle, the run contacts,
+        # and the power-fail alarm's two flags — with no role change
+        # and no non-journaled point recording a transition.
+        expected_pairs = {
+            'power_fail': [{'bool': True}, {'bool': False}],
+            'avail1': [{'bool': False}, {'bool': True}],
+            'avail2': [{'bool': False}, {'bool': True}],
+            'none_available': [{'bool': True}, {'bool': False}],
+            'none_alarm': [{'bool': True}, {'bool': False}],
+            'none_unack': [{'bool': True}, {'bool': False}],
+            'alarm': [{'bool': True}, {'bool': False}],
+            'unack': [{'bool': True}, {'bool': False}]}
+        run_want = {'run' + str(duty0): False,
+                    'run' + str(duty1): True}
+        complete = {}
+        violations = {}
+
+        def journaled():
+            try:
+                _, journal = http_json('GET', base + '/journal?since='
+                                       + str(floor))
+            except Exception:
+                return None
+            last['journal'] = journal
+            changes = _journal_point_changes(journal)
+            for key, wanted in expected_pairs.items():
+                got = changes.get(points[key], [])
+                if got == wanted:
+                    complete[key] = got
+                elif len(got) > len(wanted) \
+                        or got != wanted[:len(got)]:
+                    violations['transitions-' + key] = \
+                        'point ' + str(points[key]) + ' journaled ' \
+                        + json.dumps(got) \
+                        + ' — not the declared assert/clear pair'
+            for key, wanted in run_want.items():
+                if {'bool': wanted} in changes.get(points[key], []):
+                    complete[key] = True
+            for entry in _journal_list(journal):
+                event = entry.get('event') or {}
+                if 'role_changed' in event:
+                    violations['role-change'] = \
+                        'a role_changed event journaled while the ' \
+                        'interlock drove'
+                change = event.get('point_changed')
+                if isinstance(change, dict) \
+                        and change.get('point') in nonjournaled:
+                    violations['unjournaled-' + str(change['point'])] = \
+                        'the non-journaled point ' \
+                        + str(change['point']) \
+                        + ' journaled a transition'
+            if len(complete) == len(expected_pairs) + len(run_want) \
+                    or violations:
+                return journal
+            return None
+
+        wait_for(journaled, time.monotonic() + POWER_TRIP_DEADLINE,
+                 interval=POLL_INTERVAL)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'power-trip-journal-final.json',
+            {'floor': floor, 'complete': sorted(complete),
+             'violations': sorted(violations)})
+        case.evidence('file', ref, 'the journaled excursion above the '
+                      'pre-drive floor')
+        if violations:
+            return case.finish(
+                'failed', 'power-trip-nondeterministic: ' + '; '.join(
+                    violations[key] for key in sorted(violations)))
+        missing = [key for key in list(expected_pairs) + list(run_want)
+                   if key not in complete]
+        if missing:
+            return case.finish('failed', 'power-trip-failed: the '
+                               'served journal never recorded the '
+                               'declared point_changed evidence on: '
+                               + ', '.join(missing))
+        settled_receipts = _settled_receipts(last.get('journal') or [])
+        for command in submitted:
+            receipt_ = next(
+                (entry for entry in settled_receipts
+                 if (entry.get('command') or {}).get('write_value')
+                 == command), None)
+            if receipt_ is None:
+                return case.finish('failed', 'power-trip-failed: no '
+                                   'settled receipt journaled for '
+                                   + json.dumps(command)[:200])
+            if receipt_.get('actor') != POWER_TRIP_ACTOR:
+                return case.finish('failed', 'power-trip-failed: a '
+                                   'settled receipt lost its actor: '
+                                   + json.dumps(receipt_)[:200])
+            if 'applied' not in (receipt_.get('outcome') or {}):
+                return case.finish('failed', 'power-trip-failed: a '
+                                   'settled receipt did not apply: '
+                                   + json.dumps(receipt_)[:200])
+        case.observe('journaled: the contact, both availability legs, '
+                     'the all-out annunciation and its own alarm '
+                     'lifecycle, the run contacts, and the alarm\'s '
+                     'two flags — every receipted command settled '
+                     'applied and attributed')
+
+        # The tick-domain proof: /history carries every transition in
+        # scan order. The write lands between scans so absolute ticks
+        # shift with the attachment, but the carrier and staging deltas
+        # the declared chain produces stay fixed — the interlock's
+        # falling order, the recovery's rising order, and the group's
+        # re-stage inside the declared bounds.
+        watch = {key: points[key] for key in
+                 ('power_fail', 'power_ok', 'pok_in1', 'pok_in2',
+                  'avail1', 'avail2', 'avail_in1', 'avail_in2',
+                  'cmd1', 'cmd2', 'duty', 'staged', 'demand',
+                  'none_available', 'none_in', 'alarm', 'unack',
+                  'run1', 'run2')}
+        query = ''.join('&point=' + str(point)
+                        for point in sorted(set(watch.values())))
+        _, history = http_json('GET', base + '/history?since=0'
+                               + query)
+        transitions = {key: _history_transitions(history, point,
+                                                 drive_tick)
+                       for key, point in watch.items()}
+
+        def nth(key, landed, n=1):
+            return _nth_transition(transitions.get(key) or [],
+                                   landed, n)
+
+        def first_ge(key, bound):
+            """The tick of `key`'s first transition landing at or
+            above `bound` — the re-stage the standing demand earned."""
+            for tick, landed in transitions.get(key) or []:
+                if isinstance(landed, int) \
+                        and not isinstance(landed, bool) \
+                        and landed >= bound:
+                    return tick
+            return None
+
+        t_fail = nth('power_fail', True)
+        if t_fail is not None:
+            # Re-anchor the windows at the drive's landing scan: the
+            # baseline's own start may legitimately land between the
+            # catch and the write — only the drive's effects count.
+            transitions = {key: [(t, v) for t, v in seq if t >= t_fail]
+                           for key, seq in transitions.items()}
+        t_back = nth('power_fail', False)
+        t_ok0 = nth('power_ok', False)
+        t_ok1 = nth('power_ok', True)
+        t_av0 = {k: nth('avail' + k, False) for k in ('1', '2')}
+        t_av1 = {k: nth('avail' + k, True) for k in ('1', '2')}
+        t_avin0 = {k: nth('avail_in' + k, False) for k in ('1', '2')}
+        t_avin1 = {k: nth('avail_in' + k, True) for k in ('1', '2')}
+        t_st0 = nth('staged', 0)
+        t_nav1 = nth('none_available', True)
+        t_nav0 = nth('none_available', False)
+        t_al1 = nth('alarm', True)
+        t_al0 = nth('alarm', False)
+        t_un1 = nth('unack', True)
+        t_un0 = nth('unack', False)
+        t_d0 = nth('duty', 0)
+        t_d1 = first_ge('duty', 1)
+        t_rs1 = first_ge('staged', 1)
+        cmd_up = {}
+        cmd_down = {}
+        for k in ('1', '2'):
+            seq = transitions.get('cmd' + k) or []
+            cmd_up[k] = next((t for t, v in seq if v is True), None)
+            cmd_down[k] = next((t for t, v in seq if v is False), None)
+        restage = min((t for t in cmd_up.values() if t is not None),
+                      default=None)
+        required = {'power-fail assert': t_fail,
+                    'power-fail release': t_back,
+                    'power-ok drop': t_ok0,
+                    'power-ok return': t_ok1,
+                    'avail1 drop': t_av0['1'], 'avail2 drop': t_av0['2'],
+                    'avail1 return': t_av1['1'],
+                    'avail2 return': t_av1['2'],
+                    'avail_in1 drop': t_avin0['1'],
+                    'avail_in2 drop': t_avin0['2'],
+                    'avail_in1 return': t_avin1['1'],
+                    'avail_in2 return': t_avin1['2'],
+                    'staged release': t_st0,
+                    'none-available assert': t_nav1,
+                    'none-available clear': t_nav0,
+                    'alarm assert': t_al1, 'alarm return': t_al0,
+                    'unack latch': t_un1, 'unack clear': t_un0,
+                    'duty release': t_d0, 'duty restage': t_d1,
+                    'first re-stage': restage}
+        missing = sorted(key for key, tick in required.items()
+                         if tick is None)
+        ref = save_evidence(
+            ctx['evidence_dir'], 'power-trip-timing.json',
+            {'drive_tick': drive_tick,
+             'bounds': {'start_delay_ticks': start_delay,
+                        'min_off_ticks': min_off},
+             'transitions': {key: [[t, v] for t, v in seq]
+                             for key, seq in
+                             sorted(transitions.items())},
+             'anchors': {key: required[key]
+                         for key in sorted(required)}})
+        case.evidence('file', ref, 'the tick-domain transition '
+                      'evidence — carrier order and the declared '
+                      'restage bound')
+        if missing:
+            return case.finish('failed', 'power-trip-failed: the '
+                               'served history never showed '
+                               + ', '.join(missing)
+                               + ': ' + json.dumps(
+                                   {key: transitions[key]
+                                    for key in ('staged', 'avail1',
+                                                'alarm')})[:400])
+
+        # Every watched carrier and flag follows the declared
+        # assert/clear pair exactly — an extra toggle is a step
+        # outside the deterministic scan sequence.
+        pair_shapes = {
+            'power_fail': [True, False], 'power_ok': [False, True],
+            'pok_in1': [False, True], 'pok_in2': [False, True],
+            'avail1': [False, True], 'avail2': [False, True],
+            'avail_in1': [False, True], 'avail_in2': [False, True],
+            'none_available': [True, False],
+            'none_in': [True, False],
+            'alarm': [True, False], 'unack': [True, False]}
+        problems = []
+        for key, wanted in pair_shapes.items():
+            got = [v for _, v in transitions.get(key) or []]
+            if got != wanted:
+                problems.append(key + ' transitioned '
+                                + json.dumps(got)
+                                + ' — not the declared '
+                                + json.dumps(wanted) + ' pair')
+        # The command points: the pre-trip holder releases first; any
+        # later assertion is the declared re-stage. A command landing
+        # true before its own availability returned is a step outside
+        # the sequence; so is a re-start inside the banked holdout.
+        for k in ('1', '2'):
+            seq = [v for _, v in transitions.get('cmd' + k) or []]
+            first = seq[0] if seq else None
+            holder = cmd_down[k] is not None
+            if holder and first is not False:
+                problems.append('p10' + k + '-cmd\'s first transition '
+                                'was not the release: '
+                                + json.dumps(seq))
+            if not holder and first is not None and first is not True:
+                problems.append('p10' + k + '-cmd transitioned '
+                                + json.dumps(seq)
+                                + ' — no declared step produces that')
+            if len(seq) > 2:
+                problems.append('p10' + k + '-cmd stepped '
+                                + json.dumps(seq)
+                                + ' — beyond the release/re-stage pair')
+            if cmd_up[k] is not None and cmd_up[k] < t_avin1[k]:
+                problems.append('p10' + k + '-cmd re-staged '
+                                + str(t_avin1[k] - cmd_up[k])
+                                + ' ticks before its availability '
+                                'returned')
+            if cmd_up[k] is not None and cmd_down[k] is not None \
+                    and cmd_up[k] < cmd_down[k] + min_off:
+                problems.append('p10' + k + '-cmd re-staged '
+                                + str(cmd_up[k] - cmd_down[k])
+                                + ' ticks after its stop — inside the '
+                                'banked min_off_ticks '
+                                + str(min_off) + ' holdout')
+        duty_seq = [v for _, v in transitions.get('duty') or []]
+        if duty_seq != [0, duty1]:
+            problems.append('duty transitioned '
+                            + json.dumps(duty_seq)
+                            + ' — not the declared release/re-name '
+                            'pair')
+        staged_seq = [v for _, v in transitions.get('staged') or []]
+        if not staged_seq or staged_seq[0] != 0:
+            problems.append('staged\'s first transition was not the '
+                            'release: ' + json.dumps(staged_seq))
+        else:
+            for tick, landed in transitions['staged']:
+                if t_fail <= tick <= t_back and landed != 0:
+                    problems.append('staged served ' + str(landed)
+                                    + ' at tick ' + str(tick)
+                                    + ' — an output step inside the '
+                                    'outage')
+        # The chain keeps calling: no demand transition may land below
+        # the standing request while the outage stands.
+        for tick, landed in transitions.get('demand') or []:
+            if t_fail <= tick <= restage \
+                    and isinstance(landed, int) \
+                    and not isinstance(landed, bool) and landed < 1:
+                problems.append('demand fell to ' + str(landed)
+                                + ' at tick ' + str(tick)
+                                + ' — the station stopped calling '
+                                'under the outage')
+        # The declared carrier order, falling and rising.
+        if t_ok0 < t_fail:
+            problems.append('power-ok dropped before the driven '
+                            'contact landed')
+        if t_al1 < t_fail or t_un1 < t_al1:
+            problems.append('the alarm lifecycle did not follow the '
+                            'contact in order')
+        for k in ('1', '2'):
+            if t_av0[k] < t_ok0 or t_avin0[k] < t_av0[k]:
+                problems.append('the p10' + k + ' availability chain '
+                                'did not drop in carrier order')
+            if t_av1[k] < t_ok1 or t_avin1[k] < t_av1[k]:
+                problems.append('the p10' + k + ' availability chain '
+                                'did not return in carrier order')
+        if t_st0 < max(t_avin0['1'], t_avin0['2']):
+            problems.append('the group released before availability '
+                            'was lost')
+        if t_nav1 < t_st0 or t_d0 < t_st0:
+            problems.append('the all-out state did not follow the '
+                            'release')
+        if t_ok1 < t_back:
+            problems.append('power-ok returned before the contact '
+                            'released')
+        if t_un0 >= t_back:
+            problems.append('the latch cleared only after the '
+                            'condition released — the ack did not '
+                            'dominate while it stood')
+        if t_al0 < t_back:
+            problems.append('the standing alarm cleared before the '
+                            'contact released')
+        if t_nav0 < min(t_avin1['1'], t_avin1['2']):
+            problems.append('none-available cleared before '
+                            'availability returned')
+        if t_d1 != restage:
+            problems.append('duty re-named at tick ' + str(t_d1)
+                            + ' — off the re-stage scan '
+                            + str(restage))
+        # The declared re-stage bound: the first new start lands no
+        # earlier than any pump's delivered availability — and no
+        # later than the earliest eligible pump plus the inter-pump
+        # delay — while each re-started pump honors its banked
+        # min_off_ticks holdout.
+        earliest = min(
+            max(t_avin1[k],
+                (cmd_down[k] + min_off) if cmd_down[k] is not None
+                else 0)
+            for k in ('1', '2'))
+        if restage < earliest:
+            problems.append('the group re-staged ' + str(
+                earliest - restage) + ' ticks before the earliest '
+                'eligible pump — a step outside the deterministic '
+                'scan sequence')
+        if restage > earliest + start_delay + 1:
+            problems.append('the group re-staged '
+                            + str(restage - earliest) + ' ticks after '
+                            'the earliest eligible pump — beyond '
+                            'start_delay_ticks ' + str(start_delay))
+        if t_rs1 is not None and restage != t_rs1:
+            problems.append('staged\'s re-stage tick ' + str(t_rs1)
+                            + ' != the first command assertion '
+                            + str(restage))
+        ups = sorted(t for t in cmd_up.values() if t is not None)
+        if len(ups) == 2:
+            gap = ups[1] - ups[0]
+            if gap < start_delay:
+                problems.append('the second re-stage landed '
+                                + str(gap) + ' ticks after the first '
+                                '— inside start_delay_ticks '
+                                + str(start_delay))
+            if gap > start_delay + 1:
+                problems.append('the second re-stage landed '
+                                + str(gap) + ' ticks after the first '
+                                '— beyond the declared staging '
+                                'bound')
+        if problems:
+            return case.finish('failed',
+                               'power-trip-nondeterministic: '
+                               + '; '.join(problems))
+        case.observe('the excursion followed the declared carrier '
+                     'order and the re-stage landed inside '
+                     'start_delay_ticks=' + str(start_delay)
+                     + ' / min_off_ticks=' + str(min_off)
+                     + ' with no step outside the scan sequence')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+    finally:
+        # The driven contact is the run's shared field and the ack
+        # inputs the alarms' operator points: a case that leaves any
+        # standing poisons every later leg — the drive back to its
+        # baseline, every held ack re-armed, and any unacknowledged
+        # latch the legs left standing acknowledged best-effort.
+        if stream is not None:
+            if restore_fail is not None:
+                try:
+                    _plant_request(
+                        stream, {'op': 'write',
+                                 'point': restore_fail,
+                                 'value': {'bool': False}})
+                except Exception:
+                    pass
+            try:
+                stream.close()
+            except Exception:
+                pass
+        base_ = live['base']
+        if base_ is not None:
+            for point in held_acks:
+                try:
+                    http_json('POST', base_ + '/command',
+                              {'command': {'write_value': {
+                                  'point': point, 'kind': 'bool',
+                                  'value': {'bool': False}}},
+                               'actor': POWER_TRIP_ACTOR})
+                except Exception:
+                    pass
+            for ack_point, unack_point in cleanup.items():
+                try:
+                    snap_ = _try_snapshot(ctx, base_) or {}
+                    if _point_value(snap_, unack_point) is True:
+                        http_json('POST', base_ + '/command',
+                                  {'command': {'write_value': {
+                                      'point': ack_point,
+                                      'kind': 'bool',
+                                      'value': {'bool': True}}},
+                                   'actor': POWER_TRIP_ACTOR})
+                        wait_for(
+                            lambda: (_point_value(
+                                _try_snapshot(ctx, base_) or {},
+                                unack_point) is False),
+                            time.monotonic() + 10,
+                            interval=POLL_INTERVAL)
+                        http_json('POST', base_ + '/command',
+                                  {'command': {'write_value': {
+                                      'point': ack_point,
+                                      'kind': 'bool',
+                                      'value': {'bool': False}}},
+                                   'actor': POWER_TRIP_ACTOR})
+                except Exception:
+                    pass
+
+
+# --------------------------------------------------------------------
 # The threshold-chain lag-staging and high-level annunciation leg
 # (WW-CTL-002/WW-OPS-002 — decision 42's ordered setpoint chain on the
 # deployed station). The dynamics' declared forcing input is `inflow`:
@@ -11584,6 +12825,926 @@ def scenario_duty_rotation(ctx):
 
 
 # --------------------------------------------------------------------
+# Per-pump out-of-service duty exclusion and the managed-alarm surface
+# (WW-OPS-001's maintenance-inhibit clause, WW-ALM-002's declared
+# managed precedence): each pump's writable `oos` point is journaled
+# and receipted, and the model wires its inversion into the pump's
+# in-service availability leg (`oos-ok` -> `oos-ok-avail-in`), the
+# demand guard (`oos-ok-guard-in`), and the managed per-pump alarms'
+# declared `oos`/`suppress` inputs — so one receipted write both
+# excludes the machine from duty and manages its alarm surface. The
+# case holds the duty holder out while the pair sits settled-idle, so
+# the handover's only cause is the exclusion, proves the sibling
+# serves the next demand while the held pump's command stays released,
+# drives a run-contact fault in mid-hold to prove `alarm` still
+# reports process truth while suppression withholds the annunciation,
+# then releases the hold under the standing fault — the declared
+# re-annunciation on suppression's release — before the fault clears,
+# the receipted ack settles the latch, and the pump rejoins
+# availability and the rotation. Every managed transition lands in the
+# durable journal as ordered `point_changed` entries beside the
+# attributed receipts, and /history carries the tick-domain ordering
+# the declared wiring depth bounds. Named diagnostics: oos-failed for
+# a broken exclusion, managed-state, or return clause;
+# oos-nondeterministic when the served surfaces cannot drive or record
+# a deterministic leg.
+
+OOS_DEADLINE = 30         # bound on settle, exclusion, and audit waits
+OOS_CYCLE_DEADLINE = 20   # bound on each served demand-cycle window
+OOS_POLL = 0.5            # observation cadence
+OOS_ACTOR = 'qa-lane'
+OOS_BOUND_TICKS = 8       # the oos -> carrier -> avail -> group depth
+
+
+def _managed_alarm_bindings(snapshot):
+    """{alarm point: (instance, {port: bound point})} — every served
+    managed-alarm descriptor keyed by the point its `alarm` output
+    binds, so the leg reads each instance's declared `oos`/`suppress`/
+    `shelve` inputs rather than assuming the wiring."""
+    found = {}
+    for entry in (snapshot or {}).get('descriptors') or []:
+        if entry.get('kind') not in ('managed-bool-latching-alarm',
+                                     'managed-latching-alarm'):
+            continue
+        ports = {port.get('name'): port.get('point')
+                 for port in entry.get('ports') or []}
+        if ports.get('alarm') is not None:
+            found[ports['alarm']] = (entry.get('name'), ports)
+    return found
+
+
+def _subsequence(wanted, got):
+    """Whether `wanted`'s values land in `got` in order — the journaled
+    per-point transition ordering check."""
+    it = iter(got)
+    return all(any(item == want for item in it) for want in wanted)
+
+
+def scenario_pump_out_of_service(ctx):
+    """A receipted write on the duty pump's `oos` point excludes it
+    from availability and hands duty to the sibling inside the
+    declared bounds, manages the pump's alarms per their declared
+    `oos`/`suppress` bindings — `alarm` still reporting process truth
+    mid-OOS — and the false write returns it to availability and the
+    rotation."""
+    case = Case('pump-out-of-service',
+                'Per-pump out-of-service duty exclusion and managed '
+                'alarms',
+                'with the deployed pair settled and tracking at an '
+                'idle assigned-duty baseline, an attributed receipted '
+                'write on the duty pump\'s oos point drops its '
+                'in-service leg (the oos-ok cone and avail), hands '
+                'duty to the sibling inside the declared wiring bound '
+                'with staged reporting the available count, releases '
+                'the held pump\'s command for the whole of the '
+                'sibling\'s service, and drives the pump\'s managed '
+                'alarms into the states their declared oos/suppress '
+                'bindings select — the fault alarm out_of_service and '
+                'suppressed, the unbound alarms untouched — while a '
+                'mid-OOS run fault still asserts alarm as process '
+                'truth without the suppressed annunciation; every '
+                'managed transition journals as ordered point_changed '
+                'entries beside the attributed receipts, the false '
+                'write returns the pump to availability and '
+                're-annunciates the standing fault on suppression\'s '
+                'release, the receipted ack settles the latch, and '
+                'the pump rejoins the duty rotation with the pair\'s '
+                'roles unchanged')
+    held_oos = None      # the held pump's oos point while it stands
+    injected = None      # the held pump's run point while it faults
+    restore_ack = None   # (base, point) while the ack write stands
+    try:
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + OOS_DEADLINE)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        base = ctx[active]
+        tracking = wait_for(lambda: _tracking_peer(ctx, active),
+                            time.monotonic() + OOS_DEADLINE,
+                            interval=POLL_INTERVAL)
+        if tracking is None:
+            return case.finish('inconclusive',
+                               'no tracking peer — the deployed pair '
+                               'never settled')
+        case.observe('settled pair: ' + active + ' active, ' + tracking
+                     + ' tracking')
+
+        _, signals = http_json('GET', base + '/signals')
+        ref = save_evidence(ctx['evidence_dir'],
+                            'pump-oos-signals.json', signals)
+        case.evidence('file', ref, 'SignalIndex naming the '
+                      'out-of-service leg\'s wiring')
+        flags = ('ack', 'alarm', 'unacknowledged', 'shelved',
+                 'suppressed', 'out-of-service')
+        names = {'inflow': 'inflow', 'level-selected': 'level',
+                 'demand-in': 'demand_in', 'duty': 'duty',
+                 'staged': 'staged', 'none-available': 'none_available'}
+        for index, tag in ((1, 'p101'), (2, 'p102')):
+            for suffix, key in (
+                    ('oos', 'oos%d' % index),
+                    ('oos-ok', 'oos_ok%d' % index),
+                    ('oos-ok-avail-in', 'oos_ok_avail%d' % index),
+                    ('oos-ok-guard-in', 'oos_ok_guard%d' % index),
+                    ('avail', 'avail%d' % index),
+                    ('avail-in', 'avail_in%d' % index),
+                    ('cmd', 'cmd%d' % index),
+                    ('run', 'run%d' % index),
+                    ('fault', 'fault%d' % index),
+                    ('fault-alarm-in', 'fault_in%d' % index),
+                    ('fault-sup', 'fault_sup%d' % index),
+                    ('fault-sup-in', 'fault_sup_in%d' % index)):
+                names[tag + '-' + suffix] = key
+            for kind in ('fault', 'thermal', 'moisture'):
+                for flag in flags:
+                    names['%s-%s-%s' % (tag, kind, flag)] = \
+                        '%s_%d_%s' % (kind, index,
+                                      flag.replace('-', '_'))
+        entries = {entry.get('name'): entry
+                   for entry in signals.get('points', [])
+                   if entry.get('name') in names}
+        missing = sorted(set(names) - set(entries))
+        if missing:
+            return case.finish('inconclusive', 'the deployed model '
+                               'lacks the out-of-service leg\'s '
+                               'wiring — no signals '
+                               + ', '.join(missing))
+        for name in ('p101-oos', 'p102-oos'):
+            entry = entries[name]
+            if not (entry.get('writable')
+                    and entry.get('direction') == 'in'
+                    and entry.get('value_type') == 'bool'):
+                return case.finish('inconclusive', 'signal ' + name
+                                   + ' is not the writable bool '
+                                   'maintenance-inhibit input the leg '
+                                   'needs: ' + json.dumps(entry)[:300])
+        points = {names[name]: entry.get('point')
+                  for name, entry in entries.items()}
+        case.observe('out-of-service path: '
+                     + json.dumps({name: entry.get('point')
+                                   for name, entry in
+                                   sorted(entries.items())},
+                                  sort_keys=True))
+
+        snap0 = _snapshot(ctx, base)
+        group_name, _group_ports = _descriptor_ports(
+            snap0, 'pump-group', [])
+        if group_name is None:
+            return case.finish('inconclusive', 'the served snapshot '
+                               'carries no bound pump-group '
+                               'descriptor')
+        rotation = _parameter_value(snap0, group_name, 'rotation')
+        if rotation != 0:
+            return case.finish('inconclusive', 'the deployed group '
+                               'does not declare the '
+                               'alternate-each-cycle rotation the '
+                               'return leg\'s eligibility proof '
+                               'needs: ' + json.dumps(rotation))
+        bindings = _managed_alarm_bindings(snap0)
+        managed = {}
+        for index in (1, 2):
+            for kind in ('fault', 'thermal', 'moisture'):
+                key = '%s_%d_alarm' % (kind, index)
+                found = bindings.get(points[key])
+                if found is None:
+                    return case.finish(
+                        'inconclusive', 'the served descriptors bind '
+                        'no managed alarm to the '
+                        + key.replace('_', '-') + ' point '
+                        + str(points[key]))
+                managed[(index, kind)] = found[1]
+        ref = save_evidence(
+            ctx['evidence_dir'], 'pump-oos-bindings.json',
+            {'group': group_name, 'rotation': rotation,
+             'managed': {'p%d-%s' % (index + 100, kind): {
+                 port: managed[(index, kind)].get(port)
+                 for port in ('in', 'ack', 'shelve', 'oos', 'suppress')}
+                 for index in (1, 2)
+                 for kind in ('fault', 'thermal', 'moisture')}})
+        case.evidence('file', ref, 'each managed alarm\'s declared '
+                      'lifecycle bindings')
+
+        last = {}
+        seen = set()
+        breaches = []       # opportunistic OOS-window violations
+        held = [None]       # the held pump index, once duty names it
+        oos_window = [False]
+
+        def value(key, snap):
+            sample = _point_sample(snap, points[key])
+            if sample is None:
+                return None
+            seen.add(key)
+            raw = sample.get('value')
+            if isinstance(raw, dict):
+                return next(iter(raw.values()), None)
+            return raw
+
+        def poll(cond, keys=()):
+            snap = _try_snapshot(ctx, base)
+            if snap is None:
+                return None
+            last['snap'] = snap
+            for key in keys:
+                if _point_sample(snap, points[key]) is not None:
+                    seen.add(key)
+            if oos_window[0] and held[0] is not None \
+                    and value('avail%d' % held[0], snap) is False \
+                    and value('cmd%d' % held[0], snap) is True:
+                breaches.append('the held pump\'s command re-asserted '
+                                'at tick ' + str(snap.get('tick')))
+            return snap if cond(snap) else None
+
+        def leg(name, cond, keys, failed, deadline=None):
+            """One served-state wait plus its evidence file. A miss
+            classifies inconclusive when an awaited output never
+            reported a sample, oos-failed when the served values never
+            landed the leg."""
+            hit = wait_for(lambda: poll(cond, keys),
+                           time.monotonic()
+                           + (deadline or OOS_DEADLINE),
+                           interval=OOS_POLL)
+            snap = last.get('snap') or {}
+            ref_ = save_evidence(
+                ctx['evidence_dir'], 'pump-oos-' + name + '.json',
+                {'tick': snap.get('tick'),
+                 'samples': {key: _point_sample(snap, points[key])
+                             for key in sorted(keys)
+                             if key in points}})
+            case.evidence('file', ref_, 'the served ' + name + ' leg')
+            if hit:
+                return hit, None
+            unreported = sorted(key for key in keys
+                                if key in points and key not in seen)
+            if unreported:
+                return None, case.finish(
+                    'inconclusive', 'oos-nondeterministic: the ' + name
+                    + ' leg\'s outputs never reported on the served '
+                    'snapshot: ' + ', '.join(unreported))
+            return None, case.finish(
+                'failed', failed + '; last served ' + json.dumps(
+                    {key: value(key, snap) for key in sorted(keys)
+                     if key in points}, sort_keys=True)[:500])
+
+        def managed_want(index, kind, snap):
+            """The managed flags a snapshot should serve for one alarm:
+            each bound lifecycle input's delivered level, `False` for
+            an input the kind never declared — the declared precedence
+            read off the descriptor rather than assumed."""
+            ports = managed[(index, kind)]
+
+            def bound(port):
+                point = ports.get(port)
+                return point is not None \
+                    and _point_value(snap, point) is True
+            return {'shelved': bound('shelve'),
+                    'suppressed': bound('suppress'),
+                    'out_of_service': bound('oos')}
+
+        def managed_match(snap):
+            for index in (1, 2):
+                for kind in ('fault', 'thermal', 'moisture'):
+                    for flag, want in managed_want(index, kind,
+                                                   snap).items():
+                        if value('%s_%d_%s' % (kind, index, flag),
+                                 snap) != want:
+                            return None
+            return snap
+
+        flag_keys = ['%s_%d_%s' % (kind, index, flag)
+                     for index in (1, 2)
+                     for kind in ('fault', 'thermal', 'moisture')
+                     for flag in ('alarm', 'unacknowledged', 'shelved',
+                                  'suppressed', 'out_of_service')]
+        pump_keys = [prefix + str(index)
+                     for index in (1, 2)
+                     for prefix in ('oos', 'oos_ok', 'oos_ok_avail',
+                                    'oos_ok_guard', 'avail', 'avail_in',
+                                    'cmd', 'run', 'fault', 'fault_in',
+                                    'fault_sup', 'fault_sup_in')]
+
+        def settled_idle(snap):
+            if value('demand_in', snap) != 0 \
+                    or value('staged', snap) != 0 \
+                    or value('none_available', snap) is not False:
+                return None
+            if value('duty', snap) not in (1, 2):
+                return None
+            for index in (1, 2):
+                if value('avail%d' % index, snap) is not True \
+                        or value('oos%d' % index, snap) is not False \
+                        or value('cmd%d' % index, snap) is not False \
+                        or value('fault%d' % index, snap) is not False:
+                    return None
+            for key in flag_keys:
+                if value(key, snap) is not False:
+                    return None
+            return snap
+
+        baseline, error = leg(
+            'baseline', settled_idle,
+            ['demand_in', 'staged', 'none_available', 'duty', 'level',
+             'inflow'] + pump_keys + flag_keys,
+            'oos-failed: the pair never settled to the idle '
+            'assigned-duty baseline')
+        if error:
+            return error
+        held[0] = value('duty', baseline)
+        sibling = 3 - held[0]
+        case.observe('idle baseline: duty=p' + str(100 + held[0])
+                     + ' sibling p' + str(100 + sibling)
+                     + ' — the oos write targets the duty holder')
+
+        # The journal floor ahead of the leg: this case's records are
+        # the ones above it. The baseline tick anchors the /history
+        # transition scan.
+        _, journal0 = http_json('GET', base + '/journal?since=0')
+        floor = max((entry.get('seq') or 0
+                     for entry in _journal_list(journal0)
+                     if isinstance(entry, dict)), default=0)
+        anchor_tick = baseline.get('tick') or 0
+
+        submitted = []
+
+        def write(point, flag):
+            command = {'write_value': {'point': point, 'kind': 'bool',
+                                       'value': {'bool': flag}}}
+            status, receipt = http_json(
+                'POST', base + '/command',
+                {'command': command, 'actor': OOS_ACTOR})
+            submitted.append({'command': command, 'status': status,
+                              'receipt': receipt})
+            outcome = (receipt or {}).get('outcome') or {}
+            return status == 200 and 'rejected' not in outcome
+
+        # Leg 1 — the receipted hold: the oos write lands, the
+        # in-service cone falls through the availability leg and the
+        # demand guard, the avail carrier drops, and duty hands to the
+        # sibling — the only cause on an idle pair is the exclusion.
+        if not write(points['oos%d' % held[0]], True):
+            return case.finish('failed', 'oos-failed: the oos write '
+                               'on point ' + str(points['oos%d'
+                                                     % held[0]])
+                               + ' was refused: '
+                               + json.dumps(submitted[-1])[:300])
+        held_oos = points['oos%d' % held[0]]
+        oos_window[0] = True
+        ref = save_evidence(ctx['evidence_dir'],
+                            'pump-oos-hold-receipt.json',
+                            submitted[-1])
+        case.evidence('file', ref, 'the attributed oos write receipt')
+        case.observe('oos held on p' + str(100 + held[0]) + ' point '
+                     + str(held_oos))
+
+        def excluded(snap):
+            if value('oos%d' % held[0], snap) is not True:
+                return None
+            for key in ('oos_ok%d' % held[0], 'oos_ok_avail%d'
+                        % held[0], 'oos_ok_guard%d' % held[0],
+                        'avail%d' % held[0], 'avail_in%d' % held[0]):
+                if value(key, snap) is not False:
+                    return None
+            if value('avail%d' % sibling, snap) is not True \
+                    or value('duty', snap) != sibling \
+                    or value('cmd%d' % held[0], snap) is not False \
+                    or value('none_available', snap) is not False:
+                return None
+            return snap
+
+        hit, error = leg(
+            'excluded', excluded,
+            ['oos%d' % held[0], 'oos_ok%d' % held[0],
+             'oos_ok_avail%d' % held[0], 'oos_ok_guard%d' % held[0],
+             'avail%d' % held[0], 'avail_in%d' % held[0],
+             'avail%d' % sibling, 'duty', 'staged',
+             'cmd%d' % held[0], 'none_available'],
+            'oos-failed: the held pump\'s exclusion never landed — '
+            'the in-service cone, the avail drop, or the duty '
+            'handover missing')
+        if error:
+            return error
+        case.observe('excluded: avail p' + str(100 + held[0])
+                     + ' dropped, duty=p' + str(100 + sibling)
+                     + ' at tick ' + str(hit.get('tick')))
+
+        # Leg 2 — the managed surface: each per-pump alarm reports the
+        # managed states its declared bindings select — the held
+        # pump's fault alarm out_of_service and suppressed through the
+        # delivered copy, the unbound alarms and the sibling's whole
+        # set untouched.
+        hit, error = leg(
+            'managed', managed_match, flag_keys + [
+                'oos%d' % index for index in (1, 2)] + [
+                'fault_sup_in%d' % index for index in (1, 2)],
+            'oos-failed: the managed alarms never reported the states '
+            'their declared bindings select')
+        if error:
+            return error
+        case.observe('managed states: ' + json.dumps(
+            {'p%d-%s' % (index + 100, kind): managed_want(
+                index, kind, hit)
+             for index in (1, 2)
+             for kind in ('fault', 'thermal', 'moisture')},
+            sort_keys=True))
+
+        # Leg 3 — the sibling's service: the next demand stages only
+        # the sibling while the held pump's command stays released.
+        def served(snap):
+            demand = value('demand_in', snap)
+            if not isinstance(demand, int) or isinstance(demand, bool) \
+                    or demand < 1:
+                return None
+            if value('duty', snap) != sibling \
+                    or value('staged', snap) != min(demand, 1) \
+                    or value('cmd%d' % sibling, snap) is not True \
+                    or value('cmd%d' % held[0], snap) is not False \
+                    or value('avail%d' % held[0], snap) is not False:
+                return None
+            return snap
+
+        hit, error = leg(
+            'served', served,
+            ['demand_in', 'staged', 'duty', 'cmd%d' % held[0],
+             'cmd%d' % sibling, 'avail%d' % held[0]],
+            'oos-failed: the sibling never served the demand with '
+            'the held pump excluded', deadline=OOS_CYCLE_DEADLINE)
+        if error:
+            return error
+        case.observe('the sibling serves: duty=p' + str(100 + sibling)
+                     + ' staged ' + str(value('staged', hit))
+                     + ' while the held pump\'s command stays '
+                     'released')
+
+        def completed(snap):
+            return value('demand_in', snap) == 0 \
+                and value('staged', snap) == 0 \
+                and value('duty', snap) == sibling \
+                and value('cmd%d' % held[0], snap) is False
+
+        hit, error = leg(
+            'completed', completed,
+            ['demand_in', 'staged', 'duty', 'cmd%d' % held[0],
+             'cmd%d' % sibling],
+            'oos-failed: the sibling\'s demand cycle never completed '
+            'with the held pump still excluded',
+            deadline=OOS_CYCLE_DEADLINE)
+        if error:
+            return error
+        case.observe('the sibling\'s cycle completed at tick '
+                     + str(hit.get('tick'))
+                     + ' — duty never moved back to the held pump')
+
+        # Leg 4 — mid-OOS process truth: an injected run-contact fault
+        # proves while the suppression stands — `alarm` reports the
+        # truth, `unacknowledged` stays withheld, the named alarm
+        # counts without annunciating.
+        if ctx.get('plant_ctl') is None:
+            return case.finish('inconclusive', 'the run context '
+                               'carries no plant_ctl seam for the '
+                               'fault leg')
+        verdict = _plant_ctl(ctx, 'fault', str(points['run%d'
+                                                     % held[0]]),
+                             'bad:device_fault')
+        if verdict.get('result') != 'done':
+            return case.finish('failed', 'oos-failed: inject_fault '
+                               'on the held pump\'s run point '
+                               + str(points['run%d' % held[0]])
+                               + ' refused: '
+                               + json.dumps(verdict)[:300])
+        injected = points['run%d' % held[0]]
+        case.observe('bad:device_fault injected on p'
+                     + str(100 + held[0]) + ' run point '
+                     + str(injected) + ' mid-OOS')
+
+        def truth(snap):
+            if value('fault%d' % held[0], snap) is not True:
+                return None
+            for flag, want in (('alarm', True), ('unacknowledged',
+                                                 False),
+                               ('suppressed', True),
+                               ('out_of_service', True)):
+                if value('fault_%d_%s' % (held[0], flag), snap) \
+                        is not want:
+                    return None
+            if value('cmd%d' % held[0], snap) is not False \
+                    or value('duty', snap) != sibling:
+                return None
+            return snap
+
+        hit, error = leg(
+            'truth', truth,
+            ['fault%d' % held[0], 'fault_in%d' % held[0],
+             'fault_%d_alarm' % held[0],
+             'fault_%d_unacknowledged' % held[0],
+             'fault_%d_suppressed' % held[0],
+             'fault_%d_out_of_service' % held[0],
+             'cmd%d' % held[0], 'duty'],
+            'oos-failed: the mid-OOS fault never landed the named-'
+            'without-annunciating contract — alarm must report the '
+            'process truth while suppression withholds the latch')
+        if error:
+            return error
+        case.observe('mid-OOS truth: the fault alarm reports '
+                     'alarm=true under suppressed/out_of_service '
+                     'with the unacknowledged latch withheld')
+
+        # Leg 5 — the manual return under the standing fault: the
+        # false write reopens the in-service leg, avail rejoins, and
+        # suppression's release re-annunciates the trip that outlasted
+        # it — the declared contract's fresh unacknowledged.
+        if not write(held_oos, False):
+            return case.finish('failed', 'oos-failed: the oos '
+                               'release write was refused: '
+                               + json.dumps(submitted[-1])[:300])
+        oos_window[0] = False
+        ref = save_evidence(ctx['evidence_dir'],
+                            'pump-oos-release-receipt.json',
+                            submitted[-1])
+        case.evidence('file', ref, 'the attributed oos release '
+                      'receipt')
+
+        def returned(snap):
+            if value('oos%d' % held[0], snap) is not False:
+                return None
+            for key in ('oos_ok%d' % held[0], 'oos_ok_avail%d'
+                        % held[0], 'oos_ok_guard%d' % held[0],
+                        'avail%d' % held[0], 'avail_in%d' % held[0]):
+                if value(key, snap) is not True:
+                    return None
+            for flag, want in (('alarm', True),
+                               ('unacknowledged', True),
+                               ('suppressed', False),
+                               ('out_of_service', False)):
+                if value('fault_%d_%s' % (held[0], flag), snap) \
+                        is not want:
+                    return None
+            return snap
+
+        hit, error = leg(
+            'returned', returned,
+            ['oos%d' % held[0], 'oos_ok%d' % held[0],
+             'avail%d' % held[0], 'avail_in%d' % held[0],
+             'fault_%d_alarm' % held[0],
+             'fault_%d_unacknowledged' % held[0],
+             'fault_%d_suppressed' % held[0],
+             'fault_%d_out_of_service' % held[0]],
+            'oos-failed: the manual return never landed — the '
+            'in-service leg, the avail rejoin, or the suppression-'
+            'release re-annunciation missing')
+        if error:
+            return error
+        case.observe('manual return: avail rejoined and the '
+                     'outlasted fault re-annunciated at tick '
+                     + str(hit.get('tick')))
+
+        # The fault clears, the latch holds for the receipted ack,
+        # and the ack input restores.
+        verdict = _plant_ctl(ctx, 'clear-fault', str(injected))
+        if verdict.get('result') != 'done':
+            return case.finish('failed', 'oos-failed: clear_fault on '
+                               'the held pump\'s run point refused: '
+                               + json.dumps(verdict)[:300])
+        injected = None
+
+        def cleared(snap):
+            return value('fault%d' % held[0], snap) is False \
+                and value('fault_%d_alarm' % held[0], snap) is False \
+                and value('fault_%d_unacknowledged' % held[0], snap) \
+                is True
+
+        hit, error = leg(
+            'cleared', cleared,
+            ['fault%d' % held[0], 'fault_%d_alarm' % held[0],
+             'fault_%d_unacknowledged' % held[0]],
+            'oos-failed: the cleared fault never landed — the latch '
+            'must hold unacknowledged until the receipted ack')
+        if error:
+            return error
+        case.observe('the fault cleared with the latch still '
+                     'standing at tick ' + str(hit.get('tick')))
+
+        ack_point = points['fault_%d_ack' % held[0]]
+        if not write(ack_point, True):
+            return case.finish('failed', 'oos-failed: the fault-ack '
+                               'write was refused: '
+                               + json.dumps(submitted[-1])[:300])
+        restore_ack = (base, ack_point)
+
+        hit, error = leg(
+            'acknowledged',
+            lambda s: value('fault_%d_unacknowledged' % held[0], s)
+            is False,
+            ['fault_%d_ack' % held[0],
+             'fault_%d_unacknowledged' % held[0]],
+            'oos-failed: the receipted ack never cleared the '
+            'unacknowledged latch')
+        if error:
+            return error
+        if not write(ack_point, False):
+            return case.finish('failed', 'oos-failed: the ack '
+                               'restore write was refused: '
+                               + json.dumps(submitted[-1])[:300])
+        restore_ack = None
+        case.observe('the receipted ack settled the latch and '
+                     'restored at tick ' + str(hit.get('tick')))
+
+        # Leg 6 — rotation eligibility: the returned pump takes duty
+        # at the next cycle end and stages the next demand.
+        def rejoined(snap):
+            return value('duty', snap) == held[0] \
+                and value('cmd%d' % held[0], snap) is True \
+                and isinstance(value('staged', snap), int) \
+                and value('staged', snap) >= 1
+
+        hit, error = leg(
+            'rejoined', rejoined,
+            ['duty', 'staged', 'cmd%d' % held[0],
+             'avail%d' % held[0]],
+            'oos-failed: the returned pump never rejoined the duty '
+            'rotation — duty never named it again under the declared '
+            'alternate policy', deadline=OOS_CYCLE_DEADLINE)
+        if error:
+            return error
+        case.observe('rotation eligibility restored: duty=p'
+                     + str(100 + held[0]) + ' commanding again at '
+                     'tick ' + str(hit.get('tick')))
+
+        if breaches:
+            return case.finish('failed', 'oos-failed: '
+                               + '; '.join(breaches))
+        if _settled_active(ctx) != active \
+                or _tracking_peer(ctx, active) != tracking:
+            return case.finish('failed', 'oos-failed: the pair\'s '
+                               'roles moved during the leg')
+
+        # The durable record: every submission settles through the
+        # receipted path attributed to the lane actor, and each
+        # declared-journaled point records the leg's transitions in
+        # order — while no sibling or unbound managed flag, and no
+        # none-available, ever asserts.
+        _, journal = http_json('GET', base + '/journal?since='
+                               + str(floor))
+        settled = _settled_receipts(journal)
+        missing = []
+        for item in submitted:
+            receipt = next(
+                (entry for entry in settled
+                 if entry.get('command') == item['command']), None)
+            if receipt is None:
+                missing.append('no settled receipt journaled for '
+                               + json.dumps(item['command'])[:200])
+            elif receipt.get('actor') != OOS_ACTOR:
+                missing.append('a settled receipt lost its actor: '
+                               + json.dumps(receipt)[:200])
+            elif 'applied' not in (receipt.get('outcome') or {}):
+                missing.append('a settled receipt did not apply: '
+                               + json.dumps(receipt)[:200])
+        changes = _journal_point_changes(journal)
+        bool_t, bool_f = {'bool': True}, {'bool': False}
+        # The ordered record the leg drove: the hold and release, the
+        # availability drop and rejoin, the fault prove and clear, and
+        # each managed flag whose declared binding the oos point drives
+        # — the alarm's own `oos` binding answers on the write's scan,
+        # a `suppress` bound to the delivered copy one carrier later.
+        # An unbound lifecycle input can never assert its flag, and a
+        # binding to a driver outside this leg's model is left
+        # unchecked — the declared precedence read off the descriptors,
+        # never assumed.
+        ordered = {'oos%d' % held[0]: [bool_t, bool_f],
+                   'avail%d' % held[0]: [bool_f, bool_t],
+                   'fault%d' % held[0]: [bool_t, bool_f],
+                   'fault_%d_alarm' % held[0]: [bool_t, bool_f],
+                   'fault_%d_unacknowledged' % held[0]: [bool_t, bool_f]}
+        never_true = ['none_available']
+        for index in (1, 2):
+            for kind in ('fault', 'thermal', 'moisture'):
+                ports = managed[(index, kind)]
+                for flag, port in (('shelved', 'shelve'),
+                                   ('suppressed', 'suppress'),
+                                   ('out_of_service', 'oos')):
+                    key = '%s_%d_%s' % (kind, index, flag)
+                    bound = ports.get(port)
+                    if bound is None \
+                            or (bound in (points['oos%d' % index],
+                                          points['fault_sup_in%d'
+                                                 % index])
+                                and index != held[0]):
+                        never_true.append(key)
+                    elif bound in (points['oos%d' % index],
+                                   points['fault_sup_in%d' % index]):
+                        ordered[key] = [bool_t, bool_f]
+                if not (index == held[0] and kind == 'fault'):
+                    never_true.extend(
+                        '%s_%d_%s' % (kind, index, flag)
+                        for flag in ('alarm', 'unacknowledged'))
+        for key, wanted in ordered.items():
+            if not _subsequence(wanted, changes.get(points[key], [])):
+                missing.append('point ' + str(points[key]) + ' never '
+                               'journaled the ordered ' + key
+                               + ' transitions: '
+                               + json.dumps(changes.get(points[key],
+                                                        []))[:200])
+        for key in never_true:
+            if bool_t in changes.get(points[key], []):
+                missing.append('point ' + str(points[key]) + ' (' + key
+                               + ') journaled a true transition the '
+                               'leg never drove')
+        ref = save_evidence(
+            ctx['evidence_dir'], 'pump-oos-journal.json',
+            {'floor': floor, 'receipts': len(settled),
+             'missing': missing,
+             'transitions': {key: changes.get(points[key], [])
+                             for key in sorted(ordered)}})
+        case.evidence('file', ref, 'the journaled transitions and '
+                      'settled receipts above the floor')
+        if missing:
+            return case.finish('failed', 'oos-failed: journaled '
+                               'evidence missing: '
+                               + '; '.join(missing))
+        case.observe('journaled: the oos hold/release, the avail '
+                     'drop and rejoin, the fault prove/clear, the '
+                     'managed flags, and every settled receipt')
+
+        # The tick-domain audit: /history carries every transition in
+        # scan order — the handover lands inside the declared wiring
+        # depth, the held pump's command never re-asserts while the
+        # hold stands, staged never exceeds the available count, and
+        # the withheld annunciation lands only on suppression's
+        # release under the standing fault.
+        watch = {'oos': points['oos%d' % held[0]],
+                 'avail': points['avail%d' % held[0]],
+                 'duty': points['duty'], 'staged': points['staged'],
+                 'cmd_held': points['cmd%d' % held[0]],
+                 'cmd_sibling': points['cmd%d' % sibling],
+                 'fault': points['fault%d' % held[0]],
+                 'alarm': points['fault_%d_alarm' % held[0]],
+                 'unack': points['fault_%d_unacknowledged' % held[0]],
+                 'suppressed': points['fault_%d_suppressed' % held[0]],
+                 'oos_flag': points['fault_%d_out_of_service'
+                                    % held[0]]}
+        query = ''.join('&point=' + str(point)
+                        for point in sorted(set(watch.values())))
+        _, history = http_json('GET', base + '/history?since=0'
+                               + query)
+        transitions = {key: _history_transitions(history, point,
+                                                 anchor_tick)
+                       for key, point in watch.items()}
+
+        def nth(key, landed, n=1):
+            return _nth_transition(transitions.get(key) or [],
+                                   landed, n)
+
+        marks = {'oos_true': nth('oos', True),
+                 'oos_false': nth('oos', False),
+                 'avail_false': nth('avail', False),
+                 'avail_true': nth('avail', True),
+                 'duty_sibling': nth('duty', sibling),
+                 'duty_held': nth('duty', held[0]),
+                 'cmd_held_true': nth('cmd_held', True),
+                 'oos_flag_on': nth('oos_flag', True),
+                 'oos_flag_off': nth('oos_flag', False),
+                 'supp_on': nth('suppressed', True),
+                 'supp_off': nth('suppressed', False),
+                 'fault_on': nth('fault', True),
+                 'fault_off': nth('fault', False),
+                 'alarm_on': nth('alarm', True),
+                 'alarm_off': nth('alarm', False),
+                 'unack_on': nth('unack', True),
+                 'unack_off': nth('unack', False)}
+        deltas = {key: (marks[key] - marks['oos_true']
+                        if marks[key] is not None
+                        and marks['oos_true'] is not None else None)
+                  for key in marks}
+        ref = save_evidence(ctx['evidence_dir'],
+                            'pump-oos-history.json',
+                            {'anchor_tick': anchor_tick,
+                             'marks': marks, 'deltas': deltas})
+        case.evidence('file', ref, 'the tick-domain transition '
+                      'evidence — deltas anchored on the oos write')
+        missing = sorted(key for key, tick in marks.items()
+                         if tick is None)
+        if missing:
+            return case.finish(
+                'failed', 'oos-failed: the served history never '
+                'showed ' + ', '.join(missing) + ': '
+                + json.dumps({key: transitions[key]
+                              for key in ('oos', 'avail', 'duty',
+                                          'unack')})[:400])
+        problems = []
+        if marks['avail_false'] < marks['oos_true'] \
+                or marks['avail_false'] - marks['oos_true'] \
+                > OOS_BOUND_TICKS:
+            problems.append('the avail drop landed '
+                            + str(marks['avail_false']
+                                  - marks['oos_true'])
+                            + ' ticks from the oos write — outside '
+                            'the declared wiring bound')
+        if marks['duty_sibling'] < marks['avail_false'] \
+                or marks['duty_sibling'] - marks['avail_false'] \
+                > OOS_BOUND_TICKS:
+            problems.append('duty handed to the sibling '
+                            + str(marks['duty_sibling']
+                                  - marks['avail_false'])
+                            + ' ticks from the avail drop — outside '
+                            'the declared wiring bound')
+        if marks['oos_flag_on'] - marks['oos_true'] \
+                > OOS_BOUND_TICKS \
+                or marks['supp_on'] - marks['oos_true'] \
+                > OOS_BOUND_TICKS:
+            problems.append('the managed flags asserted beyond the '
+                            'declared wiring bound '
+                            + json.dumps(deltas, sort_keys=True)[:300])
+        if marks['avail_true'] < marks['oos_false'] \
+                or marks['avail_true'] - marks['oos_false'] \
+                > OOS_BOUND_TICKS:
+            problems.append('the avail rejoin landed '
+                            + str(marks['avail_true']
+                                  - marks['oos_false'])
+                            + ' ticks from the release — outside '
+                            'the declared wiring bound')
+        if marks['cmd_held_true'] <= marks['oos_false']:
+            problems.append('the held pump\'s command asserted while '
+                            'the hold stood (tick '
+                            + str(marks['cmd_held_true']) + ')')
+        if any(landed == held[0] and tick < marks['oos_false']
+               for tick, landed in transitions['duty']):
+            problems.append('duty named the held pump while the '
+                            'hold stood')
+        if any(isinstance(landed, int) and landed > 1
+               and tick < marks['oos_false']
+               for tick, landed in transitions['staged']):
+            problems.append('staged exceeded the available count '
+                            'while the hold stood')
+        if not marks['supp_off'] <= marks['unack_on'] \
+                <= marks['unack_off']:
+            problems.append('the withheld annunciation did not land '
+                            'on suppression\'s release (supp_off '
+                            + str(marks['supp_off']) + ', unack '
+                            + str(marks['unack_on']) + ' -> '
+                            + str(marks['unack_off']) + ')')
+        if marks['unack_on'] <= marks['fault_on']:
+            problems.append('the mid-OOS fault annunciated before '
+                            'suppression released — the named-'
+                            'without-annunciating contract broken')
+        if marks['alarm_on'] < marks['fault_on'] \
+                or marks['alarm_on'] - marks['fault_on'] \
+                > OOS_BOUND_TICKS:
+            problems.append('the fault alarm did not follow the '
+                            'proven fault inside the carrier hop')
+        if marks['duty_held'] <= marks['oos_false']:
+            problems.append('duty returned to the held pump before '
+                            'the release landed')
+        if problems:
+            return case.finish('failed', 'oos-nondeterministic: '
+                               + '; '.join(problems))
+        case.observe('history: handover +'
+                     + str(marks['duty_sibling'] - marks['oos_true'])
+                     + ' ticks from the write, managed flags +'
+                     + str(marks['supp_on'] - marks['oos_true'])
+                     + ', the withheld annunciation landed at +'
+                     + str(marks['unack_on'] - marks['oos_true'])
+                     + ' on suppression\'s release')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+    finally:
+        # The held oos point, the injected fault, and the standing ack
+        # are the run's shared state: a case that leaves any of them
+        # standing poisons every later leg. The pair's roles never
+        # moved — there is nothing to fail back.
+        live_base = None
+        try:
+            settled = _settled_active(ctx)
+            if settled is not None:
+                live_base = ctx[settled]
+        except Exception:
+            pass
+        if held_oos is not None and live_base is not None:
+            try:
+                http_json('POST', live_base + '/command',
+                          {'command': {'write_value': {
+                              'point': held_oos, 'kind': 'bool',
+                              'value': {'bool': False}}},
+                           'actor': OOS_ACTOR})
+            except Exception:
+                pass
+        if restore_ack is not None:
+            rbase, rpoint = restore_ack
+            try:
+                http_json('POST', rbase + '/command',
+                          {'command': {'write_value': {
+                              'point': rpoint, 'kind': 'bool',
+                              'value': {'bool': False}}},
+                           'actor': OOS_ACTOR})
+            except Exception:
+                pass
+        if injected is not None:
+            try:
+                _try_plant_ctl(ctx, 'clear-fault', str(injected))
+            except Exception:
+                pass
+
+
+# --------------------------------------------------------------------
 # The plant's single-writer field claim (the failover decision's
 # fencing half, exercised standing): with the settled pair's active
 # holding the write-ownership claim it took at launch, a third sim-net
@@ -12428,8 +14589,7 @@ def scenario_fenced_writer_degrade(ctx):
         # The promoted writer undisturbed end to end: a receipted
         # command settles applied and its write lands on the field —
         # then a second restores the point's standing value.
-        _, receipts0 = http_json('GET', peer_base + '/receipts')
-        index = len(_receipt_list(receipts0))
+        index = _next_receipt_index(ctx, peer_base)
         writes = []
         for value in (not baseline, baseline):
             write_command = {'command': {'write_value': {
@@ -12765,19 +14925,18 @@ def _rejected_reason(receipt):
 
 
 def _submitted_receipt(ctx, base, index, command):
-    """The receipt log's entry for the submission appended at `index`
-    once its outcome is terminal — None while it still reads
-    `accepted` or the log cannot be read. The bounded ring answers at
-    `index` until it evicts; past that the submission is the log's
-    newest entry."""
+    """The receipt logged at absolute submission `index` once its
+    outcome is terminal — None while it still reads `accepted` or the
+    log cannot be read. `index` is the submission sequence the bounded
+    window slides under — never a position in the tail."""
     try:
-        _, body = http_json('GET', base + '/receipts')
+        receipts, base_index = _receipt_window(ctx, base)
     except Exception:
         return None
-    receipts = _receipt_list(body)
-    if not receipts:
+    position = index - base_index
+    if not 0 <= position < len(receipts):
         return None
-    receipt = receipts[index] if index < len(receipts) else receipts[-1]
+    receipt = receipts[position]
     if receipt.get('command') != command:
         return None
     if _outcome_key(receipt) == 'accepted':
@@ -12930,8 +15089,7 @@ def scenario_command_availability(ctx):
 
         def submit(command):
             """POST the command and wait out its terminal receipt."""
-            _, before = http_json('GET', base + '/receipts')
-            index = len(_receipt_list(before))
+            index = _next_receipt_index(ctx, base)
             status, receipt = http_json(
                 'POST', base + '/command',
                 {'command': command, 'actor': 'qa-lane'})
@@ -14461,8 +16619,7 @@ def _starvation_pass(ctx, active, peer, point, value, floors):
     recovery = {}
     floor = floors.get(active, 0)
     try:
-        _, before = http_json('GET', base + '/receipts')
-        index = len(_receipt_list(before))
+        index = _next_receipt_index(ctx, base)
         status, receipt = http_json(
             'POST', base + '/command',
             {'command': {'write_value': {'point': point, 'kind': 'bool',
@@ -16293,6 +18450,1905 @@ def scenario_demote_settle_uniqueness(ctx):
         return case.finish('inconclusive', str(exc))
 
 
+# --------------------------------------------------------------------
+# The demote-boundary pending-command settlement contract (WW-LCM-001's
+# continuity clause, WW-FND-004's receipted-command clause) pinned on
+# the rig the #625 defect was demonstrated on: demote() suspends the
+# peer's accepted-pending commands (suspend_pending_commands), so a
+# command admitted on the active and demoted past before its applying
+# scan settles exactly once — carried into the successor's adoption to
+# apply, or settled Rejected{superseded} with its journaled audit
+# entry. Never either loss shape the QA run reproduced: a phantom
+# command_settled{applied} journaled on the fenced quiesced image and
+# erased a tick later, or a silent receipt-log replacement dropping
+# the pending command unaudited — the same audit family as the
+# promote-boundary (#527) and restart-gap (#533) fixes, on the
+# boundary that batch missed. The leg admits one receipted write on
+# the field owner, issues the documented demote on its heels — inside
+# the admission-to-application window — then audits the admission
+# against both peers' served journals, adopted receipt logs, served
+# images, and durable --journal-file records: exactly one
+# command_settled outcome — applied through the carry with its value
+# landing, or the named superseded rejection journaled — no applied
+# settle minted by a quiesced scan, no pending command vanishing
+# without a settle entry. The named diagnostics are
+# demote-pending-failed — the contract never performed: a refused
+# switch step, an admission refused or never reaching a terminal
+# journaled outcome — and demote-pending-nondeterministic — the run
+# produced an outcome the contract declares impossible: two terminal
+# outcomes on one admission, a peer journaling the settle twice, the
+# durable record disagreeing with the served journals, diverged
+# adopted logs, a phantom application, or two passes disagreeing. Two
+# passes — two switches, so the entry role layout restores by
+# construction — produce identical digests.
+
+DEMOTE_PENDING_SETTLE = 45    # bound on each demote/promote and the
+                              # pair's reconvergence
+DEMOTE_PENDING_AUDIT = 30     # bound on the admission's terminal
+                              # journaled outcome
+DEMOTE_PENDING_POLL = 0.4     # wait cadence inside the leg
+
+
+def _durable_settled(path, admission):
+    """The command_settled receipts a `--journal-file` carries for the
+    pending admission — None while the file cannot be read."""
+    try:
+        items = _journal_entries(path)
+    except (OSError, ValueError):
+        return None
+    return [receipt for receipt in
+            (_journal_settled(item) for item in items)
+            if _admission_hit(receipt, admission)]
+
+
+def _demote_pending_pass(ctx, number, entry_owner, point):
+    """One pending-command pass: admit a single receipted write on the
+    field-owning peer, demote on its heels, promote the converged
+    peer, then audit the admission — exactly one journaled terminal
+    outcome across the served and durable records, the same single
+    outcome in both peers' adopted logs, at most one image
+    application. Returns (digest, violations, evidence): the digest is
+    the pass's normalized verdict record, identical across clean
+    passes — direction-free, so the two passes' opposite switches
+    still agree."""
+    violations = {}
+    evidence = {'entry_owner': entry_owner, 'point': point}
+    admission = None
+
+    def note(key, diagnostic, detail):
+        violations.setdefault(key, (diagnostic, detail))
+
+    def failed(key, detail):
+        note(key, 'demote-pending-failed', detail)
+
+    def nondet(key, detail):
+        note(key, 'demote-pending-nondeterministic', detail)
+
+    deadline = time.monotonic() + DEMOTE_PENDING_SETTLE
+    owner = wait_for(lambda: _pair_active(ctx), deadline,
+                     interval=DEMOTE_PENDING_POLL)
+    if owner not in ('active', 'standby'):
+        failed('owner', 'no launched peer reports role=active — the '
+               'pending command has no field owner')
+        return {'outcomes': 'diverged', 'admissions': 0}, violations, \
+            evidence
+    peer = 'standby' if owner == 'active' else 'active'
+    evidence['owner'], evidence['peer'] = owner, peer
+    base, peer_base = ctx[owner], ctx[peer]
+    if wait_for(lambda: _tracking_standby(ctx, peer), deadline,
+                interval=DEMOTE_PENDING_POLL) is None:
+        failed('tracking', peer + ' is not a tracking standby — the '
+               'demote/promote has no converged target')
+        return {'outcomes': 'diverged', 'admissions': 0}, violations, \
+            evidence
+    snapshot = _try_snapshot(ctx, base) or {}
+    baseline = _point_value(snapshot, point)
+    if not isinstance(baseline, bool):
+        baseline = False
+    admission = {
+        'point': point, 'value': not baseline, 'baseline': baseline,
+        'command': {'write_value': {'point': point, 'kind': 'bool',
+                                    'value': {'bool': not baseline}}},
+        'actor': 'qa-lane-settle-pending-' + str(number),
+        'demoted': owner, 'promoted': peer}
+    evidence['admission'] = {
+        'actor': admission['actor'], 'point': point,
+        'value': admission['value'], 'baseline': baseline,
+        'demoted': owner, 'promoted': peer}
+    try:
+        floors = {}
+        for name in ('active', 'standby'):
+            _, journal = http_json('GET', ctx[name] + '/journal')
+            entries = _journal_list(journal)
+            floors[name] = (entries[-1].get('seq') or 0) \
+                if entries else 0
+    except Exception as exc:
+        failed('floors', 'a peer\'s journal floor never served: '
+               + str(exc)[:200])
+        return {'outcomes': 'diverged', 'admissions': 0}, violations, \
+            evidence
+    journals = ctx.get('journal_files') or {}
+    if journals.get('active') is None \
+            or journals.get('standby') is None:
+        failed('journals', 'the run context carries no journal-file '
+               'path for the pair')
+        return {'outcomes': 'diverged', 'admissions': 0}, violations, \
+            evidence
+    # The pending window: the receipted submission lands on the
+    # still-active owner, the documented demote on its heels — before
+    # the submission's applying scan.
+    try:
+        status, receipt = http_json(
+            'POST', base + '/command',
+            {'command': admission['command'],
+             'actor': admission['actor']})
+    except Exception as exc:
+        failed('submit', 'the pending submission never answered: '
+               + str(exc)[:200])
+        return {'outcomes': 'diverged', 'admissions': 0}, violations, \
+            evidence
+    evidence['submission'] = {'status': status, 'receipt': receipt}
+    if status != 200 or _outcome_key(receipt) != 'accepted':
+        failed('admission', 'the pending command was not admitted '
+               'accepted: ' + str(status) + ' '
+               + json.dumps(receipt)[:300])
+        return {'outcomes': 'diverged', 'admissions': 0}, violations, \
+            evidence
+    status, demote = _settle_call(base + '/demote')
+    evidence['demote'] = {'status': status, 'body': demote}
+    if status != 200:
+        failed('demote', 'the field owner\'s demote answered '
+               + str(status) + ': ' + json.dumps(demote)[:300])
+        return {'outcomes': 'diverged', 'admissions': 0}, violations, \
+            evidence
+    # The converged peer promotes — the documented order, mid-
+    # transition refusals retried inside the settle bound.
+    promoted, last = None, None
+    while time.monotonic() < deadline and promoted is None:
+        status, body = _settle_call(peer_base + '/promote')
+        if status == 200:
+            promoted = body
+        else:
+            last = (status, body)
+            time.sleep(DEMOTE_PENDING_POLL)
+    evidence['promote'] = {'body': promoted, 'last_refusal': last}
+    if promoted is None:
+        failed('promote', 'the converged peer\'s promote never '
+               'succeeded: ' + json.dumps(last)[:300])
+        return {'outcomes': 'diverged', 'admissions': 1}, violations, \
+            evidence
+    # The switch settles: the promoted peer reports active, the
+    # demoted one reconverges tracking behind it — the adopted line
+    # the audit reads.
+    settled = wait_for(
+        lambda: (_pair_active(ctx) == peer or None)
+        and _tracking_standby(ctx, owner),
+        deadline, interval=DEMOTE_PENDING_POLL)
+    evidence['settled'] = settled
+    if settled is None:
+        failed('settle', 'the switch never settled: the promoted '
+               'peer\'s role or the demoted peer\'s reconvergence '
+               'missed the bound')
+        return {'outcomes': 'diverged', 'admissions': 1}, violations, \
+            evidence
+    # The served audit: the admission resolves to exactly one terminal
+    # outcome — applied through the carry or the named superseded
+    # rejection — journaled once, carried identically in both peers'
+    # adopted logs, and applied to the image at most once.
+    window = wait_for(
+        lambda: (lambda w: w if w is not None
+                 and _settle_resolved(w, admission)
+                 else None)(
+            _settle_window(ctx, admission, floors)),
+        time.monotonic() + DEMOTE_PENDING_AUDIT,
+        interval=DEMOTE_PENDING_POLL)
+    evidence['audit'] = {'actor': admission['actor'], 'window': window}
+    if window is None:
+        failed('settled-' + admission['actor'],
+               'admission ' + str(admission['actor'])
+               + ' (point ' + str(admission['point'])
+               + ') never reached a terminal journaled outcome inside '
+               + str(DEMOTE_PENDING_AUDIT) + 's')
+        return {'outcomes': 'diverged', 'admissions': 1}, violations, \
+            evidence
+
+    def served_note(key, _diagnostic, detail):
+        note(key, 'demote-pending-nondeterministic', detail)
+
+    verdict = _settle_judge(window, admission, served_note,
+                            check_image=True)
+    outcome = next(iter(
+        _outcome_key(receipt)
+        for entries in window['journaled'].values()
+        for receipt in entries), None)
+    # The durable audit: both peers' --journal-file records must carry
+    # the same single outcome the served journals settled — the
+    # demoted peer once either way, the promoted peer once only when
+    # the line applied it. A phantom applied on the fenced image, or
+    # a pending command the replacement dropped unaudited, surfaces
+    # here as a second outcome, a count miss, or a served/durable
+    # disagreement no wait can heal.
+    durable = {}
+    for name in ('active', 'standby'):
+        durable[name] = _durable_settled(journals[name], admission)
+        if durable[name] is None:
+            failed('durable-' + name, 'the ' + name + ' journal file '
+                   'never served the admission: '
+                   + str(journals[name])[:200])
+            return {'outcomes': 'diverged', 'admissions': 1}, \
+                violations, evidence
+    evidence['durable'] = {
+        name: receipts for name, receipts in durable.items()}
+    durable_outcomes = {_outcome_key(receipt)
+                        for entries in durable.values()
+                        for receipt in entries}
+    if len(durable_outcomes) != 1:
+        nondet('durable-outcome-' + admission['actor'],
+               'admission ' + str(admission['actor']) + ' durable-'
+               'journaled ' + json.dumps(sorted(durable_outcomes))
+               + ' — one admission, never more than one terminal '
+               'outcome')
+        verdict = 'diverged'
+    elif next(iter(durable_outcomes)) != outcome:
+        nondet('durable-mismatch-' + admission['actor'],
+               'admission ' + str(admission['actor']) + ' durable-'
+               'journaled ' + next(iter(durable_outcomes))
+               + ' where the served journals settled ' + str(outcome))
+        verdict = 'diverged'
+    else:
+        for name in ('active', 'standby'):
+            count = len(durable[name])
+            want = (1 if (name == admission['demoted']
+                          or outcome == 'applied') else 0)
+            if count != want:
+                verdict = 'diverged'
+                nondet('durable-journal-' + admission['actor'] + '-'
+                       + name,
+                       'admission ' + str(admission['actor'])
+                       + ' durable-journaled ' + str(count)
+                       + ' command_settled records on ' + name
+                       + ' — the contract settles exactly '
+                       + str(want) + ' there')
+    evidence['digest'] = {
+        'outcomes': 'single'
+                    if verdict == 'single' and not violations
+                    else 'diverged',
+        'admissions': 1}
+    return evidence['digest'], violations, evidence
+
+
+def scenario_demote_pending_command(ctx):
+    """Admit one receipted write on the active, demote inside its
+    pending window, and prove the suspended command settles exactly
+    once — the #625 contract's rig replay: the admission either rides
+    the successor's adoption to apply, or settles the named
+    superseded rejection with its journaled audit — never a phantom
+    applied on the fenced quiesced image, never a silent unaudited
+    drop."""
+    case = Case(
+        'demote-pending-command',
+        'Pending command settles once across demote',
+        'against the deployed pair, one receipted writable-point '
+        'write admitted on the field-owning peer and demoted past '
+        'inside its pending window settles exactly once per pass — '
+        'applied through the successor\'s carry with its value '
+        'landing, or the named superseded rejection with the settle '
+        'journaled on the durable record — no quiesced scan journals '
+        'a phantom command_settled{applied}, no pending command '
+        'vanishes without a settle entry, the pair returns to its '
+        'entry role layout, and two passes produce identical digests')
+    try:
+        if ctx.get('active') is None or ctx.get('standby') is None:
+            return case.finish('inconclusive', 'the run context '
+                               'carries only one endpoint — the pair '
+                               'the pending command needs is absent')
+        for name in ('active', 'standby'):
+            try:
+                _role(ctx, ctx[name])
+            except Exception as exc:
+                return case.finish('inconclusive', name + '\'s '
+                                   'monitor is unreachable: '
+                                   + str(exc)[:200])
+        deadline = time.monotonic() + DEMOTE_PENDING_SETTLE
+        owner = wait_for(lambda: _pair_active(ctx), deadline,
+                         interval=DEMOTE_PENDING_POLL)
+        if owner is None:
+            return case.finish('failed', 'demote-pending-failed: no '
+                               'peer reports role=active')
+        peer = 'standby' if owner == 'active' else 'active'
+        if wait_for(lambda: _tracking_standby(ctx, peer), deadline,
+                    interval=DEMOTE_PENDING_POLL) is None:
+            return case.finish('inconclusive', 'the pair has no '
+                               'tracking standby — the demote/promote '
+                               'has no converged target')
+        case.observe('field owner: ' + owner + ' (' + ctx[owner]
+                     + '); demoting the pending command against '
+                     + peer)
+        _, signals = http_json('GET', ctx[owner] + '/signals')
+        ref = save_evidence(ctx['evidence_dir'],
+                            'demote-pending-signals.json', signals)
+        case.evidence('file', ref, 'SignalIndex naming the pending '
+                      'writable point')
+        points = _writable_bool_points(signals, 2)
+        if not points:
+            return case.finish('inconclusive', 'the model declares '
+                               'no writable bool in-point for the '
+                               'pending command')
+        journals = ctx.get('journal_files') or {}
+        if journals.get('active') is None \
+                or journals.get('standby') is None:
+            return case.finish('inconclusive', 'the run context '
+                               'carries no journal-file paths for the '
+                               'pair')
+        digests = []
+        try:
+            for number in (1, 2):
+                point = points[(number - 1) % len(points)]
+                digest, violations, evidence = _demote_pending_pass(
+                    ctx, number, owner, point)
+                ref = save_evidence(
+                    ctx['evidence_dir'],
+                    'demote-pending-pass-' + str(number) + '.json',
+                    evidence)
+                case.evidence('file', ref, 'pending-command pass '
+                              + str(number) + ' — the submission, '
+                              'the switch answers, the served and '
+                              'durable audit, and the normalized '
+                              'digest')
+                if violations:
+                    diagnostic = 'demote-pending-failed' \
+                        if any(name
+                               == 'demote-pending-failed'
+                               for name, _ in violations.values()) \
+                        else \
+                        'demote-pending-nondeterministic'
+                    return case.finish(
+                        'failed', diagnostic + ': ' + '; '.join(
+                            detail for _, detail in
+                            list(violations.values())[:4]))
+                digests.append(digest)
+        finally:
+            # The pair's entry layout for the cases behind this one —
+            # two passes switch twice and restore it by construction;
+            # a mid-pass exit gets the documented order run again,
+            # best-effort.
+            current = _pair_active(ctx)
+            other = 'standby' if owner == 'active' else 'active'
+            if current != owner \
+                    and _tracking_standby(ctx, owner) is not None:
+                try:
+                    if current is not None:
+                        _settle_call(ctx[current] + '/demote')
+                    _settle_call(ctx[owner] + '/promote')
+                    wait_for(
+                        lambda: (_pair_active(ctx) == owner or None)
+                        and _tracking_standby(ctx, other),
+                        time.monotonic() + DEMOTE_PENDING_SETTLE,
+                        interval=DEMOTE_PENDING_POLL)
+                    case.observe('cleanup: restored the entry role '
+                                 'layout')
+                except Exception as exc:
+                    case.observe('cleanup: role restore failed: '
+                                 + str(exc)[:200])
+        if digests[0] != digests[1]:
+            return case.finish(
+                'failed', 'demote-pending-nondeterministic: '
+                'the two passes\' digests diverged: '
+                + json.dumps(digests[0], sort_keys=True) + ' vs '
+                + json.dumps(digests[1], sort_keys=True))
+        case.observe('two pending-command passes, identical digests')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+# --------------------------------------------------------------------
+# The demoted-peer tracking-source contract under the wildcard-bind
+# deployment — WW-OPS-003's hot-swap clause, the follow-peer half the
+# #616/#618/#619/#620 fixes settle. Every monitor binds --listen
+# 0.0.0.0, so the tracking source a launched active records from the
+# standby's `?peer=` announces must resolve to the pull connection's
+# proven source — a dialable peer address — never the announced
+# wildcard bind that would dial the demoted peer's own stack. The
+# defect family recorded the wildcard verbatim: the demoted peer
+# looping back to itself, every pull re-poisoning the recorded source,
+# or stranding permanently unsynchronized so fail-back needed a
+# restart. On the settled runtime the demoted peer announces a
+# dialable source, follows its successor, reconverges to tracking,
+# holds it across the pull train, and promotes back through the
+# documented switch with launch roles restored and no journal run
+# boundary — a restart's signature — on either --journal-file. The
+# wire surface naming the recorded source is the `degraded` sync
+# detail's "fetch from <addr>: <error>", which the leg audits on every
+# served report for a wildcard, self-addressed, or foreign target.
+# Named diagnostics: demote-reconvergence-failed for the contract
+# never performing — a refused switch step or a settle missing the
+# bound — and demote-reconvergence-nondeterministic for an outcome the
+# contract declares impossible: a non-peer tracking source served,
+# tracking lost across the pull train, a run boundary landing, a
+# residual degraded marker, or two passes disagreeing.
+
+DEMOTE_RECONVERGENCE_SETTLE = 60  # bound on the whole pass: every
+                                # switch's settle and the demoted
+                                # peer's reconvergence
+DEMOTE_RECONVERGENCE_HOLD = 5     # consecutive tracking polls the
+                                # reconverged peer must hold — the
+                                # pull train a re-poisoning source
+                                # cannot survive
+DEMOTE_RECONVERGENCE_POLL = 0.4   # wait cadence inside the leg
+
+# The launched pair's monitor ports on the rig bridge
+# (runner._start_rig's --listen pair): a demoted peer's recorded
+# tracking source must name the successor's port — its own port is
+# the self-pin, an unspecified host the wildcard bind.
+RECONVERGENCE_PORTS = {'active': '8080', 'standby': '8081'}
+
+
+def _fetch_source(detail):
+    """The pull target a `degraded` detail names — the 'fetch from
+    <addr>: <error>' string a failed checkpoint pull reports — or
+    None when the detail names no source."""
+    if not isinstance(detail, str) or 'fetch from ' not in detail:
+        return None
+    source = detail.split('fetch from ', 1)[1].split(': ', 1)[0]
+    return source or None
+
+
+def _source_kind(source, demoted):
+    """Classify the tracking source a degraded detail names: 'wildcard'
+    for an unspecified bind address — the announced --listen 0.0.0.0
+    the defect family recorded verbatim — 'self' for the demoted
+    peer's own monitor port, 'peer' for the successor's, 'foreign'
+    for anything else. Only 'peer' is a dialable contract answer."""
+    if '0.0.0.0' in source or '[::]' in source:
+        return 'wildcard'
+    port = source.rsplit(':', 1)[-1]
+    if port == RECONVERGENCE_PORTS[demoted]:
+        return 'self'
+    successor = 'standby' if demoted == 'active' else 'active'
+    return 'peer' if port == RECONVERGENCE_PORTS[successor] \
+        else 'foreign'
+
+
+def _tracking_report(report):
+    """Whether a served RoleReport is a tracking standby — the
+    promotable posture a documented switch needs."""
+    return isinstance(report, dict) \
+        and report.get('role') == 'standby' \
+        and 'tracking' in (report.get('sync') or {})
+
+
+def _reconvergence_switch(ctx, demote, promote, deadline, watch):
+    """One documented demote-then-promote switch: POST /demote on the
+    field owner, POST /promote on the converged peer — mid-transition
+    refusals retried inside the bound — then the settle: the promoted
+    peer reports active and the demoted one reports standby tracking,
+    every polled report audited through watch(name, report). Returns
+    the failure detail, or None on settle."""
+    status, body = _settle_call(ctx[demote] + '/demote')
+    if status != 200:
+        return 'demote on ' + demote + ' answered ' + str(status) \
+               + ': ' + json.dumps(body)[:300]
+    promoted, last = None, None
+    while time.monotonic() < deadline and promoted is None:
+        status, body = _settle_call(ctx[promote] + '/promote')
+        if status == 200:
+            promoted = body
+        else:
+            last = (status, body)
+            time.sleep(DEMOTE_RECONVERGENCE_POLL)
+    if promoted is None:
+        return 'promote on ' + promote + ' never succeeded inside ' \
+               'the bound: ' + json.dumps(last)[:300]
+    reports, settled = {}, None
+    while time.monotonic() < deadline and settled is None:
+        for name in (demote, promote):
+            report = _try_role(ctx, ctx[name])
+            if report is not None:
+                watch(name, report)
+                reports[name] = report
+        if (reports.get(promote) or {}).get('role') == 'active' \
+                and _tracking_report(reports.get(demote)):
+            settled = reports
+        else:
+            time.sleep(DEMOTE_RECONVERGENCE_POLL)
+    if settled is None:
+        return 'the switch never settled: ' \
+               + json.dumps(reports, sort_keys=True)[:400]
+    return None
+
+
+def _demote_reconvergence_pass(ctx, number, journals):
+    """One demote/reconverge/fail-back pass on the launched pair:
+    demote ctrl-a — the launched active, whose only tracking source
+    is the monitor address the standby's checkpoint pulls announced —
+    promote the tracking peer, watch the demoted peer reconverge
+    tracking on a dialable successor and hold it across the pull
+    train, then run the same switch back and prove the launch roles
+    restore with no journal run boundary and no residual degraded
+    marker. Returns (digest, violations, evidence): the digest is the
+    pass's normalized verdict record, identical across clean passes."""
+    violations = {}
+    sources = {'active': set(), 'standby': set()}
+    evidence = {'pass': number}
+
+    def note(key, diagnostic, detail):
+        violations.setdefault(key, (diagnostic, detail))
+
+    def failed(key, detail):
+        note(key, 'demote-reconvergence-failed', detail)
+
+    def nondet(key, detail):
+        note(key, 'demote-reconvergence-nondeterministic', detail)
+
+    def bail():
+        evidence['sources'] = {name: sorted(items)
+                               for name, items in sources.items()}
+        return {'reconverged': False, 'failback': False,
+                'wildcard_sightings': 0, 'boundary_growth': 0}, \
+            violations, evidence
+
+    def watch(name, report):
+        """Audit one served RoleReport mid-leg: a wildcard inside the
+        sync state is an announced bind address recorded as a
+        tracking source, and a degraded detail's named pull target
+        must be the successor's dialable monitor address — both
+        verdict inputs, never just evidence."""
+        sync = report.get('sync') or {}
+        text = json.dumps(sync)
+        if '0.0.0.0' in text or '[::]' in text:
+            nondet('wildcard-' + name,
+                   name + ' reports a wildcard tracking source: '
+                   + text[:250] + ' — an announced --listen 0.0.0.0 '
+                   'bind is undialable')
+        source = _fetch_source(
+            (sync.get('degraded') or {}).get('detail'))
+        if source is not None:
+            sources[name].add(source)
+            kind = _source_kind(source, name)
+            if kind != 'peer':
+                nondet(kind + '-source-' + name,
+                       name + ' tracks a ' + kind + ' source '
+                       + source + ' — the recorded announce must be '
+                       'the successor\'s dialable monitor address')
+
+    deadline = time.monotonic() + DEMOTE_RECONVERGENCE_SETTLE
+    bounds = {}
+    for name in ('active', 'standby'):
+        try:
+            bounds[name] = len(_journal_file_runs(journals[name]))
+        except (OSError, ValueError) as exc:
+            failed('journal-' + name, 'the ' + name + ' journal file '
+                   'is unreadable: ' + str(exc)[:200])
+            return bail()
+    owner = wait_for(lambda: _pair_active(ctx), deadline,
+                     interval=DEMOTE_RECONVERGENCE_POLL)
+    evidence['entry_owner'] = owner
+    if owner is None:
+        failed('owner', 'no launched peer reports role=active — the '
+               'announced-source leg has no field owner')
+        return bail()
+    if owner != 'active':
+        # The announced-source leg demotes the launched active — the
+        # only peer whose tracking source is a recorded announce (the
+        # other's is its configured --standby). A pair settled the
+        # other way gets the documented restore first — itself the
+        # fail-back the contract guarantees.
+        detail = _reconvergence_switch(ctx, owner, 'active', deadline,
+                                       watch)
+        evidence['entry_restore'] = detail or 'settled'
+        if detail is not None:
+            failed('entry-restore', 'the pair cannot reach the '
+                   'launch roles the announced-source leg needs: '
+                   + detail)
+            return bail()
+    # The announced-source half: demote the launched active and
+    # promote the tracking peer — the demoted peer's post-demotion
+    # pulls resolve only the recorded announce, so its reconvergence
+    # proves the announce dialable while watch() audits every served
+    # target.
+    detail = _reconvergence_switch(ctx, 'active', 'standby', deadline,
+                                   watch)
+    evidence['forward'] = detail or 'settled'
+    if detail is not None:
+        failed('forward', 'the demote/promote forward switch: '
+               + detail)
+        return bail()
+    # The pull train: repeated polls are repeated pulls — a source
+    # re-poisoning on each pull drops the peer out of tracking; the
+    # contract holds it.
+    held = []
+    while time.monotonic() < deadline \
+            and len(held) < DEMOTE_RECONVERGENCE_HOLD:
+        report = _try_role(ctx, ctx['active'])
+        if report is not None:
+            watch('active', report)
+            held.append(report)
+        time.sleep(DEMOTE_RECONVERGENCE_POLL)
+    evidence['hold'] = held
+    if not held:
+        failed('hold', 'the demoted peer\'s monitor served no report '
+               'across the pull-train window')
+        return bail()
+    if not all(_tracking_report(report) for report in held):
+        nondet('hold', 'the reconverged peer dropped out of tracking '
+               'across repeated pulls: ' + json.dumps(
+                   [report.get('sync') for report in held])[:400])
+        return bail()
+    # Fail-back through the same documented switch: demote the
+    # successor, promote the reconverged peer — the contract's
+    # no-restart promise — restoring the launch roles.
+    detail = _reconvergence_switch(ctx, 'standby', 'active', deadline,
+                                   watch)
+    evidence['failback'] = detail or 'settled'
+    if detail is not None:
+        failed('failback', 'the fail-back switch: ' + detail)
+        return bail()
+    growth = {}
+    for name in ('active', 'standby'):
+        try:
+            growth[name] = len(_journal_file_runs(journals[name])) \
+                - bounds[name]
+        except (OSError, ValueError) as exc:
+            failed('journal-' + name, 'the ' + name + ' journal file '
+                   'is unreadable after the switch: ' + str(exc)[:200])
+            return bail()
+    evidence['boundary_growth'] = growth
+    if any(growth.values()):
+        nondet('restart', 'a journal file gained a run boundary — a '
+               'peer process restarted inside the switch: '
+               + json.dumps(growth, sort_keys=True))
+    # The restored pair's markers: launch roles — ctrl-a active,
+    # ctrl-b tracking — with no residual degraded sync on either
+    # served report.
+    final = {name: _try_role(ctx, ctx[name])
+             for name in ('active', 'standby')}
+    evidence['final'] = final
+    if not _tracking_report(final['standby']) \
+            or (final['active'] or {}).get('role') != 'active':
+        failed('restored', 'the launch roles did not restore: '
+               + json.dumps(final, sort_keys=True)[:400])
+        return bail()
+    for name, report in final.items():
+        if 'degraded' in (report.get('sync') or {}):
+            nondet('residual-' + name, name + ' still reports a '
+                   'degraded marker after restore: '
+                   + json.dumps(report.get('sync'))[:250])
+    evidence['sources'] = {name: sorted(items)
+                           for name, items in sources.items()}
+    evidence['digest'] = {
+        'reconverged': True, 'failback': True,
+        'wildcard_sightings': sum(
+            1 for key in violations if key.startswith('wildcard')),
+        'boundary_growth': sum(growth.values())}
+    return evidence['digest'], violations, evidence
+
+
+def scenario_demote_reconvergence(ctx):
+    """Demote the launched active, prove its announced tracking source
+    a dialable peer address through reconvergence on the successor,
+    and fail back through the documented switch — launch roles
+    restored, no restart, no residual degraded marker."""
+    case = Case(
+        'demote-reconvergence',
+        'Demoted launched-active tracks its announced successor and '
+        'fails back',
+        'on the deployed pair, POST /demote on the launched active '
+        'leaves it tracking the monitor address the standby\'s '
+        'checkpoint pulls announced — a dialable peer address, never '
+        'the announced 0.0.0.0 bind — reconverging to tracking on the '
+        'promoted successor and holding it across repeated pulls; the '
+        'documented switch then promotes it back with no process '
+        'restart and no residual degraded marker, the launch roles '
+        'restored for the cases behind, and two passes produce '
+        'identical digests')
+    try:
+        if ctx.get('active') is None or ctx.get('standby') is None:
+            return case.finish('inconclusive', 'the run context '
+                               'carries only one endpoint — the pair '
+                               'the announced-source leg needs is '
+                               'absent')
+        for name in ('active', 'standby'):
+            try:
+                _role(ctx, ctx[name])
+            except Exception as exc:
+                return case.finish('inconclusive', name + '\'s '
+                                   'monitor is unreachable: '
+                                   + str(exc)[:200])
+        journals = ctx.get('journal_files') or {}
+        if journals.get('active') is None \
+                or journals.get('standby') is None:
+            return case.finish('inconclusive', 'the run context '
+                               'carries no journal-file paths for the '
+                               'pair')
+        digests = []
+        try:
+            for number in (1, 2):
+                digest, violations, evidence = \
+                    _demote_reconvergence_pass(ctx, number, journals)
+                ref = save_evidence(
+                    ctx['evidence_dir'],
+                    'demote-reconvergence-pass-' + str(number)
+                    + '.json', evidence)
+                case.evidence('file', ref, 'demote/reconverge/'
+                              'fail-back pass ' + str(number)
+                              + ' — the switch answers, the audited '
+                              'tracking sources, the boundary diff, '
+                              'and the normalized digest')
+                if violations:
+                    diagnostic = 'demote-reconvergence-failed' \
+                        if any(name == 'demote-reconvergence-failed'
+                               for name, _ in violations.values()) \
+                        else 'demote-reconvergence-nondeterministic'
+                    return case.finish(
+                        'failed', diagnostic + ': ' + '; '.join(
+                            detail for _, detail in
+                            list(violations.values())[:4]))
+                digests.append(digest)
+        finally:
+            # The pair's launch roles for the cases behind — ctrl-a
+            # owns the field; two passes switch twice and restore it
+            # by construction. A mid-pass exit gets the documented
+            # order run again, best-effort.
+            current = _pair_active(ctx)
+            if current != 'active' \
+                    and _tracking_standby(ctx, 'active') is not None:
+                try:
+                    if current is not None:
+                        _settle_call(ctx[current] + '/demote')
+                    _settle_call(ctx['active'] + '/promote')
+                    wait_for(
+                        lambda:
+                        (_pair_active(ctx) == 'active' or None)
+                        and _tracking_standby(ctx, 'standby'),
+                        time.monotonic() + DEMOTE_RECONVERGENCE_SETTLE,
+                        interval=DEMOTE_RECONVERGENCE_POLL)
+                    case.observe('cleanup: restored the launch role '
+                                 'layout')
+                except Exception as exc:
+                    case.observe('cleanup: role restore failed: '
+                                 + str(exc)[:200])
+        if digests[0] != digests[1]:
+            return case.finish(
+                'failed', 'demote-reconvergence-nondeterministic: '
+                'the two passes\' digests diverged: '
+                + json.dumps(digests[0], sort_keys=True) + ' vs '
+                + json.dumps(digests[1], sort_keys=True))
+        case.observe('two demote/reconvergence passes, identical '
+                     'digests')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+# --------------------------------------------------------------------
+# The tracking-source announcement authenticity contract on the
+# deployed pair (WW-LCM-001's takeover-integrity clause, decision 12's
+# checkpoint-pull tracking — the #684 fix this lane verifies per
+# revision): `GET /checkpoint?peer=` is a tracking peer announcing its
+# own monitor address so a demoted field owner knows where to follow.
+# The settled contract the leg drives: the serving monitor records an
+# announce only when it names the pulling connection's own source —
+# a wildcard-bound puller's `0.0.0.0` resolves to that proven source —
+# and a recorded hint stays unverified until a demotion proves it:
+# `POST /demote` toward an announced-only source pulls one checkpoint
+# from the hint first, refuses the named `no_tracking_source` unless
+# it continues this run's line, and on verification pins the adopted
+# source as the demoted peer's tracking target and journals it by
+# name — `tracking_source_adopted` — so an accepted source is never
+# silent. The leg opens the window the defect was demonstrated in:
+# with the tracking peer's container held down the field owner
+# warm-restarts into a truly unsourced instance — no configured peer,
+# no recorded announce — where each crafted variant must meet the
+# named refusal: the bare guard first, then a foreign-source announce
+# that can never land, a fabricated same-source hint whose dead
+# endpoint cannot verify, and a live forged-checkpoint endpoint the
+# demotion must never adopt. The peer's return re-lands the genuine
+# announce on every pull, so the legitimate demotion verifies it,
+# journals the adoption naming it, and pins it — and a post-adoption
+# rewrite cannot redirect the pinned pulls. The switch then restores
+# the entry role layout for the cases behind this one. Named
+# diagnostics: tracking-source-auth-failed — the contract never
+# performed: an unanswered surface, a demote that missed the named
+# refusal, the verified adoption that never journaled; and
+# tracking-source-auth-nondeterministic — the run produced a result
+# the contract declares impossible: a crafted hint arming or silently
+# redirecting the source, an adoption naming a fabricated endpoint, a
+# configured-source demotion journaling an announced adoption, or two
+# passes disagreeing.
+
+AUTH_SETTLE = 45      # bound on role/tracking settles and the
+                      # controller lifecycle waits the window needs
+AUTH_POLL = 0.4       # wait cadence inside the leg
+AUTH_DEADLINE = 20    # bound on a crafted read, a demote answer, or
+                      # the adoption entry landing in the served
+                      # journal
+AUTH_WATCH = 4        # polls proving the pinned adoption ignores the
+                      # redirect announce — one per witnessed pull
+AUTH_FOREIGN = '10.255.255.1'
+                      # the crafted announce's foreign source IP —
+                      # never the pulling connection's own address, so
+                      # the acceptance check must refuse it
+
+
+def _closed_port():
+    """A TCP port nothing on the scenario host answers — an ephemeral
+    bind released before the crafted hint names it."""
+    stream = socket.socket()
+    try:
+        stream.bind(('0.0.0.0', 0))
+        return stream.getsockname()[1]
+    finally:
+        stream.close()
+
+
+def _checkpoint_announce(ctx, base, hint):
+    """One crafted `GET /checkpoint?peer=<hint>` against `base`. The
+    read itself is unconditional — a refused announce is ignored, so
+    the endpoint still answers the serving peer's own checkpoint.
+    Returns the served body."""
+    _, checkpoint = http_json('GET', base + '/checkpoint?peer=' + hint,
+                              timeout=AUTH_DEADLINE)
+    return checkpoint
+
+
+def _forged_checkpoint_server(document):
+    """A live forged-checkpoint endpoint bound on the scenario host:
+    every connection is drained and answered with `document` — this
+    run's own checkpoint with the tick jumped past the demotion's skew
+    bound — until closed. Returns (port, hits, close): `hits` records
+    each answered pull — the enforced rig's egress policy drops every
+    container-originated connection toward the host, so on the lane
+    the hint is unreachable and the demotion's refusal is the same
+    either way; the served count stays in evidence."""
+    body = json.dumps(document).encode()
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(('0.0.0.0', 0))
+    listener.listen(8)
+    hits = []
+    closing = threading.Event()
+
+    def serve():
+        listener.settimeout(0.2)
+        while not closing.is_set():
+            try:
+                conn, addr = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            try:
+                conn.settimeout(2)
+                conn.recv(65536)
+                hits.append(addr[0] + ':' + str(addr[1]))
+                conn.sendall(
+                    b'HTTP/1.1 200 OK\r\nContent-Type: application/json'
+                    b'\r\nContent-Length: ' + str(len(body)).encode()
+                    + b'\r\n\r\n' + body)
+            except OSError:
+                pass
+            finally:
+                conn.close()
+
+    worker = threading.Thread(target=serve, daemon=True)
+    worker.start()
+
+    def close():
+        closing.set()
+        listener.close()
+        worker.join(2)
+
+    return listener.getsockname()[1], hits, close
+
+
+def _journal_adoptions(payload):
+    """Every source a served journal payload's
+    `tracking_source_adopted` entries name — the demotion's audit
+    record of the endpoint the run moved onto."""
+    return [event['tracking_source_adopted']['source']
+            for entry in _journal_list(payload)
+            for event in [entry.get('event') or {}]
+            if isinstance(event.get('tracking_source_adopted'), dict)
+            and event['tracking_source_adopted'].get('source')]
+
+
+def _refusal_named(body, name):
+    """Whether a refused control-plane call's decoded body is the
+    named `SwitchError` — a bare string for the unit variants, an
+    object keyed on the name for the carrying ones."""
+    return body == name \
+        or isinstance(body, dict) and name in body
+
+
+def _tracking_source_auth_pass(ctx, owner, peer):
+    """One tracking-source-auth pass against the pair: the
+    unsourced-instance window's crafted announces and refused demotes,
+    the converged pair's verified adoption, the redirect probe on the
+    pinned source, and the restore to the entry layout. Returns
+    (digest, violations, evidence): `digest` is the pass's normalized
+    verdict record — identical across clean passes; `violations` is
+    {key: (diagnostic, detail)} in first-seen order."""
+    base, peer_base = ctx[owner], ctx[peer]
+    # The peer container's announced monitor port — what its
+    # wildcard-bound pulls resolve to on the owner's monitor.
+    peer_port = {'standby': 8081, 'active': 8080}[peer]
+    violations = {}
+    evidence = {'owner': owner, 'peer': peer, 'demotes': [],
+                'announces': []}
+    verdicts = {}
+    state = {'peer_stopped': False, 'switched': False}
+    forged_close, forged_hits = None, []
+
+    def note(key, diagnostic, detail):
+        violations.setdefault(key, (diagnostic, detail))
+
+    def failed(key, detail):
+        note(key, 'tracking-source-auth-failed', detail)
+
+    def impossible(key, detail):
+        note(key, 'tracking-source-auth-nondeterministic', detail)
+
+    def demote(url):
+        try:
+            return _settle_call(url + '/demote')
+        except Exception as exc:
+            return None, str(exc)[:150]
+
+    def expect_refusal(leg):
+        """The contract's named answer for a hint that cannot verify —
+        409 `no_tracking_source` — with the impossible outcome
+        separated from the unperformed one. Returns the digest
+        verdict. Once a variant has armed the demotion the owner no
+        longer holds the field — later probes would only echo
+        `not_active` — so the leg skips them."""
+        if any(key.startswith('armed-') for key in violations):
+            evidence['demotes'].append({'leg': leg, 'status': None,
+                                        'body': 'skipped'})
+            return 'skipped'
+        status, body = demote(base)
+        evidence['demotes'].append({'leg': leg, 'status': status,
+                                    'body': body})
+        if status == 200:
+            impossible('armed-' + leg, 'the ' + leg + ' variant armed '
+                       'the demotion — an unproven tracking source '
+                       'moved the run')
+            return 'armed'
+        if status != 409 or not _refusal_named(body,
+                                               'no_tracking_source'):
+            failed('refusal-' + leg, 'the ' + leg + ' demote answered '
+                   + str(status) + ' ' + json.dumps(body)[:200]
+                   + ' — not the named no_tracking_source')
+            return 'other'
+        return 'no_tracking_source'
+
+    def craft(leg, hint):
+        """Drive one announce variant; the read must still answer the
+        owner's own checkpoint — a refused announce is ignored, never
+        an error."""
+        try:
+            served = _checkpoint_announce(ctx, base, hint)
+        except Exception as exc:
+            failed('read-' + leg, 'the crafted ' + leg
+                   + ' announce\'s checkpoint read never answered: '
+                   + str(exc)[:150])
+            return
+        matched = isinstance(served, dict) \
+            and isinstance(served.get('tick'), int) \
+            and served.get('model_fingerprint') == fingerprint
+        evidence['announces'].append(
+            {'leg': leg, 'hint': hint,
+             'tick': served.get('tick')
+             if isinstance(served, dict) else None,
+             'matched': matched})
+        if not matched:
+            impossible('answered-' + leg, 'the crafted ' + leg
+                       + ' announce was answered by a checkpoint that '
+                       'is not the serving peer\'s own: '
+                       + json.dumps(served)[:200])
+
+    def tracking(name):
+        return _tracking_standby(ctx, name)
+
+    def aligned(report):
+        return (((report or {}).get('sync') or {})
+                .get('tracking') or {}).get('aligned')
+
+    try:
+        # The audit floors: every journal assertion the leg makes
+        # reads only what landed after them.
+        floors = {}
+        for name in (owner, peer):
+            try:
+                _, journal = http_json('GET', ctx[name] + '/journal',
+                                       timeout=AUTH_DEADLINE)
+            except Exception as exc:
+                failed('floor-' + name, name + '\'s journal floor '
+                       'never served: ' + str(exc)[:200])
+                return None, violations, evidence
+            entries = _journal_list(journal)
+            floors[name] = entries[-1].get('seq') or 0 \
+                if entries else 0
+
+        # The converged pair: the tracking peer's per-scan pulls
+        # announce its own monitor address on the owner — the genuine
+        # hint the legitimate demotion later verifies.
+        if wait_for(lambda: tracking(peer),
+                    time.monotonic() + AUTH_SETTLE,
+                    interval=AUTH_POLL) is None:
+            failed('converged', peer + ' is not a tracking standby — '
+                   'the legitimate announce never lands the '
+                   'follow-peer source')
+            return None, violations, evidence
+
+        # The baseline checkpoint: the fingerprint every crafted read
+        # must echo, and the document the forged endpoint serves with
+        # its tick jumped past the demotion's skew bound.
+        try:
+            _, baseline = http_json('GET', base + '/checkpoint',
+                                    timeout=AUTH_DEADLINE)
+        except Exception as exc:
+            failed('baseline', 'the field owner\'s checkpoint never '
+                   'served: ' + str(exc)[:200])
+            return None, violations, evidence
+        fingerprint = baseline.get('model_fingerprint')
+        forged = dict(baseline)
+        forged['tick'] = (baseline.get('tick') or 0) + 100000
+        forged_port, forged_hits, forged_close = \
+            _forged_checkpoint_server(forged)
+        crafted = {'foreign': AUTH_FOREIGN + ':'
+                   + str(_closed_port()),
+                   'dead': '0.0.0.0:' + str(_closed_port()),
+                   'forged': '0.0.0.0:' + str(forged_port),
+                   'redirect': '0.0.0.0:' + str(_closed_port())}
+        evidence['crafted'] = dict(crafted)
+        evidence['forged_checkpoint'] = {
+            'tick': forged['tick'],
+            'generation': forged.get('generation')}
+
+        # ---- the unsourced-instance window ----
+        # The tracking peer held down stops the per-scan announces;
+        # the warm-restarted owner records none — no configured peer,
+        # no recorded hint: the instance the fabrication was
+        # demonstrated against.
+        try:
+            ctx['stop_controller'](peer)
+            state['peer_stopped'] = True
+            ctx['restart_controller'](owner)
+        except Exception as exc:
+            failed('window', 'the unsourced-instance induction never '
+                   'completed: ' + str(exc)[:200])
+            return None, violations, evidence
+        back = wait_for(
+            lambda: (r.get('role') == 'active' and r or None)
+            if (r := _try_role(ctx, base)) else None,
+            time.monotonic() + AUTH_SETTLE, interval=AUTH_POLL)
+        if back is None:
+            failed('owner-return', 'the restarted field owner never '
+                   'reported active — the window has no demote '
+                   'target')
+            return None, violations, evidence
+        peer_up = False
+        for _ in range(3):
+            if _try_role(ctx, peer_base) is not None:
+                peer_up = True
+            time.sleep(AUTH_POLL)
+        if peer_up:
+            failed('window-held', 'the stopped peer still answered — '
+                   'the unsourced window never opened')
+            return None, violations, evidence
+
+        # Leg 1 — the bare guard: nothing configured, nothing
+        # announced; the demotion must refuse by name rather than
+        # strand the peer unsynchronized.
+        verdicts['unsourced'] = expect_refusal('unsourced')
+        # Leg 2 — the foreign-source announce: an address the pulling
+        # connection is not — the acceptance check refuses it, the
+        # recorded hint stays empty, the demotion still refuses.
+        craft('foreign', crafted['foreign'])
+        verdicts['foreign'] = expect_refusal('foreign')
+        # Leg 3 — the fabricated same-source hint: the wildcard names
+        # the connection's proven source with a dead port — it lands,
+        # but the demotion's verify pull finds nothing that continues
+        # the line.
+        craft('fabricated', crafted['dead'])
+        verdicts['fabricated'] = expect_refusal('fabricated')
+        # Leg 4 — the forged-checkpoint endpoint: a live server
+        # answering this line's checkpoint at a jumped tick — refused
+        # by name whatever of it the egress policy leaves reachable.
+        craft('forged', crafted['forged'])
+        verdicts['forged'] = expect_refusal('forged')
+        verdicts['forged'] += '/served' if forged_hits \
+            else '/unreached'
+        evidence['forged_hits'] = list(forged_hits)
+
+        # The refused legs must leave the journal silent — no
+        # adoption, no role change — and the owner still owns.
+        try:
+            _, journal = http_json('GET', base + '/journal?since='
+                                   + str(floors[owner]),
+                                   timeout=AUTH_DEADLINE)
+        except Exception as exc:
+            journal = None
+            failed('journal-window', 'the owner\'s journal never '
+                   'served after the refused legs: '
+                   + str(exc)[:150])
+        if journal is not None:
+            moved = [entry for entry in _journal_list(journal)
+                     if 'tracking_source_adopted'
+                     in (entry.get('event') or {})
+                     or 'role_changed' in (entry.get('event') or {})]
+            if moved:
+                impossible('journaled-crafted', 'a refused leg '
+                           'journaled ' + json.dumps(moved[0])[:200])
+        report = _try_role(ctx, base)
+        if (report or {}).get('role') != 'active':
+            impossible('owner-moved', 'the field owner reports role '
+                       + str((report or {}).get('role'))
+                       + ' after the refused legs')
+        if violations:
+            return None, violations, evidence
+
+        # ---- the converged pair returns ----
+        try:
+            ctx['start_controller'](peer)
+        except Exception as exc:
+            failed('peer-start', 'the tracking peer\'s restart never '
+                   'completed: ' + str(exc)[:200])
+            return None, violations, evidence
+        state['peer_stopped'] = False
+        # A tracking report already proves a pull landed — and every
+        # pull announces — but an advancing alignment proves the
+        # stream the demotion verifies is the peer's live one.
+        first = wait_for(lambda: tracking(peer),
+                         time.monotonic() + AUTH_SETTLE,
+                         interval=AUTH_POLL)
+        start_aligned = aligned(first)
+        second = None
+        if start_aligned is not None:
+            second = wait_for(
+                lambda: (lambda r: r
+                         if aligned(r) is not None
+                         and aligned(r) > start_aligned
+                         else None)(tracking(peer)),
+                time.monotonic() + AUTH_SETTLE, interval=AUTH_POLL)
+        if first is None or second is None:
+            failed('peer-return', 'the returned peer never '
+                   'reconverged tracking — its pulls never re-landed '
+                   'the genuine announce')
+            return None, violations, evidence
+
+        # Leg 5 — a foreign announce against the established hint,
+        # then the legitimate demotion: the foreign claim lands
+        # nothing, so the demotion verifies the peer's announced
+        # source, journals the adoption naming it, and pins it.
+        craft('foreign-established',
+              AUTH_FOREIGN + ':' + str(_closed_port()))
+        status, body = demote(base)
+        evidence['demotes'].append({'leg': 'legitimate',
+                                    'status': status, 'body': body})
+        if status != 200:
+            if status == 409 \
+                    and _refusal_named(body, 'no_tracking_source'):
+                impossible('foreign-landed', 'the foreign announce '
+                           'moved the recorded tracking source — the '
+                           'legitimate demotion refused '
+                           'no_tracking_source')
+            else:
+                failed('demote-legitimate', 'the announced peer\'s '
+                       'demote answered ' + str(status) + ' '
+                       + json.dumps(body)[:200])
+            return None, violations, evidence
+        state['switched'] = True
+
+        # The adopted source must land a journal-visible entry naming
+        # it — the audit that keeps an accepted source never silent.
+        def adoption():
+            try:
+                _, journal = http_json('GET', base + '/journal?since='
+                                       + str(floors[owner]),
+                                       timeout=AUTH_DEADLINE)
+            except Exception:
+                return None
+            return _journal_adoptions(journal) or None
+        adopted = wait_for(adoption, time.monotonic() + AUTH_DEADLINE,
+                           interval=AUTH_POLL)
+        evidence['adopted'] = adopted
+        if not adopted:
+            failed('adoption-unjournaled', 'the verified announced '
+                   'demotion journaled no tracking_source_adopted '
+                   'entry')
+            verdicts['adoption'] = 'missing'
+        else:
+            source = adopted[-1]
+            _, _, source_port = str(source).rpartition(':')
+            crafted_ports = {hint.rsplit(':', 1)[1]
+                             for hint in crafted.values()}
+            if str(source).startswith(AUTH_FOREIGN) \
+                    or str(source).startswith('0.0.0.0') \
+                    or source_port in crafted_ports \
+                    or source_port != str(peer_port):
+                impossible('adopted-crafted', 'the adoption entry '
+                           'names ' + str(source) + ' — a crafted '
+                           'hint, not the announced peer\'s :'
+                           + str(peer_port))
+                verdicts['adoption'] = 'crafted'
+            else:
+                verdicts['adoption'] = 'journaled'
+        # The demoted peer reconverges on the adopted source.
+        if wait_for(lambda: tracking(owner),
+                    time.monotonic() + AUTH_SETTLE,
+                    interval=AUTH_POLL) is None:
+            failed('reconverged', 'the demoted owner never '
+                   'reconverged tracking on the adopted source')
+            return None, violations, evidence
+
+        # The documented promote: the converged peer takes the field.
+        try:
+            status, body = _settle_call(peer_base + '/promote')
+        except Exception as exc:
+            status, body = None, str(exc)[:150]
+        evidence['demotes'].append({'leg': 'peer-promote',
+                                    'status': status, 'body': body})
+        if status != 200:
+            failed('promote', 'the converged peer\'s promote answered '
+                   + str(status) + ' ' + json.dumps(body)[:200])
+            return None, violations, evidence
+        promoted = wait_for(
+            lambda: (r.get('role') == 'active' and r or None)
+            if (r := _try_role(ctx, peer_base)) else None,
+            time.monotonic() + AUTH_SETTLE, interval=AUTH_POLL)
+        if promoted is None:
+            failed('promote-settle', 'the promoted peer never '
+                   'settled active')
+            return None, violations, evidence
+
+        # Leg 6 — the redirect hint against the established tracking
+        # peer: the rewrite lands like any same-source claim, but the
+        # demotion's verified adoption is pinned — the pulls keep
+        # reaching the proven successor.
+        craft('redirect', crafted['redirect'])
+        watch, redirected = [], False
+        previous = None
+        for _ in range(AUTH_WATCH):
+            report = tracking(owner)
+            current = aligned(report)
+            watch.append({'role': (report or {}).get('role'),
+                          'aligned': current})
+            if (report or {}).get('role') != 'standby' \
+                    or current is None \
+                    or previous is not None and current < previous:
+                redirected = True
+            previous = current
+            time.sleep(AUTH_POLL)
+        evidence['redirect_watch'] = watch
+        verdicts['redirect'] = 'moved' if redirected else 'pinned'
+        if redirected:
+            impossible('redirected', 'the demoted peer\'s tracking '
+                       'moved off the pinned adoption after the '
+                       'rewrite: ' + json.dumps(watch))
+        if violations:
+            return None, violations, evidence
+
+        # ---- the restore: the configured-source demotion and the
+        # documented promote put the entry layout back ----
+        status, body = demote(peer_base)
+        evidence['demotes'].append({'leg': 'restore-demote',
+                                    'status': status, 'body': body})
+        if status != 200:
+            failed('restore-demote', 'the restore demote answered '
+                   + str(status) + ' ' + json.dumps(body)[:200])
+            return None, violations, evidence
+        try:
+            status, body = _settle_call(base + '/promote')
+        except Exception as exc:
+            status, body = None, str(exc)[:150]
+        evidence['demotes'].append({'leg': 'restore-promote',
+                                    'status': status, 'body': body})
+        if status != 200:
+            failed('restore-promote', 'the restore promote answered '
+                   + str(status) + ' ' + json.dumps(body)[:200])
+            return None, violations, evidence
+
+        def settled():
+            owner_report = _try_role(ctx, base)
+            if (owner_report or {}).get('role') != 'active':
+                return None
+            return tracking(peer)
+        if wait_for(settled, time.monotonic() + AUTH_SETTLE,
+                    interval=AUTH_POLL) is None:
+            failed('restore-settle', 'the pair did not settle back '
+                   'to its entry role assignment')
+            return None, violations, evidence
+        state['switched'] = False
+        # The configured-source demotion adopts no announce: nothing
+        # journaled by name is the audit's other half — accepted
+        # sources journal, configured ones need none.
+        try:
+            _, journal = http_json('GET', peer_base
+                                   + '/journal?since='
+                                   + str(floors[peer]),
+                                   timeout=AUTH_DEADLINE)
+            peer_adoptions = _journal_adoptions(journal)
+        except Exception as exc:
+            peer_adoptions = []
+            verdicts['peer_adoption'] = 'unread'
+            failed('journal-peer', 'the peer\'s journal never served '
+                   'the restore audit: ' + str(exc)[:150])
+        else:
+            verdicts['peer_adoption'] = 'journaled' \
+                if peer_adoptions else 'absent'
+            if peer_adoptions:
+                impossible('peer-adopted', 'the configured-source '
+                           'demotion journaled an announced adoption: '
+                           + json.dumps(peer_adoptions))
+    finally:
+        if forged_close is not None:
+            forged_close()
+        # Whatever the legs left behind — a stopped peer or a
+        # switched pair — put it back for the passes and the cases
+        # behind this one, best-effort.
+        if state['peer_stopped']:
+            try:
+                ctx['start_controller'](peer)
+            except Exception:
+                pass
+        if state['switched']:
+            try:
+                _settle_call(peer_base + '/demote')
+                _settle_call(base + '/promote')
+            except Exception:
+                pass
+    verdicts['announces'] = 'answered' \
+        if evidence['announces'] \
+        and all(item['matched'] for item in evidence['announces']) \
+        else 'missed'
+    verdicts.setdefault('adoption', 'missing')
+    verdicts.setdefault('redirect', 'unproven')
+    verdicts.setdefault('peer_adoption', 'unread')
+    verdicts['roles'] = 'switched' if state['switched'] else 'restored'
+    evidence['digest'] = verdicts
+    return verdicts, violations, evidence
+
+
+def scenario_tracking_source_auth(ctx):
+    """Assert the tracking-source announcement authenticity contract
+    on the deployed pair (WW-LCM-001's takeover-integrity clause,
+    decision 12's checkpoint-pull tracking — the #684 fix this lane
+    verifies per revision): against a truly unsourced field owner —
+    the tracking peer's container held down, the owner warm-restarted
+    so no announce is recorded — every crafted `?peer=` variant must
+    meet the demotion's named `no_tracking_source` refusal: the bare
+    guard, a foreign-source claim that never lands, a fabricated
+    same-source hint, and a live forged-checkpoint endpoint. The
+    converged pair's legitimate announces keep tracking healthy — the
+    verified demotion adopts the peer's announced source, journals it
+    by name, pins it against a redirect rewrite, and the pair switches
+    and comes back. Two passes, identical digests — the rig's network
+    is fresh each run so the compare stays within it."""
+    case = Case('tracking-source-auth',
+                'tracking-source announcement authenticity',
+                'http')
+    try:
+        if not all(ctx.get(action)
+                   for action in ('stop_controller',
+                                  'start_controller',
+                                  'restart_controller')):
+            return case.finish(
+                'inconclusive', 'the run context carries no '
+                'controller lifecycle actions — the unsourced '
+                'window cannot open')
+        deadline = time.monotonic() + AUTH_SETTLE
+        if _try_role(ctx, ctx['active']) is None \
+                and _try_role(ctx, ctx['standby']) is None:
+            return case.finish(
+                'inconclusive', 'neither peer\'s monitor answers — '
+                'the rig is unreachable')
+        owner = wait_for(lambda: _pair_active(ctx), deadline)
+        if owner is None:
+            return case.finish('failed', 'no peer reports '
+                               'role=active')
+        if owner != 'active':
+            # The announced-only demotion exists only on ctrl-a —
+            # the unconfigured field owner. Put the canonical layout
+            # back before the leg.
+            try:
+                _settle_call(ctx['standby'] + '/demote')
+                _settle_call(ctx['active'] + '/promote')
+            except Exception:
+                pass
+            restored = wait_for(
+                lambda: (_pair_active(ctx) == 'active' or None)
+                and _tracking_standby(ctx, 'standby'),
+                time.monotonic() + AUTH_SETTLE, interval=AUTH_POLL)
+            if not restored:
+                return case.finish(
+                    'inconclusive', 'the pair is switched — ctrl-b '
+                    'owns the field — and could not be restored to '
+                    'the announced-demotion layout')
+            case.observe('restored ctrl-a as field owner before '
+                         'the leg')
+        digests = []
+        for number in (1, 2):
+            digest, violations, evidence = \
+                _tracking_source_auth_pass(ctx, 'active', 'standby')
+            ref = save_evidence(
+                ctx['evidence_dir'],
+                'tracking-source-auth-pass-' + str(number) + '.json',
+                evidence)
+            case.evidence('file', ref, 'tracking-source-auth pass '
+                          + str(number) + ' — the crafted announces, '
+                          'the demote answers, the adoption audit, '
+                          'and the normalized digest')
+            if violations:
+                diagnostic = 'tracking-source-auth-failed' \
+                    if any(name == 'tracking-source-auth-failed'
+                           for name, _ in violations.values()) \
+                    else 'tracking-source-auth-nondeterministic'
+                return case.finish(
+                    'failed', diagnostic + ': ' + '; '.join(
+                        detail for _, detail in
+                        list(violations.values())[:4]))
+            digests.append(digest)
+        if digests[0] != digests[1]:
+            return case.finish(
+                'failed', 'tracking-source-auth-nondeterministic: '
+                'the two passes\' digests diverged: '
+                + json.dumps(digests[0], sort_keys=True) + ' vs '
+                + json.dumps(digests[1], sort_keys=True))
+        case.observe('two tracking-source-auth passes, identical '
+                     'digests')
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+# --------------------------------------------------------------------
+# Decision 70's declared-once alarm rationalization record on the
+# deployed pair (WW-ALM-001's master-alarm-database clause, WW-OPS-002's
+# bounded retune path). Every managed alarm instance in the rig model
+# carries the record's two halves: the prose `rationalization` block —
+# consequence of inaction, required action, display/procedure
+# reference — served per instance on the signal index's `components`
+# section, and the `priority`/`class`/`response_ticks` Int parameters
+# served live on the snapshot's `parameters` section and tunable
+# through the receipted `set_parameter` path. Identity lands as the
+# instance plus the `Signal` on its standing `alarm` point — the
+# journaled point the durable record's `point_changed` entries name.
+# The case joins the served records to the registry's descriptors and
+# the standing signals by the shared `kind:id` name, audits the field
+# owner's --journal-file for every standing point's transition record,
+# then runs one receipted `response_ticks` retune — applied, served,
+# and restored to the declared value — and re-reads the sections for
+# the consistency a declared-once record owes. Named diagnostics:
+# rationalization-failed for a serving-contract miss,
+# rationalization-nondeterministic when the same section disagrees
+# with itself across reads.
+
+RATIONALIZATION_SETTLE = 30    # bound on the pair reporting settled
+RATIONALIZATION_DEADLINE = 30  # bound on each retune settle/serve wait
+
+# The managed alarm kinds — every declared instance of either carries
+# the decision-70 record.
+RATIONALIZATION_KINDS = ('managed-latching-alarm',
+                         'managed-bool-latching-alarm')
+
+# The prose fields a complete rationalization block carries.
+RATIONALIZATION_FIELDS = ('consequence', 'required_action',
+                          'reference')
+
+# The declared (priority, class, response_ticks) the rig model pins on
+# the named instances — asserted verbatim off the served report: the
+# wet-well high alarm and the per-pump fault alarms.
+RATIONALIZATION_DECLARED = {
+    'managed-latching-alarm:5': (1, 1, 30),
+    'managed-bool-latching-alarm:22': (2, 2, 60),
+    'managed-bool-latching-alarm:36': (2, 2, 60)}
+
+# The identity joins the rig model declares on the named instances —
+# instance plus the Signal on its standing alarm point.
+RATIONALIZATION_STANDING = {
+    'managed-latching-alarm:5': ('lah-alarm', 1003),
+    'managed-bool-latching-alarm:11': ('power-fail-alarm', 1053),
+    'managed-bool-latching-alarm:22': ('p101-fault-alarm', 1073)}
+
+# The retune leg's instance — the wet-well high alarm.
+RATIONALIZATION_RETUNE = 'managed-latching-alarm:5'
+
+
+def _standing_alarm_point(descriptor):
+    """The point a descriptor's `alarm` port binds — the standing
+    output the instance-plus-Signal identity names — or None."""
+    for port in descriptor.get('ports') or []:
+        if isinstance(port, dict) and port.get('name') == 'alarm':
+            return port.get('point')
+    return None
+
+
+def _journaled_point_changes(records):
+    """The point set a parsed --journal-file's `point_changed` entries
+    name."""
+    changed = set()
+    for item in records:
+        observed = _journal_observation(item)
+        if observed is not None and observed[0] == 'point_changed':
+            changed.add(observed[1])
+    return changed
+
+
+def _tune_and_served(ctx, base, component, name, value, deadline):
+    """One receipted `set_parameter` plus the served-report readback:
+    submit through POST /command, wait for the terminal receipt at the
+    captured submission index, then for the parameter report serving
+    the new value. Returns the leg's audit record — `settled` is the
+    receipt's normalized outcome key, None when the submission never
+    reached a terminal verdict."""
+    command = {'set_parameter': {'component': component, 'name': name,
+                                 'value': {'int': value}}}
+    record = {'command': command, 'value': value}
+    index = _next_receipt_index(ctx, base)
+    try:
+        status, receipt = http_json('POST', base + '/command',
+                                    {'command': command,
+                                     'actor': 'qa-lane'})
+    except urllib.error.HTTPError as exc:
+        record['status'] = exc.code
+        try:
+            record['receipt'] = json.loads(exc.read() or b'null')
+        except Exception:
+            record['receipt'] = None
+        finally:
+            exc.close()
+        return record
+    record['status'] = status
+    record['receipt'] = receipt
+    if status != 200:
+        return record
+    settled = wait_for(
+        lambda: _submitted_receipt(ctx, base, index, command),
+        deadline)
+    record['settled'] = _outcome_key(settled)
+    record['served'] = bool(wait_for(
+        lambda: _parameter_value(s, component, name) == value
+        if (s := _try_snapshot(ctx, base)) else None,
+        deadline))
+    record['served_value'] = _parameter_value(
+        _try_snapshot(ctx, base) or {}, component, name)
+    return record
+
+
+def scenario_alarm_rationalization(ctx):
+    """The deployed pair serves every managed alarm instance's
+    declared-once rationalization record: the prose block on the
+    signal index's components section, the live declared
+    priority/class/response_ticks on the snapshot's parameters, the
+    standing Signal points journaled, and a receipted response_ticks
+    retune applying, serving, and restoring."""
+    case = Case(
+        'alarm-rationalization',
+        'Served alarm rationalization record and priority data',
+        'with the deployed pair settled, GET /signals\' components '
+        'section carries one ComponentRecord per managed alarm '
+        'instance — kind:id names each carrying a complete '
+        'rationalization block (consequence, required action, '
+        'reference) — GET /snapshot\'s parameters section reports '
+        'every instance\'s live priority/class/response_ticks with '
+        'the pinned instances\' declared values, the field owner\'s '
+        'durable journal carries a point_changed entry on every '
+        'instance\'s standing Signal point (lah-alarm 1003, '
+        'power-fail-alarm 1053, p101-fault-alarm 1073), a receipted '
+        'set_parameter retune of response_ticks settles applied and '
+        'serves the new value before the declared value restores, '
+        'and a re-read serves the same record')
+    try:
+        # Self-contained on either role layout, like evidence-capture:
+        # a lone replay finds the fresh rig (ctrl-a active), the full
+        # suite reaches this case past the model-revision roll where
+        # the revised peer owns the field — the derived document's
+        # additive-only recipe leaves the alarm set untouched.
+        active = wait_for(lambda: _settled_active(ctx),
+                          time.monotonic() + RATIONALIZATION_SETTLE)
+        if active is None:
+            return case.finish('failed', 'no peer reports role=active')
+        base = ctx[active]
+        journal_path = (ctx.get('journal_files') or {}).get(active)
+        if journal_path is None:
+            return case.finish('inconclusive', 'the run context '
+                               'carries no journal-file path for the '
+                               'field owner')
+        case.observe('served record against ' + active + ' (' + base
+                     + ')')
+
+        _, signals = http_json('GET', base + '/signals')
+        snap = _snapshot(ctx, base)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'alarm-rationalization-signals.json',
+                            signals)
+        case.evidence('file', ref, 'the signal index\'s components '
+                      'records and standing-point signals')
+        ref = save_evidence(ctx['evidence_dir'],
+                            'alarm-rationalization-parameters.json',
+                            {'descriptors': snap.get('descriptors'),
+                             'parameters': snap.get('parameters')})
+        case.evidence('file', ref, 'the served descriptors and the '
+                      'live parameter report')
+
+        # The coverage leg: one ComponentRecord per managed alarm
+        # instance — the components section and the snapshot's
+        # descriptor set must agree on the managed set — each record
+        # named by the shared kind:id convention and carrying a
+        # complete prose block.
+        components = signals.get('components')
+        parameters = snap.get('parameters')
+        descriptors_wire = snap.get('descriptors')
+        if not isinstance(components, list) \
+                or not isinstance(parameters, list) \
+                or not isinstance(descriptors_wire, list):
+            return case.finish('inconclusive', 'a served section the '
+                               'record joins through is absent '
+                               '(components/descriptors/parameters) '
+                               '— the deployed build predates the '
+                               'contract')
+        records = {}
+        malformed = []
+        for entry in components:
+            if not isinstance(entry, dict) \
+                    or entry.get('kind') not in RATIONALIZATION_KINDS:
+                continue
+            if not isinstance(entry.get('name'), str):
+                malformed.append(entry)
+                continue
+            records[entry['name']] = entry
+        descriptors = {}
+        for entry in descriptors_wire:
+            if isinstance(entry, dict) \
+                    and entry.get('kind') in RATIONALIZATION_KINDS \
+                    and isinstance(entry.get('name'), str):
+                descriptors[entry['name']] = entry
+        if not records and not descriptors:
+            return case.finish('inconclusive', 'the served sections '
+                               'omit the managed alarm records — the '
+                               'deployed model is not the rig\'s '
+                               'rationalized set')
+        bad = []
+        if malformed:
+            bad.append('unnamed managed-alarm records: '
+                       + json.dumps(malformed)[:200])
+        if sorted(records) != sorted(descriptors):
+            bad.append('the components section and the served '
+                       'descriptors disagree on the managed alarm '
+                       'set: '
+                       + json.dumps({'records': sorted(records),
+                                     'descriptors':
+                                     sorted(descriptors)}))
+        for name in sorted(records):
+            record = records[name]
+            if not name.startswith(record['kind'] + ':'):
+                bad.append('record ' + name + ' is not named by its '
+                           'kind:id identity')
+                continue
+            block = record.get('rationalization')
+            missing = [field for field in RATIONALIZATION_FIELDS
+                       if not isinstance((block or {}).get(field), str)
+                       or not block[field].strip()]
+            if not isinstance(block, dict) or missing:
+                bad.append(name + ' carries no complete '
+                           'rationalization block (missing '
+                           + ', '.join(missing or
+                                       RATIONALIZATION_FIELDS) + ')')
+        if bad:
+            return case.finish('failed', 'rationalization-failed: '
+                               + '; '.join(bad[:4]))
+        case.observe(str(len(records)) + ' managed alarm records '
+                     'served with rationalization blocks')
+
+        # The live-parameter leg: every instance's declared
+        # priority/class/response_ticks reported live, the pinned
+        # instances verbatim.
+        reported = {}
+        for entry in parameters:
+            if isinstance(entry, dict) \
+                    and isinstance(entry.get('name'), str):
+                reported[entry['name']] = entry.get('values') or {}
+        live = {}
+        bad = []
+        for name in sorted(records):
+            if name not in reported:
+                bad.append(name + ' serves no parameters entry')
+                continue
+            row = {}
+            for param in ('priority', 'class', 'response_ticks'):
+                number = _parameter_value(snap, name, param)
+                if not isinstance(number, int) \
+                        or isinstance(number, bool):
+                    bad.append(name + ' ' + param + ' is not served '
+                               'live: ' + json.dumps(number)[:80])
+                else:
+                    row[param] = number
+            if len(row) == 3:
+                live[name] = (row['priority'], row['class'],
+                              row['response_ticks'])
+                pin = RATIONALIZATION_DECLARED.get(name)
+                if pin is not None and live[name] != pin:
+                    bad.append(name + ' serves (priority, class, '
+                               'response_ticks) ' + str(live[name])
+                               + ' against the declared ' + str(pin))
+        if bad:
+            return case.finish('failed', 'rationalization-failed: '
+                               + '; '.join(bad[:4]))
+        case.observe('live parameters served for '
+                     + str(len(live)) + ' instances')
+
+        # The identity leg: the record's `reference` names the
+        # standing Signal on the instance's bound `alarm` point —
+        # instance plus signal, joined to the served records by name —
+        # and the durable journal's point_changed record names that
+        # point.
+        named = {entry.get('name'): entry
+                 for entry in signals.get('points') or []
+                 if isinstance(entry, dict)}
+        journal_records = _journal_entries(journal_path)
+        changed = _journaled_point_changes(journal_records)
+        missing_pins = [name for name in RATIONALIZATION_STANDING
+                        if name not in records]
+        if missing_pins:
+            return case.finish('inconclusive', 'the served records '
+                               'omit the pinned instances '
+                               + ', '.join(sorted(missing_pins))
+                               + ' — the deployed model is not the '
+                               'rig\'s declared set')
+        bad = []
+        identity = {}
+        for name in sorted(records):
+            reference = records[name]['rationalization']['reference']
+            signal = named.get(reference)
+            if signal is None or signal.get('signal') is None:
+                bad.append(name + ' reference ' + repr(reference)
+                           + ' names no served Signal')
+                continue
+            point = signal.get('point')
+            bound = _standing_alarm_point(
+                descriptors.get(name) or {})
+            if bound != point:
+                bad.append(name + ' reference ' + repr(reference)
+                           + ' lands on point ' + str(point)
+                           + ' while its alarm port binds '
+                           + str(bound))
+                continue
+            identity[name] = (reference, point)
+            if point not in changed:
+                bad.append('the durable journal names no '
+                           'point_changed on ' + name
+                           + '\'s standing point ' + str(point)
+                           + ' (' + str(reference) + ')')
+        for name, want in RATIONALIZATION_STANDING.items():
+            got = identity.get(name)
+            if got is not None and got != want:
+                bad.append(name + ' joins to (signal, point) '
+                           + str(got) + ' — the declared identity is '
+                           + str(want))
+        standing = {point for _, point in identity.values()}
+        entries = []
+        for item in journal_records:
+            observed = _journal_observation(item)
+            if observed is not None and observed[0] == 'point_changed' \
+                    and observed[1] in standing:
+                entries.append(item)
+        ref = save_evidence(
+            ctx['evidence_dir'],
+            'alarm-rationalization-journal.json',
+            {'path': str(journal_path),
+             'standing': {name: {'signal': signal, 'point': point}
+                          for name, (signal, point)
+                          in identity.items()},
+             'entries': entries})
+        case.evidence('file', ref, 'the durable journal\'s '
+                      'point_changed entries on the standing points')
+        if bad:
+            return case.finish('failed', 'rationalization-failed: '
+                               + '; '.join(bad[:4]))
+        case.observe('identity join: ' + str(len(identity))
+                     + ' standing points journaled')
+
+        # The declared-parameter half: a receipted response_ticks
+        # retune applies and serves, then the declared value restores
+        # the same way — the bounded-path clause.
+        component = RATIONALIZATION_RETUNE
+        current = live[component][2]
+        tuned = current + 1
+        deadline = time.monotonic() + RATIONALIZATION_DEADLINE
+        tune = _tune_and_served(ctx, base, component,
+                                'response_ticks', tuned, deadline)
+        restore = None
+        if tune.get('settled') == 'applied':
+            restore = _tune_and_served(ctx, base, component,
+                                       'response_ticks', current,
+                                       time.monotonic()
+                                       + RATIONALIZATION_DEADLINE)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'alarm-rationalization-retune.json',
+                            {'component': component, 'from': current,
+                             'to': tuned, 'tune': tune,
+                             'restore': restore})
+        case.evidence('file', ref, 'the retune and restore '
+                      'submissions, receipts, and readbacks')
+        if tune.get('status') != 200 \
+                or tune.get('settled') != 'applied':
+            return case.finish('failed', 'rationalization-failed: '
+                               'the retune never settled applied: '
+                               + json.dumps(tune,
+                                            sort_keys=True)[:300])
+        if not tune.get('served'):
+            return case.finish('failed', 'rationalization-failed: '
+                               'the applied retune never served '
+                               + str(tuned) + ' — the report reads '
+                               + str(tune.get('served_value')))
+        if not restore or restore.get('status') != 200 \
+                or restore.get('settled') != 'applied':
+            return case.finish('failed', 'rationalization-failed: '
+                               'the restore never settled applied: '
+                               + json.dumps(restore,
+                                            sort_keys=True)[:300])
+        if not restore.get('served'):
+            return case.finish('failed', 'rationalization-failed: '
+                               'the restored value never served '
+                               + str(current) + ' — the report reads '
+                               + str(restore.get('served_value')))
+        case.observe('retune ' + component + ' response_ticks '
+                     + str(current) + ' -> ' + str(tuned)
+                     + ' applied and served, restored to '
+                     + str(current))
+
+        # The consistency leg: the same sections re-read after the
+        # restore must serve the same record — a divergent answer is
+        # the nondeterministic miss, not a contract one.
+        _, signals2 = http_json('GET', base + '/signals')
+        snap2 = _snapshot(ctx, base)
+        records2 = {}
+        for entry in signals2.get('components') or []:
+            if isinstance(entry, dict) \
+                    and entry.get('kind') in RATIONALIZATION_KINDS \
+                    and isinstance(entry.get('name'), str):
+                records2[entry['name']] = entry
+        reported2 = {}
+        for entry in snap2.get('parameters') or []:
+            if isinstance(entry, dict) \
+                    and isinstance(entry.get('name'), str):
+                reported2[entry['name']] = entry.get('values') or {}
+        drift = []
+        for name in sorted(records):
+            record2 = records2.get(name)
+            if record2 is None \
+                    or record2.get('rationalization') \
+                    != records[name].get('rationalization'):
+                drift.append(name + ' rationalization')
+                continue
+            row2 = tuple(_parameter_value(snap2, name, param)
+                         for param in
+                         ('priority', 'class', 'response_ticks'))
+            if row2 != live.get(name):
+                drift.append(name + ' parameters ' + str(row2)
+                             + ' vs ' + str(live.get(name)))
+        ref = save_evidence(
+            ctx['evidence_dir'],
+            'alarm-rationalization-reread.json',
+            {'records': {name: (records2.get(name) or {})
+                              .get('rationalization')
+                         for name in sorted(records)},
+             'parameters': {name: (reported2.get(name) or {})
+                            for name in sorted(records)}})
+        case.evidence('file', ref, 'the sections re-read after the '
+                      'restore')
+        if drift:
+            return case.finish(
+                'failed', 'rationalization-nondeterministic: the '
+                'served record moved between reads: '
+                + '; '.join(drift[:4]))
+        return case.finish('passed')
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
 # The restart case runs ahead of the failover case: the peer it stops
 # is ctrl-a — launched without --standby, so its resumed process comes
 # back active — while ctrl-b is the tracking standby the settle check
@@ -16348,7 +20404,17 @@ def scenario_demote_settle_uniqueness(ctx):
 # that window: it races receipted submissions against the documented
 # demote on whichever peer owns the field, cycles the switch twice per
 # pass, and lands the pair back on the launch roles before the tune
-# case's a->b switch. The
+# case's a->b switch. The demote-pending-command case shares that
+# window: it admits one receipted write on the field owner, demotes
+# inside the pending window, audits the single settle on the served
+# and durable records, and — two passes switching twice — lands the
+# pair back on the launch roles before the tune case's a->b switch.
+# The demote-reconvergence case shares that window: it demotes the
+# launched active, audits the announced tracking source and the
+# reconvergence it drives, fails back through the same documented
+# switch, and — two passes switching twice — lands the pair back on
+# the launch roles before the tune case's a->b switch.
+# The
 # parameter-tune case also runs ahead of the
 # failover leg: only ctrl-b tracks (its --standby source is ctrl-a),
 # so a tuned value can cross a checkpoint only from ctrl-a to ctrl-b,
@@ -16383,14 +20449,22 @@ def scenario_demote_settle_uniqueness(ctx):
 # found it. The event-retention case rides beside the
 # served-interface case — the same registry surface, the same
 # either-layout self-containment, and nothing but receipted drives on
-# the field-owning peer. The unclaimed-rearm case is the same shape:
+# the field-owning peer. The alarm-rationalization case rides
+# beside them — the same registry surface plus the field owner's
+# durable journal, the same either-layout self-containment, and one
+# receipted retune it restores before returning. The
+# unclaimed-rearm case is the same shape:
 # its preempt-and-release induction opens the ownerless window behind
 # whichever peer owns the field, watches the recorded owner's inline
 # re-arm and the fencing it restores, and leaves the claim state and
 # launch roles as found. The unavailable-fallback case is
 # self-contained on either role layout as well: it drives per-point
 # faults on the shared field through the shipped plant tool and
-# clears them all in teardown. The dcs-ctl case closes the schedule:
+# clears them all in teardown. The power-fail-trip case is the same
+# shape: it writes the field contact through the plant protocol under
+# whichever peer owns the field, restores the contact and re-arms every
+# alarm latch it drove, and perturbs no role — a simulated process
+# trip is not peer loss. The dcs-ctl case closes the schedule:
 # it observes the post-failover role layout and perturbs nothing
 # earlier cases established.
 SCENARIOS = (scenario_controller_active, scenario_standby_tracking,
@@ -16399,22 +20473,28 @@ SCENARIOS = (scenario_controller_active, scenario_standby_tracking,
              scenario_field_claim, scenario_fenced_writer_degrade,
              scenario_dead_peer_latency,
              scenario_monitor_starvation, scenario_duty_rotation,
+             scenario_pump_out_of_service,
              scenario_force_carryover,
              scenario_backup_health, scenario_source_failover,
              scenario_lag_staging,
              scenario_standby_loss,
              scenario_demote_settle_uniqueness,
+             scenario_demote_pending_command,
+             scenario_demote_reconvergence,
+             scenario_tracking_source_auth,
              scenario_parameter_tune_carryover, scenario_failover,
              scenario_checkpoint_negotiation,
              scenario_doomed_startup_claim,
              scenario_incompatible_revision, scenario_model_revision,
              scenario_evidence_capture, scenario_served_interface,
              scenario_event_retention,
+             scenario_alarm_rationalization,
              scenario_force_release, scenario_consumer_schedule,
              scenario_command_admission, scenario_command_availability,
              scenario_plant_link_loss,
              scenario_field_fault, scenario_unclaimed_rearm,
-             scenario_unavailable_fallback, scenario_dcs_ctl)
+             scenario_unavailable_fallback, scenario_power_fail_trip,
+             scenario_dcs_ctl)
 
 
 def run_all(ctx, timeline):

@@ -6,17 +6,19 @@
 //! monitored loop's `track_cycle` does.
 
 use dcs_core::{
-    ComponentDescriptor, Direction, Divergence, EmittedEvent, EventDecl, EventField,
-    EventFieldKind, EventRetention, EventValue, IoDriver, IoError, JournalEvent, PointId, Role,
-    Sample, StandbySync, StateMap, SwitchError, Tick, Value, ValueKind,
+    CommandOutcome, ComponentDescriptor, Direction, Divergence, EmittedEvent, EventDecl,
+    EventField, EventFieldKind, EventRetention, EventValue, IoDriver, IoError, JournalEvent,
+    PointId, Role, Sample, StandbySync, StateMap, SwitchError, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorClient};
 use dcs_runtime::{
-    Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap, StepError,
+    Checkpoint, Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap,
+    StepError,
 };
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::io::{Read, Write};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -184,6 +186,20 @@ fn emitter_executor(driver: &'static StubDriver) -> Executor<'static> {
     Executor::new(driver, PointMap::new(), vec![Box::new(Emitter { n: 0 })]).unwrap()
 }
 
+/// The dialable form of a bound monitor address: in this in-process
+/// rig a wildcard bind is reached through loopback — a deployment's
+/// answer to the same `local_addr` is the peer's `host:port` name.
+fn dialable(bound: SocketAddr) -> SocketAddr {
+    SocketAddr::new(
+        match bound.ip() {
+            IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ip => ip,
+        },
+        bound.port(),
+    )
+}
+
 /// One serving monitor: the `Arc` shares the handle so `stop` can drop
 /// the last reference — closing the listener so a later connect is
 /// refused, the simulated process outage the pair tests use.
@@ -196,7 +212,7 @@ struct Serving {
 impl Serving {
     fn start(monitor: Monitor<'static>) -> Self {
         let monitor = Arc::new(monitor);
-        let client = MonitorClient::new(monitor.local_addr());
+        let client = MonitorClient::new(dialable(monitor.local_addr()));
         let serving = Arc::clone(&monitor);
         Self {
             monitor,
@@ -249,20 +265,40 @@ impl DrivenStandby {
         failover: Option<u32>,
         build: fn(&'static StubDriver) -> Executor<'static>,
     ) -> (Self, Serving) {
+        Self::start_binding(failover, build, "127.0.0.1:0", "127.0.0.1:0", None)
+    }
+
+    /// `active_bind` and `standby_bind` are the monitors' listen
+    /// addresses — `0.0.0.0:0` reproduces the wildcard bind every
+    /// container deployment carries, whose `local_addr` is the
+    /// unroutable announce the follow-peer contract must resolve.
+    /// `key` installs the pair's shared tracking secret on both
+    /// monitors — the `--pair-token` deployment's shape.
+    fn start_binding(
+        failover: Option<u32>,
+        build: fn(&'static StubDriver) -> Executor<'static>,
+        active_bind: &str,
+        standby_bind: &str,
+        key: Option<u64>,
+    ) -> (Self, Serving) {
         let active_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
             (PointId(10), Value::Float(3.0)),
             (PointId(20), Value::Float(0.0)),
             (PointId(30), Value::Float(0.0)),
         ])));
-        let active = Serving::start(
+        let active = Serving::start(keyed(
             Monitor::bind_peer(
-                "127.0.0.1:0",
+                active_bind,
                 Peer::active(build(active_driver), None),
                 signal_index(),
             )
             .unwrap(),
-        );
-        let active_addr = active.monitor.local_addr();
+            key,
+        ));
+        // The standby's configured track is the deployment's
+        // `--standby <host:port>` — the dialable name, never the
+        // active's wildcard bind address.
+        let active_addr = dialable(active.monitor.local_addr());
 
         let standby_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
             (PointId(10), Value::Float(3.0)),
@@ -274,12 +310,14 @@ impl DrivenStandby {
             peer = peer.with_failover(budget);
         }
         let standby = Serving::start(
-            Monitor::bind_peer("127.0.0.1:0", peer, signal_index())
-                .unwrap()
-                .driven(Driven {
-                    track: Some(active_addr),
-                    after_scan: None,
-                }),
+            keyed(
+                Monitor::bind_peer(standby_bind, peer, signal_index()).unwrap(),
+                key,
+            )
+            .driven(Driven {
+                track: Some(active_addr),
+                after_scan: None,
+            }),
         );
         (
             Self {
@@ -289,6 +327,23 @@ impl DrivenStandby {
             },
             active,
         )
+    }
+
+    /// Both peers launched with the pair's tracking secret — the
+    /// `--pair-token` deployment: `?prove=` answers sign and the
+    /// announced-source pulls verify.
+    fn start_keyed(key: u64) -> (Self, Serving) {
+        Self::start_binding(None, executor, "127.0.0.1:0", "127.0.0.1:0", Some(key))
+    }
+}
+
+/// `key` installs the pair's shared tracking secret on `monitor` —
+/// the `--pair-token` deployment's shape; `None` leaves the unkeyed
+/// contract.
+fn keyed(monitor: Monitor<'static>, key: Option<u64>) -> Monitor<'static> {
+    match key {
+        Some(key) => monitor.with_pair_key(key),
+        None => monitor,
     }
 }
 
@@ -591,15 +646,30 @@ fn a_spoofed_peer_announce_cannot_redirect_the_demotion_tracking_source() {
     // Demotion follows the recorded real source: the demoted peer's
     // tracking pull converges against the standby that announced
     // itself — a pull toward the planted address would have reported
-    // `degraded` naming it.
+    // `degraded` naming it. The successor still owns nothing — the
+    // demote→promote gap is an unowned line — so the honest interim
+    // verdict is `orphaned` until its promotion claims the field.
     assert_eq!(active.client.demote().unwrap().role, Role::Demoting);
     active.client.advance(1).unwrap();
     let report = active.client.role().unwrap();
     assert_eq!(report.role, Role::Standby);
     assert!(
-        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        matches!(report.sync, Some(StandbySync::Orphaned { .. })),
         "the demoted peer tracks its announced successor, not the \
          spoofed address: {report:?}"
+    );
+    assert_eq!(
+        standby.standby.client.promote().unwrap().role,
+        Role::Promoting
+    );
+    standby.standby.client.advance(1).unwrap();
+    active.client.advance(1).unwrap();
+    assert!(
+        matches!(
+            active.client.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the demoted peer reconverges once the successor owns the field"
     );
 
     // A field owner whose only "announce" was the spoofed one keeps
@@ -638,6 +708,747 @@ fn a_spoofed_peer_announce_cannot_redirect_the_demotion_tracking_source() {
         Some("127.0.0.1:12345".parse().unwrap())
     );
     lonely.stop();
+}
+
+/// The QA finding `follow-peer-announces-unroutable-bind-address`: a
+/// tracking standby whose monitor binds the wildcard — every container
+/// deployment's `--listen 0.0.0.0:<port>` — announces that bind
+/// address through its `GET /checkpoint?peer=` pulls, and the serving
+/// monitor resolves it to the pull connection's proven source rather
+/// than recording the unroutable wildcard. Demoting the field owner
+/// then follows the resolved address: the demoted peer's checkpoint
+/// pull targets a routable address — the pull's source IP, loopback in
+/// this in-process rig, the peer's container IP on the shipped rig —
+/// and reconverges, staying promotable instead of looping back onto
+/// itself forever.
+#[test]
+fn a_wildcard_bound_peers_announce_tracks_a_routable_source() {
+    let (standby, active) =
+        DrivenStandby::start_binding(None, executor, "127.0.0.1:0", "0.0.0.0:0", None);
+    let standby_bound = standby.standby.monitor.local_addr();
+    assert!(
+        standby_bound.ip().is_unspecified(),
+        "the standby binds the wildcard like the container deployment: {standby_bound}"
+    );
+
+    // The tracking pull announces `local_addr` — `0.0.0.0:<port>`, the
+    // reproduction's unroutable address — and the serving monitor
+    // resolves the wildcard to the pull's proven source: the recorded
+    // follow-peer source is the connection's IP, never the wildcard.
+    standby.standby.client.advance(1).unwrap();
+    let resolved = active.monitor.tracking_source();
+    assert_eq!(
+        resolved,
+        Some(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            standby_bound.port()
+        )),
+        "the announced wildcard resolves to the connection's source"
+    );
+
+    // Demotion follows the resolved source: the pull reaches the
+    // announcing peer — not the demoted peer's own loopback where
+    // nothing listens on that port — so the demoted standby converges
+    // and stays promotable. The resolved successor owns nothing until
+    // promoted, so the pull's honest verdict is `orphaned` — which
+    // promotes on the same convergence `tracking` proves.
+    assert_eq!(active.client.demote().unwrap().role, Role::Demoting);
+    active.client.advance(1).unwrap();
+    let report = active.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert!(
+        matches!(report.sync, Some(StandbySync::Orphaned { .. })),
+        "the demoted peer reconverges on the resolved source: {report:?}"
+    );
+    assert_eq!(active.client.promote().unwrap().role, Role::Promoting);
+}
+
+/// The QA finding `checkpoint-announced-peer-unroutable-wildcard`'s
+/// full reproduction: *both* peers' monitors bound on the wildcard the
+/// documented container deployment's `--listen 0.0.0.0:<port>`
+/// produces, then the documented demote-then-promote switchover order.
+/// The demoted launched active's recorded tracking source is the
+/// standby's announced address resolved through its pull connection's
+/// proven source — never the unroutable `0.0.0.0` the pull announced —
+/// so the demoted peer pulls its successor and reconverges to
+/// `Tracking`. On the reported build this stranded `degraded` on
+/// `fetch from 0.0.0.0:<port>` forever, and the unconditional per-pull
+/// overwrite re-poisoned a manually corrected source within one pull
+/// cycle — only a process restart recovered, at the price of claim
+/// churn. Now each pull re-derives the recorded source from the
+/// connection itself, so the overwrite cannot drift it back.
+#[test]
+fn a_wildcard_bound_pair_reconverges_the_demoted_peer() {
+    let (standby, active) =
+        DrivenStandby::start_binding(None, executor, "0.0.0.0:0", "0.0.0.0:0", None);
+    assert!(
+        active.monitor.local_addr().ip().is_unspecified()
+            && standby.standby.monitor.local_addr().ip().is_unspecified(),
+        "both peers bind the wildcard like the container deployment"
+    );
+
+    // Converge the standby: its tracking pull announces
+    // `0.0.0.0:<port>` — the reproduction's unroutable address — and
+    // the active records the connection-proven resolution.
+    active.client.advance(3).unwrap();
+    standby.standby.client.advance(1).unwrap();
+    assert!(matches!(
+        standby.standby.client.role().unwrap().sync,
+        Some(StandbySync::Tracking { .. })
+    ));
+    assert_eq!(
+        active.monitor.tracking_source(),
+        Some(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            standby.standby.monitor.local_addr().port()
+        )),
+        "the recorded source derives from the pull connection's remote \
+         address, never the announced wildcard"
+    );
+
+    // The documented switchover order: demote the field owner first,
+    // then promote the standby.
+    assert_eq!(active.client.demote().unwrap().role, Role::Demoting);
+    assert_eq!(
+        standby.standby.client.promote().unwrap().role,
+        Role::Promoting
+    );
+    standby.standby.client.advance(1).unwrap();
+    assert_eq!(standby.standby.client.role().unwrap().role, Role::Active);
+
+    // The demoted peer's next scan cycle pulls the resolved source and
+    // reconverges — where the reported build looped on `fetch from
+    // 0.0.0.0:<port>: Connection refused` forever.
+    active.client.advance(1).unwrap();
+    let report = active.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted peer reconverges on the resolved source: {report:?}"
+    );
+
+    // Every further pull re-derives the recorded source from the
+    // connection — the overwrite cannot re-poison it — and the
+    // demoted peer stays promotable, so fail-back works without a
+    // restart.
+    active.client.advance(1).unwrap();
+    let recorded = active.monitor.tracking_source().unwrap();
+    assert!(
+        !recorded.ip().is_unspecified() && recorded.port() != 0,
+        "the per-pull overwrite re-derives a dialable source: {recorded}"
+    );
+    assert_eq!(active.client.promote().unwrap().role, Role::Promoting);
+}
+
+/// A closed loopback port — nothing listens there, so a tracking pull
+/// aimed at it is refused: the `closed_port` convention the
+/// reference-plant peer-announce leg uses for its crafted announce.
+fn closed_port() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    addr
+}
+
+/// A hostile checkpoint server on the test network — the QA
+/// reproduction's interposer: it answers every checkpoint pull with
+/// the forged document it was given, whatever that claims. Runs on
+/// its own thread until dropped.
+struct Hostile {
+    addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Hostile {
+    fn serve(forged: &Checkpoint) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = serde_json::to_string(forged).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            while !stopping.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                        let mut seen = Vec::new();
+                        let mut buf = [0u8; 4096];
+                        loop {
+                            match stream.read(&mut buf) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    seen.extend_from_slice(&buf[..n]);
+                                    if seen.windows(4).any(|window| window == b"\r\n\r\n") {
+                                        break;
+                                    }
+                                    if seen.len() > 65536 {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                             Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.flush();
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            addr,
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Hostile {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// The QA finding `checkpoint-peer-hint-fabricates-tracking-source`'s
+/// first half: on a lone field owner with no configured source, a
+/// same-source `?peer=` announce naming a closed port lands as the
+/// hint — the serving side cannot tell the puller's monitor port from
+/// any other same-IP port — but the hint is unverified, so it must
+/// not arm the demotion: `POST /demote` still refuses
+/// `no_tracking_source` and the instance stays the field owner
+/// instead of stranding `degraded` on a pull that can never land.
+#[test]
+fn announced_hint_to_a_dead_port_cannot_unblock_no_tracking_source() {
+    let lonely_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let lonely = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(executor(lonely_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    // No hint yet: the guard refuses.
+    let error = lonely.client.demote().unwrap_err();
+    assert!(
+        error.to_string().contains("no_tracking_source"),
+        "a sourceless owner refuses demotion: {error}"
+    );
+
+    // The same-source announce lands as the recorded hint — the
+    // checkpoint read still answers `200`.
+    let dead = closed_port();
+    lonely.client.checkpoint_announcing(dead).unwrap();
+    assert_eq!(lonely.monitor.tracking_source(), Some(dead));
+
+    // But the dead hint cannot unblock the guard: demotion still
+    // refuses, the instance stays the field owner, and no adoption is
+    // journaled.
+    let error = lonely.client.demote().unwrap_err();
+    assert!(
+        error.to_string().contains("no_tracking_source"),
+        "a dead announced hint must not arm the demotion: {error}"
+    );
+    assert_eq!(lonely.client.role().unwrap().role, Role::Active);
+    assert!(
+        lonely
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .all(|entry| !matches!(entry.event, JournalEvent::TrackingSourceAdopted { .. })),
+        "a refused demotion adopts no tracking source"
+    );
+}
+
+/// The finding's second half: the same-source announce names a live
+/// hostile endpoint serving a forged checkpoint far ahead of the
+/// run's tick. The hint lands — like any same-IP port claim — but the
+/// demotion verifies it first: the forged stream is not this run's
+/// continuation, so `POST /demote` refuses `no_tracking_source`,
+/// the run keeps its tick, and nothing journals an adoption.
+#[test]
+fn announced_hint_to_a_hostile_checkpoint_server_cannot_unblock_no_tracking_source() {
+    let lonely_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let lonely = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(executor(lonely_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    lonely.client.advance(3).unwrap();
+    let tick = lonely.client.role().unwrap().tick;
+
+    // The forged document: the run's own checkpoint with the tick
+    // rewritten far ahead — the reproduction's `tick 793 -> 99999`
+    // jump — served by the interposer.
+    let mut forged = lonely.client.checkpoint().unwrap();
+    forged.tick = Tick(99999);
+    let hostile = Hostile::serve(&forged);
+
+    lonely.client.checkpoint_announcing(hostile.addr).unwrap();
+    assert_eq!(lonely.monitor.tracking_source(), Some(hostile.addr));
+
+    let error = lonely.client.demote().unwrap_err();
+    assert!(
+        error.to_string().contains("no_tracking_source"),
+        "a forged announced stream must not arm the demotion: {error}"
+    );
+    // The run is undisturbed: still the owner, same tick, and the
+    // journal names no adoption — the forgery was never adopted,
+    // silently or otherwise.
+    let report = lonely.client.role().unwrap();
+    assert_eq!(report.role, Role::Active);
+    assert_eq!(report.tick, tick);
+    assert!(
+        lonely
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .all(|entry| !matches!(
+                entry.event,
+                JournalEvent::TrackingSourceAdopted { .. } | JournalEvent::RoleChanged { .. }
+            )),
+        "a refused demotion journals neither an adoption nor a role change"
+    );
+}
+
+/// The finding's audit half on the honest path: a field owner with no
+/// configured source demotes toward the address its tracking peer
+/// announced — the follow-peer contract — and the demotion journals
+/// the adopted source naming it, so the run's move onto the announced
+/// endpoint is visible. The demoted peer then reconverges on that
+/// successor and stays promotable.
+#[test]
+fn demote_toward_a_verified_announced_source_journals_the_adopted_source() {
+    let (standby, active) = DrivenStandby::start(None);
+
+    // Converge: the standby's pull announces its own address, which
+    // the owner records as its demotion fallback.
+    active.client.advance(3).unwrap();
+    standby.standby.client.advance(1).unwrap();
+    let successor = active.monitor.tracking_source().unwrap();
+
+    assert_eq!(active.client.demote().unwrap().role, Role::Demoting);
+    // The adoption is journaled at the demotion boundary, naming the
+    // verified source — the audit record of where the run moved.
+    assert!(
+        active
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .any(|entry| matches!(
+                entry.event,
+                JournalEvent::TrackingSourceAdopted { source } if source == successor
+            )),
+        "the demotion must journal its adopted tracking source: {:?}",
+        active.client.journal(0).unwrap()
+    );
+
+    // And the demoted peer reconverges on that successor instead of
+    // stranding, staying promotable for fail-back. The adopted source
+    // owns nothing until promoted, so the honest verdict while the
+    // field stands unclaimed is `orphaned` — promotable on the same
+    // convergence `tracking` proves.
+    active.client.advance(1).unwrap();
+    let report = active.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert!(
+        matches!(report.sync, Some(StandbySync::Orphaned { .. })),
+        "the demoted peer reconverges on the adopted source: {report:?}"
+    );
+    assert_eq!(active.client.promote().unwrap().role, Role::Promoting);
+}
+
+/// The finding's silence half: even a same-IP forgery the demotion
+/// gate lets through — a live endpoint serving this run's line at a
+/// plausible tick — is never adopted silently. The demotion journals
+/// the adopted source naming the hostile endpoint, so the audit
+/// shows exactly where the run moved.
+#[test]
+fn adoption_from_an_announced_source_is_journaled_with_its_source() {
+    let lonely_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let lonely = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(executor(lonely_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    lonely.client.advance(3).unwrap();
+
+    // A near-tick forgery: this run's line at the next tick with a
+    // planted output image — plausible enough to verify, hostile all
+    // the same.
+    let mut forged = lonely.client.checkpoint().unwrap();
+    forged.tick = Tick(forged.tick.0 + 1);
+    forged
+        .outputs
+        .insert(PointId(20), Sample::good(Value::Float(1234.0), forged.tick));
+    let hostile = Hostile::serve(&forged);
+
+    lonely.client.checkpoint_announcing(hostile.addr).unwrap();
+    assert_eq!(lonely.client.demote().unwrap().role, Role::Demoting);
+    assert!(
+        lonely
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .any(|entry| matches!(
+                entry.event,
+                JournalEvent::TrackingSourceAdopted { source } if source == hostile.addr
+            )),
+        "even a plausible hostile adoption must journal its source: {:?}",
+        lonely.client.journal(0).unwrap()
+    );
+
+    // The demoted peer adopts the hostile stream — and the adoption
+    // the journal names is the one the run now carries: its tracked
+    // alignment is the forged checkpoint's tick.
+    lonely.client.advance(1).unwrap();
+    let report = lonely.client.role().unwrap();
+    assert!(
+        matches!(
+            report.sync,
+            Some(StandbySync::Tracking { aligned }) if aligned == forged.tick
+        ),
+        "the demoted peer aligned on the hostile stream: {report:?}"
+    );
+}
+
+/// The finding's redirect half on the standing tracking path: the
+/// source a verified announced demotion adopts is also the one the
+/// demoted peer keeps pulling — pinned — so a later `?peer=` rewrite,
+/// the same unauthenticated mutation that planted the hint, cannot
+/// move the tracking onto an endpoint the demotion never proved.
+#[test]
+fn a_reannounce_cannot_redirect_the_demoted_peers_tracking() {
+    let (standby, active) = DrivenStandby::start(None);
+    active.client.advance(3).unwrap();
+    standby.standby.client.advance(1).unwrap();
+    let successor = active.monitor.tracking_source().unwrap();
+
+    assert_eq!(active.client.demote().unwrap().role, Role::Demoting);
+
+    // The same-source re-announce still lands — the read endpoint
+    // cannot refuse a dialable self-claim — but the demoted peer's
+    // pulls stay pinned to the verified adoption rather than the
+    // rewrite's hostile endpoint.
+    let mut forged = active.client.checkpoint().unwrap();
+    forged.tick = Tick(99999);
+    let hostile = Hostile::serve(&forged);
+    active.client.checkpoint_announcing(hostile.addr).unwrap();
+    assert_eq!(active.monitor.tracking_source(), Some(successor));
+
+    // The demoted peer keeps tracking the adopted successor: it
+    // converges on the real stream instead of adopting the hostile
+    // port's forged tick domain — the alignment, not just the
+    // convergence, proves which endpoint the pulls reached. The pinned
+    // successor owns nothing, so the verdict is `orphaned`; the forged
+    // stream — cloned from the then-owner's checkpoint — would have
+    // read `tracking` at the forged tick.
+    standby.standby.client.advance(1).unwrap();
+    active.client.advance(1).unwrap();
+    let report = active.client.role().unwrap();
+    assert!(
+        matches!(report.sync, Some(StandbySync::Orphaned { aligned }) if aligned != forged.tick),
+        "the demoted peer tracks the pinned adoption, not the rewrite: {report:?}"
+    );
+    assert!(
+        report.tick.0 < forged.tick.0,
+        "the run's clock stayed off the forged domain: {report:?}"
+    );
+    assert_eq!(active.client.promote().unwrap().role, Role::Promoting);
+}
+
+/// A lone field owner fixture for the announced-demotion tests —
+/// the reproduction's unconfigured instance: no `--standby`, no
+/// `--peer`, and `key` installing the `--pair-token` secret when set.
+fn lonely_owner(key: Option<u64>) -> Serving {
+    let lonely_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    Serving::start(keyed(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(executor(lonely_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+        key,
+    ))
+}
+
+/// The QA finding `demote-verify-replayable-redirects-tracking` (#807):
+/// the announced-hint verify proved only that the hinted endpoint
+/// serves one currently-valid continuation checkpoint — and
+/// `/checkpoint` is public, so an interposer that replays the victim's
+/// own document verbatim passed every check, got adopted and pinned,
+/// and then served forged state the demoted peer applied. The verify
+/// must refuse the document shape this run's own `/checkpoint`
+/// answers — a field-owning source not ahead of this run's tick — so
+/// a replay can never arm the demotion.
+#[test]
+fn an_announced_replay_of_the_victims_own_checkpoint_cannot_unblock_no_tracking_source() {
+    let lonely = lonely_owner(None);
+    lonely.client.advance(3).unwrap();
+    let tick = lonely.client.role().unwrap().tick;
+
+    // The reproduction's interposer: a same-source endpoint serving
+    // the victim's own checkpoint document verbatim — every byte the
+    // public read returns.
+    let replayed = lonely.client.checkpoint().unwrap();
+    let hostile = Hostile::serve(&replayed);
+
+    // The announce lands — the interposer's port is a same-source
+    // claim like any other — and the hint is recorded.
+    lonely.client.checkpoint_announcing(hostile.addr).unwrap();
+    assert_eq!(lonely.monitor.tracking_source(), Some(hostile.addr));
+
+    // But the replayed document cannot arm the demotion: it is the
+    // shape this run's own `/checkpoint` answers, which proves nothing
+    // about the endpoint serving it — the guard refuses, the run
+    // stays the field owner at its own tick, and nothing journals an
+    // adoption or a role change.
+    let error = lonely.client.demote().unwrap_err();
+    assert!(
+        error.to_string().contains("no_tracking_source"),
+        "a replayed own-document must not arm the demotion: {error}"
+    );
+    let report = lonely.client.role().unwrap();
+    assert_eq!(report.role, Role::Active);
+    assert_eq!(report.tick, tick);
+    assert!(
+        lonely
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .all(|entry| !matches!(
+                entry.event,
+                JournalEvent::TrackingSourceAdopted { .. } | JournalEvent::RoleChanged { .. }
+            )),
+        "a refused demotion journals neither an adoption nor a role change"
+    );
+}
+
+/// A stale replay is the same refusal: the interposer captured the
+/// victim's document earlier and the run has scanned past it — the
+/// replayed tick is behind now, still stamped field-owning, still the
+/// refused own-document shape.
+#[test]
+fn an_announced_stale_replay_cannot_unblock_no_tracking_source() {
+    let lonely = lonely_owner(None);
+
+    // The interposer captures the victim's document, then the run
+    // moves past it — the replayed tick is stale when the demotion
+    // verifies.
+    let stale = lonely.client.checkpoint().unwrap();
+    lonely.client.advance(3).unwrap();
+    let tick = lonely.client.role().unwrap().tick;
+    let hostile = Hostile::serve(&stale);
+    lonely.client.checkpoint_announcing(hostile.addr).unwrap();
+
+    let error = lonely.client.demote().unwrap_err();
+    assert!(
+        error.to_string().contains("no_tracking_source"),
+        "a stale replayed document must not arm the demotion: {error}"
+    );
+    let report = lonely.client.role().unwrap();
+    assert_eq!(report.role, Role::Active);
+    assert_eq!(report.tick, tick);
+    assert!(
+        lonely
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .all(|entry| !matches!(
+                entry.event,
+                JournalEvent::TrackingSourceAdopted { .. } | JournalEvent::RoleChanged { .. }
+            )),
+        "a refused demotion journals neither an adoption nor a role change"
+    );
+}
+
+/// The keyed half on an unproven endpoint: a `--pair-token` monitor
+/// demands the pulled checkpoint carry the keyed `line_proof` bound
+/// to the verify pull's fresh nonce — only a peer holding the token
+/// produces it — so even a fabricated document crafted to pass every
+/// continuation check cannot arm the demotion.
+#[test]
+fn a_fabricated_announced_checkpoint_cannot_unblock_a_keyed_demote() {
+    const KEY: u64 = 0x9e37_79b9_7f4a_7c15;
+    let lonely = lonely_owner(Some(KEY));
+    lonely.client.advance(3).unwrap();
+    let tick = lonely.client.role().unwrap().tick;
+
+    // The fabricated document: the victim's checkpoint rewritten past
+    // every document check — claiming no field ownership, one tick
+    // ahead — the exact shape the unkeyed verify accepts.
+    let mut fabricated = lonely.client.checkpoint().unwrap();
+    fabricated.source_owns_field = Some(false);
+    fabricated.tick = Tick(fabricated.tick.0 + 1);
+    let hostile = Hostile::serve(&fabricated);
+    lonely.client.checkpoint_announcing(hostile.addr).unwrap();
+    let error = lonely.client.demote().unwrap_err();
+    assert!(
+        error.to_string().contains("no_tracking_source"),
+        "an unproven fabricated document must not arm a keyed demotion: {error}"
+    );
+
+    // A fabricated document carrying a guessed proof fails the same
+    // way — the proof binds the pull's nonce to the document under
+    // the pair's key, which the fabricator does not hold.
+    let mut forged_proof = fabricated.clone();
+    forged_proof.line_proof = Some(0xdead_beef_cafe);
+    let hostile = Hostile::serve(&forged_proof);
+    lonely.client.checkpoint_announcing(hostile.addr).unwrap();
+    let error = lonely.client.demote().unwrap_err();
+    assert!(
+        error.to_string().contains("no_tracking_source"),
+        "a guessed line proof must not arm a keyed demotion: {error}"
+    );
+
+    let report = lonely.client.role().unwrap();
+    assert_eq!(report.role, Role::Active);
+    assert_eq!(report.tick, tick);
+    assert!(
+        lonely
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .all(|entry| !matches!(
+                entry.event,
+                JournalEvent::TrackingSourceAdopted { .. } | JournalEvent::RoleChanged { .. }
+            )),
+        "a refused demotion journals neither an adoption nor a role change"
+    );
+}
+
+/// The keyed contract's honest path: both peers launched with the
+/// pair's token — the announced demotion still verifies, adopts, and
+/// journals the real standby's endpoint, and the demoted peer's
+/// standing pulls keep proving each checkpoint against it.
+#[test]
+fn a_keyed_demote_toward_the_real_announced_peer_verifies_and_keeps_proving() {
+    const KEY: u64 = 0x517c_c1b7_2722_0a95;
+    let (standby, active) = DrivenStandby::start_keyed(KEY);
+
+    // Converge: the standby's pull announces its own address, which
+    // the owner records as its demotion fallback.
+    active.client.advance(3).unwrap();
+    standby.standby.client.advance(1).unwrap();
+    let successor = active.monitor.tracking_source().unwrap();
+
+    // The verify pull's `?prove=` nonce is answered by the keyed
+    // standby's signed document — the demotion adopts and journals it.
+    assert_eq!(active.client.demote().unwrap().role, Role::Demoting);
+    assert!(
+        active
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .any(|entry| matches!(
+                entry.event,
+                JournalEvent::TrackingSourceAdopted { source } if source == successor
+            )),
+        "the keyed demotion journals its adopted tracking source: {:?}",
+        active.client.journal(0).unwrap()
+    );
+
+    // The demoted peer's standing pulls toward the adopted endpoint
+    // carry fresh nonces the keyed successor keeps answering — the
+    // line reconverges and the peer stays promotable.
+    active.client.advance(1).unwrap();
+    let report = active.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert!(
+        matches!(report.sync, Some(StandbySync::Orphaned { .. })),
+        "the keyed demoted peer reconverges on the proved source: {report:?}"
+    );
+    assert_eq!(active.client.promote().unwrap().role, Role::Promoting);
+}
+
+/// The standing-pull half at the fetch level: a keyed puller requires
+/// every fetched document to carry the keyed `line_proof` bound to
+/// the pull's nonce — a replayed or fabricated document fails the
+/// fetch like a refused pull, while the real keyed peer's signed
+/// answers land.
+#[test]
+fn a_keyed_pull_refuses_documents_without_the_pairs_line_proof() {
+    const KEY: u64 = 0x243f_6a88_85a3_08d3;
+    let lonely = lonely_owner(Some(KEY));
+    lonely.client.advance(3).unwrap();
+
+    // A fabricated continuation document — this line's generation at
+    // a plausible tick, no field claim — without the proof.
+    let mut fabricated = lonely.client.checkpoint().unwrap();
+    fabricated.source_owns_field = Some(false);
+    fabricated.tick = Tick(fabricated.tick.0 + 1);
+    let hostile = Hostile::serve(&fabricated);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut puller = CheckpointPuller::with_pair_proof(hostile.addr, None, KEY);
+    loop {
+        match puller.poll() {
+            Err(detail) if detail.contains("line proof") => break,
+            _ if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+            other => panic!("an unproven fetch must fail on the line proof: {other:?}"),
+        }
+    }
+
+    // And the keyed pull accepts the real keyed peer's answers — the
+    // monitor signs its served document under the pull's nonce.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut puller =
+        CheckpointPuller::with_pair_proof(dialable(lonely.monitor.local_addr()), None, KEY);
+    loop {
+        match puller.poll() {
+            Ok(checkpoint) => {
+                assert!(checkpoint.line_proof.is_some());
+                break;
+            }
+            _ if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+            Err(detail) => panic!("the keyed peer's proved fetch must land: {detail}"),
+        }
+    }
 }
 
 /// The paced-standby reproduction of the QA finding
@@ -914,4 +1725,191 @@ fn a_tracking_standbys_resources_answer_the_same_routed_events() {
     // The parity itself: the standby's `events` is the same record —
     // same seqs, ticks, payloads, and retention marks.
     assert_eq!(events(&standby.standby.client), expected);
+}
+
+/// The settle-audit rig's executor: one writable internal `In` point —
+/// the held operator value the raced admission writes; the QA model's
+/// command targets are all internal, and an image-carried point keeps
+/// the exercise off the field.
+fn held_executor(driver: &'static StubDriver) -> Executor<'static> {
+    Executor::new(
+        driver,
+        PointMap::new().with_writable_internal(
+            PointId(40),
+            Direction::In,
+            ValueKind::Bool,
+            Value::Bool(false),
+        ),
+        Vec::new(),
+    )
+    .unwrap()
+}
+
+/// The journal's `command_settled` entries for `command`, as
+/// `(entry tick, outcome)` pairs in seq order — the per-admission
+/// settle list the uniqueness contract counts.
+fn settles(client: &MonitorClient, command: &dcs_core::Command) -> Vec<(u64, CommandOutcome)> {
+    client
+        .journal(0)
+        .unwrap()
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            JournalEvent::CommandSettled { receipt } if &receipt.command == command => {
+                Some((entry.tick.0, receipt.outcome.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// QA finding `tracking-peer-double-journals-command-settle` (#688):
+/// a checkpoint pulled while the admission is still `Accepted`
+/// re-queues the receipt on the tracking peer, whose quiesced scan
+/// must carry it — never mint a local `Applied` the covering adoption
+/// then overwrites with the line's verdict. On the reported build the
+/// pair of settles journaled local tick first, line tick second —
+/// two `command_settled` entries for one admission, the journal's
+/// ticks going backwards. Replayed end to end on the driven pair:
+/// the command submits between the active's scans, the standby's next
+/// cycle adopts it pending, the active settles it on the line, and
+/// the covering pull must journal the single settle — one per peer.
+#[test]
+fn a_tracking_peer_journals_one_settle_per_admission() {
+    use dcs_core::Command;
+    let (standby, active) = DrivenStandby::start_with(None, held_executor);
+
+    // Converge the standby on the line, then race the admission: the
+    // write submits between the active's scans, so the standby's next
+    // pull adopts the receipt still `Accepted`.
+    active.client.advance(3).unwrap();
+    standby.standby.client.advance(1).unwrap();
+    assert!(matches!(
+        standby.standby.client.role().unwrap().sync,
+        Some(StandbySync::Tracking { .. })
+    ));
+    let command = Command::WriteValue {
+        point: PointId(40),
+        kind: ValueKind::Bool,
+        value: Value::Bool(true),
+    };
+    let receipt = active.client.command(&command).unwrap();
+    assert_eq!(
+        receipt.outcome,
+        CommandOutcome::Accepted {
+            apply_tick: Tick(4)
+        }
+    );
+
+    // The raced pull: the standby's cycle adopts the pending receipt
+    // and the quiesced scan carries it — on the reported build this
+    // scan minted `Applied{local}` and journaled the phantom first
+    // settle.
+    standby.standby.client.advance(1).unwrap();
+    assert!(
+        matches!(
+            standby.standby.client.receipts().unwrap()[0].outcome,
+            CommandOutcome::Accepted { .. }
+        ),
+        "the carried admission stays pending on the tracking peer"
+    );
+    assert_eq!(settles(&standby.standby.client, &command), vec![]);
+
+    // The line settles the admission; the covering pull adopts the
+    // verdict — the one terminal outcome the admission ever gets.
+    active.client.advance(1).unwrap();
+    standby.standby.client.advance(1).unwrap();
+    assert_eq!(
+        settles(&standby.standby.client, &command),
+        vec![(4, CommandOutcome::Applied { tick: Tick(4) })],
+        "one admission journals one settle on the tracking peer"
+    );
+    assert_eq!(
+        settles(&active.client, &command),
+        vec![(4, CommandOutcome::Applied { tick: Tick(4) })],
+        "one admission journals one settle on the field owner"
+    );
+
+    // The journal's attribution never walks backwards — the phantom
+    // pair's local-then-line ordering regressed the tick.
+    let journal = standby.standby.client.journal(0).unwrap();
+    let ticks: Vec<u64> = journal.iter().map(|entry| entry.tick.0).collect();
+    assert!(
+        ticks.windows(2).all(|pair| pair[0] <= pair[1]),
+        "the journal's ticks must be non-decreasing: {ticks:?}"
+    );
+}
+
+/// The finding's demoted-peer half: the same raced admission observed
+/// from the peer that *was* the field owner. The demote suspends its
+/// pending receipt, the promote boundary's final sync carries it onto
+/// the successor still `Accepted`, and the demoted peer's tracking
+/// pull lands that checkpoint before the successor's applying scan —
+/// the window in which the reported build minted a local `Applied`
+/// the covering adoption then re-settled at the line's tick.
+#[test]
+fn a_demoted_peer_journals_one_settle_per_carried_admission() {
+    use dcs_core::Command;
+    let (standby, active) = DrivenStandby::start_with(None, held_executor);
+
+    active.client.advance(3).unwrap();
+    standby.standby.client.advance(1).unwrap();
+    assert!(matches!(
+        standby.standby.client.role().unwrap().sync,
+        Some(StandbySync::Tracking { .. })
+    ));
+
+    // The raced admission: accepted on the field owner, still pending
+    // when the documented demote-then-promote runs.
+    let command = Command::WriteValue {
+        point: PointId(40),
+        kind: ValueKind::Bool,
+        value: Value::Bool(true),
+    };
+    let receipt = active.client.command(&command).unwrap();
+    assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+    assert_eq!(active.client.demote().unwrap().role, Role::Demoting);
+    assert_eq!(
+        standby.standby.client.promote().unwrap().role,
+        Role::Promoting
+    );
+
+    // The demoted peer's first tracking pull lands the successor's
+    // checkpoint while the carried admission is still `Accepted` —
+    // suspended entries re-queue under the adoption, but the quiesced
+    // scan must carry them, never mint a local `Applied`.
+    active.client.advance(1).unwrap();
+    assert_eq!(active.client.role().unwrap().role, Role::Standby);
+    assert!(
+        matches!(
+            active.client.receipts().unwrap()[0].outcome,
+            CommandOutcome::Accepted { .. }
+        ),
+        "the carried admission stays pending on the demoted peer"
+    );
+    assert_eq!(settles(&active.client, &command), vec![]);
+
+    // The promoted peer's first field-owning scan settles the carried
+    // admission on the line; the demoted peer's covering pull adopts
+    // the verdict — one terminal outcome, journaled once per peer.
+    standby.standby.client.advance(1).unwrap();
+    active.client.advance(1).unwrap();
+    let line = settles(&standby.standby.client, &command);
+    assert_eq!(line.len(), 1, "{line:?}");
+    assert!(
+        matches!(line[0].1, CommandOutcome::Applied { .. }),
+        "{line:?}"
+    );
+    assert_eq!(
+        settles(&active.client, &command),
+        line,
+        "one admission journals one settle on the demoted peer too"
+    );
+
+    // Tick monotonicity on the demoted peer's journal as well.
+    let journal = active.client.journal(0).unwrap();
+    let ticks: Vec<u64> = journal.iter().map(|entry| entry.tick.0).collect();
+    assert!(
+        ticks.windows(2).all(|pair| pair[0] <= pair[1]),
+        "the journal's ticks must be non-decreasing: {ticks:?}"
+    );
 }

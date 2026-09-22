@@ -320,9 +320,10 @@ own surface: the HMI alarm path is never presented as the safeguard.</p>
 // initiating cause of a burst stands first. A component declaring an
 // `ack` input wired to a model-writable point gets an ack affordance
 // issuing an ordinary receipted write_value — no alarm-specific
-// protocol — and because the kind's ack is level-observed the pane
-// pulses it: once the write's apply tick has scanned past, a second
-// receipted write drops the point back to false. The managed kinds'
+// protocol — and because the kind's ack is consumed on its rising
+// edge the pane pulses it: once the write's apply tick has scanned
+// past, a second receipted write drops the point back to false so the
+// next press forms a fresh edge. The managed kinds'
 // `shelve` and `oos` inputs join the same way — the descriptor's
 // bound-point annotation plus the bound point's writable mark — but
 // they are held level-observed, not pulsed: the affordance writes the
@@ -534,7 +535,7 @@ function commandKey(component, name) {
 const interfaceOpen = new Map();
 // ack point -> the earliest snapshot tick at which its release write may
 // go: the pulse's second half, armed by submitAck once the acknowledge
-// write is accepted — see the alarm pane's notes on the level-observed
+// write is accepted — see the alarm pane's notes on the edge-consumed
 // input.
 const ackReleases = new Map();
 // Client-side display bounds; the server's rings bound retention anyway.
@@ -609,7 +610,7 @@ function pointName(point) {
 // and the pair has no failover coverage to call healthy.
 const CONVERGENCE_GRACE_MS = 5000;
 
-const PAIR_FAULT_KINDS_VERSION = 1;
+const PAIR_FAULT_KINDS_VERSION = 2;
 const PAIR_FAULT_KINDS = [
   "peer_unreachable",
   "standby_unsynchronized_past_grace",
@@ -617,6 +618,7 @@ const PAIR_FAULT_KINDS = [
   "dual_active",
   "standby_degraded",
   "standby_diverged",
+  "standby_orphaned",
 ];
 
 // The convergence-grace clock pairHealth reads: a report of
@@ -719,14 +721,18 @@ function noActiveVerdict() {
 }
 
 // StandbySync serializes as "unsynchronized" | {"tracking": {aligned}} |
-// {"degraded": {detail}} | {"diverged": {mismatches}} |
-// {"reinitialized": {report}}.
+// {"degraded": {detail}} | {"orphaned": {aligned}} |
+// {"diverged": {mismatches}} | {"reinitialized": {report}}.
 function describeSync(sync) {
   if (typeof sync === "string") return sync;
   if ("tracking" in sync) {
     return "tracking (aligned at tick " + sync.tracking.aligned + ")";
   }
   if ("degraded" in sync) return "degraded: " + sync.degraded.detail;
+  if ("orphaned" in sync) {
+    return "orphaned: the tracked line has no field owner " +
+      "(aligned at tick " + sync.orphaned.aligned + ")";
+  }
   if ("diverged" in sync) {
     return "diverged: staged outputs mismatch the field at " +
       sync.diverged.mismatches.map(m => m.point).join(", ");
@@ -781,6 +787,11 @@ function pairHealth(pairPeers, states) {
         faults.push(peer.name + " standby diverged: staged outputs mismatch the field at " +
           state.report.sync.diverged.mismatches.map(m => m.point).join(", "));
         fault_kinds.push("standby_diverged");
+      }
+      if ("orphaned" in state.report.sync) {
+        faults.push(peer.name + " reports the tracked line has no field owner " +
+          "(aligned at tick " + state.report.sync.orphaned.aligned + ")");
+        fault_kinds.push("standby_orphaned");
       }
     }
   });
@@ -1181,9 +1192,9 @@ async function refresh() {
       new Date().toLocaleTimeString();
     // The second half of an ack pulse: a snapshot at or past the
     // acknowledge write's apply tick means a scan has observed the
-    // level-observed `ack` input held true, so the point goes back to
-    // false through the same receipted write path — held true it would
-    // suppress every later trip's latch.
+    // `ack` input's rising edge, so the point goes back to false
+    // through the same receipted write path — held true, a later press
+    // would land no edge and acknowledge nothing.
     for (const [point, applyTick] of [...ackReleases]) {
       if (snapshot.tick >= applyTick) {
         ackReleases.delete(point);
@@ -2609,9 +2620,9 @@ function renderProtection(telemetry, forced) {
 
 // The acknowledge submission: an ordinary receipted write_value of true
 // to the component's `ack` point — no alarm-specific protocol. The
-// kind's ack is level-observed, so the write's apply tick arms
-// `ackReleases`: refresh drops the point back to false once a scan has
-// observed it, and a rejection never arms the release.
+// kind's ack is consumed on its rising edge, so the write's apply tick
+// arms `ackReleases`: refresh drops the point back to false once a scan
+// has observed it, and a rejection never arms the release.
 async function submitAck(button) {
   const point = Number(button.dataset.point);
   const meta = metaByPoint.get(point);
@@ -2975,7 +2986,8 @@ function describeOutcome(outcome) {
 // A rejection reason serializes as {"unknown_point": {point}} |
 // {"not_writable": {point}} |
 // {"type_mismatch": {point, expected, found}} |
-// {"driver_rejected": {point, error}} | {"not_active": {point, role}} |
+// {"driver_rejected": {point, error}} | {"point_forced": {point}} |
+// {"not_active": {point, role}} |
 // {"queue_full": {point, capacity}} — the bounded ingress's admission
 // refusal — | the parameter-command reasons
 // {"unknown_component"|"unknown_parameter"|"unsupported_parameter"|
@@ -3000,6 +3012,10 @@ function describeReason(reason) {
     const rejection = reason.driver_rejected;
     return "driver rejected " + pointName(rejection.point) + ": " +
       describeIoError(rejection.error);
+  }
+  if ("point_forced" in reason) {
+    return pointName(reason.point_forced.point) +
+      " is forced — release the force, then write";
   }
   if ("not_active" in reason) {
     return "refused: peer reports role " + reason.not_active.role +

@@ -9,10 +9,10 @@ from agent_pool.github import GitHubError
 from agent_pool.supervisor import Supervisor
 
 
-def issue(number=1, priority=2, group='core', dependencies=()):
+def issue(number=1, priority=2, group='core', dependencies=(), area='control-runtime'):
     item = dict(key=f'issue-{number}',title=f'Task {number}',scope='Implement a simulation',
                 acceptance='Test passes',tests='unit test',dependencies=list(dependencies),
-                priority=priority,milestone='foundation',group=group)
+                priority=priority,milestone='foundation',group=group,area=area)
     return dict(number=number,title=item['title'],body=planning.body(item),
                 state='OPEN',labels=[{'name':'agent:ready'}])
 
@@ -193,6 +193,18 @@ class SupervisorTests(unittest.TestCase):
         self.assertIsNotNone(self.supervisor.state.job(1))
         self.assertIsNotNone(self.supervisor.state.job(2))
         self.assertIn('Task 2', self.runtime.spawn.call_args_list[0].args[2])
+
+    def test_equal_priority_favors_underinvested_area(self):
+        completed = issue(3, area='engineering')
+        completed['state'] = 'CLOSED'
+        self.github.items = [issue(1, area='engineering'),
+                             issue(2, area='library'), completed]
+        self.supervisor.state.reserve(3, 'worker-20', 'g')
+        self.supervisor.state.complete(3)
+        self.supervisor.dispatch(self.github.items)
+        self.assertIn('Task 2', self.runtime.spawn.call_args_list[0].args[2])
+        summary = self.supervisor.state.get('area_allocation')
+        self.assertEqual(summary['library']['active'], 1)
 
     def test_failed_ci_repairs_with_session(self):
         s=self.supervisor

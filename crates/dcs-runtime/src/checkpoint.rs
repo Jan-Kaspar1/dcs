@@ -22,7 +22,22 @@
 //! that audit, so the pair's command-ingress telemetry agrees too and
 //! the adopted window's place in the submission sequence stays known:
 //! `attempts` minus the retained length is the count the source already
-//! evicted. The `driver`
+//! evicted. The `generation` stamp is the stream's tick-domain
+//! identity: minted by the process that begins a run and adopted
+//! verbatim by every run that applies one of its checkpoints, so the
+//! whole tracked line — across a switchover, across a demoted peer's
+//! reconvergence — names one generation, while a cold-restarted or
+//! replaced source begins a new one. A tracking peer reads it to tell
+//! the source's new generation — the journaled
+//! `JournalEvent::SourceRestarted` — from its own tracking-state reset:
+//! a demoted peer's first pull on its uninterrupted successor regresses
+//! in tick but names the generation the demoted run's own captures
+//! stamped, which is no restart. The `source_owns_field` stamp — set by
+//! the serving peer, absent on a bare executor's capture — lets a
+//! tracking peer name the mutual-standby wedge: a checkpoint applied
+//! cleanly from a run owning no field writes means the tracked line
+//! has no field owner, and the puller reports `orphaned` rather than a
+//! healthy `tracking`. The `driver`
 //! section is simulation-specific:
 //! on live hardware the standby's driver observes the actual process
 //! through its own channels rather than reconstructing captured field
@@ -121,6 +136,21 @@ pub struct Checkpoint {
     /// carrying the same value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_fingerprint: Option<ModelFingerprint>,
+    /// The tick-domain generation the capturing run belongs to —
+    /// minted when a process begins a fresh run and adopted verbatim by
+    /// every run whose executor applied, restored, or reinitialized one
+    /// of its checkpoints, so the whole tracked line names the same
+    /// generation while a cold-started or replaced source begins a new
+    /// one. A tracking peer compares it against its own to tell the
+    /// source's restart from its own tracking reset: a demoted peer's
+    /// first pull on the uninterrupted successor regresses in tick but
+    /// names the generation the demoted run's own captures stamped, so
+    /// it journals no `SourceRestarted`. `None` on checkpoints a
+    /// pre-generation build wrote or an unminted run captured — an
+    /// unidentified generation can prove nothing, so a regression
+    /// involving one journals the restart exactly as it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
     /// The executor's tick at capture; the restored executor resumes
     /// numbering from here.
     pub tick: Tick,
@@ -188,6 +218,59 @@ pub struct Checkpoint {
     /// was, and [`receipt_base`](Self::receipt_base) resolves to 0.
     #[serde(default)]
     pub command_admission: CommandAdmissionCounts,
+    /// Whether the run serving this checkpoint owns field writes —
+    /// stamped by the serving [`Peer`](crate::Peer) at capture, not by
+    /// the executor, which has no role view. `Some(true)` marks a
+    /// field-owning source — `active` or `promoting`; `Some(false)`
+    /// marks a serving run that writes nothing — the stamp a tracking
+    /// peer reads to name the mutual-standby wedge: a cleanly applied
+    /// checkpoint whose serving run owns no field writes means the
+    /// tracked line has no field owner, and the puller reports
+    /// [`StandbySync::Orphaned`](dcs_core::StandbySync) instead of a
+    /// converged `tracking` that only looks healthy. `None` — every
+    /// checkpoint a bare executor captures, and everything a
+    /// pre-stamping build wrote — carries no ownership claim, so an
+    /// apply treats it as owner-produced exactly as it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_owns_field: Option<bool>,
+    /// The keyed line proof a serving monitor injects into this
+    /// document's wire form on a `?prove=` pull — response decoration,
+    /// never run state: [`Executor::checkpoint`](crate::Executor::checkpoint)
+    /// never sets it, [`Executor::restore`](crate::Executor::restore)
+    /// ignores it, and it is absent on every captured checkpoint and
+    /// every response to an unproven pull. A pulling peer compares it
+    /// against the proof it computes over the received document and
+    /// its request's nonce under the pair's shared key, so a checkpoint
+    /// served by an endpoint that merely replays or fabricates this
+    /// line's documents — without holding the key — cannot masquerade
+    /// as a tracked peer's production.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_proof: Option<u64>,
+}
+
+/// Mints a fresh checkpoint-stream generation — the value a run's
+/// assembling shell stamps through
+/// [`Executor::with_generation`](crate::Executor::with_generation) so
+/// every checkpoint the run serves names this tick-domain line.
+///
+/// Process id plus the wall clock keeps a restarted process's mint
+/// distinct from the run it replaced, and a process-unique counter
+/// keeps two mints inside one process distinct — the same uniqueness
+/// budget the field-claim owner token accepts. The value carries no
+/// meaning beyond identity: equal generations name the same tracked
+/// line, different ones a new tick domain.
+pub fn mint_generation() -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u32(std::process::id());
+    if let Ok(since) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        hasher.write_u128(since.as_nanos());
+    }
+    hasher.write_u64(NEXT.fetch_add(1, Ordering::Relaxed));
+    hasher.finish()
 }
 
 impl Checkpoint {

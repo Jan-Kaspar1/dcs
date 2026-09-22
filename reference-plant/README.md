@@ -30,6 +30,29 @@ model/plant.json       the emitted, approved plant model
 model/dynamics.json    the declared simulation dynamics
 ci/scenario.json       the generated scenario the CI drives
 ci/check.sh            the clean-CI check a fresh clone runs
+ci/alarm_validation.py the alarm-validation leg — the emitted model's
+                       managed-alarm record audited, doctored copies
+                       refused by the released `dcs-controller
+                       --check`, and the driven run's served
+                       components/parameters sections reporting the
+                       same record
+ci/alarm_rationalization.py  the pair contract's alarm-
+                       rationalization leg — the emitted model's
+                       managed-alarm record asserted verbatim on the
+                       deployed pair's served signal index and
+                       snapshot parameters, before and after the
+                       changeover, and the pair's launch roles
+                       restored
+ci/claim_fencing.py    the pair contract's claim-fencing leg — a
+                       dedicated third sim-net attachment exercising
+                       the standing writer claim's whole lifecycle on
+                       the settled pair's spawned plant: fenced write
+                       and step probes, the ensure/release verbs under
+                       foreign and owner tokens, the same mutations
+                       driven through the shipped `dcs-plant-ctl`, a
+                       rogue claim's settled answer, and the pair
+                       restored with its launch roles and the claim's
+                       owner unchanged
 ci/simulate.py         the deterministic scripted-simulation runner;
                        --surface asserts the served operator surface —
                        signal index, interface registry, declared
@@ -40,10 +63,22 @@ ci/restart.py          the restart-recovery leg — the driven
 ci/pair.py             the redundant-pair leg — the manifest-declared
                        standby pair run, switched, and checked against
                        its persisted state and journal files
+ci/negotiation.py      the checkpoint-negotiation leg — a third
+                       released controller launched --standby at the
+                       pair's active on a foreign-fingerprint model
+                       document, asserting the named non-converged
+                       state, the refused promote, and the
+                       undisturbed active
 ci/refusal.py          the pair contract's refusal half — the
                        pre-transfer promote answering not_converged,
                        the standby-directed write answering not_active,
                        the same promote succeeding once tracking
+ci/handover.py         the pair contract's failure-handover leg — a
+                       proven duty-pump failure handing duty to the
+                       standby pump inside the declared bound, the
+                       all-out none_available/all_faulted annunciation,
+                       and the declared recovery with the pair's
+                       controller roles unmoved
 ci/takeover.py         the pair contract's takeover leg — the settled
                        pair driven until the pump group holds a duty
                        demand, then the declared per-pump mode seam
@@ -114,7 +149,15 @@ ci/failover.py         the pair contract's automatic-failover leg —
                        plant's writer claim, the run continuing
                        bumplessly, and the durable journal's
                        transition record audited beside a
-                       severed-standby variant reporting no failover
+                       severed-standby variant reporting no failover —
+                       then the declared measurement contract on the
+                       settled pair: the primary level source's
+                       quality fault serving the backup under the
+                       managed alarm's journaled annunciation, the
+                       backup's as well engaging the declared
+                       on_bad_demand fallback, and the restores
+                       returning the selection and the alarms per
+                       their lifecycle
 ci/divergence.py       the pair contract's staged-vs-field
                        divergence leg — the tracking standby's
                        checkpoint pulls withheld through an
@@ -133,6 +176,17 @@ ci/standby_restart.py  the pair contract's standby-restart leg —
                        inside the declared window while the active's
                        writes, receipts, and journal run undisturbed,
                        then promoting to prove the pair left whole
+ci/startup_claim.py    the pair contract's startup-claim ordering
+                       leg — with the pair switched so the field
+                       owner holds the plant's writer claim, a third
+                       released controller launched against the same
+                       plant address on a doomed --journal-file
+                       (a corrupt first record its startup replay
+                       cannot read), asserting the doomed spawn
+                       aborts before its preemptive claim while the
+                       incumbent keeps role, tick, writes, receipts,
+                       and the claim's fencing, and the pair restores
+                       its launch roles once the process stops
 ci/report.py           the pair contract's alarm-report leg — the
                         released `dcs-alarm-report` computing the
                         declared AlarmReport metric set over the
@@ -149,6 +203,24 @@ ci/command_switch.py   the pair contract's command-switch leg — the
                         with unchanged attribution, a carried invoke
                         settling exactly once across the restore
                         switch, and the pair's launch roles restored
+ci/demote_pending.py   the pair contract's demote-boundary
+                        pending-command leg — a receipted write
+                        admitted on the active and demoted past
+                        inside its pending window settling exactly
+                        once through the carry or the named
+                        superseded rejection, both peers' journals,
+                        receipt logs, images, and durable files
+                        audited for the single audited settle, and
+                        the pair's launch roles restored
+ci/demote_reconvergence.py  the pair contract's demote-follow
+                        reconvergence leg — under the manifest's
+                        declared 0.0.0.0 listen binds, the documented
+                        switch in both directions reconverging each
+                        demoted peer to tracking on the successor's
+                        dialable announced source — never the
+                        wildcard, itself, or a foreign address —
+                        held across the pull train, and the pair's
+                        launch roles restored
 ci/managed_lifecycle.py  the pair contract's managed-alarm
                         lifecycle leg — the emitted model's whole
                         managed-alarm surface exercised end to end
@@ -262,6 +334,21 @@ with their outputs recorded to the run's evidence — the check
 transcript carries them verbatim with their sha256 digests, identical
 on every pass.
 
+The stage's `alarm-validation` leg then proves the rejection half of
+the alarm contract on a customer-owned document — `ci/alarm_validation.py`
+audits that every managed alarm instance in the emitted model carries
+its `rationalization` block plus `priority`/`class`/`response_ticks`,
+doctors copies of the document — one instance's `required_action`
+removed, the same field emptied, another kind's `priority` removed —
+and requires the released `dcs-controller --check` to refuse each,
+naming the missing element rather than loading silently or warning
+only, and checks the driven run's served `components`/`parameters`
+sections report the same record. Two passes must produce the
+identical `alarm-validation-digest`; a violated contract fails
+`alarm-validation-failed`, a divergence
+`alarm-validation-nondeterministic`, and a run whose skipped
+doctoring passes `alarm-validation-unchecked`.
+
 ### 5. Run the simulation
 
 `ci/check.sh` drives `ci/simulate.py`: `dcs-plant-server` serves the
@@ -356,6 +443,46 @@ behavioral exercise, not just its static agreement. A violated
 contract fails `pair-failed`; two passes must produce the identical
 `pair-digest`, a divergence failing `pair-nondeterministic`.
 
+The stage's negotiation leg then proves the deployed pair degrades
+honestly on the misconfiguration writing your own manifests can
+produce: `ci/negotiation.py` launches a third released
+`dcs-controller` as `--standby <active>` on a foreign document — the
+emitted model doctored inside `MODEL_VERSION` to a fingerprint the
+running pair does not serve, without `--revised` — and drives scans
+through `POST /scan`. For the whole observation window the peer must
+report `standby` plus the named `degraded` negotiation state — the
+pulled checkpoint's model fingerprint named against its own —
+`POST /promote` against it must answer the named refusal, `409
+not_converged` carrying that state rather than a silent or wrong
+verdict, and the field owner's writes, receipt log, and journal must
+stay undisturbed: the refusal is the honest answer to a mismatched
+deployment, never a silent adoption or a disturbed pair. The foreign
+peer tears down before the later legs run, and a control peer — the
+same third controller on the pair's own model — converges and promotes
+normally, so the refusal names the negotiation failure rather than a
+rig defect. A violated contract fails `negotiation-failed`; two
+passes must produce the identical `negotiation-digest`, a divergence
+failing `negotiation-nondeterministic`.
+
+The stage's startup-claim ordering leg — `ci/startup_claim.py` on
+the same declared deployment — proves a doomed startup can never
+strand the plant's write claim over the running active. With the
+pair switched so the field owner holds the claim, the leg launches
+a third released `dcs-controller` against the same plant address on
+a doomed `--journal-file` — a corrupt first record its startup
+replay cannot read. The spawn must abort at startup validation
+naming the replay failure — never reporting a listener, never
+logging the preemptive claim — while the incumbent keeps `active`,
+its tick advances, its field writes and a mid-window receipted
+command keep landing, a foreign attachment's mutation probe stays
+`fenced` under the standing claim, and its journal gains no role,
+fencing, divergence, or restart records. The doomed peer's journal
+file must still hold exactly the corrupt record and its state file
+must never appear; once the foreign process is gone the pair
+restores its launch roles. A violated contract fails
+`startup-claim-failed`; two passes must produce the identical
+`startup-claim-digest`, a divergence failing
+`startup-claim-nondeterministic`.
 The stage's refusal half — `ci/refusal.py` on the same declared
 deployment — then proves the pair refuses honestly at its role
 boundaries, the half a customer driving their own pair needs the
@@ -375,6 +502,32 @@ active's field writes, receipts, and journal undisturbed throughout.
 A violated contract fails `refusal-failed`; two passes must produce
 the identical `refusal-digest`, a divergence failing
 `refusal-nondeterministic`.
+
+The stage's failure-handover leg — `ci/handover.py` on the same
+declared deployment — then proves decision 41's central behavior on
+the consumer pair: with the pair settled and the group holding a duty
+demand, the leg faults the `p101-run` field channel through the plant
+protocol's declared `inject_fault` — the honest failure lever, bad
+quality on the channel — and asserts through the active's monitor that
+`duty` moves to the standby pump inside the declared bound (the
+motor's `fault_ticks` proof plus the carrier hop the group's `fault_i`
+read crosses), `staged` reports the surviving pump against the
+standing demand, `p101-fault` reports the proven exclusion while
+`p101-avail` keeps reporting the permissive aggregate it wires, and
+the managed `p101-fault` alarm annunciates with journaled
+`point_changed` evidence on the fault flag, the alarm, and the
+unacknowledged latch. Faulting the remaining pump's channel then
+annunciates the all-out conditions — `none_available`, `all_faulted`,
+and both managed alarms — and clearing each injected fault restores
+the declared recovery: the fault flags clear once command and
+feedback agree, the annunciation returns, the duty designation
+reassigns under the declared rotation, and the unacknowledged latches
+hold awaiting an acknowledgment the leg never sends. The pair's
+controller roles never move — a field fault is a plant event, not a
+failover — and the peers' images stay identical through every driven
+scan. A violated contract fails `handover-failed`; two passes must
+produce the identical `handover-digest`, a divergence failing
+`handover-nondeterministic`.
 
 The stage's takeover leg — `ci/takeover.py` on the same declared
 deployment — then proves the per-pump mode seam the emitted model
@@ -629,7 +782,22 @@ recorded non-operator marker of the attributed role switch has
 landed the entry names it; where it has not, the entry carries no
 operator actor rather than a fabricated one. A variant run severs
 the standby instead: the field owner's writes run undisturbed and
-nothing reports a failover. A violated contract fails
+nothing reports a failover. A measurement run on a freshly
+converged pair then exercises the declared measurement contract —
+the emitted model's failover-select, threshold chain, and managed
+`backup-active` alarm resolved from the artifact's own wiring:
+degrading the primary level source's field channel asserts
+`backup_active` while the station keeps controlling on the
+selected backup measurement and the managed alarm annunciates with
+journaled `point_changed` evidence; degrading the backup as well
+engages the declared all-sources-bad fallback — the selection
+untrusted, `demand` at `on_bad_demand` with the alarmed state
+standing — rather than control on bad data; restoring the backup
+then the primary returns the selection to the primary and the
+alarm per its declared lifecycle — the unacknowledged latch
+standing until the receipted ack clears it — the durable journal
+carrying the transitions in driven order and the pair's roles
+unchanged. A violated contract fails
 `failover-failed`; two passes must produce the identical
 `failover-digest`, a divergence failing
 `failover-nondeterministic`.
@@ -765,6 +933,75 @@ produce the identical `command-switch-digest`, a divergence failing
 `command-switch-nondeterministic`. The leg's doctored cases — a
 submission settling zero times and one settling twice — must each
 report the named diagnostic rather than pass silently.
+
+The stage's demote-pending leg — `ci/demote_pending.py` on the same
+declared deployment — then exercises the demote-boundary
+pending-command settlement contract on the customer's pair: a command
+an operator races against a demotion must meet the audited settle,
+never a silent loss or a phantom application. With the pair settled
+and tracking, the leg submits a receipted `write_value` on a declared
+writable point through the field owner's `POST /command` and leaves
+it pending, then issues the documented `demote` on the owner inside
+that window and the `promote` on the converged standby — the
+promotion's final-sync checkpoint carrying the still-`Accepted`
+admission into the successor's log. The demoted peer's first
+quiesced scan, driven before the promoted peer's first field-owning
+scan, is the decisive observation: its fenced image must journal no
+`command_settled` for the admission, must still hold the suspended
+`accepted` receipt, and must still read the baseline — a quiesced
+scan mints no `applied` the line never ordered and drops no pending
+entry unaudited. The promoted peer then settles the admission
+exactly once — `applied` through the carry, or `Rejected{superseded}`
+with the settle journaled on the demoted peer alone — and the audit
+asserts both peers' served journals and adopted receipt logs carry
+the same single outcome, the served images agree, and each
+manifest-declared durable journal file records the settle in `seq`
+order. The leg restores the pair's launch roles, leaving the
+manifest's duty controller `active` and its standby `tracking`. A
+violated contract fails `demote-pending-failed`; two passes must
+produce the identical `demote-pending-digest`, a divergence failing
+`demote-pending-nondeterministic`. The leg's doctored cases — an
+expectation asserting the phantom applied settle the fenced image
+must never journal, and one asserting the pending entry vanished
+from every receipt surface and journal — must each report the named
+diagnostic rather than pass silently.
+
+The stage's demote-reconvergence leg — `ci/demote_reconvergence.py`
+on the same declared deployment — then pins the demote-follow
+tracking-source contract on the customer's pair (WW-ENG-003,
+WW-LCM-001): a demoted field owner must reconverge `tracking` on the
+successor its own checkpoint pulls announced, and under the
+manifest's declared `0.0.0.0` listen binds that announced source
+must resolve to the pull connection's proven address — a dialable
+peer address, never the wildcard bind recorded verbatim, never the
+demoted peer's own monitor, never a foreign endpoint. Both
+controllers bind the declared wildcard host, so the standby's
+`?peer=` pulls announce the wildcard address the defect family once
+recorded as-is. The leg converges the pair, then runs the
+documented `demote`/`promote` switch in both directions: the
+launched active — whose only tracking source is the recorded
+announce — demotes onto the verified adoption its journal records
+by name, reconverges `tracking`, and holds it across a driven pull
+train; the reverse switch then demotes the promoted peer onto its
+configured source and promotes the reconverged peer back. Every
+served role report across the handovers is audited for a wildcard,
+self-addressed, or foreign pull target; the served snapshots and
+adopted receipt logs stay identical on both peers; each durable
+journal file carries its own `role_changed` transitions in `seq`
+order under the single cold-start boundary — a restart boundary
+would be a process restart — and each declared state file holds the
+run's final tick under the manifest's fingerprint. The leg restores
+the pair's launch roles, leaving the manifest's duty controller
+`active` and its standby `tracking`. A violated contract fails
+`demote-reconvergence-failed`; two passes must produce the
+identical `demote-reconvergence-digest`, a divergence failing
+`demote-reconvergence-nondeterministic`. The leg's doctored case —
+a crafted `?peer=` announce naming the field owner's own monitor
+address, landing on the pulling connection's own source exactly as
+a self-claim — plants a self-addressed demotion hint whose verify
+pull reads the owner's own document: the replayable own-document
+shape an announced demotion refuses, so `POST /demote` must answer
+`409 no_tracking_source` rather than adopt the self-pin.
 
 The stage's managed-lifecycle leg — `ci/managed_lifecycle.py` on the
 same declared deployment — then exercises the emitted model's whole
@@ -1016,11 +1253,20 @@ or failing to name a refused checkpoint — is `restart-resume-failed`;
 two restart-leg passes diverging is `restart-resume-nondeterministic`;
 a declared pair failing to converge, switch, or keep its journaled
 record is `pair-failed`; two pair-leg passes diverging is
-`pair-nondeterministic`; a role boundary refusing dishonestly — a
+`pair-nondeterministic`;
+a foreign-model standby failing to report its named negotiation
+state, a promote against it answering anything but the named refusal,
+or the attempt disturbing the active is `negotiation-failed`; two
+negotiation-leg passes diverging is `negotiation-nondeterministic`;
+a role boundary refusing dishonestly — a
 pre-transfer promote not answering `not_converged`, a standby-directed
 write not answering `not_active`, or a refusal disturbing the active —
 is `refusal-failed`; two refusal-leg passes diverging is
-`refusal-nondeterministic`; a per-pump manual-takeover leg failing to
+`refusal-nondeterministic`; a proven duty-pump failure not handing
+`duty` to the standby pump inside the declared bound — or the all-out
+annunciation, the declared recovery, or the journaled evidence not
+holding — is `handover-failed`; two handover-leg passes diverging is
+`handover-nondeterministic`; a per-pump manual-takeover leg failing to
 hold — a receipted mode/hand/oos write unsettled, the manual
 selection's declared signals unreported, the guards ungated, the
 managed alarm unannunciated, the restore not returning the pump to
