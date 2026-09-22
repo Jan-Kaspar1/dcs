@@ -1228,13 +1228,16 @@ impl<'d> Monitor<'d> {
     /// proves the process can serve — a configured journal file
     /// replayed, the listener bound — and before the first scan: the
     /// claim [`Peer::activate`](dcs_runtime::Peer::activate) takes
-    /// preempts unconditionally and outlives a dead holder, so it must
-    /// be the run's last local startup step and its first shared-field
-    /// side effect — a process that fails earlier leaves no stale claim
-    /// fencing the field's standing owner. The refusal is the peer's
-    /// own [`SwitchError`](dcs_core::SwitchError): a claim the field
-    /// refuses fails the start with `FieldClaimFailed`, and a peer that
-    /// is not a launched active with `NotActive`.
+    /// outlives a dead holder, so it must be the run's last local
+    /// startup step and its first shared-field side effect — a process
+    /// that fails earlier leaves no stale claim fencing the field's
+    /// standing owner. Where the conditional startup grant is installed
+    /// the claim preempts a dead owner's standing claim but refuses a
+    /// *live* incumbent's, so a stale restart cannot silently roll back
+    /// state the incumbent receipted. The refusal is the peer's own
+    /// [`SwitchError`](dcs_core::SwitchError): a claim the field refuses
+    /// fails the start with `FieldClaimFailed`, and a peer that is not a
+    /// launched active with `NotActive`.
     pub fn activate(&self) -> Result<(), dcs_core::SwitchError> {
         let mut shared = self.shared.lock().unwrap();
         let Shared { peer, recorder } = &mut *shared;
