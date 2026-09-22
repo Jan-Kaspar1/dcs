@@ -99,12 +99,15 @@ class Runtime:
         if model.startswith('opencode/'):
             # --print-logs mirrors provider stream errors into the invocation
             # log; without it opencode freezes silently after a rate-limited
-            # stream and only the hard timeout notices.
+            # stream and only the hard timeout notices. The prompt travels
+            # via stdin (the durable prompt.txt opened by the runner), never
+            # argv: large backlog contexts exceed Linux ARG_MAX and the
+            # launch fails with E2BIG before opencode starts.
             command = [self.opencode, 'run', '--model', model, '--auto',
                        '--print-logs', '--title', key]
             if resume_session:
                 command.extend(['--session', resume_session])
-            command.append(prompt)
+            stdin_path = str(prompt_path)
             stall = self.stall_seconds
             error_stall = self.error_stall_seconds
         else:
@@ -114,8 +117,10 @@ class Runtime:
                        str(prompt_path), '--export', str(invocation / 'conversation.json')]
             if resume_session:
                 command.extend(['--resume', resume_session])
+            stdin_path = None
         spec = {'key': key, 'command': command, 'cwd': str(cwd), 'timeout': timeout or self.timeout_seconds,
                 'stall_seconds': stall, 'error_stall_seconds': error_stall,
+                'stdin': stdin_path,
                 'receipt': str(invocation / 'receipt.json'), 'log': str(invocation / 'output.log'),
                 'metadata': str(invocation / 'process.json')}
         atomic_json(invocation / 'spec.json', spec)
@@ -268,9 +273,20 @@ def runner(spec_path):
             environment = os.environ.copy()
             environment['CARGO_BUILD_JOBS'] = '4'
             environment['CARGO_TARGET_DIR'] = str(Path(spec['cwd']) / 'target')
-            child = subprocess.Popen(spec['command'], cwd=spec['cwd'], env=environment,
-                                     stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                                     start_new_session=True)
+            stdin_path = spec.get('stdin')
+            stdin_handle = None
+            try:
+                if stdin_path:
+                    stdin_handle = open(stdin_path, 'rb')
+                    stdin_arg = stdin_handle
+                else:
+                    stdin_arg = subprocess.DEVNULL
+                child = subprocess.Popen(spec['command'], cwd=spec['cwd'], env=environment,
+                                         stdin=stdin_arg, stdout=log, stderr=log,
+                                         start_new_session=True)
+            finally:
+                if stdin_handle is not None:
+                    stdin_handle.close()
             atomic_json(spec['metadata'], {'pid': child.pid, 'identity': process_identity(child.pid)})
             stall_seconds = spec.get('stall_seconds')
             error_stall = spec.get('error_stall_seconds') or stall_seconds
