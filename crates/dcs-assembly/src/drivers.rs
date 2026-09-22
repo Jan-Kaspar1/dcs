@@ -338,6 +338,22 @@ pub type ReleaseHook = Arc<dyn Fn() + Send + Sync>;
 /// cannot be probed conditionally.
 pub type EnsureHook = Arc<dyn Fn(u64) -> Result<bool, StepError> + Send + Sync>;
 
+/// The launched-controller counterpart of [`ClaimHook`] — the
+/// per-backend half of [`FanoutDriver::claim_field_writer_unless_held`],
+/// run once at startup activation: claims the field's write-ownership
+/// under `owner` only while no *live* attachment holds a different
+/// owner's claim — `Ok(true)` — answering `Ok(false)` where a live
+/// incumbent stands. A restarted controller cannot prove its resumed
+/// state is current with that incumbent's — a stale `--state-file`
+/// would silently roll back commands the incumbent receipted and
+/// applied — so the startup refuses rather than preempting. A claim a
+/// dead owner left standing — holders gone — is still preempted, the
+/// restart-as-active recovery path. `Err` reports the backend could
+/// not be asked. `None` on kinds whose arbitration cannot distinguish
+/// live holders — for them the field falls back to the unconditional
+/// [`ClaimHook`].
+pub type StartupClaimHook = Arc<dyn Fn(u64) -> Result<bool, StepError> + Send + Sync>;
+
 /// A self-contained device backend: the point-facing driver plus the
 /// step hook advancing its simulated plant, when it has one.
 pub struct DeviceBackend {
@@ -362,6 +378,14 @@ pub struct DeviceBackend {
     /// token, never preempting a standing owner. `None` on kinds whose
     /// arbitration cannot be probed conditionally.
     pub ensure: Option<EnsureHook>,
+    /// The startup counterpart of `claim` — the conditional grant a
+    /// launched controller's activation asserts: takes the claim only
+    /// where no *live* attachment holds a different owner's, refusing
+    /// (`Ok(false)`) while a live incumbent stands so a stale restart
+    /// cannot preempt it. `None` on kinds whose arbitration cannot
+    /// distinguish live holders; [`FanoutDriver`] falls back to the
+    /// unconditional `claim` for them.
+    pub startup_claim: Option<StartupClaimHook>,
     /// The backend's concrete driver, for typed inspection through
     /// [`FanoutDriver::inspect`] — e.g. a scripted device's
     /// recorded-write log. `None` when the backend exposes nothing
@@ -623,6 +647,7 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
     let claiming = Arc::clone(&remote);
     let releasing = Arc::clone(&remote);
     let ensuring = Arc::clone(&remote);
+    let starting = Arc::clone(&remote);
     let inspect: Arc<dyn Any + Send + Sync> = remote.clone();
     let device = spec.id.0;
     Ok(DeviceDriver::Backend(DeviceBackend {
@@ -663,6 +688,21 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                 backend: format!("device {device}"),
                 detail: error.to_string(),
             }),
+        })),
+        // The claim's startup counterpart: the plant server's
+        // conditional `claim_writer_unless_held` grant — a launched
+        // controller takes the field from a dead owner's standing
+        // claim but never from a live incumbent, whose newer state a
+        // stale restart would silently roll back.
+        startup_claim: Some(Arc::new(move |owner| {
+            match starting.claim_writer_unless_held(owner) {
+                Ok(_) => Ok(true),
+                Err(RemoteError::Fenced) => Ok(false),
+                Err(error) => Err(StepError::Backend {
+                    backend: format!("device {device}"),
+                    detail: error.to_string(),
+                }),
+            }
         })),
         inspect: Some(inspect),
         field_facing: true,
@@ -761,6 +801,10 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         // needs none: the claim dying with its connection frees the
         // field on the peer's death, so no dead token ever fences it.
         ensure: None,
+        // The same protocol has no live-holder query the startup
+        // claim could consult; the startup path falls back to the
+        // unconditional grant.
+        startup_claim: None,
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -859,6 +903,9 @@ fn sim_cyclic_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError>
         // As `sim-bus`: no conditional grant exists — or is needed,
         // the claim dying with its connection.
         ensure: None,
+        // As `sim-bus`: no live-holder query for the startup claim;
+        // the startup path falls back to the unconditional grant.
+        startup_claim: None,
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -952,6 +999,7 @@ fn ethercat_backend(
         claim: None,
         release: None,
         ensure: None,
+        startup_claim: None,
         inspect: Some(Arc::clone(device.master()) as Arc<dyn Any + Send + Sync>),
         field_facing: true,
     }))
@@ -1145,6 +1193,7 @@ fn scripted_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         claim: None,
         release: None,
         ensure: None,
+        startup_claim: None,
         inspect: Some(inspect),
         field_facing: false,
     }))
@@ -1166,6 +1215,9 @@ struct Backend {
     /// [`DeviceBackend::ensure`] carried into the built driver — the
     /// conditional claim re-arm an orphan cycle probes.
     ensure: Option<EnsureHook>,
+    /// [`DeviceBackend::startup_claim`] carried into the built driver —
+    /// the conditional grant a launched controller's activation asserts.
+    startup_claim: Option<StartupClaimHook>,
     /// The factory-installed typed inspection handle, if any.
     inspect: Option<Arc<dyn Any + Send + Sync>>,
     /// [`DeviceBackend::field_facing`] carried into the built driver —
@@ -1235,6 +1287,7 @@ impl DriverPlan {
                 claim: None,
                 release: None,
                 ensure: None,
+                startup_claim: None,
                 inspect: None,
                 field_facing: false,
             });
@@ -1252,6 +1305,7 @@ impl DriverPlan {
                 claim: planned.backend.claim,
                 release: planned.backend.release,
                 ensure: planned.backend.ensure,
+                startup_claim: planned.backend.startup_claim,
                 inspect: planned.backend.inspect,
                 field_facing: planned.backend.field_facing,
             });
@@ -1495,6 +1549,36 @@ impl FanoutDriver {
             }
         }
         Ok(())
+    }
+
+    /// The launched-controller counterpart of
+    /// [`claim_field_writer`](Self::claim_field_writer) — run once at
+    /// startup activation: claims the field's write-ownership under
+    /// `owner` on every field-facing backend only where no *live*
+    /// attachment holds a different owner's claim. `Ok(true)` means the
+    /// claim now stands under `owner`; `Ok(false)` that a live
+    /// incumbent stands on at least one arbitrating backend — a
+    /// restarted controller refusing the stale-checkpoint takeover it
+    /// cannot prove safe rather than rolling back the incumbent's
+    /// receipted state. A claim a dead owner left standing is still
+    /// preempted, the restart-as-active recovery path. Field-facing
+    /// backends without a startup hook — kinds whose arbitration cannot
+    /// distinguish live holders — fall back to the unconditional
+    /// [`DeviceBackend::claim`] hook exactly as `claim_field_writer`
+    /// runs it.
+    pub fn claim_field_writer_unless_held(&self, owner: u64) -> Result<bool, StepError> {
+        let mut held = true;
+        for backend in &self.backends {
+            if !backend.field_facing {
+                continue;
+            }
+            if let Some(startup_claim) = &backend.startup_claim {
+                held &= startup_claim(owner)?;
+            } else if let Some(claim) = &backend.claim {
+                claim(owner)?;
+            }
+        }
+        Ok(held)
     }
 
     /// Forgets every field-facing backend's recorded write-ownership
@@ -1814,6 +1898,7 @@ mod tests {
             claim: None,
             release: None,
             ensure: None,
+            startup_claim: None,
             inspect: None,
             field_facing: false,
         }
