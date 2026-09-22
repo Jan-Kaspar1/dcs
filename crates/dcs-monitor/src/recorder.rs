@@ -41,7 +41,7 @@ use dcs_core::{
     CarryoverReport, CommandOutcome, CommandReceipt, Divergence, EventRetention, JournalEntry,
     JournalEvent, PointId, Quality, Role, TelemetrySnapshot, Tick, Value,
 };
-use dcs_runtime::{Executor, ResolutionReport, SourceRestart};
+use dcs_runtime::{Executor, OrphanReport, ResolutionReport, SourceRestart};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::net::SocketAddr;
@@ -412,6 +412,20 @@ impl Recorder {
     /// observed at.
     pub(super) fn note_field_claim_lost(&mut self, tick: Tick, point: PointId) {
         self.push(tick, JournalEvent::FieldClaimLost { point });
+    }
+
+    /// Journals an orphan detection — a tracking peer's applied
+    /// checkpoint stamped its serving run as owning no field writes,
+    /// the mutual-standby wedge — attributed to the tick the orphaned
+    /// apply landed at, `aligned` carrying the applied checkpoint's
+    /// own tick.
+    pub(super) fn note_field_orphaned(&mut self, orphan: OrphanReport) {
+        self.push(
+            orphan.tick,
+            JournalEvent::FieldOrphaned {
+                aligned: orphan.aligned,
+            },
+        );
     }
 
     /// Journals a tracked-source restart — the checkpoint stream

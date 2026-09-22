@@ -207,7 +207,7 @@ fn pair_health_fault_kinds_roundtrip() {
             fault_kinds: vec![kind],
         };
         let json = serde_json::to_value(&health).unwrap();
-        assert_eq!(json["fault_kinds_version"], 1);
+        assert_eq!(json["fault_kinds_version"], 2);
         assert_eq!(json["fault_kinds"], serde_json::json!([kind]));
         assert_eq!(serde_json::from_value::<PairHealth>(json).unwrap(), health);
     }
@@ -238,7 +238,7 @@ fn healthy_pair_health_omits_empty_fault_kinds_and_roundtrips() {
         fault_kinds: vec![],
     };
     let json = serde_json::to_value(&health).unwrap();
-    assert_eq!(json["fault_kinds_version"], 1);
+    assert_eq!(json["fault_kinds_version"], 2);
     assert!(json.get("fault_kinds").is_none());
     assert_eq!(serde_json::from_value::<PairHealth>(json).unwrap(), health);
 }
@@ -699,6 +699,61 @@ fn an_unsynchronized_standby_past_the_convergence_grace_is_a_named_fault() {
     ] {
         assert!(page.contains(needle), "page lacks {needle}");
     }
+
+    active.stop();
+    standby.stop();
+}
+
+/// The mutual-standby wedge as pair health: a standby whose tracked
+/// line has no field owner reports `orphaned`, and the pair verdict
+/// names it `standby_orphaned` rather than rendering a healthy pair —
+/// the `tracking` report that used to hide the outage.
+#[test]
+fn an_orphaned_standby_is_a_named_fault() {
+    let active = PeerRig::start(Role::Active);
+    let standby = PeerRig::start(Role::Standby);
+    let mut pair = PairClient::new([active.addr, standby.addr]);
+
+    // The wedge's signature: a checkpoint that applies cleanly but
+    // whose serving run owns no field writes.
+    active.client.advance(1).unwrap();
+    let mut orphaned = active.client.checkpoint().unwrap();
+    orphaned.source_owns_field = Some(false);
+    standby.monitor.apply_checkpoint(&orphaned).unwrap();
+
+    pair.poll_roles();
+    match status_of(&pair, standby.addr) {
+        PeerStatus::Reporting(report) => assert!(
+            matches!(report.sync, Some(StandbySync::Orphaned { .. })),
+            "the orphaned standby must not report healthy tracking: {report:?}"
+        ),
+        other => panic!("expected the standby's report, got {other:?}"),
+    }
+    let health = pair.health();
+    assert_eq!(health.active, Some(active.addr));
+    assert_fault_kinds(&health, &[PairFaultKind::StandbyOrphaned]);
+    assert!(
+        health
+            .faults
+            .iter()
+            .any(|fault| fault.contains(&standby.addr.to_string())
+                && fault.contains("no field owner")),
+        "expected the orphaned standby named as a redundancy fault, got {:?}",
+        health.faults
+    );
+
+    // A checkpoint from a field-owning source ends the fault — the
+    // verdict is poll-driven, not sticky.
+    active.client.advance(1).unwrap();
+    standby
+        .monitor
+        .apply_checkpoint(&active.client.checkpoint().unwrap())
+        .unwrap();
+    pair.poll_roles();
+    let health = pair.health();
+    assert_eq!(health.active, Some(active.addr));
+    assert!(health.faults.is_empty(), "{:?}", health.faults);
+    assert_fault_kinds(&health, &[]);
 
     active.stop();
     standby.stop();
