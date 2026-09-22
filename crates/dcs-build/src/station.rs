@@ -22,11 +22,19 @@
 //!   the plant's availability aggregation: a `bool-gate` `and` of
 //!   in-auto (`not mode_i`), in-service (`not out_of_service_i`),
 //!   station power, and the healthy thermal/moisture contacts.
-//! - **Manual takeover (decision 42's recorded shape):** per pump, a
+//! - **Manual takeover (decision 88's recorded shape):** per pump, a
 //!   writable `mode_i` point selects between the group's `cmd_i` and
-//!   the operator's writable `hand_i` request — `motor.cmd_i = (cmd_i
-//!   and not mode_i) or (hand_i and mode_i)`, guarded by in-service,
-//!   through `bool-gate` instances and `digital-input` inversions.
+//!   the operator's writable `hand_i` request — `motor.cmd_i =
+//!   ((cmd_i and not mode_i) or (hand_i and mode_i and the held
+//!   protection set)) and protections-ok`. A per-pump `interlock`
+//!   aggregates the protections under the kind's fail-safe quality
+//!   rule — the power-fail, thermal, and moisture contacts, the
+//!   chain's `below_cutoff`, and in-service as its permissive, with
+//!   the selected level on its `in` so an untrusted measurement
+//!   cannot prove the dry-run trip clear — and the inverted
+//!   `tripped` guards the command in both modes while a `timer` at
+//!   `min_off_ticks` holds the hand leg out until the protections
+//!   have stood.
 //! - **Alarms (decision 43's set on the decision-71–73 managed
 //!   kinds):** every alarm is a wired managed latching instance with a
 //!   writable internal `ack` point — `managed-latching-alarm`s on the
@@ -80,9 +88,9 @@
 //! the document lints clean.
 
 use crate::specs::{
-    BoolGateSpec, DigitalInputSpec, FailoverSelectSpec, ManagedAlarmHandles,
-    ManagedBoolLatchingAlarmSpec, ManagedInputs, ManagedLatchingAlarmSpec, MotorSpec,
-    PumpGroupInstance, PumpGroupSpec, ThresholdChainSpec,
+    BoolGateInstance, BoolGateSpec, DigitalInputSpec, FailoverSelectSpec, InterlockSpec,
+    ManagedAlarmHandles, ManagedBoolLatchingAlarmSpec, ManagedInputs, ManagedLatchingAlarmSpec,
+    MotorSpec, PumpGroupInstance, PumpGroupSpec, ThresholdChainSpec, TimerSpec,
 };
 use crate::{
     BuildError, ChannelRef, Direction, InPoint, OutPoint, PlantBuilder, PointId, SignalId, Sink,
@@ -150,6 +158,27 @@ mod carriers {
     pub const ALL_FAULTED_IN: u64 = 221;
     pub const BACKUP_UNHEALTHY: u64 = 222;
     pub const BACKUP_UNHEALTHY_IN: u64 = 223;
+    /// The `power-ok` copy the station power interlock's permissive
+    /// reads.
+    pub const POWER_OK_ALARM_IN: u64 = 224;
+    /// The held analog feed the power interlock's `in` binds — the
+    /// declared conditions are discrete, so a constant `Good` input
+    /// leaves `tripped` reporting the permissive alone.
+    pub const POWER_GUARD_ANCHOR: u64 = 225;
+    /// The power interlock's unused pass-through carrier.
+    pub const POWER_GUARD_OUT: u64 = 226;
+    /// The power interlock's `tripped` carrier — `journaled`: the
+    /// station power trip's durable transition, asserted on the
+    /// contact's value or its untrusted quality alike.
+    pub const POWER_TRIPPED: u64 = 227;
+    /// The `tripped` copy delivered to the power-fail alarm.
+    pub const POWER_TRIPPED_IN: u64 = 228;
+    /// The any-pump-manual carrier — the `none-available` alarm's
+    /// declared suppression condition.
+    pub const ANY_MANUAL: u64 = 229;
+    /// The delivered copy the `none-available` alarm's `suppress`
+    /// reads.
+    pub const ANY_MANUAL_IN: u64 = 230;
 }
 
 /// The first per-pump internal block: pump `i` owns
@@ -340,6 +369,11 @@ pub struct PumpLayout {
     /// The aggregated `avail_i` carrier the group consumes —
     /// `journaled`.
     pub avail: PointId,
+    /// The protection interlock's `tripped` carrier — `journaled`.
+    pub protect_tripped: PointId,
+    /// The inverted `protections-ok` carrier the command guard and the
+    /// hand holdout read — `journaled`.
+    pub protections_ok: PointId,
     /// The `motor` instance's id.
     pub motor: ComponentId,
     /// The managed motor-fault alarm — `oos` bound to the pump's
@@ -391,6 +425,12 @@ pub struct PumpStationLayout {
     pub none_available: PointId,
     /// The group's `all_faulted` carrier.
     pub all_faulted: PointId,
+    /// The station power interlock's `tripped` carrier — the
+    /// `power-fail` alarm's quality-aware condition, `journaled`.
+    pub power_tripped: PointId,
+    /// The any-pump-manual carrier — the `none-available` alarm's
+    /// declared suppression condition.
+    pub any_manual: PointId,
     /// The `failover-select` instance's id.
     pub failover: ComponentId,
     /// The `threshold-chain` instance's id.
@@ -562,6 +602,29 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
         plant.internal_output::<bool>(PointId(carriers::BACKUP_UNHEALTHY), false);
     let backup_unhealthy_in =
         plant.internal_input::<bool>(PointId(carriers::BACKUP_UNHEALTHY_IN), false, false);
+    // Decision 88's cause-alarm wiring: `power_ok`'s delivered copy is
+    // the station power interlock's permissive — false or untrusted
+    // trips alike — and the `tripped` carrier pair feeds the
+    // `power-fail` alarm's condition, so the cause alarm asserts on
+    // the same reading availability takes. The `in` port's Float is
+    // the held anchor: the declared conditions are discrete.
+    let power_ok_alarm_in =
+        plant.internal_input::<bool>(PointId(carriers::POWER_OK_ALARM_IN), false, false);
+    let power_guard_anchor =
+        plant.internal_input::<f64>(PointId(carriers::POWER_GUARD_ANCHOR), 0.0, false);
+    let power_guard_out = plant.internal_output::<f64>(PointId(carriers::POWER_GUARD_OUT), 0.0);
+    let power_tripped = plant.internal_output::<bool>(PointId(carriers::POWER_TRIPPED), false);
+    let power_tripped_in =
+        plant.internal_input::<bool>(PointId(carriers::POWER_TRIPPED_IN), false, false);
+    // The `none-available` alarm's declared suppression: any pump held
+    // in manual is the operator withdrawing it from the group's roster
+    // — "demand stands with no pump available" is then designed state,
+    // not a fault (decision 73's pattern). The carrier keeps reporting
+    // truth; the `suppressed` flag names the withholding.
+    let any_manual = plant.internal_output::<bool>(PointId(carriers::ANY_MANUAL), false);
+    let any_manual_in =
+        plant.internal_input::<bool>(PointId(carriers::ANY_MANUAL_IN), false, false);
+    plant.journaled(power_tripped);
 
     // The protection-relevant status carriers decision 74's durable
     // record names — the chain's dry-run and high flags, the failover's
@@ -685,6 +748,41 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
             "backup-unhealthy-in",
             "Backup-unhealthy flag delivered to its alarm",
         ),
+        (
+            carriers::POWER_OK_ALARM_IN,
+            "power-ok-alarm-in",
+            "Station power-ok delivered to the power interlock",
+        ),
+        (
+            carriers::POWER_GUARD_ANCHOR,
+            "power-guard-anchor",
+            "Held analog feed for the power interlock — its conditions are discrete",
+        ),
+        (
+            carriers::POWER_GUARD_OUT,
+            "power-guard-out",
+            "The power interlock's analog pass-through — unused",
+        ),
+        (
+            carriers::POWER_TRIPPED,
+            "power-tripped",
+            "Station power tripped — the contact asserted or untrusted",
+        ),
+        (
+            carriers::POWER_TRIPPED_IN,
+            "power-tripped-in",
+            "The power trip delivered to the power-fail alarm",
+        ),
+        (
+            carriers::ANY_MANUAL,
+            "any-manual",
+            "Any pump held in manual — the none-available alarm's designed suppression",
+        ),
+        (
+            carriers::ANY_MANUAL_IN,
+            "any-manual-in",
+            "Any-manual delivered to the none-available alarm's suppress",
+        ),
     ] {
         let unit = match point {
             carriers::LEVEL_SEL
@@ -734,6 +832,24 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
         "invert",
         Value::Bool(true),
     )])));
+    // Decision 88: the station power interlock evaluates the
+    // conditioned `power-ok` — an unasserted *or* untrusted permissive
+    // trips — and its `tripped` flag is the `power-fail` alarm's
+    // condition, so the cause annunciates on the same reading that
+    // collapses `avail_i` (a `Bad` contact can no longer leave the
+    // alarm clean while the station declares no pump available). Its
+    // `in` binds a held anchor: the declared conditions are discrete.
+    let power_guard = plant.add(InterlockSpec::new(
+        parameters([("safe_value", Value::Float(0.0))]),
+        0,
+    ));
+    // Any pump held in manual is the `none-available` alarm's declared
+    // suppression — the operator withdrawing a pump from the group's
+    // roster makes "no pump available" designed state, not a fault.
+    let any_manual_gate = plant.add(BoolGateSpec::new(
+        parameters([("operation", Value::Int(GATE_OR))]),
+        config.pumps,
+    ));
     // The decision-70 codes are declared data — the site priority/class
     // vocabulary and response budgets stay an open customer assumption,
     // as does the shelving policy: which alarms are shelvable and their
@@ -830,7 +946,10 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
             ("class", Value::Int(1)),
             ("response_ticks", Value::Int(30)),
         ]),
-        ManagedInputs::default(),
+        ManagedInputs {
+            suppress: true,
+            ..ManagedInputs::default()
+        },
         rationalization(
             "Demand stands with no pump available to meet it",
             "Restore a pump to service or clear its faults",
@@ -897,6 +1016,14 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
     plant.connect(&group.all_faulted, all_faulted);
     plant.connect(power_fail, &inv_power.input);
     plant.connect(&inv_power.out, power_ok);
+    plant.connect(power_ok_alarm_in, power_ok);
+    plant.connect(power_guard_anchor, &power_guard.input);
+    plant.connect(power_ok_alarm_in, &power_guard.permissive);
+    plant.connect(&power_guard.out, power_guard_out);
+    plant.connect(&power_guard.tripped, power_tripped);
+    plant.connect(power_tripped_in, power_tripped);
+    plant.connect(&any_manual_gate.out, any_manual);
+    plant.connect(any_manual_in, any_manual);
     plant.connect(backup_active_in, backup_active);
     plant.connect(none_available_in, none_available);
     plant.connect(all_faulted_in, all_faulted);
@@ -959,6 +1086,14 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
         "station",
     );
     plant.connect(none_available_in, &none_available_alarm.input);
+    plant.connect(
+        any_manual_in,
+        none_available_alarm
+            .managed
+            .suppress
+            .as_ref()
+            .expect("the none-available alarm declares suppress"),
+    );
     let all_faulted_alarm_layout = managed_station_alarm(
         &mut plant,
         4,
@@ -984,7 +1119,7 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
         "power-fail",
         "station",
     );
-    plant.connect(power_fail, &power_fail_alarm.input);
+    plant.connect(power_tripped_in, &power_fail_alarm.input);
     let backup_unhealthy_alarm_layout = managed_station_alarm(
         &mut plant,
         6,
@@ -1013,7 +1148,11 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
             thermal_ch,
             moisture_ch,
             cmd_ch,
+            power_fail,
             power_ok,
+            level_chain,
+            below_cutoff,
+            &any_manual_gate,
             &group,
         ));
     }
@@ -1039,6 +1178,8 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
             backup_unhealthy: PointId(carriers::BACKUP_UNHEALTHY),
             none_available: PointId(carriers::NONE_AVAILABLE),
             all_faulted: PointId(carriers::ALL_FAULTED),
+            power_tripped: PointId(carriers::POWER_TRIPPED),
+            any_manual: PointId(carriers::ANY_MANUAL),
             failover: failover.id,
             threshold_chain: chain.id,
             pump_group: group.id,
@@ -1328,8 +1469,9 @@ fn pump_alarm(
 }
 
 /// Wires pump `index` (`0`-based): field points, the availability
-/// aggregation, the manual-takeover gates, the motor, and its three
-/// alarms — then connects the group's indexed ports.
+/// aggregation, the protection interlock and holdout, the
+/// manual-takeover gates, the motor, and its three alarms — then
+/// connects the group's indexed ports.
 #[allow(clippy::too_many_arguments)]
 fn wire_pump(
     plant: &mut PlantBuilder,
@@ -1340,7 +1482,11 @@ fn wire_pump(
     thermal_ch: ChannelRef,
     moisture_ch: ChannelRef,
     cmd_ch: ChannelRef,
+    power_fail: InPoint<bool>,
     power_ok: OutPoint<bool>,
+    level_chain: InPoint<f64>,
+    below_cutoff: OutPoint<bool>,
+    any_manual: &BoolGateInstance,
     group: &PumpGroupInstance,
 ) -> PumpLayout {
     let i = index as u64;
@@ -1471,12 +1617,26 @@ fn wire_pump(
     let moisture_ok_in = plant.internal_input::<bool>(PointId(base + 27), false, false);
     let avail_carrier = plant.internal_output::<bool>(PointId(base + 28), true);
     let avail_in = plant.internal_input::<bool>(PointId(base + 29), false, false);
-    // The proven fault and the aggregated availability are
-    // protection-relevant status — `journaled` like the contacts
-    // feeding them; the inverted and delivered copies stay off the
-    // record, their sources already carry it.
+    // Decision 88's protection carriers: the dry-run flag's delivered
+    // copy, the interlock's `tripped` and pass-through, and the
+    // inverted `protections-ok` pair the command guard and the hand
+    // holdout read. `protections-ok` seeds `true` like the other
+    // healthy-state carriers — cold start reads protected until the
+    // first computed values land.
+    let below_cutoff_in = plant.internal_input::<bool>(PointId(base + 15), false, false);
+    let protect_tripped = plant.internal_output::<bool>(PointId(base + 16), false);
+    let protect_tripped_in = plant.internal_input::<bool>(PointId(base + 17), false, false);
+    let protections_ok = plant.internal_output::<bool>(PointId(base + 18), true);
+    let protections_ok_in = plant.internal_input::<bool>(PointId(base + 19), false, false);
+    let protect_out = plant.internal_output::<f64>(PointId(base + 20), 0.0);
+    // The proven fault, the aggregated availability, and the
+    // protection state are protection-relevant status — `journaled`
+    // like the contacts feeding them; the inverted and delivered
+    // copies stay off the record, their sources already carry it.
     plant.journaled(fault);
     plant.journaled(avail_carrier);
+    plant.journaled(protect_tripped);
+    plant.journaled(protections_ok);
     for (point, name, description) in [
         (
             base + 3,
@@ -1508,7 +1668,7 @@ fn wire_pump(
         (
             base + 10,
             "oos-ok-guard-in",
-            "In-service delivered to the command guard",
+            "In-service delivered to the protection permissive",
         ),
         (
             base + 11,
@@ -1529,6 +1689,36 @@ fn wire_pump(
             base + 14,
             "fault-alarm-in",
             "Motor fault delivered to the alarm",
+        ),
+        (
+            base + 15,
+            "below-cutoff-in",
+            "Dry-run cutoff delivered to the protection interlock",
+        ),
+        (
+            base + 16,
+            "protect-tripped",
+            "Protection interlock tripped — a condition asserted or untrusted",
+        ),
+        (
+            base + 17,
+            "protect-tripped-in",
+            "Protection trip delivered to its inversion",
+        ),
+        (
+            base + 18,
+            "protections-ok",
+            "Protections clear and trusted — the inverted interlock trip",
+        ),
+        (
+            base + 19,
+            "protections-ok-in",
+            "Protections-clear delivered to the guard and holdout",
+        ),
+        (
+            base + 20,
+            "protect-out",
+            "The protection interlock's analog pass-through — unused",
         ),
         (
             base + 24,
@@ -1587,7 +1777,7 @@ fn wire_pump(
     ));
     let hand_leg = plant.add(BoolGateSpec::new(
         parameters([("operation", Value::Int(GATE_AND))]),
-        2,
+        3,
     ));
     let select = plant.add(BoolGateSpec::new(
         parameters([("operation", Value::Int(GATE_OR))]),
@@ -1597,6 +1787,24 @@ fn wire_pump(
         parameters([("operation", Value::Int(GATE_AND))]),
         2,
     ));
+    // Decision 88's protection aggregation: the `interlock` trips on
+    // an asserted *or* untrusted condition alike — the thermal,
+    // moisture, and power-fail contacts and the chain's `below_cutoff`
+    // as its trips, in-service as its permissive, and the delivered
+    // selected level on its `in` so an untrusted measurement cannot
+    // prove the dry-run trip clear. The inverted `tripped` guards the
+    // command in both modes, and the `timer` at `min_off_ticks` holds
+    // the hand leg out until the protections have stood — the group's
+    // `min_off`/`restage` discipline reaches only the auto leg.
+    let protect = plant.add(InterlockSpec::new(
+        parameters([("safe_value", Value::Float(0.0))]),
+        4,
+    ));
+    let inv_protect = plant.add(DigitalInputSpec::new(invert()));
+    let holdout = plant.add(TimerSpec::new(parameters([(
+        "delay_ticks",
+        Value::Int(config.min_off_ticks),
+    )])));
     let motor = plant.add(MotorSpec::new(parameters([(
         "fault_ticks",
         Value::Int(config.motor_fault_ticks),
@@ -1688,17 +1896,45 @@ fn wire_pump(
     plant.connect(avail_in, avail_carrier);
     plant.connect(avail_in, group.avail(index + 1));
 
-    // The recorded manual-takeover shape: &motor.cmd = (group cmd and
-    // not mode) or (hand and mode), guarded by in-service.
+    // Decision 88's protection aggregation: the raw contacts bind the
+    // interlock's trips directly — a point may feed many port inputs —
+    // so an asserted *or* untrusted thermal, moisture, power-fail, or
+    // dry-run condition trips the pump; `oos` stands as the permissive
+    // and the delivered selected level on `in` fails the same way. The
+    // inverted `tripped` is `protections-ok`; the `timer` holds the
+    // hand leg out for `min_off_ticks` after the protections clear.
+    plant.connect(below_cutoff_in, below_cutoff);
+    plant.connect(level_chain, &protect.input);
+    plant.connect(oos_ok_guard_in, &protect.permissive);
+    plant.connect(thermal, protect.trip(1));
+    plant.connect(moisture, protect.trip(2));
+    plant.connect(power_fail, protect.trip(3));
+    plant.connect(below_cutoff_in, protect.trip(4));
+    plant.connect(&protect.out, protect_out);
+    plant.connect(&protect.tripped, protect_tripped);
+    plant.connect(protect_tripped_in, protect_tripped);
+    plant.connect(protect_tripped_in, &inv_protect.input);
+    plant.connect(&inv_protect.out, protections_ok);
+    plant.connect(protections_ok_in, protections_ok);
+    plant.connect(protections_ok_in, &holdout.input);
+
+    // The manual-takeover shape under decision 88: `motor.cmd =
+    // ((group cmd and not mode) or (hand and mode and the held
+    // protection set)) and protections-ok` — the operator's `hand`
+    // request stays a demand the declared protections bound, not a
+    // bypass. A pump held in manual feeds the `any-manual`
+    // aggregation the `none-available` alarm suppresses on.
     plant.connect(group_cmd_in, auto_leg.input(1));
     plant.connect(auto_leg_in, auto_leg.input(2));
     plant.connect(hand, hand_leg.input(1));
     plant.connect(mode, hand_leg.input(2));
+    plant.connect(&holdout.out, hand_leg.input(3));
     plant.connect(&auto_leg.out, select.input(1));
     plant.connect(&hand_leg.out, select.input(2));
     plant.connect(&select.out, guard.input(1));
-    plant.connect(oos_ok_guard_in, guard.input(2));
+    plant.connect(protections_ok_in, guard.input(2));
     plant.connect(&guard.out, &motor.cmd);
+    plant.connect(mode, any_manual.input(index + 1));
     plant.connect(run, &motor.run);
     plant.connect(&motor.out, cmd);
 
@@ -1799,6 +2035,8 @@ fn wire_pump(
         group_cmd: PointId(base + 3),
         fault: PointId(base + 12),
         avail: PointId(base + 28),
+        protect_tripped: PointId(base + 16),
+        protections_ok: PointId(base + 18),
         motor: motor.id,
         fault_alarm: fault_alarm_layout,
         thermal_alarm: thermal_alarm_layout,
