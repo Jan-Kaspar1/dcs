@@ -293,8 +293,11 @@ pub struct Peer<'d> {
     /// restoring the unreached tail suspended instead. A genuinely
     /// abandoned command can never apply here — the gate quiesces the
     /// run's writes — so it settles rejected rather than vanishing
-    /// unaudited or `applied` on an abandoned image.
-    pending_superseded: Vec<CommandReceipt>,
+    /// unaudited or `applied` on an abandoned image. Each entry keeps
+    /// the receipt's absolute submission index beside it — the identity
+    /// the journal's settle dedup keys on, so a repeat drain of the
+    /// same adjudication never re-journals it.
+    pending_superseded: Vec<(u64, CommandReceipt)>,
     /// Force-set changes a checkpoint adoption made that no settled
     /// receipt in the merged log accounts for — each queued as a
     /// [`CommandReceipt`] whose actor names the adopting source, for

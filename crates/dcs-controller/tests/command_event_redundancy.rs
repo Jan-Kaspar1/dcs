@@ -913,9 +913,13 @@ fn a_receipted_unforce_survives_the_restarted_standbys_stale_pull() {
             "substituted quality must not return for {FORCED:?}"
         );
     }
+    // A is demoted — its served checkpoint stamps the tracked line
+    // field-unowned — so B reports the mutual-standby wedge honestly:
+    // `Orphaned`, still following A's stream and still promotable on
+    // the same evidence `Tracking` would have stood on.
     assert!(
-        matches!(b.role().unwrap().sync, Some(StandbySync::Tracking { .. })),
-        "the restarted standby must be tracking A"
+        matches!(b.role().unwrap().sync, Some(StandbySync::Orphaned { .. })),
+        "the restarted standby must be following A's field-unowned stream"
     );
 
     // The audit fallback the finding names: a force change the merged
