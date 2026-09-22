@@ -415,10 +415,11 @@ one fixed-arity kind. `bool-latching-alarm` keeps `latching-alarm`'s
 `in`/`ack`/`alarm`/`unacknowledged` vocabulary exactly, with `in` a
 `Bool`: `alarm` follows the input directly — no hysteresis and no
 standing-limit parameter — and
-`unacknowledged` latches the input's false-to-true edge, clearing while
-the model-wired writable `ack` point reads `true` under the same
-level-sensitive, ack-dominates rule (a held `ack` suppresses a fresh
-latch). Both outputs carry the worst of the two inputs' qualities.
+`unacknowledged` latches the input's false-to-true edge, clearing on
+the model-wired writable `ack` point's rising edge under the same
+consumed-pulse rule — a held `ack` level acknowledges once and cannot
+pre-acknowledge a later trip. Both outputs carry the worst of the two
+inputs' qualities.
 `crates/dcs-assembly/fixtures/bool_latching_alarm.json` is the recorded
 composition — a `motor`'s `fault` output carried through a declared
 internal point pair into `in`; per-port semantics live beside

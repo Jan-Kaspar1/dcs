@@ -9,7 +9,7 @@
 //! The contract in one place:
 //!
 //! - `shelve` (`In`, `Bool`), bound to a writable internal point, is
-//!   level-observed like `ack`: `true` requests shelving, `false` is
+//!   level-observed: `true` requests shelving, `false` is
 //!   the manual unshelve. `shelved` asserts on the request's first
 //!   scan and holds for `max_shelve_ticks` scans — the asserting scan
 //!   counts as the first — then expiry drops it at the bound even while
@@ -62,7 +62,9 @@ pub struct ManagedAlarmIo {
     /// `in` (`In`, `Float` or `Bool` by kind): the alarm condition.
     pub input: PointId,
     /// `ack` (`In`, `Bool`): the operator's clearing command — a
-    /// writable internal point, level-observed like the siblings'.
+    /// writable internal point, consumed on its rising edge like the
+    /// siblings': a held level acknowledges once and cannot
+    /// pre-acknowledge a later trip.
     pub ack: PointId,
     /// `shelve` (`In`, `Bool`): the level-observed shelve request —
     /// `true` requests shelving, `false` is the manual return.

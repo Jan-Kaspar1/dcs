@@ -351,7 +351,7 @@ fn the_ack_affordance_issues_an_ordinary_receipted_write() {
             }
         );
 
-        // The applying scan observes the level-observed ack: the latch
+        // The applying scan observes the ack's rising edge: the latch
         // clears while the standing limit state still reports alarmed.
         let snapshot = client.advance(1).unwrap();
         assert_eq!(

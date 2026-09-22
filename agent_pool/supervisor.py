@@ -1,5 +1,4 @@
 """Persistent local planner, dispatcher, and serialized integration loop."""
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -1082,6 +1081,9 @@ Repair context: {repair}
                 self.block(job, str(exc))
 
     def run(self):
+        # Lazy: the supervisor is POSIX-only, but the module must stay
+        # importable on Windows so the repository test suite can collect it.
+        import fcntl
         with (self.root / 'supervisor.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             signal.signal(signal.SIGTERM, lambda *_: setattr(self, 'stopping', True))
