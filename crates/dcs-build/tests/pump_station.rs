@@ -1081,6 +1081,10 @@ fn hand_command_holds_the_declared_protections() {
         "the power trip must release the hand command"
     );
     assert!(
+        drive_until(&mut executor, &driver, 4, |e| !point_bool(e, pump.run)),
+        "the power trip must stop the hand-running pump"
+    );
+    assert!(
         drive_until(&mut executor, &driver, 8, |e| point_bool(
             e,
             layout.power_fail_alarm.alarm
