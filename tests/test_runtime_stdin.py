@@ -115,12 +115,14 @@ class OpenCodeStdinTests(unittest.TestCase):
         self.runtime.opencode = self.make_stdin_double(argv_dump, stdin_capture)
         metadata = self.runtime.spawn('worker-01', clone, prompt,
                                       model='opencode/muse-spark-1.3-contributor-free')
-        result = self.wait_completed(metadata)
-        self.assertIsNotNone(result)
-        self.assertEqual(result['status'], 'completed')
-        self.assertEqual(stdin_capture.read_bytes(), prompt.encode())
-        self.assertNotIn(LARGE_PREFIX, argv_dump.read_text())
-        self.runtime.poll(metadata)
+        try:
+            result = self.wait_completed(metadata)
+            self.assertIsNotNone(result)
+            self.assertEqual(result['status'], 'completed')
+            self.assertEqual(stdin_capture.read_bytes(), prompt.encode())
+            self.assertNotIn(LARGE_PREFIX, argv_dump.read_text())
+        finally:
+            self.runtime.poll(metadata)
 
     @posix_only
     def test_opencode_resume_keeps_session_and_stdin(self):
