@@ -58,9 +58,10 @@ check's `demote-reconvergence-failed`. `--tamper self-announce`
 crafts a `?peer=` announce naming the field owner's own monitor
 address — a claim the pulling connection's own source proves, so it
 lands exactly as a self-claim — planting a self-addressed demotion
-hint: the demotion adopts the peer's own address and the leg's
-adopted-source audit must fire rather than let a self-pinned demotion
-pass silently.
+hint: the demotion's verify pull reads the owner's own document, the
+replayable own-document shape an announced demotion refuses, so
+`POST /demote` answers `409 no_tracking_source` and the leg must
+report the refusal rather than let a self-pinned demotion proceed.
 """
 
 import argparse
@@ -278,8 +279,11 @@ def reconvergence_pass(args, tamper):
         # field owner's own monitor address — the pulling connection's
         # own source, so it lands exactly as a self-claim — plants a
         # self-addressed demotion hint: the self-pin defect shape this
-        # leg exists to catch. The checkpoint read still answers the
-        # owner's checkpoint.
+        # leg exists to catch. The hint's verify pull reads the
+        # owner's own document — the replayable own-document shape the
+        # demotion refuses — so the switch's POST /demote must answer
+        # 409 no_tracking_source rather than adopt the self-pin. The
+        # checkpoint read still answers the owner's checkpoint.
         if tamper == "self-announce":
             checkpoint = pair.get(
                 f"{duty_url}/checkpoint?peer={duty_addr}",
@@ -621,8 +625,8 @@ def main():
         choices=["self-announce"],
         help="craft a ?peer= announce naming the field owner's own "
         "monitor address — landing on the pulling connection's own "
-        "source — so the demotion adopts a self-addressed tracking "
-        "source the leg must catch",
+        "source — so the demotion faces a self-addressed tracking "
+        "hint the leg must refuse as no_tracking_source",
     )
     args = parser.parse_args()
 
@@ -644,7 +648,7 @@ def main():
             eprint(
                 f"demote-reconvergence: the {args.tamper} case passed "
                 "silently — the leg never noticed the self-addressed "
-                "adoption"
+                "demotion hint"
             )
         return 1
     if failures:
