@@ -22,7 +22,7 @@
 //!   the plant's availability aggregation: a `bool-gate` `and` of
 //!   in-auto (`not mode_i`), in-service (`not out_of_service_i`),
 //!   station power, and the healthy thermal/moisture contacts.
-//! - **Manual takeover (decision 87's recorded shape):** per pump, a
+//! - **Manual takeover (decision 88's recorded shape):** per pump, a
 //!   writable `mode_i` point selects between the group's `cmd_i` and
 //!   the operator's writable `hand_i` request — `motor.cmd_i =
 //!   ((cmd_i and not mode_i) or (hand_i and mode_i and the held
@@ -602,7 +602,7 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
         plant.internal_output::<bool>(PointId(carriers::BACKUP_UNHEALTHY), false);
     let backup_unhealthy_in =
         plant.internal_input::<bool>(PointId(carriers::BACKUP_UNHEALTHY_IN), false, false);
-    // Decision 87's cause-alarm wiring: `power_ok`'s delivered copy is
+    // Decision 88's cause-alarm wiring: `power_ok`'s delivered copy is
     // the station power interlock's permissive — false or untrusted
     // trips alike — and the `tripped` carrier pair feeds the
     // `power-fail` alarm's condition, so the cause alarm asserts on
@@ -832,7 +832,7 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
         "invert",
         Value::Bool(true),
     )])));
-    // Decision 87: the station power interlock evaluates the
+    // Decision 88: the station power interlock evaluates the
     // conditioned `power-ok` — an unasserted *or* untrusted permissive
     // trips — and its `tripped` flag is the `power-fail` alarm's
     // condition, so the cause annunciates on the same reading that
@@ -1617,7 +1617,7 @@ fn wire_pump(
     let moisture_ok_in = plant.internal_input::<bool>(PointId(base + 27), false, false);
     let avail_carrier = plant.internal_output::<bool>(PointId(base + 28), true);
     let avail_in = plant.internal_input::<bool>(PointId(base + 29), false, false);
-    // Decision 87's protection carriers: the dry-run flag's delivered
+    // Decision 88's protection carriers: the dry-run flag's delivered
     // copy, the interlock's `tripped` and pass-through, and the
     // inverted `protections-ok` pair the command guard and the hand
     // holdout read. `protections-ok` seeds `true` like the other
@@ -1787,7 +1787,7 @@ fn wire_pump(
         parameters([("operation", Value::Int(GATE_AND))]),
         2,
     ));
-    // Decision 87's protection aggregation: the `interlock` trips on
+    // Decision 88's protection aggregation: the `interlock` trips on
     // an asserted *or* untrusted condition alike — the thermal,
     // moisture, and power-fail contacts and the chain's `below_cutoff`
     // as its trips, in-service as its permissive, and the delivered
@@ -1896,7 +1896,7 @@ fn wire_pump(
     plant.connect(avail_in, avail_carrier);
     plant.connect(avail_in, group.avail(index + 1));
 
-    // Decision 87's protection aggregation: the raw contacts bind the
+    // Decision 88's protection aggregation: the raw contacts bind the
     // interlock's trips directly — a point may feed many port inputs —
     // so an asserted *or* untrusted thermal, moisture, power-fail, or
     // dry-run condition trips the pump; `oos` stands as the permissive
@@ -1918,7 +1918,7 @@ fn wire_pump(
     plant.connect(protections_ok_in, protections_ok);
     plant.connect(protections_ok_in, &holdout.input);
 
-    // The manual-takeover shape under decision 87: `motor.cmd =
+    // The manual-takeover shape under decision 88: `motor.cmd =
     // ((group cmd and not mode) or (hand and mode and the held
     // protection set)) and protections-ok` — the operator's `hand`
     // request stays a demand the declared protections bound, not a

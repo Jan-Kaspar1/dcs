@@ -305,6 +305,7 @@ fn attributed(entry: &JournalEntry, name: &str, points: &BTreeSet<PointId>) -> b
         | JournalEvent::DivergenceDetected { .. }
         | JournalEvent::DivergenceResolved { .. }
         | JournalEvent::Reinitialized { .. }
+        | JournalEvent::FieldOrphaned { .. }
         | JournalEvent::SourceRestarted { .. }
         | JournalEvent::TrackingSourceAdopted { .. }
         | JournalEvent::RunBoundary { .. } => false,

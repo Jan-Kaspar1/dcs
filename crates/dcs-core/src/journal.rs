@@ -212,6 +212,23 @@ pub enum JournalEvent {
         /// The point whose write the field fenced.
         point: PointId,
     },
+    /// A tracking peer's applied checkpoint stamped its serving run as
+    /// not owning field writes — the checkpoint's `source_owns_field`
+    /// stamp — meaning the tracked line has no field owner: the
+    /// mutual-standby wedge, where every peer reports a clean apply
+    /// while the field stands unwritten. The peer's reported sync moves
+    /// to [`StandbySync::Orphaned`](crate::StandbySync) and a peer that
+    /// once owned the field re-arms its claim conditionally — granted
+    /// only while the field is unclaimed or already names its own
+    /// token, never preempting a standing owner. One entry journals per
+    /// transition into the orphaned state, attributed to the tick the
+    /// orphaned apply landed at; `aligned` carries the applied
+    /// checkpoint's own tick — where the tracked line stood when the
+    /// observation landed.
+    FieldOrphaned {
+        /// The applied checkpoint's tick — the tracked line's position.
+        aligned: Tick,
+    },
     /// A field owner demoted toward the address a tracking peer
     /// announced through its `GET /checkpoint?peer=` pulls verified
     /// that hint by pulling a checkpoint from it that continues this
@@ -466,6 +483,11 @@ mod tests {
                 tick: Tick(20),
                 event: JournalEvent::RunBoundary { run: 2 },
             },
+            JournalEntry {
+                seq: 17,
+                tick: Tick(21),
+                event: JournalEvent::FieldOrphaned { aligned: Tick(20) },
+            },
         ];
         let json = serde_json::to_string(&entries).unwrap();
         assert_eq!(
@@ -483,6 +505,7 @@ mod tests {
         assert!(json.contains("\"reinitialized\""), "{json}");
         assert!(json.contains("\"event_emitted\""), "{json}");
         assert!(json.contains("\"field_claim_lost\""), "{json}");
+        assert!(json.contains("\"field_orphaned\""), "{json}");
         assert!(json.contains("\"source_restarted\""), "{json}");
         assert!(json.contains("\"tracking_source_adopted\""), "{json}");
         assert!(json.contains("\"run_boundary\""), "{json}");

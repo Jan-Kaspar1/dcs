@@ -23,7 +23,7 @@
 //!   per pump. `avail_i` is the aggregated availability: in-auto, in
 //!   service, station power healthy, thermal and moisture contacts
 //!   healthy.
-//! - **Manual takeover (the platform's decision-87 contract this
+//! - **Manual takeover (the platform's decision-88 contract this
 //!   composition implements):** per pump, writable `mode`/`hand`/`oos`
 //!   internal points select `motor.cmd = ((group cmd and not mode) or
 //!   (hand and mode and the held protection set)) and protections-ok`.

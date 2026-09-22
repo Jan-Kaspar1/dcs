@@ -174,6 +174,22 @@ def tracking(report):
     )
 
 
+def converged_sync(report):
+    """Whether a served RoleReport carries `standby` under a converged
+    sync state — `tracking`, or the `orphaned` verdict the
+    ownership-stamped checkpoint contract reports while the tracked
+    line's serving run holds no field claim. In this leg's restore
+    window the rogue token owns the field and the successor's run
+    serves checkpoints without one, so the demoted owner's honest
+    report is `orphaned` — a promotable convergence — until its
+    re-promotion preempts the rogue. A release line that predates the
+    stamp reports `tracking` for the same convergence."""
+    sync = report.get("sync") if isinstance(report, dict) else None
+    return report.get("role") == "standby" and isinstance(
+        sync, dict
+    ) and ("tracking" in sync or "orphaned" in sync)
+
+
 def claim_fencing_pass(args, tamper):
     """The claim-fencing run: converge (switching first where the
     release claims only on promotion), fenced probes, the claim
@@ -635,21 +651,25 @@ def claim_fencing_pass(args, tamper):
             )
             evidence["rogue"] = "preempted"
 
-            # The restore: the demoted owner reconverges tracking on
-            # the monitor address its peer's pulls announced, then
-            # re-promotes — the promotion claim preempts the rogue
-            # token, so the field stays claimed throughout.
+            # The restore: the demoted owner reconverges on the
+            # monitor address its peer's pulls announced — `orphaned`
+            # while the rogue's claim stands (the tracked line's
+            # serving run owns nothing, the named verdict the wedge
+            # fix reports instead of healthy tracking), `tracking` on
+            # a stamp-less release line — then re-promotes: the
+            # promotion claim preempts the rogue token, so the field
+            # stays claimed throughout.
             report = None
             for _ in range(RECONVERGE_SCANS):
                 report = pair.get(
                     f"{owner_url}/role", "GET /role", failures
                 )
-                if tracking(report):
+                if converged_sync(report):
                     break
                 pair.scan(owner_url, failures)
             else:
                 failures.append(
-                    "the demoted owner never reconverged tracking on "
+                    "the demoted owner never reconverged on "
                     f"its announced successor — GET /role answers "
                     f"{report}"
                 )

@@ -610,7 +610,7 @@ function pointName(point) {
 // and the pair has no failover coverage to call healthy.
 const CONVERGENCE_GRACE_MS = 5000;
 
-const PAIR_FAULT_KINDS_VERSION = 1;
+const PAIR_FAULT_KINDS_VERSION = 2;
 const PAIR_FAULT_KINDS = [
   "peer_unreachable",
   "standby_unsynchronized_past_grace",
@@ -618,6 +618,7 @@ const PAIR_FAULT_KINDS = [
   "dual_active",
   "standby_degraded",
   "standby_diverged",
+  "standby_orphaned",
 ];
 
 // The convergence-grace clock pairHealth reads: a report of
@@ -720,14 +721,18 @@ function noActiveVerdict() {
 }
 
 // StandbySync serializes as "unsynchronized" | {"tracking": {aligned}} |
-// {"degraded": {detail}} | {"diverged": {mismatches}} |
-// {"reinitialized": {report}}.
+// {"degraded": {detail}} | {"orphaned": {aligned}} |
+// {"diverged": {mismatches}} | {"reinitialized": {report}}.
 function describeSync(sync) {
   if (typeof sync === "string") return sync;
   if ("tracking" in sync) {
     return "tracking (aligned at tick " + sync.tracking.aligned + ")";
   }
   if ("degraded" in sync) return "degraded: " + sync.degraded.detail;
+  if ("orphaned" in sync) {
+    return "orphaned: the tracked line has no field owner " +
+      "(aligned at tick " + sync.orphaned.aligned + ")";
+  }
   if ("diverged" in sync) {
     return "diverged: staged outputs mismatch the field at " +
       sync.diverged.mismatches.map(m => m.point).join(", ");
@@ -782,6 +787,11 @@ function pairHealth(pairPeers, states) {
         faults.push(peer.name + " standby diverged: staged outputs mismatch the field at " +
           state.report.sync.diverged.mismatches.map(m => m.point).join(", "));
         fault_kinds.push("standby_diverged");
+      }
+      if ("orphaned" in state.report.sync) {
+        faults.push(peer.name + " reports the tracked line has no field owner " +
+          "(aligned at tick " + state.report.sync.orphaned.aligned + ")");
+        fault_kinds.push("standby_orphaned");
       }
     }
   });

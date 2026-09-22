@@ -590,7 +590,7 @@ A factory returns one of two `DeviceDriver` contributions:
   initial value). The fragment merges with every other `Sim` contribution
   and the synthesized internal points into one `SimDriver` backend, so a
   model can mix many `sim*` devices freely.
-- `DeviceDriver::Backend(DeviceBackend { io, step, claim, release, inspect, field_facing })` — a
+- `DeviceDriver::Backend(DeviceBackend { io, step, claim, release, ensure, inspect, field_facing })` — a
   self-contained backend. `io` is the point-facing driver; `step` is an
   optional `StepHook` (`Fn(f64) -> Result<Tick, dcs_assembly::StepError>`)
   advancing the backend's simulated plant one `dt` per `FanoutDriver::step` —
@@ -609,6 +609,16 @@ A factory returns one of two `DeviceDriver` contributions:
   claim token it would otherwise re-assert on a reconnect. `sim-tcp`
   installs `RemoteDriver::release_claim` for exactly that — a demoted
   attachment must not race the new owner back onto a restarted plant.
+  `ensure` is an optional `EnsureHook`
+  (`Fn(u64) -> Result<bool, dcs_assembly::StepError>`) — the conditional
+  counterpart of `claim` the orphan cycle probes: while a demoted
+  ex-owner's tracked line reports no field owner,
+  `FanoutDriver::ensure_field_writer` runs it to re-arm the claim under
+  the owner's token only where the field stands unclaimed or already
+  names that token, never preempting a standing owner. `sim-tcp`
+  installs the plant server's `ensure_writer`; a kind whose claim dies
+  with its connection — `sim-bus`, `sim-cyclic` — leaves it `None`, its
+  arbitration carrying no conditional grant to probe.
   `inspect` is an optional
   `Option<Arc<dyn Any + Send + Sync>>` typed handle the factory installs when
   the backend exposes more than the `IoDriver` surface — `sim-scripted`
@@ -792,6 +802,7 @@ fn memory_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         step: None,
         claim: None,
         release: None,
+        ensure: None,
         inspect: None,
         field_facing: false,
     }))
@@ -1262,6 +1273,7 @@ fn demo_bus(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         step: None,
         claim: None,
         release: None,
+        ensure: None,
         inspect: Some(inspect),
         field_facing: true,
     }))

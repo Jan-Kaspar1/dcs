@@ -36,7 +36,7 @@
 //!   standby-loss annunciation issue #502 calls for;
 //! - the manual-takeover path drives `p101-cmd` from the operator's
 //!   `hand` request while the group no longer requests that pump —
-//!   under the decision-87 protection set the separate regression
+//!   under the decision-88 protection set the separate regression
 //!   below exercises;
 //! - a `Disconnected` run contact proves the motor fault, drops the
 //!   pump from the group, and latches the fault alarm;
@@ -1007,7 +1007,7 @@ fn point_bool(executor: &dcs_runtime::Executor<'_>, point: PointId) -> bool {
 
 #[test]
 fn hand_command_holds_the_declared_protections() {
-    // Issue #782's contract — decision 87: the operator's `hand`
+    // Issue #782's contract — decision 88: the operator's `hand`
     // request stays a demand the protection set bounds. A
     // hand-commanded pump runs while its protections are healthy and
     // releases on the station power-fail, the thermal and moisture
@@ -1540,7 +1540,7 @@ fn alarms_emit_the_managed_kinds_and_wiring() {
         assert_eq!(bound_point(model, alarm.component, "oos"), None);
         assert_eq!(bound_point(model, alarm.component, "suppress"), None);
     }
-    // Decision 87's designed suppression: the none-available alarm
+    // Decision 88's designed suppression: the none-available alarm
     // declares `suppress` bound to the delivered `any-manual` copy — a
     // pump held in manual withdraws from the group's roster, so
     // demand-with-no-available-pump is designed state, not a fault.
