@@ -479,19 +479,122 @@
 #                inputs restored; two passes produce identical digests
 #                (managed-lifecycle-failed,
 #                managed-lifecycle-nondeterministic)
-#                The stage's emit-identical event-parity leg,
-#                ci/event_parity.py on the same declared deployment:
-#                with the pair tracking, the emitted model's sequencer
-#                is driven through the field owner's receipted path —
-#                the `run` write refused `not_active` at the standby's
-#                role boundary — until the counted `step_completed`
-#                set stands, then both peers' `GET /resources` views
-#                must collect the same routed `event_emitted` records:
-#                identical component attribution, declared identities,
-#                ordered fields, tick, and retention, the stream-local
-#                seqs excluded, the standby still tracking; two passes
-#                produce identical digests (event-parity-failed,
-#                event-parity-nondeterministic)
+#                The stage's managed-carryover leg,
+#                ci/managed_carryover.py on the same declared
+#                deployment — the consumer-side proof that the managed
+#                alarm kinds' checkpointed run state carries across a
+#                takeover on the customer-owned pair (WW-ENG-003,
+#                WW-ALM-002, WW-LCM-001): with the pair tracking, a
+#                per-pump fault alarm put out of service through its
+#                wired oos point and tripped suppressed so its alarm
+#                reports process truth with the latch withheld, and
+#                the shelvable low-level alarm shelved mid-run through
+#                its writable journaled shelve point, the documented
+#                demote/promote landing inside the declared
+#                max_shelve_ticks bound — the promoted peer asserting
+#                shelved still stands and releases at the tick the
+#                continued countdown expires, never a bound restarted
+#                at the switch, out_of_service and suppressed standing
+#                with evaluation held, every written point carried,
+#                and both durable journals' ordered records continuous
+#                across the switch — then every driven input and the
+#                pair's roles restored; two passes produce identical
+#                digests (carry-failed, carry-nondeterministic)
+#                The stage's staging leg, ci/staging.py on the same
+#                declared deployment — the consumer-side proof that
+#                the deployed pair stages and de-stages on level
+#                through the emitted model's declared setpoint chain
+#                (WW-ENG-003, WW-CTL-001, WW-CTL-002): both pumps held
+#                out of service through receipted write_value on their
+#                declared writable oos points so the declared inflow
+#                raises the wet-well level unopposed, the active's
+#                monitor asserting demand moves 0→1→2 only at the
+#                chain's own declared start/lag_start crossings with
+#                duty_call/lag_call reporting and the group's staged
+#                count and motor commands held at zero, the high
+#                crossing annunciating the managed high-level alarm
+#                with the journaled evidence; the releases restoring
+#                the driven inputs so the standing demand stages the
+#                group — the duty pump first, the lag inside the
+#                declared start_delay_ticks, each pump's cmd/run field
+#                outputs proving the delivered start — then the staged
+#                pumps drawing the level down through the declared
+#                de-stage order, the lag's run releasing before the
+#                duty's and the journaled transitions landing in the
+#                same order down to the below-cutoff floor; the
+#                receipted ack clearing the alarm's latch, every
+#                driven input restored, the pair's roles unchanged,
+#                and the durable journal audited for the ordered
+#                record the served journal answers identically; two
+#                passes produce identical digests
+#                (staging-failed, staging-nondeterministic)
+#                The stage's out-of-service leg, ci/oos.py on the
+#                same declared deployment — the consumer-side proof
+#                that a receipted maintenance inhibit on the duty
+#                pump's declared writable journaled oos point
+#                excludes it on the customer-owned pair (WW-ENG-003,
+#                WW-OPS-001, WW-ALM-002): with the pair tracking at
+#                an idle assigned-duty baseline — duty naming the
+#                pump whose oos the leg drives — the attributed
+#                write drops the in-service cone (oos-ok through
+#                oos-ok-avail-in and oos-ok-guard-in), the aggregated
+#                avail and its delivered copy, handing duty to the
+#                sibling inside the declared wiring bound with staged
+#                reporting the available count and the held pump's
+#                command released for the whole of the sibling's
+#                service; each managed per-pump alarm reports the
+#                out_of_service/suppressed states its declared
+#                lifecycle bindings select — the bound fault alarm,
+#                the unbound thermal/moisture kinds and the sibling's
+#                set untouched — while a mid-OOS run-contact fault
+#                still asserts alarm as process truth with the
+#                unacknowledged latch withheld; the false write
+#                returns the pump to availability and re-annunciates
+#                the outlasted trip on suppression's release, the
+#                receipted ack settles the latch, and the next
+#                completed cycle's declared rotation hands duty back;
+#                every managed transition journaled as ordered
+#                point_changed entries beside the attributed receipts
+#                with the tick-domain ordering the declared bound
+#                measures, and the pair's roles unmoved throughout;
+#                two passes produce identical digests (oos-failed,
+#                oos-nondeterministic)
+#                The stage's power-fail interlock leg,
+#                ci/power_trip.py on the same declared deployment:
+#                with the pair settled and the group holding a full
+#                duty demand, the station power-fail contact driven
+#                through the plant protocol drops `power-ok` and both
+#                pumps' availability aggregates — the motor commands
+#                releasing while the chain's `demand` still stands,
+#                `none-available` annunciating, and the managed
+#                `power-fail` alarm's `alarm`/`unacknowledged`
+#                asserting with journaled `point_changed` evidence;
+#                a receipted `power-fail-ack` clears the latch while
+#                the condition stands, and the released contact
+#                returns the permissives and re-stages the demand
+#                inside the declared `min_off_ticks`/`start_delay_ticks`
+#                bounds with the field outputs moving only on the
+#                driven scan sequence and the pair's roles unchanged;
+#                two passes produce identical digests
+#                (power-trip-failed, power-trip-nondeterministic)
+#                The stage's monitor-starvation leg,
+#                ci/monitor_starvation.py on the same declared
+#                deployment: with the armed pair settled — the
+#                standby's --auto-promote carrying the manifest's
+#                failover_budget — the saturating set of
+#                incomplete-body connections held against the field
+#                owner's monitor leaves the serving lane answering
+#                GET /role, /snapshot, and /checkpoint inside the
+#                declared per-request bound on both peers, the
+#                standby's per-scan checkpoint pulls landing through
+#                a window one pull wider than the armed miss budget —
+#                no promoting/active transition and no
+#                field_claim_lost on either durable journal — and the
+#                field's writer claim fencing foreign probes; closing
+#                the set restores driven scans and a receipted command
+#                with the pair's roles unchanged; two passes produce
+#                identical digests (monitor-starvation-failed,
+#                monitor-starvation-nondeterministic)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -2095,6 +2198,58 @@ for tamper in dropped-event-record reattributed-event-record; do
     echo "  $tamper: reported, event-parity-failed"
 done
 
+# The pair contract's monitor-starvation leg, on the same
+# manifest-declared deployment: ci/monitor_starvation.py converges the
+# armed pair — the standby's --auto-promote carrying the declared
+# failover_budget — then holds the saturating set of incomplete-body
+# connections against the field owner's monitor, the stalled-client
+# shape that pinned every worker before the lane split (WW-ENG-003,
+# WW-FND-004). Through the hold the serving lane must keep answering
+# GET /role, /snapshot, and /checkpoint inside the declared
+# per-request bound on both peers, the standby's per-scan checkpoint
+# pulls must keep landing — the window running one driven pull past
+# the armed budget, so a starved heartbeat produces the spurious
+# self-promotion inside it — a foreign attachment's field probe must
+# stay fenced, and neither durable journal may carry role_changed or
+# field_claim_lost. Closing the set must free the submission lane: a
+# driven POST /scan on the flooded owner answering again and a
+# receipted kind-declared command settling applied into both peers'
+# adopted log, the pair's roles unchanged. Two passes must produce
+# identical digests.
+run_starvation() {
+    python3 ci/monitor_starvation.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_starvation)" \
+    || fail "monitor-starvation-failed: the monitor-starvation leg did not hold — its evidence lines are above"
+SECOND="$(run_starvation)" \
+    || fail "monitor-starvation-failed: the monitor-starvation leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "monitor-starvation-nondeterministic: two monitor-starvation passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: a leg whose liveness reads starve — the declared
+# bound doctored to zero — and one whose armed standby reports a role
+# change mid-hold must each surface the named diagnostic — never a
+# silently unexercised contract.
+for tamper in starved-reads peer-transition; do
+    if out="$(run_starvation --tamper "$tamper" 2>&1)"; then
+        fail "monitor-starvation-unchecked: a $tamper case passed the starvation leg"
+    fi
+    case "$tamper" in
+        starved-reads) expected="never answered inside the declared" ;;
+        peer-transition) expected="moved to role" ;;
+    esac
+    [[ "$out" == *"$expected"* ]] \
+        || fail "monitor-starvation-unchecked: the $tamper case did not report its named diagnostic: $out"
+    echo "  $tamper: reported, monitor-starvation-failed"
+done
+
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
@@ -2104,10 +2259,13 @@ for file in ci/alarm_rationalization.py ci/alarm_validation.py \
         ci/availability.py \
         ci/burst_order.py ci/claim_fencing.py ci/command_switch.py \
         ci/consumers.py \
-        ci/ctl.py ci/deploy_rig.py ci/divergence.py ci/event_parity.py \
-        ci/failover.py \
-        ci/force_carryover.py ci/force_release.py \
-        ci/managed_lifecycle.py ci/pair.py ci/peer_announce.py \
+        ci/ctl.py ci/demote_pending.py ci/deploy_rig.py \
+        ci/divergence.py ci/failover.py \
+        ci/force_carryover.py ci/force_release.py ci/handover.py \
+        ci/managed_carryover.py ci/managed_lifecycle.py \
+        ci/monitor_starvation.py \
+        ci/negotiation.py ci/oos.py ci/pair.py \
+        ci/peer_announce.py ci/power_trip.py \
         ci/refusal.py ci/report.py ci/restart.py \
         ci/schema_conformance.py ci/simulate.py ci/staging.py \
         ci/standby_restart.py ci/startup_claim.py \

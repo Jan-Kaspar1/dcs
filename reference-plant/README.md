@@ -229,14 +229,54 @@ ci/managed_lifecycle.py  the pair contract's managed-alarm
                         the named never-shelvable refusal, and the
                         designed oos/suppress wiring through its
                         suppressed trip and return to service
-ci/event_parity.py     the pair contract's emit-identical leg — the
-                       tracking pair's sequencer driven through the
-                       owner's receipted path until a counted
-                       step_completed set stands, both peers' served
-                       resource views asserted to carry the same
-                       routed event records — attribution, identities,
-                       ordered fields, tick, retention — the standby
-                       tracking with its writes gated
+ci/managed_carryover.py  the pair contract's managed run-state
+                        carryover leg — the managed alarm kinds'
+                        checkpointed run state proven carried across a
+                        promotion on the deployed pair: a mid-shelve
+                        countdown releasing at its continued expiry,
+                        never a restarted bound, and the wired
+                        out_of_service standing with evaluation held
+ci/staging.py          the pair contract's staging leg — the emitted
+                       threshold chain's level-driven demand staging
+                       exercised on the deployed pair: the unopposed
+                       rise through the declared crossings, the
+                       high-level annunciation, the bounded staging
+                       response, and the declared de-stage order
+ci/oos.py              the pair contract's out-of-service leg — a
+                       receipted maintenance inhibit on the duty
+                       pump's declared `oos` point excluding it from
+                       availability and handing `duty` to the sibling
+                       on the deployed pair, the managed alarms
+                       reporting their declared
+                       `out_of_service`/`suppressed` states with
+                       `alarm` still reporting process truth mid-OOS,
+                       and the false write returning the pump to
+                       availability and the duty rotation
+ci/power_trip.py       the pair contract's power-fail interlock leg —
+                       the station power-fail contact driven through
+                       the plant protocol on the settled pair under a
+                       standing duty demand: `power-ok` and both
+                       pumps' availability dropping, the motor
+                       commands releasing while the chain's demand
+                       stands, `none-available` and the managed
+                       `power-fail` alarm annunciating with journaled
+                       evidence, the receipted `power-fail-ack`
+                       clearing the latch mid-condition, and the
+                       released contact re-staging the demand inside
+                       the declared bounds with the pair's roles
+                       unchanged
+ci/monitor_starvation.py  the pair contract's monitor-starvation leg
+                       — the saturating set of incomplete-body
+                       connections held against the armed pair's field
+                       owner while the serving lane's GET /role,
+                       /snapshot, and /checkpoint keep answering
+                       inside the declared bound on both peers, the
+                       standby's checkpoint pulls keep landing past
+                       the armed miss budget with no role transition
+                       or field_claim_lost journaled, fencing probes
+                       stay fenced, and closing the set restores
+                       driven scans and a receipted command with the
+                       pair's roles unchanged
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
@@ -1060,6 +1100,37 @@ produce the identical `event-parity-digest`, a divergence failing
 `event-parity-nondeterministic`. The leg's doctored cases — a standby
 record set missing an emission or carrying one re-attributed — must
 each report the named diagnostic rather than pass silently.
+
+The stage's monitor-starvation leg — `ci/monitor_starvation.py` on
+the same declared deployment — then proves the serving-lane
+resilience contract on the customer-owned pair (WW-ENG-003,
+WW-FND-004), the stalled-client half of the consumer-boundary
+schedules a lone driven run cannot reach: a controller whose monitor
+starved its reads under an incomplete-body flood would read as a
+dead active to its armed standby — the spurious-failover window the
+bounded submission lane exists to close. With the pair settled and
+the standby's `--auto-promote` carrying the manifest's declared
+`failover_budget`, the leg opens the saturating set of
+incomplete-body connections against the field owner's monitor —
+requests whose declared bodies never follow, pinning the quarantined
+body-reading handlers — and asserts through the hold that `GET
+/role`, `GET /snapshot`, and `GET /checkpoint` keep answering inside
+the declared per-request bound on both peers, that the standby's
+per-scan checkpoint pulls keep landing — one more driven pull than
+the armed budget, so a starved heartbeat would self-promote inside
+the window — that a foreign attachment's field probe stays fenced,
+and that neither peer's durable journal carries `role_changed` or
+`field_claim_lost`. Closing the set must free the submission lane:
+a driven `POST /scan` on the flooded owner answers again and
+advances the tick, and a receipted kind-declared command settles
+`applied` into both peers' adopted log with the pair's roles
+unchanged. A violated contract fails `monitor-starvation-failed`;
+two passes must produce the identical `monitor-starvation-digest`,
+a divergence failing `monitor-starvation-nondeterministic`. The
+leg's doctored cases — a run whose liveness reads starve under a
+zeroed declared bound, and one whose standby reports a genuine role
+change mid-hold — must each report the named diagnostic rather than
+pass silently.
 
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
