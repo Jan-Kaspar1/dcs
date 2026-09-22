@@ -256,11 +256,15 @@ impl ManagedAlarmConfig {
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ManagedState {
     /// Consecutive scans the `shelve` request has stood — the
-    /// shelve-expiry timer; `0` while no request stands. `shelved`
-    /// asserts while the count sits within `max_shelve_ticks`: the
-    /// request's asserting scan counts as the first shelved scan, the
-    /// flag drops the scan the count passes the bound even while the
-    /// request stands, and a standing request never re-arms — a
+    /// shelve-expiry timer; `0` while no request stands. The count
+    /// seeds from the request sample's stamp on its first standing
+    /// scan — `1` for a same-scan request, the line's elapsed count for
+    /// a carried write replayed late on a promoted peer — so the bound
+    /// measures the operator-visible window across a handover.
+    /// `shelved` asserts while the count sits within `max_shelve_ticks`:
+    /// the request's asserting scan counts as the first shelved scan,
+    /// the flag drops the scan the count passes the bound even while
+    /// the request stands, and a standing request never re-arms — a
     /// re-shelve after expiry requires the request to cycle.
     pub shelve_elapsed: u64,
     /// Whether suppression held on the last scan — the baseline the
@@ -322,7 +326,22 @@ impl ManagedState {
 
         let request = shelve.map(|sample| sample.value).unwrap_or(false);
         self.shelve_elapsed = if request {
-            self.shelve_elapsed.saturating_add(1)
+            if self.shelve_elapsed == 0 {
+                // The request's first standing scan seeds the countdown
+                // from the sample's own stamp rather than assuming it
+                // arrived this scan: a carried write replayed on a
+                // promoted peer lands stamped with the tick the line
+                // scheduled it for, so `max_shelve_ticks` keeps bounding
+                // the operator-visible shelving window instead of
+                // restarting at the handover's replay scan. A request
+                // stamped so far back the bound already lapsed stays
+                // expired — the standing request cannot re-arm it.
+                tick.0
+                    .saturating_sub(shelve.map(|sample| sample.tick.0).unwrap_or(tick.0))
+                    .saturating_add(1)
+            } else {
+                self.shelve_elapsed.saturating_add(1)
+            }
         } else {
             0
         };

@@ -1288,6 +1288,48 @@ mod tests {
         assert!(!shelved(&standby_io));
     }
 
+    /// QA finding `shelve-bound-restarts-on-stale-final-sync-promotion`
+    /// at the component's own seam: the promoted peer's run state is the
+    /// stale checkpoint's — `shelve_elapsed` 0, the write's pre-apply
+    /// value — while the carried receipt's replay lands the same
+    /// `write_value` stamped with the tick the line scheduled it for.
+    /// The countdown seeds from that stamp, so the promoted run serves
+    /// the remainder of the bound rather than a fresh one — and a
+    /// replay arriving after the bound lapsed stays expired.
+    #[test]
+    fn a_carried_shelve_replay_seeds_the_countdown_from_its_stamp() {
+        let mut standby = component();
+        let io = io();
+
+        // The stale checkpoint's state: the write had not applied when
+        // the checkpoint was captured — no request stood.
+        let state = component().capture_state();
+        assert_eq!(state.get("shelve_elapsed"), Some(Value::Int(0)));
+        standby.restore_state(&state).unwrap();
+
+        // The carried receipt replays at tick 10 the write the line
+        // scheduled for tick 7 — the image stamps it with the schedule,
+        // so this scan counts as the request's fourth standing scan.
+        io.feed(SHELVE, Sample::good(Value::Bool(true), Tick(7)));
+        standby.step(&io, Tick(10)).unwrap();
+        assert!(shelved(&io), "scan 4 of the bound");
+        standby.step(&io, Tick(11)).unwrap();
+        assert!(shelved(&io), "scan 5 — the bound's last");
+        standby.step(&io, Tick(12)).unwrap();
+        assert!(
+            !shelved(&io),
+            "the replay serves the window's remainder, not a fresh bound"
+        );
+
+        // A replay landing after the bound already lapsed never
+        // asserts — the standing request's window closed on the line.
+        io.feed(SHELVE, Sample::good(Value::Bool(false), Tick(12)));
+        standby.step(&io, Tick(12)).unwrap();
+        io.feed(SHELVE, Sample::good(Value::Bool(true), Tick(6)));
+        standby.step(&io, Tick(13)).unwrap();
+        assert!(!shelved(&io), "an outlived stamp cannot resurrect");
+    }
+
     #[test]
     fn capture_restore_mid_oos_and_suppression_continues_identically() {
         let mut block = component();
