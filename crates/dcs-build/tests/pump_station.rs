@@ -1134,6 +1134,60 @@ fn hand_command_holds_the_declared_protections() {
         "a trusted contact must re-admit the standing hand request"
     );
 
+    // Issue #809's reproduction: a Bad thermal contact — value
+    // healthy, quality untrusted — must release the command AND
+    // annunciate its own cause alarm on the same reading, so a
+    // hand-held pump cannot stop with no annunciation at all.
+    sim.inject_fault(
+        pump.thermal,
+        Fault::Quality(Quality::Bad(QualityReason::CommunicationFault)),
+    )
+    .unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| !point_bool(e, pump.cmd)),
+        "an untrusted thermal contact must release the hand command"
+    );
+    assert!(point_bool(&executor, pump.protect_tripped));
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| point_bool(
+            e,
+            pump.thermal_alarm.alarm
+        )),
+        "the thermal cause alarm must annunciate the untrusted contact"
+    );
+    assert!(point_bool(&executor, pump.thermal_alarm.unacknowledged));
+    sim.clear_fault(pump.thermal).unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 12, |e| point_bool(e, pump.cmd)),
+        "a trusted thermal contact must re-admit the standing hand request"
+    );
+
+    // The degraded moisture contact trips and annunciates the same
+    // way on its own cause alarm.
+    sim.inject_fault(
+        pump.moisture,
+        Fault::Quality(Quality::Bad(QualityReason::CommunicationFault)),
+    )
+    .unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| !point_bool(e, pump.cmd)),
+        "an untrusted moisture contact must release the hand command"
+    );
+    assert!(point_bool(&executor, pump.protect_tripped));
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| point_bool(
+            e,
+            pump.moisture_alarm.alarm
+        )),
+        "the moisture cause alarm must annunciate the untrusted contact"
+    );
+    assert!(point_bool(&executor, pump.moisture_alarm.unacknowledged));
+    sim.clear_fault(pump.moisture).unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 12, |e| point_bool(e, pump.cmd)),
+        "a trusted moisture contact must re-admit the standing hand request"
+    );
+
     // The dry-run cutoff: the hand pump cannot run the well below the
     // declared level — a negative inflow draws the well down, the
     // command releases and stays released while the cutoff stands,

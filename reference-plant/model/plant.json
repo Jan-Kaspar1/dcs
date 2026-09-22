@@ -355,6 +355,22 @@
       }
     },
     {
+      "id": 229,
+      "direction": "in",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 230,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": true
+      }
+    },
+    {
       "id": 1000,
       "direction": "in",
       "value_type": "bool",
@@ -987,6 +1003,22 @@
       }
     },
     {
+      "id": 329,
+      "direction": "out",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 330,
+      "direction": "out",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
       "id": 1060,
       "direction": "in",
       "value_type": "bool",
@@ -1431,6 +1463,22 @@
     },
     {
       "id": 360,
+      "direction": "out",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 361,
+      "direction": "out",
+      "value_type": "float",
+      "initial": {
+        "float": 0.0
+      }
+    },
+    {
+      "id": 362,
       "direction": "out",
       "value_type": "float",
       "initial": {
@@ -1897,6 +1945,22 @@
       "source": 228,
       "unit": "",
       "description": "Any-manual delivered to the none-available alarm's suppress",
+      "group": "station"
+    },
+    {
+      "id": 10229,
+      "name": "guard-anchor",
+      "source": 229,
+      "unit": "",
+      "description": "Held analog feed for the per-pump cause guards — their conditions are discrete",
+      "group": "station"
+    },
+    {
+      "id": 10230,
+      "name": "guard-true",
+      "source": 230,
+      "unit": "",
+      "description": "Held permissive for the per-pump cause guards — a cause alarm stands in every service state",
       "group": "station"
     },
     {
@@ -2476,6 +2540,22 @@
       "group": "pump-p101"
     },
     {
+      "id": 10329,
+      "name": "p101-thermal-guard-out",
+      "source": 329,
+      "unit": "",
+      "description": "The thermal cause guard's analog pass-through — unused",
+      "group": "pump-p101"
+    },
+    {
+      "id": 10330,
+      "name": "p101-moisture-guard-out",
+      "source": 330,
+      "unit": "",
+      "description": "The moisture cause guard's analog pass-through — unused",
+      "group": "pump-p101"
+    },
+    {
       "id": 11060,
       "name": "p101-fault-ack",
       "source": 1060,
@@ -2889,6 +2969,22 @@
       "source": 360,
       "unit": "",
       "description": "The protection interlock's analog pass-through — unused",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10361,
+      "name": "p102-thermal-guard-out",
+      "source": 361,
+      "unit": "",
+      "description": "The thermal cause guard's analog pass-through — unused",
+      "group": "pump-p102"
+    },
+    {
+      "id": 10362,
+      "name": "p102-moisture-guard-out",
+      "source": 362,
+      "unit": "",
+      "description": "The moisture cause guard's analog pass-through — unused",
       "group": "pump-p102"
     },
     {
@@ -3891,6 +3987,68 @@
     },
     {
       "id": 23,
+      "kind": "interlock",
+      "parameters": {
+        "safe_value": {
+          "float": 0.0
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "permissive": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "trip_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "tripped": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 24,
+      "kind": "interlock",
+      "parameters": {
+        "safe_value": {
+          "float": 0.0
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "permissive": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "trip_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "tripped": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 25,
       "kind": "digital-input",
       "parameters": {
         "invert": {
@@ -3909,7 +4067,7 @@
       }
     },
     {
-      "id": 24,
+      "id": 26,
       "kind": "timer",
       "parameters": {
         "delay_ticks": {
@@ -3928,7 +4086,7 @@
       }
     },
     {
-      "id": 25,
+      "id": 27,
       "kind": "motor",
       "parameters": {
         "fault_ticks": {
@@ -3955,7 +4113,7 @@
       }
     },
     {
-      "id": 26,
+      "id": 28,
       "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
@@ -4016,7 +4174,7 @@
       }
     },
     {
-      "id": 27,
+      "id": 29,
       "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
@@ -4069,7 +4227,7 @@
       }
     },
     {
-      "id": 28,
+      "id": 30,
       "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
@@ -4122,49 +4280,11 @@
       }
     },
     {
-      "id": 29,
-      "kind": "digital-input",
-      "parameters": {
-        "invert": {
-          "bool": false
-        }
-      },
-      "ports": {
-        "in": {
-          "direction": "in",
-          "value_type": "bool"
-        },
-        "out": {
-          "direction": "out",
-          "value_type": "bool"
-        }
-      }
-    },
-    {
-      "id": 30,
-      "kind": "digital-input",
-      "parameters": {
-        "invert": {
-          "bool": true
-        }
-      },
-      "ports": {
-        "in": {
-          "direction": "in",
-          "value_type": "bool"
-        },
-        "out": {
-          "direction": "out",
-          "value_type": "bool"
-        }
-      }
-    },
-    {
       "id": 31,
       "kind": "digital-input",
       "parameters": {
         "invert": {
-          "bool": true
+          "bool": false
         }
       },
       "ports": {
@@ -4218,6 +4338,44 @@
     },
     {
       "id": 34,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 35,
+      "kind": "digital-input",
+      "parameters": {
+        "invert": {
+          "bool": true
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 36,
       "kind": "bool-gate",
       "parameters": {
         "operation": {
@@ -4252,61 +4410,11 @@
       }
     },
     {
-      "id": 35,
-      "kind": "bool-gate",
-      "parameters": {
-        "operation": {
-          "int": 0
-        }
-      },
-      "ports": {
-        "in_1": {
-          "direction": "in",
-          "value_type": "bool"
-        },
-        "in_2": {
-          "direction": "in",
-          "value_type": "bool"
-        },
-        "out": {
-          "direction": "out",
-          "value_type": "bool"
-        }
-      }
-    },
-    {
-      "id": 36,
-      "kind": "bool-gate",
-      "parameters": {
-        "operation": {
-          "int": 0
-        }
-      },
-      "ports": {
-        "in_1": {
-          "direction": "in",
-          "value_type": "bool"
-        },
-        "in_2": {
-          "direction": "in",
-          "value_type": "bool"
-        },
-        "in_3": {
-          "direction": "in",
-          "value_type": "bool"
-        },
-        "out": {
-          "direction": "out",
-          "value_type": "bool"
-        }
-      }
-    },
-    {
       "id": 37,
       "kind": "bool-gate",
       "parameters": {
         "operation": {
-          "int": 1
+          "int": 0
         }
       },
       "ports": {
@@ -4341,6 +4449,10 @@
           "direction": "in",
           "value_type": "bool"
         },
+        "in_3": {
+          "direction": "in",
+          "value_type": "bool"
+        },
         "out": {
           "direction": "out",
           "value_type": "bool"
@@ -4349,6 +4461,52 @@
     },
     {
       "id": 39,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": {
+          "int": 1
+        }
+      },
+      "ports": {
+        "in_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 40,
+      "kind": "bool-gate",
+      "parameters": {
+        "operation": {
+          "int": 0
+        }
+      },
+      "ports": {
+        "in_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "in_2": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 41,
       "kind": "interlock",
       "parameters": {
         "safe_value": {
@@ -4391,7 +4549,69 @@
       }
     },
     {
-      "id": 40,
+      "id": 42,
+      "kind": "interlock",
+      "parameters": {
+        "safe_value": {
+          "float": 0.0
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "permissive": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "trip_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "tripped": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 43,
+      "kind": "interlock",
+      "parameters": {
+        "safe_value": {
+          "float": 0.0
+        }
+      },
+      "ports": {
+        "in": {
+          "direction": "in",
+          "value_type": "float"
+        },
+        "out": {
+          "direction": "out",
+          "value_type": "float"
+        },
+        "permissive": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "trip_1": {
+          "direction": "in",
+          "value_type": "bool"
+        },
+        "tripped": {
+          "direction": "out",
+          "value_type": "bool"
+        }
+      }
+    },
+    {
+      "id": 44,
       "kind": "digital-input",
       "parameters": {
         "invert": {
@@ -4410,7 +4630,7 @@
       }
     },
     {
-      "id": 41,
+      "id": 45,
       "kind": "timer",
       "parameters": {
         "delay_ticks": {
@@ -4429,7 +4649,7 @@
       }
     },
     {
-      "id": 42,
+      "id": 46,
       "kind": "motor",
       "parameters": {
         "fault_ticks": {
@@ -4456,7 +4676,7 @@
       }
     },
     {
-      "id": 43,
+      "id": 47,
       "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
@@ -4517,7 +4737,7 @@
       }
     },
     {
-      "id": 44,
+      "id": 48,
       "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
@@ -4570,7 +4790,7 @@
       }
     },
     {
-      "id": 45,
+      "id": 49,
       "kind": "managed-bool-latching-alarm",
       "parameters": {
         "class": {
@@ -4623,7 +4843,7 @@
       }
     },
     {
-      "id": 46,
+      "id": 50,
       "kind": "digital-input",
       "parameters": {
         "invert": {
@@ -4642,7 +4862,7 @@
       }
     },
     {
-      "id": 47,
+      "id": 51,
       "kind": "sequencer",
       "parameters": {
         "step_1_out": {
@@ -5869,7 +6089,7 @@
       },
       "to": {
         "port": {
-          "component": 23,
+          "component": 25,
           "name": "in"
         }
       }
@@ -5877,7 +6097,7 @@
     {
       "from": {
         "port": {
-          "component": 23,
+          "component": 25,
           "name": "out"
         }
       },
@@ -5899,7 +6119,123 @@
       },
       "to": {
         "port": {
+          "component": 26,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 229
+      },
+      "to": {
+        "port": {
+          "component": 23,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 230
+      },
+      "to": {
+        "port": {
+          "component": 23,
+          "name": "permissive"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 60
+      },
+      "to": {
+        "port": {
+          "component": 23,
+          "name": "trip_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 23,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 329
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 23,
+          "name": "tripped"
+        }
+      },
+      "to": {
+        "port": {
+          "component": 29,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 229
+      },
+      "to": {
+        "port": {
           "component": 24,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 230
+      },
+      "to": {
+        "port": {
+          "component": 24,
+          "name": "permissive"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 80
+      },
+      "to": {
+        "port": {
+          "component": 24,
+          "name": "trip_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 24,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 330
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 24,
+          "name": "tripped"
+        }
+      },
+      "to": {
+        "port": {
+          "component": 30,
           "name": "in"
         }
       }
@@ -5951,7 +6287,7 @@
     {
       "from": {
         "port": {
-          "component": 24,
+          "component": 26,
           "name": "out"
         }
       },
@@ -6024,7 +6360,7 @@
       },
       "to": {
         "port": {
-          "component": 25,
+          "component": 27,
           "name": "cmd"
         }
       }
@@ -6046,7 +6382,7 @@
       },
       "to": {
         "port": {
-          "component": 25,
+          "component": 27,
           "name": "run"
         }
       }
@@ -6054,7 +6390,7 @@
     {
       "from": {
         "port": {
-          "component": 25,
+          "component": 27,
           "name": "out"
         }
       },
@@ -6076,7 +6412,7 @@
     {
       "from": {
         "port": {
-          "component": 25,
+          "component": 27,
           "name": "fault"
         }
       },
@@ -6117,7 +6453,7 @@
       },
       "to": {
         "port": {
-          "component": 29,
+          "component": 31,
           "name": "in"
         }
       }
@@ -6125,7 +6461,7 @@
     {
       "from": {
         "port": {
-          "component": 29,
+          "component": 31,
           "name": "out"
         }
       },
@@ -6147,7 +6483,7 @@
       },
       "to": {
         "port": {
-          "component": 26,
+          "component": 28,
           "name": "ack"
         }
       }
@@ -6158,7 +6494,7 @@
       },
       "to": {
         "port": {
-          "component": 26,
+          "component": 28,
           "name": "oos"
         }
       }
@@ -6169,7 +6505,7 @@
       },
       "to": {
         "port": {
-          "component": 26,
+          "component": 28,
           "name": "suppress"
         }
       }
@@ -6177,7 +6513,7 @@
     {
       "from": {
         "port": {
-          "component": 26,
+          "component": 28,
           "name": "alarm"
         }
       },
@@ -6188,7 +6524,7 @@
     {
       "from": {
         "port": {
-          "component": 26,
+          "component": 28,
           "name": "unacknowledged"
         }
       },
@@ -6199,7 +6535,7 @@
     {
       "from": {
         "port": {
-          "component": 26,
+          "component": 28,
           "name": "shelved"
         }
       },
@@ -6210,7 +6546,7 @@
     {
       "from": {
         "port": {
-          "component": 26,
+          "component": 28,
           "name": "suppressed"
         }
       },
@@ -6221,7 +6557,7 @@
     {
       "from": {
         "port": {
-          "component": 26,
+          "component": 28,
           "name": "out_of_service"
         }
       },
@@ -6235,7 +6571,7 @@
       },
       "to": {
         "port": {
-          "component": 26,
+          "component": 28,
           "name": "in"
         }
       }
@@ -6246,7 +6582,7 @@
       },
       "to": {
         "port": {
-          "component": 27,
+          "component": 29,
           "name": "ack"
         }
       }
@@ -6254,7 +6590,7 @@
     {
       "from": {
         "port": {
-          "component": 27,
+          "component": 29,
           "name": "alarm"
         }
       },
@@ -6265,7 +6601,7 @@
     {
       "from": {
         "port": {
-          "component": 27,
+          "component": 29,
           "name": "unacknowledged"
         }
       },
@@ -6276,7 +6612,7 @@
     {
       "from": {
         "port": {
-          "component": 27,
+          "component": 29,
           "name": "shelved"
         }
       },
@@ -6287,7 +6623,7 @@
     {
       "from": {
         "port": {
-          "component": 27,
+          "component": 29,
           "name": "suppressed"
         }
       },
@@ -6298,7 +6634,7 @@
     {
       "from": {
         "port": {
-          "component": 27,
+          "component": 29,
           "name": "out_of_service"
         }
       },
@@ -6308,22 +6644,11 @@
     },
     {
       "from": {
-        "point": 60
-      },
-      "to": {
-        "port": {
-          "component": 27,
-          "name": "in"
-        }
-      }
-    },
-    {
-      "from": {
         "point": 1080
       },
       "to": {
         "port": {
-          "component": 28,
+          "component": 30,
           "name": "ack"
         }
       }
@@ -6331,7 +6656,7 @@
     {
       "from": {
         "port": {
-          "component": 28,
+          "component": 30,
           "name": "alarm"
         }
       },
@@ -6342,7 +6667,7 @@
     {
       "from": {
         "port": {
-          "component": 28,
+          "component": 30,
           "name": "unacknowledged"
         }
       },
@@ -6353,7 +6678,7 @@
     {
       "from": {
         "port": {
-          "component": 28,
+          "component": 30,
           "name": "shelved"
         }
       },
@@ -6364,7 +6689,7 @@
     {
       "from": {
         "port": {
-          "component": 28,
+          "component": 30,
           "name": "suppressed"
         }
       },
@@ -6375,23 +6700,12 @@
     {
       "from": {
         "port": {
-          "component": 28,
+          "component": 30,
           "name": "out_of_service"
         }
       },
       "to": {
         "point": 1087
-      }
-    },
-    {
-      "from": {
-        "point": 80
-      },
-      "to": {
-        "port": {
-          "component": 28,
-          "name": "in"
-        }
       }
     },
     {
@@ -6408,7 +6722,7 @@
       },
       "to": {
         "port": {
-          "component": 30,
+          "component": 32,
           "name": "in"
         }
       }
@@ -6419,7 +6733,7 @@
       },
       "to": {
         "port": {
-          "component": 31,
+          "component": 33,
           "name": "in"
         }
       }
@@ -6430,7 +6744,7 @@
       },
       "to": {
         "port": {
-          "component": 32,
+          "component": 34,
           "name": "in"
         }
       }
@@ -6441,7 +6755,7 @@
       },
       "to": {
         "port": {
-          "component": 33,
+          "component": 35,
           "name": "in"
         }
       }
@@ -6468,7 +6782,7 @@
     {
       "from": {
         "port": {
-          "component": 30,
+          "component": 32,
           "name": "out"
         }
       },
@@ -6495,7 +6809,7 @@
     {
       "from": {
         "port": {
-          "component": 31,
+          "component": 33,
           "name": "out"
         }
       },
@@ -6530,7 +6844,7 @@
     {
       "from": {
         "port": {
-          "component": 32,
+          "component": 34,
           "name": "out"
         }
       },
@@ -6549,7 +6863,7 @@
     {
       "from": {
         "port": {
-          "component": 33,
+          "component": 35,
           "name": "out"
         }
       },
@@ -6571,7 +6885,7 @@
       },
       "to": {
         "port": {
-          "component": 34,
+          "component": 36,
           "name": "in_1"
         }
       }
@@ -6582,7 +6896,7 @@
       },
       "to": {
         "port": {
-          "component": 34,
+          "component": 36,
           "name": "in_2"
         }
       }
@@ -6593,7 +6907,7 @@
       },
       "to": {
         "port": {
-          "component": 34,
+          "component": 36,
           "name": "in_3"
         }
       }
@@ -6604,7 +6918,7 @@
       },
       "to": {
         "port": {
-          "component": 34,
+          "component": 36,
           "name": "in_4"
         }
       }
@@ -6615,7 +6929,7 @@
       },
       "to": {
         "port": {
-          "component": 34,
+          "component": 36,
           "name": "in_5"
         }
       }
@@ -6623,7 +6937,7 @@
     {
       "from": {
         "port": {
-          "component": 34,
+          "component": 36,
           "name": "out"
         }
       },
@@ -6664,7 +6978,7 @@
       },
       "to": {
         "port": {
-          "component": 39,
+          "component": 41,
           "name": "in"
         }
       }
@@ -6675,7 +6989,7 @@
       },
       "to": {
         "port": {
-          "component": 39,
+          "component": 41,
           "name": "permissive"
         }
       }
@@ -6686,7 +7000,7 @@
       },
       "to": {
         "port": {
-          "component": 39,
+          "component": 41,
           "name": "trip_1"
         }
       }
@@ -6697,7 +7011,7 @@
       },
       "to": {
         "port": {
-          "component": 39,
+          "component": 41,
           "name": "trip_2"
         }
       }
@@ -6708,7 +7022,7 @@
       },
       "to": {
         "port": {
-          "component": 39,
+          "component": 41,
           "name": "trip_3"
         }
       }
@@ -6719,7 +7033,7 @@
       },
       "to": {
         "port": {
-          "component": 39,
+          "component": 41,
           "name": "trip_4"
         }
       }
@@ -6727,7 +7041,7 @@
     {
       "from": {
         "port": {
-          "component": 39,
+          "component": 41,
           "name": "out"
         }
       },
@@ -6738,7 +7052,7 @@
     {
       "from": {
         "port": {
-          "component": 39,
+          "component": 41,
           "name": "tripped"
         }
       },
@@ -6760,7 +7074,7 @@
       },
       "to": {
         "port": {
-          "component": 40,
+          "component": 44,
           "name": "in"
         }
       }
@@ -6768,7 +7082,7 @@
     {
       "from": {
         "port": {
-          "component": 40,
+          "component": 44,
           "name": "out"
         }
       },
@@ -6790,7 +7104,123 @@
       },
       "to": {
         "port": {
-          "component": 41,
+          "component": 45,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 229
+      },
+      "to": {
+        "port": {
+          "component": 42,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 230
+      },
+      "to": {
+        "port": {
+          "component": 42,
+          "name": "permissive"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 61
+      },
+      "to": {
+        "port": {
+          "component": 42,
+          "name": "trip_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 42,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 361
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 42,
+          "name": "tripped"
+        }
+      },
+      "to": {
+        "port": {
+          "component": 48,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 229
+      },
+      "to": {
+        "port": {
+          "component": 43,
+          "name": "in"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 230
+      },
+      "to": {
+        "port": {
+          "component": 43,
+          "name": "permissive"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 81
+      },
+      "to": {
+        "port": {
+          "component": 43,
+          "name": "trip_1"
+        }
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 43,
+          "name": "out"
+        }
+      },
+      "to": {
+        "point": 362
+      }
+    },
+    {
+      "from": {
+        "port": {
+          "component": 43,
+          "name": "tripped"
+        }
+      },
+      "to": {
+        "port": {
+          "component": 49,
           "name": "in"
         }
       }
@@ -6801,7 +7231,7 @@
       },
       "to": {
         "port": {
-          "component": 35,
+          "component": 37,
           "name": "in_1"
         }
       }
@@ -6812,7 +7242,7 @@
       },
       "to": {
         "port": {
-          "component": 35,
+          "component": 37,
           "name": "in_2"
         }
       }
@@ -6823,7 +7253,7 @@
       },
       "to": {
         "port": {
-          "component": 36,
+          "component": 38,
           "name": "in_1"
         }
       }
@@ -6834,7 +7264,7 @@
       },
       "to": {
         "port": {
-          "component": 36,
+          "component": 38,
           "name": "in_2"
         }
       }
@@ -6842,13 +7272,13 @@
     {
       "from": {
         "port": {
-          "component": 41,
+          "component": 45,
           "name": "out"
         }
       },
       "to": {
         "port": {
-          "component": 36,
+          "component": 38,
           "name": "in_3"
         }
       }
@@ -6856,13 +7286,13 @@
     {
       "from": {
         "port": {
-          "component": 35,
+          "component": 37,
           "name": "out"
         }
       },
       "to": {
         "port": {
-          "component": 37,
+          "component": 39,
           "name": "in_1"
         }
       }
@@ -6870,13 +7300,13 @@
     {
       "from": {
         "port": {
-          "component": 36,
+          "component": 38,
           "name": "out"
         }
       },
       "to": {
         "port": {
-          "component": 37,
+          "component": 39,
           "name": "in_2"
         }
       }
@@ -6884,13 +7314,13 @@
     {
       "from": {
         "port": {
-          "component": 37,
+          "component": 39,
           "name": "out"
         }
       },
       "to": {
         "port": {
-          "component": 38,
+          "component": 40,
           "name": "in_1"
         }
       }
@@ -6901,7 +7331,7 @@
       },
       "to": {
         "port": {
-          "component": 38,
+          "component": 40,
           "name": "in_2"
         }
       }
@@ -6909,13 +7339,13 @@
     {
       "from": {
         "port": {
-          "component": 38,
+          "component": 40,
           "name": "out"
         }
       },
       "to": {
         "port": {
-          "component": 42,
+          "component": 46,
           "name": "cmd"
         }
       }
@@ -6937,7 +7367,7 @@
       },
       "to": {
         "port": {
-          "component": 42,
+          "component": 46,
           "name": "run"
         }
       }
@@ -6945,7 +7375,7 @@
     {
       "from": {
         "port": {
-          "component": 42,
+          "component": 46,
           "name": "out"
         }
       },
@@ -6967,7 +7397,7 @@
     {
       "from": {
         "port": {
-          "component": 42,
+          "component": 46,
           "name": "fault"
         }
       },
@@ -7008,7 +7438,7 @@
       },
       "to": {
         "port": {
-          "component": 46,
+          "component": 50,
           "name": "in"
         }
       }
@@ -7016,7 +7446,7 @@
     {
       "from": {
         "port": {
-          "component": 46,
+          "component": 50,
           "name": "out"
         }
       },
@@ -7038,7 +7468,7 @@
       },
       "to": {
         "port": {
-          "component": 43,
+          "component": 47,
           "name": "ack"
         }
       }
@@ -7049,7 +7479,7 @@
       },
       "to": {
         "port": {
-          "component": 43,
+          "component": 47,
           "name": "oos"
         }
       }
@@ -7060,7 +7490,7 @@
       },
       "to": {
         "port": {
-          "component": 43,
+          "component": 47,
           "name": "suppress"
         }
       }
@@ -7068,7 +7498,7 @@
     {
       "from": {
         "port": {
-          "component": 43,
+          "component": 47,
           "name": "alarm"
         }
       },
@@ -7079,7 +7509,7 @@
     {
       "from": {
         "port": {
-          "component": 43,
+          "component": 47,
           "name": "unacknowledged"
         }
       },
@@ -7090,7 +7520,7 @@
     {
       "from": {
         "port": {
-          "component": 43,
+          "component": 47,
           "name": "shelved"
         }
       },
@@ -7101,7 +7531,7 @@
     {
       "from": {
         "port": {
-          "component": 43,
+          "component": 47,
           "name": "suppressed"
         }
       },
@@ -7112,7 +7542,7 @@
     {
       "from": {
         "port": {
-          "component": 43,
+          "component": 47,
           "name": "out_of_service"
         }
       },
@@ -7126,7 +7556,7 @@
       },
       "to": {
         "port": {
-          "component": 43,
+          "component": 47,
           "name": "in"
         }
       }
@@ -7137,7 +7567,7 @@
       },
       "to": {
         "port": {
-          "component": 44,
+          "component": 48,
           "name": "ack"
         }
       }
@@ -7145,7 +7575,7 @@
     {
       "from": {
         "port": {
-          "component": 44,
+          "component": 48,
           "name": "alarm"
         }
       },
@@ -7156,7 +7586,7 @@
     {
       "from": {
         "port": {
-          "component": 44,
+          "component": 48,
           "name": "unacknowledged"
         }
       },
@@ -7167,7 +7597,7 @@
     {
       "from": {
         "port": {
-          "component": 44,
+          "component": 48,
           "name": "shelved"
         }
       },
@@ -7178,7 +7608,7 @@
     {
       "from": {
         "port": {
-          "component": 44,
+          "component": 48,
           "name": "suppressed"
         }
       },
@@ -7189,7 +7619,7 @@
     {
       "from": {
         "port": {
-          "component": 44,
+          "component": 48,
           "name": "out_of_service"
         }
       },
@@ -7199,22 +7629,11 @@
     },
     {
       "from": {
-        "point": 61
-      },
-      "to": {
-        "port": {
-          "component": 44,
-          "name": "in"
-        }
-      }
-    },
-    {
-      "from": {
         "point": 1110
       },
       "to": {
         "port": {
-          "component": 45,
+          "component": 49,
           "name": "ack"
         }
       }
@@ -7222,7 +7641,7 @@
     {
       "from": {
         "port": {
-          "component": 45,
+          "component": 49,
           "name": "alarm"
         }
       },
@@ -7233,7 +7652,7 @@
     {
       "from": {
         "port": {
-          "component": 45,
+          "component": 49,
           "name": "unacknowledged"
         }
       },
@@ -7244,7 +7663,7 @@
     {
       "from": {
         "port": {
-          "component": 45,
+          "component": 49,
           "name": "shelved"
         }
       },
@@ -7255,7 +7674,7 @@
     {
       "from": {
         "port": {
-          "component": 45,
+          "component": 49,
           "name": "suppressed"
         }
       },
@@ -7266,7 +7685,7 @@
     {
       "from": {
         "port": {
-          "component": 45,
+          "component": 49,
           "name": "out_of_service"
         }
       },
@@ -7276,22 +7695,11 @@
     },
     {
       "from": {
-        "point": 81
-      },
-      "to": {
-        "port": {
-          "component": 45,
-          "name": "in"
-        }
-      }
-    },
-    {
-      "from": {
         "point": 240
       },
       "to": {
         "port": {
-          "component": 47,
+          "component": 51,
           "name": "run"
         }
       }
@@ -7302,7 +7710,7 @@
       },
       "to": {
         "port": {
-          "component": 47,
+          "component": 51,
           "name": "reset"
         }
       }
@@ -7310,7 +7718,7 @@
     {
       "from": {
         "port": {
-          "component": 47,
+          "component": 51,
           "name": "out"
         }
       },
@@ -7321,7 +7729,7 @@
     {
       "from": {
         "port": {
-          "component": 47,
+          "component": 51,
           "name": "step"
         }
       },
@@ -7332,7 +7740,7 @@
     {
       "from": {
         "port": {
-          "component": 47,
+          "component": 51,
           "name": "done"
         }
       },

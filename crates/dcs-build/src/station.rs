@@ -42,7 +42,11 @@
 //!   `managed-bool-latching-alarm`s on each motor's fault flag, the
 //!   failover's `backup_active` and `backup_unhealthy`, the group's
 //!   `none_available`/`all_faulted`, the per-pump thermal and moisture
-//!   contacts, and the station power-fail field point. Every managed
+//!   contacts, and the station power-fail field point. The cause
+//!   alarms read quality-aware conditions — the station power guard's
+//!   `tripped` and one per-pump cause guard per contact — so an
+//!   asserted *or* untrusted contact annunciates on the same reading
+//!   that trips the pump (decision 88, issue #809). Every managed
 //!   status point is `journaled` (decision 74), and the lifecycle
 //!   wiring is the station's declared WW-ALM-002 site policy — open
 //!   customer assumptions carried as data:
@@ -179,6 +183,14 @@ mod carriers {
     /// The delivered copy the `none-available` alarm's `suppress`
     /// reads.
     pub const ANY_MANUAL_IN: u64 = 230;
+    /// The held analog feed the per-pump cause guards' `in` binds —
+    /// the declared conditions are discrete, so a constant `Good`
+    /// input leaves each `tripped` reporting the contact alone.
+    pub const GUARD_ANCHOR: u64 = 231;
+    /// The held permissive the per-pump cause guards bind — a cause
+    /// alarm stands in every service state, so `oos-ok` is not its
+    /// permissive.
+    pub const GUARD_TRUE: u64 = 232;
 }
 
 /// The first per-pump internal block: pump `i` owns
@@ -624,6 +636,14 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
     let any_manual = plant.internal_output::<bool>(PointId(carriers::ANY_MANUAL), false);
     let any_manual_in =
         plant.internal_input::<bool>(PointId(carriers::ANY_MANUAL_IN), false, false);
+    // The per-pump cause guards' held feeds — the power guard's
+    // held-anchor trick again: a constant `Good` `in` and `permissive`
+    // leave each guard's `tripped` reporting the contact alone —
+    // asserted or untrusted alike — so a degraded thermal or moisture
+    // contact annunciates its own cause alarm on the same reading
+    // that trips the pump (issue #809).
+    let guard_anchor = plant.internal_input::<f64>(PointId(carriers::GUARD_ANCHOR), 0.0, false);
+    let guard_true = plant.internal_input::<bool>(PointId(carriers::GUARD_TRUE), true, false);
     plant.journaled(power_tripped);
 
     // The protection-relevant status carriers decision 74's durable
@@ -782,6 +802,16 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
             carriers::ANY_MANUAL_IN,
             "any-manual-in",
             "Any-manual delivered to the none-available alarm's suppress",
+        ),
+        (
+            carriers::GUARD_ANCHOR,
+            "guard-anchor",
+            "Held analog feed for the per-pump cause guards — their conditions are discrete",
+        ),
+        (
+            carriers::GUARD_TRUE,
+            "guard-true",
+            "Held permissive for the per-pump cause guards — a cause alarm stands in every service state",
         ),
     ] {
         let unit = match point {
@@ -1152,6 +1182,8 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
             power_ok,
             level_chain,
             below_cutoff,
+            guard_anchor,
+            guard_true,
             &any_manual_gate,
             &group,
         ));
@@ -1486,6 +1518,8 @@ fn wire_pump(
     power_ok: OutPoint<bool>,
     level_chain: InPoint<f64>,
     below_cutoff: OutPoint<bool>,
+    guard_anchor: InPoint<f64>,
+    guard_true: InPoint<bool>,
     any_manual: &BoolGateInstance,
     group: &PumpGroupInstance,
 ) -> PumpLayout {
@@ -1629,6 +1663,10 @@ fn wire_pump(
     let protections_ok = plant.internal_output::<bool>(PointId(base + 18), true);
     let protections_ok_in = plant.internal_input::<bool>(PointId(base + 19), false, false);
     let protect_out = plant.internal_output::<f64>(PointId(base + 20), 0.0);
+    // The cause guards' pass-through carriers — unused like
+    // `protect-out`: each guard exists for its `tripped` flag.
+    let thermal_guard_out = plant.internal_output::<f64>(PointId(base + 21), 0.0);
+    let moisture_guard_out = plant.internal_output::<f64>(PointId(base + 22), 0.0);
     // The proven fault, the aggregated availability, and the
     // protection state are protection-relevant status — `journaled`
     // like the contacts feeding them; the inverted and delivered
@@ -1721,6 +1759,16 @@ fn wire_pump(
             "The protection interlock's analog pass-through — unused",
         ),
         (
+            base + 21,
+            "thermal-guard-out",
+            "The thermal cause guard's analog pass-through — unused",
+        ),
+        (
+            base + 22,
+            "moisture-guard-out",
+            "The moisture cause guard's analog pass-through — unused",
+        ),
+        (
             base + 24,
             "thermal-ok",
             "Thermal contact healthy — the inverted contact",
@@ -1799,6 +1847,21 @@ fn wire_pump(
     let protect = plant.add(InterlockSpec::new(
         parameters([("safe_value", Value::Float(0.0))]),
         4,
+    ));
+    // The cause guards — decision 88's annunciation half for the
+    // per-pump contacts, the station power guard's shape repeated per
+    // cause: a held `Good` `in` and `permissive` leave `tripped`
+    // reporting the contact alone, asserted or untrusted alike. Each
+    // contact alarm binds its guard's `tripped` directly, so a
+    // degraded contact can no longer trip the pump while its cause
+    // alarm stays clean (issue #809).
+    let thermal_guard = plant.add(InterlockSpec::new(
+        parameters([("safe_value", Value::Float(0.0))]),
+        1,
+    ));
+    let moisture_guard = plant.add(InterlockSpec::new(
+        parameters([("safe_value", Value::Float(0.0))]),
+        1,
     ));
     let inv_protect = plant.add(DigitalInputSpec::new(invert()));
     let holdout = plant.add(TimerSpec::new(parameters([(
@@ -1918,6 +1981,22 @@ fn wire_pump(
     plant.connect(protections_ok_in, protections_ok);
     plant.connect(protections_ok_in, &holdout.input);
 
+    // The per-pump cause guards: one `interlock` per contact whose
+    // `tripped` feeds the cause alarm's condition — the port-to-port
+    // wire synthesizes the delivered copy, so the asserted *or*
+    // untrusted contact annunciates on the same reading that trips
+    // the pump.
+    plant.connect(guard_anchor, &thermal_guard.input);
+    plant.connect(guard_true, &thermal_guard.permissive);
+    plant.connect(thermal, thermal_guard.trip(1));
+    plant.connect(&thermal_guard.out, thermal_guard_out);
+    plant.connect(&thermal_guard.tripped, &thermal_alarm.input);
+    plant.connect(guard_anchor, &moisture_guard.input);
+    plant.connect(guard_true, &moisture_guard.permissive);
+    plant.connect(moisture, moisture_guard.trip(1));
+    plant.connect(&moisture_guard.out, moisture_guard_out);
+    plant.connect(&moisture_guard.tripped, &moisture_alarm.input);
+
     // The manual-takeover shape under decision 88: `motor.cmd =
     // ((group cmd and not mode) or (hand and mode and the held
     // protection set)) and protections-ok` — the operator's `hand`
@@ -2006,7 +2085,6 @@ fn wire_pump(
         &format!("{tag}-thermal"),
         &group_name,
     );
-    plant.connect(thermal, &thermal_alarm.input);
     let moisture_alarm_layout = pump_alarm(
         plant,
         PUMP_ALARM_BASE + 3 * i + 2,
@@ -2020,7 +2098,6 @@ fn wire_pump(
         &format!("{tag}-moisture"),
         &group_name,
     );
-    plant.connect(moisture, &moisture_alarm.input);
 
     PumpLayout {
         index: index + 1,

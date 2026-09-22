@@ -27,7 +27,8 @@
 //! annunciates on the same quality-aware reading, the holdout
 //! delaying the restart after the protections stand clear again, the
 //! thermal and moisture contacts failing safe on bad quality and
-//! disconnection, the out-of-service declaration suppressing a
+//! disconnection while each contact's own cause alarm annunciates on
+//! the same reading, the out-of-service declaration suppressing a
 //! faulted pump's alarm, and the restore returning the pump to the
 //! group's roster.
 
@@ -433,7 +434,9 @@ pub fn scenario(layout: &StationLayout) -> Value {
             ])),
             // A degraded thermal contact fails safe the same way —
             // the untrusted trip input trips the protection interlock
-            // and the delivered command releases.
+            // and the delivered command releases — and its cause alarm
+            // annunciates on the same quality-aware reading, so the
+            // hand-held pump cannot stop silently.
             leg(
                 "thermal-bad-quality-trips-hand",
                 vec![],
@@ -444,6 +447,8 @@ pub fn scenario(layout: &StationLayout) -> Value {
                     (pump1.cmd.0, json!({"bool": false})),
                     (pump1.run.0, json!({"bool": false})),
                     (pump1.protect_tripped.0, json!({"bool": true})),
+                    (pump1.thermal_alarm.alarm.0, json!({"bool": true})),
+                    (pump1.thermal_alarm.unacknowledged.0, json!({"bool": true})),
                 ]),
             ),
             leg(
@@ -455,11 +460,13 @@ pub fn scenario(layout: &StationLayout) -> Value {
                 expect(&[
                     (pump1.protect_tripped.0, json!({"bool": false})),
                     (pump1.protections_ok.0, json!({"bool": true})),
+                    (pump1.thermal_alarm.alarm.0, json!({"bool": false})),
+                    (pump1.thermal_alarm.unacknowledged.0, json!({"bool": true})),
                 ]),
             ),
             // A disconnected moisture contact is the same fail-safe
-            // case: the lost input reads untrusted and the interlock
-            // trips.
+            // case: the lost input reads untrusted, the interlock
+            // trips, and its own cause alarm annunciates.
             leg(
                 "moisture-disconnected-trips-hand",
                 vec![],
@@ -470,6 +477,8 @@ pub fn scenario(layout: &StationLayout) -> Value {
                     (pump1.cmd.0, json!({"bool": false})),
                     (pump1.run.0, json!({"bool": false})),
                     (pump1.protect_tripped.0, json!({"bool": true})),
+                    (pump1.moisture_alarm.alarm.0, json!({"bool": true})),
+                    (pump1.moisture_alarm.unacknowledged.0, json!({"bool": true})),
                 ]),
             ),
             leg(
@@ -480,6 +489,7 @@ pub fn scenario(layout: &StationLayout) -> Value {
                 12,
                 expect(&[
                     (pump1.protect_tripped.0, json!({"bool": false})),
+                    (pump1.moisture_alarm.alarm.0, json!({"bool": false})),
                     (pump1.cmd.0, json!({"bool": true})),
                     (pump1.run.0, json!({"bool": true})),
                 ]),
