@@ -2,16 +2,19 @@
 //!
 //! [`Monitor`] exposes a [`dcs_runtime::Executor`] over `tiny_http` — a
 //! small synchronous HTTP server, so no async runtime is involved.
-//! Requests dispatch across three worker lanes: a submission lane for
-//! requests that can hold a worker on a client-paced wait —
-//! `POST /command` and `POST /scan`, the only handlers that read a
-//! request body, plus any request still carrying a body the client
+//! Requests dispatch across four worker lanes: a command lane for
+//! `POST /command` — one worker draining a queue deep enough to hold
+//! the pipelined wave the bounded-ingress contract must answer, so
+//! every submission takes its receipted settlement or the named
+//! `queue_full` rejection in submission order — a submission lane for
+//! the other requests that can hold a worker on a client-paced wait —
+//! `POST /scan`, plus any request still carrying a body the client
 //! owes (dropping its live reader drains the remainder, the same
 //! unbounded wait) — a heartbeat lane for the pair-liveness reads,
 //! `GET /checkpoint` and `GET /role`, and a serving lane for
 //! everything else. A client that stalls mid-body pins at most the
-//! small submission pool, so request-body traffic can never
-//! impersonate a dead active. The serving lane still holds one
+//! command worker or the small submission pool, so request-body
+//! traffic can never impersonate a dead active. The serving lane still holds one
 //! client-paced wait the body quarantine cannot reach: the response
 //! write itself — tiny_http exposes no socket timeout, so a client
 //! that never reads a large response pins its worker in `respond`
@@ -27,10 +30,12 @@
 //! of head-of-line blocking every endpoint behind it, and body reads
 //! themselves are bounded: a declared or delivered body past
 //! [`MAX_REQUEST_BODY`] is refused `413`. Lane queues are bounded too
-//! ([`LANE_QUEUE_DEPTH`]): a request arriving while its lane's queue
-//! is full gets a `503` from the refuse worker instead of queueing
-//! without limit, so a request flood pinned behind wedged workers
-//! cannot grow memory. The executor lives behind a
+//! ([`LANE_QUEUE_DEPTH`], the command lane's [`command_lane_depth`]):
+//! a request arriving while its lane's queue is full falls to the
+//! refuse worker — `503` for anything but a command, which still runs
+//! the receipted admission path — instead of queueing without limit,
+//! so a request flood pinned behind wedged workers cannot grow
+//! memory. The executor lives behind a
 //! [`Mutex`]
 //! the control-plane endpoints and the scan loop share — scans, commands,
 //! checkpoints, and role changes hold it for their mutation, so a
@@ -543,21 +548,39 @@ const SERVE_WORKERS: usize = 4;
 /// overflow is refused rather than queued without limit.
 const HEARTBEAT_WORKERS: usize = 2;
 
-/// The worker count serving the submission lane — `POST /command` and
-/// `POST /scan`, the only handlers that read a request body, plus any
-/// request still carrying a body the client owes: reading that body
-/// waits on the client, and dropping its reader drains the remainder,
-/// the same unbounded wait. tiny_http exposes no socket timeout to
-/// bound either wait: a client that stalls mid-body holds its worker
-/// for as long as it cares to. Those client-paced waits are
-/// quarantined on this lane so the heartbeat lane — `GET /checkpoint`
-/// among it, the pull a tracking standby measures the active's
-/// liveness by — and the serving lane keep answering through a
-/// stalled-body flood, per the disposable-consumer contract. Two
-/// workers keep a long `POST /scan` batch from queueing every command
-/// behind it; a flood beyond the lane's width can still starve
-/// submissions, but never the served surface.
+/// The worker count serving the submission lane — `POST /scan`, the
+/// one remaining handler that reads a request body once `POST
+/// /command` peels off to the command lane, plus any request still
+/// carrying a body the client owes: reading that body waits on the
+/// client, and dropping its reader drains the remainder, the same
+/// unbounded wait. tiny_http exposes no socket timeout to bound
+/// either wait: a client that stalls mid-body holds its worker for as
+/// long as it cares to. Those client-paced waits are quarantined on
+/// this lane so the heartbeat lane — `GET /checkpoint` among it, the
+/// pull a tracking standby measures the active's liveness by — and
+/// the serving lane keep answering through a stalled-body flood, per
+/// the disposable-consumer contract. Two workers keep a wedged body
+/// read from starving the lane outright; a flood beyond the lane's
+/// width can still starve submissions, but never the served surface.
 const SUBMIT_WORKERS: usize = 2;
+
+/// The command lane's queue bound: [`LANE_QUEUE_DEPTH`] plus twice the
+/// served `command_queue` capacity. `POST /command` is owed a
+/// receipted answer for every submission — a settlement or the named
+/// `queue_full` rejection, appended to the executor's log in
+/// submission order — so its lane must hold the whole wave a client
+/// can pipeline before the first response returns: the admission
+/// bound is only observable by overshooting it, which makes a burst
+/// of twice the bound the contract's declared flood shape. The single
+/// draining worker keeps the log in dispatch order — two workers
+/// racing the shared lock could invert a settlement against a
+/// `queue_full` refusal — and a stalled command body pins only this
+/// lane. Past the bound the refuse path still runs the real admission
+/// handler rather than answering a bare `503`, so the receipt lands —
+/// just outside the queue's dispatch order.
+fn command_lane_depth(command_capacity: usize) -> usize {
+    LANE_QUEUE_DEPTH.saturating_add(command_capacity.saturating_mul(2))
+}
 
 /// The bound on every lane's pending-request queue — the flood half
 /// of the undrained-response fix. A lane's queue only fills while its
@@ -884,16 +907,23 @@ impl<'d> Monitor<'d> {
     ///
     /// Blocking: run this on a dedicated thread. One dispatcher drains
     /// tiny_http's internal queue and routes each request onto one of
-    /// three lanes. [`submission`] wins first — requests that can hold
-    /// a worker on a client-paced body wait (the body-reading
-    /// `POST /command` and `POST /scan`, plus any request still
-    /// carrying a body the client owes, whose dropped reader drains
-    /// the rest the same way) go to the submission lane's
-    /// [`SUBMIT_WORKERS`] workers, whatever their path: a stalled-body
-    /// `GET /checkpoint` must not pin a heartbeat worker either.
-    /// Bodiless pair-liveness reads — `GET /checkpoint`, `GET /role` —
-    /// go to the heartbeat lane's [`HEARTBEAT_WORKERS`] workers;
-    /// everything else to the serving lane's [`SERVE_WORKERS`].
+    /// four lanes. [`command_request`] wins first — `POST /command`
+    /// takes the dedicated command lane, the receipted-ingress path
+    /// the bounded-admission contract owns: every submission must
+    /// answer with a settlement or the named `queue_full` rejection,
+    /// appended to the executor's log in submission order, so the lane
+    /// drains through one worker and queues [`command_lane_depth`]
+    /// deep — enough to hold the whole pipelined wave the contract's
+    /// flood shape can send before a response returns. [`submission`]
+    /// next — requests that can hold a worker on a client-paced body
+    /// wait (`POST /scan`, plus any request still carrying a body the
+    /// client owes, whose dropped reader drains the rest the same
+    /// way) go to the submission lane's [`SUBMIT_WORKERS`] workers,
+    /// whatever their path: a stalled-body `GET /checkpoint` must not
+    /// pin a heartbeat worker either. Bodiless pair-liveness reads —
+    /// `GET /checkpoint`, `GET /role` — go to the heartbeat lane's
+    /// [`HEARTBEAT_WORKERS`] workers; everything else to the serving
+    /// lane's [`SERVE_WORKERS`].
     ///
     /// The split exists because serving holds two waits no handler can
     /// bound: the body read and the response write — tiny_http exposes
@@ -904,24 +934,38 @@ impl<'d> Monitor<'d> {
     /// pair-liveness reads keeps the standby heartbeat and the role
     /// surface answering through an undrained-response flood — a
     /// wedged reader can starve the bulk GETs but can never
-    /// impersonate a dead active. Every lane's queue is bounded by
-    /// [`LANE_QUEUE_DEPTH`]; overflow is refused `503` by the refuse
-    /// worker rather than queueing without limit, and a request that
-    /// cannot even queue for refusal is dropped on its own detached
-    /// thread so the dispatcher itself never joins a client-paced
-    /// wait. The executor's command/scan interleaving stays
-    /// deterministic either way: the pools only decide which request
-    /// waits on the shared lock next, and scans, commands,
+    /// impersonate a dead active. Every lane's queue is bounded — the
+    /// command lane by its [`command_lane_depth`] wave, the rest by
+    /// [`LANE_QUEUE_DEPTH`]; a non-command overflow is refused `503`
+    /// by the refuse worker rather than queueing without limit, while
+    /// a refused `POST /command` still runs the real admission path so
+    /// the submission is answered with its receipt, never a bare
+    /// fault. A request that cannot even queue for refusal is dropped
+    /// on its own detached thread so the dispatcher itself never joins
+    /// a client-paced wait. The executor's command/scan interleaving
+    /// stays deterministic either way: the pools only decide which
+    /// request waits on the shared lock next, and scans, commands,
     /// checkpoints, and role changes still serialize on it.
     pub fn serve(&self) {
+        let command_depth = command_lane_depth(
+            self.shared
+                .lock()
+                .unwrap()
+                .peer
+                .executor()
+                .command_queue_capacity(),
+        );
         let submissions = Lane::new();
+        let commands = Lane::with_depth(command_depth);
         let heartbeat = Lane::new();
         let served = Lane::new();
         let refused = Lane::new();
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 while let Ok(request) = self.server.recv() {
-                    let lane = if submission(&request) {
+                    let lane = if command_request(&request) {
+                        &commands
+                    } else if submission(&request) {
                         &submissions
                     } else if pair_liveness(&request) {
                         &heartbeat
@@ -929,12 +973,14 @@ impl<'d> Monitor<'d> {
                         &served
                     };
                     // A full lane never holds the dispatcher: the
-                    // request falls to the refuse lane's `503`, and
-                    // past even that bound it is dropped on a detached
-                    // thread — a dropped request answers `500` on the
-                    // way out, itself a write a wedged connection can
-                    // stall, so the drop runs off the dispatcher's
-                    // thread rather than ever blocking routing.
+                    // request falls to the refuse lane — a `503`, or
+                    // the receipted admission path for a command —
+                    // and past even that bound it is dropped on a
+                    // detached thread: a dropped request answers `500`
+                    // on the way out, itself a write a wedged
+                    // connection can stall, so the drop runs off the
+                    // dispatcher's thread rather than ever blocking
+                    // routing.
                     let Some(request) = lane.push(request) else {
                         continue;
                     };
@@ -945,6 +991,7 @@ impl<'d> Monitor<'d> {
                 // `recv` ending — `unblock` or a dead listener —
                 // drains every lane and releases their workers.
                 submissions.close();
+                commands.close();
                 heartbeat.close();
                 served.close();
                 refused.close();
@@ -973,15 +1020,35 @@ impl<'d> Monitor<'d> {
                     }
                 });
             }
+            // One worker drains the command lane: a single consumer
+            // keeps the receipt log in dispatch order — the
+            // submission-sequence ordering the receipted-ingress audit
+            // correlates by — and a stalled command body pins only this
+            // worker while `POST /scan` keeps its own lane.
+            let lane = &commands;
+            scope.spawn(move || {
+                while let Some(request) = lane.pop() {
+                    self.handle(request);
+                }
+            });
             // The refuse worker answers the overflow every lane shares:
             // one bounded queue of requests that get a `503` instead of
-            // an unbounded wait. Its respond can wedge on a dead
-            // connection like any write — quarantined to this one
-            // worker, whose own queue stays bounded the same way.
+            // an unbounded wait — except `POST /command`, which the
+            // admission contract still owes a receipted answer: it runs
+            // the real handler so the refusal is the named
+            // `queue_full` rejection rather than a bare fault. Its
+            // respond — or a refused command's body read — can wedge on
+            // a dead connection like any client-paced wait,
+            // quarantined to this one worker, whose own queue stays
+            // bounded the same way.
             let lane = &refused;
             scope.spawn(move || {
                 while let Some(request) = lane.pop() {
-                    let _ = request.respond(json(503, "serving overloaded"));
+                    if command_request(&request) {
+                        self.handle(request);
+                    } else {
+                        let _ = request.respond(json(503, "serving overloaded"));
+                    }
                 }
             });
         });
@@ -1635,6 +1702,16 @@ impl<'d> Monitor<'d> {
     }
 }
 
+/// Whether the request is a `POST /command` — the receipted ingress
+/// path. [`Monitor::serve`] routes these ahead of [`submission`] onto
+/// the dedicated command lane: they still qualify there (the handler
+/// reads a body, and a stalled one pins that lane's single worker),
+/// but their queue bound and drain order belong to the bounded
+/// admission contract, not the generic submission pool.
+fn command_request(request: &Request) -> bool {
+    request.method() == &Method::Post && request.url().split('?').next() == Some("/command")
+}
+
 /// Whether the request can hold a worker on a client-paced wait —
 /// the routing [`Monitor::serve`] applies. Two request shapes can:
 ///
@@ -1683,17 +1760,22 @@ fn pair_liveness(request: &Request) -> bool {
 }
 
 /// One lane's bounded request queue — [`Monitor::serve`]'s dispatcher
-/// pushes, the lane's workers pop. The queue caps at
-/// [`LANE_QUEUE_DEPTH`]: [`push`](Self::push) hands the request back
-/// once the lane is full or closed rather than queueing without
-/// limit, so a flood pinned behind wedged workers stays a bounded
-/// count of waiting requests — the dispatcher routes the overflow to
-/// the refuse lane's `503`. [`close`](Self::close) releases every
-/// blocked worker once the queued requests drain, so `shutdown`
-/// reaching the dispatcher propagates down all lanes.
+/// pushes, the lane's workers pop. The queue caps at its `depth` —
+/// [`LANE_QUEUE_DEPTH`] generally, [`command_lane_depth`] for the
+/// command lane: [`push`](Self::push) hands the request back once the
+/// lane is full or closed rather than queueing without limit, so a
+/// flood pinned behind wedged workers stays a bounded count of
+/// waiting requests — the dispatcher routes the overflow to the
+/// refuse lane. [`close`](Self::close) releases every blocked worker
+/// once the queued requests drain, so `shutdown` reaching the
+/// dispatcher propagates down all lanes.
 struct Lane {
     inner: Mutex<LaneInner>,
     ready: Condvar,
+    /// The queue bound [`push`](Self::push) enforces —
+    /// [`LANE_QUEUE_DEPTH`] for the generic lanes, the command lane's
+    /// [`command_lane_depth`] wave for `POST /command`.
+    depth: usize,
 }
 
 struct LaneInner {
@@ -1703,23 +1785,28 @@ struct LaneInner {
 
 impl Lane {
     fn new() -> Self {
+        Self::with_depth(LANE_QUEUE_DEPTH)
+    }
+
+    fn with_depth(depth: usize) -> Self {
         Self {
             inner: Mutex::new(LaneInner {
                 queue: VecDeque::new(),
                 closed: false,
             }),
             ready: Condvar::new(),
+            depth,
         }
     }
 
     /// Queues `request` for the lane's workers, or hands it back —
     /// `Some(request)` — when the lane is closed or already holding
-    /// [`LANE_QUEUE_DEPTH`] requests. Never waits: a push past the
-    /// bound is the caller's signal to refuse the request elsewhere,
-    /// so a pinned lane's queue is the flood's hard bound.
+    /// `depth` requests. Never waits: a push past the bound is the
+    /// caller's signal to refuse the request elsewhere, so a pinned
+    /// lane's queue is the flood's hard bound.
     fn push(&self, request: Request) -> Option<Request> {
         let mut inner = self.inner.lock().unwrap();
-        if inner.closed || inner.queue.len() >= LANE_QUEUE_DEPTH {
+        if inner.closed || inner.queue.len() >= self.depth {
             return Some(request);
         }
         inner.queue.push_back(request);
