@@ -2,7 +2,8 @@
 
 An area describes the product capability that benefits from the work, not the
 crate, validation venue, or worker that happens to implement it. Every managed
-open issue owns exactly one ``area:*`` label and matching metadata value.
+open issue owns exactly one ``area:*`` label; newly published issues also carry
+the matching metadata value.
 """
 from collections import Counter
 from dataclasses import dataclass, field
@@ -22,7 +23,6 @@ DEFINITIONS = {
     'verification': (5, 'Test infrastructure, conformance, simulation, and QA machinery'),
     'delivery-platform': (5, 'Agent factory, CI, repository automation, and contributor flow'),
 }
-NAMES = tuple(DEFINITIONS)
 
 
 def validate(area):
@@ -36,20 +36,25 @@ def label(area):
 
 
 def issue_area(issue):
-    """Return the single valid area recorded by labels or metadata."""
+    """Return the canonical area, inferring it for legacy managed issues."""
     labels = [row['name'][5:] for row in issue.get('labels', [])
               if row.get('name', '').startswith('area:')]
     valid = [value for value in labels if value in DEFINITIONS]
-    if len(valid) == 1:
-        return valid[0]
     body = issue.get('body') or ''
     if body.startswith(PREFIX):
         try:
-            value = json.loads(body[len(PREFIX):body.index(' -->')]).get('area')
-            return value if value in DEFINITIONS else None
+            metadata = json.loads(body[len(PREFIX):body.index(' -->')])
+            value = metadata.get('area')
+            if value in DEFINITIONS:
+                return value
+            if len(valid) == 1:
+                return valid[0]
+            group = metadata.get('group')
+            if isinstance(group, str):
+                return infer(group, issue.get('title', ''), body)
         except (ValueError, TypeError, json.JSONDecodeError):
             pass
-    return None
+    return valid[0] if len(valid) == 1 else None
 
 
 def infer(module, *text):
@@ -57,7 +62,7 @@ def infer(module, *text):
     words = ' '.join((module,) + text).lower()
     keyword_areas = (
         ('high-availability', ('standby', 'failover', 'promot', 'demot', 'checkpoint',
-                               'receipt', 'reconverg', 'tracking', 'fencing', 'ownership')),
+                               'reconverg', 'tracking', 'fencing', 'ownership')),
         ('alarms-diagnostics', ('alarm', 'acknowledg', 'latch', 'shelv', 'suppress',
                                 'first-out', 'diagnostic')),
         ('field-connectivity', ('ethercat', 'fieldbus', 'cyclic', 'driver', 'fanout',

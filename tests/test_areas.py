@@ -28,6 +28,9 @@ class ProductAreaTests(unittest.TestCase):
                          'alarms-diagnostics')
         self.assertEqual(areas.infer('qa_lane', 'runner cannot parse report', ''),
                          'verification')
+        self.assertEqual(areas.infer('dcs-controller',
+                                     'command receipt is lost', ''),
+                         'control-runtime')
 
     def test_allocation_exposes_backlog_and_favors_underinvested_area(self):
         issues = [managed(1, 'engineering'), managed(2, 'library'),
@@ -43,8 +46,23 @@ class ProductAreaTests(unittest.TestCase):
     def test_issue_area_requires_one_known_label_or_metadata_value(self):
         issue = managed(1, 'operations')
         self.assertEqual(areas.issue_area(issue), 'operations')
+        issue['labels'] = [{'name': 'area:library'}]
+        self.assertEqual(areas.issue_area(issue), 'operations')
         issue['labels'] = [{'name': 'area:operations'}, {'name': 'area:library'}]
         # Conflicting labels fall back to the canonical managed metadata.
+        self.assertEqual(areas.issue_area(issue), 'operations')
+
+    def test_issue_area_infers_legacy_managed_issue_without_area(self):
+        item = dict(key='legacy-task', title='Legacy task', scope='s',
+                    acceptance='a', tests='t', dependencies=[], priority=2,
+                    milestone='m', group='dcs-monitor', area='operations')
+        body = planning.body(item).replace(',"area":"operations"', '')
+        issue = {'number': 1, 'title': item['title'], 'body': body,
+                 'state': 'OPEN', 'labels': [{'name': 'agent:ready'}]}
+        self.assertEqual(areas.issue_area(issue), 'operations')
+
+        issue['labels'] += [{'name': 'area:library'},
+                            {'name': 'area:engineering'}]
         self.assertEqual(areas.issue_area(issue), 'operations')
 
 

@@ -484,6 +484,20 @@ class ReviewLaneTests(unittest.TestCase):
         self.assertIn('priority:P0', names)
         self.assertNotIn('priority:P3', names)
 
+    def test_legacy_issue_area_is_inferred_and_reconciled(self):
+        issue = managed_issue(7, group='dcs-monitor')
+        issue['body'] = issue['body'].replace(',"area":"control-runtime"', '')
+        issue['labels'] += [{'name': 'area:library'},
+                            {'name': 'area:engineering'}]
+        self.github.items = [issue]
+
+        self.supervisor.mirror(self.github.items)
+
+        names = [label['name'] for label in self.github.issue(7)['labels']]
+        self.assertIn('area:operations', names)
+        self.assertNotIn('area:library', names)
+        self.assertNotIn('area:engineering', names)
+
     def test_pending_assessment_requires_done_issues(self):
         self.supervisor.state.begin_review('r0', 1, 'sha-0', 1)
         self.supervisor.state.record_candidates('r0', [candidate()])
