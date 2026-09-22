@@ -265,6 +265,18 @@ ci/power_trip.py       the pair contract's power-fail interlock leg —
                        released contact re-staging the demand inside
                        the declared bounds with the pair's roles
                        unchanged
+ci/monitor_starvation.py  the pair contract's monitor-starvation leg
+                       — the saturating set of incomplete-body
+                       connections held against the armed pair's field
+                       owner while the serving lane's GET /role,
+                       /snapshot, and /checkpoint keep answering
+                       inside the declared bound on both peers, the
+                       standby's checkpoint pulls keep landing past
+                       the armed miss budget with no role transition
+                       or field_claim_lost journaled, fencing probes
+                       stay fenced, and closing the set restores
+                       driven scans and a receipted command with the
+                       pair's roles unchanged
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
@@ -1070,219 +1082,55 @@ and one asserting the `shelved` flag still stands after the
 declared bound's own auto-release — must each report the named
 diagnostic rather than pass silently.
 
-The stage's managed run-state carryover leg —
-`ci/managed_carryover.py` on the same declared deployment — then
-proves the managed alarm kinds' checkpointed run state itself carries
-across a takeover on the customer-owned pair (WW-ENG-003, WW-ALM-002,
-WW-LCM-001), the continuity the lifecycle leg's quiet-pair surface
-never reached. With the pair settled and tracking, the pump's `oos`
-point takes the receipted inhibit so the fault alarm reports
-`out_of_service`/`suppressed`, and a driven run-contact fault holds
-the standing suppressed trip — `alarm` reporting the process truth
-while the latch stays withheld. The shelvable low-level alarm's
-writable journaled `shelve` point then takes the receipted request
-mid-run, and the documented demote/promote lands inside the emitted
-model's declared `max_shelve_ticks` bound with the countdown still in
-flight. On the promoted peer the leg asserts `shelved` stands carried
-and releases at the tick the continued countdown expires — the
-journaled assertion-to-expiry span measuring the declared bound with
-the promotion inside it, a bound restarted at the switch releasing
-later — that `out_of_service`/`suppressed` stand with evaluation
-held, and that every written point rode the checkpoint. Both durable
-journal files must carry the ordered record continuous across the
-switch — each its single cold-start boundary with `seq` order intact,
-the promoted peer's record ordering the adopted settlements, the
-promotion's `role_changed` entries inside the countdown's span, the
-expiry at the continued bound's tick, and the restores in run order —
-the served journal answering the same record. Every driven input is
-restored on the promoted peer and the pair returns to its manifest
-roles. A violated contract fails `carry-failed`; two passes must
-produce the identical `carry-digest`, a divergence failing
-`carry-nondeterministic`. The leg's doctored cases — an expectation
-asserting the expiry a fresh bound after the switch, the countdown
-restarted, and one asserting the promoted peer dropped
-`out_of_service` — must each report the named diagnostic rather than
+The stage's emit-identical event-parity leg — `ci/event_parity.py` on
+the same declared deployment — then proves the tracking standby's
+published event record is not a hollow copy: the property that lets a
+UI consumer fail its event feed over between the peers without a gap
+in attribution. With the pair settled and tracking, the exercise
+sequencer's `run` input is held through the field owner's receipted
+path — the same write refused `not_active` at the standby's role
+boundary — and driven scans run the declared step table out until the
+counted `step_completed` set stands. `GET /resources` on both peers
+must then serve the same routed `event_emitted` records — identical
+outer and inner component attribution, declared event identities,
+ordered payload fields, tick, and retention, the stream-local `seq`
+positions excluded — while the standby still reports `tracking`. A
+violated contract fails `event-parity-failed`; two passes must
+produce the identical `event-parity-digest`, a divergence failing
+`event-parity-nondeterministic`. The leg's doctored cases — a standby
+record set missing an emission or carrying one re-attributed — must
+each report the named diagnostic rather than pass silently.
+
+The stage's monitor-starvation leg — `ci/monitor_starvation.py` on
+the same declared deployment — then proves the serving-lane
+resilience contract on the customer-owned pair (WW-ENG-003,
+WW-FND-004), the stalled-client half of the consumer-boundary
+schedules a lone driven run cannot reach: a controller whose monitor
+starved its reads under an incomplete-body flood would read as a
+dead active to its armed standby — the spurious-failover window the
+bounded submission lane exists to close. With the pair settled and
+the standby's `--auto-promote` carrying the manifest's declared
+`failover_budget`, the leg opens the saturating set of
+incomplete-body connections against the field owner's monitor —
+requests whose declared bodies never follow, pinning the quarantined
+body-reading handlers — and asserts through the hold that `GET
+/role`, `GET /snapshot`, and `GET /checkpoint` keep answering inside
+the declared per-request bound on both peers, that the standby's
+per-scan checkpoint pulls keep landing — one more driven pull than
+the armed budget, so a starved heartbeat would self-promote inside
+the window — that a foreign attachment's field probe stays fenced,
+and that neither peer's durable journal carries `role_changed` or
+`field_claim_lost`. Closing the set must free the submission lane:
+a driven `POST /scan` on the flooded owner answers again and
+advances the tick, and a receipted kind-declared command settles
+`applied` into both peers' adopted log with the pair's roles
+unchanged. A violated contract fails `monitor-starvation-failed`;
+two passes must produce the identical `monitor-starvation-digest`,
+a divergence failing `monitor-starvation-nondeterministic`. The
+leg's doctored cases — a run whose liveness reads starve under a
+zeroed declared bound, and one whose standby reports a genuine role
+change mid-hold — must each report the named diagnostic rather than
 pass silently.
-
-The stage's staging leg — `ci/staging.py` on the same declared
-deployment — then proves the deployed pair stages and de-stages on
-level through the emitted model's declared setpoint chain
-(WW-ENG-003, WW-CTL-001, WW-CTL-002), the process behavior the
-lifecycle legs never reached. Receipted `write_value` holds on both
-pumps' declared writable `oos` points take every pump out of service
-before the first driven scan, so the declared inflow raises the
-wet-well level unopposed while the group's aggregated availability
-holds `staged` and the motor commands at zero whatever the demand
-reads. Through the active's monitor the leg asserts `demand` moves
-0→1→2 only at the chain's own declared crossings — `duty_call` with
-the `start` crossing, `lag_call` with `lag_start` — and that the
-`high` crossing asserts `high_level` beside the managed high-level
-alarm's `alarm`/`unacknowledged`, the journaled annunciation the
-durable record must carry. The receipted releases then restore the
-driven inputs and the standing demand stages the group: the duty
-pump answers first, the lag follows inside the declared
-`start_delay_ticks`, and each pump's `cmd`/`run` field outputs prove
-the delivered start. The staged pumps draw the level down through the
-declared de-stage order — the demand releasing at its `start` and
-`stop` crossings, never ahead of or behind the level the chain read,
-the most recently staged lag's run releasing before the duty's — down
-to the `below-cutoff` floor the journaled chain flag reports. A
-receipted `ack` clears the alarm's latch; every driven input stands
-restored and the pair's roles never moved; the field owner's durable
-journal file must carry the holds, the high-level annunciation, the
-staged runs, and the lag-first de-stage in `seq` order, the served
-journal answering the same record. A violated contract fails
-`staging-failed`; two passes must produce the identical
-`staging-digest`, a divergence failing `staging-nondeterministic`.
-The leg's doctored cases — an expectation asserting the wrong demand
-at the `lag_start` crossing, and one asserting the lag start landed
-inside a shortened delay bound — must each report the named
-diagnostic rather than pass silently.
-
-The stage's out-of-service leg — `ci/oos.py` on the same declared
-deployment — then proves the per-pump maintenance inhibit the emitted
-model declares actually excludes the machine on the customer pair
-(WW-ENG-003, WW-OPS-001, WW-ALM-002). With the pair converged and
-tracking at an idle assigned-duty baseline — `duty` naming the pump
-whose `oos` the leg drives, so the handover's only cause is the
-exclusion — the leg submits the attributed receipted `write_value`
-hold through the active's `POST /command` and asserts the in-service
-cone falls: the `oos-ok` inversion through the `oos-ok-avail-in`
-availability leg and the `oos-ok-guard-in` demand guard alike, the
-aggregated `avail` and its delivered `avail-in` copy dropping, and
-`duty` handing to the sibling inside the declared wiring bound while
-`staged` reports only the available count. Each managed per-pump
-alarm reports the states its declared lifecycle bindings select — the
-fault alarm `out_of_service` and `suppressed` through its declared
-`oos`/`suppress` inputs, the unbound thermal/moisture kinds and the
-sibling's whole set untouched, the precedence read off the served
-descriptors rather than assumed — while the sibling serves the next
-demand with the held pump's `cmd` staying released through the whole
-cycle. An injected non-Good on the held pump's run contact through
-the plant protocol's unfenced surface then proves `alarm` still
-reports process truth mid-OOS while suppression withholds the
-`unacknowledged` annunciation; the receipted false write returns the
-pump — the in-service leg reopening, `avail` rejoining, and
-suppression's release re-annunciating the outlasted trip as a fresh
-`unacknowledged` before the cleared contact returns the condition
-with the latch standing for the receipted `ack` — and the next
-completed cycle's declared alternate-each-cycle rotation hands `duty`
-back, the manual return proven as a return to service. The field
-owner's durable journal file must carry every managed transition as
-ordered `point_changed` entries beside the attributed `applied`
-settlements — the journaled edges measuring the declared wiring bound
-from write to avail drop and from release to rejoin — the served
-`GET /journal` answering the same record, the peers' adopted receipt
-logs one identical log, and the pair's controller roles unmoved
-throughout: a maintenance hold is a plant event, not a failover. A
-violated contract fails `oos-failed`; two passes must produce the
-identical `oos-digest`, a divergence failing `oos-nondeterministic`.
-The leg's doctored cases — an expectation asserting the held-out pump
-keeps `duty`, and one asserting the managed alarms never report their
-declared states — must each report the named diagnostic rather than
-pass silently (`oos-unchecked`).
-
-The stage's power-fail interlock leg — `ci/power_trip.py` on the
-same declared deployment — then proves the station protection-layer
-trip and its declared recovery on the customer-owned pair
-(WW-ENG-003, WW-OPS-001, WW-CTL-002), the demand behavior the
-cascade legs never exercised. With the pair settled and the group
-holding a full duty demand — both pumps staged and running — the
-leg drives the `power-fail` contact through the plant protocol's
-field write and asserts through the active's monitor that
-`power-ok` drops, both pumps' `power-ok-in`/`avail` aggregates lose
-their power leg and report unavailable, and the motor commands
-release while the chain's `demand` still stands — `none-available`
-annunciating and the managed `power-fail` alarm's
-`alarm`/`unacknowledged` asserting with journaled `point_changed`
-evidence on the durable record. A receipted `power-fail-ack` write
-through the active's `POST /command` must settle `applied` under the
-leg's actor and clear the `unacknowledged` latch while the driven
-condition still stands — the contact held, the alarm reporting
-process truth. Releasing the contact then asserts the declared
-recovery: `power-ok` and both availability legs return, the alarm
-returns while the acknowledged latch stays down and the
-never-acknowledged `none-available` latch holds, and the group
-re-stages the standing demand inside the emitted model's declared
-bounds — no `cmd` re-asserting inside its `min_off_ticks` holdout,
-the lag's start inside the declared `start_delay_ticks` of the
-duty's — the field outputs moving only on the driven scan sequence,
-the plant-side reads proving no output step lands between scans.
-The pair's controller roles never move — a field contact is a plant
-event, not a failover — and the field owner's durable journal file
-must carry the driven transitions and attributed settlements in
-`seq` order, the served `GET /journal` answering the same record. A
-violated contract fails `power-trip-failed`; two passes must
-produce the identical `power-trip-digest`, a divergence failing
-`power-trip-nondeterministic`. The leg's doctored cases — an
-expectation asserting the motor commands still stand under the
-driven power-fail, and one asserting the pumps' availability never
-dropped — must each report the named diagnostic rather than pass
-silently.
-
-The stage's alarm-rationalization leg —
-`ci/alarm_rationalization.py` on the same declared deployment —
-then proves the declared-once half of the alarm contract's
-rationalization record reaches the operator boundary on the
-customer-owned pair (WW-ENG-003, WW-ALM-001): the alarm-validation
-stage proved the rejection half on the document, but nothing had
-asserted the deployed pair serves the same single declaration. With
-the pair settled and tracking, the leg reads the emitted model's
-managed alarm instances and audits both peers' served surfaces —
-`GET /signals`' components section must carry each instance's
-declared `rationalization` block verbatim (consequence, required
-action, display/procedure reference) and `GET /snapshot`'s
-parameters section must serve each alarm's declared
-`priority`/`class`/`response_ticks` live, every mismatch or dropped
-record failing by the instance's `<kind>:<id>` name. The documented
-`demote`/`promote` switch lands and the same audit re-reads both
-peers — the promoted owner and the reconverged tracker serving the
-identical declared record, the declaration riding the checkpoint
-rather than re-derived per peer — then the leg restores the pair's
-launch roles. A violated contract fails
-`alarm-rationalization-failed`; two passes must produce the
-identical `alarm-rationalization-digest`, a divergence failing
-`alarm-rationalization-nondeterministic`. The leg's doctored cases —
-a served record dropping one managed alarm's component record and
-parameter report, and one rewriting a declared field's served value
-— must each report the named diagnostic rather than pass silently.
-
-The stage's claim-fencing leg — `ci/claim_fencing.py` on the same
-declared deployment — is the consumer-side mirror of the platform
-lane's standing field-claim scenario (WW-ENG-003, WW-OPS-003): the
-pair legs prove switchover and receipted commands, but none attaches
-a third plant-protocol client, so the single-writer claim the
-redundancy contract stands on went unexercised here. With the pair
-settled and a field-owning peer holding the spawned
-`dcs-plant-server`'s writer claim — the launched active's startup
-claim where the release logs its owner token, else the documented
-`demote`/`promote` switch stands the promoted peer's claim up first —
-a dedicated third sim-net attachment's `write` and `step` must answer
-the named fencing refusal while the field owner's own writes and its
-served `active` role stay undisturbed, and the same mutations driven
-through the shipped `dcs-plant-ctl` exit nonzero naming the refusal
-while its unfenced `list`/`read` still answer. The lifecycle verbs
-then answer per contract on that attachment where the release speaks
-them: a foreign token's `ensure_writer` refused `fenced`, the owner's
-token answering `claimed_shared` with a
-write landing under the shared hold, `release_writer` dropping only
-the caller's hold so the standing claim keeps fencing the released
-attachment, and a release from a holder of nothing a harmless `done`
-that leaves the claim standing. A rogue `claim_writer` then resolves
-per the settled contract, never silently — a refusal leaves the claim
-and the owner untouched, while the unconditional preempt it grants
-journals `field_claim_lost` on the superseded owner and demotes it in
-place with its monitor serving throughout, after which the leg
-re-promotes the demoted owner — the promotion claim preempts the
-rogue token — and the pair settles its launch roles with the claim's
-owner standing unchanged. The dead-owner window — an owner
-disconnect leaving the claim standing — is a separate leg's scope.
-A violated contract fails `claim-fencing-failed`; two passes must
-produce the identical `claim-fencing-digest`, a divergence failing
-`claim-fencing-nondeterministic`. The leg's doctored cases — a probe
-attachment writing through the claim, a foreign `ensure_writer`
-granted, and a rogue claim succeeding with no supersession evidence —
-must each report the named diagnostic rather than pass silently.
 
 The check's `consumers` stage then proves the replaceable-consumer
 boundary end to end — `ci/consumers.py --schedule <name>` replays the
@@ -1526,6 +1374,10 @@ active's writes, receipts, or journal disturbed, or the pair unable
 to promote afterward — is `standby-restart-failed`; two
 standby-restart passes diverging is
 `standby-restart-nondeterministic`;
+a tracking standby whose served event
+records diverge from the active's — or whose counted emission set
+never stands — is `event-parity-failed`; two event-parity passes
+diverging is `event-parity-nondeterministic`;
 a consumer schedule changing the driven run's
 outputs or receipts — or failing its own evidence — is
 `consumer-interference`; and two consumer-stage passes diverging is
