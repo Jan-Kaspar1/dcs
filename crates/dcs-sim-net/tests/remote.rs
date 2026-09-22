@@ -724,6 +724,66 @@ fn the_shared_flag_tracks_live_holders_not_the_standing_claim() {
     });
 }
 
+#[test]
+fn the_conditional_startup_claim_refuses_a_live_incumbent_only() {
+    with_server(loopback_map(), |addr| {
+        let incumbent = RemoteDriver::connect(addr).unwrap();
+        let restart = RemoteDriver::connect(addr).unwrap();
+        let same_owner = RemoteDriver::connect(addr).unwrap();
+
+        // The incumbent's unconditional claim stands with a live holder.
+        assert_eq!(incumbent.claim_writer(7).unwrap(), ClaimGrant::Exclusive);
+
+        // A different token's conditional startup grant is refused — the
+        // stale-checkpoint takeover the grant exists to prevent. The
+        // refusal changed nothing: the incumbent keeps writing and
+        // stepping, and the refused attachment holds no claim.
+        assert_eq!(
+            restart.claim_writer_unless_held(9),
+            Err(RemoteError::Fenced)
+        );
+        assert_eq!(
+            restart.write(PointId(20), Value::Float(9.0)),
+            Err(IoError::Fenced(PointId(20)))
+        );
+        incumbent.write(PointId(20), Value::Float(1.0)).unwrap();
+        incumbent.step(0.1).unwrap();
+
+        // The incumbent's own token still joins — a second live holder
+        // of the same owner is the shared grant, never a refusal.
+        assert_eq!(
+            same_owner.claim_writer_unless_held(7).unwrap(),
+            ClaimGrant::Shared
+        );
+
+        // Once the incumbent's last holder drops, the standing claim's
+        // holder set empties — the dead-owner state — and the
+        // conditional grant preempts it legitimately: the
+        // restart-as-active recovery of a crashed owner keeps working.
+        drop(incumbent);
+        drop(same_owner);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match restart.claim_writer_unless_held(9) {
+                Ok(ClaimGrant::Exclusive) => break,
+                Err(RemoteError::Fenced) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the dead owner's claim was never reaped"
+                    );
+                    thread::sleep(Duration::from_millis(50));
+                }
+                other => panic!("a dead owner's claim must preempt: {other:?}"),
+            }
+        }
+        // The granted restart owns the field outright.
+        restart.write(PointId(20), Value::Float(3.0)).unwrap();
+        restart.step(0.1).unwrap();
+        let observer = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(observer.read(PointId(20)).unwrap().value, Value::Float(3.0));
+    });
+}
+
 /// Polls `remote`'s link until the re-attach lands or `deadline`
 /// expires — the returned-plant half of every restart test.
 fn wait_for_reattach(remote: &RemoteDriver, deadline: Duration) {
