@@ -42,7 +42,7 @@ use support::{image_value, spawn_controller_logged, spawn_plant};
 /// checked-in document the lane's plant server and both controllers
 /// run. Its `p10x-cmd` outputs are the only field `Out` points, so
 /// the staged-output divergence check covers exactly the commands the
-//! finding watched freeze.
+/// finding watched freeze.
 const STATION: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../dcs-demo/fixtures/pump_station.json"
@@ -70,6 +70,11 @@ const CMD_B: PointId = PointId(101);
 const DEMAND: PointId = PointId(204);
 const STAGED: PointId = PointId(211);
 const HIGH_LEVEL: PointId = PointId(215);
+/// The dynamics' declared forcing input — the field point the QA
+/// lane drives high to fill the well to the standing demand inside
+/// the demand bound, written through the same field seam the trip's
+/// `power-fail` write uses.
+const INFLOW: PointId = PointId(12);
 
 /// The owner token the launched active's startup claim reported —
 /// parsed from the spawn preamble's `owner token <n>` line, the same
@@ -96,8 +101,8 @@ fn field_value(field: &RemoteDriver, point: PointId) -> Value {
 /// energized, the high-level condition up — the healthy precondition
 /// the power-fail trip interrupts.
 fn full_demand(snapshot: &dcs_core::TelemetrySnapshot) -> bool {
-    image_value(snapshot, DEMAND) >= Value::Int(2)
-        && image_value(snapshot, STAGED) >= Value::Int(2)
+    matches!(image_value(snapshot, DEMAND), Value::Int(demand) if demand >= 2)
+        && matches!(image_value(snapshot, STAGED), Value::Int(staged) if staged >= 2)
         && image_value(snapshot, CMD_A) == Value::Bool(true)
         && image_value(snapshot, CMD_B) == Value::Bool(true)
         && image_value(snapshot, HIGH_LEVEL) == Value::Bool(true)
@@ -107,11 +112,11 @@ fn full_demand(snapshot: &dcs_core::TelemetrySnapshot) -> bool {
 /// then `POST /demote` inside the release-propagation window — before
 /// any driven scan could write the released commands. The demoted
 /// owner abandons the in-flight write: the field keeps the energized
-//! outputs while no peer owns them — the defect's precondition,
-//! asserted rather than assumed — but the line reports `orphaned`,
-//! never `diverged`, so `POST /promote` on the peer takes the field
-//! and its first owning scans write the release through. The demoted
-//! peer then reconverges on the restored owner.
+/// outputs while no peer owns them — the defect's precondition,
+/// asserted rather than assumed — but the line reports `orphaned`,
+/// never `diverged`, so `POST /promote` on the peer takes the field
+/// and its first owning scans write the release through. The demoted
+/// peer then reconverges on the restored owner.
 #[test]
 fn demote_during_power_fail_release_lets_the_successor_write_it() {
     let dir = std::env::temp_dir().join(format!("dcs-demote-release-{}", std::process::id()));
@@ -135,6 +140,11 @@ fn demote_during_power_fail_release_lets_the_successor_write_it() {
 
     // Converge the standby, then drive the simulated well to the
     // standing two-pump demand — both commands delivered to the field.
+    // The lane's forcing write: `inflow` driven above the declared
+    // high setpoint under the owner's writer claim, so the well
+    // reaches the high-level demand inside the bound.
+    field.ensure_writer(token).unwrap();
+    field.write(INFLOW, Value::Float(5.0)).unwrap();
     let mut owner = None;
     for _ in 0..DEMAND_BOUND {
         standby.advance(1).unwrap();
@@ -174,9 +184,14 @@ fn demote_during_power_fail_release_lets_the_successor_write_it() {
     // the single-writer rule forbids either standby from writing.
     // Where the old build compared staged-released against
     // field-energized and wedged both peers `diverged`, every pull now
-    // lands the named `orphaned` state — promotable, journaled.
+    // lands the named `orphaned` state — promotable, journaled. A
+    // tracking pull can still be in flight or applying a pre-demotion
+    // fetch on the first ownerless cycle, so the assertion is what
+    // the defect violated: the promote-blocking `diverged` never
+    // reports, and `orphaned` stands inside the window.
+    let mut staged = None;
     for tick in 1..=ORPHAN_TICKS {
-        standby.advance(1).unwrap();
+        staged = Some(standby.advance(1).unwrap());
         active.advance(1).unwrap();
         assert_eq!(
             field_value(&field, CMD_A),
@@ -187,12 +202,28 @@ fn demote_during_power_fail_release_lets_the_successor_write_it() {
         for (peer, name) in [(&active, "demoted"), (&standby, "standby")] {
             let report = peer.role().unwrap();
             assert!(
-                matches!(report.sync, Some(StandbySync::Orphaned { .. })),
-                "tick {tick}: the {name} peer must surface the unowned \
-                 line as orphaned — never the promote-blocking diverged \
-                 the defect produced: {report:?}"
+                !matches!(report.sync, Some(StandbySync::Diverged { .. })),
+                "tick {tick}: the {name} peer reported the \
+                 promote-blocking diverged the defect produced: \
+                 {report:?}"
             );
         }
+    }
+    // The defect's evidence, asserted rather than assumed: the
+    // quiesced peers' staged images did compute the released commands
+    // while the field stood energized — the staged-vs-field mismatch
+    // the old build's divergence gate wedged on.
+    let staged = staged.unwrap();
+    assert_eq!(image_value(&staged, CMD_A), Value::Bool(false));
+    assert_eq!(image_value(&staged, CMD_B), Value::Bool(false));
+    for (peer, name) in [(&active, "demoted"), (&standby, "standby")] {
+        let report = peer.role().unwrap();
+        assert!(
+            matches!(report.sync, Some(StandbySync::Orphaned { .. })),
+            "the {name} peer must surface the unowned line as \
+             orphaned — never the promote-blocking diverged the \
+             defect produced: {report:?}"
+        );
     }
     assert!(
         standby
