@@ -1770,10 +1770,10 @@ fn wire_pump(
     plant.connect(below_cutoff_in, below_cutoff);
     plant.connect(level_chain_in, &protect.input);
     plant.connect(oos_ok_guard_in, &protect.permissive);
-    plant.connect(thermal, &protect.trip(1));
-    plant.connect(moisture, &protect.trip(2));
-    plant.connect(power_fail, &protect.trip(3));
-    plant.connect(below_cutoff_in, &protect.trip(4));
+    plant.connect(thermal, protect.trip(1));
+    plant.connect(moisture, protect.trip(2));
+    plant.connect(power_fail, protect.trip(3));
+    plant.connect(below_cutoff_in, protect.trip(4));
     plant.connect(&protect.out, protect_out);
     plant.connect(&protect.tripped, protect_tripped);
     plant.connect(protect_tripped_in, protect_tripped);
