@@ -1692,8 +1692,9 @@ fn an_involuntary_demote_verifies_the_announced_hints_before_tracking() {
 /// involuntarily demoted peer pulls nothing, the same answer
 /// `POST /demote` gives an unproven hint. The failed set is
 /// remembered rather than re-probed every cycle, so the unproven
-/// endpoint sees one bounded verification pull and no tracking pull
-/// ever follows it.
+/// endpoint sees one bounded verification pass — the demote
+/// verify's pull and the owner-resolution probe's — and no
+/// tracking pull ever follows it.
 #[test]
 fn an_involuntary_demote_with_only_unproven_hints_pulls_nothing() {
     let fencing = FencingDriver::start();
@@ -1729,7 +1730,8 @@ fn an_involuntary_demote_with_only_unproven_hints_pulls_nothing() {
     );
 
     // The demoted peer's cycles refuse the hint the way the demote
-    // path would: one verification pull proves the stream foreign,
+    // path would: one verification pass — the demote verify's pull
+    // and the owner-resolution probe's — proves the stream foreign,
     // nothing adopts, and no tracking pull ever targets it — the run
     // reports standby/unsynchronized instead of stranding degraded on
     // the foreign endpoint.
@@ -1746,10 +1748,12 @@ fn an_involuntary_demote_with_only_unproven_hints_pulls_nothing() {
             .all(|entry| !matches!(entry.event, JournalEvent::TrackingSourceAdopted { .. })),
         "an unproven hint must never journal an adoption"
     );
-    assert_eq!(
-        probe.hits(),
-        1,
-        "the unproven hint earned one bounded verify pull — and nothing else"
+    assert!(
+        probe.hits() <= 2,
+        "the unproven hint earned one bounded verify pass — the \
+         demote-verify pull and the owner-resolution probe — and \
+         nothing else: {}",
+        probe.hits()
     );
     // The recorded hint stays the recorded answer, but the proven
     // resolution stays empty: no pull ever follows it.

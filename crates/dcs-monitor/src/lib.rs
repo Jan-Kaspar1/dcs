@@ -2159,12 +2159,21 @@ impl<'d> Monitor<'d> {
     /// foreign monitor that announced itself onto a launched active
     /// can never strand the demoted peer pulling it, and the
     /// legitimate successor's hint wins the pass on its own proof.
-    /// Every hint failing leaves the peer sourceless — the same
-    /// answer `POST /demote` gives an unproven hint — rather than
-    /// following one verbatim, and the failed set is remembered so a
-    /// later cycle re-probes only a changed set, or the same one
-    /// after [`ANNOUNCED_VERIFY_RETRY`]: a dead recorded hint falls
-    /// back inside one bounded pass and earns a fresh probe inside a
+    /// When no hint proves a continuation, the recorded set still
+    /// gets the orphan-resolution probe's owner check
+    /// ([`resolve_tracking_source`](Self::resolve_tracking_source)):
+    /// a successor that already claimed the field serves a
+    /// field-owning document the demote verify refuses unproven —
+    /// the stamp is this run's own public one — but the owner check
+    /// proves it serves this line's field, so the promoted
+    /// legitimate successor resolves where a dead or foreign
+    /// endpoint cannot. Every hint failing both passes leaves the
+    /// peer sourceless — the same answer `POST /demote` gives an
+    /// unproven hint — rather than following one verbatim, and the
+    /// failed set is remembered so a later cycle re-probes only a
+    /// changed set, or the same one after
+    /// [`ANNOUNCED_VERIFY_RETRY`]: a dead recorded hint falls back
+    /// inside one bounded pass and earns a fresh probe inside a
     /// bounded window. Runs outside the shared lock under
     /// [`CHECKPOINT_PULL_TIMEOUT`] per hint — the stall bound is the
     /// verify pass, never a hint's own patience.
@@ -2196,16 +2205,29 @@ impl<'d> Monitor<'d> {
         // request path applies — and only while nothing proven stands:
         // a promotion or orphan resolution landing mid-verify already
         // answered where the pulls go.
-        let source = verified.filter(|source| self.announced.lock().unwrap().contains(source))?;
-        let mut shared = self.shared.lock().unwrap();
-        if shared.peer.owns_field() || self.pull_source().is_some() {
-            return None;
+        if let Some(source) =
+            verified.filter(|source| self.announced.lock().unwrap().contains(source))
+        {
+            let mut shared = self.shared.lock().unwrap();
+            if shared.peer.owns_field() || self.pull_source().is_some() {
+                return None;
+            }
+            let Shared { peer, recorder } = &mut *shared;
+            recorder.note_tracking_source(peer.tick(), source);
+            drop(shared);
+            *self.adopted.lock().unwrap() = Some(source);
+            return Some(source);
         }
-        let Shared { peer, recorder } = &mut *shared;
-        recorder.note_tracking_source(peer.tick(), source);
-        drop(shared);
-        *self.adopted.lock().unwrap() = Some(source);
-        Some(source)
+        // No hint proved this run's continuation — but a successor
+        // that already claimed the field serves a document the demote
+        // verify must refuse on an unkeyed run: `source_owns_field`
+        // is this run's own public stamp, replayable by any endpoint,
+        // so only a keyed pull attests it. The orphan-resolution
+        // probe's owner check is the scrutiny such a document can
+        // pass — the same one the post-demotion orphan cycle applies
+        // to these hints — so a promoted legitimate successor still
+        // earns the pulls while a dead or foreign endpoint cannot.
+        self.resolve_tracking_source()
     }
 
     /// Re-resolves the tracking source while the tracked line reports
