@@ -4,9 +4,11 @@ This document directs roadmap and library planning. `docs/architecture.md` remai
 
 ## Market sequence
 
-The first target market is municipal and industrial water and wastewater. The first product must let an engineer assemble, simulate, commission, operate, diagnose, and maintain a representative plant from reusable components whose control behavior and operator UI share the same contracts.
+The product follows this market order: **water and wastewater → food and beverage → cement → chemical → pharmaceutical → oil and gas**.
 
-Pharmaceutical and chemical batch control is a later product phase. Foundation choices should leave room for it, but current tickets must not add batch semantics unless a current water requirement or an accepted architecture decision needs the same capability.
+Water and wastewater is the only active implementation market. Its accepted requirements and pre-pilot milestone order remain authoritative in `docs/requirements/water-wastewater.md` and `docs/plan.md`. Each later market is a separate evidence pack; success in one market does not establish the requirements of another. The entry and exit gates are recorded in `docs/market-roadmap.md`.
+
+Research may prepare a later stage while the active stage is being built. Implementation scope advances in sequence only after the prior stage passes its gate and the next market has customer- or domain-supported requirements. A vendor library can suggest questions and tests, but cannot by itself pass a market gate.
 
 ## Delivery sequence
 
@@ -15,7 +17,7 @@ Pharmaceutical and chemical batch control is a later product phase. Foundation c
 3. **Complete the schema-driven block and presentation boundary.** Make every reusable block publish one typed interface for measurements, configuration, runtime state, commands, and events. Prove that generic tooling and UI derive their surfaces from that contract and that slow, disconnected, restarted, or absent UI consumers cannot delay or terminate plant execution.
 4. **Build the water and wastewater library.** Add reusable equipment modules and process assemblies in response to accepted requirements. Every component includes control behavior, modes, diagnostics, alarms, state persistence, descriptors, and faceplate behavior where applicable.
 5. **Close the pre-pilot gaps.** Take the validated water library to first-customer-pilot scale in the order `docs/plan.md`'s pre-pilot tranche records. Pilot-customer-scale deployment comes first — topology beyond one pair per model where the site requires it, a defined configuration-backup artifact set, named rollback semantics, and commissioning and handover records (`WW-LCM-002`), which depends on a first-client deployment plan or owner specification naming the lifecycle obligations, or on a pilot topology outgrowing the current configuration seams. The capability gaps follow in audit order: operations UI depth, completing the `WW-OPS-001`–`WW-OPS-003` end-to-end evidence and depending on the recorded station-policy answers only where they fix presentation policy; durable history and historian export, the recording substrate the `WW-REP-001`/`WW-LCM-002` retention clauses and the remaining acceptance runs assume; security and identity (`WW-SEC-001`), depending on a first client naming role tiers; operating reports (`WW-REP-001`), depending on a first client naming report formats; and engineering scale-up (`WW-ENG-002`), depending on a client naming I/O-list/tag conventions. Each step's acceptance evidence names the customer answer it depends on, and a requirement stays candidate until that evidence exists.
-6. **Expand by market evidence.** Add batch control for pharmaceutical and chemical plants after a separate requirements baseline and representative batch application exist. Batch control stays deferred behind the pre-pilot tranche above.
+6. **Expand by market evidence.** Follow the ordered, separately gated sequence in `docs/market-roadmap.md`. Complete the water and wastewater pre-pilot tranche first; then advance through food and beverage, cement, chemical, pharmaceutical, and oil and gas. Chemical and pharmaceutical remain separate evidence packs even where a capability could serve both. Batch control stays deferred under `docs/requirements/batch-control.md` until its market stage has a supported requirements baseline and representative application.
 
 ## Product principles
 
@@ -23,11 +25,26 @@ Pharmaceutical and chemical batch control is a later product phase. Foundation c
 - The DCS platform and each customer plant have separate ownership and release lifecycles. Customer plant source lives outside the platform repository and depends on documented, versioned release interfaces rather than workspace paths or platform internals.
 - A block owns one typed interface schema. Measurements and state are observed, configuration and named commands are admitted through declared validation rules, and emitted events retain stable identities; the UI must not rediscover these categories from kind-specific code or naming conventions.
 - The controller runtime is the plant authority. UI and telemetry delivery are replaceable consumers: they may disconnect, lag, restart, coalesce updates, or observe an explicit gap, but they never pace the scan or decide authoritative state. Commands are the exception to fire-and-forget delivery and always use the bounded, validated, receipted scan-boundary path.
-- A reusable component is complete only when its control behavior, operator interaction, diagnostics, and lifecycle behavior work together.
+- A reusable library item is complete only when it meets the contract in the Library completeness section below; control behavior and operator experience ship as one verified slice.
 - Alarm management is foundation work for water and wastewater. An alarm is actionable operator guidance with priority, state, context, history, and a defined response; it is not only a Boolean flag. Alarm handling does not replace an independent automatic protection function where hazard analysis requires one.
 - Representative applications validate shared contracts before the library grows broadly.
 - Research supplies evidence and alternatives. Architecture decisions define this product's semantics; vendor behavior is inspiration rather than a compatibility target.
 - Customer evidence outranks vendor feature breadth. Record assumptions that still need an operator, integrator, or plant owner to validate.
+
+## Library completeness
+
+The APL manual is a source of test prompts, not a compatibility target. The selected pages recorded in `docs/research/apl-reusable-library.md` inform these completeness checks. DCS defines its own terms and behavior through accepted requirements and architecture decisions.
+
+A block, equipment module, or process assembly is complete for its declared scope when evidence covers:
+
+1. **One contract:** a versioned machine-readable interface declares typed engineering parameters, ports, measurements, configuration, runtime state, commands, events, constraints, and relevant quality or unit semantics. Engineering, runtime, and generic UI consume the same declaration.
+2. **Control behavior:** deterministic normal behavior, applicable modes and transitions, parameter boundaries, interlocks or permissives, state persistence, redundancy behavior, and failure handling are explicit and tested. Inapplicable capabilities are named as out of scope for that item.
+3. **Operator use:** the generic UI presents the declared state and available actions. Commands show availability and settle through the validated, bounded, receipted path. A specialized faceplate is added only when it improves a validated operator workflow and remains consistent with the contract.
+4. **Diagnostics and history:** quality, freshness, faults, recovery, and consequential state changes have defined meanings. Events and alarm transitions keep stable identities and the persistence behavior required by the accepted scope.
+5. **Reproducible evidence:** deterministic scenarios cover normal use, boundaries, invalid or conflicting requests, bad or stale inputs, unavailable peers or devices, restart or takeover, and recovery as applicable. Contract and composition tests exercise the library through a supported consumer seam.
+6. **Release evidence:** compatibility and migration behavior are named, and a customer-owned example consumes the supported versioned artifacts. Site commissioning claims require their named owner and deployment evidence; simulation alone does not stand in for site evidence.
+
+APL comparisons may identify a behavior worth testing, such as explicit override precedence, visible simulation origin, family-specific legal modes, quality propagation, command availability, event ordering, or declared capability variants. Adopt a behavior only when DCS requirements and user evidence support it. Do not copy Siemens names, mode taxonomies, implementation, visual layouts, or vendor resource figures into the DCS contract.
 
 ## Planning policy
 
