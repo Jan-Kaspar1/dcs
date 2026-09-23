@@ -878,6 +878,63 @@
       "scans": 12
     },
     {
+      "commands": [],
+      "expect": {
+        "101": {
+          "bool": false
+        },
+        "1113": {
+          "bool": true
+        },
+        "1114": {
+          "bool": true
+        },
+        "356": {
+          "bool": true
+        },
+        "41": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [],
+      "name": "moisture-bad-quality-trips-hand",
+      "plant": [
+        {
+          "fault": {
+            "quality": {
+              "bad": "device_fault"
+            }
+          },
+          "op": "inject_fault",
+          "point": 81
+        }
+      ],
+      "scans": 5
+    },
+    {
+      "commands": [],
+      "expect": {
+        "101": {
+          "bool": true
+        },
+        "356": {
+          "bool": false
+        },
+        "41": {
+          "bool": true
+        }
+      },
+      "expect_receipts": [],
+      "name": "moisture-cleared-hand-resumes",
+      "plant": [
+        {
+          "op": "clear_fault",
+          "point": 81
+        }
+      ],
+      "scans": 18
+    },
+    {
       "commands": [
         {
           "actor": "ci-scenario",
@@ -1088,6 +1145,151 @@
       "name": "restored-to-auto",
       "plant": [],
       "scans": 4
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 332,
+              "value": {
+                "bool": true
+              }
+            }
+          }
+        },
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 333,
+              "value": {
+                "bool": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "101": {
+          "bool": true
+        },
+        "332": {
+          "bool": true
+        },
+        "41": {
+          "bool": true
+        }
+      },
+      "expect_receipts": [
+        "accepted",
+        "accepted"
+      ],
+      "name": "hand-requested-for-level-leg",
+      "plant": [],
+      "scans": 5
+    },
+    {
+      "commands": [],
+      "expect": {
+        "101": {
+          "bool": false
+        },
+        "1023": {
+          "bool": true
+        },
+        "1024": {
+          "bool": true
+        },
+        "216": {
+          "bool": true
+        },
+        "356": {
+          "bool": true
+        },
+        "358": {
+          "bool": false
+        },
+        "41": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [],
+      "name": "level-bad-quality-trips-hand",
+      "plant": [
+        {
+          "fault": {
+            "quality": {
+              "bad": "device_fault"
+            }
+          },
+          "op": "inject_fault",
+          "point": 10
+        },
+        {
+          "fault": {
+            "quality": {
+              "bad": "device_fault"
+            }
+          },
+          "op": "inject_fault",
+          "point": 11
+        }
+      ],
+      "scans": 7
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 1020,
+              "value": {
+                "bool": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "1024": {
+          "bool": false
+        }
+      },
+      "expect_receipts": [
+        "accepted"
+      ],
+      "name": "backup-alarm-acknowledged-again",
+      "plant": [],
+      "scans": 1
+    },
+    {
+      "commands": [
+        {
+          "actor": "ci-scenario",
+          "command": {
+            "write_value": {
+              "kind": "bool",
+              "point": 1020,
+              "value": {
+                "bool": false
+              }
+            }
+          }
+        }
+      ],
+      "expect": {},
+      "expect_receipts": [
+        "accepted"
+      ],
+      "name": "backup-ack-released-again",
+      "plant": [],
+      "scans": 1
     }
   ]
 }
