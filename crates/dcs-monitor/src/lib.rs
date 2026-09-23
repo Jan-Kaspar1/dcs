@@ -1910,9 +1910,7 @@ impl<'d> Monitor<'d> {
             Ok(pulled) => pulled,
             Err(_) => return Err(json(409, &SwitchError::NoTrackingSource)),
         };
-        if !self.proven(&pulled, nonce)
-            || verify_announced_checkpoint(&pulled, &own).is_err()
-        {
+        if !self.proven(&pulled, nonce) || verify_announced_checkpoint(&pulled, &own).is_err() {
             return Err(json(409, &SwitchError::NoTrackingSource));
         }
         Ok(Some(hint))
@@ -3198,10 +3196,7 @@ mod tests {
         unminted_own.generation = None;
         let mut pulled = unminted_own.clone();
         pulled.tick = Tick(101);
-        assert_eq!(
-            verify_announced_checkpoint(&pulled, &unminted_own),
-            Ok(())
-        );
+        assert_eq!(verify_announced_checkpoint(&pulled, &unminted_own), Ok(()));
 
         // The reproduction's forgery: this line's identity at a tick
         // far ahead of the run's — refused.

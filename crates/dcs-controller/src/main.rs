@@ -911,7 +911,9 @@ fn fail(message: impl std::fmt::Display) -> ExitCode {
 /// deployment declared one — `--pair-token` hashed to the key the
 /// monitor's `?prove=` checkpoint answers sign and its adopted-source
 /// pulls verify. `None` keeps the run unkeyed: `?prove=` answers stay
-/// plain and announced demotions verify on the document checks alone.
+/// plain and the announced-source contract stays closed — an
+/// announced-only demotion refuses `no_tracking_source`, no unproven
+/// document being able to authenticate the endpoint serving it.
 fn keyed_monitor<'d>(monitor: Monitor<'d>, options: &Options) -> Monitor<'d> {
     match &options.pair_token {
         Some(token) => monitor.with_pair_key(dcs_monitor::pair_key(token)),
