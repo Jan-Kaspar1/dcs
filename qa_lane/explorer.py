@@ -95,6 +95,14 @@ the results directory. No physical channels exist: the Wago rig, EtherCAT
 path, and feedback loop are not commissioned — never claim hardware
 behavior from simulation evidence.
 
+Bridge-to-host reachability rule: containers on the run's rig bridge
+cannot reach host sockets — the host egress policy drops every
+rig-sourced packet aimed at the host. Any endpoint a rig container
+must dial (a checkpoint interposer, a forged-checkpoint server, a
+plant-probe listener) runs in a labeled container on the run's bridge
+and is dialed by container name; host-side probes use the published
+loopback ports only.
+
 Known capability limits carried by the lane:
 {{CAPABILITIES}}"""
 
