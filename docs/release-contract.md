@@ -151,7 +151,10 @@ YAML is equivalent data):
     "path": "model/plant.json",
     "fingerprint": "<ModelFingerprint of the approved document>"
   },
-  "dynamics": { "path": "model/dynamics.json" },
+  "dynamics": {
+    "path": "model/dynamics.json",
+    "fingerprint": "<canonical dynamics fingerprint of the approved document>"
+  },
   "plant": { "listen": "0.0.0.0:9001" },
   "controllers": [
     {
@@ -176,7 +179,17 @@ Each field maps to the documented run commands in
 documents, `plant.listen` is the plant server's `--listen`,
 `standby` is the tracking peer's `--standby` address, and
 `model.fingerprint` is the identity the checkpoint negotiation
-verifies on the wire. A controller entry's `state_file` and
+verifies on the wire. `dynamics.fingerprint` is **optional** and has
+no wire role — the dynamics document is simulation internals the
+plant server alone consumes, and decision 46 keeps content off the
+wire — so it is a check-side authorization: the same canonical
+fingerprint contract the model carries (FNV-1a over the parsed
+document's reserialization, the sixteen-hex-digit shape), naming the
+dynamics document the deployment's `dynamics.path` serves. When the
+field is recorded, the consumer's check holds the served document —
+the pair launched on the declared path — and the checked-in artifact
+equal to it; a manifest omitting the field declares no dynamics pin.
+A controller entry's `state_file` and
 `journal_file` are **optional** per-controller container paths
 carried to the invocation's `--state-file` and `--journal-file`
 flags: `state_file` is decision 35's restart-recovery checkpoint — a
@@ -261,12 +274,21 @@ byte-identical to the release record's schema artifacts fetched from
 the pinned revision through the same git remote, `dcs-model diff`
 legs over a doctored compatible revision and the identical document,
 and `summary`/`signal-index` outputs recorded as run evidence — the
-manifest fingerprint check, which authorizes the served model bytes:
-each peer's checkpoint-stamped `model_fingerprint` on the
-manifest-declared deployment held equal to the recorded fingerprint,
-a doctored served document with renumbered point ids over identical
-components reporting the named mismatch with the expected vs served
-fingerprint and the first diverging section — two runs
+manifest fingerprint check, which authorizes the served bytes: the
+emitted model's fingerprint held equal to the recorded
+`model.fingerprint`, the deployed pair's served model digest — each
+peer's checkpoint-stamped `model_fingerprint` on the
+manifest-declared deployment — held equal to it, a doctored served
+document with renumbered point ids over identical components
+reporting the named mismatch with the expected vs served fingerprint
+and the first diverging section, and the dynamics document the
+manifest-declared pair serves — launched on the deployment's
+declared `dynamics.path`, the served point census answering —
+fingerprinted canonically and held equal to the recorded
+`dynamics.fingerprint` and the checked-in artifact, a doctored served
+document with renumbered point references over identical element
+content reporting the named mismatch with the expected vs served
+fingerprint and the first diverging element — two runs
 of the scripted simulation, the served-operator-surface stage —
 the signal index, monitoring page, snapshot descriptors, and journal
 the driven controller serves, asserted against the emitted model's
@@ -393,9 +415,11 @@ The checks' failures are named diagnostics:
 | `alarm-validation-nondeterministic` | Two passes of the alarm-validation leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
 | `crossing-unrefused` | An incompatible crossing this contract names was not refused: the released tooling accepted a document outside `MODEL_VERSION`, or a pin resolved that must not. |
 | `stale-artifact` | A checked-in artifact (`model/plant.json`, `ci/scenario.json`) no longer matches a fresh emit — the committed approved document drifted from the composition. Reported by the reference plant's `ci/check.sh`. |
-| `manifest-fingerprint-mismatch` | The emitted model's `ModelFingerprint` differs from the `model.fingerprint` the consumer's deployment manifest records — or the deployed pair's served model digest differs from it: a peer's checkpoint-stamped `model_fingerprint` not equal to the recorded fingerprint, the diagnostic naming the diverging peer, the expected and served fingerprints, and the first top-level document section the served model diverges in (a silent point-id renumbering over identical components included). Either way the deployment declaration no longer names the model the pair runs. Reported by the reference plant's `ci/check.sh`. |
+| `manifest-fingerprint-mismatch` | The emitted model's `ModelFingerprint` differs from the `model.fingerprint` the consumer's deployment manifest records — or the deployed pair's served model digest differs from it: a peer's checkpoint-stamped `model_fingerprint` not equal to the recorded fingerprint, the diagnostic naming the diverging peer, the expected and served fingerprints, and the first top-level document section the served model diverges in (a silent point-id renumbering over identical components included) — or the dynamics fingerprint diverges: the manifest's recorded `dynamics.fingerprint` against the deployed pair's served document or the checked-in artifact, or the served document against the checked-in artifact, the diagnostic carrying the expected and served fingerprints and the first diverging element (a silent point-reference renumbering over identical element content included). Either way the deployment declaration no longer names the approved documents. Reported by the reference plant's `ci/check.sh`. |
 | `fingerprint-failed` | The manifest-fingerprint leg did not hold: the declared pair did not launch or serve its stamped model digests, or a served digest diverged from the manifest's recorded fingerprint. Reported by the reference plant's `ci/check.sh`, with the leg's `fingerprint: …`/`manifest-fingerprint-mismatch: …` evidence lines on stderr. |
 | `fingerprint-nondeterministic` | Two passes of the manifest-fingerprint leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
+| `dynamics-fingerprint-failed` | The dynamics-fingerprint leg did not hold: the manifest-declared pair did not launch on the declared `dynamics.path`, the served point census did not answer, or a served/checked-in/manifest fingerprint comparison diverged — reported with the leg's `manifest-fingerprint-mismatch: …`/`dynamics-fingerprint: …` evidence lines on stderr. Reported by the reference plant's `ci/check.sh`. |
+| `dynamics-fingerprint-nondeterministic` | Two passes of the dynamics-fingerprint leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
 | `scenario-failed` | The scripted simulation's declared leg outcomes did not hold against the checked-in model and dynamics. Reported by the reference plant's `ci/check.sh`. |
 | `scenario-nondeterministic` | Two scripted-simulation runs produced different outcome digests. Reported by the reference plant's `ci/check.sh`. |
 | `surface-mismatch` | The driven controller's served operator surface — the `GET /signals` index, the `GET /` page, the `GET /schema` block-interface registry's coverage of the declared kinds, a kind-declared command's structured receipt through `POST /command`, a kind-emitted event's arrival in `GET /journal`/`GET /resources`, the snapshot's `descriptors`, or `GET /journal` — diverged from the emitted model's declared surface. Reported by the reference plant's `ci/check.sh`. |
@@ -462,4 +486,4 @@ The checks' failures are named diagnostics:
 | `rig-invalid` | The consumer's checked-in rig definition does not parse — `docker compose config` or the fallback YAML parser rejected it. Reported by the reference plant's `ci/check.sh`. |
 | `rig-unverifiable` | The rig-definition consistency check could not run: neither `docker compose` nor PyYAML is available to parse the definition. Reported by the reference plant's `ci/check.sh`. |
 | `rig-mismatch` | The consumer's checked-in rig definition diverges from its deployment manifest — images, mounted model or dynamics paths, the propagated model fingerprint, listen addresses, the controller pair's standby wiring, the standby's declared `failover_budget` against its `--auto-promote` flag (a declared budget with no flag, a flag with no declaration, a diverging value, or the field placed on the duty entry), or the declared persistence paths' mounts and flags disagree with what the manifest declares. Reported by the reference plant's `ci/check.sh`. |
-| `<leg>-unchecked` | The paired self-check diagnostic every checked leg carries: `ci/check.sh` plants a negative case for each leg — a doctored input or tampered expectation the leg must refuse with its named diagnostic — and reports `<leg>-unchecked`, formed on the leg stem its failure (`<leg>-failed` or, for the divergence leg, `<leg>-missed`) and `<leg>-nondeterministic` diagnostics share, when the planted case passes or the leg answers a name other than its declared one (e.g. a drifted record artifact passing the interface-schema non-drift leg reports `schema-drift-unchecked`, not `schema-drift`). It is distinct from `<leg>-failed`: the failed diagnostic is the leg's contract check failing on a real divergence; the unchecked diagnostic is the leg's own negative self-test failing — the leg can no longer be trusted to catch what it names. Reported by the reference plant's `ci/check.sh`; the emitted set grows with each leg that plants a negative case — currently `schema-drift-unchecked`, `diff-mismatch-unchecked`, `alarm-validation-unchecked`, `fingerprint-unchecked`, `rig-mismatch-unchecked`, `restart-resume-unchecked`, `schema-mismatch-unchecked`, `pair-unchecked`, `negotiation-unchecked`, `startup-claim-unchecked`, `refusal-unchecked`, `handover-unchecked`, `takeover-unchecked`, `force-carryover-unchecked`, `tune-carryover-unchecked`, `force-release-unchecked`, `stale-checkpoint-unchecked`, `burst-order-unchecked`, `peer-announce-unchecked`, `availability-unchecked`, `failover-unchecked`, `divergence-unchecked`, `standby-restart-unchecked`, `report-unchecked`, `command-switch-unchecked`, `demote-pending-unchecked`, `managed-lifecycle-unchecked`, `carry-unchecked`, `staging-unchecked`, `oos-unchecked`, `power-trip-unchecked`, `monitor-starvation-unchecked`, `event-parity-unchecked`, `journal-boundary-unchecked` — and this convention entry declares each new name without a per-leg row. |
+| `<leg>-unchecked` | The paired self-check diagnostic every checked leg carries: `ci/check.sh` plants a negative case for each leg — a doctored input or tampered expectation the leg must refuse with its named diagnostic — and reports `<leg>-unchecked`, formed on the leg stem its failure (`<leg>-failed` or, for the divergence leg, `<leg>-missed`) and `<leg>-nondeterministic` diagnostics share, when the planted case passes or the leg answers a name other than its declared one (e.g. a drifted record artifact passing the interface-schema non-drift leg reports `schema-drift-unchecked`, not `schema-drift`). It is distinct from `<leg>-failed`: the failed diagnostic is the leg's contract check failing on a real divergence; the unchecked diagnostic is the leg's own negative self-test failing — the leg can no longer be trusted to catch what it names. Reported by the reference plant's `ci/check.sh`; the emitted set grows with each leg that plants a negative case — currently `schema-drift-unchecked`, `diff-mismatch-unchecked`, `alarm-validation-unchecked`, `fingerprint-unchecked`, `dynamics-fingerprint-unchecked`, `rig-mismatch-unchecked`, `restart-resume-unchecked`, `schema-mismatch-unchecked`, `pair-unchecked`, `negotiation-unchecked`, `startup-claim-unchecked`, `refusal-unchecked`, `handover-unchecked`, `takeover-unchecked`, `force-carryover-unchecked`, `tune-carryover-unchecked`, `force-release-unchecked`, `stale-checkpoint-unchecked`, `burst-order-unchecked`, `peer-announce-unchecked`, `availability-unchecked`, `failover-unchecked`, `divergence-unchecked`, `standby-restart-unchecked`, `report-unchecked`, `command-switch-unchecked`, `demote-pending-unchecked`, `managed-lifecycle-unchecked`, `carry-unchecked`, `staging-unchecked`, `oos-unchecked`, `power-trip-unchecked`, `monitor-starvation-unchecked`, `event-parity-unchecked`, `journal-boundary-unchecked` — and this convention entry declares each new name without a per-leg row. |
