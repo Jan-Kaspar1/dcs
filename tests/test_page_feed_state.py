@@ -2,8 +2,9 @@
 
 `crates/dcs-monitor/src/page.html` is a single dependency-free asset
 whose feed-state rules — the publication-gap latch, the trend
-watermark/seq fallback, and the bounded poll's named degradations —
-previously had no executable coverage below a browser. `PageReplica`
+watermark/seq fallback, the served `run` mark's restart detection, and
+the bounded poll's named degradations — previously had no executable
+coverage below a browser. `PageReplica`
 below mirrors those rules poll-for-poll over a stubbed transport:
 synthetic `/snapshot`, `/role`, `/history`, and `/journal` answers
 drive the same ordering `refresh()` runs, including the abort bound a
@@ -15,15 +16,16 @@ that moves or rewrites the mirrored logic fails here naming the line,
 keeping the replica honest instead of silently drifting. The mirrored
 spans, in page.html 1-based lines:
 
-- `feed` record — L505; `POLL_MS`/`pollFetch` abort bound — L645–648
-- `pollRoles` fetch/error bookkeeping — L654–666; `selectSource`/
-  `switchSource` — L676–701; the "unreachable" pair render — L854–860
-- `notePublication`/`noteFeedGap`/`renderFeed` — L884–932
+- `feed` record — L510; `POLL_MS`/`pollFetch` abort bound — L650–652
+- `pollRoles` fetch/error bookkeeping — L659–667; `selectSource`/
+  `switchSource` — L681–712; the "unreachable" pair render — L865–871
+- `notePublication`/`noteFeedGap`/`noteFeedRestart`/`renderFeed` —
+  L895–957
 - `refresh()`'s feed ordering and its failed-poll stale mark —
-  L1171–1193, L1252–1253, L1261–1270
-- `refreshTrends`' since cursor, gap note, and the
-  refetch-gated watermark / seq fallback — L2708–2750
-- `refreshJournal`'s cursor and gap note — L2805–2813
+  L1196–1219, L1278–1279, L1292–1293
+- `refreshTrends`' since cursor, run-mark restart detection, gap note,
+  and the refetch-gated watermark / seq fallback — L2734–2790
+- `refreshJournal`'s cursor and gap note — L2845–2853
 """
 import unittest
 from pathlib import Path
@@ -44,75 +46,88 @@ def page_line(number):
 # naming the line, so the replica is re-verified against the page.
 PINS = [
     # The feed record and the shared poll bound.
-    (505, 'const feed = { publication: null, gap: null, stale: null };'),
-    (645, 'const POLL_MS = 1000;'),
-    (646, 'function pollFetch(url) {'),
-    (647, 'return fetch(url, { signal: AbortSignal.timeout(POLL_MS) });'),
+    (510, 'const feed = { publication: null, gap: null, stale: null, restart: null };'),
+    (650, 'const POLL_MS = 1000;'),
+    (651, 'function pollFetch(url) {'),
+    (652, 'return fetch(url, { signal: AbortSignal.timeout(POLL_MS) });'),
     # pollRoles — bounded role fetches, errors recorded not thrown.
-    (654, 'async function pollRoles() {'),
-    (657, 'const response = await pollFetch(peer.base + "/role");'),
-    (659, 'peerState[i].report = await response.json();'),
-    (660, 'peerState[i].error = null;'),
-    (662, 'peerState[i].error = String(error);'),
+    (659, 'async function pollRoles() {'),
+    (662, 'const response = await pollFetch(peer.base + "/role");'),
+    (664, 'peerState[i].report = await response.json();'),
+    (665, 'peerState[i].error = null;'),
+    (667, 'peerState[i].error = String(error);'),
     # Source selection and the switch's bookkeeping reset.
-    (676, 'function selectSource() {'),
-    (692, 'function switchSource(next) {'),
-    (694, 'for (const state of trends.values()) state.lastSeq = 0;'),
-    (695, 'journalSince = 0;'),
-    (699, 'feed.publication = null;'),
-    (700, 'feed.gap = null;'),
-    (701, 'feed.stale = null;'),
+    (681, 'function selectSource() {'),
+    (697, 'function switchSource(next) {'),
+    (700, 'state.lastSeq = 0;'),
+    (703, 'state.run = null;'),
+    (705, 'journalSince = 0;'),
+    (709, 'feed.publication = null;'),
+    (710, 'feed.gap = null;'),
+    (711, 'feed.stale = null;'),
+    (712, 'feed.restart = null;'),
     # The unreachable peer fault the role poll's error names.
-    (781, 'faults.push(was + peer.name + " unreachable");'),
-    (782, 'fault_kinds.push("peer_unreachable");'),
-    (854, 'const unreachable = state.error !== null;'),
+    (792, 'faults.push(was + peer.name + " unreachable");'),
+    (793, 'fault_kinds.push("peer_unreachable");'),
+    (865, 'const unreachable = state.error !== null;'),
     # Publication freshness bookkeeping.
-    (884, 'function notePublication(snapshot) {'),
-    (891, 'feed.stale = last !== null &&'),
-    (892, 'current.published === last.published && current.tick <= last.tick'),
-    (895, 'feed.publication = current;'),
-    # The gap note and the feed-state render.
-    (903, 'function noteFeedGap(stream, from, through) {'),
-    (905, 'feed.gap = { stream: stream, from: from, through: through };'),
-    (913, 'function renderFeed() {'),
-    (917, 'notices.push("publication gap: " + feed.gap.stream + " seqs " +'),
-    (922, 'notices.push("stale publication: " +'),
-    (928, 'line.hidden = notices.length === 0;'),
+    (895, 'function notePublication(snapshot) {'),
+    (902, 'feed.stale = last !== null &&'),
+    (903, 'current.published === last.published && current.tick <= last.tick'),
+    (906, 'feed.publication = current;'),
+    # The gap note, the restart note, and the feed-state render.
+    (914, 'function noteFeedGap(stream, from, through) {'),
+    (916, 'feed.gap = { stream: stream, from: from, through: through };'),
+    (924, 'function noteFeedRestart(stream, run) {'),
+    (925, 'feed.restart = { stream: stream, run: run };'),
+    (932, 'function renderFeed() {'),
+    (936, 'notices.push("publication gap: " + feed.gap.stream + " seqs " +'),
+    (941, 'notices.push("stream restarted: " + feed.restart.stream +'),
+    (946, 'notices.push("stale publication: " +'),
+    (952, 'line.hidden = notices.length === 0;'),
     # refresh()'s feed ordering and its failed-poll stale mark.
-    (1171, 'async function refresh() {'),
-    (1175, 'await pollRoles();'),
-    (1184, 'pollFetch(base + "/snapshot").then(r => r.json()),'),
-    (1192, 'notePublication(snapshot);'),
-    (1193, 'feed.gap = null;'),
-    (1252, 'await Promise.all([refreshTrends(base), refreshJournal(base)]);'),
-    (1253, 'renderFeed();'),
-    (1266, 'if (feed.stale === null && feed.publication !== null) {'),
-    (1267, 'feed.stale = feed.publication;'),
-    # refreshTrends: the common since cursor, the served gap note, and
-    # the refetch-gated tick watermark / seq fallback.
-    (2708, 'async function refreshTrends(base) {'),
-    (2714, 'const histories = await (await pollFetch(base + "/history?since=" + since)).json();'),
-    (2721, 'const first = history.samples.find(entry => entry.seq > state.lastSeq);'),
-    (2722, 'if (state.lastSeq > 0 && first && first.seq > state.lastSeq + 1) {'),
-    (2723, 'noteFeedGap("history", state.lastSeq + 1, first.seq - 1);'),
-    (2734, 'const refetch = state.lastSeq === 0;'),
-    (2735, 'const watermark = state.lastTick;'),
-    (2737, 'if (entry.seq <= state.lastSeq) continue;'),
-    (2738, 'state.lastSeq = entry.seq;'),
-    (2739, 'if (refetch && watermark !== null && entry.sample.tick <= watermark) {'),
-    (2742, 'state.samples.push(entry.sample);'),
-    (2744, 'state.lastTick = entry.sample.tick;'),
+    (1196, 'async function refresh() {'),
+    (1200, 'await pollRoles();'),
+    (1209, 'pollFetch(base + "/snapshot").then(r => r.json()),'),
+    (1217, 'notePublication(snapshot);'),
+    (1218, 'feed.gap = null;'),
+    (1219, 'feed.restart = null;'),
+    (1278, 'await Promise.all([refreshTrends(base), refreshJournal(base)]);'),
+    (1279, 'renderFeed();'),
+    (1292, 'if (feed.stale === null && feed.publication !== null) {'),
+    (1293, 'feed.stale = feed.publication;'),
+    # refreshTrends: the common since cursor, the run-mark restart
+    # detection, the served gap note, and the refetch-gated tick
+    # watermark / seq fallback.
+    (2725, 'trends.set(meta.point, { samples: [], lastSeq: 0, lastTick: null, run: null });'),
+    (2734, 'async function refreshTrends(base) {'),
+    (2740, 'const histories = await (await pollFetch(base + "/history?since=" + since)).json();'),
+    (2751, 'const run = history.run === undefined ? null : history.run;'),
+    (2752, 'if (state.run !== null && run !== null && run !== state.run) {'),
+    (2753, 'state.lastSeq = 0;'),
+    (2755, 'noteFeedRestart("history", run);'),
+    (2757, 'state.run = run;'),
+    (2761, 'const first = history.samples.find(entry => entry.seq > state.lastSeq);'),
+    (2762, 'if (state.lastSeq > 0 && first && first.seq > state.lastSeq + 1) {'),
+    (2763, 'noteFeedGap("history", state.lastSeq + 1, first.seq - 1);'),
+    (2774, 'const refetch = state.lastSeq === 0;'),
+    (2775, 'const watermark = state.lastTick;'),
+    (2777, 'if (entry.seq <= state.lastSeq) continue;'),
+    (2778, 'state.lastSeq = entry.seq;'),
+    (2779, 'if (refetch && watermark !== null && entry.sample.tick <= watermark) {'),
+    (2782, 'state.samples.push(entry.sample);'),
+    (2784, 'state.lastTick = entry.sample.tick;'),
     # refreshJournal's served gap note and cursor advance.
-    (2806, 'const entries = await (await pollFetch(base + "/journal?since=" + journalSince)).json();'),
-    (2810, 'noteFeedGap("journal", journalSince + 1, entries[0].seq - 1);'),
-    (2813, 'journalSince = Math.max(journalSince, entry.seq);'),
+    (2846, 'const entries = await (await pollFetch(base + "/journal?since=" + journalSince)).json();'),
+    (2850, 'noteFeedGap("journal", journalSince + 1, entries[0].seq - 1);'),
+    (2853, 'journalSince = Math.max(journalSince, entry.seq);'),
     # The cadence both tickers share.
-    (3271, 'setInterval(refreshOverview, POLL_MS);'),
-    (3446, 'setInterval(refresh, POLL_MS);'),
+    (3311, 'setInterval(refreshOverview, POLL_MS);'),
+    (3486, 'setInterval(refresh, POLL_MS);'),
 ]
 
 
-POLL_MS = 1000           # page.html:645 — the shared poll cadence/bound
+POLL_MS = 1000           # page.html:650 — the shared poll cadence/bound
 HANG = object()          # a scripted listener that never answers
 
 
@@ -168,9 +183,10 @@ class PageReplica:
                             'unsyncedSince': None}
                            for _ in self.peers]
         self.source = 0
-        self.feed = {'publication': None, 'gap': None, 'stale': None}
+        self.feed = {'publication': None, 'gap': None, 'stale': None,
+                     'restart': None}
         self.trends = {point: {'samples': [], 'lastSeq': 0,
-                               'lastTick': None}
+                               'lastTick': None, 'run': None}
                        for point in points}
         self.journal_since = 0
         self.polling = False
@@ -180,7 +196,7 @@ class PageReplica:
         self.feed_line = {'hidden': True, 'class': '', 'text': ''}
         self.peer_rows = ['—' for _ in self.peers]
 
-    # --- the bounded fetch every poll read rides: page.html:645-648 ---
+    # --- the bounded fetch every poll read rides: page.html:650-652 ---
 
     def poll_fetch(self, url):
         answer = self.transport.fetch(url)
@@ -193,7 +209,7 @@ class PageReplica:
             raise PollError('AbortError: signal timed out')
         return answer
 
-    # --- the role poll and pair render: page.html:654-666, 676-701 ---
+    # --- the role poll and pair render: page.html:659-667, 681-712 ---
 
     def poll_roles(self):
         for i, peer in enumerate(self.peers):
@@ -245,25 +261,29 @@ class PageReplica:
             self.switch_source(nxt)
 
     def switch_source(self, nxt):
-        # page.html:692-701 — the new peer's streams re-read whole and
-        # the feed bookkeeping starts over.
+        # page.html:697-712 — the new peer's streams re-read whole and
+        # the feed bookkeeping starts over; each peer counts its own
+        # process lifetimes, so the run marks adopt fresh rather than
+        # reading as a restart of this stream.
         self.source = nxt
         for state in self.trends.values():
             state['lastSeq'] = 0
+            state['run'] = None
         self.journal_since = 0
         self.feed['publication'] = None
         self.feed['gap'] = None
         self.feed['stale'] = None
+        self.feed['restart'] = None
 
     def render_pair(self):
-        # page.html:854-860 — the per-peer row's reachability column.
+        # page.html:865-871 — the per-peer row's reachability column.
         self.peer_rows = [
             'unreachable' if self.peer_state[i]['error'] is not None
             else ('serving' if i == self.source else 'reachable')
             for i in range(len(self.peers))
         ]
 
-    # --- the feed record: page.html:884-932 ---
+    # --- the feed record: page.html:895-957 ---
 
     def note_publication(self, snapshot):
         health = snapshot.get('publication') or None
@@ -285,6 +305,11 @@ class PageReplica:
             self.feed['gap'] = {'stream': stream, 'from': from_,
                                 'through': through}
 
+    def note_feed_restart(self, stream, run):
+        # page.html:920-926 — the same source's stream renumbered under
+        # a new process lifetime.
+        self.feed['restart'] = {'stream': stream, 'run': run}
+
     def render_feed(self):
         notices = []
         if self.feed['gap'] is not None:
@@ -293,6 +318,12 @@ class PageReplica:
                 'publication gap: %s seqs %s–%s evicted before this '
                 'page read them — showing the retained tail'
                 % (gap['stream'], gap['from'], gap['through']))
+        if self.feed['restart'] is not None:
+            restart = self.feed['restart']
+            notices.append(
+                'stream restarted: %s renumbered under run %s'
+                ' — cursor reset, re-synchronizing'
+                % (restart['stream'], restart['run']))
         if self.feed['stale'] is not None:
             stale = self.feed['stale']
             notices.append(
@@ -304,13 +335,14 @@ class PageReplica:
         self.feed_line = {
             'hidden': len(notices) == 0,
             'class': ('gap' if self.feed['gap'] is not None
+                      or self.feed['restart'] is not None
                       else 'stale' if self.feed['stale'] is not None
                       else ''),
             'text': '; '.join(notices),
         }
         return self.feed_line
 
-    # --- the stream polls: page.html:2708-2750, 2805-2813 ---
+    # --- the stream polls: page.html:2734-2790, 2845-2853 ---
 
     def refresh_trends(self):
         states = list(self.trends.values())
@@ -323,6 +355,18 @@ class PageReplica:
             state = self.trends.get(history['point'])
             if state is None:
                 continue
+            # page.html:2744-2757 — the served run mark names the
+            # producing lifetime: a changed run on the same source
+            # means the seq domain restarted, so the cursor and the
+            # tick watermark reset rather than stalling behind a dead
+            # domain. A source serving no mark stays un-attributed.
+            run = history.get('run')
+            if (state['run'] is not None and run is not None
+                    and run != state['run']):
+                state['lastSeq'] = 0
+                state['lastTick'] = None
+                self.note_feed_restart('history', run)
+            state['run'] = run
             first = next((entry for entry in history['samples']
                           if entry['seq'] > state['lastSeq']), None)
             if (state['lastSeq'] > 0 and first
@@ -355,7 +399,7 @@ class PageReplica:
         for entry in entries:
             self.journal_since = max(self.journal_since, entry['seq'])
 
-    # --- the poll ordering: page.html:1171-1274 ---
+    # --- the poll ordering: page.html:1196-1299 ---
 
     def refresh(self):
         """One poll's feed-relevant ordering: roles, the bounded
@@ -379,6 +423,7 @@ class PageReplica:
                     pass
             self.note_publication(snapshot)
             self.feed['gap'] = None
+            self.feed['restart'] = None
             self.refresh_trends()
             self.refresh_journal()
             self.render_feed()
@@ -565,6 +610,116 @@ class TickZeroSeqFallback(unittest.TestCase):
                          [s['value']['float']
                           for s in page.trends[1]['samples']])
         self.assertIsNone(page.feed['gap'])
+
+
+class HistoryRunBoundary(unittest.TestCase):
+    """Issue #886's consumer side: a restarted monitor renumbers its
+    /history rings from 1 while a since-cursor held from the old
+    lifetime would silently stall. The served `run` mark is the
+    contract's boundary signal — the page must read it, reset the
+    point's cursor and tick watermark, and mark the feed."""
+
+    def rig(self, history_answers, polls):
+        transport = StubTransport()
+        transport.script('/role', [Response({'role': 'active', 'tick': t,
+                                             'sync': None})
+                                   for t in range(1, polls + 1)])
+        transport.script('/schema', [Response({})] * polls)
+        transport.script('/resources', [Response({})] * polls)
+        transport.script('/snapshot', [Response(snapshot(t, t))
+                                       for t in range(1, polls + 1)])
+        transport.script('/history', history_answers)
+        transport.script('/journal', [Response([])] * polls)
+        return PageReplica(transport, points=(1,)), transport
+
+    def test_run_change_resets_the_cursor_instead_of_stalling(self):
+        page, transport = self.rig([
+            # Run 1 fills the cursor to its max seq.
+            Response([{'point': 1, 'run': 1,
+                       'samples': [entry(1, 1.0), entry(2, 2.0),
+                                   entry(3, 3.0)]}]),
+            # The restart's answer under the stale since=3 cursor: an
+            # empty page that still names the new lifetime — the
+            # defect's silent stall would have read this as quiescence.
+            Response([{'point': 1, 'run': 2, 'samples': []}]),
+            # The reset cursor's since=0 poll re-reads the new run's
+            # ring whole — the seqs 1..2 the old domain could never
+            # pass land on the trend.
+            Response([{'point': 1, 'run': 2,
+                       'samples': [entry(1, 4.0), entry(2, 5.0)]}]),
+        ], polls=3)
+
+        page.refresh()
+        self.assertEqual(3, page.trends[1]['lastSeq'])
+        self.assertEqual(1, page.trends[1]['run'])
+
+        page.refresh()
+        self.assertEqual({'stream': 'history', 'run': 2},
+                         page.feed['restart'])
+        self.assertFalse(page.feed_line['hidden'])
+        self.assertEqual('gap', page.feed_line['class'])
+        self.assertIn('stream restarted: history renumbered under run 2',
+                      page.feed_line['text'])
+        # The dead domain's cursor is gone: the next poll re-reads from
+        # zero rather than waiting on seqs that can never pass.
+        self.assertEqual(0, page.trends[1]['lastSeq'])
+
+        page.refresh()
+        self.assertEqual('/history?since=0', transport.requests[-2])
+        self.assertEqual([1.0, 2.0, 3.0, 4.0, 5.0],
+                         [s['value']['float']
+                          for s in page.trends[1]['samples']])
+        self.assertEqual(2, page.trends[1]['lastSeq'])
+        # The mark clears with the poll that observed it — an
+        # in-sequence feed renders clean again.
+        self.assertIsNone(page.feed['restart'])
+        self.assertTrue(page.feed_line['hidden'])
+
+    def test_a_markless_source_never_fires_the_boundary(self):
+        # A producer predating the `run` field answers without it: the
+        # cursor behaves exactly as before — no spurious boundary.
+        page, _ = self.rig([
+            Response([{'point': 1, 'samples': [entry(1, 1.0)]}]),
+            Response([{'point': 1, 'samples': [entry(2, 2.0)]}]),
+        ], polls=2)
+        page.refresh()
+        page.refresh()
+        self.assertIsNone(page.feed['restart'])
+        self.assertIsNone(page.trends[1]['run'])
+        self.assertEqual(2, page.trends[1]['lastSeq'])
+
+    def test_a_peer_switch_does_not_read_as_a_restart(self):
+        # Each peer counts its own lifetimes: the switch's whole-stream
+        # re-read adopts the new source's run rather than marking a
+        # boundary on the moved view.
+        transport = StubTransport()
+        page = PageReplica(transport, peers=('', 'http://b'), points=(1,))
+        transport.script('/role', [
+            Response({'role': 'active', 'tick': 1, 'sync': None}),
+            Response({'role': 'standby', 'tick': 1, 'sync': None}),
+            Response({'role': 'standby', 'tick': 2, 'sync': None}),
+            Response({'role': 'active', 'tick': 2, 'sync': None}),
+        ])
+        transport.script('/schema', [Response({})] * 2)
+        transport.script('/resources', [Response({})] * 2)
+        transport.script('/snapshot', [Response(snapshot(1, 1)),
+                                       Response(snapshot(2, 2))])
+        transport.script('/history', [
+            Response([{'point': 1, 'run': 3,
+                       'samples': [entry(1, 1.0), entry(2, 2.0)]}]),
+            # The new peer serves its own run numbering — a different
+            # mark, but a peer switch is not a restart.
+            Response([{'point': 1, 'run': 1,
+                       'samples': [entry(1, 1.0), entry(2, 2.0)]}]),
+        ])
+        transport.script('/journal', [Response([]), Response([])])
+        page.refresh()
+        self.assertEqual(3, page.trends[1]['run'])
+        page.refresh()
+        self.assertEqual(1, page.source)
+        self.assertEqual(1, page.trends[1]['run'])
+        self.assertIsNone(page.feed['restart'])
+        self.assertTrue(page.feed_line['hidden'])
 
 
 class HangingPollDegradation(unittest.TestCase):

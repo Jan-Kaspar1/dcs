@@ -480,13 +480,17 @@ const metaByPoint = new Map();
 // rationalization block. The index's components section is
 // serde-defaulted — an index served without it simply joins nothing.
 const componentsByName = new Map();
-// point id -> { samples: [Sample], lastSeq, lastTick } — the series a
-// trend draws. lastSeq is the since-cursor in the *current* source's
-// stream; lastTick is the merge watermark that keeps the series
-// continuous across a source switch's whole-stream re-read — an
+// point id -> { samples: [Sample], lastSeq, lastTick, run } — the
+// series a trend draws. lastSeq is the since-cursor in the *current*
+// source's stream; lastTick is the merge watermark that keeps the
+// series continuous across a source switch's whole-stream re-read — an
 // incremental poll's seq cursor proves each entry new on its own, so a
 // point whose served stamps stop advancing the tick domain still
-// extends on each served change.
+// extends on each served change. run is the serving process's
+// lifetime mark: a changed run on the same source means the seq domain
+// restarted, so the cursor and watermark belong to a dead lifetime and
+// both reset rather than stalling the trend behind a cursor the new
+// run's samples cannot pass.
 const trends = new Map();
 // The retained journal window, oldest first.
 const journalEntries = [];
@@ -499,10 +503,11 @@ let journalSince = 0;
 // ({published, tick}) plus the named degradations the latest poll
 // observed: gap = {stream, from, through}, the served seq stretch a
 // since-poll stepped over; stale = the re-served publication's
-// identity when a poll found nothing new. null marks are a fresh,
-// in-sequence feed; a source switch resets the identity — each peer
-// numbers its own publications.
-const feed = { publication: null, gap: null, stale: null };
+// identity when a poll found nothing new; restart = {stream, run},
+// the same source's stream renumbering under a new process lifetime.
+// null marks are a fresh, in-sequence feed; a source switch resets the
+// identity — each peer numbers its own publications.
+const feed = { publication: null, gap: null, stale: null, restart: null };
 // component name -> its served descriptor, rebuilt on every poll: the
 // parameter edit path reads declared kinds and ranges from it — the
 // descriptor is the page's authority for what a tunable accepts.
@@ -691,7 +696,12 @@ function selectSource() {
 // same run without duplicating samples.
 function switchSource(next) {
   source = next;
-  for (const state of trends.values()) state.lastSeq = 0;
+  for (const state of trends.values()) {
+    state.lastSeq = 0;
+    // The new peer counts its own process lifetimes: its served run
+    // adopts fresh rather than reading as a restart of this stream.
+    state.run = null;
+  }
   journalSince = 0;
   // The new peer numbers its own publications: the feed's freshness
   // and gap bookkeeping starts over — a mark observed against the old
@@ -699,6 +709,7 @@ function switchSource(next) {
   feed.publication = null;
   feed.gap = null;
   feed.stale = null;
+  feed.restart = null;
 }
 
 // The indices of the peers reporting settled "active" — the legitimate
@@ -906,6 +917,14 @@ function noteFeedGap(stream, from, through) {
   }
 }
 
+// Notes that the same source's stream renumbered: the served `run`
+// mark changed, meaning a new process lifetime restarted the seq
+// domain the page's since-cursor reads. The cursor was already reset
+// where the mark was observed; renderFeed names the boundary.
+function noteFeedRestart(stream, run) {
+  feed.restart = { stream: stream, run: run };
+}
+
 // Renders the feed's named degraded states on the #feed-state line —
 // or hides it when the poll landed fresh and in sequence. The marks
 // name the page's own consumption: distinct from the pair section's
@@ -918,6 +937,11 @@ function renderFeed() {
       feed.gap.from + "–" + feed.gap.through +
       " evicted before this page read them — showing the retained tail");
   }
+  if (feed.restart !== null) {
+    notices.push("stream restarted: " + feed.restart.stream +
+      " renumbered under run " + feed.restart.run +
+      " — cursor reset, re-synchronizing");
+  }
   if (feed.stale !== null) {
     notices.push("stale publication: " +
       (feed.stale.published === null
@@ -926,8 +950,9 @@ function renderFeed() {
       " re-served — values shown are last-known, not current");
   }
   line.hidden = notices.length === 0;
-  line.className =
-    feed.gap !== null ? "gap" : feed.stale !== null ? "stale" : "";
+  line.className = feed.gap !== null || feed.restart !== null
+    ? "gap"
+    : feed.stale !== null ? "stale" : "";
   line.textContent = notices.join("; ");
 }
 
@@ -1191,6 +1216,7 @@ async function refresh() {
     // they step over.
     notePublication(snapshot);
     feed.gap = null;
+    feed.restart = null;
     interfaceByName.clear();
     for (const entry of (schema && schema.interfaces) || []) {
       interfaceByName.set(entry.name, entry.interface);
@@ -2696,7 +2722,7 @@ function buildTrends() {
     "<svg id=\"trend-" + meta.point + "\" viewBox=\"0 0 320 90\" width=\"320\" height=\"90\"></svg>" +
     "</figure>").join("");
   for (const meta of index.points) {
-    trends.set(meta.point, { samples: [], lastSeq: 0, lastTick: null });
+    trends.set(meta.point, { samples: [], lastSeq: 0, lastTick: null, run: null });
   }
 }
 
@@ -2715,6 +2741,20 @@ async function refreshTrends(base) {
   for (const history of histories) {
     const state = trends.get(history.point);
     if (!state) continue;
+    // The served run mark names the producing process lifetime. A
+    // changed run on the same source means the rings renumbered from
+    // 1 — the cursor and the tick watermark belong to a dead seq
+    // domain, so both reset and the next since=0 poll re-reads the new
+    // run's ring whole rather than stalling on a cursor its samples
+    // can never pass. A source without the mark (run absent) stays
+    // un-attributed rather than firing a false boundary.
+    const run = history.run === undefined ? null : history.run;
+    if (state.run !== null && run !== null && run !== state.run) {
+      state.lastSeq = 0;
+      state.lastTick = null;
+      noteFeedRestart("history", run);
+    }
+    state.run = run;
     // A since-read answering past the cursor's successor is the served
     // form of the named publication gap: the stretch between evicted
     // from the bounded ring while the page wasn't polling.

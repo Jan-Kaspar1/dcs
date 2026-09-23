@@ -211,11 +211,19 @@ impl Recorder {
             }
             None => (None, crate::journal_file::Replay::default()),
         };
+        // The store's served `run` mark is the same lifetime number
+        // this run's `run_boundary` journal marker carries — the
+        // replayed file's count plus one — so a `/history` consumer
+        // reads the restart the volatile rings' renumbering would
+        // otherwise hide. With no journal file there is no lifetime
+        // record to count: every lifetime serves run 1, the same
+        // anonymity the journal itself has without its file.
         let store = Store::new(
             config.history_capacity,
             config.journal_capacity,
             config.publication_capacity,
             config.event_history_capacity,
+            replay.runs + 1,
         );
         // The replay seeds the ring in `seq` order: boundary markers
         // the file's retained tail already aged out push first, so the

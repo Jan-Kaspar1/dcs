@@ -1,13 +1,13 @@
 //! The page's feed-state surface — the consumer-side honesty the
 //! bounded-publication decision requires of the page as a consumer: a
 //! `since`-cursor poll stepping over an evicted stretch observes the
-//! served numbering gap, and a snapshot re-serving the same
-//! publication's seq/tick observes a stall. The page's detection rule
-//! is mirrored here poll-for-poll against the same Monitor rig the
-//! other page tests use — the stub driver is the stubbed feed — driving
-//! a real eviction through small retained bounds and a real stall by
-//! simply not scanning, then asserting the named state renders and
-//! clears.
+//! served numbering gap, a changed `run` mark names the restart whose
+//! ring renumbered, and a snapshot re-serving the same publication's
+//! seq/tick observes a stall. The page's detection rule is mirrored
+//! here poll-for-poll against the same Monitor rig the other page
+//! tests use — the stub driver is the stubbed feed — driving a real
+//! eviction through small retained bounds and a real stall by simply
+//! not scanning, then asserting the named state renders and clears.
 
 use dcs_core::{Direction, IoDriver, IoError, PointId, Sample, Tick, Value, ValueKind};
 use dcs_model::{PlantModel, SignalIndex};
@@ -128,6 +128,11 @@ enum FeedState {
     /// from the bounded served stream before the page read it. The
     /// page's "publication gap".
     Gap { from: u64, through: u64 },
+    /// The same source's stream answered under a new `run` mark — the
+    /// producing process lifetime changed and the ring renumbered, so
+    /// the cursor reset rather than stalling behind seqs that can
+    /// never pass. The page's "stream restarted".
+    Restart { run: u64 },
     /// The snapshot re-served the publication identity the last poll
     /// already rendered — a stall. The page's "stale publication".
     Stale { published: Option<u64>, tick: Tick },
@@ -150,6 +155,9 @@ struct PageFeed {
     /// Per-point history cursors — the page's per-trend `lastSeq`,
     /// seeded for every index point like `buildTrends`.
     history_since: BTreeMap<PointId, u64>,
+    /// Per-point run marks — the page's per-trend `run`: the process
+    /// lifetime the cursor's seq domain belongs to.
+    history_run: BTreeMap<PointId, u64>,
     /// The journal cursor — the page's `journalSince`.
     journal_since: u64,
 }
@@ -165,6 +173,7 @@ impl PageFeed {
                 .iter()
                 .map(|meta| (meta.point, 0))
                 .collect(),
+            history_run: BTreeMap::new(),
             journal_since: 0,
         }
     }
@@ -197,6 +206,16 @@ impl PageFeed {
                 0
             };
         for history in client.history(&[], since).unwrap() {
+            // The served run mark names the producing lifetime: a
+            // changed run on the same source means the seq domain
+            // restarted, so the cursor resets rather than stalling
+            // behind a dead domain.
+            let adopted = self.history_run.get(&history.point).copied().unwrap_or(0);
+            if adopted != 0 && history.run != adopted {
+                self.history_since.insert(history.point, 0);
+                state = FeedState::Restart { run: history.run };
+            }
+            self.history_run.insert(history.point, history.run);
             let last = self.history_since.get(&history.point).copied().unwrap_or(0);
             if last > 0
                 && let Some(first) = history.samples.iter().find(|entry| entry.seq > last)
@@ -250,7 +269,12 @@ fn page_carries_the_feed_state_indicator() {
     // The line beside the view the marks render on, and the named
     // states themselves — distinct names from the pair section's
     // unreachable-peer fault and from the quality vocabulary.
-    for needle in ["id=\"feed-state\"", "publication gap", "stale publication"] {
+    for needle in [
+        "id=\"feed-state\"",
+        "publication gap",
+        "stale publication",
+        "stream restarted",
+    ] {
         assert!(page.contains(needle), "page lacks {needle}");
     }
     // The detection machinery: the publication identity the freshness
@@ -266,6 +290,8 @@ fn page_carries_the_feed_state_indicator() {
         "health.published",
         "noteFeedGap(\"history\"",
         "noteFeedGap(\"journal\"",
+        "noteFeedRestart(\"history\"",
+        "feed.restart",
     ] {
         assert!(page.contains(needle), "page lacks {needle}");
     }
@@ -276,6 +302,7 @@ fn page_carries_the_feed_state_indicator() {
         "feed.publication = null",
         "feed.gap = null",
         "feed.stale = null",
+        "feed.restart = null",
         "line.hidden = notices.length === 0",
     ] {
         assert!(page.contains(needle), "page lacks {needle}");
@@ -351,6 +378,60 @@ fn a_poll_through_eviction_and_stall_names_the_state_then_clears() {
             }
         );
     });
+}
+
+/// Issue #886's consumer side against the real monitor: the restarted
+/// process renumbers its rings under a new `run` mark, and the
+/// mirrored cursor rule reads the boundary instead of stalling behind
+/// a cursor the new domain's seqs cannot pass.
+#[test]
+fn a_monitor_restart_renders_the_run_boundary_then_clears() {
+    let dir = std::env::temp_dir().join(format!("dcs-monitor-feed-restart-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("journal.jsonl");
+    let (driver, map) = rig();
+    let bind = || {
+        let executor = Executor::new(&driver, map.clone(), vec![Box::new(Scale)]).unwrap();
+        Monitor::bind_with(
+            "127.0.0.1:0",
+            executor,
+            signal_index(),
+            MonitorConfig {
+                journal_file: Some(path.clone()),
+                ..MonitorConfig::default()
+            },
+        )
+        .unwrap()
+    };
+
+    // First lifetime: the cursor fills under run 1.
+    let monitor = bind();
+    let client = MonitorClient::new(monitor.local_addr());
+    let mut feed = serving(&monitor, || {
+        client.advance(2).unwrap();
+        let mut feed = PageFeed::new(&client);
+        assert_eq!(feed.poll(&client), FeedState::Fresh);
+        feed
+    });
+    drop(monitor);
+
+    // The restart: the ring renumbered under run 2, so the stale
+    // cursor's poll names the boundary instead of answering Fresh.
+    let monitor = bind();
+    let client = MonitorClient::new(monitor.local_addr());
+    serving(&monitor, || {
+        client.advance(2).unwrap();
+        match feed.poll(&client) {
+            FeedState::Restart { run } => assert_eq!(run, 2),
+            other => panic!("expected the named restart, got {other:?}"),
+        }
+        // Recovery: the resynced cursor tracks the new domain, and the
+        // next fresh in-sequence poll is clean again.
+        client.advance(1).unwrap();
+        assert_eq!(feed.poll(&client), FeedState::Fresh);
+    });
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

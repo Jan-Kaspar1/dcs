@@ -85,7 +85,12 @@
 //!   point's retained samples in tick order from the store's bounded
 //!   rings; `?point=<id>` (repeatable) selects points and
 //!   `?since=<seq>` returns only samples newer than the caller's last
-//!   seen sequence — an evicted stretch surfaces as a numbering gap
+//!   seen sequence — an evicted stretch surfaces as a numbering gap.
+//!   Every answer also carries the producing process's `run` — the
+//!   lifetime number the journal file's `run_boundary` markers count —
+//!   on populated and empty pages alike, so a `since` cursor a restart
+//!   stranded in a dead seq domain reads the renumbering as a changed
+//!   `run` and resyncs instead of stalling
 //! - `GET /journal` → `200` `Vec<`[`JournalEntry`]`>` — the transition
 //!   journal in scan order; `?since=<seq>` filters likewise. The tail
 //!   is bounded, but `run_boundary` entries are pinned: evicting one
@@ -225,7 +230,12 @@
 //! `--state-file` diffs its first scan against the restored executor
 //! state and the replayed record's last observations, so the audit
 //! trail continues rather than re-journaling what it already recorded.
-//! Point history stays volatile; only the journal persists. The file is
+//! Point history stays volatile; only the journal persists. The rings'
+//! renumbering is still explicit to consumers, though: every served
+//! [`PointHistory`] carries this run's number — the same count the
+//! `run_boundary` markers name — so a `since` cursor surviving the
+//! restart sees the new lifetime instead of an answer that looks like
+//! quiescence. The file is
 //! single-writer: the bind holds an exclusive advisory lock on the path
 //! for the monitor's lifetime, so two monitors configured with the same
 //! `journal_file` cannot interleave duplicate `seq`s into one
@@ -3001,7 +3011,10 @@ impl MonitorClient {
 
     /// `GET /history`: the retained samples of `points` — or of every
     /// mapped point when empty — keeping only samples with a `seq` above
-    /// `since` (`0` fetches everything retained).
+    /// `since` (`0` fetches everything retained). Each [`PointHistory`]
+    /// also carries the serving process's `run`, so a cursor a restart
+    /// stranded above the renumbered ring reads the new lifetime rather
+    /// than a silent empty page.
     pub fn history(&self, points: &[PointId], since: u64) -> io::Result<Vec<PointHistory>> {
         let mut path = format!("/history?since={since}");
         for point in points {
