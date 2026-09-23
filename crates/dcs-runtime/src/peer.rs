@@ -2017,12 +2017,12 @@ impl<'d> Peer<'d> {
     }
 
     /// Drains the adoption-audit receipts queued since the last call —
-    /// one [`CommandReceipt`] per force-set change a checkpoint
-    /// adoption made that no settled receipt accounts for, each
-    /// `Applied` at the landing tick with `actor` naming the adopting
-    /// checkpoint — for the settle journal the monitoring layer
-    /// records them into through `Recorder::note_settled`, beside the
-    /// superseded settlements.
+    /// one [`CommandReceipt`] per force-set or held-value change a
+    /// checkpoint adoption made that no settled receipt accounts for,
+    /// each `Applied` at the landing tick with `actor` naming the
+    /// adopting checkpoint — for the settle journal the monitoring
+    /// layer records them into through `Recorder::note_settled`,
+    /// beside the superseded settlements.
     pub fn take_adoption_receipts(&mut self) -> Vec<CommandReceipt> {
         std::mem::take(&mut self.pending_adoption_receipts)
     }

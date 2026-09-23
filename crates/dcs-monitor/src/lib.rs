@@ -2080,10 +2080,10 @@ fn track_and_record(
     for (index, receipt) in peer.take_superseded_commands() {
         recorder.note_settled(Some(index), receipt, peer.tick());
     }
-    // Force-set changes the adoption authored beyond the receipted
-    // log — a re-stood or dropped force no settled verdict backs —
-    // journal here, each receipt's actor naming the adopting
-    // checkpoint.
+    // Force-set and held-value changes the adoption authored beyond
+    // the receipted log — a re-stood or dropped force, or a reverted
+    // receipted write, no settled verdict backs — journal here, each
+    // receipt's actor naming the adopting checkpoint.
     for receipt in peer.take_adoption_receipts() {
         recorder.note_settled(None, receipt, peer.tick());
     }

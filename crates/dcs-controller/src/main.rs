@@ -1413,7 +1413,7 @@ fn main() -> ExitCode {
                         }
                         for receipt in peer.take_adoption_receipts() {
                             eprintln!(
-                                "standby: checkpoint adoption changed the force set at tick {}: {:?} (actor {:?})",
+                                "standby: checkpoint adoption changed receipted state at tick {}: {:?} (actor {:?})",
                                 peer.tick().0,
                                 receipt.command,
                                 receipt.actor
