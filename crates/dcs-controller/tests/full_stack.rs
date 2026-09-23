@@ -1004,6 +1004,7 @@ fn run_full_stack(tag: &str) -> Outcome {
             role: Role::Active,
             tick: continued.tick,
             sync: None,
+            field_claim: None,
         }
     );
     let report = active.role().unwrap();

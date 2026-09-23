@@ -74,7 +74,7 @@ pub use resources::{
     CommandState, ComponentInterface, ComponentResources, ConfigValue, ResourceEvent,
     ResourceSample, ResourceView, SchemaView,
 };
-pub use role::{Divergence, Role, RoleReport, StandbySync, SwitchError};
+pub use role::{Divergence, FieldClaim, Role, RoleReport, StandbySync, SwitchError};
 pub use signal::{
     CoercionError, PointId, Quality, QualityReason, Sample, SignalId, Tick, Value, ValueKind,
 };
