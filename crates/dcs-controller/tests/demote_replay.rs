@@ -9,14 +9,18 @@
 //! endpoint's *document* — which replaying the victim's own checkpoint
 //! satisfies — then pinned it, journaled the adoption, and let the
 //! endpoint's forged follow-up checkpoints re-domain the demoted peer.
-//! Under the fix the verify pull's document checks refuse the
-//! replayable shape: the victim's own `/checkpoint` is a field-owning
-//! document, and no unproven pull may serve one — verbatim, stale, or
-//! tick-bumped alike. A `--pair-token` run demands more: the keyed
-//! `line_proof` only a peer holding the token stamps — yet even a
-//! transparent relay that proxies the `?prove=` nonce and returns a
-//! genuinely signed answer still fails, because the signed document
-//! is the victim's own field-owning checkpoint.
+//! The document checks then refused only the field-owning shape —
+//! leaving the standby-shaped forgery the
+//! `announced-source-adopts-standby-shaped-checkpoint` finding served:
+//! the victim's checkpoint with `source_owns_field` flipped false.
+//! Under the fix the announced-source contract is keyed-only: an
+//! unkeyed run can prove nothing about an endpoint the public
+//! `/checkpoint` hands every document shape to, so an announced-only
+//! demotion refuses whatever the document claims. A `--pair-token`
+//! run demands the keyed `line_proof` only a peer holding the token
+//! stamps — yet even a transparent relay that proxies the `?prove=`
+//! nonce and returns a genuinely signed answer still fails, because
+//! the signed document is the victim's own field-owning checkpoint.
 //!
 //! The reproduction is the issue's required shape: one controller
 //! process plus a standard-library TCP interposer serving the
@@ -88,6 +92,81 @@ impl Relay {
 }
 
 impl Drop for Relay {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// A forged-document endpoint bound on loopback — the reproduction's
+/// forge: it answers every connection with the checkpoint document it
+/// was given, whatever shape that claims. Unlike the relay it never
+/// touches the victim's monitor, so nothing it serves can carry the
+/// keyed `line_proof` — and on an unkeyed run nothing it serves can
+/// prove anything at all.
+struct Forge {
+    addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Forge {
+    fn serve(forged: &serde_json::Value) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = forged.to_string();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            while !stopping.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                        let mut buf = [0u8; 4096];
+                        let mut seen = Vec::new();
+                        loop {
+                            match std::io::Read::read(&mut stream, &mut buf) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    seen.extend_from_slice(&buf[..n]);
+                                    if seen.windows(4).any(|window| window == b"\r\n\r\n") {
+                                        break;
+                                    }
+                                    if seen.len() > 65536 {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                             Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+                        let _ = std::io::Write::flush(&mut stream);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            addr,
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Forge {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
@@ -172,5 +251,68 @@ fn an_unkeyed_lone_controller_refuses_a_demote_armed_by_its_replayed_checkpoint(
 fn a_keyed_lone_controller_refuses_a_demote_armed_by_a_relay_of_its_own_monitor() {
     let mut controller = spawn_controller(Path::new(MODEL), &[], "0.05");
     replay_refusal(controller.addr);
+    kill(&mut controller);
+}
+
+/// The `announced-source-adopts-standby-shaped-checkpoint` finding's
+/// exact reproduction at the process boundary: a lone unkeyed
+/// controller — no `--standby`, no `--pair-token` — whose checkpoint
+/// the forge replays with `source_owns_field` flipped false, the
+/// standby shape the document-shape refusal never covered. The
+/// same-source announce lands, but the announced-source contract is
+/// keyed-only: nothing the forge serves can authenticate it, so
+/// `POST /demote` refuses `no_tracking_source`, nothing is adopted or
+/// journaled, and the controller stays the field owner.
+#[test]
+fn an_unkeyed_lone_controller_refuses_a_demote_armed_by_a_standby_shaped_forge() {
+    let mut controller: Spawned = spawn_logged(
+        Path::new(CONTROLLER),
+        &[
+            MODEL.to_string(),
+            "--listen".to_string(),
+            "127.0.0.1:0".to_string(),
+            "--driven".to_string(),
+            "--dt".to_string(),
+            "0.05".to_string(),
+        ],
+        listening_on,
+    )
+    .0;
+    let client = MonitorClient::new(controller.addr);
+    client.advance(3).unwrap();
+    let tick = client.role().unwrap().tick;
+    let since = client
+        .journal(0)
+        .unwrap()
+        .last()
+        .map(|entry| entry.seq)
+        .unwrap_or(0);
+
+    // The reproduction's forge verbatim: the victim's own document
+    // with the field claim stripped — the standby shape that used to
+    // pass the unkeyed document checks.
+    let mut forged = client.checkpoint().unwrap();
+    forged.source_owns_field = Some(false);
+    let forged_json = serde_json::to_value(&forged).unwrap();
+    let forge = Forge::serve(&forged_json);
+
+    client.checkpoint_announcing(forge.addr).unwrap();
+
+    let error = client.demote().unwrap_err();
+    assert!(
+        error.to_string().contains("no_tracking_source"),
+        "a standby-shaped forged document must not arm the demotion: {error}"
+    );
+    client.advance(1).unwrap();
+    let report = client.role().unwrap();
+    assert_eq!(report.role, Role::Active);
+    assert_eq!(report.tick, Tick(tick.0 + 1));
+    assert!(
+        client.journal(since).unwrap().iter().all(|entry| !matches!(
+            entry.event,
+            JournalEvent::TrackingSourceAdopted { .. } | JournalEvent::RoleChanged { .. }
+        )),
+        "a refused demotion journals neither an adoption nor a role change"
+    );
     kill(&mut controller);
 }

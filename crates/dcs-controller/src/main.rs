@@ -148,24 +148,30 @@
 //! or strand `unsynchronized` and unpromotable forever. The demoted
 //! peer's checkpoint source is therefore resolved per scan cycle: the
 //! configured `--peer ADDR` when given — "active now, but here is my
-//! peer for later" — else the address the tracking peer announced
-//! through its pulls. The announced fallback is a hint, not a proof:
-//! the serving side cannot tell the puller's monitor port from any
-//! other port its connection's source claims, so `POST /demote`
-//! toward an announced-only source first pulls one checkpoint from it
-//! and proceeds only when that checkpoint continues this run's line in
-//! a way this run's own public `/checkpoint` could not have answered —
-//! a field-owning document not ahead of this run's tick is replayable,
-//! not a successor — journaling the adopted source and pinning it, so
-//! a later `?peer=` rewrite cannot redirect the demoted peer's pulls —
+//! peer for later" — else, on a `--pair-token` pair only, the address
+//! the tracking peer announced through its pulls. The announced
+//! fallback is a hint, not a proof: the serving side cannot tell the
+//! puller's monitor port from any other port its connection's source
+//! claims, and `/checkpoint` is public — an unkeyed run can prove
+//! nothing about an announced endpoint whatever document shape it
+//! serves, so the announced source is keyed-only and an unkeyed owner
+//! with no configured source refuses `POST /demote` with
+//! `no_tracking_source` like an absent one. A keyed `POST /demote`
+//! toward an announced-only source first pulls
+//! `GET /checkpoint?prove=<nonce>` from it and proceeds only when the
+//! answer carries the keyed `line_proof` only a peer holding the token
+//! produces — bound to the pull's nonce and the served document — and
+//! the document continues this run's line in a way this run's own
+//! public `/checkpoint` could not have answered — a field-owning
+//! document not ahead of this run's tick is replayable, not a
+//! successor — journaling the adopted source and pinning it, so a
+//! later `?peer=` rewrite cannot redirect the demoted peer's pulls —
 //! while a dead, unreachable, replayed, or forged hint refuses
-//! `no_tracking_source` like an absent one. When both peers launch
-//! with the same `--pair-token`, the verify pull and every checkpoint
-//! the adopted source later serves must additionally carry the keyed
-//! `line_proof` only a peer holding the token produces — bound to the
-//! pull's nonce and the served document — so an endpoint that merely
-//! replays or fabricates this line's checkpoints can neither arm the
-//! demotion nor feed the demoted peer forged state. Either way the
+//! `no_tracking_source` like an absent one. Every checkpoint the
+//! adopted source later serves must carry the proof too, so an
+//! endpoint that merely replays or fabricates this line's checkpoints
+//! can neither arm the demotion nor feed the demoted peer forged
+//! state. Either way the
 //! demoted instance pulls, applies, and
 //! reconverges like any standby, and a later `POST /promote` fails
 //! back without a restart. A field owner with neither — nothing
@@ -658,8 +664,8 @@ controller scan.
                   endpoint that only replays or fabricates this line's
                   checkpoints can neither arm the demotion nor feed the
                   demoted peer forged state. Requires --listen; unset,
-                  announced demotions verify on the document checks
-                  alone
+                  an announced source is never a tracking source — an
+                  announced-only demotion refuses no_tracking_source
   --state-file PATH
                   persist the run's checkpoint to PATH at the end of
                   every scan cycle and at each accepted command's

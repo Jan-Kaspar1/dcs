@@ -130,14 +130,19 @@
 //!   when it names the request's own source address (a wildcard-bound
 //!   puller's `0.0.0.0` resolves to that address, so a demotion never
 //!   follows an undialable source) — so this instance
-//!   knows where to track if it is later demoted. A `?prove=<nonce>`
-//!   on a keyed monitor — one launched under the pair's `--pair-token`
-//!   — gets the served document's keyed `line_proof` stamped over it:
-//!   the digest only a peer holding the token produces, which the
-//!   announced-source demotion's verify pull and the adopted source's
-//!   standing pulls then demand, so an endpoint that merely replays
-//!   or fabricates this line's checkpoints can neither arm a demotion
-//!   nor feed the demoted peer
+//!   knows where to track if it is later demoted. The announced-source
+//!   contract is a keyed one: a `?prove=<nonce>` on a keyed monitor —
+//!   one launched under the pair's `--pair-token` — gets the served
+//!   document's keyed `line_proof` stamped over it, the digest only a
+//!   peer holding the token produces, which the announced-source
+//!   demotion's verify pull and every pull toward an announced source
+//!   then demand, so an endpoint that merely replays or fabricates
+//!   this line's checkpoints can neither arm a demotion nor feed the
+//!   demoted peer. Unkeyed monitors answer every pull plain — and
+//!   close the announced-source contract entirely: no unproven
+//!   document can authenticate an announced endpoint, so an
+//!   announced-only demotion refuses and a recorded hint never
+//!   becomes a tracking source
 //! - `GET /role` → `200` [`RoleReport`] — the instance's reported role
 //!   in a redundant pair (`active`, `standby`, or a transition state)
 //!   plus the standby's convergence — the pair-as-one-controller
@@ -733,15 +738,16 @@ pub struct Monitor<'d> {
     /// connection's source claims, so a recorded hint stays unverified
     /// until a demotion proves it — `POST /demote` pulls one
     /// checkpoint from the hint and adopts it only when the checkpoint
-    /// continues this run's line in a way this run's own `/checkpoint`
-    /// could not have served (a field-owning document is just a
-    /// replayable answer on an unproven pull — bumped ahead or not —
-    /// never a successor), and on a keyed run when the document also
-    /// carries the pull's `line_proof` — journaling the adopted
-    /// source either way. A dead, replayed, or forged hint refuses
-    /// `NoTrackingSource` instead of stranding or adopting. Outside
-    /// `shared`: the value is request-path bookkeeping, never part of
-    /// a scan's state.
+    /// continues this run's line and carries the pull's keyed
+    /// `line_proof` — journaling the adopted source — refusing
+    /// `NoTrackingSource` instead of stranding or adopting. The
+    /// contract is keyed-only: an unkeyed run can prove nothing about
+    /// the hinted endpoint — `/checkpoint` is public, so a forge can
+    /// answer it in any shape, the standby's `source_owns_field: false`
+    /// included — and an announced-only demotion on an unkeyed run
+    /// refuses outright, the hint never becoming a tracking source
+    /// either. Outside `shared`: the value is request-path
+    /// bookkeeping, never part of a scan's state.
     announced: Mutex<Option<SocketAddr>>,
     /// The tracking source a verified announced demotion pinned — the
     /// endpoint `POST /demote` proved serves this run's continuation
@@ -759,12 +765,14 @@ pub struct Monitor<'d> {
     /// dcs-controller's `--pair-token`. A `GET /checkpoint?prove=<nonce>`
     /// response on a keyed monitor stamps the served document's
     /// [`line_proof`], and the pulls this monitor makes toward an
-    /// adopted announced source — plus the one that verifies a
-    /// demotion's announced hint — each carry a fresh nonce whose
-    /// returned proof must match. Unset, `?prove=` answers are plain
-    /// and announced demotions verify on the document checks alone —
-    /// which on an unproven pull means no field-owning document can
-    /// ever arm them.
+    /// announced source — adopted or merely hinted — plus the one
+    /// that verifies a demotion's announced hint, each carry a fresh
+    /// nonce whose returned proof must match. Unset, `?prove=`
+    /// answers are plain and the announced-source contract is closed:
+    /// no unproven document can authenticate an announced endpoint —
+    /// `/checkpoint` serves every document shape an attacker needs —
+    /// so an announced-only demotion refuses `NoTrackingSource` and
+    /// the hint never becomes a tracking source.
     pair_key: Option<u64>,
 }
 
@@ -928,16 +936,16 @@ impl<'d> Monitor<'d> {
     /// same one. Then `GET /checkpoint?prove=<nonce>` answers with the
     /// served document's keyed [`line_proof`] stamped over it, and the
     /// announced-source contract demands the matching proof back: the
-    /// demotion's verify pull and every pull the adopted source later
+    /// demotion's verify pull and every pull an announced source later
     /// answers must return the digest only a peer holding the key can
     /// produce — bound to that nonce and that document — so an
     /// endpoint that merely replays or fabricates this line's
     /// checkpoints can neither arm the demotion nor feed the demoted
     /// peer forged state. Unset, the deployment configured no shared
-    /// secret: `?prove=` answers stay plain and the announced demotion
-    /// verifies on the document checks alone — a field-owning
-    /// document being exactly what this run's own public
-    /// `/checkpoint` serves, so no unproven endpoint may serve one.
+    /// secret: `?prove=` answers stay plain and the announced-source
+    /// contract is closed — an announced-only demotion refuses and a
+    /// recorded hint never becomes a tracking source, because no
+    /// unproven document can authenticate the endpoint serving it.
     pub fn with_pair_key(mut self, key: u64) -> Self {
         self.pair_key = Some(key);
         self
@@ -946,33 +954,42 @@ impl<'d> Monitor<'d> {
     /// The checkpoint address this peer tracks — `Driven`'s `track` or
     /// the configured [`with_standby_source`](Self::with_standby_source)
     /// when set, else the pinned adoption a verified announced
-    /// demotion recorded, else the monitor address a tracking peer
-    /// announced through its `GET /checkpoint?peer=` pulls — an
-    /// announce accepted only from the connection it names as its own
-    /// address, with a wildcard-announced IP resolved to that address
-    /// and a port-0 claim refused, so the recorded source is always
-    /// one a demotion could dial. A recorded hint alone does not arm
-    /// a demotion: the serving side cannot verify the puller's monitor
-    /// port from the connection, so `POST /demote` toward an
-    /// announced-only source first pulls one checkpoint from it and
-    /// proceeds only when that checkpoint continues this run's line in
-    /// a way this run's own public `/checkpoint` could not have
-    /// produced — plus, on a keyed run, the keyed `line_proof` only a
-    /// peer holding the pair's token stamps — adopting the source
-    /// into the journal and pinning it as the tracking target, so a
-    /// later `?peer=` rewrite cannot redirect the demoted peer's
-    /// pulls — and otherwise refuses `NoTrackingSource`. The
-    /// announced fallback is the follow-peer
-    /// half of the tracking-source contract: a peer launched without
-    /// a source — an active never told its peer — that is later
-    /// demoted tracks its successor here and reconverges instead of
-    /// stranding `unsynchronized` and unpromotable.
+    /// demotion recorded, else — on a keyed run only — the monitor
+    /// address a tracking peer announced through its
+    /// `GET /checkpoint?peer=` pulls: an announce accepted only from
+    /// the connection it names as its own address, with a
+    /// wildcard-announced IP resolved to that address and a port-0
+    /// claim refused, so the recorded source is always one a demotion
+    /// could dial. A recorded hint alone does not arm a demotion: the
+    /// serving side cannot verify the puller's monitor port from the
+    /// connection, so `POST /demote` toward an announced-only source
+    /// first pulls one checkpoint from it and proceeds only when that
+    /// checkpoint continues this run's line and carries the keyed
+    /// `line_proof` only a peer holding the pair's token stamps —
+    /// adopting the source into the journal and pinning it as the
+    /// tracking target, so a later `?peer=` rewrite cannot redirect
+    /// the demoted peer's pulls — and otherwise refuses
+    /// `NoTrackingSource`. The announced fallback is the follow-peer
+    /// half of the tracking-source contract, and it is keyed-only:
+    /// an unkeyed run can prove nothing about an announced endpoint —
+    /// the public `/checkpoint` hands a forge every document shape —
+    /// so a recorded hint on an unkeyed run is no tracking source at
+    /// all and an announced-only demotion refuses outright. On a
+    /// keyed run a peer launched without a source — an active never
+    /// told its peer — that is later demoted tracks its successor
+    /// here and reconverges instead of stranding `unsynchronized` and
+    /// unpromotable.
     pub fn tracking_source(&self) -> Option<SocketAddr> {
         self.driven
             .track
             .or(self.standby_source)
             .or_else(|| *self.adopted.lock().unwrap())
-            .or_else(|| *self.announced.lock().unwrap())
+            .or_else(|| {
+                // The bare announced hint resolves only under the
+                // keyed contract — an unkeyed run could never prove
+                // the endpoint, so it must never pull from it.
+                self.pair_key.and_then(|_| *self.announced.lock().unwrap())
+            })
     }
 
     /// The address the listener is bound to.
@@ -1672,15 +1689,17 @@ impl<'d> Monitor<'d> {
     /// as an unpulled promote would.
     ///
     /// A demotion toward an announced-only source — nothing configured,
-    /// only a `?peer=` hint recorded — first verifies the hint the
-    /// same way outside the lock: one checkpoint pull against it that
-    /// must continue this run's line without being a replayable copy
-    /// of this run's own document — a field-owning document, which an
-    /// unproven endpoint may only have replayed verbatim or bumped
-    /// ahead — and on a keyed run must carry the `?prove=` nonce's
-    /// keyed `line_proof` — or the demotion refuses
-    /// `NoTrackingSource`. The verified adoption journals naming the
-    /// source, ahead of the role change it enables.
+    /// only a `?peer=` hint recorded — is a keyed-run contract: an
+    /// unkeyed owner refuses `NoTrackingSource` outright, no unproven
+    /// document being able to authenticate the endpoint serving it.
+    /// On a keyed run the hint first verifies the same way outside the
+    /// lock: one checkpoint pull against it that must carry the
+    /// `?prove=` nonce's keyed `line_proof` and continue this run's
+    /// line without being a replayable copy of this run's own document
+    /// — a field-owning document not ahead of this run's tick, which
+    /// even a signed answer cannot make a successor — or the demotion
+    /// refuses `NoTrackingSource`. The verified adoption journals
+    /// naming the source, ahead of the role change it enables.
     fn switchover(&self, promote: bool) -> Response<Cursor<Vec<u8>>> {
         // The final-sync fetch runs outside the shared lock under the
         // dedicated pull bound — like the tracking pull it can wait on
@@ -1789,17 +1808,25 @@ impl<'d> Monitor<'d> {
     }
 
     /// The pair key a pull toward `source` must prove under — `Some`
-    /// when `source` is the endpoint a verified announced demotion
-    /// adopted and this run is keyed: the demotion proved the endpoint
-    /// once, but every checkpoint it serves afterward must keep proving
-    /// it came from a key-holding peer of this line, so an adopted
-    /// endpoint that only replays or fabricates this line's documents
-    /// feeds the demoted peer nothing. `None` for a configured source
-    /// — operator-declared, no proof owed — and whenever the run is
-    /// unkeyed.
+    /// when `source` is an announced endpoint and this run is keyed:
+    /// the verified demotion proved its adopted endpoint once, but
+    /// every checkpoint an announced source serves must keep proving
+    /// it came from a key-holding peer of this line — the merely
+    /// hinted endpoint a non-owner's pulls can resolve to (a demotion
+    /// that never ran the verify, like the fencing demote) earns the
+    /// same per-pull demand — so an announced endpoint that only
+    /// replays or fabricates this line's documents feeds the pulling
+    /// peer nothing. `None` for a configured source —
+    /// operator-declared, no proof owed — and whenever the run is
+    /// unkeyed, where no announced address ever resolves as a source.
     pub fn pull_proof_key(&self, source: SocketAddr) -> Option<u64> {
-        match (self.pair_key, *self.adopted.lock().unwrap()) {
-            (Some(key), Some(adopted)) if adopted == source => Some(key),
+        match self.pair_key {
+            Some(key)
+                if *self.adopted.lock().unwrap() == Some(source)
+                    || *self.announced.lock().unwrap() == Some(source) =>
+            {
+                Some(key)
+            }
             _ => None,
         }
     }
@@ -1840,17 +1867,19 @@ impl<'d> Monitor<'d> {
     /// side cannot tell the puller's monitor port from any other
     /// same-IP port the connection claims, so a recorded hint is
     /// unverified until one checkpoint pulled from it proves it
-    /// continues this run's line. Returns the verified hint, or `None`
-    /// when the demotion needs no proof — a configured source covers
-    /// it, or the peer owns no field — or the `409 NoTrackingSource`
-    /// refusal when the owner has only an unproven hint: nothing
-    /// announced, an unreachable hint, or a hint whose checkpoint is
-    /// not this run's continuation — a field-owning document being no
-    /// continuation an unproven endpoint can earn, since this run's
-    /// own public `/checkpoint` serves that exact stamp — and on a
-    /// keyed run, a hint that answers no valid `line_proof` either:
-    /// replaying this run's own checkpoint or fabricating one that
-    /// merely continues the line produces neither.
+    /// continues this run's line under the pair's key. Returns the
+    /// verified hint, or `None` when the demotion needs no proof — a
+    /// configured source covers it, or the peer owns no field — or
+    /// the `409 NoTrackingSource` refusal when the owner has only an
+    /// unproven hint: nothing announced, an unreachable hint, a hint
+    /// whose checkpoint is not this run's continuation, or — every
+    /// forged document's limit — a hint answering no valid keyed
+    /// `line_proof` for the pull's nonce. The contract is keyed-only:
+    /// `/checkpoint` is public, so an unkeyed verify pull can demand
+    /// nothing an attacker cannot serve — this run's own document
+    /// verbatim, stale, tick-bumped, or re-stamped into the standby's
+    /// `source_owns_field: false` shape — and an announced-only
+    /// demotion on an unkeyed run refuses outright.
     fn verify_demote_hint(&self) -> Result<Option<SocketAddr>, Response<Cursor<Vec<u8>>>> {
         if self.configured_source().is_some() {
             return Ok(None);
@@ -1858,30 +1887,32 @@ impl<'d> Monitor<'d> {
         if !self.shared.lock().unwrap().peer.owns_field() {
             return Ok(None);
         }
+        // An unkeyed run can prove nothing about the hinted endpoint —
+        // every document shape it might serve is one the public
+        // `/checkpoint` already hands a forge — so the hint can never
+        // arm a demotion.
+        if self.pair_key.is_none() {
+            return Err(json(409, &SwitchError::NoTrackingSource));
+        }
         let hint = match *self.announced.lock().unwrap() {
             Some(hint) => hint,
             None => return Err(json(409, &SwitchError::NoTrackingSource)),
         };
         let own = self.shared.lock().unwrap().peer.checkpoint();
-        // A keyed run demands the proof only a key-holding peer of
-        // this line can produce: the verify pull carries a fresh nonce
-        // and the document it returns must carry the keyed line proof
-        // binding that nonce to that document.
-        let nonce = self.pair_key.map(|_| mint_generation());
+        // The verify pull demands the proof only a key-holding peer of
+        // this line can produce: a fresh nonce whose returned document
+        // must carry the keyed line proof binding that nonce to that
+        // document — the attestation the document checks below run on.
+        let nonce = Some(mint_generation());
         let pulled = match MonitorClient::with_timeout(hint, CHECKPOINT_PULL_TIMEOUT)
             .checkpoint_tracking(None, nonce)
         {
             Ok(pulled) => pulled,
             Err(_) => return Err(json(409, &SwitchError::NoTrackingSource)),
         };
-        let proven = self.proven(&pulled, nonce);
-        // The document checks need the proof's verdict too: only a
-        // key-attested answer may serve a field-owning checkpoint —
-        // the stamp this run's own public `/checkpoint` carries, so
-        // an unproven endpoint serving it, even bumped ahead into the
-        // successor's tick shape, may simply be replaying it.
-        let key_attested = self.pair_key.is_some() && proven;
-        if !proven || verify_announced_checkpoint(&pulled, &own, key_attested).is_err() {
+        if !self.proven(&pulled, nonce)
+            || verify_announced_checkpoint(&pulled, &own).is_err()
+        {
             return Err(json(409, &SwitchError::NoTrackingSource));
         }
         Ok(Some(hint))
@@ -2269,19 +2300,18 @@ enum AnnouncedCheckpointError {
         /// This run's own tick when the hint was verified.
         own: Tick,
     },
-    /// The pulled checkpoint claims its source owns the field — the
-    /// stamp every document this run's own `/checkpoint` answer
-    /// carries — and the pull could not show the endpoint earned it.
-    /// `/checkpoint` is public and freely fetchable, so an endpoint
-    /// serving a field-owning document may simply be replaying one of
-    /// this run's own: at or behind this run's tick the replay is
-    /// verbatim or stale, and bumped a few ticks ahead it wears the
-    /// successor shape — indistinguishable without a key. Two
-    /// productions never take this shape: a tracking standby stamps
+    /// The pulled checkpoint claims its source owns the field at a
+    /// tick not ahead of this run's own — the replayable shape:
+    /// `/checkpoint` is public and freely fetchable, so every
+    /// field-owning document an endpoint serves may simply be one of
+    /// this run's own answers replayed — verbatim, stale, or bumped a
+    /// few ticks ahead to wear the successor shape — and the keyed
+    /// proof the pull already passed attests the document, not the
+    /// endpoint's right to stand down this run. Two productions never
+    /// take this shape: a tracking standby stamps
     /// `source_owns_field: false`, and a successor that already owns
     /// the field continues this run's line strictly ahead of it — the
-    /// one owner document a key-attested pull may accept, the proof
-    /// being what separates it from the replayed bump.
+    /// one owner document the verify accepts.
     OwnDocument {
         /// The tick the pulled checkpoint claims.
         pulled: Tick,
@@ -2292,11 +2322,11 @@ enum AnnouncedCheckpointError {
 
 /// Whether one checkpoint pulled from an announced demotion hint
 /// proves the hinted endpoint serves this run's continuation — the
-/// demote-side half of the `?peer=` hardening. The serving side
-/// cannot tell the puller's monitor port from any other same-IP port
-/// a connection claims, so the recorded hint is trusted only after
-/// the endpoint's own checkpoint answers as this line's successor
-/// would: a readable format, this run's generation — the line's
+/// demote-side half of the `?peer=` hardening. The verify runs only
+/// on a keyed pull whose `line_proof` already attested the answer, so
+/// every document reaching these checks carries a real peer's
+/// signature — what remains is whether the document is a successor's:
+/// a readable format, this run's generation — the line's
 /// tick-domain identity, which a tracking peer adopts verbatim on
 /// every apply and a reinitialized successor keeps across the
 /// fingerprint crossing — and a tick no further ahead of this run's
@@ -2310,22 +2340,17 @@ enum AnnouncedCheckpointError {
 /// behind this run's tick is no rejection either — a lagging
 /// successor is still this line, and the demoted peer's pulls simply
 /// reconverge it. One document shape is refused outright: a
-/// field-owning source — the exact stamp this run's own
-/// `/checkpoint` answers, which being public and unauthenticated any
-/// endpoint can replay. At or behind this run's tick the replayed
-/// document is verbatim or stale; bumped a few ticks ahead it takes
-/// the honest successor's shape, which an unproven pull cannot tell
-/// from the bump — so `key_attested`, the keyed `line_proof`'s
-/// verdict on this pull, gates the strictly-ahead owner document
-/// while every unproven field-owning document refuses. A real
-/// tracking peer's checkpoint never needs the shape — a standby
+/// field-owning source not ahead of this run's tick — the stamp this
+/// run's own `/checkpoint` answers, which being public any endpoint
+/// can relay or replay; the signature attests the document, and the
+/// document proves nothing about the endpoint being a successor. A
+/// real tracking peer's checkpoint never takes the shape — a standby
 /// stamps `source_owns_field: false` — and a successor that already
-/// owns the field serves this line strictly ahead under a proof only
-/// a key-holding peer produces.
+/// owns the field serves this line strictly ahead, the one owner
+/// document a signed pull may adopt.
 fn verify_announced_checkpoint(
     pulled: &Checkpoint,
     own: &Checkpoint,
-    key_attested: bool,
 ) -> Result<(), AnnouncedCheckpointError> {
     if !SUPPORTED_FORMAT_VERSIONS.contains(&pulled.format_version) {
         return Err(AnnouncedCheckpointError::UnreadableVersion {
@@ -2341,7 +2366,7 @@ fn verify_announced_checkpoint(
             own: own.tick,
         });
     }
-    if pulled.source_owns_field == Some(true) && (pulled.tick.0 <= own.tick.0 || !key_attested) {
+    if pulled.source_owns_field == Some(true) && pulled.tick.0 <= own.tick.0 {
         return Err(AnnouncedCheckpointError::OwnDocument {
             pulled: pulled.tick,
             own: own.tick,
@@ -3086,10 +3111,11 @@ mod tests {
 
     /// The demote-side half of the `?peer=` hardening at the document
     /// level: the checkpoint pulled to prove an announced hint must be
-    /// this line's continuation — readable format, this run's model
-    /// fingerprint and generation, and a tick within the honest
-    /// successor skew — or the hint proves nothing and the demotion
-    /// refuses.
+    /// this line's continuation — readable format, this run's
+    /// generation, and a tick within the honest successor skew — or
+    /// the hint proves nothing and the demotion refuses. The checks
+    /// run on a keyed pull's signed answer; the proof's verdict is
+    /// the caller's to combine with them.
     #[test]
     fn verify_announced_checkpoint_accepts_only_this_lines_continuation() {
         let checkpoint = || Checkpoint {
@@ -3113,58 +3139,38 @@ mod tests {
         // few ticks ahead inside the skew window, and far behind — a
         // lagging successor is still this line. None of them stamps
         // field ownership, which a tracking peer's checkpoint never
-        // claims — and none needs the pull's key attestation either.
+        // claims.
         for ahead in [0, 1, MAX_ANNOUNCED_AHEAD] {
             let mut pulled = checkpoint();
             pulled.tick = Tick(own.tick.0 + ahead);
-            for attested in [false, true] {
-                assert_eq!(verify_announced_checkpoint(&pulled, &own, attested), Ok(()));
-            }
+            assert_eq!(verify_announced_checkpoint(&pulled, &own), Ok(()));
         }
         let mut lagging = checkpoint();
         lagging.tick = Tick(3);
-        assert_eq!(verify_announced_checkpoint(&lagging, &own, false), Ok(()));
+        assert_eq!(verify_announced_checkpoint(&lagging, &own), Ok(()));
         // A successor that already owns the field is this line's
-        // continuation only strictly ahead of the run it replaces —
-        // and only when the pull proved the document under the pair's
-        // key. Every document this run's own `/checkpoint` answers
-        // takes that same field-owning shape, so on an unproven pull
-        // even a few ticks ahead it may just be the replayed answer
-        // with its tick bumped — the `demote-verify-own-document-
-        // check-bypassed-by-tick-bump` reproduction — which the
-        // demotion refuses.
+        // continuation only strictly ahead of the run it replaces.
+        // Every document this run's own `/checkpoint` answers takes
+        // that same field-owning shape at or behind this run's tick —
+        // verbatim, stale, or bumped into the honest skew window like
+        // the `demote-verify-own-document-check-bypassed-by-tick-bump`
+        // reproduction — so only the strictly-ahead owner document
+        // verifies.
         let mut owner_ahead = checkpoint();
         owner_ahead.source_owns_field = Some(true);
         owner_ahead.tick = Tick(own.tick.0 + 1);
-        assert_eq!(
-            verify_announced_checkpoint(&owner_ahead, &own, true),
-            Ok(())
-        );
-        for ahead in [1, 10, MAX_ANNOUNCED_AHEAD] {
-            let mut bumped = checkpoint();
-            bumped.source_owns_field = Some(true);
-            bumped.tick = Tick(own.tick.0 + ahead);
-            assert_eq!(
-                verify_announced_checkpoint(&bumped, &own, false),
-                Err(AnnouncedCheckpointError::OwnDocument {
-                    pulled: bumped.tick,
-                    own: own.tick,
-                })
-            );
-        }
+        assert_eq!(verify_announced_checkpoint(&owner_ahead, &own), Ok(()));
         for lag in [0, 1, 50] {
             let mut replay = checkpoint();
             replay.source_owns_field = Some(true);
             replay.tick = Tick(own.tick.0 - lag);
-            for attested in [false, true] {
-                assert_eq!(
-                    verify_announced_checkpoint(&replay, &own, attested),
-                    Err(AnnouncedCheckpointError::OwnDocument {
-                        pulled: replay.tick,
-                        own: own.tick,
-                    })
-                );
-            }
+            assert_eq!(
+                verify_announced_checkpoint(&replay, &own),
+                Err(AnnouncedCheckpointError::OwnDocument {
+                    pulled: replay.tick,
+                    own: own.tick,
+                })
+            );
         }
         // The reproduction verbatim: the victim's own checkpoint
         // document served back to it — stamped field-owning at the
@@ -3172,7 +3178,7 @@ mod tests {
         let mut verbatim = checkpoint();
         verbatim.source_owns_field = Some(true);
         assert_eq!(
-            verify_announced_checkpoint(&verbatim, &own, false),
+            verify_announced_checkpoint(&verbatim, &own),
             Err(AnnouncedCheckpointError::OwnDocument {
                 pulled: own.tick,
                 own: own.tick,
@@ -3184,7 +3190,7 @@ mod tests {
         // demote-side check lets the crossing through.
         let mut revised = checkpoint();
         revised.model_fingerprint = Some(dcs_core::ModelFingerprint(8));
-        assert_eq!(verify_announced_checkpoint(&revised, &own, false), Ok(()));
+        assert_eq!(verify_announced_checkpoint(&revised, &own), Ok(()));
         // An unidentified line — both unminted — still verifies on
         // generation and tick: the unminted test/legacy shape.
         let mut unminted_own = checkpoint();
@@ -3193,7 +3199,7 @@ mod tests {
         let mut pulled = unminted_own.clone();
         pulled.tick = Tick(101);
         assert_eq!(
-            verify_announced_checkpoint(&pulled, &unminted_own, false),
+            verify_announced_checkpoint(&pulled, &unminted_own),
             Ok(())
         );
 
@@ -3202,7 +3208,7 @@ mod tests {
         let mut forged = checkpoint();
         forged.tick = Tick(99999);
         assert_eq!(
-            verify_announced_checkpoint(&forged, &own, false),
+            verify_announced_checkpoint(&forged, &own),
             Err(AnnouncedCheckpointError::Ahead {
                 pulled: Tick(99999),
                 own: Tick(100),
@@ -3211,7 +3217,7 @@ mod tests {
         let mut just_past = checkpoint();
         just_past.tick = Tick(own.tick.0 + MAX_ANNOUNCED_AHEAD + 1);
         assert!(matches!(
-            verify_announced_checkpoint(&just_past, &own, false),
+            verify_announced_checkpoint(&just_past, &own),
             Err(AnnouncedCheckpointError::Ahead { .. })
         ));
         // A foreign generation — a restarted or unrelated stream, and
@@ -3220,20 +3226,20 @@ mod tests {
         let mut restarted = checkpoint();
         restarted.generation = Some(12);
         assert_eq!(
-            verify_announced_checkpoint(&restarted, &own, false),
+            verify_announced_checkpoint(&restarted, &own),
             Err(AnnouncedCheckpointError::ForeignGeneration)
         );
         let mut identified = checkpoint();
         identified.model_fingerprint = None;
         identified.generation = Some(11);
         assert_eq!(
-            verify_announced_checkpoint(&identified, &unminted_own, false),
+            verify_announced_checkpoint(&identified, &unminted_own),
             Err(AnnouncedCheckpointError::ForeignGeneration)
         );
         let mut unreadable = checkpoint();
         unreadable.format_version = 999;
         assert_eq!(
-            verify_announced_checkpoint(&unreadable, &own, false),
+            verify_announced_checkpoint(&unreadable, &own),
             Err(AnnouncedCheckpointError::UnreadableVersion { found: 999 })
         );
     }

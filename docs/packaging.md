@@ -155,8 +155,12 @@ active's monitoring address (`--standby ctrl-a:8080`), scans
 output-quiesced behind its write gate, and promotes through
 `POST /promote` on its own monitor — or self-promotes with
 `--auto-promote N`. Launching both peers with the same
-`--pair-token TOKEN` adds the keyed tracking contract: announced-source
-demotions and every checkpoint the adopted source serves must carry the
+`--pair-token TOKEN` carries the keyed tracking contract every real
+redundant deployment declares: it is the only way the launched active's
+announced-source demotion can work — an unkeyed run cannot authenticate
+an announced endpoint, so an announced-only demotion refuses
+`no_tracking_source` — and under it the demotion's verify pull plus
+every checkpoint the adopted source serves must carry the
 token-keyed `line_proof`, so an endpoint that merely replays or
 fabricates the line's checkpoints can neither arm a demotion nor feed
 the demoted peer forged state. In a cross-host rig the same commands hold with the
