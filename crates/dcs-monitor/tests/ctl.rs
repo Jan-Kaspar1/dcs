@@ -403,6 +403,7 @@ fn read_subcommands_roundtrip_the_served_payloads() {
                 role: Role::Active,
                 tick: Tick(2),
                 sync: None,
+                field_claim: None,
             }
         );
 
