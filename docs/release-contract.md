@@ -199,7 +199,12 @@ operator-action record that survives the process lifetime. Each
 declared path must live on writable deployment storage — a named
 volume in the checked-in rig definition — while the model and
 dynamics mounts stay read-only; a consumer without durable storage
-omits both fields, and the flags are then absent. The shape is a
+omits both fields, and the flags are then absent. What the shape
+deliberately never records is the pair's `--pair-token`: the shared
+tracking secret the keyed announced-source contract runs on is a
+deployment secret, carried on the invocation alone — the reference
+rig definition shows the flag with a demonstration value — never in
+the checked-in declaration. The shape is a
 recorded contract, not yet a
 schema-enforced document — `reference-plant/deploy/manifest.json`
 instantiates it, `reference-plant/deploy/compose.yaml` instantiates

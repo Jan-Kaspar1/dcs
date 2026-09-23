@@ -126,6 +126,15 @@ DEFAULT_CONFIG = {
     'plant_owner_tokens': {'active': 424243, 'standby': 424244,
                            'revised': 424245, 'foreign': 424246,
                            'driven': 424247},
+    # The pair's shared tracking secret: the announced-source contract
+    # is keyed-only, so the rig's redundant pair — and the revised peer
+    # a model-revision roll promotes — carries the same --pair-token,
+    # letting a demoted owner's verify pull demand the keyed line_proof
+    # only a peer holding the token stamps. A scenario endpoint that
+    # merely replays or forges the line's public checkpoints — the
+    # bridge-placed forge or interposer — holds no token and arms
+    # nothing; the labeled foreign peer stays unkeyed on purpose.
+    'pair_token': 'dcs-qa-pair',
     # The rig bridge-to-host reachability rule the qax-20260922-001,
     # qax-20260922-005, and qax-20260923-001 exploration runs
     # demonstrated, recorded as the lane's endpoint-placement contract:
@@ -1227,7 +1236,13 @@ def start_revised_controller(cfg, record, run_dir, model, active,
            '--revised',
            '--scan-ms', '100', '--listen', '0.0.0.0:8082',
            '--state-file', CONTAINER_STATE_FILE,
-           '--journal-file', CONTAINER_JOURNAL_FILE)
+           '--journal-file', CONTAINER_JOURNAL_FILE,
+           # The roll demotes the field owner toward this peer's
+           # announced address — under the keyed announced-source
+           # contract only a peer carrying the pair's token can sign
+           # the line_proof the demoted peer's verify pull demands.
+           *(['--pair-token', str(cfg['pair_token'])]
+             if cfg.get('pair_token') else []))
     timeline('model-revision-up', container
              + ' running the revised model')
     return dict(info, container=container)
@@ -1533,6 +1548,12 @@ def _start_rig(cfg, record, src, run_dir, timeline):
             time.sleep(1)
     else:
         raise RuntimeError('plant listener never bound')
+    # The announced-source contract is keyed-only: both pair members
+    # carry the run config's shared --pair-token so a demoted owner's
+    # verify pull can demand the keyed line_proof. An empty token runs
+    # the rig unkeyed — where every announced-only demotion refuses.
+    pair_flags = (['--pair-token', str(cfg['pair_token'])]
+                  if cfg.get('pair_token') else [])
     docker(*_docker_run_args(cfg, run_id, prefix + '-a'),
            '--network', net,
            '-p', '127.0.0.1:' + str(cfg['active_port']) + ':8080',
@@ -1545,7 +1566,8 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            '--owner-token', str(tokens['active']),
            '--scan-ms', '100', '--listen', '0.0.0.0:8080',
            '--state-file', CONTAINER_STATE_FILE,
-           '--journal-file', CONTAINER_JOURNAL_FILE)
+           '--journal-file', CONTAINER_JOURNAL_FILE,
+           *pair_flags)
     docker(*_docker_run_args(cfg, run_id, prefix + '-b'),
            '--network', net,
            '-p', '127.0.0.1:' + str(cfg['standby_port']) + ':8081',
@@ -1560,10 +1582,12 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            '--auto-promote', str(cfg['failover_misses']),
            '--scan-ms', '100', '--listen', '0.0.0.0:8081',
            '--state-file', CONTAINER_STATE_FILE,
-           '--journal-file', CONTAINER_JOURNAL_FILE)
+           '--journal-file', CONTAINER_JOURNAL_FILE,
+           *pair_flags)
     timeline('rig-up', 'plant + controller pair on ' + net
              + ' (owner tokens active=' + str(tokens['active'])
-             + ', standby=' + str(tokens['standby']) + ')')
+             + ', standby=' + str(tokens['standby'])
+             + (', pair-keyed' if pair_flags else ', unkeyed') + ')')
 
 
 def _wait_monitor(cfg, timeline):

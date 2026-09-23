@@ -553,7 +553,10 @@ those fields out of `deploy/manifest.json` and spawns
 `dcs-plant-server` plus two released `dcs-controller --driven --remote`
 instances wired exactly as the manifest declares — the standby's
 `--standby` flag at the peer it names, each controller's declared
-`--state-file`/`--journal-file` carried at runner-owned scratch paths.
+`--state-file`/`--journal-file` carried at runner-owned scratch paths —
+plus the shared `--pair-token` the keyed announced-source contract
+runs on, the deployment secret the manifest deliberately does not
+record (the checked-in rig definition carries the demonstration value).
 The leg converges the standby to `tracking` through the served `GET
 /role`, drives scans through `POST /scan` on each peer keeping their
 served snapshots identical, submits a kind-declared command the owner
