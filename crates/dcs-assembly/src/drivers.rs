@@ -28,8 +28,9 @@
 use crate::assembly::{neutral, resolve};
 use crate::error::AssemblyError;
 use dcs_core::{
-    CyclicIoDriver, DriverDiagnostics, ExchangeDiagnostics, IoDriver, IoError, LinkState, PointId,
-    Quality, QualityReason, Sample, StateError, StateMap, Tick, Value, ValueKind,
+    CyclicIoDriver, DriverDiagnostics, ExchangeDiagnostics, FieldClaim, IoDriver, IoError,
+    LinkState, PointId, Quality, QualityReason, Sample, StateError, StateMap, Tick, Value,
+    ValueKind,
 };
 use dcs_ethercat::{AttachError, BusPoint, ChannelDecl, EthercatBuses};
 use dcs_model::{Channel, DeviceId, Direction, PlantModel};
@@ -354,6 +355,18 @@ pub type EnsureHook = Arc<dyn Fn(u64) -> Result<bool, StepError> + Send + Sync>;
 /// [`ClaimHook`].
 pub type StartupClaimHook = Arc<dyn Fn(u64) -> Result<bool, StepError> + Send + Sync>;
 
+/// The read-only half of [`ClaimHook`] — the per-backend half of
+/// [`FanoutDriver::probe_field_claim`]: reports the verdict a mutation
+/// from this attachment would meet, without mutating —
+/// [`FieldClaim::Held`] while an owner stands (this attachment's own
+/// hold or a standing owner's, which the report need not distinguish),
+/// [`FieldClaim::Unclaimed`] while no claim stands. `Err` reports the
+/// backend could not be asked — no observation, so the last one
+/// stands. The probe asserts, joins, and releases nothing: an
+/// observation cannot seize the field it reports. `None` on kinds
+/// whose arbitration cannot be observed without taking it.
+pub type ProbeHook = Arc<dyn Fn() -> Result<FieldClaim, StepError> + Send + Sync>;
+
 /// A self-contained device backend: the point-facing driver plus the
 /// step hook advancing its simulated plant, when it has one.
 pub struct DeviceBackend {
@@ -386,6 +399,13 @@ pub struct DeviceBackend {
     /// distinguish live holders; [`FanoutDriver`] falls back to the
     /// unconditional `claim` for them.
     pub startup_claim: Option<StartupClaimHook>,
+    /// The claim's observational counterpart — the read-only probe a
+    /// peer runs once per scan to learn the field's write-ownership
+    /// state without disturbing it: `held` while an owner stands,
+    /// `unclaimed` while none does. `None` on kinds whose arbitration
+    /// cannot be observed without taking it — for them the served
+    /// report carries no claim observation rather than a guessed one.
+    pub probe: Option<ProbeHook>,
     /// The backend's concrete driver, for typed inspection through
     /// [`FanoutDriver::inspect`] — e.g. a scripted device's
     /// recorded-write log. `None` when the backend exposes nothing
@@ -648,6 +668,7 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
     let releasing = Arc::clone(&remote);
     let ensuring = Arc::clone(&remote);
     let starting = Arc::clone(&remote);
+    let probing = Arc::clone(&remote);
     let inspect: Arc<dyn Any + Send + Sync> = remote.clone();
     let device = spec.id.0;
     Ok(DeviceDriver::Backend(DeviceBackend {
@@ -703,6 +724,16 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                     detail: error.to_string(),
                 }),
             }
+        })),
+        // The claim's observational counterpart: the plant server's
+        // `probe_writer` — the verdict a mutation from this attachment
+        // would meet, without mutating. An observation cannot seize
+        // the field it reports, so a peer may ask every scan.
+        probe: Some(Arc::new(move || {
+            probing.probe_writer().map_err(|error| StepError::Backend {
+                backend: format!("device {device}"),
+                detail: error.to_string(),
+            })
         })),
         inspect: Some(inspect),
         field_facing: true,
@@ -805,6 +836,10 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         // claim could consult; the startup path falls back to the
         // unconditional grant.
         startup_claim: None,
+        // Nor a read-only claim observation — the device claim binds
+        // to the connection, so "unclaimed" never outlives a holder's
+        // link and there is no probe to ask.
+        probe: None,
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -906,6 +941,8 @@ fn sim_cyclic_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError>
         // As `sim-bus`: no live-holder query for the startup claim;
         // the startup path falls back to the unconditional grant.
         startup_claim: None,
+        // As `sim-bus`: no read-only claim observation either.
+        probe: None,
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -1000,6 +1037,7 @@ fn ethercat_backend(
         release: None,
         ensure: None,
         startup_claim: None,
+        probe: None,
         inspect: Some(Arc::clone(device.master()) as Arc<dyn Any + Send + Sync>),
         field_facing: true,
     }))
@@ -1194,6 +1232,7 @@ fn scripted_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         release: None,
         ensure: None,
         startup_claim: None,
+        probe: None,
         inspect: Some(inspect),
         field_facing: false,
     }))
@@ -1218,6 +1257,9 @@ struct Backend {
     /// [`DeviceBackend::startup_claim`] carried into the built driver —
     /// the conditional grant a launched controller's activation asserts.
     startup_claim: Option<StartupClaimHook>,
+    /// [`DeviceBackend::probe`] carried into the built driver — the
+    /// read-only claim-state observation a peer reports.
+    probe: Option<ProbeHook>,
     /// The factory-installed typed inspection handle, if any.
     inspect: Option<Arc<dyn Any + Send + Sync>>,
     /// [`DeviceBackend::field_facing`] carried into the built driver —
@@ -1288,6 +1330,7 @@ impl DriverPlan {
                 release: None,
                 ensure: None,
                 startup_claim: None,
+                probe: None,
                 inspect: None,
                 field_facing: false,
             });
@@ -1306,6 +1349,7 @@ impl DriverPlan {
                 release: planned.backend.release,
                 ensure: planned.backend.ensure,
                 startup_claim: planned.backend.startup_claim,
+                probe: planned.backend.probe,
                 inspect: planned.backend.inspect,
                 field_facing: planned.backend.field_facing,
             });
