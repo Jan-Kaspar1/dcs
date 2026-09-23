@@ -33,7 +33,17 @@ declares:
   container path must be covered by a read-write mount and carried as
   the `--state-file`/`--journal-file` flag argument; a field the
   manifest omits means the flag is absent, and a writable mount or
-  flag the manifest does not declare diverges the same way.
+  flag the manifest does not declare diverges the same way;
+- `topology` — the optional named-pair index (decision 47's deferred
+  plant-index artifact, the declaration a `?pair=` overview URL is
+  generated from): each declared pair names two distinct member
+  controllers, memberships stay disjoint across pairs, and the
+  pair's wiring closes inside it — exactly one member tracks the
+  other — while a standby edge into a declared pair belongs to its
+  members. A member the manifest does not declare, a shared or
+  duplicated member, or a declared pair whose wiring does not close
+  diverges the same way; a manifest without the section is the
+  single-pair default, unchanged.
 
 The definition is parsed through `docker compose config --format json`
 when a docker CLI is available — which also statically validates the
@@ -461,6 +471,102 @@ def main():
             f"manifest standby {controller['standby']!r} does not name a "
             f"declared controller at its declared listen port",
         )
+
+    # The optional topology section: the deployment's declared
+    # named-pair index — the artifact a `?pair=` overview URL is
+    # generated from (decision 47's deferred plant index), additive
+    # over the single-pair default. Each named pair lists two
+    # distinct declared controllers, memberships stay disjoint
+    # across pairs, and the pair's wiring closes inside it: exactly
+    # one member tracks the other. A standby edge into a declared
+    # pair from a controller outside it diverges the same way.
+    pair_of = {}
+    topology = manifest.get("topology")
+    if topology is not None:
+        pairs = topology.get("pairs") if isinstance(topology, dict) else None
+        expect(
+            isinstance(pairs, list) and bool(pairs),
+            f"manifest topology {topology!r} must declare a nonempty "
+            f"pairs list",
+        )
+        if isinstance(pairs, list):
+            named = set()
+            for pair in pairs:
+                name = pair.get("name") if isinstance(pair, dict) else None
+                members = (
+                    pair.get("members") if isinstance(pair, dict) else None
+                )
+                label = name if isinstance(name, str) and name else repr(pair)
+                well_formed = (
+                    isinstance(name, str)
+                    and bool(name)
+                    and isinstance(members, list)
+                    and len(members) == 2
+                    and all(isinstance(member, str) for member in members)
+                    and members[0] != members[1]
+                )
+                expect(
+                    well_formed,
+                    f"topology pair {label} must declare a name and two "
+                    f"distinct member controllers",
+                )
+                if not well_formed:
+                    continue
+                expect(
+                    name not in named,
+                    f"topology pair name {name!r} is declared twice",
+                )
+                named.add(name)
+                for member in members:
+                    expect(
+                        member in declared,
+                        f"topology pair {name!r} member {member!r} "
+                        f"names no declared controller",
+                    )
+                    expect(
+                        member not in pair_of,
+                        f"{member} belongs to topology pairs "
+                        f"{pair_of.get(member)!r} and {name!r}",
+                    )
+                    pair_of[member] = name
+                trackers = [
+                    member
+                    for member in members
+                    if member in declared and "standby" in declared[member]
+                ]
+                expect(
+                    len(trackers) == 1,
+                    f"topology pair {name!r} carries {len(trackers)} "
+                    f"standby declarations — a pair is one duty "
+                    f"controller tracked by one standby",
+                )
+                if len(trackers) == 1:
+                    tracker = trackers[0]
+                    peer = declared[tracker]["standby"].rsplit(":", 1)[0]
+                    other = (
+                        members[1] if members[0] == tracker else members[0]
+                    )
+                    expect(
+                        peer == other,
+                        f"topology pair {name!r} member {tracker} tracks "
+                        f"{peer!r} outside the pair — a pair's wiring "
+                        f"closes inside it",
+                    )
+
+    # A standby declaration aimed at a declared pair belongs to that
+    # pair's members — a tracker outside the topology the deployment
+    # declares.
+    for controller in manifest["controllers"]:
+        standby = controller.get("standby")
+        if standby is None:
+            continue
+        owner = pair_of.get(standby.rsplit(":", 1)[0])
+        if owner is not None:
+            expect(
+                pair_of.get(controller["name"]) == owner,
+                f"{controller['name']} tracks {standby!r} inside "
+                f"topology pair {owner!r} it does not belong to",
+            )
 
     if mismatches:
         die(
