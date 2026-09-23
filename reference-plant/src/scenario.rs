@@ -31,8 +31,15 @@
 //! thermal and moisture contacts failing safe on bad quality and
 //! disconnection while each contact's own cause alarm annunciates on
 //! the same reading, the out-of-service declaration suppressing a
-//! faulted pump's alarm, and the restore returning the pump to the
-//! group's roster.
+//! faulted pump's alarm, the restore returning the pump to the
+//! group's roster — and, closing the run, the level-derived
+//! protection cause tripping a fresh hand command on an
+//! all-instruments-Bad measurement while the backup-serving alarm
+//! names the failed source. The level cause runs last because the
+//! simulated dynamics propagate `Bad` quality around the level →
+//! well-full → inflow → integrator loop, freezing the process model
+//! itself once both instruments are untrusted; the recovery half of
+//! the contract lives in the composed fixture's test.
 
 use crate::station::{points, StationLayout};
 use serde_json::{json, Map, Value};
@@ -529,6 +536,37 @@ pub fn scenario(layout: &StationLayout) -> Value {
                     (pump1.run.0, json!({"bool": true})),
                 ]),
             ),
+            // Issue #826's reproduction exactly: a Bad-quality moisture
+            // contact — value clean, quality untrusted — trips the
+            // protection interlock and releases the running hand
+            // command while its own cause alarm annunciates on the
+            // same reading the command path tripped on.
+            leg(
+                "moisture-bad-quality-trips-hand",
+                vec![],
+                vec![],
+                vec![inject_bad(points::moisture(1).0)],
+                5,
+                expect(&[
+                    (pump1.cmd.0, json!({"bool": false})),
+                    (pump1.run.0, json!({"bool": false})),
+                    (pump1.protect_tripped.0, json!({"bool": true})),
+                    (pump1.moisture_alarm.alarm.0, json!({"bool": true})),
+                    (pump1.moisture_alarm.unacknowledged.0, json!({"bool": true})),
+                ]),
+            ),
+            leg(
+                "moisture-cleared-hand-resumes",
+                vec![],
+                vec![],
+                vec![clear(points::moisture(1).0)],
+                18,
+                expect(&[
+                    (pump1.protect_tripped.0, json!({"bool": false})),
+                    (pump1.cmd.0, json!({"bool": true})),
+                    (pump1.run.0, json!({"bool": true})),
+                ]),
+            ),
             // Out of service: the interlock's permissive drops and the
             // guard cuts the pump's command path — the hand request no
             // longer reaches the motor — and the pump stays out of the
@@ -622,6 +660,75 @@ pub fn scenario(layout: &StationLayout) -> Value {
                     (pump1.avail.0, json!({"bool": true})),
                     (duty, json!({"int": 1})),
                 ]),
+            ),
+            // Issue #826's fourth protection cause, driven last
+            // because the run cannot recover from it: the simulated
+            // dynamics propagate a `Bad` level around the
+            // level → well-full → inflow → integrator loop, so an
+            // all-instruments-Bad injection freezes the process model
+            // even after the field fault clears — no resume leg can
+            // follow. A fresh hand demand stands the command up first:
+            leg(
+                "hand-requested-for-level-leg",
+                vec![write(pump1.mode.0, true), write(pump1.hand.0, true)],
+                vec![json!("accepted"), json!("accepted")],
+                vec![],
+                5,
+                expect(&[
+                    (pump1.mode.0, json!({"bool": true})),
+                    (pump1.cmd.0, json!({"bool": true})),
+                    (pump1.run.0, json!({"bool": true})),
+                ]),
+            ),
+            // The level-derived protection cause: both instruments Bad
+            // leaves the failover serving an untrusted measurement —
+            // the interlock's `in` trips the command exactly as an
+            // asserted contact does — and the measurement path's own
+            // managed annunciation, the backup-serving alarm, stands on
+            // the same reading. The protective stop is never unnamed:
+            // with the pump held in manual the `none-available`
+            // annunciation stays designed-suppressed, so this alarm is
+            // what the operator sees.
+            leg(
+                "level-bad-quality-trips-hand",
+                vec![],
+                vec![],
+                vec![
+                    inject_bad(points::LEVEL_PRIMARY.0),
+                    inject_bad(points::LEVEL_BACKUP.0),
+                ],
+                7,
+                expect(&[
+                    (pump1.cmd.0, json!({"bool": false})),
+                    (pump1.run.0, json!({"bool": false})),
+                    (pump1.protect_tripped.0, json!({"bool": true})),
+                    (pump1.protections_ok.0, json!({"bool": false})),
+                    (backup_active, json!({"bool": true})),
+                    (backup_alarm.alarm.0, json!({"bool": true})),
+                    (backup_alarm.unacknowledged.0, json!({"bool": true})),
+                ]),
+            ),
+            // The re-latched backup alarm clears on the receipted ack,
+            // the same lifecycle the earlier failover leg exercised —
+            // the managed latch is controller-side, so the wedged
+            // field state cannot hold it open.
+            leg(
+                "backup-alarm-acknowledged-again",
+                vec![write(backup_alarm.ack.0, true)],
+                vec![json!("accepted")],
+                vec![],
+                1,
+                expect(&[
+                    (backup_alarm.unacknowledged.0, json!({"bool": false})),
+                ]),
+            ),
+            leg(
+                "backup-ack-released-again",
+                vec![write(backup_alarm.ack.0, false)],
+                vec![json!("accepted")],
+                vec![],
+                1,
+                expect(&[]),
             ),
         ],
     })
