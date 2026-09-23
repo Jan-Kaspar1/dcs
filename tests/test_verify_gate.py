@@ -1,12 +1,60 @@
-"""scripts/verify.py build-slot gate: the lock primitive must acquire,
-exclude, and release a slot on the running platform (fcntl on POSIX,
-msvcrt byte-range locking on Windows)."""
+"""scripts/verify.py gates: phase timing and build-slot behavior."""
+import contextlib
+import io
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts import verify
+
+
+class PhaseTimingTests(unittest.TestCase):
+    def test_run_phase_logs_elapsed_time_and_preserves_command(self):
+        output = io.StringIO()
+        root = Path(".")
+        env = {"CARGO_BUILD_JOBS": "4"}
+        command = ["cargo", "test", "--workspace", "--locked"]
+        with (
+            patch.object(verify.time, "monotonic", side_effect=(3.0, 4.25)),
+            patch.object(verify.subprocess, "run") as run,
+            contextlib.redirect_stdout(output),
+        ):
+            elapsed = verify.run_phase("rust-tests", command, root, env)
+
+        self.assertEqual(elapsed, 1.25)
+        run.assert_called_once_with(command, cwd=root, env=env, check=True)
+        self.assertIn("phase=rust-tests status=passed elapsed_s=1.250", output.getvalue())
+
+    def test_run_phase_logs_failure_and_propagates_it(self):
+        output = io.StringIO()
+        error = subprocess.CalledProcessError(1, ["cargo", "clippy"])
+        with (
+            patch.object(verify.time, "monotonic", side_effect=(5.0, 6.5)),
+            patch.object(verify.subprocess, "run", side_effect=error),
+            contextlib.redirect_stdout(output),
+        ):
+            with self.assertRaises(subprocess.CalledProcessError):
+                verify.run_phase("rust-clippy", ["cargo", "clippy"], Path("."), {})
+
+        self.assertIn("phase=rust-clippy status=failed elapsed_s=1.500", output.getvalue())
+
+    def test_ci_phase_commands_match_required_checks(self):
+        self.assertEqual(verify.phase_command("rust-format"), [
+            "cargo", "fmt", "--all", "--", "--check",
+        ])
+        self.assertEqual(verify.phase_command("rust-clippy"), [
+            "cargo", "clippy", "--workspace", "--all-targets", "--locked",
+            "--", "-D", "warnings",
+        ])
+        self.assertEqual(verify.phase_command("rust-tests"), [
+            "cargo", "test", "--workspace", "--locked",
+        ])
+        self.assertEqual(verify.phase_command("supervisor-tests"), [
+            verify.sys.executable, "scripts/run_tests.py", "--workers", "4",
+        ])
 
 
 class BuildSlotTests(unittest.TestCase):
@@ -64,8 +112,10 @@ class BuildSlotTests(unittest.TestCase):
             path = Path(tmp) / 'slot-0.lock'
             held, rival, reacquired = (path.open('a') for _ in range(3))
             try:
-                with patch('os.name', 'nt'), \
-                        patch.dict(sys.modules, {'msvcrt': fake}):
+                with (
+                    patch('os.name', 'nt'),
+                    patch.dict(sys.modules, {'msvcrt': fake}),
+                ):
                     spec.loader.exec_module(mod)
                     self.assertTrue(mod._try_lock(held))
                     self.assertFalse(mod._try_lock(rival))
@@ -77,5 +127,5 @@ class BuildSlotTests(unittest.TestCase):
                 reacquired.close()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()
