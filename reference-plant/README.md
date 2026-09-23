@@ -295,6 +295,22 @@ ci/monitor_starvation.py  the pair contract's monitor-starvation leg
                        stay fenced, and closing the set restores
                        driven scans and a receipted command with the
                        pair's roles unchanged
+ci/commissioning.py    the pair contract's commissioning/handover
+                       record leg — the declared commissioning record
+                       materialized from one deterministic driven run
+                       on the deployed pair: the field census audited
+                       against the declared channel set (I/O checkout
+                       record), the measurement ladder and the
+                       receipted output loop (loop-check evidence),
+                       every managed alarm's declared record served
+                       verbatim on both peers (alarm rationalization
+                       sign-off), the documented demote/promote
+                       switch and restore, and the document set
+                       digested with each peer's fingerprint and
+                       durable files (documentation turnover) — the
+                       completeness audit failing a record missing
+                       any named artifact by name, two passes
+                       byte-identical
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
