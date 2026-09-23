@@ -498,7 +498,7 @@ fn failure_quality(error: IoError) -> Quality {
         IoError::Disconnected(_) | IoError::Timeout(_) | IoError::Fenced(_) => {
             Quality::Bad(QualityReason::CommunicationFault)
         }
-        IoError::UnknownPoint(_) | IoError::TypeMismatch { .. } => {
+        IoError::UnknownPoint(_) | IoError::TypeMismatch { .. } | IoError::InvalidValue { .. } => {
             Quality::Bad(QualityReason::ConfigurationFault)
         }
     }
