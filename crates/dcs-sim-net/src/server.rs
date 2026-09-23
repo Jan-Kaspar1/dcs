@@ -56,6 +56,30 @@ struct WriterClaim {
     /// set is fenced: its `write` and `step` requests are refused while
     /// the claim stands.
     holders: HashSet<u64>,
+    /// Whether a holder released this claim with `keep_claim` — the
+    /// demotion hand-off: the owner deliberately gave the field up, so
+    /// a successor's conditional `claim_writer_unless_held` may preempt
+    /// even while other attachments still hold the yielded token (a
+    /// mutation tool's lingering hold is not a live incumbent). A claim
+    /// no holder ever yielded — its owner still owns, or died without
+    /// releasing — keeps refusing the conditional grant while live
+    /// holders stand: a live unyielded claim is the field's own proof
+    /// an incumbent exists, and preempting it is the stale-image
+    /// takeover the conditional shape exists to refuse.
+    yielded: bool,
+    /// Whether the claim's owner is a controller peer rather than a
+    /// field tool — set at claim creation and upgraded whenever a
+    /// controller attachment joins the standing owner, so a claim a
+    /// controller stands behind always reads as one. The conditional
+    /// `claim_writer_unless_held` grant refuses only live unyielded
+    /// *controller* claims: a tool's hold is never an incumbent a peer
+    /// must defer to — the rogue `claim_writer` a peer's documented
+    /// promote recovery exists to preempt — where a live controller's
+    /// claim is the islanded run's stale-image takeover it must
+    /// refuse. Requests from builds predating the flag carry no marker
+    /// and read as `true` — an unmarked claim is treated as a
+    /// controller's, the conservative verdict.
+    controller: bool,
 }
 
 impl WriterClaim {
@@ -110,17 +134,27 @@ fn release_hold(writer: &Mutex<Option<WriterClaim>>, connection: u64) {
 /// second process reusing it, and the second case silently defeats the
 /// single-writer fencing a promotion relies on, so the grant reports
 /// the sharing rather than hiding it.
-fn grant_writer_claim(shared: &Shared, owner: u64, connection: u64) -> PlantResponse {
+fn grant_writer_claim(
+    shared: &Shared,
+    owner: u64,
+    connection: u64,
+    controller: bool,
+) -> PlantResponse {
     let mut writer = shared.writer.lock().unwrap();
-    grant_writer_claim_locked(&mut writer, owner, connection)
+    grant_writer_claim_locked(&mut writer, owner, connection, controller)
 }
 
 /// The locked half of [`grant_writer_claim`], also invoked from inside
-/// the conditional claim's guard once its refusal check passed.
+/// the conditional claim's guard once its refusal check passed. A
+/// same-owner join records `controller` too: once a controller
+/// attachment stands behind the claim it reads as a controller claim,
+/// so a token a tool raised and a controller adopted still refuses a
+/// peer's conditional preemption while the controller holds it live.
 fn grant_writer_claim_locked(
     writer: &mut Option<WriterClaim>,
     owner: u64,
     connection: u64,
+    controller: bool,
 ) -> PlantResponse {
     let shared_claim = writer
         .as_ref()
@@ -128,11 +162,14 @@ fn grant_writer_claim_locked(
     match writer.as_mut() {
         Some(claim) if claim.owner == owner => {
             claim.holders.insert(connection);
+            claim.controller |= controller;
         }
         _ => {
             *writer = Some(WriterClaim {
                 owner,
                 holders: HashSet::from([connection]),
+                yielded: false,
+                controller,
             });
         }
     }
@@ -270,42 +307,68 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
         PlantRequest::ListPoints => PlantResponse::Points {
             points: shared.driver.points(),
         },
-        PlantRequest::ClaimWriter { owner } => {
+        PlantRequest::ClaimWriter { owner, controller } => {
             // The grant preempts unconditionally: the promoted standby's
             // claim must beat the old owner's, wherever it still lives.
-            grant_writer_claim(shared, owner, connection)
+            grant_writer_claim(shared, owner, connection, controller)
         }
         PlantRequest::ClaimWriterUnlessHeld { owner } => {
-            // The startup grant: a launched controller takes the field
-            // from a dead owner — the claim's never-release rule leaves
-            // a crashed owner's token standing with an empty holder
-            // set, the exact recovery case — but never from a live
-            // incumbent. Preempting an owner still attached and writing
-            // is the stale-checkpoint takeover: the restarted run's
-            // older state would silently roll back commands the
-            // incumbent receipted and applied, so the request is
-            // refused and the incumbent keeps the field.
+            // The startup and orphan grant: a launched controller or an
+            // orphaned peer's promotion takes the field from a dead
+            // owner — the claim's never-release rule leaves a crashed
+            // owner's token standing with an empty holder set, the
+            // exact recovery case — and from a field tool's claim,
+            // which is never an incumbent a peer must defer to — but
+            // never from a live *controller's* unyielded claim.
+            // Preempting a controller still attached and writing is the
+            // stale-image takeover: the claimant's older state would
+            // silently roll back commands the incumbent receipted and
+            // applied, so the request is refused and the incumbent
+            // keeps the field. A granted claim is always recorded as a
+            // controller's — only a peer's takeover runs this grant.
             let mut writer = shared.writer.lock().unwrap();
             match writer.as_ref() {
-                Some(claim) if claim.owner != owner && !claim.holders.is_empty() => {
+                // The live-incumbent refusal: a different owner's
+                // *controller* claim with live holders and no yield
+                // mark is the field's own proof an incumbent still
+                // owns — preempting it is the stale-island takeover
+                // this grant exists to refuse. A yielded claim's owner
+                // deliberately demoted, and a tool's claim is no
+                // incumbent at all, so neither blocks the successor.
+                Some(claim)
+                    if claim.owner != owner
+                        && claim.controller
+                        && !claim.holders.is_empty()
+                        && !claim.yielded =>
+                {
                     PlantResponse::Error {
                         error: PlantError::Fenced {
-                            detail: "a live attachment holds the field's write-ownership \
+                            detail: "a live controller holds the field's write-ownership \
                                  claim"
                                 .to_string(),
                         },
                     }
                 }
-                _ => grant_writer_claim_locked(&mut writer, owner, connection),
+                _ => grant_writer_claim_locked(&mut writer, owner, connection, true),
             }
         }
-        PlantRequest::EnsureWriter { owner } => {
+        PlantRequest::EnsureWriter {
+            owner,
+            rebind,
+            controller,
+        } => {
             // The re-attach grant: the claim a reconnecting field owner
             // re-arms after a server restart dropped it. It is refused
             // while a *different* owner holds the field — a superseded
             // peer re-attaching cannot preempt the attachment that
-            // claimed during the outage. Joining the standing owner is
-            // flagged `ClaimedShared` exactly as `claim_writer` is.
+            // claimed during the outage. `rebind` joins this connection
+            // to the claim's holders — flagged `ClaimedShared` exactly
+            // as `claim_writer` is — while `rebind: false` only raises
+            // or confirms the claim *for* the token: the orphan cycle's
+            // probe, which keeps a released claim fencing the field
+            // without the probing attachment becoming a live holder a
+            // different owner's conditional claim would read as a live
+            // incumbent.
             let mut writer = shared.writer.lock().unwrap();
             match writer.as_mut() {
                 Some(claim) if claim.owner != owner => PlantResponse::Error {
@@ -314,8 +377,15 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
                     },
                 },
                 Some(claim) => {
-                    let shared_claim = claim.shared_with(owner, connection);
-                    claim.holders.insert(connection);
+                    let shared_claim = rebind && claim.shared_with(owner, connection);
+                    if rebind {
+                        claim.holders.insert(connection);
+                    }
+                    // A controller attachment asserting the standing
+                    // owner upgrades the marker: a claim a controller
+                    // stands behind reads as a controller claim even
+                    // where a tool raised it first.
+                    claim.controller |= controller;
                     if shared_claim {
                         PlantResponse::ClaimedShared { owner }
                     } else {
@@ -325,13 +395,19 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
                 None => {
                     *writer = Some(WriterClaim {
                         owner,
-                        holders: HashSet::from([connection]),
+                        holders: if rebind {
+                            HashSet::from([connection])
+                        } else {
+                            HashSet::new()
+                        },
+                        yielded: false,
+                        controller,
                     });
                     PlantResponse::Done
                 }
             }
         }
-        PlantRequest::ReleaseWriter => {
+        PlantRequest::ReleaseWriter { keep_claim } => {
             // The deliberate hand-back: this connection leaves the
             // holder set, and the last hold out releases the claim —
             // the field returns to `unclaimed`, still closed to
@@ -343,13 +419,19 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
             // set: a `release_writer` from an attachment holding nothing
             // must not dissolve the claim — an empty holder set is the
             // dead-owner state the claim exists to fence, not the last
-            // holder's release.
+            // holder's release. `keep_claim` — the demotion shape —
+            // keeps the claim standing instead, marked yielded: the
+            // owner's deliberate step-down, which a successor's
+            // conditional claim may preempt despite other holders.
             let mut writer = shared.writer.lock().unwrap();
             if let Some(claim) = writer.as_mut()
                 && claim.holders.remove(&connection)
-                && claim.holders.is_empty()
             {
-                *writer = None;
+                if keep_claim {
+                    claim.yielded = true;
+                } else if claim.holders.is_empty() {
+                    *writer = None;
+                }
             }
             PlantResponse::Done
         }

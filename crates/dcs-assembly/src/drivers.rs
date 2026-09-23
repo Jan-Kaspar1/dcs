@@ -617,12 +617,18 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
             }
         }
     };
-    let remote =
-        RemoteDriver::connect_with_timeout(addresses.as_slice(), timeout).map_err(|error| {
+    let remote = RemoteDriver::connect_with_timeout(addresses.as_slice(), timeout)
+        .map_err(|error| {
             DeviceError::backend(format!(
                 "cannot connect to plant server at {address:?}: {error}"
             ))
-        })?;
+        })?
+        // A controller's device backend claims the field as a
+        // controller: the claim records the marker, so a peer's
+        // conditional takeover refuses to preempt it while the owner
+        // stays attached — where a tool attachment's claim never
+        // blocks that recovery.
+        .as_controller();
     // Probe every declared point: the remote plant must serve it, with
     // the value kind the model declares — a plant configured for a
     // different model fails here, at assembly, not mid-scan.
@@ -672,22 +678,32 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                     detail: error.to_string(),
                 })
         })),
-        // The claim's demotion counterpart: the attachment forgets its
-        // recorded owner so a re-attach after a plant restart does not
-        // re-assert a claim this peer gave up.
-        release: Some(Arc::new(move || releasing.release_claim())),
+        // The claim's demotion counterpart: the attachment drops its
+        // hold on the field's claim and forgets its recorded owner —
+        // the claim itself stays standing, marked yielded, so the
+        // field never opens an unclaimed window and a successor's
+        // conditional claim can still tell the step-down from a live
+        // incumbent's. Best-effort: a dead plant drops the connection
+        // — and the hold with it — anyway.
+        release: Some(Arc::new(move || {
+            let _ = releasing.release_writer_keep_claim();
+        })),
         // The claim's orphan-cycle counterpart: the plant server's
-        // conditional `ensure_writer` grant — a demoted ex-owner's
-        // probe re-arms only while the field stands unclaimed or
-        // already names the token, `Fenced` while a different owner
-        // stands, so the wedge surfaces rather than being seized.
-        ensure: Some(Arc::new(move |owner| match ensuring.ensure_writer(owner) {
-            Ok(_) => Ok(true),
-            Err(RemoteError::Fenced) => Ok(false),
-            Err(error) => Err(StepError::Backend {
-                backend: format!("device {device}"),
-                detail: error.to_string(),
-            }),
+        // conditional `ensure_writer` grant in its unbound shape — a
+        // demoted ex-owner's probe keeps the released claim standing
+        // for the token while the field stands unclaimed or already
+        // names it, `Fenced` while a different owner stands, and never
+        // joins the holders: the probing attachment must not read as a
+        // live incumbent to another owner's conditional claim.
+        ensure: Some(Arc::new(move |owner| {
+            match ensuring.ensure_writer_unbound(owner) {
+                Ok(()) => Ok(true),
+                Err(RemoteError::Fenced) => Ok(false),
+                Err(error) => Err(StepError::Backend {
+                    backend: format!("device {device}"),
+                    detail: error.to_string(),
+                }),
+            }
         })),
         // The claim's startup counterpart: the plant server's
         // conditional `claim_writer_unless_held` grant — a launched

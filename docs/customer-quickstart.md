@@ -46,7 +46,13 @@ Its `README.md` walks the full customer path:
    deliberate path is restarting a fresh active, whose unconditional
    startup claim preempts the dead owner's field claim (decision 86,
    `docs/architecture.md`). A consumer without durable storage
-   omits both fields and the flags stay absent.
+   omits both fields and the flags stay absent. A deployment
+   running more than one controller pair may carry the optional
+   top-level `topology` section — named pairs each listing their
+   two member `controllers`, the pair's standby wiring closing
+   inside it — the declared pair index a `?pair=` overview URL is
+   generated from; a single-pair deployment omits the section and
+   configures the overview by URL exactly as before.
 7. **Upgrade** by repinning to a compatible release; an incompatible
    crossing surfaces as a named diagnostic (`pin-unresolvable`,
    `surface-incompatible`, `tooling-rejected`,

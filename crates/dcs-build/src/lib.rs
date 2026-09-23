@@ -107,11 +107,27 @@
 //! spec against its kind's `describe()` output and pins the spec table
 //! against the registered-kind list, so a spec that drifts or a
 //! registered kind with no spec fails CI beside the kind it mirrors.
+//!
+//! ## The dynamics document
+//!
+//! Beside the model, the same composition emits the plant-side
+//! dynamics document — the `ProcessElement` declaration list
+//! `dcs-plant-server --dynamics` merges into the simulated field.
+//! [`dynamics`] mirrors that serde vocabulary as data, like the spec
+//! table mirrors descriptors: [`DynamicsBuilder`]'s per-kind methods
+//! bind element ends through the [`InPoint`]/[`OutPoint`] handles the
+//! model composition returns — `Float` ends take `f64` handles, the
+//! `Bool` gate and contact ends `bool` ones — and
+//! [`emit`](DynamicsBuilder::emit) checks every referenced point
+//! against the emitted model as a named [`DynamicsError`]. The crate
+//! stays a `dcs-core`/`dcs-model` producer: the vocabulary arrives as
+//! serde data, never a `dcs-sim` dependency.
 
 #![warn(missing_docs)]
 
 mod builder;
 pub mod dosing;
+pub mod dynamics;
 mod endpoint;
 pub mod ethercat;
 pub mod ijmuiden;
@@ -121,6 +137,7 @@ pub mod station;
 pub mod wago;
 
 pub use builder::{BuildError, PlantBuilder, SignalBuilder};
+pub use dynamics::{BoolPoint, DynamicsBuilder, DynamicsElement, DynamicsError, FloatPoint};
 pub use endpoint::{Dynamic, InPoint, OutPoint, Sink, Source};
 pub use spec::{
     DynamicInstance, DynamicSpec, FINITE_F64, FRACTION_F64, NONNEGATIVE_F64, NONNEGATIVE_INT,

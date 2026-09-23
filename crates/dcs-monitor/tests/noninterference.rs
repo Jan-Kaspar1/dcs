@@ -1188,8 +1188,13 @@ fn published_reads_cover_every_execution_mode() {
         // stands — visible between scans.
         assert_eq!(client.receipts().unwrap(), monitor.checkpoint().receipts);
         // The executor's between-scans capture — the standby's pull
-        // target — is consistent with the in-process view.
-        assert_eq!(client.checkpoint().unwrap(), monitor.checkpoint());
+        // target — is consistent with the in-process view, modulo
+        // `line_owner`: the serving monitor stamps its own address on
+        // the wire form as owner-propagation decoration, never part of
+        // the captured run state.
+        let mut served = client.checkpoint().unwrap();
+        served.line_owner = None;
+        assert_eq!(served, monitor.checkpoint());
         // The bounded streams answer from the store.
         let history = client.history(&[PointId(10), PointId(20)], 0).unwrap();
         assert!(history.iter().all(|history| !history.samples.is_empty()));

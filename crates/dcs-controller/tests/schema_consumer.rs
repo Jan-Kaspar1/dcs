@@ -259,16 +259,19 @@ fn settlements_of(client: &MonitorClient, command: &Command) -> Vec<(u64, Comman
         .collect()
 }
 
-/// The checkpoint a client serves with its model fingerprint and
-/// stream generation normalized out: the pair and reference models
-/// differ only in the plant address, and each process mints its own
-/// generation at boot, so the rest of the transferable state — tick,
-/// component states, output and internal images, forces, receipts,
-/// admission counters — must serialize identically.
+/// The checkpoint a client serves with its model fingerprint, stream
+/// generation, and line-owner name normalized out: the pair and
+/// reference models differ only in the plant address, each process
+/// mints its own generation at boot, and each serving run stamps its
+/// own monitor as the line's field owner, so the rest of the
+/// transferable state — tick, component states, output and internal
+/// images, forces, receipts, admission counters — must serialize
+/// identically.
 fn checkpoint_digest(client: &MonitorClient) -> Vec<u8> {
     let mut checkpoint: Checkpoint = client.checkpoint().unwrap();
     checkpoint.model_fingerprint = None;
     checkpoint.generation = None;
+    checkpoint.line_owner = None;
     serde_json::to_vec(&checkpoint).unwrap()
 }
 
@@ -998,8 +1001,8 @@ fn assert_resources(client: &MonitorClient, snapshot: &TelemetrySnapshot) {
 fn assert_generic_page(client: &MonitorClient) {
     let page = client.page().unwrap();
     for needle in [
-        "fetch(base + \"/schema\")",
-        "fetch(base + \"/resources\")",
+        "pollFetch(base + \"/schema\")",
+        "pollFetch(base + \"/resources\")",
         "interfaceMarkup(descriptor.name, generic)",
         "interfaceOpen.get(name) : generic",
         "resourceTable(\"measurements\", iface.measurements",

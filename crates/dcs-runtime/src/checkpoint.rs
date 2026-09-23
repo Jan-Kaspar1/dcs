@@ -51,6 +51,7 @@ use dcs_core::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::net::SocketAddr;
 
 /// The checkpoint format version this build writes.
 ///
@@ -233,6 +234,19 @@ pub struct Checkpoint {
     /// apply treats it as owner-produced exactly as it always did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_owns_field: Option<bool>,
+    /// The monitor address this checkpoint line currently names as its
+    /// field owner — serve-time decoration like
+    /// [`line_proof`](Self::line_proof), never run state: a serving
+    /// field owner stamps its own address, a non-owning serving run
+    /// propagates the address the checkpoints it pulls carried, and a
+    /// bare [`Executor::checkpoint`] leaves it absent. A tracking peer
+    /// whose tracked line reports no owner — [`StandbySync::Orphaned`]
+    /// — probes it to re-resolve onto the run that actually holds the
+    /// field, so a demoted peer pinned onto a sibling standby's
+    /// checkpoints follows the line onward to the real owner instead
+    /// of orphaned-tracking a stale island forever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_owner: Option<SocketAddr>,
     /// The keyed line proof a serving monitor injects into this
     /// document's wire form on a `?prove=` pull — response decoration,
     /// never run state: [`Executor::checkpoint`](crate::Executor::checkpoint)

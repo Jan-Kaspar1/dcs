@@ -483,7 +483,10 @@ const componentsByName = new Map();
 // point id -> { samples: [Sample], lastSeq, lastTick } — the series a
 // trend draws. lastSeq is the since-cursor in the *current* source's
 // stream; lastTick is the merge watermark that keeps the series
-// continuous across a source switch.
+// continuous across a source switch's whole-stream re-read — an
+// incremental poll's seq cursor proves each entry new on its own, so a
+// point whose served stamps stop advancing the tick domain still
+// extends on each served change.
 const trends = new Map();
 // The retained journal window, oldest first.
 const journalEntries = [];
@@ -634,6 +637,16 @@ function noteSyncAge(state) {
   }
 }
 
+// The shared poll cadence — roles, the snapshot, and the history and
+// journal since-reads all ride it — and the bound each poll's fetches
+// answer within: a hanging read aborts into the poll's named
+// degradation — an unreachable peer, a stale publication — inside one
+// period instead of freezing the view on last-known data.
+const POLL_MS = 1000;
+function pollFetch(url) {
+  return fetch(url, { signal: AbortSignal.timeout(POLL_MS) });
+}
+
 // Polls GET /role on every configured peer — the role cadence the pair
 // view adds to the normal data polling — then re-selects the data
 // source. A failed poll is recorded as pair health, not thrown: one
@@ -641,7 +654,7 @@ function noteSyncAge(state) {
 async function pollRoles() {
   await Promise.all(peers.map(async (peer, i) => {
     try {
-      const response = await fetch(peer.base + "/role");
+      const response = await pollFetch(peer.base + "/role");
       if (!response.ok) throw new Error("HTTP " + response.status);
       peerState[i].report = await response.json();
       peerState[i].error = null;
@@ -995,7 +1008,7 @@ function selectPairSource(pair) {
 async function pollPairCard(pair) {
   await Promise.all(pair.peers.map(async (peer, i) => {
     try {
-      const response = await fetch(peer.base + "/role");
+      const response = await pollFetch(peer.base + "/role");
       if (!response.ok) throw new Error("HTTP " + response.status);
       pair.state[i].report = await response.json();
       pair.state[i].error = null;
@@ -1010,7 +1023,7 @@ async function pollPairCard(pair) {
   const state = pair.state[pair.source];
   if (state.error !== null || state.report === null) return;
   try {
-    const response = await fetch(pair.peers[pair.source].base + "/snapshot");
+    const response = await pollFetch(pair.peers[pair.source].base + "/snapshot");
     if (!response.ok) throw new Error("HTTP " + response.status);
     pair.snapshot = await response.json();
   } catch (error) {
@@ -1168,9 +1181,9 @@ async function refresh() {
     // /resources answers 404 — the interface surface then renders
     // nothing, the absent-section convention.
     const [snapshot, schema, resources] = await Promise.all([
-      fetch(base + "/snapshot").then(r => r.json()),
-      fetch(base + "/schema").then(r => (r.ok ? r.json() : null)).catch(() => null),
-      fetch(base + "/resources").then(r => (r.ok ? r.json() : null)).catch(() => null),
+      pollFetch(base + "/snapshot").then(r => r.json()),
+      pollFetch(base + "/schema").then(r => (r.ok ? r.json() : null)).catch(() => null),
+      pollFetch(base + "/resources").then(r => (r.ok ? r.json() : null)).catch(() => null),
     ]);
     // Freshness bookkeeping before the view re-renders: the served
     // publication's seq/tick identity decides whether this poll found
@@ -1246,6 +1259,14 @@ async function refresh() {
     renderAlarms(snapshot, telemetry, forced);
     renderProtection(telemetry, forced);
   } catch (error) {
+    // A poll whose reads fail or abort lands nothing fresh: the values
+    // on the page stay last-known, so the standing publication takes
+    // the feed's stale mark rather than the line hiding on the last
+    // fresh poll's bookkeeping.
+    if (feed.stale === null && feed.publication !== null) {
+      feed.stale = feed.publication;
+      renderFeed();
+    }
     document.getElementById("status").textContent = "poll failed: " + error;
   } finally {
     polling = false;
@@ -2690,7 +2711,7 @@ async function refreshTrends(base) {
   if (states.length > 0 && states.every(state => state.lastSeq > 0)) {
     since = Math.min(...states.map(state => state.lastSeq));
   }
-  const histories = await (await fetch(base + "/history?since=" + since)).json();
+  const histories = await (await pollFetch(base + "/history?since=" + since)).json();
   for (const history of histories) {
     const state = trends.get(history.point);
     if (!state) continue;
@@ -2701,14 +2722,27 @@ async function refreshTrends(base) {
     if (state.lastSeq > 0 && first && first.seq > state.lastSeq + 1) {
       noteFeedGap("history", state.lastSeq + 1, first.seq - 1);
     }
+    // The tick watermark dedupes only a whole-stream re-read — the
+    // cursor standing at 0 means this batch re-serves the ring (the
+    // first poll, or the refetch a source switch forces), where a new
+    // source's restarted seqs cannot order entries against the drawn
+    // series. An entry the seq cursor itself proves new takes the seq
+    // fallback instead: a point whose served stamps stop advancing the
+    // tick domain — every sample stamped tick 0 — still extends its
+    // series on each served change instead of freezing on the first
+    // drawn sample.
+    const refetch = state.lastSeq === 0;
+    const watermark = state.lastTick;
     for (const entry of history.samples) {
       if (entry.seq <= state.lastSeq) continue;
       state.lastSeq = entry.seq;
-      if (state.lastTick !== null && entry.sample.tick <= state.lastTick) {
+      if (refetch && watermark !== null && entry.sample.tick <= watermark) {
         continue;
       }
       state.samples.push(entry.sample);
-      state.lastTick = entry.sample.tick;
+      if (state.lastTick === null || entry.sample.tick > state.lastTick) {
+        state.lastTick = entry.sample.tick;
+      }
     }
     if (state.samples.length > TREND_LIMIT) {
       state.samples.splice(0, state.samples.length - TREND_LIMIT);
@@ -2769,7 +2803,7 @@ function drawTrend(meta) {
 // after a source switch adds each transition once: both peers journal
 // the same run's events, and each journals its own role changes.
 async function refreshJournal(base) {
-  const entries = await (await fetch(base + "/journal?since=" + journalSince)).json();
+  const entries = await (await pollFetch(base + "/journal?since=" + journalSince)).json();
   // The journal stream's served form of the same gap.
   if (journalSince > 0 && entries.length > 0 &&
       entries[0].seq > journalSince + 1) {
@@ -3234,7 +3268,7 @@ async function init() {
     document.getElementById("overview").hidden = false;
     renderOverview();
     refreshOverview();
-    setInterval(refreshOverview, 1000);
+    setInterval(refreshOverview, POLL_MS);
     return;
   }
   index = await (await fetch("/signals")).json();
@@ -3409,7 +3443,7 @@ async function init() {
     refresh();
   });
   refresh();
-  setInterval(refresh, 1000);
+  setInterval(refresh, POLL_MS);
 }
 
 init().catch(error => {
