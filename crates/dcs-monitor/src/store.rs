@@ -433,6 +433,7 @@ impl Store {
             depth: (inner.window.len() + 1).min(inner.window_capacity) as u64,
             window: inner.window_capacity as u64,
         });
+        let run = inner.run;
         let publication = Arc::new(Publication {
             seq,
             tick,
@@ -443,7 +444,7 @@ impl Store {
                 .iter_mut()
                 .map(|(&point, samples)| PointHistory {
                     point,
-                    run: inner.run,
+                    run,
                     samples: samples.drain(..).collect(),
                 })
                 .collect(),
