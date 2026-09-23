@@ -93,6 +93,23 @@ Implementation order: second, after [daily architecture review](daily-architectu
   and transient containment failures park for retry. The pending queue
   is emitted as `verifications.json` beside the report inbox.
 
+### Landed 2026-09-23 (rig endpoint placement record)
+
+- The rig bridge-to-host reachability rule the qax-20260922-001,
+  qax-20260922-005, and qax-20260923-001 exploration runs
+  demonstrated is recorded: the host egress policy drops every
+  rig-network packet aimed at a host socket, so a lane endpoint a
+  rig container must dial (a checkpoint interposer, the
+  forged-checkpoint server the tracking-source/auth legs announce,
+  or a plant-probe listener) runs bridge-placed in a labeled
+  rig-bridge container dialed by container name, while host-side
+  attachments use the published loopback ports only.
+  `qa_lane/runner.py` records the selection in the run config's
+  `endpoint_placement`, validates it before a launch trusts it, and
+  hands it to the scenario ctx beside `rig_network`; the deploy
+  README and the tracking-source-auth/shared-claim scenario docs
+  reference it. Enabler for the WW-LCM-001 takeover-integrity legs.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,

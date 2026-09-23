@@ -44,9 +44,12 @@ non-interference audits. The tracking-source-auth scenario drives the
 same controller lifecycle seam to open the announced-only demotion
 window — the tracking peer stopped, the field owner warm-restarted so
 no announce is recorded — probes the `GET /checkpoint?peer=` contract
-with crafted announce hints and a forged-checkpoint server bound on
-the scenario host, and audits the served journals for the adoption
-entries every verified source owes.
+with crafted announce hints and a forged-checkpoint server placed per
+the run config's recorded `endpoint_placement` ('bridge': a labeled
+container on the run's rig network, since the host egress policy
+drops every packet a rig peer aims at a host socket — a forge bound
+on the scenario host is unreachable from the rig), and audits the
+served journals for the adoption entries every verified source owes.
 
 The field-fault, backup-health, and unavailable-fallback cases
 inject and clear per-point faults on the shared simulated field
@@ -74,7 +77,13 @@ published endpoint — fenced step/write probes, the conditional and
 shared grants under foreign and owner tokens (ctx['plant_owner']
 names the standing owner's pin), the release legs, and a rogue
 preemption are all ops the tool does not expose — while its field
-census rides the tool's `list`. The fenced-writer-degrade case
+census rides the tool's `list`. Every plant-probe attachment above
+stays host-side on the published loopback port — the placement the
+run config's recorded `endpoint_placement` gives the shared-claim
+legs; an attachment that must sit inside the rig network instead
+runs bridge-placed in a labeled rig-bridge container, dialed by
+container name, because the egress policy refuses rig-network
+traffic to host sockets. The fenced-writer-degrade case
 drives the misordered promote the same claim makes survivable —
 POST /promote on the tracking standby while the active still runs —
 then asserts the superseded peer's demote-in-place contract through

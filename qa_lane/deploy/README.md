@@ -113,6 +113,21 @@ sudo systemctl enable --now dcs-hwtest-netpolicy.service
   through Docker's embedded resolver and never enters the forwarding
   path. A missing policy fails the cycle closed with
   `egress-policy-missing`.
+- Bridge-to-host reachability rule (demonstrated by the
+  qax-20260922-001, qax-20260922-005, and qax-20260923-001
+  exploration runs): no socket bound on the host is reachable from
+  the rig bridge — the INPUT half of the egress policy drops every
+  rig-sourced packet aimed at the host, covering host loopback, the
+  host LAN address, and other stacks' published ports reached via
+  the host. Lane endpoint placement follows: an endpoint a rig
+  container must dial — a checkpoint interposer or the
+  forged-checkpoint server the tracking-source/auth legs announce,
+  or a plant-probe listener — runs in a labeled container on the
+  run's rig bridge and is dialed by container name; host-side
+  scenario attachments reach rig services only through the
+  127.0.0.1-published ports. The selection is recorded in the run
+  config under `endpoint_placement` and validated before a launch
+  trusts it.
 - Every run object carries the `dcs-hwtest.managed=1` +
   `dcs-hwtest.run=<id>` labels reconciliation uses to reap orphans;
   cleanup failures are recorded in the durable cleanup ledger, appear
