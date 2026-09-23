@@ -148,16 +148,20 @@
 //! or strand `unsynchronized` and unpromotable forever. The demoted
 //! peer's checkpoint source is therefore resolved per scan cycle: the
 //! configured `--peer ADDR` when given — "active now, but here is my
-//! peer for later" — else the address the tracking peer announced
-//! through its pulls. The announced fallback is a hint, not a proof:
+//! peer for later" — else, on a `--pair-token` keyed run only, the
+//! address the tracking peer announced through its pulls. The
+//! announced fallback is a hint, not a proof:
 //! the serving side cannot tell the puller's monitor port from any
 //! other port its connection's source claims, so `POST /demote`
 //! toward an announced-only source first pulls one checkpoint from it
-//! and proceeds only when that checkpoint continues this run's line in
+//! and proceeds only when the answer carries the `?prove=` nonce's
+//! keyed `line_proof` — the attestation only a peer holding the pair's
+//! token produces — *and* that checkpoint continues this run's line in
 //! a way this run's own public `/checkpoint` could not have answered —
 //! a field-owning document not ahead of this run's tick is replayable,
 //! not a successor — journaling the adopted source and pinning it, so
 //! a later `?peer=` rewrite cannot redirect the demoted peer's pulls —
+<<<<<<< HEAD
 //! while a dead, unreachable, replayed, or forged hint refuses
 //! `no_tracking_source` like an absent one. The same scrutiny gates
 //! the involuntary demotion a preempted field claim forces: with no
@@ -172,12 +176,26 @@
 //! pull's nonce and the served document — so an endpoint that merely
 //! replays or fabricates this line's checkpoints can neither arm the
 //! demotion nor feed the demoted peer forged state. Either way the
+=======
+//! while a dead, unreachable, unsigned, replayed, or forged hint
+//! refuses `no_tracking_source` like an absent one. The announced
+//! contract is keyed-only outright: `/checkpoint` is public, so on an
+//! unkeyed run every document shape an announced endpoint could serve —
+//! the standby's `source_owns_field: false` included — is derivable
+//! from this run's own answers and proves nothing about who serves it,
+//! and an announced-only demotion refuses whatever the hint would
+//! serve; the configured `--peer` remains the unkeyed switchover path.
+//! On a keyed run every checkpoint the adopted source later serves
+//! keeps proving under fresh nonces, so an endpoint that merely
+//! replays or fabricates this line's checkpoints feeds the demoted
+//! peer nothing. Either way the
+>>>>>>> origin/main
 //! demoted instance pulls, applies, and
 //! reconverges like any standby, and a later `POST /promote` fails
 //! back without a restart. A field owner with neither — nothing
-//! configured and no peer ever announced — refuses `POST /demote`
-//! outright (`no_tracking_source`) rather than silently marooning
-//! itself.
+//! configured and no announced source it can prove — refuses
+//! `POST /demote` outright (`no_tracking_source`) rather than silently
+//! marooning itself.
 //!
 //! The field's single-writer claim is taken at every transition into
 //! field ownership — a promotion, and a launched active's startup:
@@ -695,8 +713,11 @@ controller scan.
                   endpoint that only replays or fabricates this line's
                   checkpoints can neither arm the demotion nor feed the
                   demoted peer forged state. Requires --listen; unset,
-                  announced demotions verify on the document checks
-                  alone
+                  the announced-source contract is closed — /checkpoint
+                  is public, so no announced endpoint can prove itself
+                  and an announced-only demotion refuses
+                  no_tracking_source (a configured --peer still covers
+                  the switchover)
   --state-file PATH
                   persist the run's checkpoint to PATH at the end of
                   every scan cycle and at each accepted command's

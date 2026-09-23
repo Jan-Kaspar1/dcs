@@ -217,7 +217,13 @@ def negotiation_pass(args, tamper):
         plant_addr = simulate.listen_address(plant, "dcs-plant-server")
 
         duty, duty_url, preamble = pair.spawn_peer(
-            args.controller, args.model, args.dt, plant_addr, None, duty_files
+            args.controller,
+            args.model,
+            args.dt,
+            plant_addr,
+            None,
+            duty_files,
+            pair_token=pair.PAIR_TOKEN,
         )
         if duty_url is None:
             raise Abort(
@@ -232,6 +238,7 @@ def negotiation_pass(args, tamper):
             plant_addr,
             target,
             standby_files,
+            pair_token=pair.PAIR_TOKEN,
         )
         if standby_url is None:
             raise Abort(
