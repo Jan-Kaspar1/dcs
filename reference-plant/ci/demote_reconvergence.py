@@ -58,10 +58,13 @@ check's `demote-reconvergence-failed`. `--tamper self-announce`
 crafts a `?peer=` announce naming the field owner's own monitor
 address — a claim the pulling connection's own source proves, so it
 lands exactly as a self-claim — planting a self-addressed demotion
-hint: the demotion's verify pull reads the owner's own document, the
-replayable own-document shape an announced demotion refuses, so
-`POST /demote` answers `409 no_tracking_source` and the leg must
-report the refusal rather than let a self-pinned demotion proceed.
+hint in the bounded announced set beside the genuine one: the
+demotion's verify pull on it reads the owner's own document, the
+replayable own-document shape a candidate can never satisfy, so the
+verified adoption keeps the genuine successor — and the tamper
+doctors the adoption audit to require the self-pin, so a healthy
+demotion reports the journaled `tracking_source_adopted` mismatch
+while a self-pinning regression passes silently.
 """
 
 import argparse
@@ -279,10 +282,12 @@ def reconvergence_pass(args, tamper):
         # field owner's own monitor address — the pulling connection's
         # own source, so it lands exactly as a self-claim — plants a
         # self-addressed demotion hint: the self-pin defect shape this
-        # leg exists to catch. The hint's verify pull reads the
-        # owner's own document — the replayable own-document shape the
-        # demotion refuses — so the switch's POST /demote must answer
-        # 409 no_tracking_source rather than adopt the self-pin. The
+        # leg exists to catch. The hint joins the bounded announced
+        # set beside the genuine standby's, and the demotion's verify
+        # pull on it reads the owner's own document — the replayable
+        # own-document shape a candidate can never satisfy — so the
+        # verified adoption keeps the successor; the tamper's doctored
+        # assertion below requires the self-pin instead. The
         # checkpoint read still answers the owner's checkpoint.
         if tamper == "self-announce":
             checkpoint = pair.get(
@@ -350,6 +355,26 @@ def reconvergence_pass(args, tamper):
                 "adopted": adopted["kinds"],
             }
         )
+
+        # The self-announce tamper's doctored assertion: the
+        # self-addressed hint sat in the announced set beside the
+        # genuine standby's, and the demotion's per-candidate
+        # verification — its own-document rejection — is what answers
+        # it, so the verified adoption keeps the real successor. The
+        # tamper requires the journaled tracking_source_adopted to
+        # name the self-pin, so a healthy adoption reports the named
+        # mismatch while a self-pinning regression satisfies the
+        # doctored expectation and passes silently.
+        if tamper == "self-announce" and "self" not in adopted.get(
+            "kinds", []
+        ):
+            failures.append(
+                "the demotion did not adopt the self-addressed "
+                "announce — the journaled tracking_source_adopted "
+                f"kinds are {adopted.get('kinds') or 'none'}, "
+                f"expected the self-pin {duty_addr}"
+            )
+            raise Abort
 
         # Phase 3 — the pull train: driven ticks scanning the demoted
         # peer first — each a checkpoint pull — the reconverged peer
@@ -626,7 +651,9 @@ def main():
         help="craft a ?peer= announce naming the field owner's own "
         "monitor address — landing on the pulling connection's own "
         "source — so the demotion faces a self-addressed tracking "
-        "hint the leg must refuse as no_tracking_source",
+        "hint; the leg's doctored assertion requires the journaled "
+        "tracking_source_adopted to name that self-pin, so a "
+        "healthy verified adoption reports the mismatch",
     )
     args = parser.parse_args()
 

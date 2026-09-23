@@ -272,6 +272,21 @@ pub struct Peer<'d> {
     /// a claim a dead owner left standing is still preempted, the
     /// restart-as-active recovery path.
     startup_claim: Option<StartupClaim<'d>>,
+    /// The claim's orphan-promotion counterpart — the conditional grant
+    /// a [`promote`](Self::promote) or [`self_promote`](Self::self_promote)
+    /// from [`StandbySync::Orphaned`] runs in place of the
+    /// unconditional [`Claim`]. An orphaned run cannot tell at the
+    /// checkpoint layer whether the tracked line's missing field owner
+    /// is dead — the mutual-standby wedge the orphan promote exists to
+    /// break — or a live incumbent the run lost track of — the stale
+    /// island whose stale image would silently roll the incumbent back.
+    /// The field's own arbitration answers which: granted while no
+    /// live *controller* attachment holds a different owner's unyielded
+    /// claim — `Ok(true)` — so a dead, deliberately yielded, or
+    /// tool-held claim still preempts, and refused `Ok(false)` while a
+    /// live controller incumbent stands. `Err` where the field could
+    /// not be asked.
+    orphan_claim: Option<OrphanClaim<'d>>,
     /// Orphan detections not yet consumed for journaling — one
     /// [`OrphanReport`] per transition into [`StandbySync::Orphaned`].
     pending_orphans: Vec<OrphanReport>,
@@ -377,6 +392,25 @@ struct Ensure<'d>(Box<dyn Fn() -> Result<bool, String> + Send + Sync + 'd>);
 impl fmt::Debug for Ensure<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("field ensure")
+    }
+}
+
+/// The conditional counterpart of [`Claim`] an orphaned
+/// [`promote`](Peer::promote)/[`self_promote`](Peer::self_promote)
+/// runs: takes the field's write-ownership under this run's token only
+/// where no *live* attachment holds a different owner's unyielded
+/// claim — `Ok(true)` — answering `Ok(false)` where a live incumbent
+/// stands and `Err` where the field could not be asked. A dead owner's
+/// standing claim and a claim its owner deliberately yielded still
+/// preempt — the wedge escapes the orphan promote exists for — while
+/// a live incumbent's claim refuses it: the orphaned run cannot prove
+/// its tracked line is the field's, and preempting the real owner
+/// would silently roll back the state and outputs it applied.
+struct OrphanClaim<'d>(Box<dyn Fn() -> Result<bool, String> + Send + Sync + 'd>);
+
+impl fmt::Debug for OrphanClaim<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("field orphan claim")
     }
 }
 
@@ -706,6 +740,7 @@ impl<'d> Peer<'d> {
             was_owner: true,
             ensure: None,
             startup_claim: None,
+            orphan_claim: None,
             pending_orphans: Vec::new(),
             revision: false,
             pending_reinits: Vec::new(),
@@ -787,6 +822,35 @@ impl<'d> Peer<'d> {
         self
     }
 
+    /// Arms the claim's orphan-promotion counterpart — run by
+    /// [`promote`](Self::promote) and [`self_promote`](Self::self_promote)
+    /// while the reported convergence is [`StandbySync::Orphaned`], in
+    /// place of the unconditional [`with_field_claim`](Self::with_field_claim)
+    /// hook. An orphaned run's tracking evidence proves only that it
+    /// follows *some* line: it cannot tell the mutual-standby wedge —
+    /// the tracked line's owner dead or never claimed — from a stale
+    /// island — the line's real owner running elsewhere while the
+    /// tracked pair orphaned-loop on each other. The field's own
+    /// arbitration answers which: `claim` takes write-ownership under
+    /// this run's token only where no live *controller* attachment
+    /// holds a different owner's unyielded claim — `Ok(true)` — so the
+    /// wedge's dead, deliberately yielded, or tool-held claim still
+    /// preempts and the escape works; `Ok(false)` where a live
+    /// controller incumbent stands refuses
+    /// the promotion as [`SwitchError::FieldClaimFailed`] with the gate
+    /// still closed, so an islanded run's stale image never preempts —
+    /// and silently rolls back — the real owner's applied state and
+    /// outputs. A peer built without the hook keeps the unconditional
+    /// claim — the pre-hook contract — and field kinds that cannot
+    /// arbitrate live holders fall back to it.
+    pub fn with_field_orphan_claim(
+        mut self,
+        claim: impl Fn() -> Result<bool, String> + Send + Sync + 'd,
+    ) -> Self {
+        self.orphan_claim = Some(OrphanClaim(Box::new(claim)));
+        self
+    }
+
     /// Arms the claim's observational counterpart — run once per scan
     /// to learn the field's write-ownership state without disturbing
     /// it. `probe` answers the verdict a mutation from this run's
@@ -860,6 +924,7 @@ impl<'d> Peer<'d> {
             was_owner: false,
             ensure: None,
             startup_claim: None,
+            orphan_claim: None,
             pending_orphans: Vec::new(),
             revision: false,
             pending_reinits: Vec::new(),
@@ -980,11 +1045,21 @@ impl<'d> Peer<'d> {
     /// under the documented carryover rule and the carryover report
     /// records exactly what continues — not bumpless by restored state,
     /// but honest about what the revised run starts from.
-    /// [`StandbySync::Orphaned`] is promotable on the same evidence
-    /// `Tracking` stands on: the run is still current with the tracked
-    /// line, the stamp only names the line's missing field owner — the
-    /// promotion's own claim then supplies exactly that owner, the
-    /// documented escape from the mutual-standby wedge. A standby
+    /// [`StandbySync::Orphaned`] is promotable on the same convergence
+    /// evidence `Tracking` stands on — the run is still current with
+    /// the tracked line, the stamp only names the line's missing field
+    /// owner — but its claim is the *conditional* grant
+    /// [`with_field_orphan_claim`](Self::with_field_orphan_claim)
+    /// installs: the tracking evidence cannot tell a dead owner — the
+    /// mutual-standby wedge the orphan promote exists to break — from
+    /// a live incumbent the run lost track of, whose claim a stale
+    /// island's promotion would preempt, silently rolling its applied
+    /// state and outputs back. The field's arbitration answers which:
+    /// a dead or deliberately yielded claim preempts, while a live
+    /// different-owner's refuses with
+    /// [`SwitchError::FieldClaimFailed`]. Without the hook the
+    /// unconditional claim stands — the wedge escape the verdict was
+    /// made promotable for. A standby
     /// that has not converged — or that reports
     /// [`StandbySync::Diverged`] — is refused with
     /// [`SwitchError::NotConverged`] carrying the reported state; a
@@ -1006,7 +1081,7 @@ impl<'d> Peer<'d> {
                 sync: self.sync.clone(),
             });
         }
-        self.lift_gate()?;
+        self.claim_gate()?;
         self.change(self.executor.tick(), Role::Promoting);
         Ok(())
     }
@@ -1038,7 +1113,7 @@ impl<'d> Peer<'d> {
                 sync: self.sync.clone(),
             });
         }
-        self.lift_gate()?;
+        self.claim_gate()?;
         self.change(self.executor.tick(), Role::Promoting);
         Ok(())
     }
@@ -2339,12 +2414,12 @@ impl<'d> Peer<'d> {
     }
 
     /// Drains the adoption-audit receipts queued since the last call —
-    /// one [`CommandReceipt`] per force-set change a checkpoint
-    /// adoption made that no settled receipt accounts for, each
-    /// `Applied` at the landing tick with `actor` naming the adopting
-    /// checkpoint — for the settle journal the monitoring layer
-    /// records them into through `Recorder::note_settled`, beside the
-    /// superseded settlements.
+    /// one [`CommandReceipt`] per force-set or held-value change a
+    /// checkpoint adoption made that no settled receipt accounts for,
+    /// each `Applied` at the landing tick with `actor` naming the
+    /// adopting checkpoint — for the settle journal the monitoring
+    /// layer records them into through `Recorder::note_settled`,
+    /// beside the superseded settlements.
     pub fn take_adoption_receipts(&mut self) -> Vec<CommandReceipt> {
         std::mem::take(&mut self.pending_adoption_receipts)
     }
@@ -2414,6 +2489,40 @@ impl<'d> Peer<'d> {
     /// Consumes the peer and returns the executor.
     pub fn into_executor(self) -> Executor<'d> {
         self.executor
+    }
+
+    /// The claim a promotion runs before the gate lifts: the
+    /// unconditional [`Claim`] for a proven `Tracking`/`Reinitialized`
+    /// convergence — the deliberate takeover — but the conditional
+    /// [`OrphanClaim`] while `Orphaned` and the hook is armed. The
+    /// orphaned run's tracking evidence cannot tell the tracked line's
+    /// missing owner — dead, the wedge the orphan promote exists to
+    /// break — from a live incumbent the run lost track of: the field's
+    /// own arbitration answers it, granting while no live
+    /// different-owner's unyielded claim stands and refusing
+    /// [`SwitchError::FieldClaimFailed`] while one does — an islanded
+    /// run whose stale image would otherwise preempt the real owner
+    /// and silently roll its applied state and outputs back.
+    fn claim_gate(&mut self) -> Result<(), SwitchError> {
+        if matches!(self.sync, StandbySync::Orphaned { .. })
+            && let Some(claim) = &self.orphan_claim
+        {
+            return match claim.0() {
+                Ok(true) => {
+                    self.open_gate();
+                    Ok(())
+                }
+                Ok(false) => Err(SwitchError::FieldClaimFailed {
+                    detail: "a live controller holds the field's write-ownership claim — \
+                             the orphaned tracked line is an island, not ownerless: \
+                             preempting the incumbent would silently roll back its \
+                             applied state; reconverge on the owner first"
+                        .to_string(),
+                }),
+                Err(detail) => Err(SwitchError::FieldClaimFailed { detail }),
+            };
+        }
+        self.lift_gate()
     }
 
     /// Takes the field's write-ownership claim when one is installed —
@@ -4423,6 +4532,145 @@ mod tests {
         assert_eq!(peer.role(), Role::Active);
     }
 
+    /// The QA finding `demoted-peer-adopts-standby-line-into-
+    /// promotable-stale-island`: an orphaned run's tracking evidence
+    /// cannot tell a dead owner — the wedge the orphan promote exists
+    /// to break — from a live incumbent the run lost track of, so the
+    /// armed conditional claim decides. `Ok(true)` grants and the
+    /// promotion proceeds; the unconditional claim never runs for it.
+    #[test]
+    fn an_orphaned_promotion_claims_conditionally() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let orphan_claimed = AtomicBool::new(false);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_field_claim(|| panic!("an orphaned promotion never claims unconditionally"))
+            .with_field_orphan_claim(|| {
+                orphan_claimed.store(true, Ordering::Relaxed);
+                Ok(true)
+            });
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(5);
+        let mut checkpoint = source.checkpoint();
+        checkpoint.source_owns_field = Some(false);
+        peer.apply(&checkpoint).unwrap();
+
+        peer.promote().unwrap();
+        assert!(orphan_claimed.load(Ordering::Relaxed));
+        assert_eq!(peer.role(), Role::Promoting);
+        assert!(gate.is_open());
+    }
+
+    /// `Ok(false)` — a live attachment holds a different owner's
+    /// unyielded claim — refuses the promotion as `FieldClaimFailed`
+    /// with the gate still closed: the islanded run's stale image
+    /// never preempts the incumbent's applied state and outputs.
+    #[test]
+    fn an_orphaned_promotion_a_live_incumbent_refuses_stays_gated() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_field_claim(|| panic!("an orphaned promotion never claims unconditionally"))
+            .with_field_orphan_claim(|| Ok(false));
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(5);
+        let mut checkpoint = source.checkpoint();
+        checkpoint.source_owns_field = Some(false);
+        peer.apply(&checkpoint).unwrap();
+
+        let Err(SwitchError::FieldClaimFailed { detail }) = peer.promote() else {
+            panic!("a live incumbent's claim must refuse the orphaned promotion")
+        };
+        assert!(detail.contains("live controller holds the field"));
+        assert_eq!(peer.role(), Role::Standby);
+        assert!(!gate.is_open());
+    }
+
+    /// `Err` — the field's arbitration itself failed — refuses the
+    /// same way, naming the backend's detail.
+    #[test]
+    fn an_orphaned_promotion_surfaces_the_claim_error() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_field_orphan_claim(|| Err("plant unreachable".to_string()));
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(5);
+        let mut checkpoint = source.checkpoint();
+        checkpoint.source_owns_field = Some(false);
+        peer.apply(&checkpoint).unwrap();
+
+        assert_eq!(
+            peer.promote(),
+            Err(SwitchError::FieldClaimFailed {
+                detail: "plant unreachable".to_string()
+            })
+        );
+        assert!(!gate.is_open());
+    }
+
+    /// A proven `Tracking` convergence is the deliberate takeover, not
+    /// the orphaned guess: the unconditional claim stands and the
+    /// orphan hook never runs.
+    #[test]
+    fn a_tracking_promotion_ignores_the_orphan_claim() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let claimed = AtomicBool::new(false);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_field_claim(|| {
+                claimed.store(true, Ordering::Relaxed);
+                Ok(())
+            })
+            .with_field_orphan_claim(|| {
+                panic!("a converged promotion never runs the orphan claim")
+            });
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(5);
+        let mut checkpoint = source.checkpoint();
+        checkpoint.source_owns_field = Some(true);
+        peer.apply(&checkpoint).unwrap();
+
+        peer.promote().unwrap();
+        assert!(claimed.load(Ordering::Relaxed));
+        assert!(gate.is_open());
+    }
+
+    /// The budget-th orphaned pull's self-promotion runs the same
+    /// conditional gate: a live incumbent's claim refuses it as the
+    /// named `PromotionRefused`, with the peer still reporting its
+    /// orphaned convergence.
+    #[test]
+    fn failover_orphaned_promotion_a_live_incumbent_refuses() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_failover(1)
+            .with_field_orphan_claim(|| Ok(false));
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(3);
+        let mut orphaned = source.checkpoint();
+        orphaned.source_owns_field = Some(false);
+        match peer.track_once(|| Ok(orphaned)) {
+            TrackReport::PromotionRefused { error, .. } => {
+                assert!(matches!(error, SwitchError::FieldClaimFailed { .. }));
+            }
+            other => panic!("a live incumbent must refuse the failover, got {other:?}"),
+        }
+        assert!(!gate.is_open());
+        assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
+    }
+
     /// The QA finding
     /// `demote-during-interlock-release-leaves-field-energized-and-
     /// wedges-pair`: a demote inside a release-propagation window can
@@ -6339,6 +6587,89 @@ mod tests {
         assert_eq!(
             b.executor().sample(POINT).map(|sample| sample.value),
             Some(Value::Bool(true))
+        );
+        assert!(b.take_adoption_receipts().is_empty());
+    }
+
+    /// The finding's own shape (#865): the rejoining peer never
+    /// submitted the reverted command — an ordinary tracking standby
+    /// adopted the field owner's `applied` settlement through its
+    /// checkpoint pulls. When the restarted run then adopts a staler
+    /// checkpoint the revert is audited exactly as the
+    /// locally-submitted half is: one `WriteValue` receipt applied at
+    /// the landing tick naming the adopting checkpoint.
+    #[test]
+    fn an_adopted_receipted_write_reverted_on_rejoin_journals_the_adoption() {
+        use crate::checkpoint::CommandAdmissionCounts;
+        const POINT: PointId = PointId(10);
+        let map = || {
+            PointMap::new().with_writable_internal(
+                POINT,
+                Direction::In,
+                ValueKind::Bool,
+                Value::Bool(false),
+            )
+        };
+        let write = |value| Command::WriteValue {
+            point: POINT,
+            kind: ValueKind::Bool,
+            value: Value::Bool(value),
+        };
+
+        // The field owner's line: the write receipted and applied —
+        // the honest checkpoint the standby tracks, and the stale
+        // pre-write checkpoint its restart will serve.
+        let a_driver = StubDriver::field(&[]);
+        let a_gate = WriteGate::closed(&a_driver);
+        let mut a = Peer::active(
+            Executor::new(&a_gate, map(), Vec::new()).unwrap(),
+            Some(&a_gate),
+        );
+        a.activate().unwrap();
+        for _ in 0..3 {
+            a.scan();
+        }
+        let mut stale = a.checkpoint();
+        // The staler line's window never reached the standby's adopted
+        // receipts — the finding's served-view shape.
+        stale.receipts.clear();
+        stale.command_admission = CommandAdmissionCounts::default();
+        a.submit_command(write(true));
+        a.scan();
+        let honest = a.checkpoint();
+
+        // The tracking standby: the applied settlement arrives through
+        // adoption, never through a local submission.
+        let b_driver = StubDriver::field(&[]);
+        let b_gate = WriteGate::closed(&b_driver);
+        let mut b = Peer::standby(
+            Executor::new(&b_gate, map(), Vec::new()).unwrap(),
+            Some(&b_gate),
+        );
+        b.apply(&honest).unwrap();
+        assert_eq!(
+            b.executor().sample(POINT).map(|sample| sample.value),
+            Some(Value::Bool(true))
+        );
+        assert!(matches!(
+            b.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { .. }
+        ));
+
+        // The rejoin: the resumed run adopts the restarted peer's
+        // staler checkpoint and the held value reverts.
+        b.apply(&stale).unwrap();
+        assert_eq!(
+            b.executor().sample(POINT).map(|sample| sample.value),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            b.take_adoption_receipts(),
+            vec![CommandReceipt {
+                command: write(false),
+                outcome: CommandOutcome::Applied { tick: Tick(4) },
+                actor: Some("checkpoint@3".to_string()),
+            }]
         );
         assert!(b.take_adoption_receipts().is_empty());
     }

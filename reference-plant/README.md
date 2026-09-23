@@ -869,8 +869,12 @@ produce the identical `peer-announce-digest`, a divergence failing
 `peer-announce-nondeterministic`. The leg's doctored case — a
 crafted announce naming the pulling connection's own source,
 landing exactly as it would on a controller whose acceptance check
-regressed — must strand the demoted peer and report the named
-diagnostic rather than pass silently.
+regressed — joins the bounded announced set beside the genuine
+ones, and the demotion's per-candidate verification skips the dead
+hint for the verified standby; the leg doctors its adoption
+assertion to require the planted address, so a healthy demotion
+reports the journaled `tracking_source_adopted` mismatch while a
+blind last-announcer adoption would pass silently.
 
 The stage's command-availability leg — `ci/availability.py` on the
 same declared deployment — then proves the served per-command
@@ -1149,10 +1153,14 @@ identical `demote-reconvergence-digest`, a divergence failing
 `demote-reconvergence-nondeterministic`. The leg's doctored case —
 a crafted `?peer=` announce naming the field owner's own monitor
 address, landing on the pulling connection's own source exactly as
-a self-claim — plants a self-addressed demotion hint whose verify
-pull reads the owner's own document: the replayable own-document
-shape an announced demotion refuses, so `POST /demote` must answer
-`409 no_tracking_source` rather than adopt the self-pin.
+a self-claim — plants a self-addressed demotion hint beside the
+genuine announce in the bounded set: the demotion's verify pull on
+it reads the owner's own document, the replayable own-document
+shape a candidate can never satisfy, so the verified adoption keeps
+the real successor — and the leg doctors the adoption audit to
+require the self-pin, so a healthy demotion reports the journaled
+`tracking_source_adopted` mismatch while a self-pinning regression
+passes silently.
 
 The stage's managed-lifecycle leg — `ci/managed_lifecycle.py` on the
 same declared deployment — then exercises the emitted model's whole
@@ -1350,6 +1358,12 @@ and the redundant controller pair:
   and reconverging to `tracking` on its peer's checkpoints —
   `ci/standby_restart.py` exercises that promise on the deployed
   pair.
+- `topology` — **optional**: the deployment's named redundant pairs
+  beyond the single-pair default, each `{"name": …, "members":
+  [<controller>, <controller>]}` entry naming two `controllers`
+  members whose standby wiring closes inside the pair — the
+  declared pair index a `?pair=` overview URL is generated from.
+  A single-pair deployment omits the section; this manifest does.
 
 The deployment maps directly onto the platform's documented run
 commands: `dcs-plant-server <model> --dynamics <doc> --listen <addr>`
@@ -1371,10 +1385,13 @@ environment — the identity checkpoint negotiation verifies on the
 wire. The check's `deploy` stage parses the file through `docker
 compose config` (or an equivalent YAML parser) and asserts it agrees
 with the manifest on every field — release, images, mounts,
-fingerprint, listen addresses, pair wiring, and the standby's
-`failover_budget` against its `--auto-promote` flag — a declared
+fingerprint, listen addresses, pair wiring, the standby's
+`failover_budget` against its `--auto-promote` flag, and the
+optional `topology` section's declared pairs — a declared
 budget with no flag, a flag with no declaration, a diverging value,
-or the field placed on the duty entry each fail `rig-mismatch`, an
+the field placed on the duty entry, a pair member the manifest does
+not declare, a member two pairs share, or a declared pair whose
+standby wiring does not close inside it each fail `rig-mismatch`, an
 unparsable file `rig-invalid`, a host with
 neither parser `rig-unverifiable`.
 

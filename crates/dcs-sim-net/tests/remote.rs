@@ -12,8 +12,8 @@ use dcs_runtime::{
     StepError, WriteGate,
 };
 use dcs_sim::{
-    ChannelId, ChannelMap, Fault, FirstOrderLag, Integrator, Loopback, PointBinding,
-    ProcessElement, SimDriver,
+    BoolFlow, ChannelId, ChannelMap, Fault, FirstOrderLag, FlowSum, Integrator, Loopback,
+    PointBinding, ProcessElement, SimDriver,
 };
 use dcs_sim_net::{ClaimGrant, PlantError, PlantResponse, PlantServer, RemoteDriver, RemoteError};
 use std::io::{self, BufRead, BufReader, Write};
@@ -360,6 +360,123 @@ fn a_non_finite_write_payload_is_refused_at_the_field_boundary() {
 
         let remote = RemoteDriver::connect(addr).unwrap();
         assert_eq!(remote.read(PointId(10)).unwrap().value, Value::Float(0.0));
+    });
+}
+
+/// The pump-station dynamics chain the QA lane deploys: the gate
+/// points 100/101 drive the pump draws 20/21, the sum of the draws
+/// with the writable inflow 12 stands on net flow 13, the level
+/// integrator 10 accumulates it, and the backup lag 11 follows — the
+/// `pump_station_dynamics` fixture's shape, points included.
+fn pump_dynamics_map() -> ChannelMap {
+    ChannelMap::new()
+        .with_point(binding(10, Direction::In, Value::Float(0.8)))
+        .with_point(binding(11, Direction::In, Value::Float(0.8)))
+        .with_point(binding(12, Direction::In, Value::Float(0.0)))
+        .with_point(binding(13, Direction::In, Value::Float(0.2)))
+        .with_point(binding(20, Direction::In, Value::Float(0.0)))
+        .with_point(binding(21, Direction::In, Value::Float(0.0)))
+        .with_point(binding(100, Direction::In, Value::Bool(false)))
+        .with_point(binding(101, Direction::In, Value::Bool(false)))
+        .with_element(ProcessElement::BoolFlow(BoolFlow {
+            input: PointId(100),
+            output: PointId(20),
+            on_rate: -1.0,
+            off_rate: 0.0,
+            initial: 0.0,
+        }))
+        .with_element(ProcessElement::BoolFlow(BoolFlow {
+            input: PointId(101),
+            output: PointId(21),
+            on_rate: -1.0,
+            off_rate: 0.0,
+            initial: 0.0,
+        }))
+        .with_element(ProcessElement::FlowSum(FlowSum {
+            inputs: vec![PointId(12), PointId(20), PointId(21)],
+            output: PointId(13),
+            bias: 0.2,
+            initial: 0.2,
+        }))
+        .with_element(ProcessElement::Integrator(Integrator {
+            input: PointId(13),
+            output: PointId(10),
+            initial: 0.8,
+        }))
+        .with_element(ProcessElement::FirstOrderLag(FirstOrderLag {
+            input: PointId(10),
+            output: PointId(11),
+            time_constant: 0.5,
+            initial: 0.8,
+        }))
+}
+
+#[test]
+fn an_overflowed_level_chain_stays_finite_and_decodable_for_fresh_clients() {
+    // QA `sim-net-nonfinite-write-poisons-plant-permanently` (verif #4
+    // replay): claim -> write inflow 12 = 1e308 -> step until the level
+    // integrator overflows -> release -> a fresh client reading 10/11
+    // got `{"float":null}` forever — a frame this protocol cannot spell
+    // — until the plant restarted. The chain now degrades in place:
+    // every stored value stays finite, the overflowed elements report
+    // their held state `Bad`/`out_of_range`, and the served frames
+    // decode for every later attachment.
+    with_server(pump_dynamics_map(), |addr| {
+        let remote = RemoteDriver::connect(addr).unwrap();
+        remote.claim_writer(1).unwrap();
+        let driver: &dyn IoDriver = &remote;
+
+        driver.write(PointId(12), Value::Float(1e308)).unwrap();
+        // The first step still sums finite — 13 stands at 1e308 and the
+        // integrator commits it — so the second step is the one whose
+        // accumulation would pass the f64 range; the element refuses
+        // the commit and holds its last finite state instead.
+        remote.step(1.0).unwrap();
+        remote.step(1.0).unwrap();
+        remote.release_writer().unwrap();
+
+        // The overflowed integrator reports the finite level it held,
+        // degraded — never an unrepresentable sample.
+        let level = driver.read(PointId(10)).unwrap();
+        assert_eq!(level.quality, Quality::Bad(QualityReason::OutOfRange));
+        let Value::Float(held) = level.value else {
+            panic!("a level sample is always a Float")
+        };
+        assert!(held.is_finite());
+
+        // The downstream lag propagates the input's quality onto its
+        // own held finite value — the whole chain degrades, nothing
+        // stores non-finite.
+        let backup = driver.read(PointId(11)).unwrap();
+        assert_eq!(backup.quality, Quality::Bad(QualityReason::OutOfRange));
+        let Value::Float(followed) = backup.value else {
+            panic!("a level sample is always a Float")
+        };
+        assert!(followed.is_finite());
+
+        // The defect's verdict: a fresh client connecting after the
+        // writer released reads real samples — `{"float":null}` never
+        // reaches the wire, on the census either.
+        let fresh = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(fresh.read(PointId(10)).unwrap(), level);
+        assert_eq!(fresh.read(PointId(11)).unwrap(), backup);
+        assert!(
+            fresh
+                .list_points()
+                .unwrap()
+                .iter()
+                .all(|info| match info.sample.value {
+                    Value::Float(v) => v.is_finite(),
+                    _ => true,
+                })
+        );
+
+        // A finite inflow write plus a finite step resumes the chain in
+        // place — no plant restart.
+        remote.claim_writer(2).unwrap();
+        driver.write(PointId(12), Value::Float(0.0)).unwrap();
+        remote.step(1.0).unwrap();
+        assert!(driver.read(PointId(10)).unwrap().quality.is_good());
     });
 }
 
@@ -824,9 +941,13 @@ fn the_shared_flag_tracks_live_holders_not_the_standing_claim() {
 #[test]
 fn the_conditional_startup_claim_refuses_a_live_incumbent_only() {
     with_server(loopback_map(), |addr| {
-        let incumbent = RemoteDriver::connect(addr).unwrap();
+        // The incumbent claims as a controller — only a live
+        // *controller's* unyielded claim is the incumbent the
+        // conditional grant refuses; a tool's claim never blocks it.
+        let incumbent = RemoteDriver::connect(addr).unwrap().as_controller();
         let restart = RemoteDriver::connect(addr).unwrap();
         let same_owner = RemoteDriver::connect(addr).unwrap();
+        let tool = RemoteDriver::connect(addr).unwrap();
 
         // The incumbent's unconditional claim stands with a live holder.
         assert_eq!(incumbent.claim_writer(7).unwrap(), ClaimGrant::Exclusive);
@@ -878,6 +999,19 @@ fn the_conditional_startup_claim_refuses_a_live_incumbent_only() {
         restart.step(0.1).unwrap();
         let observer = RemoteDriver::connect(addr).unwrap();
         assert_eq!(observer.read(PointId(20)).unwrap().value, Value::Float(3.0));
+
+        // The other half of the verdict: a field tool's claim is never
+        // an incumbent — its live hold does not refuse the conditional
+        // grant, so a rogue `claim_writer` can never wedge a peer's
+        // documented promote recovery the way the unconditional
+        // live-holder refusal did.
+        tool.claim_writer(0xF0_21_61_6E).unwrap();
+        let peer = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(
+            peer.claim_writer_unless_held(9).unwrap(),
+            ClaimGrant::Exclusive
+        );
+        assert_eq!(tool.step(0.1), Err(RemoteError::Fenced));
     });
 }
 

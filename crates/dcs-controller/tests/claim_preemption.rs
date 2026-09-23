@@ -21,8 +21,10 @@
 //! superseding even a standing `diverged` verdict, because no
 //! staged-vs-field comparison on an ownerless stream can ever clear
 //! one and the promotion the verdict blocks is exactly the write that
-//! converges the field. The promotion's own unconditional
-//! `claim_writer` then preempts the foreign token — released or not.
+//! converges the field. The promotion's conditional claim then
+//! preempts the foreign token — released or not: the field records a
+//! tool's claim as a tool's, and only a live *controller's* unyielded
+//! claim is the incumbent an orphaned promote must refuse.
 //!
 //! The scripted reproduction runs the QA rig's own shape: one
 //! `dcs-plant-server` serving the demo pump station, two
