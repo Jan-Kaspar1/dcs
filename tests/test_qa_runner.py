@@ -556,6 +556,178 @@ class RigStateFileTests(unittest.TestCase):
         self.assertFalse(self.run_dir.exists())
 
 
+class OwnerTokenPinTests(unittest.TestCase):
+    """The per-controller --owner-token pins the run config records:
+    every controller the runner launches — the pair and the
+    scenario-action third peers — carries its endpoint's pinned
+    token, so a scenario plant-protocol attachment can share the
+    standing owner's claim through ensure_writer (the designed
+    harness path) instead of preempting it; ctx['plant_owner'] hands
+    the cases the same recorded map."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        self.run_dir.mkdir(parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+        self.model = self.src / self.cfg['model_fixture']
+        self.model.parent.mkdir(parents=True, exist_ok=True)
+        self.model.write_text(json.dumps(
+            {'version': 1,
+             'devices': [{'id': 1, 'kind': 'sim-di',
+                          'channels': [{'name': 'ch0',
+                                        'direction': 'in',
+                                        'value_type': 'bool'}]}],
+             'io_points': [
+                 {'id': 10, 'direction': 'in', 'value_type': 'bool',
+                  'channel': {'device': 1, 'channel': 'ch0'}},
+                 {'id': 300, 'direction': 'in', 'value_type': 'bool',
+                  'writable': True, 'initial': {'bool': False}}],
+             'signals': [{'id': 10300, 'name': 'oos', 'source': 300}],
+             'components': [], 'connections': []}))
+        dynamics = self.src / self.cfg['dynamics_fixture']
+        dynamics.parent.mkdir(parents=True, exist_ok=True)
+        dynamics.write_text('{}')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _record(self):
+        return {'run_id': 'qa-1', 'attempted_sha': SHA_A}
+
+    @staticmethod
+    def _docker(calls):
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+        return fake_docker
+
+    @staticmethod
+    def _launch(calls, container):
+        return next(c for c in calls
+                    if c[0] == 'run' and container in c)
+
+    @staticmethod
+    def _owner_token(launch):
+        return launch[launch.index('--owner-token') + 1]
+
+    def test_pair_launches_carry_the_config_pins(self):
+        calls = []
+
+        class FakeConn:
+            def close(self):
+                pass
+
+        with patch.object(runner, 'docker', self._docker(calls)), \
+                patch.object(runner.socket, 'create_connection',
+                             return_value=FakeConn()):
+            runner._start_rig(self.cfg, self._record(), self.src,
+                              self.run_dir, lambda e, d=None: None)
+        tokens = self.cfg['plant_owner_tokens']
+        for key, container in (('active', 'dcs-hw-qa-1-a'),
+                               ('standby', 'dcs-hw-qa-1-b')):
+            launch = self._launch(calls, container)
+            self.assertEqual(self._owner_token(launch),
+                             str(tokens[key]), key)
+        self.assertNotEqual(tokens['active'], tokens['standby'])
+
+    def test_pins_come_from_the_run_config_not_a_constant(self):
+        # A config-file override is what the launch carries — the pin
+        # is recorded in the run config, not buried in the code.
+        self.cfg['plant_owner_tokens'] = {
+            **self.cfg['plant_owner_tokens'], 'active': 424299}
+        calls = []
+
+        class FakeConn:
+            def close(self):
+                pass
+
+        with patch.object(runner, 'docker', self._docker(calls)), \
+                patch.object(runner.socket, 'create_connection',
+                             return_value=FakeConn()):
+            runner._start_rig(self.cfg, self._record(), self.src,
+                              self.run_dir, lambda e, d=None: None)
+        launch = self._launch(calls, 'dcs-hw-qa-1-a')
+        self.assertEqual(self._owner_token(launch), '424299')
+
+    def test_every_third_controller_launch_carries_its_pin(self):
+        calls, events = [], []
+        with patch.object(runner, 'docker', self._docker(calls)):
+            runner.start_revised_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'standby', lambda e, d=None: events.append((e, d)))
+            runner.start_foreign_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'standby', lambda e, d=None: events.append((e, d)))
+            runner.start_driven_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'standby', lambda e, d=None: events.append((e, d)))
+        tokens = self.cfg['plant_owner_tokens']
+        for key, container in (('revised', 'dcs-hw-qa-1-c'),
+                               ('foreign', 'dcs-hw-qa-1-foreign'),
+                               ('driven', 'dcs-hw-qa-1-d')):
+            launch = self._launch(calls, container)
+            self.assertEqual(self._owner_token(launch),
+                             str(tokens[key]), key)
+        self.assertEqual(
+            len({tokens[key] for key in
+                 ('revised', 'foreign', 'driven')}), 3)
+        # Each launch record names the pin it carried.
+        for event, detail in events:
+            if event in ('model-revision-start', 'negotiation-start',
+                         'driven-start'):
+                self.assertIn('--owner-token', detail, event)
+
+    def test_scenario_ctx_hands_cases_the_recorded_map(self):
+        ctx = runner._scenario_ctx(
+            self.cfg, self._record(), self.src, self.run_dir,
+            self.run_dir / 'evidence', 0, lambda e, d=None: None)
+        self.assertEqual(ctx['plant_owner'],
+                         self.cfg['plant_owner_tokens'])
+        self.assertEqual(set(ctx['plant_owner']),
+                         set(runner.OWNER_TOKEN_ENDPOINTS))
+
+    def test_a_duplicated_pin_fails_the_launch_loudly(self):
+        # Two endpoints on one token would silently defeat the sim's
+        # single-writer fencing — the config check refuses before any
+        # container launches.
+        self.cfg['plant_owner_tokens'] = {
+            **self.cfg['plant_owner_tokens'],
+            'standby': self.cfg['plant_owner_tokens']['active']}
+        calls = []
+        with patch.object(runner, 'docker', self._docker(calls)):
+            with self.assertRaises(RuntimeError) as caught:
+                runner._start_rig(self.cfg, self._record(), self.src,
+                                  self.run_dir, lambda e, d=None: None)
+            self.assertIn('distinct', str(caught.exception))
+            with self.assertRaises(RuntimeError):
+                runner.start_revised_controller(
+                    self.cfg, self._record(), self.run_dir, self.model,
+                    'standby', lambda e, d=None: None)
+        self.assertFalse(any(c[0] == 'run' for c in calls))
+
+    def test_a_missing_pin_fails_the_launch_loudly(self):
+        tokens = dict(self.cfg['plant_owner_tokens'])
+        del tokens['revised']
+        self.cfg['plant_owner_tokens'] = tokens
+        with patch.object(runner, 'docker', self._docker([])):
+            with self.assertRaises(RuntimeError) as caught:
+                runner.start_revised_controller(
+                    self.cfg, self._record(), self.run_dir, self.model,
+                    'standby', lambda e, d=None: None)
+        self.assertIn('revised', str(caught.exception))
+
+    def test_a_non_integer_pin_fails_the_launch_loudly(self):
+        self.cfg['plant_owner_tokens'] = {
+            **self.cfg['plant_owner_tokens'], 'driven': 'qa-d'}
+        with patch.object(runner, 'docker', self._docker([])):
+            with self.assertRaises(RuntimeError):
+                runner.start_driven_controller(
+                    self.cfg, self._record(), self.run_dir, self.model,
+                    'standby', lambda e, d=None: None)
+
+
 class DcsCtlBuildTests(unittest.TestCase):
     """The dcs-ctl host-binary seam: the bounded image build compiles
     the operator CLI beside the image binaries, _scenario_ctx hands its

@@ -162,6 +162,25 @@ pub fn spawn_piped(
     spawn_logged_piped(binary, args, parse).0
 }
 
+/// The `--pair-token` every helper-spawned controller carries — the
+/// keyed deployment shape a real redundant pair declares: an
+/// announced-source demotion then verifies the hinted endpoint's
+/// `line_proof`, and every checkpoint the adopted source serves keeps
+/// proving under fresh nonces. A test that needs the unkeyed shape —
+/// the replaying interposer's reproduction — spawns its controller
+/// directly.
+pub const PAIR_TOKEN: &str = "dcs-test-pair";
+
+/// Appends the shared `--pair-token` to `args` unless the caller
+/// already declared one — the keyed pair wiring the scripted
+/// controllers run the announced-demotion contract under.
+fn pair_args(args: &mut Vec<String>, extra: &[String]) {
+    if !extra.iter().any(|arg| arg == "--pair-token") {
+        args.push("--pair-token".to_string());
+        args.push(PAIR_TOKEN.to_string());
+    }
+}
+
 /// A `dcs-plant-server` process serving `model` with `dynamics` merged
 /// in, on an ephemeral port.
 pub fn spawn_plant(model: &Path, dynamics: &Path) -> Spawned {
@@ -190,6 +209,7 @@ pub fn spawn_controller(model: &Path, extra: &[String], dt: &str) -> Spawned {
 pub fn spawn_controller_logged(model: &Path, extra: &[String], dt: &str) -> (Spawned, Vec<String>) {
     let mut args = vec![model.to_str().unwrap().to_string()];
     args.extend(extra.iter().cloned());
+    pair_args(&mut args, extra);
     for arg in ["--listen", "127.0.0.1:0", "--driven", "--dt", dt] {
         args.push(arg.to_string());
     }
@@ -209,6 +229,7 @@ pub fn spawn_controller_paced(
 ) -> Spawned {
     let mut args = vec![model.to_str().unwrap().to_string()];
     args.extend(extra.iter().cloned());
+    pair_args(&mut args, extra);
     for arg in [
         "--listen".to_string(),
         listen.to_string(),
