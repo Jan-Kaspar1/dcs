@@ -1,8 +1,9 @@
 //! Process-level integration tests for `dcs-plant-server`: the binary
 //! spawned against the checked-in tank-loop fixture pair, two attached
 //! `RemoteDriver`s sharing the stepped plant, stepping on explicit
-//! request only, the named failure surface, graceful shutdown, and
-//! identical scripted runs across restarts.
+//! request only, the named failure surface, graceful shutdown, the
+//! standalone `--check-dynamics` preflight, and identical scripted runs
+//! across restarts.
 
 use dcs_core::{IoDriver, IoError, PointId, Sample, Value};
 use dcs_sim_net::RemoteDriver;
@@ -48,6 +49,10 @@ const UNBOUND_DYNAMICS: &str = concat!(
 const MALFORMED_DYNAMICS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/invalid/dynamics_malformed.json"
+);
+const UNBOUND_CONFLICTING_DYNAMICS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/invalid/dynamics_unbound_and_conflicting.json"
 );
 const UNKNOWN_DEVICE_MODEL: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -511,6 +516,85 @@ fn the_level_crossing_drives_the_protection_contact_through_the_merge() {
             .iter()
             .any(|(_, contact)| contact.value == Value::Bool(false))
     );
+}
+
+#[test]
+fn check_dynamics_accepts_a_valid_document_without_serving() {
+    // The standalone preflight: a valid document exits zero with the
+    // element summary on stdout — and since no listener binds, stderr
+    // stays silent and the process exits on its own, no signal needed.
+    let output = Command::new(SERVER)
+        .args([MODEL, "--check-dynamics", DYNAMICS])
+        .output()
+        .expect("dcs-plant-server runs");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("check ok"), "{stdout}");
+    assert!(stdout.contains("elements: 1"), "{stdout}");
+    assert!(stdout.contains("first_order_lag: 1"), "{stdout}");
+    assert!(output.stderr.is_empty(), "{}", stderr(&output));
+}
+
+#[test]
+fn check_dynamics_rejects_invalid_documents_without_serving() {
+    // An element driving a point the model does not bind is named by
+    // index and driving point — the same message `--dynamics` reports
+    // at startup.
+    let output = run_fail(&[MODEL, "--check-dynamics", UNBOUND_DYNAMICS]);
+    let message = stderr(&output);
+    assert!(message.contains("dynamics element 0"), "{message}");
+    assert!(message.contains("99"), "{message}");
+    assert!(!message.contains("listening on"), "{message}");
+
+    // A document with several malformed elements reports each rejection
+    // in one pass: indices 0 and 2 drive unbound points, index 3
+    // conflicts with the point the valid element 1 merged onto, and
+    // element 1 itself is not named.
+    let output = run_fail(&[MODEL, "--check-dynamics", UNBOUND_CONFLICTING_DYNAMICS]);
+    let message = stderr(&output);
+    for (index, point) in [(0, 98), (2, 97), (3, 10)] {
+        assert!(
+            message.contains(&format!("dynamics element {index} (driving point {point})")),
+            "{message}"
+        );
+    }
+    assert!(!message.contains("dynamics element 1"), "{message}");
+
+    // A document that is not a process-element list at all.
+    let output = run_fail(&[MODEL, "--check-dynamics", MALFORMED_DYNAMICS]);
+    let message = stderr(&output);
+    assert!(message.contains("dynamics"), "{message}");
+    assert!(message.contains("dynamics_malformed.json"), "{message}");
+
+    // A dynamics path that does not exist names the path.
+    let output = run_fail(&[MODEL, "--check-dynamics", "no-such-dynamics.json"]);
+    assert!(stderr(&output).contains("no-such-dynamics.json"));
+
+    // A model failing validation reports before any element is read.
+    let output = run_fail(&[INVALID_MODEL, "--check-dynamics", DYNAMICS]);
+    let message = stderr(&output);
+    assert!(message.contains("invalid plant model"), "{message}");
+
+    // The serve-mode options do not combine with the preflight: each is
+    // rejected as a usage error, naming the refused flag.
+    for flag in ["--listen", "--dynamics"] {
+        let output = Command::new(SERVER)
+            .args([MODEL, "--check-dynamics", DYNAMICS, flag, "x"])
+            .output()
+            .expect("dcs-plant-server runs");
+        assert_eq!(output.status.code(), Some(2), "{flag}");
+        let message = stderr(&output);
+        assert!(message.contains("--check-dynamics"), "{message}");
+        assert!(message.contains(flag), "{message}");
+    }
+
+    // The flag requires its document argument.
+    let output = Command::new(SERVER)
+        .args([MODEL, "--check-dynamics"])
+        .output()
+        .expect("dcs-plant-server runs");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("--check-dynamics"));
 }
 
 #[test]

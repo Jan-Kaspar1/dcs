@@ -17,7 +17,11 @@
 #                stale-artifact)
 #   tooling      the released tooling accepts the emitted model —
 #                `dcs-model validate`, `dcs-model lint`,
-#                `dcs-controller --check` — and exercises the contract's
+#                `dcs-controller --check` — and the dynamics document
+#                standalone, `dcs-plant-server --check-dynamics` merging
+#                and validating every element against the model's
+#                channel map with no server launched — and exercises the
+#                contract's
 #                remaining dcs-model surfaces: `dcs-model schema` and
 #                `dcs-model interface-schema` emissions byte-identical
 #                to the release record's schema artifacts (fetched from
@@ -884,7 +888,9 @@ LINT="$("$TOOLS/dcs-model" lint model/plant.json)" \
     || fail "tooling-rejected: dcs-model lint reports findings: $LINT"
 "$TOOLS/dcs-controller" model/plant.json --check \
     || fail "tooling-rejected: dcs-controller --check refused the checked-in model"
-echo "  validate, lint, and --check accept the checked-in model"
+"$TOOLS/dcs-plant-server" model/plant.json --check-dynamics model/dynamics.json \
+    || fail "tooling-rejected: dcs-plant-server --check-dynamics refused the checked-in dynamics document"
+echo "  validate, lint, --check, and --check-dynamics accept the checked-in documents"
 
 # The release record's schema artifacts: `docs/releases/<tag>/` lives
 # in the same repository the crate and tooling pins resolve from, so

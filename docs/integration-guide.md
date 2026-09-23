@@ -1426,7 +1426,12 @@ JSON list of `ProcessElement` declarations into the served channel map —
 `first_order_lag`, `second_order_lag`, `integrator`, `dead_time`, `noise`,
 `bool_flow`, `flow_sum`, `scaled_flow`, `threshold` — and
 `dcs-sim-bus-device --dynamics` merges the same list over its register bank.
-The document is deliberately not `PlantModel` schema: process physics are
+`dcs-plant-server <model> --check-dynamics FILE` preflights the document
+without starting the server: every element is merged and validated against
+the model's channel map under the same rules `--dynamics` applies, each
+rejection named by its element index and driving point, so plant CI can
+reject a malformed document before deployment. The document is
+deliberately not `PlantModel` schema: process physics are
 simulation internals no controller reads.
 
 `dcs-build`'s `dynamics` module composes that document through the same

@@ -1,0 +1,32 @@
+[
+  {
+    "first_order_lag": {
+      "input": 20,
+      "output": 98,
+      "time_constant": 1.0,
+      "initial": 0.0
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 20,
+      "output": 10,
+      "time_constant": 2.0,
+      "initial": 4.0
+    }
+  },
+  {
+    "integrator": {
+      "input": 20,
+      "output": 97,
+      "initial": 0.0
+    }
+  },
+  {
+    "integrator": {
+      "input": 20,
+      "output": 10,
+      "initial": 0.0
+    }
+  }
+]
