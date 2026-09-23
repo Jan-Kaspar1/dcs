@@ -1484,17 +1484,22 @@ fn a_stale_restart_is_refused_over_the_live_incumbent() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The fenced-peer command-audit test — the QA finding
-/// `fenced-unscanned-peer-accepts-commands`. A peer superseded out of
-/// the field still reports `active` and accepts commands until its
-/// detection scan, and the commands that boundary settles land on an
-/// image the field never saw — the surviving owner does not carry
-/// them. The fencing demotion must reconcile those settlements —
-/// `rejected`/`superseded`, not `applied` — so the served receipts and
-/// the journaled `command_settled` entries never tell an operator a
-/// lost command took effect.
+/// The fenced-peer command-audit test — the QA findings
+/// `fenced-unscanned-peer-accepts-commands` and
+/// `demote-boundary-superseded-mint-then-carried-applied`. A peer
+/// superseded out of the field still reports `active` and accepts
+/// commands until its detection scan, and the commands that boundary
+/// settles land on an image the field never saw. Whether the surviving
+/// line carried the admissions is not the demoted run's to decide, so
+/// the fencing demotion replays the boundary's provisional settlements
+/// back to `accepted` — the suspended shape a voluntary demotion's
+/// queue keeps — rather than minting a `rejected`/`superseded` the
+/// line's later `applied` would contradict in the same journal. Each
+/// suspended admission then settles exactly once, on the surviving
+/// line's adjudication: carried, or passed by its checkpoint
+/// high-water into `rejected`/`superseded`.
 #[test]
-fn a_fenced_peer_supersedes_commands_accepted_before_its_detection_scan() {
+fn a_fenced_peer_suspends_the_commands_its_detection_scan_settled() {
     let dir = std::env::temp_dir().join(format!("dcs-fenced-commands-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -1583,10 +1588,13 @@ fn a_fenced_peer_supersedes_commands_accepted_before_its_detection_scan() {
         );
     }
 
-    // The detection scan: the boundary applies the queued commands onto
-    // the superseded image, then the field write meets the fence and
-    // the demotion runs — reconciling the settlements before the
-    // journal echoes them.
+    // The detection scan: the boundary settles the queued commands
+    // onto the superseded image — provisionally — then the field write
+    // meets the fence and the demotion replays every settlement back
+    // to the `accepted` outcome each receipt held. No `command_settled`
+    // may journal here: the surviving line has not adjudicated the
+    // admissions, and a `superseded` minted on the boundary's say-so is
+    // the verdict the carried copy's later `applied` contradicted.
     let fenced = active.advance(1).unwrap();
     assert_eq!(
         fenced.io_health.last_error.map(|fault| fault.error),
@@ -1598,10 +1606,6 @@ fn a_fenced_peer_supersedes_commands_accepted_before_its_detection_scan() {
     assert_eq!(demoting.role, Role::Demoting, "{demoting:?}");
     assert_eq!(demoting.tick, fenced.tick);
 
-    // No settlement may report the phantom application — not on the
-    // served receipts, not in the journaled `command_settled` echo. The
-    // boundary's own refusals stand named: the field-bound write met
-    // the fence itself and settles `driver_rejected`/`fenced`.
     let outcome_of = |command: &Command| -> Option<CommandOutcome> {
         active
             .receipts()
@@ -1610,44 +1614,24 @@ fn a_fenced_peer_supersedes_commands_accepted_before_its_detection_scan() {
             .find(|receipt| &receipt.command == command)
             .map(|receipt| receipt.outcome.clone())
     };
-    assert_eq!(
-        outcome_of(&held_write),
-        Some(CommandOutcome::Rejected {
-            reason: CommandError::Superseded { point: Some(HELD) }
-        }),
-        "the image write must settle superseded, not applied"
-    );
-    assert_eq!(
-        outcome_of(&tune),
-        Some(CommandOutcome::Rejected {
-            reason: CommandError::Superseded { point: None }
-        }),
-        "the parameter tune must settle superseded, not applied"
-    );
-    assert!(
-        matches!(
-            outcome_of(&field_write),
-            Some(CommandOutcome::Rejected {
-                reason: CommandError::DriverRejected { point, error },
-            }) if point == SETPOINT && error == IoError::Fenced(SETPOINT)
-        ),
-        "the field write's own fenced refusal stands: {:?}",
-        outcome_of(&field_write)
-    );
-    let journal = active.journal(0).unwrap();
-    for receipt in settled_receipts(&journal) {
-        if receipt.command == held_write || receipt.command == tune {
-            assert!(
-                matches!(
-                    receipt.outcome,
-                    CommandOutcome::Rejected {
-                        reason: CommandError::Superseded { .. }
-                    }
-                ),
-                "the journal must not echo a phantom application: {receipt:?}"
-            );
-        }
+    for command in [&held_write, &tune, &field_write] {
+        assert_eq!(
+            outcome_of(command),
+            Some(CommandOutcome::Accepted {
+                apply_tick: fenced.tick
+            }),
+            "the boundary's settlement must re-suspend, not settle: {command:?}"
+        );
     }
+    let journal = active.journal(0).unwrap();
+    assert!(
+        settled_receipts(&journal)
+            .iter()
+            .all(|receipt| receipt.command != held_write
+                && receipt.command != tune
+                && receipt.command != field_write),
+        "no settle may journal before the line adjudicates: {journal:?}"
+    );
     assert!(
         journal.iter().any(|entry| matches!(
             entry.event,
@@ -1656,12 +1640,32 @@ fn a_fenced_peer_supersedes_commands_accepted_before_its_detection_scan() {
         "the fenced owner's journal must record the claim loss: {journal:?}"
     );
 
+    // The receipts' `accepted` agrees with the served state: the
+    // boundary's staged mutations rolled back out with the settlement
+    // replay, so the demoted run's quiesced checkpoints carry the
+    // pre-boundary image and tuning beside the live admissions.
+    let demoted = active.snapshot().unwrap();
+    assert_eq!(
+        image_value(&demoted, HELD),
+        Value::Bool(false),
+        "the suspended write must not persist on the demoted image"
+    );
+    assert_eq!(
+        demoted
+            .parameters
+            .iter()
+            .find(|parameters| parameters.name == "pid:2")
+            .and_then(|parameters| parameters.values.get("kp")),
+        Some(&Value::Float(0.5)),
+        "the suspended tune must not persist on the demoted run"
+    );
+
     // The surviving owner and the field never carried any of it.
     let owner = standby.snapshot().unwrap();
     assert_eq!(
         image_value(&owner, HELD),
         Value::Bool(false),
-        "the surviving owner's image must not carry the superseded write"
+        "the surviving owner's image must not carry the suspended write"
     );
     assert_eq!(
         owner
@@ -1670,7 +1674,7 @@ fn a_fenced_peer_supersedes_commands_accepted_before_its_detection_scan() {
             .find(|parameters| parameters.name == "pid:2")
             .and_then(|parameters| parameters.values.get("kp")),
         Some(&Value::Float(0.5)),
-        "the surviving owner's tuning must not carry the superseded parameter"
+        "the surviving owner's tuning must not carry the suspended parameter"
     );
     assert_eq!(
         field.read(VALVE).unwrap().value,
@@ -1683,32 +1687,103 @@ fn a_fenced_peer_supersedes_commands_accepted_before_its_detection_scan() {
         "the fenced peer's setpoint write never reached the field"
     );
 
-    // The first quiesced scan settles `standby` — the pending queue
-    // was drained by the reconciliation, so nothing else settles — and
-    // the promoted peer keeps owning the field alone.
+    // The first quiesced scan settles `standby` and adopts the promoted
+    // line's checkpoint — whose receipt window does not reach the
+    // suspended submissions. A stale window is the source's lag, not a
+    // verdict: the suffix restores verbatim, still `accepted`, and
+    // still nothing settles.
     active.advance(1).unwrap();
-    assert_eq!(active.role().unwrap().role, Role::Standby);
-    let owner = standby.advance(1).unwrap();
-    assert_eq!(
-        field.read(VALVE).unwrap().value,
-        image_value(&owner, VALVE),
-        "the field must carry only the promoted owner's writes"
+    let report = active.role().unwrap();
+    assert_eq!(report.role, Role::Standby, "{report:?}");
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted peer must reconverge on its successor: {report:?}"
     );
+    for command in [&held_write, &tune, &field_write] {
+        assert!(
+            matches!(outcome_of(command), Some(CommandOutcome::Accepted { .. })),
+            "an unreached admission stays suspended, unsettled: {command:?}"
+        );
+    }
+    assert!(
+        settled_receipts(&active.journal(0).unwrap())
+            .iter()
+            .all(|receipt| receipt.command != held_write
+                && receipt.command != tune
+                && receipt.command != field_write),
+        "a superseded verdict waits on the line's adjudication"
+    );
+
+    // The adjudication itself: the line's submission high-water passes
+    // the suspended receipts' indices — the promoted run admits and
+    // applies three commands of its own — and the demoted peer's next
+    // adoption covers each index with a different command. That is the
+    // verdict `superseded` stands on, and each admission settles it
+    // exactly once in the durable journal.
+    let line_commands = [
+        Command::WriteValue {
+            point: SETPOINT,
+            kind: ValueKind::Float,
+            value: Value::Float(55.0),
+        },
+        Command::SetParameter {
+            component: "pid:2".to_string(),
+            name: "kp".to_string(),
+            value: Value::Float(1.5),
+        },
+        Command::WriteValue {
+            point: HELD,
+            kind: ValueKind::Bool,
+            value: Value::Bool(false),
+        },
+    ];
+    for command in &line_commands {
+        standby.command(command).unwrap();
+    }
+    standby.advance(1).unwrap();
+    active.advance(1).unwrap();
+    assert_eq!(
+        active.receipts().unwrap(),
+        standby.receipts().unwrap(),
+        "the demoted peer's log converges on the surviving line's audit"
+    );
+    let journal = active.journal(0).unwrap();
+    for (command, point) in [
+        (&held_write, Some(HELD)),
+        (&tune, None),
+        (&field_write, Some(SETPOINT)),
+    ] {
+        let settles: Vec<CommandOutcome> = settled_receipts(&journal)
+            .iter()
+            .filter(|receipt| &receipt.command == command)
+            .map(|receipt| receipt.outcome.clone())
+            .collect();
+        assert_eq!(
+            settles,
+            vec![CommandOutcome::Rejected {
+                reason: CommandError::Superseded { point }
+            }],
+            "one admission, one settle — the passed-by verdict: {command:?}"
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The QA finding `superseded-receipt-internal-write-persists` — the
+/// The carried half of
+/// `demote-boundary-superseded-mint-then-carried-applied` — the QA
 /// reproduction's ordering, which the fenced-commands test above does
 /// not cover: here the field claim is preempted *before* the command's
 /// apply scan and the tracking peer is still following the demoted run
-/// when it pulls the post-fence checkpoint. The `rejected`/`superseded`
-/// receipt means the surviving line never made the change, so the
-/// reconciled contract rolls the fenced boundary's staged mutations
-/// back: the demoted run's quiesced checkpoints carry the pre-boundary
-/// state, and the promoted line's image must not carry the write.
+/// when it pulls the post-fence checkpoint. The boundary's provisional
+/// settlement replays to `accepted` and the staged mutation rolls
+/// back, so the checkpoint carries the pre-boundary image beside the
+/// live admission — and the promoted line carries the command itself:
+/// it applies for real on the surviving run, its one journaled settle
+/// is `applied`, and the demoted peer's own journal never shows the
+/// superseded-then-applied pair the defect minted.
 #[test]
-fn a_superseded_internal_write_never_reaches_the_promoted_line() {
+fn a_suspended_internal_write_carries_to_the_promoted_line() {
     let dir = std::env::temp_dir().join(format!("dcs-superseded-persist-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -1773,9 +1848,11 @@ fn a_superseded_internal_write_never_reaches_the_promoted_line() {
     );
 
     // The detection scan: the boundary applies the write onto the
-    // superseded image, the field write meets the fence, and the
-    // demotion runs — settling the receipt `rejected`/`superseded` and
-    // rolling the staged mutation back out.
+    // superseded image — provisionally — the field write meets the
+    // fence, and the demotion replays the settlement back to
+    // `accepted` while rolling the staged mutation out. Nothing
+    // settles yet: whether the line carried the admission is the
+    // surviving run's verdict to make.
     let fenced = active.advance(1).unwrap();
     assert_eq!(
         fenced.io_health.last_error.map(|fault| fault.error),
@@ -1794,23 +1871,33 @@ fn a_superseded_internal_write_never_reaches_the_promoted_line() {
     };
     assert_eq!(
         outcome_of(&active, &held_write),
-        Some(CommandOutcome::Rejected {
-            reason: CommandError::Superseded { point: Some(HELD) }
+        Some(CommandOutcome::Accepted {
+            apply_tick: fenced.tick
         }),
-        "the write must settle superseded, not applied"
+        "the boundary's settlement must re-suspend, not settle superseded"
     );
-    // The reconciled state agrees with the receipt: the demoted run's
-    // own image no longer carries the write.
+    // The replayed state agrees with the still-live receipt: the
+    // demoted run's own image no longer carries the write — the
+    // `superseded-receipt-internal-write-persists` half of the
+    // contract — so the checkpoints it serves carry the pre-boundary
+    // state beside the admission, not beside a phantom mutation.
     assert_eq!(
         image_value(&active.snapshot().unwrap(), HELD),
         Value::Bool(false),
-        "the superseded write must not persist on the demoted image"
+        "the suspended write must not persist on the demoted image"
+    );
+    assert!(
+        settled_receipts(&active.journal(0).unwrap())
+            .iter()
+            .all(|receipt| receipt.command != held_write),
+        "no settle may journal before the line adjudicates"
     );
 
     // The propagation leg the defect rode: the standby is still
     // tracking when it pulls the demoted run's post-fence checkpoint —
     // orphaned by the `source_owns_field` stamp, still promotable —
-    // then takes the field.
+    // and the suspended receipt re-queues on it live, the same carry
+    // shape a promotion-boundary pull takes.
     standby.advance(1).unwrap();
     assert!(
         matches!(
@@ -1820,25 +1907,51 @@ fn a_superseded_internal_write_never_reaches_the_promoted_line() {
         "tracking a field-less source must report orphaned: {:?}",
         standby.role().unwrap()
     );
+    assert_eq!(
+        outcome_of(&standby, &held_write),
+        Some(CommandOutcome::Accepted {
+            apply_tick: fenced.tick
+        }),
+        "the carried admission lands live on the tracking peer"
+    );
+    assert_eq!(
+        image_value(&standby.snapshot().unwrap(), HELD),
+        Value::Bool(false),
+        "the adopted image carries the pre-boundary state, not the write"
+    );
+
+    // The promoted line then makes the change for real: the carried
+    // receipt applies at the new owner's first field-owning boundary,
+    // and the image carries the write because the surviving line made
+    // it — the receipt's `applied` is the truth the journal records.
     standby.promote().unwrap();
     let owner = standby.advance(1).unwrap();
     assert_eq!(standby.role().unwrap().role, Role::Active);
-
-    // The reconciled contract's assertion: the promoted line does not
-    // carry the value its receipt claims was never applied.
     assert_eq!(
         image_value(&owner, HELD),
-        Value::Bool(false),
-        "the promoted line must not carry the superseded write"
+        Value::Bool(true),
+        "the promoted line carries the write its receipt genuinely applied"
     );
-    // Receipt-log parity on the surviving peer: the adoption carried
-    // the same `rejected`/`superseded` record — one verdict, one state.
+    assert!(
+        matches!(
+            outcome_of(&standby, &held_write),
+            Some(CommandOutcome::Applied { .. })
+        ),
+        "the carried admission settles applied on the surviving line"
+    );
+    let standby_settles: Vec<CommandOutcome> = settled_receipts(&standby.journal(0).unwrap())
+        .iter()
+        .filter(|receipt| receipt.command == held_write)
+        .map(|receipt| receipt.outcome.clone())
+        .collect();
     assert_eq!(
-        outcome_of(&standby, &held_write),
-        Some(CommandOutcome::Rejected {
-            reason: CommandError::Superseded { point: Some(HELD) }
-        }),
-        "the promoted peer's adopted log must carry the same superseded record"
+        standby_settles.len(),
+        1,
+        "one admission settles once on the surviving journal: {standby_settles:?}"
+    );
+    assert!(
+        matches!(standby_settles[0], CommandOutcome::Applied { .. }),
+        "the surviving line's one verdict is applied: {standby_settles:?}"
     );
     // The promoted owner's writes reach the field the rogue held —
     // the takeover itself is unaffected by the reconciliation.
@@ -1846,6 +1959,34 @@ fn a_superseded_internal_write_never_reaches_the_promoted_line() {
         rogue.read(VALVE).unwrap().value,
         image_value(&owner, VALVE),
         "the promoted peer's write must reach the field the rogue held"
+    );
+
+    // The demoted peer reconverges on its successor: the adopted log
+    // carries the same command at the admission's index — carried —
+    // so the receipt converges to the line's `applied` and the journal
+    // records the pair's one verdict. The defect's pair — a
+    // `superseded` minted at the demotion boundary followed by the
+    // carried `applied` — never forms.
+    active.advance(1).unwrap();
+    assert_eq!(
+        outcome_of(&active, &held_write),
+        outcome_of(&standby, &held_write),
+        "the demoted peer's log converges on the line's verdict"
+    );
+    let demoted_settles: Vec<CommandOutcome> = settled_receipts(&active.journal(0).unwrap())
+        .iter()
+        .filter(|receipt| receipt.command == held_write)
+        .map(|receipt| receipt.outcome.clone())
+        .collect();
+    assert_eq!(
+        demoted_settles.len(),
+        1,
+        "one admission settles once on the demoted journal: {demoted_settles:?}"
+    );
+    assert!(
+        matches!(demoted_settles[0], CommandOutcome::Applied { .. }),
+        "the demoted peer journals the line's applied — never a \
+         superseded it would contradict: {demoted_settles:?}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

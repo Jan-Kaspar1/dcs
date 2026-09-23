@@ -543,16 +543,30 @@ enum Resolved {
 }
 
 /// The rollback record for one effect a command boundary staged: the
-/// pre-boundary state [`Executor::supersede_commands`] returns when the
-/// boundary's run turns out superseded. Every state a command mutates
-/// is run state the checkpoints keep carrying — the image's internal
-/// `In` samples, the force set, a component's captured state — so a
-/// `Rejected`/`Superseded` receipt is honest only while the abandoned
-/// run also unwrote the effect: without the rollback the mutation rode
-/// the demoted peer's quiesced checkpoints into the tracking successor
-/// while the journal claimed it never landed.
+/// pre-boundary state [`Executor::suspend_boundary_commands`] returns
+/// when the boundary's run turns out superseded. Every state a command
+/// mutates is run state the checkpoints keep carrying — the receipt
+/// outcome the boundary wrote, the image's internal `In` samples, the
+/// force set, a component's captured state — and a settlement on the
+/// abandoned boundary is provisional: the surviving line may already
+/// carry the admission, so the boundary replays its effects *and* its
+/// verdicts back out — the receipts re-suspend `Accepted` for the
+/// tracked line's adoption to adjudicate once, and the mutations
+/// unwrite so the demoted peer's quiesced checkpoints carry the
+/// pre-boundary state the still-pending receipts claim.
 #[derive(Debug)]
 enum BoundaryUndo {
+    /// A queued command's receipt as the boundary found it — always
+    /// `Accepted`, since only queued entries reach the boundary. The
+    /// settlement the boundary then wrote is provisional like every
+    /// other staged effect: a successor's checkpoint carry can hold
+    /// the same still-live admission, and a terminal verdict written
+    /// here would journal beside the line's own later, contradictory
+    /// one — so the replay returns the outcome the receipt held. The
+    /// index is the absolute submission index, not the log position:
+    /// the boundary's own `trim_receipts` may slide positions before
+    /// the replay runs.
+    Receipt { index: u64, prior: CommandOutcome },
     /// An internal `In` point's image sample as the boundary found it —
     /// staged by a `WriteValue` or by the force pair's image re-stamps.
     Image {
@@ -879,11 +893,11 @@ pub struct Executor<'d> {
     /// boundary applied — one [`BoundaryUndo`] per staged effect, in
     /// application order. A scan product like `emitted`: cleared when
     /// the next scan starts and by a checkpoint apply. Only
-    /// [`supersede_commands`](Self::supersede_commands) consumes it —
-    /// the fencing path replays it in reverse so the abandoned run's
-    /// state, and every checkpoint it keeps serving, agree with the
-    /// `Rejected`/`Superseded` receipts: the line never made the
-    /// change.
+    /// [`suspend_boundary_commands`](Self::suspend_boundary_commands)
+    /// consumes it — the fencing path replays it in reverse so the
+    /// abandoned run's state, and every checkpoint it keeps serving,
+    /// carry the pre-boundary state while the receipts it settled
+    /// re-suspend for the surviving line to adjudicate.
     boundary_undo: Vec<BoundaryUndo>,
     /// The fingerprint of the model this run was assembled from, when
     /// the assembling layer supplied one: stamped into every checkpoint
@@ -2594,6 +2608,17 @@ impl<'d> Executor<'d> {
     fn apply_commands(&mut self, tick: Tick) {
         while let Some(index) = self.pending_commands.pop_front() {
             let command = self.receipts[index].command.clone();
+            // The settlement the boundary is about to write is
+            // provisional until the scan proves the run still owns the
+            // field — stage the receipt's `Accepted` outcome so a
+            // superseded boundary's replay suspends it back for the
+            // surviving line to adjudicate. The absolute submission
+            // index survives the boundary's own receipt-log trim,
+            // which can slide positions before the replay runs.
+            self.boundary_undo.push(BoundaryUndo::Receipt {
+                index: self.receipt_base() + index as u64,
+                prior: self.receipts[index].outcome.clone(),
+            });
             // The schedule the admitting line set: a queued entry is
             // still `Accepted`, and a carried one replays on the
             // promoted run scans after its `apply_tick`. An internal
@@ -2746,7 +2771,7 @@ impl<'d> Executor<'d> {
 
     /// Captures the component at `index` for the boundary's rollback
     /// record — once per boundary per component, before the first
-    /// command touches it — so [`supersede_commands`](Self::supersede_commands)
+    /// command touches it — so [`suspend_boundary_commands`](Self::suspend_boundary_commands)
     /// can return every mutation the abandoned boundary staged.
     fn note_component_undo(&mut self, index: usize) {
         if self.boundary_undo.iter().any(
@@ -2759,57 +2784,71 @@ impl<'d> Executor<'d> {
             .push(BoundaryUndo::Component { index, state });
     }
 
-    /// Reconciles the commands a superseded run must not report applied.
+    /// Suspends every command the fenced boundary just settled — the
+    /// superseded run's command-audit reconciliation.
     ///
     /// [`Peer`](crate::Peer) runs this on the scan that discovered the
     /// lost field claim: the boundary settled the run's queued commands
     /// onto an image the field will never see — the claim already
-    /// belonged to another attachment — so `Applied` would overstate
-    /// what an auditing operator reads as "took effect". Every receipt
-    /// still `Accepted` in the pending queue, and every receipt the
-    /// boundary at `tick` settled `Applied`, is rewritten `Rejected`
-    /// carrying [`CommandError::Superseded`]. Settlements of earlier
-    /// boundaries — applied while the run still owned the field — stand,
-    /// as do the boundary's own refusals (a field-point write the fence
-    /// already answered `DriverRejected`).
+    /// belonged to another attachment. What the surviving line did with
+    /// the admissions is not this run's to decide: the promoted peer's
+    /// promotion-boundary pull may already have carried the
+    /// still-`Accepted` receipt, in which case it applies on the live
+    /// line — and a terminal `Rejected`/`Superseded` verdict written
+    /// here would journal beside the line's own later `applied` entry
+    /// for the identical admission (the QA finding
+    /// `demote-boundary-superseded-mint-then-carried-applied`). So every
+    /// receipt the boundary settled returns to the `Accepted` outcome
+    /// it held — the same suspended shape
+    /// [`suspend_pending_commands`](Self::suspend_pending_commands)
+    /// leaves a voluntary demotion's queue in — and the tracked line's
+    /// checkpoint applies adjudicate each once: covered by the adopted
+    /// log, settling with the line's own verdict, or passed by its
+    /// submission high-water into the one `Rejected`/`Superseded` the
+    /// journal emits — never both, never a provisional verdict the
+    /// next adoption contradicts.
     ///
-    /// The receipt rewrite is only half the reconciliation: the state
-    /// those commands mutated is run state — internal `In` image
-    /// samples, the force set, component state — and this demoted run
-    /// keeps serving it in quiesced checkpoints a tracking successor
-    /// adopts. A `Rejected`/`Superseded` receipt means the surviving
-    /// line never made the change, so the boundary's staged effects
-    /// replay back out in reverse application order — the rollback
-    /// records [`apply_commands`](Self::apply_commands) captured — and
-    /// the checkpoints this run serves from here carry the
-    /// pre-boundary state. A field-side write the driver accepted gets
-    /// a best-effort compensating write-back: the field's own claim
-    /// arbitration may refuse it — the claim is already lost — which is
-    /// the plant keeping its own record of what landed.
-    pub fn supersede_commands(&mut self, tick: Tick) {
-        while let Some(index) = self.pending_commands.pop_front() {
-            self.receipts[index].outcome = CommandOutcome::Rejected {
-                reason: CommandError::Superseded {
-                    point: self.receipts[index].command.point(),
-                },
-            };
-        }
-        for receipt in &mut self.receipts {
-            if receipt.outcome == (CommandOutcome::Applied { tick }) {
-                receipt.outcome = CommandOutcome::Rejected {
-                    reason: CommandError::Superseded {
-                        point: receipt.command.point(),
-                    },
-                };
-            }
-        }
+    /// The settlement replay is only half the reconciliation: the
+    /// state those commands mutated is run state — internal `In`
+    /// image samples, the force set, component state — and this
+    /// demoted run keeps serving it in quiesced checkpoints a
+    /// tracking successor adopts. A still-`Accepted` receipt claims
+    /// the line has not settled the change, so the boundary's staged
+    /// effects replay back out in reverse application order — the
+    /// rollback records [`apply_commands`](Self::apply_commands)
+    /// captured — and the checkpoints this run serves from here carry
+    /// the pre-boundary state beside the live admission a successor's
+    /// carry can still pick up. A field-side write the driver
+    /// accepted gets a best-effort compensating write-back: the
+    /// field's own claim arbitration may refuse it — the claim is
+    /// already lost — which is the plant keeping its own record of
+    /// what landed.
+    pub fn suspend_boundary_commands(&mut self) {
+        // The queue already drained inside `apply_commands`; any
+        // defensive remainder suspends rather than settles — its
+        // `Accepted` receipts stay in the log for the line's adoption
+        // to adjudicate.
+        self.pending_commands.clear();
         // Unstage what the superseded boundary staged — reverse
         // application order, so a chain of writes to one point unwinds
-        // to the sample the boundary found. The records belong to this
-        // tick's boundary alone: `scan` clears the list each cycle and
-        // `apply_commands` is the only producer.
-        for undo in self.boundary_undo.drain(..).rev() {
+        // to the sample the boundary found and every settlement
+        // returns the receipt to the outcome it held. The records
+        // belong to this tick's boundary alone: `scan` clears the
+        // list each cycle and `apply_commands` is the only producer.
+        for undo in std::mem::take(&mut self.boundary_undo).into_iter().rev() {
             match undo {
+                BoundaryUndo::Receipt { index, prior } => {
+                    // The boundary's own trim may have moved the
+                    // window — the absolute index maps back to the
+                    // receipt's current position, and an entry the
+                    // trim evicted needs no replay: its provisional
+                    // settlement left the log with it.
+                    if let Some(position) = index.checked_sub(self.receipt_base())
+                        && let Some(receipt) = self.receipts.get_mut(position as usize)
+                    {
+                        receipt.outcome = prior;
+                    }
+                }
                 BoundaryUndo::Image { point, prior } => {
                     let mut image = self.image.borrow_mut();
                     match prior {
@@ -2846,7 +2885,10 @@ impl<'d> Executor<'d> {
     }
 
     /// Suspends the run's queued commands without settling them — the
-    /// demotion counterpart of [`supersede_commands`](Self::supersede_commands).
+    /// demotion counterpart of
+    /// [`suspend_boundary_commands`](Self::suspend_boundary_commands),
+    /// which does the same for the receipts the fenced boundary had
+    /// already settled.
     /// [`Peer::demote`](crate::Peer::demote) runs it as the gate closes:
     /// the receipts stay `Accepted` in the log, so the checkpoints this
     /// run keeps serving still carry them for a successor's
