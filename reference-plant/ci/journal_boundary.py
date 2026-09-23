@@ -198,6 +198,7 @@ def restart_standby(rig, args, failures, run):
         rig.plant_addr,
         rig.duty_url.removeprefix("http://"),
         rig.standby_files,
+        pair_token=pair.PAIR_TOKEN,
     )
     rig.standby_url = url
     if url is None:
