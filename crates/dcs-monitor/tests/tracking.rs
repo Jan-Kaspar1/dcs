@@ -12,7 +12,7 @@ use dcs_core::{
     Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
-use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorClient};
+use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorClient, line_proof};
 use dcs_runtime::{
     Checkpoint, Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap,
     StepError,
@@ -971,17 +971,30 @@ fn closed_port() -> SocketAddr {
 /// Runs on its own thread until dropped.
 struct Hostile {
     addr: SocketAddr,
-    body: Arc<Mutex<String>>,
+    body: Arc<Mutex<Checkpoint>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Hostile {
     fn serve(forged: &Checkpoint) -> Self {
+        Self::start(forged, None)
+    }
+
+    /// The same interposer holding the pair's key — the compromised
+    /// key-holder shape: it stamps every answer's `line_proof` for the
+    /// pull's `?prove=` nonce like a real keyed peer, so the document's
+    /// own contents, not a missing signature, are what must convict
+    /// it.
+    fn serve_signed(forged: &Checkpoint, key: u64) -> Self {
+        Self::start(forged, Some(key))
+    }
+
+    fn start(forged: &Checkpoint, key: Option<u64>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
-        let body = Arc::new(Mutex::new(serde_json::to_string(forged).unwrap()));
+        let body = Arc::new(Mutex::new(forged.clone()));
         let served = Arc::clone(&body);
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = Arc::clone(&stop);
@@ -1007,7 +1020,12 @@ impl Hostile {
                                 Err(_) => break,
                             }
                         }
-                        let body = served.lock().unwrap().clone();
+                        let mut answer = served.lock().unwrap().clone();
+                        if let Some(key) = key {
+                            answer.line_proof =
+                                prove_nonce(&seen).map(|nonce| line_proof(key, nonce, &answer));
+                        }
+                        let body = serde_json::to_string(&answer).unwrap();
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
                              Content-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1036,8 +1054,22 @@ impl Hostile {
     /// post-adoption flip, where the verified document and the tracked
     /// ones are not the same.
     fn set_body(&self, forged: &Checkpoint) {
-        *self.body.lock().unwrap() = serde_json::to_string(forged).unwrap();
+        *self.body.lock().unwrap() = forged.clone();
     }
+}
+
+/// The `prove=<nonce>` a checkpoint request's query carried, if any —
+/// the nonce a signing hostile stamps its answer for, the same
+/// `?prove=` contract a real keyed monitor answers.
+fn prove_nonce(request: &[u8]) -> Option<u64> {
+    let target = std::str::from_utf8(request)
+        .ok()?
+        .split_whitespace()
+        .nth(1)?;
+    target.split('?').nth(1)?.split('&').find_map(|pair| {
+        pair.strip_prefix("prove=")
+            .and_then(|value| value.parse().ok())
+    })
 }
 
 impl Drop for Hostile {
@@ -1533,21 +1565,25 @@ fn an_announced_tick_bumped_replay_cannot_unblock_no_tracking_source() {
 }
 
 /// The QA finding `announced-source-verify-adopts-standby-shaped-
-/// checkpoint` (#850): the owner-document refusals cover the replayed
-/// `source_owns_field: true` shapes, but the standby document shape —
-/// the victim's own checkpoint with the stamp flipped `false` and the
-/// tick bumped inside the announced-ahead window — is exactly what a
-/// real tracking peer serves, so an unkeyed verify cannot refuse the
-/// shape itself. What it can refuse is the document's commanded
-/// state: a field owner holds the line's audit itself — its image
-/// carries every value its commands produced and its receipt log is
-/// the submission sequence — so a checkpoint planting an internal
-/// `In` value no settled verdict produced is provably not the tracked
-/// line's continuation. Across the whole `+1..=32` tick window the
-/// demotion refuses `no_tracking_source`, the run stays the field
-/// owner, and nothing adopts.
+/// checkpoint` (#850) on a keyed run — the shape a compromised
+/// key-holder takes: the interposer signs every answer for the pull's
+/// `?prove=` nonce, so the proof gate passes and only the document
+/// itself can convict it. The owner-document refusals cover the
+/// replayed `source_owns_field: true` shapes, but the standby
+/// document shape — the victim's own checkpoint with the stamp
+/// flipped `false` and the tick bumped inside the announced-ahead
+/// window — is exactly what a real tracking peer serves, so the
+/// verify cannot refuse the shape itself. What it can refuse is the
+/// document's commanded state: a field owner holds the line's audit
+/// itself — its image carries every value its commands produced and
+/// its receipt log is the submission sequence — so a checkpoint
+/// planting an internal `In` value no settled verdict produced is
+/// provably not the tracked line's continuation. Across the whole
+/// `+1..=32` tick window the demotion refuses `no_tracking_source`,
+/// the run stays the field owner, and nothing adopts.
 #[test]
 fn an_announced_standby_shaped_forgery_cannot_unblock_no_tracking_source() {
+    const KEY: u64 = 0x243f_6a88_85a3_08d3;
     let lonely_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
         (PointId(10), Value::Float(3.0)),
         (PointId(20), Value::Float(0.0)),
@@ -1559,16 +1595,18 @@ fn an_announced_standby_shaped_forgery_cannot_unblock_no_tracking_source() {
             Peer::active(internal_executor(lonely_driver), None),
             signal_index(),
         )
-        .unwrap(),
+        .unwrap()
+        .with_pair_key(KEY),
     );
     lonely.client.advance(3).unwrap();
     let tick = lonely.client.role().unwrap().tick;
 
     // The reproduction's interposer: the victim's own captured
-    // document, re-stamped `source_owns_field: false` — the shape the
-    // unkeyed verify must keep accepting — with a planted internal
-    // value the run never held and no command produced, served at
-    // every tick offset the announced-ahead window covers.
+    // document, re-stamped `source_owns_field: false` — the standby
+    // shape the document checks keep accepting — with a planted
+    // internal value the run never held and no command produced,
+    // signed for the verify pull's nonce at every tick offset the
+    // announced-ahead window covers.
     let captured = lonely.client.checkpoint().unwrap();
     assert_eq!(
         captured
@@ -1578,7 +1616,7 @@ fn an_announced_standby_shaped_forgery_cannot_unblock_no_tracking_source() {
         Some(Value::Bool(false)),
         "the rig's operator-held value starts unwritten: {captured:?}"
     );
-    let hostile = Hostile::serve(&captured);
+    let hostile = Hostile::serve_signed(&captured, KEY);
     lonely.client.checkpoint_announcing(hostile.addr).unwrap();
     assert_eq!(lonely.monitor.tracking_source(), Some(hostile.addr));
 
@@ -1622,19 +1660,21 @@ fn an_announced_standby_shaped_forgery_cannot_unblock_no_tracking_source() {
     );
 }
 
-/// The finding's post-adoption half: even where a standby-shaped
-/// document is truthful enough to verify — the shape an unkeyed
-/// deployment must keep accepting — the adoption binds the endpoint,
-/// not its contents. The reproduction's second move: once adopted,
-/// the interposer flips `source_owns_field` back to `true` to clear
-/// the orphan verdict the `false` stamp would raise, and keeps
-/// serving the planted internal value on the standing pulls nothing
-/// re-verified. The demoted peer's own audit still vets every pulled
-/// document: the forged one refuses like any rejected checkpoint —
-/// the peer reports `degraded` rather than adopting the planted
-/// state, and cannot promote onto it.
+/// The finding's post-adoption half on a keyed run — the compromised
+/// key-holder shape again: even where a signed standby-shaped
+/// document is truthful enough to verify, the adoption binds the
+/// endpoint, not its contents. The reproduction's second move: once
+/// adopted, the interposer flips `source_owns_field` back to `true`
+/// to clear the orphan verdict the `false` stamp would raise, and
+/// keeps serving the planted internal value — signed for each pull's
+/// nonce — on the standing pulls nothing re-verifies at the monitor.
+/// The demoted peer's own audit still vets every pulled document: the
+/// forged one refuses like any rejected checkpoint — the peer reports
+/// `degraded` rather than adopting the planted state, and cannot
+/// promote onto it.
 #[test]
 fn an_adopted_announced_source_cannot_land_forged_commanded_state() {
+    const KEY: u64 = 0x517c_c1b7_2722_0a95;
     let lonely_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
         (PointId(10), Value::Float(3.0)),
         (PointId(20), Value::Float(0.0)),
@@ -1646,17 +1686,19 @@ fn an_adopted_announced_source_cannot_land_forged_commanded_state() {
             Peer::active(internal_executor(lonely_driver), None),
             signal_index(),
         )
-        .unwrap(),
+        .unwrap()
+        .with_pair_key(KEY),
     );
     lonely.client.advance(3).unwrap();
 
     // The verification document: standby-shaped and otherwise the
-    // run's own line — the endpoint adopts on it, the journaled
-    // adoption the announced-source contract requires.
+    // run's own line — signed for the verify pull's nonce — the
+    // endpoint adopts on it, the journaled adoption the
+    // announced-source contract requires.
     let mut clean = lonely.client.checkpoint().unwrap();
     clean.source_owns_field = Some(false);
     clean.tick = Tick(clean.tick.0 + 1);
-    let hostile = Hostile::serve(&clean);
+    let hostile = Hostile::serve_signed(&clean, KEY);
     lonely.client.checkpoint_announcing(hostile.addr).unwrap();
     assert_eq!(lonely.client.demote().unwrap().role, Role::Demoting);
     assert!(
