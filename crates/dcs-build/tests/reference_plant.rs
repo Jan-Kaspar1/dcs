@@ -163,7 +163,18 @@
 //! foreign and owner tokens, and a rogue `claim_writer` resolving per
 //! the settled contract — its preempt's journaled `field_claim_lost`
 //! and in-place demotion on the superseded owner, then the pair
-//! restored to its launch roles — and the `upgrade` stage,
+//! restored to its launch roles — the pair contract's
+//! commissioning/handover record leg, which materializes the declared
+//! commissioning record from one deterministic driven run: the field
+//! census audited against the declared channel set (the I/O checkout
+//! record), the measurement ladder and the receipted output loop (the
+//! loop-check evidence), every managed alarm's declared record served
+//! verbatim on both peers (the alarm rationalization sign-off), the
+//! documented `demote`/`promote` switch and restore (the handover
+//! procedure), and the document set digested with each peer's
+//! checkpoint fingerprint and durable files (the documentation
+//! turnover) — the completeness audit naming any missing artifact,
+//! two passes producing identical digests — and the `upgrade` stage,
 //! which repins the materialized tree to the checkout's `HEAD`
 //! (seeded into the stand-in beside the recorded rev) and re-runs the
 //! full pipeline under the repin.
@@ -186,8 +197,9 @@
 //! `divergence-missed`/`divergence-nondeterministic`,
 //! `report-failed`/`report-nondeterministic`,
 //! `managed-lifecycle-failed`/`managed-lifecycle-nondeterministic`,
-//! `event-parity-failed`/`event-parity-nondeterministic`, and
-//! the `surface-mismatch` paths
+//! `event-parity-failed`/`event-parity-nondeterministic`,
+//! `commissioning-failed`/`commissioning-nondeterministic`/
+//! `commissioning-unchecked`, and the `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
 
@@ -828,6 +840,39 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         assert!(
             stdout.contains(&format!("{tamper}: reported, event-parity-failed")),
             "the event-parity leg's {tamper} case did not report its named diagnostic:\n{stdout}"
+        );
+    }
+    // The pair contract's commissioning/handover record leg ran and
+    // held: the declared commissioning record materialized from one
+    // deterministic driven run — its digest line reports each named
+    // artifact's evidence — and every missing-artifact doctored case
+    // reported its named diagnostic.
+    let commissioning_line = stdout
+        .lines()
+        .find(|line| line.contains("commissioning-digest"))
+        .unwrap_or_else(|| panic!("the commissioning leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "field points checked out",
+        "loop-check marks driven",
+        "managed alarm instances signed off",
+        "switched at tick",
+        "restored at tick",
+        "turnover documents digested",
+    ] {
+        assert!(
+            commissioning_line.contains(phrase),
+            "the commissioning digest names no '{phrase}' evidence: {commissioning_line}"
+        );
+    }
+    for tamper in [
+        "missing-io-checkout",
+        "missing-loop-check",
+        "missing-alarm-signoff",
+        "missing-documentation-turnover",
+    ] {
+        assert!(
+            stdout.contains(&format!("{tamper}: reported, commissioning-failed")),
+            "the commissioning leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
     assert!(

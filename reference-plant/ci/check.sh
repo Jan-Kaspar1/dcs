@@ -639,6 +639,35 @@
 #                with the pair's roles unchanged; two passes produce
 #                identical digests (monitor-starvation-failed,
 #                monitor-starvation-nondeterministic)
+#                The stage's commissioning/handover record leg,
+#                ci/commissioning.py on the same declared deployment —
+#                the pre-pilot WW-LCM-002 drill materializing the
+#                commissioning record
+#                docs/releases/commissioning-record.md declares: with
+#                the pair converged, the plant protocol's point census
+#                audited against the emitted model's declared channel
+#                set — every point's declared direction and the served
+#                image's sample equal to a value the field presented
+#                at the scan boundary (the I/O checkout record); the
+#                declared measurement driven at marks across the
+#                threshold chain's declared span with both peers
+#                serving each mark identically, then the receipted
+#                mode/hand path exercising the output loop through
+#                the field's delivered command and returned run
+#                feedback (the loop-check evidence); every managed
+#                alarm instance's declared rationalization record
+#                audited verbatim on both peers (the sign-off); the
+#                documented demote/promote switch and restore (the
+#                handover procedure); the model, dynamics, and
+#                manifest documents digested, each peer's
+#                checkpoint-stamped fingerprint held equal to the
+#                manifest's, and each durable journal and state file
+#                reported (the documentation turnover) — the
+#                completeness audit refusing a record missing any
+#                named artifact; two passes produce identical digests
+#                (commissioning-failed,
+#                commissioning-nondeterministic,
+#                commissioning-unchecked)
 #                The stage's journal-boundary leg,
 #                ci/journal_boundary.py on the same declared
 #                deployment — the consumer-side mirror of the
@@ -2451,6 +2480,55 @@ for tamper in starved-reads peer-transition; do
     echo "  $tamper: reported, monitor-starvation-failed"
 done
 
+# The pair contract's commissioning/handover record leg, on the same
+# manifest-declared deployment — the pre-pilot WW-LCM-002 drill:
+# ci/commissioning.py materializes the commissioning record
+# docs/releases/commissioning-record.md declares from one
+# deterministic driven run — the plant protocol's point census
+# audited against the emitted model's declared channel set (the I/O
+# checkout record), the declared measurement driven at marks across
+# the threshold chain's span with both peers serving each mark
+# identically and the receipted mode/hand path exercising the output
+# loop through the field's delivered command and returned run
+# feedback (the loop-check evidence), every managed alarm instance's
+# declared record audited served verbatim on both peers (the alarm
+# rationalization sign-off), the documented demote/promote switch
+# and restore (the handover procedure), and the document set
+# digested with each peer's checkpoint fingerprint, durable journal,
+# and state file reported (the documentation turnover) — the
+# completeness audit requiring every named artifact. Two passes must
+# produce identical digests.
+run_commissioning() {
+    python3 ci/commissioning.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_commissioning)" \
+    || fail "commissioning-failed: the commissioning leg did not hold — its evidence lines are above"
+SECOND="$(run_commissioning)" \
+    || fail "commissioning-failed: the commissioning leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "commissioning-nondeterministic: two commissioning passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: a record assembled without one named artifact
+# must fail the completeness audit naming it — never an incomplete
+# record passing silently.
+for tamper in missing-io-checkout missing-loop-check \
+        missing-alarm-signoff missing-documentation-turnover; do
+    if out="$(run_commissioning --tamper "$tamper" 2>&1)"; then
+        fail "commissioning-unchecked: a $tamper record passed the commissioning leg"
+    fi
+    artifact="${tamper#missing-}"
+    [[ "$out" == *"the record carries no $artifact artifact"* ]] \
+        || fail "commissioning-unchecked: the $tamper case did not report its named diagnostic: $out"
+    echo "  $tamper: reported, commissioning-failed"
+done
+
 # The pair contract's journal-boundary flood leg, on the same
 # manifest-declared deployment: ci/journal_boundary.py converges the
 # pair, then restarts the tracking standby onto its declared
@@ -2507,7 +2585,7 @@ echo "== consumers =="
 for file in ci/alarm_rationalization.py ci/alarm_validation.py \
         ci/availability.py \
         ci/burst_order.py ci/claim_fencing.py ci/command_switch.py \
-        ci/consumers.py \
+        ci/commissioning.py ci/consumers.py \
         ci/ctl.py ci/demote_pending.py ci/deploy_rig.py \
         ci/divergence.py ci/failover.py \
         ci/force_carryover.py ci/force_release.py ci/handover.py \
