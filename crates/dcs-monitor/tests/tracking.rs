@@ -6,9 +6,10 @@
 //! monitored loop's `track_cycle` does.
 
 use dcs_core::{
-    CommandOutcome, ComponentDescriptor, Direction, Divergence, EmittedEvent, EventDecl,
-    EventField, EventFieldKind, EventRetention, EventValue, IoDriver, IoError, JournalEvent,
-    PointId, Role, Sample, StandbySync, StateMap, SwitchError, Tick, Value, ValueKind,
+    Command, CommandAvailability, CommandDecl, CommandOutcome, ComponentDescriptor, Direction,
+    Divergence, EmittedEvent, EventDecl, EventField, EventFieldKind, EventRetention, EventValue,
+    IoDriver, IoError, JournalEvent, PointId, Role, Sample, StandbySync, StateMap, SwitchError,
+    Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorClient};
@@ -16,7 +17,7 @@ use dcs_runtime::{
     Checkpoint, Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap,
     StepError,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -202,6 +203,109 @@ fn internal_executor(driver: &'static StubDriver) -> Executor<'static> {
             Value::Bool(false),
         );
     Executor::new(driver, map, vec![Box::new(Scale)]).unwrap()
+}
+
+/// A component declaring a `KindDeclared` command whose standing
+/// predicate refuses at a checkpointed count — the served-verdict
+/// parity rig: `advance` counts toward the declared `LIMIT`, where
+/// probe and dispatch share the named refusal, while `reset` —
+/// `Always`-available — zeroes it. The checkpointed `count` carries
+/// the verdict across the tracking pull, so a standby's scans
+/// re-derive the active's published answer from the adopted state.
+struct Gate {
+    count: i64,
+}
+
+impl Gate {
+    /// The kind's declared `advance` ceiling.
+    const LIMIT: i64 = 2;
+
+    /// The standing predicate `command_refusal` publishes and
+    /// `invoke_command` enforces — one code path, as the contract
+    /// requires of probe and dispatch.
+    fn refusal(&self) -> Option<String> {
+        (self.count >= Self::LIMIT).then(|| "the gate is at its end; reset reopens it".to_string())
+    }
+}
+
+impl Component for Gate {
+    fn name(&self) -> &str {
+        "gate"
+    }
+
+    fn io_requirements(&self) -> Vec<IoRequirement> {
+        Vec::new()
+    }
+
+    fn step(&mut self, _io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+        Ok(())
+    }
+
+    fn describe(&self) -> ComponentDescriptor {
+        ComponentDescriptor {
+            name: "gate".to_string(),
+            kind: "gate".to_string(),
+            label: "gate".to_string(),
+            ports: Vec::new(),
+            parameters: Vec::new(),
+            commands: vec![
+                CommandDecl {
+                    name: "advance".to_string(),
+                    request: Vec::new(),
+                    availability: CommandAvailability::KindDeclared,
+                },
+                CommandDecl {
+                    name: "reset".to_string(),
+                    request: Vec::new(),
+                    availability: CommandAvailability::Always,
+                },
+            ],
+            events: Vec::new(),
+        }
+    }
+
+    fn command_refusal(&self, _command: &str) -> Option<String> {
+        self.refusal()
+    }
+
+    fn invoke_command(
+        &mut self,
+        command: &str,
+        _arguments: &BTreeMap<String, Value>,
+    ) -> Result<(), String> {
+        match command {
+            "advance" => {
+                if let Some(reason) = self.refusal() {
+                    return Err(reason);
+                }
+                self.count += 1;
+                Ok(())
+            }
+            "reset" => {
+                self.count = 0;
+                Ok(())
+            }
+            _ => unreachable!("submission validates the declared command name"),
+        }
+    }
+
+    fn capture_state(&self) -> StateMap {
+        let mut state = StateMap::new();
+        state.insert("count", Value::Int(self.count));
+        state
+    }
+
+    fn restore_state(&mut self, state: &StateMap) -> Result<(), dcs_core::StateError> {
+        state.ensure_known_fields("gate", &["count"])?;
+        self.count = state.require_i64("gate", "count")?;
+        Ok(())
+    }
+}
+
+/// The verdict-parity rig's executor: one `Gate` and no I/O surface —
+/// the tracked `count` exercises the served `KindDeclared` verdicts.
+fn gate_executor(driver: &'static StubDriver) -> Executor<'static> {
+    Executor::new(driver, PointMap::new(), vec![Box::new(Gate { count: 0 })]).unwrap()
 }
 
 /// The dialable form of a bound monitor address: in this in-process
@@ -2195,6 +2299,77 @@ fn a_tracking_standbys_resources_answer_the_same_routed_events() {
     // The parity itself: the standby's `events` is the same record —
     // same seqs, ticks, payloads, and retention marks.
     assert_eq!(events(&standby.standby.client), expected);
+}
+
+/// Verdict parity at the served surface: a tracking peer's post-scan
+/// probe re-derives the `KindDeclared` verdicts from the adopted
+/// state, so `GET /resources` on either peer answers the same
+/// `commands` rows — `advance` invocable below the limit, then the
+/// kind's named refusal once the receipted submissions complete it,
+/// and `reset` `Always`-available throughout.
+#[test]
+fn a_tracking_standbys_resources_answer_the_same_command_verdicts() {
+    let (standby, active) = DrivenStandby::start_with(None, gate_executor);
+
+    // Converge in lockstep — each requested standby scan pulls the
+    // active's checkpoint first — so both peers publish the gate's
+    // mid-table verdicts: `advance` invocable.
+    for _ in 0..2 {
+        standby.standby.client.advance(1).unwrap();
+        active.client.advance(1).unwrap();
+    }
+    assert_eq!(standby.standby.client.role().unwrap().role, Role::Standby);
+    let commands = |client: &MonitorClient| {
+        client
+            .resources()
+            .unwrap()
+            .components
+            .into_iter()
+            .find(|entry| entry.name == "gate")
+            .expect("the gate is served")
+            .commands
+    };
+    let expected = commands(&active.client);
+    let advance = expected
+        .iter()
+        .find(|command| command.name == "advance")
+        .unwrap();
+    assert!(advance.available);
+    assert_eq!(advance.refusal, None);
+    // The invocable direction's parity: the standby's served rows are
+    // the active's, name for name.
+    assert_eq!(commands(&standby.standby.client), expected);
+
+    // Drive the active's count to the limit through the receipted
+    // path — each `advance` settles `applied` at its own boundary —
+    // and the covering pull adopts the completed state: the standby's
+    // served rows carry the kind's named refusal, identical to the
+    // field owner's, while the submission path it guards stays the
+    // receipted one alone.
+    for _ in 0..Gate::LIMIT {
+        let receipt = active
+            .client
+            .command(&Command::Invoke {
+                component: "gate".to_string(),
+                command: "advance".to_string(),
+                arguments: BTreeMap::new(),
+            })
+            .unwrap();
+        assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+        active.client.advance(1).unwrap();
+        standby.standby.client.advance(1).unwrap();
+    }
+    let expected = commands(&active.client);
+    let advance = expected
+        .iter()
+        .find(|command| command.name == "advance")
+        .unwrap();
+    assert!(!advance.available);
+    assert_eq!(
+        advance.refusal.as_deref(),
+        Some("the gate is at its end; reset reopens it")
+    );
+    assert_eq!(commands(&standby.standby.client), expected);
 }
 
 /// The settle-audit rig's executor: one writable internal `In` point —
