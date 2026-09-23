@@ -498,7 +498,7 @@ fn failure_quality(error: IoError) -> Quality {
         IoError::Disconnected(_) | IoError::Timeout(_) | IoError::Fenced(_) => {
             Quality::Bad(QualityReason::CommunicationFault)
         }
-        IoError::UnknownPoint(_) | IoError::TypeMismatch { .. } => {
+        IoError::UnknownPoint(_) | IoError::TypeMismatch { .. } | IoError::InvalidValue { .. } => {
             Quality::Bad(QualityReason::ConfigurationFault)
         }
     }
@@ -1497,6 +1497,22 @@ impl<'d> Executor<'d> {
     /// change no receipt accounts for can journal its true cause.
     pub(crate) fn forces(&self) -> &BTreeMap<PointId, Value> {
         &self.forces
+    }
+
+    /// The image's held internal `In` samples — the operator-commanded
+    /// and link-carried values a checkpoint's `internal` section
+    /// overlays on adoption, the same span
+    /// [`Checkpoint::internal`](crate::Checkpoint) carries. The peer
+    /// layer diffs them across the adoption so a held value the
+    /// adoption reverted against a settled write receipt can journal
+    /// its true cause.
+    pub(crate) fn held_internals(&self) -> BTreeMap<PointId, Sample> {
+        let image = self.image.borrow();
+        self.map
+            .iter()
+            .filter(|(_, spec)| spec.direction == Direction::In && spec.internal.is_some())
+            .filter_map(|(point, _)| image.get(&point).map(|&sample| (point, sample)))
+            .collect()
     }
 
     /// The events the last completed scan's components emitted, in the

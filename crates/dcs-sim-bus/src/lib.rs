@@ -179,7 +179,10 @@
 //! any incoherent answer surface as `IoError::Disconnected`, an
 //! unanswered request as `IoError::Timeout`, an unmapped point as
 //! `IoError::UnknownPoint`, a kind-mismatched write as
-//! `IoError::TypeMismatch`, and a fenced-out write as
+//! `IoError::TypeMismatch`, a non-finite `Float` write as
+//! `IoError::InvalidValue` — refused locally, like the kind check, so a
+//! value the bank cannot represent is a caller error rather than a
+//! link fault — and a fenced-out write as
 //! `IoError::Fenced` — the first failure drops the connection
 //! for good, and [`BusDriver`] reports that link health through
 //! `IoDriver::diagnostics` for the telemetry snapshot's I/O-health

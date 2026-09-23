@@ -786,6 +786,15 @@ impl IoDriver for CyclicBusDriver {
                 found: value,
             });
         }
+        // The bank refuses a non-finite `Float` — and a staged one
+        // would refuse every later exchange the same way, wedging the
+        // image permanently; the refusal lands here, where the
+        // caller's mistake is still a point error.
+        if let Value::Float(v) = value
+            && !v.is_finite()
+        {
+            return Err(IoError::InvalidValue { point });
+        }
         image.staged.insert(slot.register, value);
         image.dirty.insert(slot.register);
         Ok(())
