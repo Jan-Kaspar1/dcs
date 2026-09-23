@@ -21,7 +21,7 @@ class SchedulingTests(unittest.TestCase):
     def test_retries_count_as_demand_for_early_planning(self):
         self.assertFalse(scheduling.due_for_planning(1000, 0, 0, 6))
         self.assertTrue(scheduling.due_for_planning(1000, 0, 0, 5))
-        self.assertFalse(scheduling.due_for_planning(7300, 0, 0, 6))
+        self.assertTrue(scheduling.due_for_planning(7300, 0, 0, 6))
         self.assertTrue(scheduling.due_for_planning(100, 0, 6, 0, forced=True))
 
     def test_explain_keeps_target_separate_from_probe_limit(self):

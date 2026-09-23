@@ -46,12 +46,9 @@ def inventory(issues, jobs, active_improvement=None):
     return rows
 
 def due_for_planning(now, last_plan, ready_count, armed_retries, *, forced=False):
-    """Plan only when demand is low or an operator requests a pass."""
-    if forced:
-        return True
-    if ready_count + armed_retries >= 6:
-        return False
-    return now - last_plan >= 900
+    """Run periodic planning, or earlier when the work frontier is thin."""
+    elapsed = now - last_plan
+    return forced or elapsed >= 7200 or (elapsed >= 900 and ready_count + armed_retries < 6)
 
 def explain(issues, jobs, admission, retry_issues=(), active_improvement=None, now=None, configured_groups=None):
     """Read-only, compact explanation of factory demand and provider limits."""
