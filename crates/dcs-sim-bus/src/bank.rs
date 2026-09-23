@@ -51,7 +51,9 @@ use std::fmt;
 /// One register's declaration: its address and initial value. The
 /// initial's [`Value`] variant is the register's declared kind — writes
 /// carrying any other variant fail
-/// [`BusError::KindMismatch`].
+/// [`BusError::KindMismatch`]. A `Float` initial must be finite — the
+/// register's seed sample is representable like every value it can
+/// later hold.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RegisterDecl {
     /// The register address.
@@ -84,6 +86,10 @@ pub enum BankError {
     },
     /// A declared field wire loops a register onto itself.
     SelfWire(u16),
+    /// A declaration's `initial` is a non-finite `Float` — NaN or an
+    /// infinity — which the bank cannot store: every served sample must
+    /// stay representable.
+    NonFiniteInitial(u16),
 }
 
 impl fmt::Display for BankError {
@@ -102,6 +108,9 @@ impl fmt::Display for BankError {
             ),
             Self::SelfWire(register) => {
                 write!(f, "field wire loops register {register} onto itself")
+            }
+            Self::NonFiniteInitial(register) => {
+                write!(f, "register {register} declares a non-finite initial value")
             }
         }
     }
@@ -240,6 +249,11 @@ fn channel_map(decls: impl IntoIterator<Item = RegisterDecl>) -> Result<ChannelM
             Entry::Vacant(slot) => {
                 slot.insert(());
             }
+        }
+        if let Value::Float(initial) = decl.initial
+            && !initial.is_finite()
+        {
+            return Err(BankError::NonFiniteInitial(decl.register));
         }
         map.points.push(PointBinding {
             point: PointId(u64::from(decl.register)),
@@ -432,6 +446,11 @@ impl RegisterBank {
                 expected,
                 found,
             }),
+            // A non-finite `Float` is a request the device cannot
+            // serve — every stored value must stay representable.
+            Err(IoError::InvalidValue { .. }) => Err(BusError::InvalidRequest {
+                detail: format!("register {register} refused a non-finite value"),
+            }),
             // The bank injects quality faults only, and they never
             // refuse a write.
             Err(_) => unreachable!("the bank injects no error faults"),
@@ -599,6 +618,34 @@ mod tests {
         );
         // The failed write leaves the stored value untouched.
         assert_eq!(bank.read(0).unwrap().value, Value::Float(1.5));
+    }
+
+    #[test]
+    fn a_non_finite_float_is_refused_and_the_stored_value_stands() {
+        // The bank holds only representable values — a non-finite
+        // `Float` is a request the device cannot serve, refused before
+        // anything stores, not a register fault.
+        let bank = bank();
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                bank.write(0, Value::Float(value)),
+                Err(BusError::InvalidRequest { .. })
+            ));
+        }
+        assert_eq!(
+            bank.read(0).unwrap(),
+            Sample::good(Value::Float(1.5), Tick(0))
+        );
+
+        // A declaration seeded non-finite cannot build at all.
+        assert_eq!(
+            RegisterBank::new([RegisterDecl {
+                register: 0,
+                initial: Value::Float(f64::NAN),
+            }])
+            .unwrap_err(),
+            BankError::NonFiniteInitial(0)
+        );
     }
 
     #[test]

@@ -298,11 +298,13 @@ pub struct Peer<'d> {
     /// the journal's settle dedup keys on, so a repeat drain of the
     /// same adjudication never re-journals it.
     pending_superseded: Vec<(u64, CommandReceipt)>,
-    /// Force-set changes a checkpoint adoption made that no settled
-    /// receipt in the merged log accounts for — each queued as a
-    /// [`CommandReceipt`] whose actor names the adopting source, for
-    /// the journal. A receipted change — the force pair's own durable
-    /// audit — journals through the ordinary settle path instead.
+    /// Point-state changes a checkpoint adoption made that no settled
+    /// receipt in the merged log accounts for — force-set changes and
+    /// held-value reverts alike — each queued as a [`CommandReceipt`]
+    /// whose actor names the adopting source, for the journal. A
+    /// receipted change the adopted log carries — the force pair's or
+    /// the write's own durable audit — journals through the ordinary
+    /// settle path instead.
     pending_adoption_receipts: Vec<CommandReceipt>,
 }
 
@@ -913,8 +915,10 @@ impl<'d> Peer<'d> {
     /// scan completes.
     ///
     /// The same boundary reconciles the command audit the way the
-    /// fenced path's [`Executor::supersede_commands`] does, but for the
-    /// voluntary handoff: the run's queued commands are *suspended*
+    /// fenced path's [`Executor::suspend_boundary_commands`] does —
+    /// that call extends the suspension to receipts the detection
+    /// scan already settled; here only the queue is still pending:
+    /// the run's queued commands are *suspended*
     /// ([`Executor::suspend_pending_commands`]) rather than rejected —
     /// their receipts stay `Accepted` in the log so the checkpoints
     /// this peer keeps serving still carry them for the successor's
@@ -1144,10 +1148,16 @@ impl<'d> Peer<'d> {
         // are what the adoption below either covers, passes by, or
         // leaves unrestored behind its high-water.
         let pending = self.pending_accepted();
-        // The standing force set is the adoption audit's baseline: a
-        // force change the merged receipt log cannot account for is the
-        // adoption's own doing and journals naming the source.
+        // The standing force set and the held internal values are the
+        // adoption audit's baselines: a force change or a held-value
+        // revert the merged receipt log cannot account for is the
+        // adoption's own doing and journals naming the source. The
+        // prior receipt log rides along — a staler window's high-water
+        // gap can drop this run's settled verdicts from the merged
+        // log without erasing the durable truth they record.
         let prior_forces = self.executor.forces().clone();
+        let prior_internals = self.executor.held_internals();
+        let prior_receipts = self.executor.receipts().to_vec();
         let (offset, regressed) = self.stream_offset(checkpoint);
         // A regression is a source restart only when the stream's
         // generation provably differs from the run's own: a demoted
@@ -1174,6 +1184,7 @@ impl<'d> Peer<'d> {
             Ok(()) => {
                 self.note_abandoned_commands(pending);
                 self.note_adopted_forces(&prior_forces, checkpoint, landed);
+                self.note_adopted_writes(&prior_internals, &prior_receipts, checkpoint, landed);
                 self.tick_offset = offset;
                 if regressed {
                     // The staged image pairs its run tick against the
@@ -1486,6 +1497,87 @@ impl<'d> Peer<'d> {
         }
     }
 
+    /// Audits the held-value changes a successful adoption made: a
+    /// writable internal `In` point's held sample legitimately moves
+    /// only through a receipted `WriteValue` — or under a force pair,
+    /// whose audit [`note_adopted_forces`](Self::note_adopted_forces)
+    /// owns — so a change whose newest settled write verdict does not
+    /// produce the adopted value has the adoption itself as its only
+    /// cause, and it must not stand silently. The QA finding's
+    /// dead-incumbent revert is exactly this shape: the restarted
+    /// source's legitimately staler line wins the field, the
+    /// rejoining peer adopts it, and its receipted-and-applied writes
+    /// roll back to the adopted image — formerly leaving a bare
+    /// `point_changed` while the served receipt log rewrote itself to
+    /// the adopted line.
+    ///
+    /// The verdict lookup reads the merged log first — this run's
+    /// unreached tail restored into it included — and falls back to
+    /// this run's own prior log: a staler window's high-water gap can
+    /// drop the run's settled verdicts from the merged log without
+    /// erasing the durable truth they record, while a newer verdict
+    /// the merged log carries that already produces the adopted value
+    /// explains the change by the pair's own audit. Each revert then
+    /// queues a [`CommandReceipt`] carrying the equivalent
+    /// `WriteValue` `Applied` at the landing tick, its `actor` naming
+    /// the adopting source — never a new entry in the served receipt
+    /// log, which stays the adopted line's own.
+    fn note_adopted_writes(
+        &mut self,
+        prior: &BTreeMap<PointId, Sample>,
+        prior_receipts: &[CommandReceipt],
+        checkpoint: &Checkpoint,
+        landed: Tick,
+    ) {
+        let post = self.executor.held_internals();
+        let changed: BTreeSet<PointId> = prior.keys().chain(post.keys()).copied().collect();
+        for point in changed {
+            let adopted = post.get(&point).map(|sample| sample.value);
+            if prior.get(&point).map(|sample| sample.value) == adopted {
+                continue;
+            }
+            // The command audit covers only the command surface: a
+            // point the model never declared writable has no
+            // `WriteValue` to claim or contradict — a link-carried
+            // internal's value moves with the adopted image by
+            // design, and a revision-dropped point has no write to
+            // revert.
+            if !self
+                .executor
+                .point_map()
+                .get(point)
+                .is_some_and(|spec| spec.writable)
+            {
+                continue;
+            }
+            let verdict = receipted_point_verdict(self.executor.receipts(), point)
+                .or_else(|| receipted_point_verdict(prior_receipts, point));
+            match verdict {
+                // The merged log's own newest settled write already
+                // produces the adopted value — the change is the
+                // line's audit, not the adoption's.
+                Some(PointVerdict::Write(settled)) if Some(settled) == adopted => continue,
+                // A force pair holds the point's newest verdict — the
+                // force audit owns its image change.
+                Some(PointVerdict::Force) => continue,
+                _ => {}
+            }
+            // No `WriteValue` can name a removal — a point the
+            // adoption dropped from the held map entirely is a
+            // revision or model fact, not a reverted command.
+            let Some(value) = adopted else { continue };
+            self.pending_adoption_receipts.push(CommandReceipt {
+                command: Command::WriteValue {
+                    point,
+                    kind: value.kind(),
+                    value,
+                },
+                outcome: CommandOutcome::Applied { tick: landed },
+                actor: Some(adoption_actor(checkpoint)),
+            });
+        }
+    }
+
     /// Consumes one pulled checkpoint — the standby's transfer entry
     /// point, covering both convergence and the rolling model revision.
     ///
@@ -1557,10 +1649,13 @@ impl<'d> Peer<'d> {
         // The still-`Accepted` receipts this log holds are what the
         // crossing either carries or abandons, exactly as in `apply`.
         let pending = self.pending_accepted();
-        // The force-set adoption audit runs the same diff `apply`
-        // does — a carried force set answers to the merged receipt
-        // log, and an unbacked change journals naming the source.
+        // The force-set and held-value adoption audits run the same
+        // diffs `apply` does — a carried force set or held value
+        // answers to the merged receipt log, and an unbacked change
+        // journals naming the source.
         let prior_forces = self.executor.forces().clone();
+        let prior_internals = self.executor.held_internals();
+        let prior_receipts = self.executor.receipts().to_vec();
         let (offset, regressed) = self.stream_offset(checkpoint);
         // As in `apply`: the regression journals a `SourceRestart` only
         // when the stream's generation differs from the run's own — a
@@ -1583,6 +1678,7 @@ impl<'d> Peer<'d> {
             Ok(report) => {
                 self.note_abandoned_commands(pending);
                 self.note_adopted_forces(&prior_forces, checkpoint, landed);
+                self.note_adopted_writes(&prior_internals, &prior_receipts, checkpoint, landed);
                 self.tick_offset = offset;
                 if boundary {
                     self.pending_restarts.push(SourceRestart {
@@ -1776,19 +1872,26 @@ impl<'d> Peer<'d> {
     /// The same demotion reconciles the command audit: commands the
     /// still-reporting-`active` peer accepted between the preemption
     /// and this detection scan applied at its head onto an image the
-    /// field never saw — the superseding owner does not carry them —
-    /// so [`Executor::supersede_commands`] rewrites the boundary's
-    /// `Applied` settlements `Rejected` with
-    /// [`CommandError::Superseded`](dcs_core::CommandError::Superseded)
-    /// before the journaled `CommandSettled` would echo a phantom
-    /// application. The receipt rewrite alone is not the whole
-    /// reconciliation: the effects those commands staged — internal
-    /// `In` image samples, the force set, component state — are run
-    /// state this demoted peer keeps serving in quiesced checkpoints
-    /// a tracking successor adopts, so the supersede also rolls the
-    /// boundary's mutations back to the pre-boundary state. A
-    /// `Rejected`/`Superseded` receipt means the surviving line never
-    /// made the change — the served state must agree.
+    /// field never saw — but whether the superseding owner carries
+    /// the admissions is not this run's to decide, since the promoted
+    /// peer's boundary pull may already hold the still-`Accepted`
+    /// receipts. [`Executor::suspend_boundary_commands`] therefore
+    /// replays the boundary's settlements back to `Accepted` — the
+    /// suspended shape a voluntary demotion's queue keeps — rather
+    /// than minting a terminal `Rejected`/
+    /// [`Superseded`](dcs_core::CommandError::Superseded) the line's
+    /// own later `applied` would contradict in the same journal. The
+    /// receipt replay alone is not the whole reconciliation: the
+    /// effects those commands staged — internal `In` image samples,
+    /// the force set, component state — are run state this demoted
+    /// peer keeps serving in quiesced checkpoints a tracking
+    /// successor adopts, so the suspended boundary also rolls the
+    /// mutations back to the pre-boundary state. Each re-suspended
+    /// admission then settles exactly once on the tracked line's
+    /// applies: carried, with the line's own verdict — the
+    /// `Applied` the surviving run genuinely made — or passed by the
+    /// adopted window's submission high-water into the one
+    /// `Rejected`/`Superseded` the journal emits.
     ///
     /// A scan that does not own the field runs quiesced
     /// ([`Executor::scan_quiesced`]): it still reads, steps, writes
@@ -1820,12 +1923,15 @@ impl<'d> Peer<'d> {
             // ownership token, and the reported role walks `demoting`
             // to `standby`. The fenced scan ran under the lifted gate,
             // so it does not settle the transition — the first
-            // quiesced scan does. Commands the fenced boundary applied
-            // reconcile first: they settle superseded rather than
-            // applied — and their staged mutations roll back out, so
-            // the checkpoints this demoted run keeps serving carry
-            // the pre-boundary state the receipt claims.
-            self.executor.supersede_commands(tick);
+            // quiesced scan does. Commands the fenced boundary settled
+            // reconcile first: their provisional outcomes re-suspend —
+            // the surviving line's adoption adjudicates each once,
+            // never a `Superseded` the carried copy's later `Applied`
+            // would contradict — and their staged mutations roll back
+            // out, so the checkpoints this demoted run keeps serving
+            // carry the pre-boundary state the still-pending receipts
+            // claim.
+            self.executor.suspend_boundary_commands();
             self.demote().expect("a field-owning peer demotes");
             return tick;
         }
@@ -2042,6 +2148,43 @@ fn receipted_force_state(receipts: &[CommandReceipt], point: PointId) -> Option<
                 point: p, value, ..
             } if *p == point => Some(Some(*value)),
             Command::UnforcePoint { point: p } if *p == point => Some(None),
+            _ => None,
+        }
+    })
+}
+
+/// The point-command claim a settled verdict makes — the durable
+/// truth an adopted image must not contradict unaudited.
+enum PointVerdict {
+    /// An applied `WriteValue`: the held value the verdict produced.
+    Write(Value),
+    /// An applied force pair entry: the force audit's surface —
+    /// [`Peer::note_adopted_forces`] already answers for its changes,
+    /// so the write audit defers to it.
+    Force,
+}
+
+/// `receipts`' newest *settled* point verdict for `point`: an applied
+/// `WriteValue`'s claimed held value, or [`PointVerdict::Force`] when
+/// the newest applied point command is a force pair entry — the
+/// verdict [`Peer::note_adopted_writes`] holds the adopted held value
+/// against. `Accepted` and `Rejected` entries move no state and back
+/// nothing; a log carrying no settled verdict for the point answers
+/// `None`, leaving the caller to consult the run's own prior log.
+fn receipted_point_verdict(receipts: &[CommandReceipt], point: PointId) -> Option<PointVerdict> {
+    receipts.iter().rev().find_map(|receipt| {
+        if !matches!(receipt.outcome, CommandOutcome::Applied { .. }) {
+            return None;
+        }
+        match &receipt.command {
+            Command::WriteValue {
+                point: p, value, ..
+            } if *p == point => Some(PointVerdict::Write(*value)),
+            Command::ForcePoint { point: p, .. } | Command::UnforcePoint { point: p }
+                if *p == point =>
+            {
+                Some(PointVerdict::Force)
+            }
             _ => None,
         }
     })
@@ -2673,10 +2816,17 @@ mod tests {
     /// A peer whose claim was preempted between scans still reports
     /// `active` and accepts commands until the detection scan — the
     /// fencing demotion must reconcile what that boundary settled onto
-    /// the abandoned image: `Rejected`/`Superseded`, never `Applied`
-    /// for an effect the field never saw.
+    /// the abandoned image. Whether the surviving line carried the
+    /// admissions is not the demoted run's to decide, so the boundary
+    /// replays its provisional settlements back to `Accepted` — never
+    /// a terminal `Superseded` a carried copy's later `Applied` would
+    /// contradict (the `demote-boundary-superseded-mint-then-carried-
+    /// applied` finding) — and rolls the staged mutations out, so the
+    /// quiesced checkpoints carry the pre-boundary state beside the
+    /// still-live receipts. The tracked line then adjudicates each
+    /// once: carried, settling `applied` with the line's own verdict.
     #[test]
-    fn a_fenced_owner_supersedes_the_commands_its_detection_scan_applied() {
+    fn a_fenced_owner_suspends_the_commands_its_detection_scan_settled() {
         const HELD: PointId = PointId(30);
         let field = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
         let fenced = FencingDriver {
@@ -2739,36 +2889,27 @@ mod tests {
         });
         assert!(matches!(force.outcome, CommandOutcome::Accepted { .. }));
 
-        // The detection scan: the boundary applies the queued commands
-        // onto the image, then the field write meets the fence and the
-        // demotion runs. The reconciled settlements name the
-        // supersession; the field write's own fenced refusal stands as
-        // the named driver rejection; nothing reached the field.
+        // The detection scan: the boundary settles the queued commands
+        // onto the image — `Applied`, `DriverRejected`, all provisional
+        // — then the field write meets the fence and the demotion
+        // replays every settlement back to the `Accepted` the receipt
+        // held. Nothing reached the field, and nothing terminally
+        // settled: the surviving line has not adjudicated the
+        // admissions yet, so no `Superseded` mints here to be
+        // contradicted by a carried copy's `Applied` later.
         assert_eq!(peer.scan(), Tick(2));
         assert_eq!(peer.role(), Role::Demoting);
         assert!(!gate.is_open());
         assert_eq!(field.value(INPUT), Value::Float(1.0));
-        assert_eq!(
-            peer.receipts()[1].outcome,
-            CommandOutcome::Rejected {
-                reason: CommandError::Superseded { point: Some(HELD) }
-            }
-        );
-        assert_eq!(
-            peer.receipts()[2].outcome,
-            CommandOutcome::Rejected {
-                reason: CommandError::DriverRejected {
-                    point: INPUT,
-                    error: IoError::Fenced(INPUT),
-                }
-            }
-        );
-        assert_eq!(
-            peer.receipts()[3].outcome,
-            CommandOutcome::Rejected {
-                reason: CommandError::Superseded { point: Some(HELD) }
-            }
-        );
+        for index in 1..=3 {
+            assert_eq!(
+                peer.receipts()[index].outcome,
+                CommandOutcome::Accepted {
+                    apply_tick: Tick(2)
+                },
+                "receipt {index} must re-suspend for the line's adjudication"
+            );
+        }
         // The earlier boundary's settlement stands: it applied while
         // the peer owned the field.
         assert_eq!(
@@ -2776,38 +2917,43 @@ mod tests {
             CommandOutcome::Applied { tick: Tick(1) }
         );
 
-        // The receipts' `Rejected`/`Superseded` is the surviving line's
-        // truth too — the QA finding
-        // `superseded-receipt-internal-write-persists`: the boundary's
-        // staged mutations rolled back out with the receipt rewrite, so
-        // the held point shows the last *owned* boundary's value and
-        // the force set is empty, not the substituted pin.
+        // The boundary's staged mutations rolled back with the
+        // settlement replay — the QA finding
+        // `superseded-receipt-internal-write-persists`: the held point
+        // shows the last *owned* boundary's value and the force set is
+        // empty, so the quiesced checkpoints never carry a mutation
+        // the still-pending receipts have not made.
         assert_eq!(
             peer.executor().sample(HELD),
             Some(Sample::good(Value::Float(2.0), Tick(1))),
-            "the superseded write must not persist on the demoted image"
+            "the suspended write must not persist on the demoted image"
         );
         assert!(
             peer.snapshot().forces.is_empty(),
-            "the superseded force must not persist on the demoted run"
+            "the suspended force must not persist on the demoted run"
         );
 
-        // The finding's propagation leg: a tracking peer adopting the
-        // state this demoted run keeps serving inherits no trace of the
-        // write — the superseded mutation cannot ride the quiesced
-        // checkpoints onto the promoted line.
+        // The carry leg the finding's pair produced: a tracking peer
+        // adopting the demoted run's checkpoints picks the suspended
+        // admissions up live — the adopted window re-queues them — and
+        // promotes, settling each `Applied` on the line that owns the
+        // field. The demoted peer's adoption then converges the log to
+        // the line's verdict: one settle, `applied`, and no
+        // `Superseded` queued beside it.
         let tracking_field =
             StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
         let tracking_gate = WriteGate::closed(&tracking_field);
         let mut successor = Peer::standby(
             Executor::new(
                 &tracking_gate,
-                loop_map().with_writable_internal(
-                    HELD,
-                    Direction::In,
-                    ValueKind::Float,
-                    Value::Float(0.0),
-                ),
+                loop_map()
+                    .with_writable_point(INPUT, Direction::In, ValueKind::Float)
+                    .with_writable_internal(
+                        HELD,
+                        Direction::In,
+                        ValueKind::Float,
+                        Value::Float(0.0),
+                    ),
                 vec![Box::new(PassThrough)],
             )
             .unwrap(),
@@ -2817,13 +2963,30 @@ mod tests {
         assert_eq!(
             successor.executor().sample(HELD),
             Some(Sample::good(Value::Float(2.0), Tick(1))),
-            "the adopted line must not carry the superseded write"
+            "the adopted line must not carry the suspended mutation"
         );
         assert!(successor.snapshot().forces.is_empty());
+        successor.promote().unwrap();
+        assert_eq!(successor.scan(), Tick(3));
+        assert!(
+            successor.receipts()[1..]
+                .iter()
+                .all(|receipt| matches!(receipt.outcome, CommandOutcome::Applied { .. })),
+            "the carried admissions settle applied on the live line: {:?}",
+            successor.receipts()
+        );
+        assert_eq!(tracking_field.value(INPUT), Value::Float(5.0));
+
+        peer.apply(&successor.checkpoint()).unwrap();
+        assert!(
+            peer.take_superseded_commands().is_empty(),
+            "a carried admission never settles superseded beside the line's applied"
+        );
+        assert_eq!(peer.receipts(), successor.receipts());
 
         // The demoted peer's next quiesced boundary settles no strays —
-        // the pending queue was drained by the reconciliation.
-        assert_eq!(peer.scan(), Tick(3));
+        // the suspended receipts resolved with the line.
+        assert_eq!(peer.scan(), Tick(4));
         assert_eq!(peer.role(), Role::Standby);
         assert_eq!(peer.receipts().len(), 4);
     }
@@ -5274,5 +5437,104 @@ mod tests {
                 actor: Some("checkpoint@2".to_string()),
             }]
         );
+    }
+
+    /// QA finding `standby-rejoin-adoption-reverts-receipted-commands-unaudited`
+    /// (#833) — the dead-incumbent half of #805's receipted-command
+    /// contract. Once the incumbent is dead the restarted peer's stale
+    /// line legitimately wins, and the rejoining peer's
+    /// receipted-and-applied `WriteValue` reverts under the adoption:
+    /// the held value must not roll back to a bare `point_changed` —
+    /// the journal gains a `WriteValue` receipt `Applied` at the
+    /// landing tick whose actor names the adopting checkpoint.
+    #[test]
+    fn a_reverted_receipted_write_journals_the_adoption_as_its_cause() {
+        use crate::checkpoint::CommandAdmissionCounts;
+        const POINT: PointId = PointId(10);
+        let map = || {
+            PointMap::new().with_writable_internal(
+                POINT,
+                Direction::In,
+                ValueKind::Bool,
+                Value::Bool(false),
+            )
+        };
+        let write = |value| Command::WriteValue {
+            point: POINT,
+            kind: ValueKind::Bool,
+            value: Value::Bool(value),
+        };
+
+        // The restarted source's line — captured before the write,
+        // legitimately staler once the incumbent is dead. Its receipt
+        // window's high-water never reached the rejoining run's own
+        // receipts, so the merged log will hold no verdict for the
+        // point at all — the finding's served-view shape, the applied
+        // write surviving only in the durable journal.
+        let a_driver = StubDriver::field(&[]);
+        let mut a = Executor::new(&a_driver, map(), Vec::new()).unwrap();
+        a.run(3);
+        let mut stale = a.checkpoint();
+        stale.receipts.clear();
+        stale.command_admission = CommandAdmissionCounts::default();
+
+        // The incumbent's own run receipted and applied the write —
+        // the operator protection command the revert must not drop
+        // silently.
+        let b_driver = StubDriver::field(&[]);
+        let b_gate = WriteGate::closed(&b_driver);
+        let mut b = Peer::active(
+            Executor::new(&b_gate, map(), Vec::new()).unwrap(),
+            Some(&b_gate),
+        );
+        b.activate().unwrap();
+        b.submit_command(write(true));
+        b.scan();
+        assert_eq!(
+            b.executor().sample(POINT).map(|sample| sample.value),
+            Some(Value::Bool(true))
+        );
+        assert!(matches!(
+            b.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { .. }
+        ));
+        // The receipted line itself, kept for the consistency check
+        // below.
+        let honest = b.checkpoint();
+
+        // The rejoin: demoted off the dead line, the run adopts the
+        // stale checkpoint — the held value reverts to the adopted
+        // image.
+        b.demote().unwrap();
+        b.apply(&stale).unwrap();
+        assert_eq!(
+            b.executor().sample(POINT).map(|sample| sample.value),
+            Some(Value::Bool(false))
+        );
+
+        // The revert is audited: one `WriteValue` receipt applied at
+        // the landing tick, its actor naming the adopting checkpoint
+        // — the durable journal answers "who rolled the command
+        // back" even though the merged log carried no verdict.
+        assert_eq!(
+            b.take_adoption_receipts(),
+            vec![CommandReceipt {
+                command: write(false),
+                outcome: CommandOutcome::Applied { tick: Tick(3) },
+                actor: Some("checkpoint@3".to_string()),
+            }]
+        );
+        assert!(b.take_adoption_receipts().is_empty());
+
+        // The consistent half: adopting the receipted line itself —
+        // whose merged log's newest settled write already produces
+        // the adopted value — moves the held value back with no
+        // adoption receipt at all.
+        b.apply(&honest).unwrap();
+        assert_eq!(
+            b.executor().sample(POINT).map(|sample| sample.value),
+            Some(Value::Bool(true))
+        );
+        assert!(b.take_adoption_receipts().is_empty());
     }
 }

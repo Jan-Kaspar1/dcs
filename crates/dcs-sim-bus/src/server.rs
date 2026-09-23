@@ -7,6 +7,7 @@ use crate::protocol::{
     BusError, BusRequest, BusResponse, ExchangeOutcome, MAX_FRAME, decode_request, encode_response,
     read_frame,
 };
+use dcs_core::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{self, BufReader, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
@@ -205,7 +206,20 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> Option<Bus
                             },
                         });
                     }
-                    Ok(_) => {}
+                    Ok(_) => {
+                        if let Value::Float(v) = output.value
+                            && !v.is_finite()
+                        {
+                            return Some(BusResponse::Error {
+                                error: BusError::InvalidRequest {
+                                    detail: format!(
+                                        "register {} refused a non-finite value",
+                                        output.register
+                                    ),
+                                },
+                            });
+                        }
+                    }
                     Err(error) => return Some(BusResponse::Error { error }),
                 }
             }
