@@ -129,6 +129,13 @@ fn write_value(point: u64, value: f64) -> Command {
     }
 }
 
+/// The pair's shared tracking secret the keyed rigs install — the
+/// deployment's `--pair-token` hashed through `pair_key`: an
+/// announced-source demotion verifies the hinted endpoint against
+/// the `line_proof` it signs, and the adopted source's checkpoints
+/// keep proving under fresh nonces.
+const PAIR_KEY: u64 = 0x517c_c1b7_2722_0a95;
+
 /// The answer bound the reproduction held `GET /role` to — `curl -m3`.
 const ANSWER_BOUND: Duration = Duration::from_secs(3);
 
@@ -199,9 +206,12 @@ impl Rig {
 
     /// A peer monitor with `peer`'s role — `active` or `standby` — and
     /// `driven` wiring when the standby tracks a source through its
-    /// `POST /scan` boundary.
+    /// `POST /scan` boundary. Every peer rig runs keyed — the
+    /// `--pair-token` deployment a real redundant pair declares.
     fn peer(peer: Peer<'static>, driven: Option<Driven<'static>>) -> Self {
-        let monitor = Monitor::bind_peer("127.0.0.1:0", peer, signal_index()).unwrap();
+        let monitor = Monitor::bind_peer("127.0.0.1:0", peer, signal_index())
+            .unwrap()
+            .with_pair_key(PAIR_KEY);
         let monitor = match driven {
             Some(driven) => monitor.driven(driven),
             None => monitor,
@@ -244,7 +254,8 @@ impl Rig {
                     ..MonitorConfig::default()
                 },
             )
-            .unwrap(),
+            .unwrap()
+            .with_pair_key(PAIR_KEY),
         )
     }
 
