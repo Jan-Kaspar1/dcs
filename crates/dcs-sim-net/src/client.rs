@@ -3,7 +3,9 @@
 use crate::protocol::{
     MAX_MESSAGE, PlantError, PlantRequest, PlantResponse, encode_message, read_message,
 };
-use dcs_core::{DriverDiagnostics, IoDriver, IoError, LinkState, PointId, Sample, Tick, Value};
+use dcs_core::{
+    DriverDiagnostics, FieldClaim, IoDriver, IoError, LinkState, PointId, Sample, Tick, Value,
+};
 use dcs_sim::{Fault, PointInfo};
 use std::fmt;
 use std::io::{BufReader, Write};
@@ -730,6 +732,35 @@ impl RemoteDriver {
     /// and a released attachment's mutations stay fenced against it.
     pub fn release_claim(&self) {
         self.connection.lock().unwrap().owner = None;
+    }
+
+    /// The read-only half of the writer claim — the claim-state
+    /// observation a peer reports through its role surface as
+    /// [`RoleReport::field_claim`](dcs_core::RoleReport::field_claim).
+    /// The answer is the verdict a mutation from this attachment would
+    /// meet, without any mutation: [`FieldClaim::Held`] while an owner
+    /// stands — this attachment's own hold or a standing owner's, which
+    /// the report need not distinguish — and
+    /// [`FieldClaim::Unclaimed`] while no claim stands at all.
+    ///
+    /// The probe asserts, joins, and releases nothing — the recorded
+    /// `owner` token is untouched and the server arbitrates nothing —
+    /// so an observation cannot seize the field it reports: probing an
+    /// unclaimed field leaves it exactly as closed as it found it. The
+    /// two refusals are answers, not link failures, so neither records
+    /// a `last_error`; a transport failure is `Err` like any request's.
+    pub fn probe_writer(&self) -> Result<FieldClaim, RemoteError> {
+        match self.request(&PlantRequest::ProbeWriter)? {
+            PlantResponse::Done => Ok(FieldClaim::Held),
+            PlantResponse::Error {
+                error: PlantError::Fenced { .. },
+            } => Ok(FieldClaim::Held),
+            PlantResponse::Error {
+                error: PlantError::Unclaimed { .. },
+            } => Ok(FieldClaim::Unclaimed),
+            PlantResponse::Error { error } => Err(self.fail(error.into())),
+            _ => Err(self.protocol_violation()),
+        }
     }
 
     /// Lists every point the shared plant serves — `SimDriver::points`
