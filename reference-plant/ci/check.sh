@@ -629,6 +629,27 @@
 #                with the pair's roles unchanged; two passes produce
 #                identical digests (monitor-starvation-failed,
 #                monitor-starvation-nondeterministic)
+#                The stage's journal-boundary leg,
+#                ci/journal_boundary.py on the same declared
+#                deployment — the consumer-side mirror of the
+#                rig-side journal-flood finding (#623, landed fix;
+#                WW-ENG-003, WW-LCM-001): the tracking standby
+#                restarted onto its declared files twice around two
+#                floods of receipted journal-producing commands past
+#                the served journal's retained bound, so its served
+#                GET /journal must still answer both lifetimes'
+#                run_boundary entries pinned ahead of the retained
+#                tail — the first flood's evicted marker recovered at
+#                the second restart's replay, the second's pinned
+#                live — with strict seq order, the evicted stretch
+#                reading as the usual numbering gap, and the ?since=
+#                cursor past the last boundary answering exactly the
+#                retained tail; the durable file retaining every
+#                marker in order with contiguous seqs, the field
+#                owner's single-lifetime record audited the same
+#                way, and the pair's roles unmoved; two passes
+#                produce identical digests (journal-boundary-failed,
+#                journal-boundary-nondeterministic)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -2366,6 +2387,54 @@ for tamper in starved-reads peer-transition; do
     echo "  $tamper: reported, monitor-starvation-failed"
 done
 
+# The pair contract's journal-boundary flood leg, on the same
+# manifest-declared deployment: ci/journal_boundary.py converges the
+# pair, then restarts the tracking standby onto its declared
+# --state-file/--journal-file twice around two floods of
+# journal-producing commands past the served journal's 1024-entry
+# retained bound — the consumer-side mirror of the rig-side
+# journal-flood finding (#623, landed fix; WW-ENG-003, WW-LCM-001).
+# Each receipted write_value settles a `command_settled` on the field
+# owner and an adopted one on the tracking peer, so both durable
+# journals outgrow the bound: the standby's served GET /journal must
+# still answer both lifetimes' run_boundary entries ahead of the
+# retained tail — the first flood's eviction of run 2's marker
+# recovered at the second restart's replay, the second flood's of
+# run 3's pinned live — with strict seq order, the evicted stretch
+# reading as the usual numbering gap, and the ?since= cursor past the
+# last boundary answering exactly the retained tail; its durable file
+# must retain every run_boundary marker in order with contiguous
+# seqs; the field owner's single-lifetime journal stays bounded the
+# same way with its cold-start marker retained and no served
+# boundary by contract; and the pair's roles never move. Two passes
+# must produce identical digests.
+run_journal_boundary() {
+    python3 ci/journal_boundary.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_journal_boundary)" \
+    || fail "journal-boundary-failed: the journal-boundary flood leg did not hold — its evidence lines are above"
+SECOND="$(run_journal_boundary)" \
+    || fail "journal-boundary-failed: the journal-boundary flood leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "journal-boundary-nondeterministic: two journal-boundary passes produced different digests"
+echo "  $FIRST"
+
+# The doctored case: a leg whose served tail loses every run_boundary
+# while the durable file retains them must surface the named
+# diagnostic — never a silently unattributed pass.
+if out="$(run_journal_boundary --tamper dropped-boundaries 2>&1)"; then
+    fail "journal-boundary-unchecked: a dropped-boundaries case passed the journal-boundary leg"
+fi
+[[ "$out" == *"journal-boundary-failed"* ]] \
+    || fail "journal-boundary-unchecked: the dropped-boundaries case did not report journal-boundary-failed: $out"
+echo "  dropped-boundaries: reported, journal-boundary-failed"
+
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
@@ -2378,6 +2447,7 @@ for file in ci/alarm_rationalization.py ci/alarm_validation.py \
         ci/ctl.py ci/demote_pending.py ci/deploy_rig.py \
         ci/divergence.py ci/failover.py \
         ci/force_carryover.py ci/force_release.py ci/handover.py \
+        ci/journal_boundary.py \
         ci/managed_carryover.py ci/managed_lifecycle.py \
         ci/monitor_starvation.py \
         ci/negotiation.py ci/oos.py ci/pair.py \
