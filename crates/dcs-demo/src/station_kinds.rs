@@ -87,6 +87,22 @@
 //! out-of-service blocks a hand start; power-fail drops every pump's
 //! availability; a thermal contact trips its per-pump alarm.
 //!
+//! # The frozen-field leg
+//!
+//! The `run_frozen_*` variants prove freshness in the deterministic
+//! tick domain: inside [`FIELD_FREEZE`] the boundary applies the
+//! script's ops but the field's own work — the local
+//! `FanoutDriver::step`, or the bank's wires, re-injections, and step —
+//! holds, so the field keeps serving its last reports while the driven
+//! scans advance. The `net-flow` point's declared
+//! `stale_after_ticks: 5` is the model's only freshness declaration:
+//! lagging past it presents `Uncertain(Stale)` — the freshness
+//! condition, distinct from a quality injection — while the
+//! unbudgeted neighbors stay `Good`, and the resumed step's next
+//! fresh report restores `Good`. It is the tick-deterministic
+//! analogue of the QA lane's writer-stop freeze, the induction
+//! `tests/stale_freshness.rs` asserts the published contract over.
+//!
 //! # What equality means here
 //!
 //! The same comparison [`two_kinds`](crate::two_kinds) records:
@@ -145,6 +161,21 @@ pub const SCAN_PERIOD: f64 = 1.0;
 /// The run's documented length in scans.
 pub const TOTAL_SCANS: u64 = 135;
 
+/// The frozen-field leg's window: `after_scan` boundaries in this range
+/// run the script's field ops but skip the field's own step — the
+/// stored samples keep their stamps while the driven scans keep
+/// reading them, the tick-deterministic analogue of the QA lane's
+/// writer-stop induction.
+///
+/// The last step runs at boundary `start - 1`, so scan `start` reads
+/// the field's last fresh report and the lag clock starts there: the
+/// `net-flow` point's declared `stale_after_ticks: 5` budget presents
+/// `Uncertain(Stale)` once the lag passes it — from scan `start + 6`
+/// through scan `end + 1`, the last read of the held report before
+/// the resumed step at boundary `end + 1` refreshes it. With the
+/// declared budget that window is scans 12..=14, recovery at 15.
+pub const FIELD_FREEZE: std::ops::RangeInclusive<u64> = 6..=13;
+
 /// The station's point ids — the checked-in document's fixed blocks,
 /// named for the scenario and its tests.
 pub mod points {
@@ -157,6 +188,11 @@ pub mod points {
     pub const LEVEL_BACKUP: PointId = PointId(11);
     /// The declared station inflow — a `flow_sum` input.
     pub const INFLOW: PointId = PointId(12);
+    /// The `flow_sum` net-flow carrier — the model's one
+    /// `stale_after_ticks` declaration (a five-tick freshness budget),
+    /// the point the frozen-field leg watches present
+    /// `Uncertain(Stale)` once the field's reports lag past it.
+    pub const NET_FLOW: PointId = PointId(13);
     /// The failover-selected level the chain and alarms control on.
     pub const LEVEL_SELECTED: PointId = PointId(200);
     /// The chain's stage-count demand carrier.
@@ -714,10 +750,12 @@ fn driven_run<'d>(
                 snapshots.push(client.advance(1)?);
             }
             let journal = client.journal(0)?;
+            let history = client.history(&[], 0)?;
             Ok(VariantRun {
                 snapshots,
                 journal,
                 receipts,
+                history,
             })
         })();
         monitor.shutdown();
@@ -774,6 +812,18 @@ pub fn bus_variant() -> Result<(PlantModel, BusServer), TwoKindsError> {
 /// `FanoutDriver::step` the `--driven` wiring installs — the single
 /// local backend's loopbacks and elements.
 pub fn run_local() -> Result<VariantRun, TwoKindsError> {
+    run_local_inner(false)
+}
+
+/// [`run_local`] with the frozen-field leg: inside [`FIELD_FREEZE`] the
+/// script's ops still land but the field never steps — the `net-flow`
+/// report's freshness budget is the only declaration that degrades
+/// while the driven scans outrun the held samples.
+pub fn run_frozen_local() -> Result<VariantRun, TwoKindsError> {
+    run_local_inner(true)
+}
+
+fn run_local_inner(frozen: bool) -> Result<VariantRun, TwoKindsError> {
     let (model, driver) = local_variant()?;
     let driver = &driver;
     let sim = driver
@@ -782,6 +832,12 @@ pub fn run_local() -> Result<VariantRun, TwoKindsError> {
     let ops = field_ops();
     let boundary = move |tick: u64| -> Result<(), String> {
         apply_local(&ops, tick, sim)?;
+        // The frozen leg: the field holds its last reports — the
+        // step that would route loopbacks and advance the elements
+        // does not run.
+        if frozen && FIELD_FREEZE.contains(&tick) {
+            return Ok(());
+        }
         driver
             .step(SCAN_PERIOD)
             .map_err(|error| format!("plant step failed: {error}"))
@@ -798,6 +854,18 @@ pub fn run_local() -> Result<VariantRun, TwoKindsError> {
 /// boundary. No writer claim is taken in the run, so the bank stays
 /// open to every attachment.
 pub fn run_bus() -> Result<VariantRun, TwoKindsError> {
+    run_bus_inner(false)
+}
+
+/// [`run_bus`] with the frozen-field leg: inside [`FIELD_FREEZE`] the
+/// register bank holds its last reports — the wire copies, standing
+/// re-injections, and the bank step the boundary would carry all hold
+/// with it, so the two transports freeze identically.
+pub fn run_frozen_bus() -> Result<VariantRun, TwoKindsError> {
+    run_bus_inner(true)
+}
+
+fn run_bus_inner(frozen: bool) -> Result<VariantRun, TwoKindsError> {
     let (model, server) = bus_variant()?;
     thread::scope(|scope| {
         scope.spawn(|| server.serve());
@@ -809,6 +877,13 @@ pub fn run_bus() -> Result<VariantRun, TwoKindsError> {
             let standing: Mutex<BTreeMap<u16, Quality>> = Mutex::new(BTreeMap::new());
             let boundary = move |tick: u64| -> Result<(), String> {
                 apply_bus(&ops, tick, &field, &standing)?;
+                // The frozen leg: the field's own work — the wire
+                // copies, the standing re-injections, the bank step —
+                // holds with the bank, so the reports the scans read
+                // stop changing exactly as the local sim's do.
+                if frozen && FIELD_FREEZE.contains(&tick) {
+                    return Ok(());
+                }
                 // The field wires: run feedback follows the command
                 // register — the value-only copy a cross-backend route
                 // performs.
