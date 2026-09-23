@@ -455,7 +455,8 @@ fn declared_commands_and_emitted_events_survive_promotion() {
 /// pending copy later settled `applied` on its fenced image. Now the
 /// stale checkpoint's newer receipts still carry, the promoted peer
 /// settles the write `applied` on the live image, and the superseded
-/// peer's copy settles `superseded` — never `applied` on a dead image.
+/// peer's own boundary settlement re-suspends — the carried `applied`
+/// is the one verdict its journal converges on.
 #[test]
 fn a_pending_command_at_the_promote_boundary_survives_the_driven_cadence() {
     let dir = std::env::temp_dir().join(format!("dcs-promote-pending-{}", std::process::id()));
@@ -532,37 +533,43 @@ fn a_pending_command_at_the_promote_boundary_survives_the_driven_cadence() {
         CommandOutcome::Applied { tick: Tick(N + 2) }
     );
 
-    // The superseded peer's own pending copy settles honestly: its
-    // next scan applies it to the abandoned image, the field write
-    // fences on the promoted peer's claim, and the receipt rewrites to
-    // `superseded` — a phantom `applied` never journals.
+    // The QA finding
+    // `demote-boundary-superseded-mint-then-carried-applied`: the
+    // fenced peer's detection scan applied the write onto the
+    // abandoned image, and the demotion used to mint a provisional
+    // `Rejected`/`Superseded` for it — which the adopted checkpoint's
+    // `Applied` then contradicted in the same journal, two terminal
+    // outcomes for one admission. The boundary now re-suspends its
+    // settlements instead: whether the line carried the admission is
+    // the surviving run's verdict to make, so the receipt stays
+    // `Accepted` and no `command_settled` journals on the demoted
+    // peer yet.
     active.advance(1).unwrap();
-    let superseded = active.receipts().unwrap();
+    let suspended = active.receipts().unwrap();
     assert_eq!(
-        superseded[0].outcome,
-        CommandOutcome::Rejected {
-            reason: CommandError::Superseded { point: Some(HELD) }
+        suspended[0].outcome,
+        CommandOutcome::Accepted {
+            apply_tick: Tick(N + 1)
         },
-        "{superseded:?}"
+        "the demote boundary must re-suspend, not settle: {suspended:?}"
     );
     assert_eq!(active.role().unwrap().role, Role::Demoting);
     assert_eq!(
         settlements_of(&active, &write),
-        vec![(
-            N + 1,
-            CommandOutcome::Rejected {
-                reason: CommandError::Superseded { point: Some(HELD) }
-            }
-        )]
+        vec![],
+        "no settlement may journal before the line adjudicates"
     );
     assert_eq!(
         settlements_of(&standby, &write),
         vec![(N + 2, CommandOutcome::Applied { tick: Tick(N + 2) })]
     );
 
-    // The demoted peer reconverges on its announced successor and the
-    // pair's receipt log is again the run's one audit — the new
-    // active's applied settlement included.
+    // The demoted peer reconverges on its announced successor: the
+    // adopted log carries the line's `Applied` verdict at the same
+    // index — the carried admission — so nothing settles `superseded`
+    // and the journal records the one terminal outcome every peer
+    // agrees on. One admission, one `command_settled` per journal, and
+    // never a `Superseded` beside the `Applied`.
     active.advance(1).unwrap();
     let report = active.role().unwrap();
     assert_eq!(report.role, Role::Standby, "{report:?}");
@@ -571,6 +578,12 @@ fn a_pending_command_at_the_promote_boundary_survives_the_driven_cadence() {
         "the demoted peer must reconverge on its successor: {report:?}"
     );
     assert_eq!(active.receipts().unwrap(), standby.receipts().unwrap());
+    assert_eq!(
+        settlements_of(&active, &write),
+        vec![(N + 2, CommandOutcome::Applied { tick: Tick(N + 2) })],
+        "the demoted peer journals the line's one verdict — applied — \
+         never the superseded-then-applied pair the defect produced"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
