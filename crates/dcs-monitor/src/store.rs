@@ -116,7 +116,10 @@ pub struct PublicationPage {
 
 /// One point's ring of recent samples.
 struct Ring {
-    /// The `seq` the next appended sample takes.
+    /// The `seq` floor the next appended sample takes — the actual
+    /// stamp is the scan's own tick when that lies ahead, so the axis
+    /// rides the run's tick domain and a restart continuing that
+    /// domain keeps numbering instead of silently restarting it.
     next_seq: u64,
     samples: VecDeque<HistorySample>,
 }
@@ -174,6 +177,13 @@ struct Inner {
     /// History samples appended since the last publish — the next
     /// publication's history delta, drained there.
     pending_history: BTreeMap<PointId, VecDeque<HistorySample>>,
+    /// The serving process's lifetime ordinal — the journal file's run
+    /// count when one is configured, `1` without — stamped on every
+    /// served [`PointHistory`] envelope so a `since`-cursor consumer
+    /// detects a restart whose new tick domain restarted the seq axis:
+    /// the marker answers even when the cursor's filter empties the
+    /// samples list.
+    run: u64,
     /// Journal entries appended since the last publish — the next
     /// publication's event delta, drained there.
     pending_journal: VecDeque<JournalEntry>,
@@ -261,12 +271,14 @@ impl Store {
     /// An empty store with the given retention bounds — a
     /// [`Monitor`](crate::Monitor)'s bind publishes the seed read
     /// model immediately after, so a store without any publication
-    /// exists only inside construction.
+    /// exists only inside construction. `run` is the serving process's
+    /// lifetime ordinal, stamped on every served [`PointHistory`].
     pub(crate) fn new(
         history_capacity: usize,
         journal_capacity: usize,
         window_capacity: usize,
         event_history_capacity: usize,
+        run: u64,
     ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
@@ -281,6 +293,7 @@ impl Store {
                 next_event_seq: 1,
                 receipts: Arc::new(Vec::new()),
                 pending_history: BTreeMap::new(),
+                run,
                 pending_journal: VecDeque::new(),
                 pending_boundaries: VecDeque::new(),
                 next_seq: 1,
@@ -296,17 +309,21 @@ impl Store {
 
     /// Appends `point`'s fresh scan sample to its served ring and to
     /// the pending history delta the next publication drains. The
-    /// sample's `seq` comes from the ring — never reused, so a
-    /// `since`-cursor consumer detects eviction as a numbering gap.
-    pub(crate) fn push_sample(&self, point: PointId, sample: Sample) {
+    /// sample's `seq` is the scan's own `tick` when that lies ahead of
+    /// the ring's floor — never reused, so a `since`-cursor consumer
+    /// detects eviction as a numbering gap. Riding the run's tick
+    /// domain keeps the axis continuous across a restart that adopts
+    /// the same domain (a checkpoint-adopted standby, a restored state
+    /// file) instead of silently restarting it at 1; a restart that
+    /// begins a new tick domain restarts the axis, which the served
+    /// envelope's `run` marker distinguishes.
+    pub(crate) fn push_sample(&self, point: PointId, tick: Tick, sample: Sample) {
         let mut inner = self.inner.lock().unwrap();
         let capacity = inner.history_capacity;
         let ring = inner.rings.entry(point).or_insert_with(Ring::new);
-        let stamped = HistorySample {
-            seq: ring.next_seq,
-            sample,
-        };
-        ring.next_seq += 1;
+        let seq = ring.next_seq.max(tick.0);
+        let stamped = HistorySample { seq, sample };
+        ring.next_seq = seq + 1;
         ring.samples.push_back(stamped);
         while ring.samples.len() > capacity {
             ring.samples.pop_front();
@@ -426,6 +443,7 @@ impl Store {
                 .iter_mut()
                 .map(|(&point, samples)| PointHistory {
                     point,
+                    run: inner.run,
                     samples: samples.drain(..).collect(),
                 })
                 .collect(),
@@ -478,6 +496,7 @@ impl Store {
             .into_iter()
             .map(|point| PointHistory {
                 point,
+                run: inner.run,
                 samples: inner
                     .rings
                     .get(&point)
@@ -599,7 +618,7 @@ mod tests {
     fn history_emissions_evict_oldest_first_at_the_bound() {
         // A two-slot ring keeps the newest records; the never-reused
         // seqs show the evicted stretch as a numbering gap.
-        let store = Store::new(0, 0, 4, 2);
+        let store = Store::new(0, 0, 4, 2, 1);
         for n in 1..=4 {
             store.push_event_history(emission("em", "shift", n), Tick(n as u64));
         }
@@ -625,7 +644,7 @@ mod tests {
         // Each newer emission supersedes the identity's standing
         // record; a second identity sits beside it. The standing
         // record carries the superseding emission's seq and tick.
-        let store = Store::new(0, 0, 4, 8);
+        let store = Store::new(0, 0, 4, 8, 1);
         for n in 1..=3 {
             store.push_latest_event(emission("em", "beat", n), Tick(n as u64));
         }
@@ -651,7 +670,7 @@ mod tests {
     fn routed_emissions_ride_the_publication_delta() {
         // Every routed emission — both classes — appends to the event
         // delta the next publication drains, in routed order.
-        let store = Store::new(0, 0, 4, 8);
+        let store = Store::new(0, 0, 4, 8, 1);
         store.push_event_history(emission("em", "shift", 1), Tick(1));
         store.push_latest_event(emission("em", "beat", 1), Tick(1));
         let publication = store.publish(Tick(1), snapshot(Tick(1)), &[]);

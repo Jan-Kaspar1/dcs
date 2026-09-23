@@ -480,13 +480,15 @@ const metaByPoint = new Map();
 // rationalization block. The index's components section is
 // serde-defaulted — an index served without it simply joins nothing.
 const componentsByName = new Map();
-// point id -> { samples: [Sample], lastSeq, lastTick } — the series a
-// trend draws. lastSeq is the since-cursor in the *current* source's
-// stream; lastTick is the merge watermark that keeps the series
-// continuous across a source switch's whole-stream re-read — an
+// point id -> { samples: [Sample], lastSeq, lastTick, run } — the
+// series a trend draws. lastSeq is the since-cursor in the *current*
+// source's stream; lastTick is the merge watermark that keeps the
+// series continuous across a source switch's whole-stream re-read — an
 // incremental poll's seq cursor proves each entry new on its own, so a
 // point whose served stamps stop advancing the tick domain still
-// extends on each served change.
+// extends on each served change. run is the served envelope's process
+// lifetime marker — a change under a standing cursor means the seq
+// axis restarted with the source process.
 const trends = new Map();
 // The retained journal window, oldest first.
 const journalEntries = [];
@@ -499,10 +501,14 @@ let journalSince = 0;
 // ({published, tick}) plus the named degradations the latest poll
 // observed: gap = {stream, from, through}, the served seq stretch a
 // since-poll stepped over; stale = the re-served publication's
-// identity when a poll found nothing new. null marks are a fresh,
+// identity when a poll found nothing new; restart = a string naming
+// the observation that proved the source process restarted — its
+// publication identity regressing, a served run_boundary, or a changed
+// history run marker — so the page's stream cursors reset rather than
+// silently merging two lifetimes. null marks are a fresh,
 // in-sequence feed; a source switch resets the identity — each peer
 // numbers its own publications.
-const feed = { publication: null, gap: null, stale: null };
+const feed = { publication: null, gap: null, stale: null, restart: null };
 // component name -> its served descriptor, rebuilt on every poll: the
 // parameter edit path reads declared kinds and ranges from it — the
 // descriptor is the page's authority for what a tunable accepts.
@@ -691,7 +697,10 @@ function selectSource() {
 // same run without duplicating samples.
 function switchSource(next) {
   source = next;
-  for (const state of trends.values()) state.lastSeq = 0;
+  for (const state of trends.values()) {
+    state.lastSeq = 0;
+    state.run = null;
+  }
   journalSince = 0;
   // The new peer numbers its own publications: the feed's freshness
   // and gap bookkeeping starts over — a mark observed against the old
@@ -699,6 +708,7 @@ function switchSource(next) {
   feed.publication = null;
   feed.gap = null;
   feed.stale = null;
+  feed.restart = null;
 }
 
 // The indices of the peers reporting settled "active" — the legitimate
@@ -881,6 +891,11 @@ function renderPair() {
 // same read model it last served, so the values about to re-render are
 // last-known rather than current. A new identity clears the mark. A
 // peer serving snapshots without the section compares on tick alone.
+// A regressed identity — a lower `published` seq than the one already
+// rendered, or an older tick — can only mean the source's store
+// restarted: its streams' seq axes reset with it, so the page's
+// cursors reset too rather than reading the new lifetime's numbering
+// as a continuation of the old.
 function notePublication(snapshot) {
   const health = snapshot.publication || null;
   const current = {
@@ -893,6 +908,34 @@ function notePublication(snapshot) {
     ? current
     : null;
   feed.publication = current;
+  if (last !== null && ((current.published !== null &&
+      last.published !== null && current.published < last.published) ||
+      current.tick < last.tick)) {
+    noteRestart("the source's publication identity regressed");
+  }
+}
+
+// A same-source restart, observed through any of the served streams:
+// the publication identity regressing, a new journal run_boundary, or
+// a history envelope's changed run marker. Every stream cursor resets
+// so the next reads re-fetch whole and merge by tick — idempotent
+// across the several observations one restart produces. A restart that
+// restarted the tick domain itself (the served tick now stands at or
+// below a drawn sample's) can't merge — the drawn series belongs to
+// the old lifetime's axis, so it clears rather than stitching across.
+function noteRestart(detail) {
+  const freshDomain = [...trends.values()].some(state =>
+    state.lastTick !== null && feed.publication.tick <= state.lastTick);
+  for (const state of trends.values()) {
+    state.lastSeq = 0;
+    state.run = null;
+    if (freshDomain) {
+      state.samples = [];
+      state.lastTick = null;
+    }
+  }
+  journalSince = 0;
+  feed.restart = detail;
 }
 
 // Notes a served seq stretch the page's since-cursor stepped over:
@@ -913,6 +956,10 @@ function noteFeedGap(stream, from, through) {
 function renderFeed() {
   const line = document.getElementById("feed-state");
   const notices = [];
+  if (feed.restart !== null) {
+    notices.push("source restarted — " + feed.restart +
+      "; new process lifetime, streams re-read and merged by tick");
+  }
   if (feed.gap !== null) {
     notices.push("publication gap: " + feed.gap.stream + " seqs " +
       feed.gap.from + "–" + feed.gap.through +
@@ -927,7 +974,9 @@ function renderFeed() {
   }
   line.hidden = notices.length === 0;
   line.className =
-    feed.gap !== null ? "gap" : feed.stale !== null ? "stale" : "";
+    feed.gap !== null || feed.restart !== null
+      ? "gap"
+      : feed.stale !== null ? "stale" : "";
   line.textContent = notices.join("; ");
 }
 
@@ -1187,10 +1236,11 @@ async function refresh() {
     ]);
     // Freshness bookkeeping before the view re-renders: the served
     // publication's seq/tick identity decides whether this poll found
-    // anything new, and the since-polls below note any evicted stretch
-    // they step over.
-    notePublication(snapshot);
+    // anything new — a regressed one marks the source's restart — and
+    // the since-polls below note any evicted stretch they step over.
     feed.gap = null;
+    feed.restart = null;
+    notePublication(snapshot);
     interfaceByName.clear();
     for (const entry of (schema && schema.interfaces) || []) {
       interfaceByName.set(entry.name, entry.interface);
@@ -2696,7 +2746,7 @@ function buildTrends() {
     "<svg id=\"trend-" + meta.point + "\" viewBox=\"0 0 320 90\" width=\"320\" height=\"90\"></svg>" +
     "</figure>").join("");
   for (const meta of index.points) {
-    trends.set(meta.point, { samples: [], lastSeq: 0, lastTick: null });
+    trends.set(meta.point, { samples: [], lastSeq: 0, lastTick: null, run: null });
   }
 }
 
@@ -2715,6 +2765,19 @@ async function refreshTrends(base) {
   for (const history of histories) {
     const state = trends.get(history.point);
     if (!state) continue;
+    // The envelope's served lifetime marker: a `run` that changed under
+    // a standing cursor means the seq axis restarted with a new process
+    // lifetime — the same seam the publication identity names — so the
+    // stream cursors reset rather than read the restarted axis as a
+    // continuation. A peer predating the marker serves no `run` and
+    // seeds nothing.
+    if (history.run !== undefined) {
+      if (state.run !== null && history.run !== state.run) {
+        noteRestart("the served history run marker advanced to run " +
+          history.run);
+      }
+      state.run = history.run;
+    }
     // A since-read answering past the cursor's successor is the served
     // form of the named publication gap: the stretch between evicted
     // from the bounded ring while the page wasn't polling.
@@ -2815,6 +2878,15 @@ async function refreshJournal(base) {
     if (!journalSeen.has(key)) {
       journalSeen.add(key);
       journalEntries.push(entry);
+      // A run_boundary the page had not yet rendered is the journal
+      // stream's own restart marker — the same seam the publication
+      // identity or a changed history run names. The dedupe above
+      // keeps a whole-journal re-fetch from re-firing on a boundary it
+      // already merged.
+      if ("run_boundary" in entry.event) {
+        noteRestart("the journal recorded run " +
+          entry.event.run_boundary.run + " beginning");
+      }
       // A settled set_parameter receipt is the authority's final word on
       // a tuning submission: the applied tick or the named rejection
       // surfaces on the parameter's faceplate row as well as in this
