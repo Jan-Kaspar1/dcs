@@ -92,8 +92,9 @@ pub enum StandbySync {
     /// The last checkpoint applied cleanly: the run is aligned with the
     /// active's at the checkpointed tick and tracking.
     Tracking {
-        /// The last applied checkpoint's tick — how far the run is known
-        /// to be aligned.
+        /// The last applied checkpoint's source tick — the tracked
+        /// stream's own counter, not the reporting run's run tick: how
+        /// far the run is known to be aligned.
         aligned: Tick,
     },
     /// The last transfer failed — an unreachable active or a rejected
@@ -112,8 +113,8 @@ pub enum StandbySync {
     /// with, so the run is promotable on the same evidence `tracking`
     /// stands on: the run it would resume is the proven-converged one.
     Orphaned {
-        /// The last applied checkpoint's tick — how far the run is known
-        /// to be aligned.
+        /// The last applied checkpoint's source tick — the tracked
+        /// stream's own counter: how far the run is known to be aligned.
         aligned: Tick,
     },
     /// Checkpoints apply cleanly but the outputs the standby's own scan

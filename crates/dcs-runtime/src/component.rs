@@ -148,7 +148,9 @@ pub trait Component: Send {
     /// may touch.
     fn io_requirements(&self) -> Vec<IoRequirement>;
 
-    /// Executes one scan step at `tick`.
+    /// Executes one scan step at run tick `tick` — the executor's own
+    /// scan counter, the same domain every sample `io` serves is stamped
+    /// in.
     ///
     /// `io` serves the component's declared points: reads observe the
     /// scan's input image and writes land in the output image the executor

@@ -198,7 +198,7 @@ pub struct ExchangeDiagnostics {
     /// driver attributes the shortfall to a station and degrades only
     /// that station's points; the rest of the image latched.
     pub working_counter_mismatches: u64,
-    /// The scan tick of the most recent completed exchange — the
+    /// The run tick of the most recent completed exchange — the
     /// acquisition stamp the currently latched input samples carry.
     /// `None` before the first completed exchange.
     pub last_exchange_tick: Option<Tick>,
@@ -220,6 +220,13 @@ pub struct ExchangeDiagnostics {
 /// mutability and many handles can share one `&dyn IoDriver` at once.
 pub trait IoDriver {
     /// Reads the most recent sample for `point`.
+    ///
+    /// The returned [`Sample::tick`] is stamped in the driver's own tick
+    /// domain — a remote simulated plant's *plant tick*, the scan's *run
+    /// tick* for a [`CyclicIoDriver`]'s latched image — which need not be
+    /// the caller's: the executor treats it as change evidence and
+    /// re-stamps the landed sample with the scan's run tick rather than
+    /// comparing the domains directly.
     ///
     /// Returns [`IoError::UnknownPoint`] when the driver serves no such point.
     fn read(&self, point: PointId) -> Result<Sample, IoError>;
@@ -352,8 +359,8 @@ pub trait IoDriver {
 /// The trait is deliberately open: device integrations implement it
 /// from their own crates, like [`IoDriver`] itself.
 pub trait CyclicIoDriver: IoDriver {
-    /// Runs one process-image exchange for scan `tick`, per the
-    /// contract above.
+    /// Runs one process-image exchange for run tick `tick` — the
+    /// caller's scan tick — per the contract above.
     fn exchange(&self, tick: Tick) -> Result<(), IoError>;
 }
 
@@ -438,7 +445,9 @@ pub struct TypedSample<T> {
     pub value: T,
     /// How much the value can be trusted.
     pub quality: Quality,
-    /// The logical tick at which the value was sampled.
+    /// The logical tick at which the value was sampled — same domain as
+    /// the [`Sample`] it was decoded from: a run tick on scan-image
+    /// samples, the driver's own domain on driver-returned ones.
     pub tick: Tick,
 }
 

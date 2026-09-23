@@ -57,15 +57,16 @@
 //! caller-owned.
 //!
 //! The run's tick is the journal and history attribution domain, so it
-//! never rewinds: a checkpoint stream that regresses — below the run's
-//! last alignment, or below the run's own tick before any alignment
-//! stood — while naming a generation different from the run's own is a
-//! restarted or replaced source beginning a new tick generation, not a
-//! continuation of the tracked line. Its state still applies — the
-//! tracked source is the live one — but the run resumes it at the run's
-//! own tick, carrying the offset every later checkpoint lands under,
-//! and the boundary queues one [`SourceRestart`] for the journal rather
-//! than silently rewinding scans the run already ran and recorded.
+//! never rewinds: a checkpoint stream whose source ticks regress — below
+//! the run's last alignment, or below the run's own tick before any
+//! alignment stood — while naming a generation different from the run's
+//! own is a restarted or replaced source beginning a new source-tick
+//! generation, not a continuation of the tracked line. Its state still
+//! applies — the tracked source is the live one — but the run resumes
+//! it at the run's own tick, carrying the offset every later checkpoint
+//! lands under, and the boundary queues one [`SourceRestart`] for the
+//! journal rather than silently rewinding scans the run already ran and
+//! recorded.
 //! The regression heuristic alone cannot tell that boundary from the
 //! peer's own tracking reset — [`demote`](Peer::demote) clears the
 //! alignment, so a demoted peer's first pull on a healthy successor
@@ -73,7 +74,7 @@
 //! decides: the uninterrupted successor still stamps the generation
 //! the demoted run's own captures carried, and a same-generation
 //! regression journals nothing while a different one is the source's
-//! new tick domain. An unidentified generation on either side can
+//! new source-tick domain. An unidentified generation on either side can
 //! prove no continuation, so it keeps the conservative verdict.
 //! The carried offset is re-evaluated on each apply
 //! against the run's live lead over the stream — it covers at most the
@@ -81,7 +82,7 @@
 //! tick — so a tracking apply can hold or realign the run's clock but
 //! never land it ahead of both clocks, the bound that keeps two
 //! mutually tracking peers' offsets from compounding into each other's
-//! served ticks.
+//! served source ticks.
 //!
 //! The field-ownership claim installed by
 //! [`with_field_claim`](Peer::with_field_claim) runs at every transition
@@ -191,26 +192,27 @@ pub struct Peer<'d> {
     /// while the instance does not own the field; reset to
     /// `Unsynchronized` on demotion.
     sync: StandbySync,
-    /// The last applied checkpoint's tick — in the tracked stream's own
-    /// tick domain — while any transfer has succeeded; kept beside
+    /// The last applied checkpoint's source tick — the tracked stream's
+    /// own counter — while any transfer has succeeded; kept beside
     /// `sync` so `aligned_tick` still reports it across a `Degraded` or
     /// `Diverged` state.
     aligned: Option<Tick>,
-    /// The run tick's lead over the tracked stream's own tick — the
+    /// The run tick's lead over the tracked stream's source tick — the
     /// generation offset [`apply`](Self::apply) lands each checkpoint
-    /// at `tick + tick_offset`. Zero while the stream continues the
-    /// run's generation; a regressed stream — the source restarted
-    /// cold or was replaced — resets it so the apply lands at the
-    /// run's current tick rather than rewinding scans the run already
-    /// ran and journaled. Re-evaluated against the run's live lead on
-    /// every apply — see [`stream_offset`](Self::stream_offset) — so a
+    /// under: source tick plus `tick_offset`, in the run's domain. Zero
+    /// while the stream continues the run's generation; a regressed
+    /// stream — the source restarted cold or was replaced — resets it so
+    /// the apply lands at the run's current tick rather than rewinding
+    /// scans the run already ran and journaled. Re-evaluated against the
+    /// run's live lead on every apply — see
+    /// [`stream_offset`](Self::stream_offset) — so a
     /// recovering tracked stream shrinks it to the gap that remains
     /// and clears it at the run's own tick.
     tick_offset: u64,
     /// Reported-role transitions not yet consumed for journaling.
     pending_changes: Vec<RoleChange>,
     /// The last non-field-owning scan's staged field `Out` image and its
-    /// tick — the divergence check's "would have written" evidence,
+    /// run tick — the divergence check's "would have written" evidence,
     /// compared against the field when a checkpoint lands at that tick.
     staged: Option<(Tick, BTreeMap<PointId, Sample>)>,
     /// Divergence detections not yet consumed for journaling — one per
@@ -491,17 +493,17 @@ pub struct OrphanReport {
     /// The run tick the detection is attributed to — the tick the
     /// orphaned checkpoint's state landed at.
     pub tick: Tick,
-    /// The applied checkpoint's own tick — where the tracked line
+    /// The applied checkpoint's source tick — where the tracked line
     /// stood when the observation landed.
     pub aligned: Tick,
 }
 
 /// The tracked checkpoint stream regressed across a generation
-/// boundary — the tick it served fell below the run's last alignment
-/// (or, before any alignment stood, below the run's own tick) while
-/// naming a generation the run's own stream does not carry: the
+/// boundary — the source tick it served fell below the run's last
+/// alignment (or, before any alignment stood, below the run's own tick)
+/// while naming a generation the run's own stream does not carry: the
 /// signature of a cold-restarted or replaced source beginning a new
-/// tick generation. The run adopted the checkpoint's state without
+/// source-tick generation. The run adopted the checkpoint's state without
 /// rewinding its own tick — the resync this report names — so the scan
 /// history stays newest-last and the journal's attribution monotonic.
 /// A regression on the run's own generation is the peer's tracking
@@ -514,12 +516,12 @@ pub struct SourceRestart {
     /// regressed checkpoint's state landed at, which the run's clock
     /// never rewound across.
     pub tick: Tick,
-    /// The last applied checkpoint's tick before the regression —
+    /// The last applied checkpoint's source tick before the regression —
     /// where the previous alignment stood; `None` when the run had
     /// none (a demoted peer's first pull), the regression then being
     /// measured against the run's own tick.
     pub was_aligned: Option<Tick>,
-    /// The regressed checkpoint's own tick — where the new
+    /// The regressed checkpoint's source tick — where the new
     /// generation's stream resumed.
     pub resumed_at: Tick,
 }
@@ -997,9 +999,9 @@ impl<'d> Peer<'d> {
     }
 
     /// The tick of the last applied checkpoint — how far the run is
-    /// known to be aligned with the active's. Reported in the tracked
-    /// stream's own tick domain: after a source restart the run's clock
-    /// leads it by the generation offset the resync left.
+    /// known to be aligned with the active's — reported as a source
+    /// tick in the tracked stream's own domain: after a source restart
+    /// the run tick leads it by the generation offset the resync left.
     pub fn aligned_tick(&self) -> Option<Tick> {
         self.aligned
     }
@@ -1203,14 +1205,14 @@ impl<'d> Peer<'d> {
     /// The pull is opportunistic, not a heartbeat cycle: it never counts
     /// a miss and never decides the transition by itself. A field-owning
     /// peer has no source to sync from; a produced-nothing pull changes
-    /// nothing; and a checkpoint older than the run's tick is stale —
-    /// applying it would rewind scans the peer already ran, re-applying
-    /// their commands and re-emitting their events — so its state does
-    /// not land. Stale is not empty, though: the receipt log inside the
-    /// stale checkpoint may still carry admissions the run lacks — the
-    /// driven cadence rests at `aligned + 1`, so the freshest checkpoint
-    /// carrying a just-admitted command is exactly this one — and the
-    /// boundary adopts that log's new tail instead
+    /// nothing; and a checkpoint whose source tick predates the run tick
+    /// is stale — applying it would rewind scans the peer already ran,
+    /// re-applying their commands and re-emitting their events — so its
+    /// state does not land. Stale is not empty, though: the receipt log
+    /// inside the stale checkpoint may still carry admissions the run
+    /// lacks — the driven cadence rests at `aligned + 1`, so the freshest
+    /// checkpoint carrying a just-admitted command is exactly this one —
+    /// and the boundary adopts that log's new tail instead
     /// ([`Executor::carry_pending_commands`]), the still-`Accepted`
     /// entries queueing on the standing state to settle at the promoted
     /// run's first scan. A checkpoint this build cannot read — an
@@ -1255,12 +1257,13 @@ impl<'d> Peer<'d> {
             return;
         };
         if checkpoint.tick < self.executor.tick() {
-            // Stale by the run's clock: the state cannot land without
-            // rewinding scans this peer already ran, but the receipt
-            // log's newer tail still carries — a command the active
-            // admitted since this run's last alignment queues here and
-            // settles at the promoted run's first scan rather than
-            // being lost to the gap the skip used to leave.
+            // Stale by the run's clock — a source tick below the run
+            // tick: the state cannot land without rewinding scans this
+            // peer already ran, but the receipt log's newer tail still
+            // carries — a command the active admitted since this run's
+            // last alignment queues here and settles at the promoted
+            // run's first scan rather than being lost to the gap the
+            // skip used to leave.
             if SUPPORTED_FORMAT_VERSIONS.contains(&checkpoint.format_version) {
                 self.executor.carry_pending_commands(&checkpoint);
             }
@@ -1295,20 +1298,22 @@ impl<'d> Peer<'d> {
     }
 
     /// Applies a checkpoint received from the active, aligning the run
-    /// at the checkpointed tick — the tracking half of the redundancy
-    /// contract, in place on the running executor.
+    /// at the checkpoint's source tick translated into the run-tick
+    /// domain — the tracking half of the redundancy contract, in place
+    /// on the running executor.
     ///
-    /// The run's tick is its journal and history attribution domain and
-    /// never rewinds across a source-generation boundary: a checkpoint
-    /// whose tick fell below the run's last alignment — or below the
-    /// run's own tick before any alignment stood — while naming a
-    /// generation the run's own stream does not carry is not a
+    /// The run tick is the run's journal and history attribution domain
+    /// and never rewinds across a source-generation boundary: a
+    /// checkpoint whose source tick fell below the run's last alignment
+    /// — or below the run's own tick before any alignment stood — while
+    /// naming a generation the run's own stream does not carry is not a
     /// continuation of the tracked line but the signature of a
-    /// cold-restarted or replaced source beginning a new tick
+    /// cold-restarted or replaced source beginning a new source-tick
     /// generation. Its state still applies — the tracked source is the
     /// live one — but the run resumes it at the run's current tick, the
-    /// `tick + tick_offset` landing every later checkpoint on the new
-    /// stream takes, and one [`SourceRestart`] queues for the journal:
+    /// `tick + tick_offset` landing — source tick plus offset — every
+    /// later checkpoint on the new stream takes, and one
+    /// [`SourceRestart`] queues for the journal:
     /// a restart that rewound nothing still changes what the stream
     /// means. A checkpoint on the tracked line itself — a repeat or a
     /// post-miss catch-up, which may still lag the run's tick — keeps
@@ -1705,15 +1710,15 @@ impl<'d> Peer<'d> {
     }
 
     /// The generation offset `checkpoint` applies under — the run
-    /// tick's lead over the tracked stream's own tick — and whether
-    /// the stream regressed: a checkpoint whose tick fell below the
-    /// run's last alignment, or below the run's own tick before any
+    /// tick's lead over the checkpoint's source tick — and whether
+    /// the stream regressed: a checkpoint whose source tick fell below
+    /// the run's last alignment, or below the run's own tick before any
     /// alignment stood, is the signature of a source-side reset — a
     /// cold-restarted or replaced source, or the peer's own demotion
     /// clearing the alignment the comparison stood on. The generation
     /// check in [`apply`](Self::apply) separates the two; the offset
-    /// mechanics are the same either way. The
-    /// offset a regression resets to — `run - checkpoint.tick` —
+    /// mechanics are the same either way. The offset a regression resets
+    /// to — `run - checkpoint.tick`, run tick minus source tick —
     /// lands the apply at the run's current tick, so the run's clock
     /// never rewinds scans it already ran and journaled; a
     /// same-generation pull keeps the standing offset, and a first
@@ -1726,8 +1731,8 @@ impl<'d> Peer<'d> {
     /// seeded it, so it may cover at most the gap that remains. A
     /// tracked stream still below the run's tick lands the apply at
     /// the run's tick — never ahead of it — and one that has recovered
-    /// to or past the run's tick clears the offset entirely, so the
-    /// run's clock rejoins the stream's domain. A stale offset can
+    /// to or past the run's tick clears the offset entirely, the run
+    /// tick rejoining the source stream's numbering. A stale offset can
     /// therefore realign the run backward onto the line or hold it in
     /// place, but it can never land the apply ahead of both clocks —
     /// the bound that keeps two mutually tracking peers' seeded
@@ -1757,13 +1762,13 @@ impl<'d> Peer<'d> {
     /// [`SourceRestart`] on. `own` is the generation this run's
     /// executor currently stamps, `checkpoint`'s the pulled stream's:
     /// only a checkpoint whose generation positively differs proves
-    /// the source began a new tick domain. A demoted peer's first pull
-    /// on its uninterrupted successor regresses on the generation its
-    /// own captures stamped — the tracking reset was the peer's, so
-    /// nothing journals. Either side unidentified — a checkpoint a
-    /// pre-generation build wrote, or a run never given a generation —
-    /// can prove no continuation, so the regression journals as a
-    /// restart exactly as it always did.
+    /// the source began a new source-tick domain. A demoted peer's
+    /// first pull on its uninterrupted successor regresses on the
+    /// generation its own captures stamped — the tracking reset was the
+    /// peer's, so nothing journals. Either side unidentified — a
+    /// checkpoint a pre-generation build wrote, or a run never given a
+    /// generation — can prove no continuation, so the regression journals
+    /// as a restart exactly as it always did.
     fn generation_boundary(own: Option<u64>, checkpoint: Option<u64>) -> bool {
         own.is_none_or(|own| Some(own) != checkpoint)
     }
@@ -2444,7 +2449,7 @@ impl<'d> Peer<'d> {
         &self.executor
     }
 
-    /// The executor's current tick.
+    /// The executor's current run tick.
     pub fn tick(&self) -> Tick {
         self.executor.tick()
     }

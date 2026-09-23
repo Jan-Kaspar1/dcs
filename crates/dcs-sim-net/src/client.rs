@@ -422,8 +422,9 @@ impl RemoteDriver {
         self.connection.lock().unwrap().stream.is_some()
     }
 
-    /// Advances the shared plant one tick of `dt` time units —
+    /// Advances the shared plant one plant tick of `dt` time units —
     /// `SimDriver::step` on the server — and returns the plant's new
+    /// plant tick — the simulated field's counter, not the client's run
     /// tick.
     ///
     /// Stepping is explicit rather than attached to `read`/`write`, so a

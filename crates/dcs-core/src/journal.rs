@@ -270,7 +270,7 @@ pub enum JournalEvent {
 /// ring's bounded eviction is visible to consumers as a numbering
 /// gap — the same honest-gap convention the journal and the
 /// per-point history rings follow. `tick` is the producing scan's
-/// tick; `retention` names the declared class the emission routed
+/// run tick; `retention` names the declared class the emission routed
 /// under; `event` carries the [`EmittedEvent`] itself.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventRecord {
@@ -278,7 +278,7 @@ pub struct EventRecord {
     /// append order starting at 1 and increasing by one per routed
     /// emission, never reused.
     pub seq: u64,
-    /// The producing scan's tick.
+    /// The producing scan's run tick.
     pub tick: Tick,
     /// The declared retention class the emission routed under —
     /// `History` for the bounded ring's records, `Latest` for the

@@ -83,7 +83,7 @@ struct ImageSlot {
 /// bookkeeping.
 struct Image {
     /// The held input image: register → sample the last completed
-    /// exchange latched, stamped with that exchange's scan tick — the
+    /// exchange latched, stamped with that exchange's run tick — the
     /// acquisition stamp a point's `stale_after_ticks` budget measures.
     /// Seeded by the connect-time census at `Tick::ZERO`, so before the
     /// first exchange every declared register has a defined — and
@@ -133,7 +133,8 @@ struct Image {
 /// are the same as any point-wise driver's. [`exchange`](CyclicIoDriver::exchange)
 /// is the only call that touches the wire: one `exchange` request
 /// carrying every register staged since the last completed exchange,
-/// its answer latching the input image atomically at the scan tick.
+/// its answer latching the input image atomically at the scan's run
+/// tick.
 /// A command-staged write therefore publishes in the same exchange the
 /// applying scan runs, and a component's scan-`t` write publishes in
 /// scan `t + 1`'s — the contract's documented one-scan actuation

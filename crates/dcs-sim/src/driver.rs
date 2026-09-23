@@ -54,7 +54,8 @@ pub struct PointInfo {
     pub point: PointId,
     /// Whether the controller reads (`In`) or writes (`Out`) the point.
     pub direction: Direction,
-    /// The sample readers currently observe.
+    /// The sample readers currently observe — stamped with the plant
+    /// tick that produced it.
     pub sample: Sample,
     /// The fault injected on the point, if any.
     pub fault: Option<Fault>,
@@ -462,20 +463,21 @@ impl SimDriver {
         })
     }
 
-    /// The driver's current logical tick.
+    /// The driver's current plant tick — the simulated field's step
+    /// counter, a different tick domain from any reading run's.
     pub fn tick(&self) -> Tick {
         self.state.lock().unwrap().tick
     }
 
-    /// Advances the simulation one tick of `dt` time units and returns the
-    /// new tick.
+    /// Advances the simulation one plant tick of `dt` time units and
+    /// returns the new plant tick.
     ///
     /// Each step, in order:
     ///
-    /// 1. the driver's tick counter advances by one;
+    /// 1. the driver's plant-tick counter advances by one;
     /// 2. every [`Loopback`] copies its `Out` point's effective sample —
     ///    value plus any injected quality — onto its paired `In` point,
-    ///    stamped with the new tick;
+    ///    stamped with the new plant tick;
     /// 3. every [`ProcessElement`], in declaration order, reads its input
     ///    points' effective samples and updates its output point: a
     ///    `Good` input advances the element — for a dead-time element,
@@ -728,11 +730,12 @@ impl IoDriver for SimDriver {
         Ok(())
     }
 
-    /// Captures the simulated field state: the driver tick, every bound
-    /// point's stored sample (value, quality, tick) and injected fault,
-    /// and every process element's accumulator.
+    /// Captures the simulated field state: the driver's plant tick, every
+    /// bound point's stored sample (value, quality, tick) and injected
+    /// fault, and every process element's accumulator.
     ///
-    /// Field names are `tick`, `point.{id}.value` / `.quality` / `.tick`
+    /// Field names are `tick` (the plant tick), `point.{id}.value` /
+    /// `.quality` / `.tick`
     /// / `.fault` (the last only while a fault is active), and
     /// `element.{id}` — a `Float` accumulator for every variant but a
     /// `threshold`, whose standing contact captures as a `Bool` — plus

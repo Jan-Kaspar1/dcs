@@ -34,7 +34,8 @@ use std::sync::Mutex;
 /// [`step`](ScriptedDriver::step) reaches them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScriptEntry {
-    /// The driver tick this entry takes effect at.
+    /// The plant tick this entry takes effect at — the driver's own
+    /// step counter, not a reading run's tick.
     pub tick: Tick,
     /// The value readers observe; its variant must match the point's
     /// declared kind, and a `Float` must be finite — the observed
@@ -61,7 +62,8 @@ pub struct RecordedWrite {
     pub channel: ChannelId,
     /// The written value.
     pub value: Value,
-    /// The driver tick the write landed at.
+    /// The plant tick the write landed at — the driver's own step
+    /// counter.
     pub tick: Tick,
 }
 
@@ -337,14 +339,15 @@ impl ScriptedDriver {
         })
     }
 
-    /// The driver's current logical tick.
+    /// The driver's current plant tick — the simulated device's own
+    /// step counter, a different tick domain from any reading run's.
     pub fn tick(&self) -> Tick {
         self.state.lock().unwrap().tick
     }
 
-    /// Advances the driver one tick of `dt` time units and returns the
-    /// new tick, applying every script entry whose tick the new tick
-    /// reaches. `dt` paces simulated time exactly as on
+    /// Advances the driver one plant tick of `dt` time units and returns
+    /// the new plant tick, applying every script entry whose tick the new
+    /// tick reaches. `dt` paces simulated time exactly as on
     /// [`SimDriver::step`](crate::SimDriver::step); playback itself is
     /// indexed by ticks, not `dt`.
     ///
