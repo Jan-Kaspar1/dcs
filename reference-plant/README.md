@@ -1358,6 +1358,12 @@ and the redundant controller pair:
   and reconverging to `tracking` on its peer's checkpoints —
   `ci/standby_restart.py` exercises that promise on the deployed
   pair.
+- `topology` — **optional**: the deployment's named redundant pairs
+  beyond the single-pair default, each `{"name": …, "members":
+  [<controller>, <controller>]}` entry naming two `controllers`
+  members whose standby wiring closes inside the pair — the
+  declared pair index a `?pair=` overview URL is generated from.
+  A single-pair deployment omits the section; this manifest does.
 
 The deployment maps directly onto the platform's documented run
 commands: `dcs-plant-server <model> --dynamics <doc> --listen <addr>`
@@ -1379,10 +1385,13 @@ environment — the identity checkpoint negotiation verifies on the
 wire. The check's `deploy` stage parses the file through `docker
 compose config` (or an equivalent YAML parser) and asserts it agrees
 with the manifest on every field — release, images, mounts,
-fingerprint, listen addresses, pair wiring, and the standby's
-`failover_budget` against its `--auto-promote` flag — a declared
+fingerprint, listen addresses, pair wiring, the standby's
+`failover_budget` against its `--auto-promote` flag, and the
+optional `topology` section's declared pairs — a declared
 budget with no flag, a flag with no declaration, a diverging value,
-or the field placed on the duty entry each fail `rig-mismatch`, an
+the field placed on the duty entry, a pair member the manifest does
+not declare, a member two pairs share, or a declared pair whose
+standby wiring does not close inside it each fail `rig-mismatch`, an
 unparsable file `rig-invalid`, a host with
 neither parser `rig-unverifiable`.
 
