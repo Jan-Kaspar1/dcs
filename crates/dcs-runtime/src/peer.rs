@@ -898,6 +898,10 @@ impl<'d> Peer<'d> {
                 Role::Active => None,
                 _ => Some(self.sync.clone()),
             },
+            // The field-claim observation contract is defined but not
+            // yet produced: reports carry `None` until the claim-state
+            // chain lands.
+            field_claim: None,
         }
     }
 
@@ -2597,6 +2601,7 @@ mod tests {
                 role: Role::Promoting,
                 tick: Tick(7),
                 sync: Some(StandbySync::Tracking { aligned: Tick(7) }),
+                field_claim: None,
             }
         );
 
