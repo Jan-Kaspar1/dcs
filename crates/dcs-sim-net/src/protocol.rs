@@ -151,6 +151,16 @@ pub enum PlantRequest {
     /// release afterward rather than leaving a dead token standing
     /// against the field owner's re-arm.
     ReleaseWriter,
+    /// The read-only half of the writer claim — the claim-state
+    /// observation a tracking peer reports through its role surface.
+    /// The answer is the verdict a mutation from this connection would
+    /// meet, without any mutation: [`PlantResponse::Done`] while this
+    /// connection holds the claim, [`PlantError::Fenced`] while another
+    /// owner does, [`PlantError::Unclaimed`] while no claim stands.
+    /// The probe asserts, joins, and releases nothing — an observation
+    /// cannot seize the field it reports, so reporting `unclaimed`
+    /// leaves the claim exactly as closed as it found it.
+    ProbeWriter,
 }
 
 /// The server's answer to one [`PlantRequest`].
@@ -342,6 +352,7 @@ mod tests {
             PlantRequest::ClaimWriterUnlessHeld { owner: 44 },
             PlantRequest::EnsureWriter { owner: 43 },
             PlantRequest::ReleaseWriter,
+            PlantRequest::ProbeWriter,
         ];
         for request in requests {
             let json = serde_json::to_string(&request).unwrap();
@@ -385,6 +396,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&PlantRequest::ReleaseWriter).unwrap(),
             r#"{"op":"release_writer"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PlantRequest::ProbeWriter).unwrap(),
+            r#"{"op":"probe_writer"}"#
         );
     }
 
