@@ -18,6 +18,12 @@ declares:
   negotiation verifies on the wire;
 - `plant.listen` — the plant service's `--listen` address, whose port
   the controllers' `--remote` targets by network name;
+- `pair_token` — the optional pair shared tracking secret: declared,
+  every controller invocation's `--pair-token` carries it verbatim —
+  the keyed announced-source contract only authenticates peers
+  holding the same token. A manifest without the field means the
+  flag is absent everywhere, and a flag the manifest does not
+  declare diverges the same way;
 - `controllers` — one service per named controller, each `--listen`
   matching its declared address and publishing its monitor port, and
   the tracking standby's `--standby` flag plus startup ordering wired
@@ -337,6 +343,24 @@ def main():
                 (port, port) in svc["published"],
                 f"{name} publishes {svc['published']}, expected its monitor port "
                 f"{port} published as {port}",
+            )
+        # The pair's shared tracking secret: a declared pair_token
+        # means every controller invocation's --pair-token carries it
+        # verbatim — the keyed announced-source contract authenticates
+        # only peers holding the same token. A flag the manifest does
+        # not declare diverges the same way.
+        pair_flag = flag(svc["argv"], "--pair-token")
+        if manifest.get("pair_token") is None:
+            expect(
+                pair_flag is None,
+                f"{name} passes --pair-token {pair_flag!r} but the "
+                "manifest declares no pair_token",
+            )
+        else:
+            expect(
+                pair_flag == manifest["pair_token"],
+                f"{name} --pair-token is {pair_flag!r}, manifest "
+                f"pair_token is {manifest['pair_token']!r}",
             )
         if "standby" in controller:
             expect(

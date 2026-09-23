@@ -574,8 +574,9 @@ struct Options {
     /// holding the token can produce, so an endpoint that merely
     /// replays or fabricates this line's checkpoints can neither arm
     /// the demotion nor feed the demoted peer forged state. `None`
-    /// keeps the unkeyed contract: announced demotions verify on the
-    /// document checks alone.
+    /// runs the unkeyed deployment: the public `/checkpoint` endpoint
+    /// cannot authenticate any announced endpoint, so an
+    /// announced-source demotion refuses `no_tracking_source`.
     pair_token: Option<String>,
 }
 

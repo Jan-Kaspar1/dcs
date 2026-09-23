@@ -151,6 +151,7 @@ def spawn_peer(
     auto_promote=None,
     listen="127.0.0.1:0",
     bound=None,
+    pair_token=None,
 ):
     """Spawn `dcs-controller <model> --remote … --driven` for one pair
     peer — `standby` the manifest's tracking wiring (None on the field
@@ -161,12 +162,15 @@ def spawn_peer(
     declared wildcard host on a runner port under a declared-binds
     launch, the default an ephemeral loopback bind), `bound` an
     optional list the verbatim bound address is appended to — the
-    leg's evidence the declared wildcard bind actually deployed.
-    Returns `(process, monitor_url, preamble)`: `monitor_url` is the
-    dialable form of the reported bind — a wildcard bind normalized
-    to loopback — or None when the process exits before reporting a
-    listener, the preamble then carrying the startup refusal's stderr
-    lines."""
+    leg's evidence the declared wildcard bind actually deployed — and
+    `pair_token` the manifest's declared shared tracking secret the
+    keyed announced-source contract runs under (None leaves the
+    controller unkeyed: no announced endpoint can then authenticate,
+    so an announced-source demotion refuses). Returns `(process,
+    monitor_url, preamble)`: `monitor_url` is the dialable form of the
+    reported bind — a wildcard bind normalized to loopback — or None
+    when the process exits before reporting a listener, the preamble
+    then carrying the startup refusal's stderr lines."""
     argv = [
         controller,
         model,
@@ -182,6 +186,8 @@ def spawn_peer(
         argv += ["--standby", standby]
     if auto_promote is not None:
         argv += ["--auto-promote", str(auto_promote)]
+    if pair_token is not None:
+        argv += ["--pair-token", pair_token]
     for field, flag in (
         ("state_file", "--state-file"),
         ("journal_file", "--journal-file"),
@@ -670,6 +676,7 @@ def launch_pair(args, manifest, tamper=None, auto_promote=None,
             rig.duty_files,
             listen=listen_bind(rig.duty_decl) if declared_binds else "127.0.0.1:0",
             bound=rig.duty_bound,
+            pair_token=rig.manifest.get("pair_token"),
         )
         if rig.duty_url is None:
             raise Abort(
@@ -694,6 +701,7 @@ def launch_pair(args, manifest, tamper=None, auto_promote=None,
             auto_promote=auto_promote,
             listen=listen_bind(rig.standby_decl) if declared_binds else "127.0.0.1:0",
             bound=rig.standby_bound,
+            pair_token=rig.manifest.get("pair_token"),
         )
         if rig.standby_url is None:
             raise Abort(

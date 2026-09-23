@@ -32,6 +32,13 @@
 # `standby` wiring alone never arms it: only the declared budget
 # does.
 #
+# The manifest's `pair_token` instantiates as the `--pair-token`
+# argument on both controllers — the pair's shared tracking secret.
+# Under the keyed contract an announced-source demotion verifies the
+# hinted endpoint's keyed `line_proof` before adopting it, so a
+# forged checkpoint server can never stand down the field owner; an
+# unkeyed pair cannot demote through an announced source at all.
+#
 # `ci/check.sh`'s `deploy` stage asserts this file and the manifest
 # agree on every field — a divergence fails `rig-mismatch` — and that
 # `docker compose config` (or the stage's fallback parser) accepts it.
@@ -95,6 +102,8 @@ services:
       - "100"
       - --listen
       - 0.0.0.0:8080
+      - --pair-token
+      - dcs-reference-pair
       - --state-file
       - /var/tmp/state.json
       - --journal-file
@@ -129,6 +138,8 @@ services:
       - "100"
       - --listen
       - 0.0.0.0:8081
+      - --pair-token
+      - dcs-reference-pair
       - --state-file
       - /var/tmp/state.json
       - --journal-file

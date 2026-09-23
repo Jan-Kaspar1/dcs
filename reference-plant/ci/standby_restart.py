@@ -391,6 +391,7 @@ def standby_restart_pass(args, tamper):
                 rig.plant_addr,
                 rig.duty_url.removeprefix("http://"),
                 standby_files,
+                pair_token=rig.manifest.get("pair_token"),
             )
             rig.standby_url = standby_url
             if standby_url is None:

@@ -232,6 +232,7 @@ def handover_pass(args, tamper):
             plant_addr,
             None,
             persistence(duty_decl),
+            pair_token=manifest.get("pair_token"),
         )
         if duty_url is None:
             raise Abort(
@@ -245,6 +246,7 @@ def handover_pass(args, tamper):
             plant_addr,
             duty_url.removeprefix("http://"),
             persistence(standby_decl),
+            pair_token=manifest.get("pair_token"),
         )
         if standby_url is None:
             raise Abort(

@@ -113,6 +113,14 @@ DEFAULT_CONFIG = {
     # stale well inside the window, while a healthy container restart
     # (~3-5 s of misses) never reaches it.
     'failover_misses': 120,
+    # The redundant pair's shared tracking secret: every controller the
+    # runner launches into the pair carries --pair-token, so an
+    # announced-source demotion verifies the hinted endpoint's keyed
+    # line_proof before adopting it — the deployment shape the keyed
+    # announced-source contract requires. The checkpoint-negotiation
+    # case's foreign peer deliberately goes without: it models a
+    # deployment that never held the pair's secret.
+    'pair_token': 'dcs-qa-pair',
     # Deterministic plant-writer owner tokens pinned per controller
     # endpoint key — every controller the runner launches carries its
     # key's --owner-token, so a scenario plant-protocol attachment can
@@ -1225,6 +1233,7 @@ def start_revised_controller(cfg, record, run_dir, model, active,
            '--owner-token', str(owner_token),
            '--standby', standby,
            '--revised',
+           '--pair-token', cfg['pair_token'],
            '--scan-ms', '100', '--listen', '0.0.0.0:8082',
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE)
@@ -1543,6 +1552,7 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            '/model/plant.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
            '--owner-token', str(tokens['active']),
+           '--pair-token', cfg['pair_token'],
            '--scan-ms', '100', '--listen', '0.0.0.0:8080',
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE)
@@ -1558,6 +1568,7 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            '--owner-token', str(tokens['standby']),
            '--standby', prefix + '-a:8080',
            '--auto-promote', str(cfg['failover_misses']),
+           '--pair-token', cfg['pair_token'],
            '--scan-ms', '100', '--listen', '0.0.0.0:8081',
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE)
