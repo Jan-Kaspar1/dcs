@@ -39,6 +39,19 @@ class WorkLedgerTests(unittest.TestCase):
         events = self.state.events(7)
         self.assertEqual([event['kind'] for event in events], ['invocation:rate'])
 
+    def test_merge_flow_compares_adjacent_windows(self):
+        now = 20 * 86400
+        for number, age_days in ((1, 2), (2, 9), (3, 10)):
+            self.state.reserve(number, f'worker-{number:02d}', 'test')
+            self.state.complete(number)
+            with self.state.db:
+                self.state.db.execute('UPDATE jobs SET updated=? WHERE issue=?',
+                                      (now - age_days * 86400, number))
+        flow = self.state.merge_flow(now=now)
+        self.assertEqual(flow['current_merges'], 1)
+        self.assertEqual(flow['previous_merges'], 2)
+        self.assertEqual(flow['decline_percent'], 50.0)
+
     def test_source_key_deduplicates_manual_event(self):
         self.state.record_event('checkpoint', 7, source_key='checkpoint:7:1')
         self.state.record_event('checkpoint', 7, source_key='checkpoint:7:1')

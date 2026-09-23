@@ -968,7 +968,7 @@ Repair context: {repair}
             output.parent.mkdir(parents=True, exist_ok=True)
             allocation = areas.Allocation.from_inventory(issues, self.state.jobs())
             process = self.runtime.spawn('planner-' + str(int(now)), clone, planning.prompt(
-                issues, prs, output, self.planner_review_input(), self.state.get('planner_feedback'), allocation.summary()), model=self.models[0])
+                issues, prs, output, self.planner_review_input(), self.state.get('planner_feedback'), allocation.summary(), self.state.merge_flow()), model=self.models[0])
         except Exception:
             self.admission.release('planner')
             raise

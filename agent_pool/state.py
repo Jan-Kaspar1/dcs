@@ -120,6 +120,21 @@ class State:
         args.append(limit)
         return [dict(row) for row in self.db.execute(sql, args)]
 
+    def merge_flow(self, now=None, window_seconds=7 * 86400):
+        """Compare completed merges in adjacent rolling windows."""
+        now = time.time() if now is None else now
+        boundary = now - window_seconds
+        previous = boundary - window_seconds
+        rows = self.db.execute(
+            "SELECT updated FROM jobs WHERE status='done' AND updated>=?",
+            (previous,)).fetchall()
+        current_count = sum(row['updated'] >= boundary for row in rows)
+        prior_count = len(rows) - current_count
+        decline_percent = round(100 * (prior_count - current_count) / prior_count, 1) if prior_count else None
+        return {'window_days': round(window_seconds / 86400, 2),
+                'current_merges': current_count, 'previous_merges': prior_count,
+                'decline_percent': decline_percent}
+
     def paused(self):
         return bool(self.get('paused', False) or self.get('integrity_error'))
 
