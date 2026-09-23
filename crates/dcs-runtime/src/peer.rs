@@ -3897,7 +3897,7 @@ mod tests {
         let Err(SwitchError::FieldClaimFailed { detail }) = peer.promote() else {
             panic!("a live incumbent's claim must refuse the orphaned promotion")
         };
-        assert!(detail.contains("live attachment holds the field"));
+        assert!(detail.contains("live controller holds the field"));
         assert_eq!(peer.role(), Role::Standby);
         assert!(!gate.is_open());
     }
