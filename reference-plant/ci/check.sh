@@ -39,8 +39,20 @@
 #                same record (alarm-validation-failed,
 #                alarm-validation-nondeterministic)
 #   fingerprint  the emitted model's fingerprint equals the manifest's
-#                recorded `model.fingerprint`
-#                (manifest-fingerprint-mismatch)
+#                recorded `model.fingerprint`, and the dynamics
+#                document the manifest-declared deployment serves —
+#                the `dynamics.path` the rig mounts and
+#                `dcs-plant-server --dynamics` merges — fingerprints
+#                the recorded optional `dynamics.fingerprint` and the
+#                checked-in artifact identically on the launched
+#                pair, a doctored served document with renumbered
+#                point references over identical element content
+#                reporting the named mismatch; two passes produce
+#                identical digests
+#                (manifest-fingerprint-mismatch,
+#                dynamics-fingerprint-failed,
+#                dynamics-fingerprint-nondeterministic,
+#                dynamics-fingerprint-unchecked)
 #   deploy       the checked-in rig definition deploy/compose.yaml
 #                instantiates every field of deploy/manifest.json —
 #                release, images, mounted model and dynamics paths,
@@ -996,6 +1008,60 @@ MANIFEST_FP="$(python3 -c 'import json; print(json.load(open("deploy/manifest.js
 [ "$EMITTED_FP" = "$MANIFEST_FP" ] \
     || fail "manifest-fingerprint-mismatch: emitted model fingerprints $EMITTED_FP but deploy/manifest.json records $MANIFEST_FP"
 echo "  fingerprint $EMITTED_FP matches the manifest"
+
+# The dynamics half of the authorization, under the same canonical
+# fingerprint contract: the optional `dynamics.fingerprint` must name
+# the dynamics document the deployment serves — the manifest's
+# declared `dynamics.path`, the read-only mount the rig instantiates
+# and `dcs-plant-server --dynamics` merges — and the checked-in
+# artifact must fingerprint it identically. A manifest omitting the
+# optional field declares no pin; the served-vs-checked-in comparison
+# still stands.
+DYN_FP="$(python3 ci/dynamics_fingerprint.py --fingerprint model/dynamics.json)"
+MANIFEST_DYN_FP="$(python3 -c 'import json; print(json.load(open("deploy/manifest.json")).get("dynamics", {}).get("fingerprint") or "")')"
+if [ -n "$MANIFEST_DYN_FP" ]; then
+    [ "$DYN_FP" = "$MANIFEST_DYN_FP" ] \
+        || fail "manifest-fingerprint-mismatch: the checked-in dynamics fingerprints $DYN_FP but deploy/manifest.json records $MANIFEST_DYN_FP"
+    echo "  dynamics fingerprint $DYN_FP matches the manifest"
+else
+    echo "  the manifest records no dynamics.fingerprint — the pin is undeclared"
+fi
+
+# The served-bytes half: ci/dynamics_fingerprint.py launches the
+# manifest-declared pair on the released tooling serving the
+# deployment's declared dynamics.path, fingerprints the document it
+# actually runs, and holds it equal to the recorded fingerprint and
+# the checked-in artifact — reporting manifest-fingerprint-mismatch
+# with the expected vs served fingerprint and the first diverging
+# element on any divergence. Two passes must produce identical
+# digests.
+run_dynamics_fingerprint() {
+    python3 ci/dynamics_fingerprint.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_dynamics_fingerprint)" \
+    || fail "dynamics-fingerprint-failed: the dynamics-fingerprint leg did not hold — its evidence lines are above"
+SECOND="$(run_dynamics_fingerprint)" \
+    || fail "dynamics-fingerprint-failed: the dynamics-fingerprint leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "dynamics-fingerprint-nondeterministic: two dynamics-fingerprint passes produced different digests"
+echo "  $FIRST"
+
+# The doctored case: the pair serving a dynamics document whose point
+# references were renumbered — identical element content — must
+# surface the named diagnostic; a silent pass would leave the
+# authorization unproven.
+if out="$(run_dynamics_fingerprint --tamper renumber-points 2>&1)"; then
+    fail "dynamics-fingerprint-unchecked: a served dynamics document with renumbered points passed the fingerprint leg"
+fi
+[[ "$out" == *"manifest-fingerprint-mismatch"* && "$out" == *"element 0"* ]] \
+    || fail "dynamics-fingerprint-unchecked: the renumber-points case did not report its named diagnostic: $out"
+echo "  renumber-points: reported, manifest-fingerprint-mismatch"
 
 echo "== deploy =="
 # The rig-definition consistency check reports its own named

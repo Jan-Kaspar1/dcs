@@ -480,6 +480,14 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         "managed alarm instances carry the declared record",
         "doctored documents refused",
         "a skipped-doctoring run refused: alarm-validation",
+        // The fingerprint stage's dynamics leg ran and held: the
+        // manifest-declared pair served the declared dynamics.path,
+        // its canonical fingerprint matched the recorded
+        // dynamics.fingerprint and the checked-in artifact, and the
+        // leg's own renumbered-points case reported its diagnostic.
+        "dynamics fingerprint",
+        "dynamics-fingerprint-digest",
+        "renumber-points: reported, manifest-fingerprint-mismatch",
     ] {
         assert!(
             stdout.contains(line),
