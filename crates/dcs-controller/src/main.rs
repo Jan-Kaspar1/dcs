@@ -159,7 +159,13 @@
 //! not a successor — journaling the adopted source and pinning it, so
 //! a later `?peer=` rewrite cannot redirect the demoted peer's pulls —
 //! while a dead, unreachable, replayed, or forged hint refuses
-//! `no_tracking_source` like an absent one. When both peers launch
+//! `no_tracking_source` like an absent one. The same scrutiny gates
+//! the involuntary demotion a preempted field claim forces: with no
+//! `POST /demote` boundary to run it on, the tracking cycle verifies
+//! the recorded hints lazily — a dead or foreign announcer loses to
+//! the legitimate successor's own proof inside one bounded pass, and a
+//! peer with only unproven hints pulls nothing rather than following
+//! one verbatim. When both peers launch
 //! with the same `--pair-token`, the verify pull and every checkpoint
 //! the adopted source later serves must additionally carry the keyed
 //! `line_proof` only a peer holding the token produces — bound to the
@@ -1587,23 +1593,29 @@ fn main() -> ExitCode {
 /// One paced scan cycle behind the monitor: the tracking pull first —
 /// while the peer does not own the field and a checkpoint source exists
 /// — then the scan itself. The source is re-resolved every cycle:
-/// the configured `--standby`/`--peer` target when set, else the monitor
-/// address a tracking peer announced through its `?peer=` pulls — the
-/// follow-peer half that lets a demoted launched active find its
-/// successor without a restart, the serving side accepting the
-/// announce only as the pulling connection's own source address (a
-/// wildcard `--listen 0.0.0.0` announce resolving to it, so the
-/// recorded source is never an undialable bind address). The
-/// puller follows the resolved source, respawning when it changes, and
-/// announces this monitor's own address on every pull so the serving
-/// peer learns where to track back. A
+/// the configured `--standby`/`--peer` target when set, else a proven
+/// announced source — the monitor address a tracking peer announced
+/// through its `?peer=` pulls once the demote verify's checks passed
+/// on it — the follow-peer half that lets a demoted launched active
+/// find its successor without a restart, the serving side accepting
+/// the announce only as the pulling connection's own source address
+/// (a wildcard `--listen 0.0.0.0` announce resolving to it, so the
+/// recorded source is never an undialable bind address). An
+/// involuntary demotion — the field claim's mid-run loss — runs that
+/// verification lazily here the first sourceless cycle after it: each
+/// recorded hint gets one bounded pull, a dead or foreign announcer
+/// loses to the legitimate successor's own proof, and only unproven
+/// hints leaves the peer pulling nothing rather than following one.
+/// The puller follows the resolved source, respawning when it
+/// changes, and announces this monitor's own address on every pull so
+/// the serving peer learns where to track back. A
 /// field-owning cycle's [`Monitor::track_cycle`] short-circuits before
 /// the pull, so the puller's fetch thread idles until a demotion.
 fn tracked_cycle(
     monitor: &Monitor<'_>,
     puller: &mut Option<(SocketAddr, CheckpointPuller)>,
 ) -> Tick {
-    if let Some(source) = monitor.tracking_source() {
+    if let Some(source) = monitor.verified_tracking_source() {
         if puller.as_ref().map(|(bound, _)| *bound) != Some(source) {
             let announce = Some(monitor.local_addr());
             // A source a keyed run adopted through an announced

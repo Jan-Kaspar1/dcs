@@ -542,6 +542,16 @@ const MAX_ANNOUNCED_AHEAD: u64 = 32;
 /// a handful of peers.
 const MAX_ANNOUNCED: usize = 8;
 
+/// How long the tracking path waits before re-probing an announced
+/// hint set a verify pass already refused — the involuntary path's
+/// re-probe bound: a peer demoted mid-run with only unproven hints
+/// re-verifies when the set changes — a new announce lands or the
+/// order shifts — or once this much wall time has passed, so a dead
+/// or hostile set cannot stall every scan cycle on a bounded pull
+/// burst while a hint that recovers still earns a fresh probe inside
+/// a bounded window.
+const ANNOUNCED_VERIFY_RETRY: Duration = Duration::from_secs(4);
+
 /// The worker count [`Monitor::serve`] dispatches the serving lane
 /// across — every request that cannot hold a worker on a client-paced
 /// wait and is neither a pair-liveness read nor a switchover action:
@@ -750,7 +760,13 @@ pub struct Monitor<'d> {
     /// the candidate that serves the line as field owner over one
     /// that merely tracks it, and on a keyed run requiring each
     /// pulled document to carry the pull's `line_proof` — journaling
-    /// the adopted source either way. The set is bounded at
+    /// the adopted source either way. The same proof gates the
+    /// involuntary path: a field claim's mid-run loss demotes the peer
+    /// in place with no `POST /demote` boundary ever running it, so
+    /// the tracking path verifies lazily instead
+    /// ([`adopt_announced_source`](Self::adopt_announced_source)) —
+    /// a recorded hint is a candidate, never a pull target. The set
+    /// is bounded at
     /// [`MAX_ANNOUNCED`], newest first: with several standbys every
     /// announcer stays a demotion candidate rather than the last pull
     /// silently evicting the rest. A dead, replayed, or forged hint
@@ -758,6 +774,16 @@ pub struct Monitor<'d> {
     /// Outside `shared`: the value is request-path bookkeeping, never
     /// part of a scan's state.
     announced: Mutex<VecDeque<SocketAddr>>,
+    /// The last verification pass the tracking path ran over
+    /// `announced` — the set probed and when. The involuntary
+    /// demotion path runs the demote verify's scrutiny lazily, at the
+    /// first tracking cycle after the demotion; a failed set is
+    /// remembered here so the next cycle's resolution does not
+    /// re-probe the same endpoints until the set changes or
+    /// [`ANNOUNCED_VERIFY_RETRY`] elapses — the bound a dead hint
+    /// falls back within. Outside `shared`: request-path bookkeeping
+    /// like `announced`.
+    announced_verify: Mutex<Option<AnnouncedVerify>>,
     /// The tracking source a verified announced demotion pinned — the
     /// endpoint `POST /demote` proved serves this run's continuation
     /// and journaled as the adopted source. The demoted peer's pulls
@@ -818,6 +844,17 @@ pub struct Monitor<'d> {
 struct Shared<'d> {
     peer: Peer<'d>,
     recorder: recorder::Recorder,
+}
+
+/// One announced-hint verification pass's bookkeeping — the hint set
+/// probed, in announced order, and the wall-clock time the pass ran.
+/// The tracking path re-probes only a changed set or one whose pass
+/// aged past [`ANNOUNCED_VERIFY_RETRY`].
+struct AnnouncedVerify {
+    /// The announced hint set the pass probed, newest first.
+    hints: Vec<SocketAddr>,
+    /// When the pass ran.
+    at: Instant,
 }
 
 impl<'d> Monitor<'d> {
@@ -926,6 +963,7 @@ impl<'d> Monitor<'d> {
             command_persist: None,
             standby_source: None,
             announced: Mutex::new(VecDeque::new()),
+            announced_verify: Mutex::new(None),
             adopted: Mutex::new(None),
             resolved: Mutex::new(None),
             line_owner: Mutex::new(None),
@@ -1019,14 +1057,55 @@ impl<'d> Monitor<'d> {
     /// target that itself tracks onward is exactly the wedge this
     /// resolution exists to escape, and every softer slot can only
     /// say who tracks the line, never who owns it.
+    ///
+    /// The announced tail of this answer is a *recorded hint*, never
+    /// a pull target on its own: every cycle that actually fetches a
+    /// checkpoint resolves through
+    /// [`verified_tracking_source`](Self::verified_tracking_source),
+    /// which spends an announced hint only after the demote verify's
+    /// scrutiny proves it. Read this for the recorded resolution —
+    /// diagnostics and the demote guard's "any candidate exists" test
+    /// — not as the pull's destination.
     pub fn tracking_source(&self) -> Option<SocketAddr> {
+        self.pull_source()
+            .or_else(|| self.announced.lock().unwrap().front().copied())
+    }
+
+    /// The checkpoint source a tracking pull may target without
+    /// further proof — the orphan probe's verified owner
+    /// ([`resolved`](Self::resolved)) first, then the configured
+    /// `Driven`/`with_standby_source` target, then the pinned
+    /// adoption a verified announced source recorded. The recorded
+    /// `announced` hints are deliberately absent: they are unproven
+    /// claims — the serving side cannot tell the puller's monitor
+    /// port from any other same-IP port the connection claims — so no
+    /// pull ever follows one until the demote verify's scrutiny
+    /// proves it and pins it into `adopted`.
+    fn pull_source(&self) -> Option<SocketAddr> {
         self.resolved
             .lock()
             .unwrap()
             .or(self.driven.track)
             .or(self.standby_source)
             .or_else(|| *self.adopted.lock().unwrap())
-            .or_else(|| self.announced.lock().unwrap().front().copied())
+    }
+
+    /// The checkpoint source a tracking cycle pulls now — the
+    /// proven half of [`tracking_source`](Self::tracking_source)
+    /// ([`pull_source`](Self::pull_source)), and when none stands
+    /// while the peer owns no field, the announced hint set probed
+    /// through the demote verify's own checks
+    /// ([`adopt_announced_source`](Self::adopt_announced_source)),
+    /// a passing candidate pinning into `adopted`. A bare `?peer=`
+    /// announce can therefore never redirect a pull — the involuntary
+    /// path applies the same scrutiny `POST /demote` does: a field
+    /// claim's mid-run loss demotes the peer in place with no request
+    /// boundary to hang the verification on, so it runs lazily here,
+    /// and an endpoint that cannot prove it serves this run's
+    /// continuation is refused the same way — a peer with only
+    /// unproven hints pulls nothing.
+    pub fn verified_tracking_source(&self) -> Option<SocketAddr> {
+        self.pull_source().or_else(|| self.adopt_announced_source())
     }
 
     /// The address the listener is bound to.
@@ -1710,8 +1789,14 @@ impl<'d> Monitor<'d> {
                         // source stalls only this request's worker,
                         // never the lock the other endpoints queue on —
                         // and consumes the result under it, re-applying
-                        // the owns-field gate.
-                        if let Some(active) = self.tracking_source() {
+                        // the owns-field gate. The source resolution
+                        // never spends an unproven `?peer=` hint: a
+                        // peer demoted in place — the field claim's
+                        // loss path, with no `POST /demote` boundary —
+                        // verifies the recorded hints here under the
+                        // same per-hint bound before any pull targets
+                        // one.
+                        if let Some(active) = self.verified_tracking_source() {
                             self.track_cycle(|| self.fetch_checkpoint(active));
                         }
                         // Each scan takes the lock fresh and releases
@@ -1779,12 +1864,16 @@ impl<'d> Monitor<'d> {
         // The final-sync fetch runs outside the shared lock under the
         // dedicated pull bound — like the tracking pull it can wait on
         // an unreachable peer, and that wait must stall only this
-        // request, never the lock's hold or the paced scan. A peer
+        // request, never the lock's hold or the paced scan. The source
+        // is the proven resolution — the announced tail of
+        // `tracking_source` is a recorded hint no pull follows
+        // unverified, here least of all: the fetched document's receipt
+        // log is about to carry commands into the promoted run. A peer
         // already owning the field has no source to sync from — the
         // gate `Peer::final_sync` itself applies — so it fetches
         // nothing; the consume below re-applies the gate, discarding a
         // checkpoint fetched while a concurrent promotion landed.
-        let pulled = match self.tracking_source() {
+        let pulled = match self.pull_source() {
             Some(source) if promote && !self.shared.lock().unwrap().peer.owns_field() => {
                 Some(self.fetch_checkpoint(source))
             }
@@ -1981,27 +2070,51 @@ impl<'d> Monitor<'d> {
             return Err(json(409, &SwitchError::NoTrackingSource));
         }
         let own = self.shared.lock().unwrap().peer.checkpoint();
-        // A keyed run demands the proof only a key-holding peer of
-        // this line can produce: the verify pulls carry a fresh nonce
-        // and each returned document must carry the keyed line proof
-        // binding that nonce to that document.
+        match self.probe_announced_hints(&hints, &own) {
+            Some(hint) => Ok(Some(hint)),
+            None => Err(json(409, &SwitchError::NoTrackingSource)),
+        }
+    }
+
+    /// One bounded checkpoint pull against each announced hint — the
+    /// shared prove-half of `POST /demote`'s verification
+    /// ([`verify_demote_hint`](Self::verify_demote_hint)) and the
+    /// involuntary path's
+    /// [`adopt_announced_source`](Self::adopt_announced_source). A
+    /// keyed run demands the proof only a key-holding peer of this
+    /// line can produce: the verify pulls carry a fresh nonce and
+    /// each returned document must carry the keyed line proof binding
+    /// that nonce to that document.
+    ///
+    /// Newest announcer first, one bounded pull each under
+    /// [`CHECKPOINT_PULL_TIMEOUT`]. A candidate serving the line as
+    /// field owner wins outright — where the pull may attest one:
+    /// only a key-attested answer may serve a field-owning
+    /// checkpoint, the stamp this run's own public `/checkpoint`
+    /// carries, so on an unproven pull every owner document, even
+    /// bumped ahead into the successor's tick shape, refuses as
+    /// replayable. A candidate that only tracks the line is
+    /// remembered as the fallback — adopted provisional, since the
+    /// orphan-resolution probe can still re-resolve onto the owner
+    /// the line later names. And every candidate answers this run's
+    /// command audit: a document whose receipt window forks the
+    /// settled log or whose internal `In` samples plant a value no
+    /// settled verdict produced is forged, not a continuation, and
+    /// loses to the next candidate. `None` when no hint proves out —
+    /// dead, unreachable, replayed, or foreign endpoints all lose the
+    /// same way.
+    fn probe_announced_hints(&self, hints: &[SocketAddr], own: &Checkpoint) -> Option<SocketAddr> {
         let nonce = self.pair_key.map(|_| mint_generation());
-        // Newest announcer first, one bounded pull each. A candidate
-        // serving the line as field owner wins outright — where the
-        // pull may attest one: only a key-attested answer may serve a
-        // field-owning checkpoint, the stamp this run's own public
-        // `/checkpoint` carries, so on an unproven pull every owner
-        // document, even bumped ahead into the successor's tick
-        // shape, refuses as replayable. A candidate that only tracks
-        // the line is remembered as the fallback — adopted
-        // provisional, since the orphan-resolution probe can still
-        // re-resolve onto the owner the line later names. And every
-        // candidate answers this run's command audit: a document whose
-        // receipt window forks the settled log or whose internal `In`
-        // samples plant a value no settled verdict produced is forged,
-        // not a continuation, and loses to the next candidate.
         let mut tracked = None;
-        for hint in hints {
+        for &hint in hints {
+            // A hint naming this monitor could only ever serve this
+            // run's own document back — never a successor — and on
+            // the involuntary path the demoted run's own standby
+            // document would pass the continuation checks, wedging
+            // the peer onto pulling itself.
+            if hint == self.local_addr() {
+                continue;
+            }
             let pulled = match MonitorClient::with_timeout(hint, CHECKPOINT_PULL_TIMEOUT)
                 .checkpoint_tracking(None, nonce)
             {
@@ -2011,7 +2124,7 @@ impl<'d> Monitor<'d> {
             let proven = self.proven(&pulled, nonce);
             let key_attested = self.pair_key.is_some() && proven;
             if !proven
-                || verify_announced_checkpoint(&pulled, &own, key_attested).is_err()
+                || verify_announced_checkpoint(&pulled, own, key_attested).is_err()
                 || self
                     .shared
                     .lock()
@@ -2023,14 +2136,76 @@ impl<'d> Monitor<'d> {
                 continue;
             }
             if pulled.source_owns_field == Some(true) {
-                return Ok(Some(hint));
+                return Some(hint);
             }
             tracked.get_or_insert(hint);
         }
-        match tracked {
-            Some(hint) => Ok(Some(hint)),
-            None => Err(json(409, &SwitchError::NoTrackingSource)),
+        tracked
+    }
+
+    /// The involuntary-demotion half of the announced-source contract
+    /// — the QA finding
+    /// `involuntary-demote-unverified-announced-hint`: `POST /demote`
+    /// proves the recorded hints before demoting
+    /// ([`verify_demote_hint`](Self::verify_demote_hint)), but a field
+    /// claim's mid-run loss — `Peer::demote` on a fenced write — and
+    /// every other non-request demotion cross the same boundary with
+    /// nothing to hang the verification on. The tracking path runs it
+    /// lazily here instead: while the peer owns no field and no
+    /// proven source stands, the recorded hints get one bounded pull
+    /// each under the demote verify's checks, and a candidate proving
+    /// it serves this run's continuation pins into `adopted` and
+    /// journals the adoption exactly like the request path — so a
+    /// foreign monitor that announced itself onto a launched active
+    /// can never strand the demoted peer pulling it, and the
+    /// legitimate successor's hint wins the pass on its own proof.
+    /// Every hint failing leaves the peer sourceless — the same
+    /// answer `POST /demote` gives an unproven hint — rather than
+    /// following one verbatim, and the failed set is remembered so a
+    /// later cycle re-probes only a changed set, or the same one
+    /// after [`ANNOUNCED_VERIFY_RETRY`]: a dead recorded hint falls
+    /// back inside one bounded pass and earns a fresh probe inside a
+    /// bounded window. Runs outside the shared lock under
+    /// [`CHECKPOINT_PULL_TIMEOUT`] per hint — the stall bound is the
+    /// verify pass, never a hint's own patience.
+    fn adopt_announced_source(&self) -> Option<SocketAddr> {
+        if self.shared.lock().unwrap().peer.owns_field() {
+            return None;
         }
+        let hints: Vec<SocketAddr> = self.announced.lock().unwrap().iter().copied().collect();
+        if hints.is_empty() {
+            return None;
+        }
+        {
+            let last = self.announced_verify.lock().unwrap();
+            if let Some(last) = &*last
+                && last.hints == hints
+                && last.at.elapsed() < ANNOUNCED_VERIFY_RETRY
+            {
+                return None;
+            }
+        }
+        let own = self.shared.lock().unwrap().peer.checkpoint();
+        let verified = self.probe_announced_hints(&hints, &own);
+        *self.announced_verify.lock().unwrap() = Some(AnnouncedVerify {
+            hints,
+            at: Instant::now(),
+        });
+        // Pin only a still-recorded hint — a re-announce that evicted
+        // it mid-verify un-verifies the record, the same guard the
+        // request path applies — and only while nothing proven stands:
+        // a promotion or orphan resolution landing mid-verify already
+        // answered where the pulls go.
+        let source = verified.filter(|source| self.announced.lock().unwrap().contains(source))?;
+        let mut shared = self.shared.lock().unwrap();
+        if shared.peer.owns_field() || self.pull_source().is_some() {
+            return None;
+        }
+        let Shared { peer, recorder } = &mut *shared;
+        recorder.note_tracking_source(peer.tick(), source);
+        drop(shared);
+        *self.adopted.lock().unwrap() = Some(source);
+        Some(source)
     }
 
     /// Re-resolves the tracking source while the tracked line reports
