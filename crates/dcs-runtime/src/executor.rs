@@ -1663,9 +1663,11 @@ impl<'d> Executor<'d> {
             receipts: self.receipts.clone(),
             command_admission: self.command_admission,
             // The executor has no role view — the serving `Peer` stamps
-            // `source_owns_field` over its own capture; `line_proof`
-            // exists only on `?prove=` responses, never on a capture.
+            // `source_owns_field` over its own capture and the serving
+            // `Monitor` stamps `line_owner`; `line_proof` exists only
+            // on `?prove=` responses, never on a capture.
             source_owns_field: None,
+            line_owner: None,
             line_proof: None,
         }
     }
@@ -7699,6 +7701,7 @@ mod tests {
             receipts: Vec::new(),
             command_admission: CommandAdmissionCounts::default(),
             source_owns_field: None,
+            line_owner: None,
             line_proof: None,
         }
     }
@@ -7861,6 +7864,7 @@ mod tests {
             receipts: Vec::new(),
             command_admission: CommandAdmissionCounts::default(),
             source_owns_field: None,
+            line_owner: None,
             line_proof: None,
         }
     }

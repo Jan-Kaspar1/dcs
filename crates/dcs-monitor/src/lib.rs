@@ -456,8 +456,8 @@ pub use store::{Publication, PublicationGap, PublicationPage};
 
 use dcs_core::{
     CarryoverReport, Command, CommandError, CommandOutcome, CommandReceipt, JournalEntry,
-    PointHistory, PointId, PublicationHealth, ResourceView, RoleReport, SchemaView, SwitchError,
-    TelemetrySnapshot, Tick,
+    PointHistory, PointId, PublicationHealth, ResourceView, RoleReport, SchemaView, StandbySync,
+    SwitchError, TelemetrySnapshot, Tick,
 };
 use dcs_model::SignalIndex;
 use dcs_runtime::{
@@ -468,7 +468,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::io::{self, Cursor, Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -531,6 +531,16 @@ const CHECKPOINT_PULL_TIMEOUT: Duration = Duration::from_secs(1);
 /// any deployed scan period — far beyond the lockstep drift of a real
 /// tracking peer, far below any forgery worth serving.
 const MAX_ANNOUNCED_AHEAD: u64 = 32;
+
+/// How many announced follow-peer hints the tracking-source contract
+/// retains: every standby pulling `GET /checkpoint?peer=` lands its
+/// own monitor address, newest first, so a demotion with several
+/// standbys verifies the whole set — preferring the candidate that
+/// serves the line as its field owner — rather than inheriting
+/// whichever sibling announced last. The bound keeps an announce
+/// flood from growing the set unboundedly; a real redundancy group is
+/// a handful of peers.
+const MAX_ANNOUNCED: usize = 8;
 
 /// The worker count [`Monitor::serve`] dispatches the serving lane
 /// across — every request that cannot hold a worker on a client-paced
@@ -732,28 +742,61 @@ pub struct Monitor<'d> {
     /// puller's monitor port from any other same-IP port the
     /// connection's source claims, so a recorded hint stays unverified
     /// until a demotion proves it — `POST /demote` pulls one
-    /// checkpoint from the hint and adopts it only when the checkpoint
-    /// continues this run's line in a way this run's own `/checkpoint`
-    /// could not have served (a field-owning document is just a
-    /// replayable answer on an unproven pull — bumped ahead or not —
-    /// never a successor), and on a keyed run when the document also
-    /// carries the pull's `line_proof` — journaling the adopted
-    /// source either way. A dead, replayed, or forged hint refuses
-    /// `NoTrackingSource` instead of stranding or adopting. Outside
-    /// `shared`: the value is request-path bookkeeping, never part of
-    /// a scan's state.
-    announced: Mutex<Option<SocketAddr>>,
+    /// checkpoint from each hint and adopts a candidate only when the
+    /// checkpoint continues this run's line in a way this run's own
+    /// `/checkpoint` could not have served — a field-owning document
+    /// being the replayable shape, so only a key-attested pull may
+    /// earn a strictly-ahead owner document the adoption — preferring
+    /// the candidate that serves the line as field owner over one
+    /// that merely tracks it, and on a keyed run requiring each
+    /// pulled document to carry the pull's `line_proof` — journaling
+    /// the adopted source either way. The set is bounded at
+    /// [`MAX_ANNOUNCED`], newest first: with several standbys every
+    /// announcer stays a demotion candidate rather than the last pull
+    /// silently evicting the rest. A dead, replayed, or forged hint
+    /// refuses `NoTrackingSource` instead of stranding or adopting.
+    /// Outside `shared`: the value is request-path bookkeeping, never
+    /// part of a scan's state.
+    announced: Mutex<VecDeque<SocketAddr>>,
     /// The tracking source a verified announced demotion pinned — the
     /// endpoint `POST /demote` proved serves this run's continuation
     /// and journaled as the adopted source. The demoted peer's pulls
     /// target it rather than re-reading `announced`, so a later
     /// `?peer=` rewrite — the same unauthenticated mutation that
     /// planted the hint — cannot move the tracking onto an endpoint
-    /// the demotion never proved. `None` until an announced-only
-    /// demotion verifies one; a configured source always outranks it,
-    /// and the next announced-only demotion re-proves and re-pins.
-    /// Outside `shared`: request-path bookkeeping like `announced`.
+    /// the demotion never proved. The pin is provisional, though: the
+    /// adopted endpoint may itself be a standby tracking onward, so
+    /// while the tracked line reports no field owner the
+    /// [`resolve_tracking_source`](Self::resolve_tracking_source)
+    /// probe may re-resolve onto the owner the line names. `None`
+    /// until an announced-only demotion verifies one; a configured
+    /// source always outranks it, and the next announced-only demotion
+    /// re-proves and re-pins. Outside `shared`: request-path
+    /// bookkeeping like `announced`.
     adopted: Mutex<Option<SocketAddr>>,
+    /// The tracking source the orphan-resolution probe verified — an
+    /// endpoint that served this run's line *as its field owner* while
+    /// the tracked source reported none. The orphaned peer's pulls
+    /// re-target it: the announce and adopted slots can only say who
+    /// tracks this line, never who owns it — only a pulled
+    /// `source_owns_field: true` document on this line's generation
+    /// (plus, on a keyed run, its `line_proof`) can say that — so the
+    /// resolution outranks every softer source, letting a demoted peer
+    /// and the sibling it adopted follow the line onward to the real
+    /// owner instead of orphaned-tracking each other forever. `None`
+    /// until a probe verifies one; cleared when the line reports an
+    /// owner again — either the peer itself promoted, or a candidate
+    /// refused the line and `resolved` falls back to the softer slots.
+    /// Outside `shared`: request-path bookkeeping like `announced`.
+    resolved: Mutex<Option<SocketAddr>>,
+    /// The owner address the last pulled checkpoint propagated — its
+    /// `line_owner` stamp: the serving run's own address when it owns
+    /// the field, the recorded owner's onward when it does not —
+    /// served on this monitor's own `/checkpoint` answers, so a peer
+    /// several tracking hops from the owner still learns where the
+    /// line's field ownership lives. Serve-time bookkeeping like
+    /// `announced`; a field owner stamps itself and never reads this.
+    line_owner: Mutex<Option<SocketAddr>>,
     /// This run's half of the pair's shared tracking secret — the key
     /// [`with_pair_key`](Self::with_pair_key) installs from
     /// dcs-controller's `--pair-token`. A `GET /checkpoint?prove=<nonce>`
@@ -882,8 +925,10 @@ impl<'d> Monitor<'d> {
             driven: Driven::default(),
             command_persist: None,
             standby_source: None,
-            announced: Mutex::new(None),
+            announced: Mutex::new(VecDeque::new()),
             adopted: Mutex::new(None),
+            resolved: Mutex::new(None),
+            line_owner: Mutex::new(None),
             pair_key: None,
         })
     }
@@ -967,12 +1012,21 @@ impl<'d> Monitor<'d> {
     /// a source — an active never told its peer — that is later
     /// demoted tracks its successor here and reconverges instead of
     /// stranding `unsynchronized` and unpromotable.
+    ///
+    /// A [`resolved`](Self::resolved) source — the endpoint the
+    /// orphan-resolution probe proved serves this line *as its field
+    /// owner* — outranks even the configured slots: a `--standby`
+    /// target that itself tracks onward is exactly the wedge this
+    /// resolution exists to escape, and every softer slot can only
+    /// say who tracks the line, never who owns it.
     pub fn tracking_source(&self) -> Option<SocketAddr> {
-        self.driven
-            .track
+        self.resolved
+            .lock()
+            .unwrap()
+            .or(self.driven.track)
             .or(self.standby_source)
             .or_else(|| *self.adopted.lock().unwrap())
-            .or_else(|| *self.announced.lock().unwrap())
+            .or_else(|| self.announced.lock().unwrap().front().copied())
     }
 
     /// The address the listener is bound to.
@@ -1420,14 +1474,36 @@ impl<'d> Monitor<'d> {
     /// promotion landed is discarded. Callers should still keep `pull`
     /// cheap — e.g. a [`CheckpointPuller::poll`] consuming a fetch
     /// worker's completed pull — since the cycle itself waits on it.
+    ///
+    /// A pulled document's `line_owner` stamp also lands — the address
+    /// this line currently names as its field owner — so this monitor's
+    /// own `/checkpoint` propagates it onward. When the apply's verdict
+    /// is orphaned — the tracked run is not the line's owner — the
+    /// cycle ends with [`resolve_tracking_source`](Self::resolve_tracking_source),
+    /// the probe that follows the propagated owner name and re-targets
+    /// the pulls onto it: a demoted peer pinned onto a sibling standby
+    /// reconverges on the real owner instead of orphaned-tracking the
+    /// island forever.
     pub fn track_cycle(&self, pull: impl FnOnce() -> Result<Checkpoint, String>) -> TrackReport {
         if self.shared.lock().unwrap().peer.owns_field() {
             return TrackReport::OwnsField;
         }
         let pulled = pull();
-        track_and_record(&mut self.shared.lock().unwrap(), &self.store, move || {
+        if let Ok(checkpoint) = &pulled {
+            *self.line_owner.lock().unwrap() = checkpoint.line_owner;
+        }
+        let report = track_and_record(&mut self.shared.lock().unwrap(), &self.store, move || {
             pulled
-        })
+        });
+        if matches!(report, TrackReport::Applied(_))
+            && matches!(
+                self.shared.lock().unwrap().peer.report().sync,
+                Some(StandbySync::Orphaned { .. })
+            )
+        {
+            self.resolve_tracking_source();
+        }
+        report
     }
 
     /// Whether the heartbeat's consecutive failed pulls have reached the
@@ -1485,10 +1561,28 @@ impl<'d> Monitor<'d> {
                 // and ignores any other, so the read endpoint cannot
                 // rewrite the demotion tracking source for an
                 // unrelated client or record one that cannot be dialed.
+                // With several standbys every announcer stays a
+                // candidate — the set is newest-first bounded — rather
+                // than the last pull's hint silently evicting the rest.
                 if let Some(announced) = checkpoint_peer(query, remote) {
-                    *self.announced.lock().unwrap() = Some(announced);
+                    let mut hints = self.announced.lock().unwrap();
+                    hints.retain(|&hint| hint != announced);
+                    hints.push_front(announced);
+                    hints.truncate(MAX_ANNOUNCED);
                 }
                 let mut checkpoint = self.shared.lock().unwrap().peer.checkpoint();
+                // Where this line's field ownership lives: a field
+                // owner stamps itself; a non-owning serving run
+                // propagates the owner the checkpoints it pulls
+                // carried — so a peer several tracking hops out still
+                // learns the real owner's address and an orphaned pair
+                // can re-resolve onto it instead of tracking each
+                // other forever.
+                if checkpoint.source_owns_field == Some(true) {
+                    checkpoint.line_owner = Some(self.local_addr());
+                } else {
+                    checkpoint.line_owner = *self.line_owner.lock().unwrap();
+                }
                 // The keyed attestation half of the contract: a
                 // `?prove=<nonce>` pull on a keyed monitor gets the
                 // served document's `line_proof` stamped over it —
@@ -1757,8 +1851,12 @@ impl<'d> Monitor<'d> {
             // endpoint as the tracking target, so a `?peer=` rewrite
             // landing after the demotion cannot redirect the demoted
             // peer's pulls onto a source the demotion never proved.
-            match (*self.announced.lock().unwrap(), verified) {
-                (Some(current), Some(source)) if current == source => {
+            match verified {
+                // The verified source must still be an announcer — a
+                // re-announce that evicted it mid-verify un-verifies
+                // the record, and the safe answer is refusal, never a
+                // demotion toward an unproven endpoint.
+                Some(source) if self.announced.lock().unwrap().contains(&source) => {
                     recorder.note_tracking_source(peer.tick(), source);
                     *self.adopted.lock().unwrap() = Some(source);
                     peer.demote()
@@ -1790,17 +1888,22 @@ impl<'d> Monitor<'d> {
 
     /// The pair key a pull toward `source` must prove under — `Some`
     /// when `source` is the endpoint a verified announced demotion
-    /// adopted and this run is keyed: the demotion proved the endpoint
+    /// adopted, or the endpoint the orphan-resolution probe verified,
+    /// and this run is keyed: the demotion or probe proved the endpoint
     /// once, but every checkpoint it serves afterward must keep proving
-    /// it came from a key-holding peer of this line, so an adopted
+    /// it came from a key-holding peer of this line, so an unconfigured
     /// endpoint that only replays or fabricates this line's documents
-    /// feeds the demoted peer nothing. `None` for a configured source
+    /// feeds the tracking peer nothing. `None` for a configured source
     /// — operator-declared, no proof owed — and whenever the run is
     /// unkeyed.
     pub fn pull_proof_key(&self, source: SocketAddr) -> Option<u64> {
-        match (self.pair_key, *self.adopted.lock().unwrap()) {
-            (Some(key), Some(adopted)) if adopted == source => Some(key),
-            _ => None,
+        let key = self.pair_key?;
+        if *self.adopted.lock().unwrap() == Some(source)
+            || *self.resolved.lock().unwrap() == Some(source)
+        {
+            Some(key)
+        } else {
+            None
         }
     }
 
@@ -1835,28 +1938,37 @@ impl<'d> Monitor<'d> {
         Ok(pulled)
     }
 
-    /// Proves the announced follow-peer hint a demotion would follow,
+    /// Proves the announced follow-peer hints a demotion would follow,
     /// or refuses the demotion — the `?peer=` hardening: the serving
     /// side cannot tell the puller's monitor port from any other
     /// same-IP port the connection claims, so a recorded hint is
     /// unverified until one checkpoint pulled from it proves it
-    /// continues this run's line. Returns the verified hint, or `None`
-    /// when the demotion needs no proof — a configured source covers
-    /// it, or the peer owns no field — or the `409 NoTrackingSource`
-    /// refusal when the owner has only an unproven hint: nothing
-    /// announced, an unreachable hint, or a hint whose checkpoint is
-    /// not this run's continuation — a field-owning document being no
-    /// continuation an unproven endpoint can earn, since this run's
-    /// own public `/checkpoint` serves that exact stamp — and on a
-    /// keyed run, a hint that answers no valid `line_proof` either:
-    /// replaying this run's own checkpoint or fabricating one that
-    /// merely continues the line produces neither. A standby-shaped
-    /// document — the shape unkeyed deployments must keep accepting —
-    /// additionally answers to this run's command audit: a field owner
-    /// holds the line's receipt log and held-value image itself, so a
-    /// document whose receipt window forks that log or whose internal
-    /// `In` samples plant a value no settled verdict produced is
-    /// forged rather than a continuation, and refuses the same way.
+    /// continues this run's line. With several standbys every
+    /// announcer is a candidate: a hint serving this line *as its
+    /// field owner* wins where the pull attests that stamp — on a
+    /// keyed run, the strictly-ahead owner document carrying a valid
+    /// `line_proof`; every field-owning document on an unproven pull
+    /// is the replayable own-document shape and refuses, since this
+    /// run's own public `/checkpoint` serves that exact stamp — while
+    /// an announcer that only tracks this run, a sibling standby
+    /// replaying this run's own line back, is remembered as the
+    /// provisional fallback, adopted only when no owner verified, so
+    /// the orphan-resolution probe can still re-resolve onto an owner
+    /// that appears later. Returns the verified hint, or `None` when
+    /// the demotion needs no proof — a configured source covers it,
+    /// or the peer owns no field — or the `409 NoTrackingSource`
+    /// refusal when the owner has only unproven hints: nothing
+    /// announced, unreachable hints, or checkpoints that are not this
+    /// run's continuation — and on a keyed run, hints answering no
+    /// valid `line_proof` either: replaying this run's own checkpoint
+    /// or fabricating one that merely continues the line produces
+    /// neither. A standby-shaped document — the shape unkeyed
+    /// deployments must keep accepting — additionally answers to this
+    /// run's command audit: a field owner holds the line's receipt
+    /// log and held-value image itself, so a document whose receipt
+    /// window forks that log or whose internal `In` samples plant a
+    /// value no settled verdict produced is forged rather than a
+    /// continuation, and loses to the next candidate the same way.
     fn verify_demote_hint(&self) -> Result<Option<SocketAddr>, Response<Cursor<Vec<u8>>>> {
         if self.configured_source().is_some() {
             return Ok(None);
@@ -1864,43 +1976,142 @@ impl<'d> Monitor<'d> {
         if !self.shared.lock().unwrap().peer.owns_field() {
             return Ok(None);
         }
-        let hint = match *self.announced.lock().unwrap() {
-            Some(hint) => hint,
-            None => return Err(json(409, &SwitchError::NoTrackingSource)),
-        };
-        let own = self.shared.lock().unwrap().peer.checkpoint();
-        // A keyed run demands the proof only a key-holding peer of
-        // this line can produce: the verify pull carries a fresh nonce
-        // and the document it returns must carry the keyed line proof
-        // binding that nonce to that document.
-        let nonce = self.pair_key.map(|_| mint_generation());
-        let pulled = match MonitorClient::with_timeout(hint, CHECKPOINT_PULL_TIMEOUT)
-            .checkpoint_tracking(None, nonce)
-        {
-            Ok(pulled) => pulled,
-            Err(_) => return Err(json(409, &SwitchError::NoTrackingSource)),
-        };
-        let proven = self.proven(&pulled, nonce);
-        // The document checks need the proof's verdict too: only a
-        // key-attested answer may serve a field-owning checkpoint —
-        // the stamp this run's own public `/checkpoint` carries, so
-        // an unproven endpoint serving it, even bumped ahead into the
-        // successor's tick shape, may simply be replaying it.
-        let key_attested = self.pair_key.is_some() && proven;
-        if !proven
-            || verify_announced_checkpoint(&pulled, &own, key_attested).is_err()
-            || self
-                .shared
-                .lock()
-                .unwrap()
-                .peer
-                .unaccounted(&pulled)
-                .is_some()
-        {
+        let hints: Vec<SocketAddr> = self.announced.lock().unwrap().iter().copied().collect();
+        if hints.is_empty() {
             return Err(json(409, &SwitchError::NoTrackingSource));
         }
-        Ok(Some(hint))
+        let own = self.shared.lock().unwrap().peer.checkpoint();
+        // A keyed run demands the proof only a key-holding peer of
+        // this line can produce: the verify pulls carry a fresh nonce
+        // and each returned document must carry the keyed line proof
+        // binding that nonce to that document.
+        let nonce = self.pair_key.map(|_| mint_generation());
+        // Newest announcer first, one bounded pull each. A candidate
+        // serving the line as field owner wins outright — where the
+        // pull may attest one: only a key-attested answer may serve a
+        // field-owning checkpoint, the stamp this run's own public
+        // `/checkpoint` carries, so on an unproven pull every owner
+        // document, even bumped ahead into the successor's tick
+        // shape, refuses as replayable. A candidate that only tracks
+        // the line is remembered as the fallback — adopted
+        // provisional, since the orphan-resolution probe can still
+        // re-resolve onto the owner the line later names. And every
+        // candidate answers this run's command audit: a document whose
+        // receipt window forks the settled log or whose internal `In`
+        // samples plant a value no settled verdict produced is forged,
+        // not a continuation, and loses to the next candidate.
+        let mut tracked = None;
+        for hint in hints {
+            let pulled = match MonitorClient::with_timeout(hint, CHECKPOINT_PULL_TIMEOUT)
+                .checkpoint_tracking(None, nonce)
+            {
+                Ok(pulled) => pulled,
+                Err(_) => continue,
+            };
+            let proven = self.proven(&pulled, nonce);
+            let key_attested = self.pair_key.is_some() && proven;
+            if !proven
+                || verify_announced_checkpoint(&pulled, &own, key_attested).is_err()
+                || self
+                    .shared
+                    .lock()
+                    .unwrap()
+                    .peer
+                    .unaccounted(&pulled)
+                    .is_some()
+            {
+                continue;
+            }
+            if pulled.source_owns_field == Some(true) {
+                return Ok(Some(hint));
+            }
+            tracked.get_or_insert(hint);
+        }
+        match tracked {
+            Some(hint) => Ok(Some(hint)),
+            None => Err(json(409, &SwitchError::NoTrackingSource)),
+        }
     }
+
+    /// Re-resolves the tracking source while the tracked line reports
+    /// no field owner — the orphan half of the tracking-source
+    /// contract: `StandbySync::Orphaned` proves only that the tracked
+    /// run is not the owner, not that the line has none. The line's
+    /// own `line_owner` propagation names where ownership lives, so a
+    /// demoted peer pinned onto a sibling standby — two runs
+    /// orphaned-tracking each other while a third owns the field —
+    /// follows the name onward instead of wedging forever. The probe
+    /// pulls one checkpoint from the named owner and accepts it only
+    /// when it verifiably serves this line *as its field owner* — on
+    /// a keyed run, with the pull's `line_proof` — before re-targeting
+    /// the resolved slot; a candidate that cannot prove ownership
+    /// clears any prior resolution rather than pinning a guess.
+    /// Returns the tracking target after resolution, or `None` when
+    /// the line named no routable owner and nothing resolves.
+    pub fn resolve_tracking_source(&self) -> Option<SocketAddr> {
+        if self.shared.lock().unwrap().peer.owns_field() {
+            return None;
+        }
+        let own = self.shared.lock().unwrap().peer.checkpoint();
+        let mut candidates: Vec<SocketAddr> = Vec::new();
+        // The line's own word for its owner leads — a wildcard stamp
+        // dials through the tracked source's IP, the monitor that
+        // served it; then the tracked source itself — a standby may
+        // simply not have propagated the stamp yet — then the recorded
+        // announcers, any of which may already own the field.
+        let tracked = self
+            .driven
+            .track
+            .or(self.standby_source)
+            .or_else(|| *self.adopted.lock().unwrap())
+            .or_else(|| self.announced.lock().unwrap().front().copied());
+        if let Some(owner) = *self.line_owner.lock().unwrap() {
+            let fallback = tracked.map(|source| source.ip());
+            if let Some(owner) = routable_addr(owner, fallback) {
+                candidates.push(owner);
+            }
+        }
+        if let Some(source) = tracked
+            && !candidates.contains(&source)
+        {
+            candidates.push(source);
+        }
+        let mut extra: Vec<SocketAddr> = self.announced.lock().unwrap().iter().copied().collect();
+        extra.retain(|hint| !candidates.contains(hint) && Some(*hint) != tracked);
+        candidates.extend(extra);
+        let nonce = self.pair_key.map(|_| mint_generation());
+        for candidate in candidates {
+            if candidate == self.local_addr() {
+                continue;
+            }
+            let pulled = match MonitorClient::with_timeout(candidate, CHECKPOINT_PULL_TIMEOUT)
+                .checkpoint_tracking(None, nonce)
+            {
+                Ok(pulled) => pulled,
+                Err(_) => continue,
+            };
+            if verify_owner_checkpoint(&pulled, &own).is_ok() && self.proven(&pulled, nonce) {
+                *self.resolved.lock().unwrap() = Some(candidate);
+                return Some(candidate);
+            }
+        }
+        *self.resolved.lock().unwrap() = None;
+        None
+    }
+}
+
+/// The dialable form of an address a checkpoint propagated — a
+/// `line_owner` stamp may name a wildcard-bound listener's `0.0.0.0`
+/// or `::` address, which no peer can dial; the monitor that served
+/// the stamp is reachable at the tracked source's IP, so it
+/// substitutes, exactly like a `?peer=` wildcard resolving to its
+/// connection's source. `None` for a wildcard with no routable
+/// fallback.
+fn routable_addr(addr: SocketAddr, fallback: Option<IpAddr>) -> Option<SocketAddr> {
+    if !addr.ip().is_unspecified() {
+        return Some(addr);
+    }
+    fallback.map(|ip| SocketAddr::new(ip, addr.port()))
 }
 
 /// Whether the request is a `POST /command` — the receipted ingress
@@ -2095,10 +2306,10 @@ fn track_and_record(
     for (index, receipt) in peer.take_superseded_commands() {
         recorder.note_settled(Some(index), receipt, peer.tick());
     }
-    // Force-set changes the adoption authored beyond the receipted
-    // log — a re-stood or dropped force no settled verdict backs —
-    // journal here, each receipt's actor naming the adopting
-    // checkpoint.
+    // Force-set and held-value changes the adoption authored beyond
+    // the receipted log — a re-stood or dropped force, or a reverted
+    // receipted write, no settled verdict backs — journal here, each
+    // receipt's actor naming the adopting checkpoint.
     for receipt in peer.take_adoption_receipts() {
         recorder.note_settled(None, receipt, peer.tick());
     }
@@ -2303,6 +2514,13 @@ enum AnnouncedCheckpointError {
         /// This run's own tick when the hint was verified.
         own: Tick,
     },
+    /// The pulled checkpoint does not claim the field —
+    /// `source_owns_field` absent or `false` — so its endpoint is a
+    /// standby tracking this line onward, not the owner the
+    /// orphan-resolution probe is looking for: resolving onto it
+    /// would pin the demoted peer onto another subordinate of the
+    /// same stale island.
+    NotOwner,
 }
 
 /// Whether one checkpoint pulled from an announced demotion hint
@@ -2361,6 +2579,42 @@ fn verify_announced_checkpoint(
             pulled: pulled.tick,
             own: own.tick,
         });
+    }
+    Ok(())
+}
+
+/// Whether one checkpoint pulled while the tracked line reports no
+/// field owner proves its source serves this line *as that owner* —
+/// the orphan-resolution probe's bar. The document checks are the
+/// demote verification's readable-format, same-generation,
+/// bounded-lead ones; on top of them the document must itself claim
+/// the field — `source_owns_field: true` — since a standby-line
+/// endpoint merely tracking this line onward proves nothing about
+/// ownership and would only re-pin the demoted peer onto another
+/// island member. The demote check's own-document rejection does not
+/// apply here: the probing run is already a standby, so an owner a
+/// few ticks behind its local tick is still this line's owner — only
+/// a runaway lead marks a foreign stream.
+fn verify_owner_checkpoint(
+    pulled: &Checkpoint,
+    own: &Checkpoint,
+) -> Result<(), AnnouncedCheckpointError> {
+    if !SUPPORTED_FORMAT_VERSIONS.contains(&pulled.format_version) {
+        return Err(AnnouncedCheckpointError::UnreadableVersion {
+            found: pulled.format_version,
+        });
+    }
+    if pulled.generation != own.generation {
+        return Err(AnnouncedCheckpointError::ForeignGeneration);
+    }
+    if pulled.tick.0 > own.tick.0.saturating_add(MAX_ANNOUNCED_AHEAD) {
+        return Err(AnnouncedCheckpointError::Ahead {
+            pulled: pulled.tick,
+            own: own.tick,
+        });
+    }
+    if pulled.source_owns_field != Some(true) {
+        return Err(AnnouncedCheckpointError::NotOwner);
     }
     Ok(())
 }
@@ -3120,6 +3374,7 @@ mod tests {
             receipts: Vec::new(),
             command_admission: Default::default(),
             source_owns_field: None,
+            line_owner: None,
             line_proof: None,
         };
         let own = checkpoint();
@@ -3249,6 +3504,91 @@ mod tests {
         unreadable.format_version = 999;
         assert_eq!(
             verify_announced_checkpoint(&unreadable, &own, false),
+            Err(AnnouncedCheckpointError::UnreadableVersion { found: 999 })
+        );
+    }
+
+    /// The orphan-resolution probe's bar: the same readable-format,
+    /// same-generation, bounded-lead document checks, plus the pulled
+    /// checkpoint must itself claim the field — a standby-line source
+    /// merely tracking the line onward is `NotOwner`, so the demoted
+    /// peer can never re-resolve onto another island member.
+    #[test]
+    fn verify_owner_checkpoint_rejects_a_standby_line_source() {
+        let checkpoint = || Checkpoint {
+            format_version: dcs_runtime::CHECKPOINT_FORMAT_VERSION,
+            model_fingerprint: Some(dcs_core::ModelFingerprint(7)),
+            generation: Some(11),
+            tick: Tick(100),
+            components: Default::default(),
+            driver: None,
+            outputs: Default::default(),
+            internal: Default::default(),
+            forces: Default::default(),
+            receipts: Vec::new(),
+            command_admission: Default::default(),
+            source_owns_field: None,
+            line_owner: None,
+            line_proof: None,
+        };
+        let own = checkpoint();
+
+        // The owner shapes: this line stamped field-owning — at the
+        // probing standby's tick, ahead inside the skew window, and
+        // behind it: the probe runs on a stalled demoted peer, so an
+        // owner a few ticks back is still this line's owner, where the
+        // demote check's own-document rejection does not apply.
+        for lag in [0, 1, 50] {
+            let mut owner = checkpoint();
+            owner.source_owns_field = Some(true);
+            owner.tick = Tick(own.tick.0 - lag);
+            assert_eq!(verify_owner_checkpoint(&owner, &own), Ok(()));
+        }
+        let mut ahead = checkpoint();
+        ahead.source_owns_field = Some(true);
+        ahead.tick = Tick(own.tick.0 + MAX_ANNOUNCED_AHEAD);
+        assert_eq!(verify_owner_checkpoint(&ahead, &own), Ok(()));
+
+        // The reproduction's shape: a sibling standby's checkpoint —
+        // this line's continuation stamped `source_owns_field: false`
+        // — is exactly what the probe refuses: resolving onto it would
+        // re-pin the demoted peer onto the stale island. The un-
+        // stamped pre-stamping shape refuses the same way.
+        let mut standby = checkpoint();
+        standby.source_owns_field = Some(false);
+        standby.tick = Tick(own.tick.0 + 3);
+        assert_eq!(
+            verify_owner_checkpoint(&standby, &own),
+            Err(AnnouncedCheckpointError::NotOwner)
+        );
+        let mut unstamped = checkpoint();
+        unstamped.tick = Tick(own.tick.0 + 3);
+        assert_eq!(
+            verify_owner_checkpoint(&unstamped, &own),
+            Err(AnnouncedCheckpointError::NotOwner)
+        );
+
+        // A foreign generation, a runaway lead, and an unreadable
+        // format refuse before the ownership question is ever asked.
+        let mut restarted = checkpoint();
+        restarted.generation = Some(12);
+        restarted.source_owns_field = Some(true);
+        assert_eq!(
+            verify_owner_checkpoint(&restarted, &own),
+            Err(AnnouncedCheckpointError::ForeignGeneration)
+        );
+        let mut forged = checkpoint();
+        forged.source_owns_field = Some(true);
+        forged.tick = Tick(99999);
+        assert!(matches!(
+            verify_owner_checkpoint(&forged, &own),
+            Err(AnnouncedCheckpointError::Ahead { .. })
+        ));
+        let mut unreadable = checkpoint();
+        unreadable.format_version = 999;
+        unreadable.source_owns_field = Some(true);
+        assert_eq!(
+            verify_owner_checkpoint(&unreadable, &own),
             Err(AnnouncedCheckpointError::UnreadableVersion { found: 999 })
         );
     }
