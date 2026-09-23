@@ -998,8 +998,8 @@ fn assert_resources(client: &MonitorClient, snapshot: &TelemetrySnapshot) {
 fn assert_generic_page(client: &MonitorClient) {
     let page = client.page().unwrap();
     for needle in [
-        "fetch(base + \"/schema\")",
-        "fetch(base + \"/resources\")",
+        "pollFetch(base + \"/schema\")",
+        "pollFetch(base + \"/resources\")",
         "interfaceMarkup(descriptor.name, generic)",
         "interfaceOpen.get(name) : generic",
         "resourceTable(\"measurements\", iface.measurements",
