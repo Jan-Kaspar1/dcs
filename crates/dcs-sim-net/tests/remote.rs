@@ -727,9 +727,13 @@ fn the_shared_flag_tracks_live_holders_not_the_standing_claim() {
 #[test]
 fn the_conditional_startup_claim_refuses_a_live_incumbent_only() {
     with_server(loopback_map(), |addr| {
-        let incumbent = RemoteDriver::connect(addr).unwrap();
+        // The incumbent claims as a controller — only a live
+        // *controller's* unyielded claim is the incumbent the
+        // conditional grant refuses; a tool's claim never blocks it.
+        let incumbent = RemoteDriver::connect(addr).unwrap().as_controller();
         let restart = RemoteDriver::connect(addr).unwrap();
         let same_owner = RemoteDriver::connect(addr).unwrap();
+        let tool = RemoteDriver::connect(addr).unwrap();
 
         // The incumbent's unconditional claim stands with a live holder.
         assert_eq!(incumbent.claim_writer(7).unwrap(), ClaimGrant::Exclusive);
@@ -781,6 +785,19 @@ fn the_conditional_startup_claim_refuses_a_live_incumbent_only() {
         restart.step(0.1).unwrap();
         let observer = RemoteDriver::connect(addr).unwrap();
         assert_eq!(observer.read(PointId(20)).unwrap().value, Value::Float(3.0));
+
+        // The other half of the verdict: a field tool's claim is never
+        // an incumbent — its live hold does not refuse the conditional
+        // grant, so a rogue `claim_writer` can never wedge a peer's
+        // documented promote recovery the way the unconditional
+        // live-holder refusal did.
+        tool.claim_writer(0xF0_21_61_6E).unwrap();
+        let peer = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(
+            peer.claim_writer_unless_held(9).unwrap(),
+            ClaimGrant::Exclusive
+        );
+        assert_eq!(tool.step(0.1), Err(RemoteError::Fenced));
     });
 }
 

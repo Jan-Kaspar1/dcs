@@ -793,8 +793,12 @@ produce the identical `peer-announce-digest`, a divergence failing
 `peer-announce-nondeterministic`. The leg's doctored case — a
 crafted announce naming the pulling connection's own source,
 landing exactly as it would on a controller whose acceptance check
-regressed — must strand the demoted peer and report the named
-diagnostic rather than pass silently.
+regressed — joins the bounded announced set beside the genuine
+ones, and the demotion's per-candidate verification skips the dead
+hint for the verified standby; the leg doctors its adoption
+assertion to require the planted address, so a healthy demotion
+reports the journaled `tracking_source_adopted` mismatch while a
+blind last-announcer adoption would pass silently.
 
 The stage's command-availability leg — `ci/availability.py` on the
 same declared deployment — then proves the served per-command
@@ -1073,10 +1077,14 @@ identical `demote-reconvergence-digest`, a divergence failing
 `demote-reconvergence-nondeterministic`. The leg's doctored case —
 a crafted `?peer=` announce naming the field owner's own monitor
 address, landing on the pulling connection's own source exactly as
-a self-claim — plants a self-addressed demotion hint whose verify
-pull reads the owner's own document: the replayable own-document
-shape an announced demotion refuses, so `POST /demote` must answer
-`409 no_tracking_source` rather than adopt the self-pin.
+a self-claim — plants a self-addressed demotion hint beside the
+genuine announce in the bounded set: the demotion's verify pull on
+it reads the owner's own document, the replayable own-document
+shape a candidate can never satisfy, so the verified adoption keeps
+the real successor — and the leg doctors the adoption audit to
+require the self-pin, so a healthy demotion reports the journaled
+`tracking_source_adopted` mismatch while a self-pinning regression
+passes silently.
 
 The stage's managed-lifecycle leg — `ci/managed_lifecycle.py` on the
 same declared deployment — then exercises the emitted model's whole

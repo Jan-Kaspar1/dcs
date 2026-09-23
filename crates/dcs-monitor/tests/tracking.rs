@@ -710,6 +710,74 @@ fn a_spoofed_peer_announce_cannot_redirect_the_demotion_tracking_source() {
     lonely.stop();
 }
 
+/// The QA finding `demoted-peer-adopts-standby-line-into-promotable-
+/// stale-island`, demote half: with two standbys announcing, an
+/// announcer that merely tracks this run's line — a sibling standby
+/// replaying the demoted peer's own line back to it — can never win
+/// the demotion over the candidate that serves the line as its field
+/// owner, even when the sibling announced last. The demotion adopts
+/// the owner and the demoted peer reconverges `tracking`, never
+/// `orphaned`.
+#[test]
+fn an_announced_standby_line_loses_the_demote_hint_to_the_field_owner() {
+    let (b, active) = DrivenStandby::start(None);
+    // A second driven standby on the same active — the reproduction's
+    // sibling — wired the same way `b` is.
+    let c_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let c = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(c_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(b.active_addr),
+            after_scan: None,
+        }),
+    );
+
+    // Both standbys track and announce; the sibling announces last,
+    // so under the old last-announcer-wins slot it is the one the
+    // demotion would have adopted.
+    active.client.advance(3).unwrap();
+    b.standby.client.advance(1).unwrap();
+    c.client.advance(1).unwrap();
+
+    // The other standby takes the field — the line's real owner,
+    // strictly ahead of the active's stalled tick — and the sibling
+    // announces again, keeping the newest hint the standby-line one.
+    assert_eq!(c.client.promote().unwrap().role, Role::Promoting);
+    c.client.advance(1).unwrap();
+    b.standby.client.advance(1).unwrap();
+
+    // Demotion verifies every announcer and adopts the owner: the
+    // sibling's standby-line checkpoint continues the run's line but
+    // claims no field, so it can only ever be the provisional
+    // fallback — never the verified adoption.
+    assert_eq!(active.client.demote().unwrap().role, Role::Demoting);
+    assert_eq!(
+        active.monitor.tracking_source(),
+        Some(dialable(c.monitor.local_addr())),
+        "the demotion adopts the field owner, not the standby-line sibling"
+    );
+
+    // The demoted peer reconverges on the owner it adopted — an
+    // owning source's checkpoint is a tracking verdict, not an
+    // orphan report.
+    active.client.advance(1).unwrap();
+    let report = active.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted peer tracks the adopted owner: {report:?}"
+    );
+}
+
 /// The QA finding `follow-peer-announces-unroutable-bind-address`: a
 /// tracking standby whose monitor binds the wildcard — every container
 /// deployment's `--listen 0.0.0.0:<port>` — announces that bind
