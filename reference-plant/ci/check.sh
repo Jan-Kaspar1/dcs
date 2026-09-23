@@ -639,6 +639,35 @@
 #                with the pair's roles unchanged; two passes produce
 #                identical digests (monitor-starvation-failed,
 #                monitor-starvation-nondeterministic)
+#                The stage's commissioning/handover record leg,
+#                ci/commissioning.py on the same declared deployment —
+#                the pre-pilot WW-LCM-002 drill materializing the
+#                commissioning record
+#                docs/releases/commissioning-record.md declares: with
+#                the pair converged, the plant protocol's point census
+#                audited against the emitted model's declared channel
+#                set — every point's declared direction and the served
+#                image's sample equal to a value the field presented
+#                at the scan boundary (the I/O checkout record); the
+#                declared measurement driven at marks across the
+#                threshold chain's declared span with both peers
+#                serving each mark identically, then the receipted
+#                mode/hand path exercising the output loop through
+#                the field's delivered command and returned run
+#                feedback (the loop-check evidence); every managed
+#                alarm instance's declared rationalization record
+#                audited verbatim on both peers (the sign-off); the
+#                documented demote/promote switch and restore (the
+#                handover procedure); the model, dynamics, and
+#                manifest documents digested, each peer's
+#                checkpoint-stamped fingerprint held equal to the
+#                manifest's, and each durable journal and state file
+#                reported (the documentation turnover) — the
+#                completeness audit refusing a record missing any
+#                named artifact; two passes produce identical digests
+#                (commissioning-failed,
+#                commissioning-nondeterministic,
+#                commissioning-unchecked)
 #                The stage's journal-boundary leg,
 #                ci/journal_boundary.py on the same declared
 #                deployment — the consumer-side mirror of the
@@ -1887,16 +1916,19 @@ echo "  $FIRST"
 
 # The doctored case: a crafted announce naming the pulling
 # connection's own source — a closed local port — lands exactly as it
-# would on a controller whose acceptance check regressed. The
-# hardened contract answers it at the demote: the planted hint names
-# an endpoint no checkpoint pull can verify, so `POST /demote`
-# refuses `no_tracking_source` rather than stranding the demoted
-# peer on the dead pull; the leg must surface the named diagnostic —
-# never a silently poisoned pass.
+# would on a controller whose acceptance check regressed. It joins
+# the bounded announced set beside the genuine ones, and the
+# demotion's per-candidate verification is what answers it: the
+# planted hint names an endpoint no checkpoint pull can verify, so
+# the adoption keeps the verified standby — the journal's
+# tracking_source_adopted is the audit. The leg doctors its
+# assertion to require the planted address, so a healthy demotion
+# reports the adopted mismatch — a blind last-announcer adoption
+# would satisfy the doctored expectation and pass silently.
 if out="$(run_peer_announce --tamper landed-announce 2>&1)"; then
     fail "peer-announce-unchecked: a landed foreign announce passed the peer-announce leg"
 fi
-[[ "$out" == *"no_tracking_source"* ]] \
+[[ "$out" == *"tracking_source_adopted"* ]] \
     || fail "peer-announce-unchecked: the landed-announce case did not report its named diagnostic: $out"
 echo "  landed-announce: reported, peer-announce-failed"
 
@@ -2296,16 +2328,19 @@ echo "  $FIRST"
 # The doctored case: a crafted ?peer= announce naming the field
 # owner's own monitor address — a claim the pulling connection's own
 # source proves, so it lands exactly as a self-claim — plants a
-# self-addressed demotion hint: the self-pin defect shape this leg
-# exists to catch. The demotion's verify pull reads the owner's own
-# document — the replayable own-document shape an announced demotion
-# now refuses — so POST /demote answers 409 no_tracking_source and
-# the leg must report the refusal rather than let a self-pinned
-# demotion proceed.
+# self-addressed demotion hint beside the genuine announce: the
+# self-pin defect shape this leg exists to catch. The demotion's
+# verify pull on it reads the owner's own document — the replayable
+# own-document shape a candidate can never satisfy — so the verified
+# adoption keeps the genuine successor and the journal's
+# tracking_source_adopted names it. The leg doctors its adoption
+# audit to require the self-pin, so a healthy demotion reports the
+# mismatch — a self-pinning regression would satisfy the doctored
+# expectation and pass silently.
 if out="$(run_demote_reconvergence --tamper self-announce 2>&1)"; then
     fail "demote-reconvergence-unchecked: a self-addressed announce passed the demote-reconvergence leg"
 fi
-[[ "$out" == *"no_tracking_source"* ]] \
+[[ "$out" == *"tracking_source_adopted"* ]] \
     || fail "demote-reconvergence-unchecked: the self-announce case did not report its named diagnostic: $out"
 echo "  self-announce: reported, demote-reconvergence-failed"
 
@@ -2451,6 +2486,55 @@ for tamper in starved-reads peer-transition; do
     echo "  $tamper: reported, monitor-starvation-failed"
 done
 
+# The pair contract's commissioning/handover record leg, on the same
+# manifest-declared deployment — the pre-pilot WW-LCM-002 drill:
+# ci/commissioning.py materializes the commissioning record
+# docs/releases/commissioning-record.md declares from one
+# deterministic driven run — the plant protocol's point census
+# audited against the emitted model's declared channel set (the I/O
+# checkout record), the declared measurement driven at marks across
+# the threshold chain's span with both peers serving each mark
+# identically and the receipted mode/hand path exercising the output
+# loop through the field's delivered command and returned run
+# feedback (the loop-check evidence), every managed alarm instance's
+# declared record audited served verbatim on both peers (the alarm
+# rationalization sign-off), the documented demote/promote switch
+# and restore (the handover procedure), and the document set
+# digested with each peer's checkpoint fingerprint, durable journal,
+# and state file reported (the documentation turnover) — the
+# completeness audit requiring every named artifact. Two passes must
+# produce identical digests.
+run_commissioning() {
+    python3 ci/commissioning.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_commissioning)" \
+    || fail "commissioning-failed: the commissioning leg did not hold — its evidence lines are above"
+SECOND="$(run_commissioning)" \
+    || fail "commissioning-failed: the commissioning leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "commissioning-nondeterministic: two commissioning passes produced different digests"
+echo "  $FIRST"
+
+# The doctored cases: a record assembled without one named artifact
+# must fail the completeness audit naming it — never an incomplete
+# record passing silently.
+for tamper in missing-io-checkout missing-loop-check \
+        missing-alarm-signoff missing-documentation-turnover; do
+    if out="$(run_commissioning --tamper "$tamper" 2>&1)"; then
+        fail "commissioning-unchecked: a $tamper record passed the commissioning leg"
+    fi
+    artifact="${tamper#missing-}"
+    [[ "$out" == *"the record carries no $artifact artifact"* ]] \
+        || fail "commissioning-unchecked: the $tamper case did not report its named diagnostic: $out"
+    echo "  $tamper: reported, commissioning-failed"
+done
+
 # The pair contract's journal-boundary flood leg, on the same
 # manifest-declared deployment: ci/journal_boundary.py converges the
 # pair, then restarts the tracking standby onto its declared
@@ -2507,7 +2591,7 @@ echo "== consumers =="
 for file in ci/alarm_rationalization.py ci/alarm_validation.py \
         ci/availability.py \
         ci/burst_order.py ci/claim_fencing.py ci/command_switch.py \
-        ci/consumers.py \
+        ci/commissioning.py ci/consumers.py \
         ci/ctl.py ci/demote_pending.py ci/deploy_rig.py \
         ci/divergence.py ci/failover.py \
         ci/force_carryover.py ci/force_release.py ci/handover.py \
