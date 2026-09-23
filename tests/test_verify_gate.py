@@ -50,7 +50,7 @@ class PhaseTimingTests(unittest.TestCase):
             "--", "-D", "warnings",
         ])
         self.assertEqual(verify.phase_command("rust-tests"), [
-            "cargo", "test", "--workspace", "--locked",
+            verify.sys.executable, "scripts/run_rust_tests.py",
         ])
         self.assertEqual(verify.phase_command("supervisor-tests"), [
             verify.sys.executable, "scripts/run_tests.py", "--workers", "4",

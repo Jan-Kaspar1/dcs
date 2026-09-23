@@ -93,12 +93,12 @@ def run_phase(name, args, root, env, **kwargs):
 
 
 def phase_command(name):
-    """Return the unchanged command that implements a named required check."""
+    """Return the command that implements a named required check."""
     commands = {
         "rust-format": ["cargo", "fmt", "--all", "--", "--check"],
         "supervisor-tests": [sys.executable, "scripts/run_tests.py", "--workers", "4"],
         "rust-clippy": ["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"],
-        "rust-tests": ["cargo", "test", "--workspace", "--locked"],
+        "rust-tests": [sys.executable, "scripts/run_rust_tests.py"],
     }
     return commands[name]
 
@@ -124,7 +124,10 @@ def main(argv=None):
             # this process whether or not the child would inherit the handle.
             inherit = {"pass_fds": (slot.fileno(),)} if os.name == "posix" else {}
             for name in ("rust-clippy", "rust-tests"):
-                run_phase(name, phase_command(name), root, env, **inherit)
+                phase_env = env
+                if name == "rust-tests" and os.name == "posix":
+                    phase_env = dict(env, DCS_BUILD_SLOT_FD=str(slot.fileno()))
+                run_phase(name, phase_command(name), root, phase_env, **inherit)
         print(f"verify.py: cargo build slot held for {time.monotonic() - held:.1f}s", flush=True)
     else:
         name = options.phase
@@ -132,7 +135,10 @@ def main(argv=None):
             with build_slot() as slot:
                 held = time.monotonic()
                 inherit = {"pass_fds": (slot.fileno(),)} if os.name == "posix" else {}
-                run_phase(name, phase_command(name), root, env, **inherit)
+                phase_env = env
+                if name == "rust-tests" and os.name == "posix":
+                    phase_env = dict(env, DCS_BUILD_SLOT_FD=str(slot.fileno()))
+                run_phase(name, phase_command(name), root, phase_env, **inherit)
             print(f"verify.py: cargo build slot held for {time.monotonic() - held:.1f}s", flush=True)
         else:
             run_phase(name, phase_command(name), root, env)
