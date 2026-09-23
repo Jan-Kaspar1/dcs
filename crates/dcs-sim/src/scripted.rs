@@ -37,7 +37,9 @@ pub struct ScriptEntry {
     /// The driver tick this entry takes effect at.
     pub tick: Tick,
     /// The value readers observe; its variant must match the point's
-    /// declared kind.
+    /// declared kind, and a `Float` must be finite — the observed
+    /// sample must stay representable like every value the point can
+    /// hold.
     pub value: Value,
     /// The quality readers observe — [`Quality::Good`] or a scripted
     /// fault.
@@ -104,6 +106,18 @@ pub enum ScriptError {
         /// The value the entry carries.
         found: Value,
     },
+    /// A binding's `initial` or a script entry's `value` is a
+    /// non-finite `Float` — NaN or an infinity — which a stored sample
+    /// cannot carry: the value has no JSON spelling, so it would poison
+    /// every checkpoint the field appears in.
+    NonFinite {
+        /// The point the non-finite value would seed.
+        point: PointId,
+        /// The channel it is bound to.
+        channel: ChannelId,
+        /// The offending value.
+        value: f64,
+    },
 }
 
 impl fmt::Display for ScriptError {
@@ -147,6 +161,15 @@ impl fmt::Display for ScriptError {
             } => write!(
                 f,
                 "script for channel {:?} (point {}) expects {expected:?} values, found {found:?}",
+                channel.name, point.0
+            ),
+            Self::NonFinite {
+                point,
+                channel,
+                value,
+            } => write!(
+                f,
+                "channel {:?} (point {}) seeds or scripts a non-finite value {value}",
                 channel.name, point.0
             ),
         }
@@ -218,8 +241,9 @@ impl ScriptedDriver {
     ///
     /// Validation rejects duplicate points and channels, scripts naming
     /// unserved or `Out` points, entries not in strictly increasing tick
-    /// order, and entry values whose kind differs from the point's —
-    /// each as a [`ScriptError`] naming the offending point and channel.
+    /// order, entry values whose kind differs from the point's, and
+    /// non-finite `Float` seeds or entry values — each as a
+    /// [`ScriptError`] naming the offending point and channel.
     pub fn new(
         points: Vec<PointBinding>,
         scripts: BTreeMap<PointId, Vec<ScriptEntry>>,
@@ -232,6 +256,15 @@ impl ScriptedDriver {
             }
             if !channels.insert(binding.channel.clone()) {
                 return Err(ScriptError::DuplicateChannel(binding.channel));
+            }
+            if let Value::Float(initial) = binding.initial
+                && !initial.is_finite()
+            {
+                return Err(ScriptError::NonFinite {
+                    point: binding.point,
+                    channel: binding.channel,
+                    value: initial,
+                });
             }
             states.insert(
                 binding.point,
@@ -263,6 +296,15 @@ impl ScriptedDriver {
                         channel: state.channel.clone(),
                         expected: state.kind,
                         found: entry.value,
+                    });
+                }
+                if let Value::Float(v) = entry.value
+                    && !v.is_finite()
+                {
+                    return Err(ScriptError::NonFinite {
+                        point,
+                        channel: state.channel.clone(),
+                        value: v,
                     });
                 }
                 if let Some(previous) = previous
@@ -359,6 +401,15 @@ impl IoDriver for ScriptedDriver {
                 found: value,
             });
         }
+        // Same rule [`SimDriver::write`](crate::SimDriver) applies: a
+        // non-finite `Float` has no JSON spelling, so a stored one would
+        // poison every checkpoint the field appears in — serde writes it
+        // `null`, which no `Value` decode reads back.
+        if let Value::Float(v) = value
+            && !v.is_finite()
+        {
+            return Err(IoError::InvalidValue { point });
+        }
         point_state.sample = Sample::good(value, state.tick);
         state.writes.push(RecordedWrite {
             point,
@@ -446,6 +497,11 @@ impl IoDriver for ScriptedDriver {
             };
             let value =
                 state.require_kind(STATE_ELEMENT, &format!("{prefix}.value"), point_state.kind)?;
+            if let Value::Float(v) = value
+                && !v.is_finite()
+            {
+                return Err(invalid(format!("{prefix}.value"), value));
+            }
             let write_tick = state.require_i64(STATE_ELEMENT, &format!("{prefix}.tick"))?;
             if write_tick < 0 {
                 return Err(invalid(format!("{prefix}.tick"), Value::Int(write_tick)));
@@ -850,5 +906,54 @@ mod tests {
                 field: "point.10.fault".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn non_finite_values_are_refused_everywhere_a_sample_can_come_from() {
+        // Same representability rule `SimDriver` applies: a non-finite
+        // `Float` has no JSON spelling, so a stored one would poison
+        // every checkpoint the field appears in. The write boundary
+        // refuses it, the stored sample stands, and the write is not
+        // recorded.
+        let driver = driver();
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                driver.write(PointId(10), Value::Float(value)),
+                Err(IoError::InvalidValue { point: PointId(10) })
+            );
+        }
+        assert!(driver.writes().is_empty());
+        assert_eq!(driver.read(PointId(10)).unwrap().value, Value::Float(4.0));
+
+        // A non-finite seed or script value fails construction.
+        let error = ScriptedDriver::new(
+            vec![binding(10, Direction::In, Value::Float(f64::NAN))],
+            BTreeMap::new(),
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(error, ScriptError::NonFinite { .. }));
+        let error = ScriptedDriver::new(
+            vec![binding(10, Direction::In, Value::Float(0.0))],
+            BTreeMap::from([(PointId(10), vec![good(0, Value::Float(f64::INFINITY))])]),
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(
+            error,
+            ScriptError::NonFinite {
+                point: PointId(10),
+                ..
+            }
+        ));
+
+        // And a checkpoint carrying one restores nothing.
+        let mut map = driver.capture_state().unwrap();
+        map.insert("point.10.value", Value::Float(f64::NEG_INFINITY));
+        assert!(matches!(
+            driver.restore_state(&map),
+            Err(StateError::InvalidValue { .. })
+        ));
+        assert_eq!(driver.read(PointId(10)).unwrap().value, Value::Float(4.0));
     }
 }

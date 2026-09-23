@@ -494,7 +494,9 @@ impl ChannelMap {
     /// Checks the map's internal consistency, returning the first
     /// [`ConfigError`] found:
     ///
-    /// - point ids and channels are bound at most once;
+    /// - point ids and channels are bound at most once, and a `Float`
+    ///   point's `initial` is finite — the seed sample must be
+    ///   representable like every value the point can later hold;
     /// - every loopback and element names bound points only;
     /// - a loopback runs from an `Out` point to an `In` point of the same
     ///   value kind;
@@ -524,6 +526,14 @@ impl ChannelMap {
                 Entry::Vacant(slot) => {
                     slot.insert(binding_.point);
                 }
+            }
+            if let Value::Float(initial) = binding_.initial
+                && !initial.is_finite()
+            {
+                return Err(ConfigError::NonFinitePointInitial {
+                    point: binding_.point,
+                    value: initial,
+                });
             }
         }
 
@@ -818,6 +828,15 @@ pub enum ConfigError {
         /// The offending value.
         value: f64,
     },
+    /// A point binding's `initial` is a non-finite `Float` — the seed
+    /// sample must be representable like every value the point can
+    /// later hold.
+    NonFinitePointInitial {
+        /// The bound point.
+        point: PointId,
+        /// The offending value.
+        value: f64,
+    },
     /// A point's value is driven by more than one loopback or element.
     ConflictingDriver {
         /// The contested point.
@@ -928,6 +947,9 @@ impl fmt::Display for ConfigError {
                 "element driving point {} has non-finite initial value {value}",
                 point.0
             ),
+            Self::NonFinitePointInitial { point, value } => {
+                write!(f, "point {} has non-finite initial value {value}", point.0)
+            }
             Self::ConflictingDriver { point } => write!(
                 f,
                 "point {} is driven by more than one loopback or element",
