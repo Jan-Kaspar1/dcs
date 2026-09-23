@@ -760,20 +760,6 @@ pub struct Monitor<'d> {
     /// pull proves the endpoint under the pair's key and the
     /// checkpoint continues this run's line in a way this run's own
     /// `/checkpoint` could not have served — a field-owning document
-<<<<<<< HEAD
-    /// being the replayable shape, so only a key-attested pull may
-    /// earn a strictly-ahead owner document the adoption — preferring
-    /// the candidate that serves the line as field owner over one
-    /// that merely tracks it, and on a keyed run requiring each
-    /// pulled document to carry the pull's `line_proof` — journaling
-    /// the adopted source either way. The same proof gates the
-    /// involuntary path: a field claim's mid-run loss demotes the peer
-    /// in place with no `POST /demote` boundary ever running it, so
-    /// the tracking path verifies lazily instead
-    /// ([`adopt_announced_source`](Self::adopt_announced_source)) —
-    /// a recorded hint is a candidate, never a pull target. The set
-    /// is bounded at
-=======
     /// not ahead of this run's tick being the replayable shape —
     /// preferring the candidate that serves the line as field owner
     /// over one that merely tracks it, and journaling
@@ -781,8 +767,13 @@ pub struct Monitor<'d> {
     /// inert: the public `/checkpoint` hands a forge every document
     /// shape, so no announced endpoint can authenticate — they never
     /// resolve as a tracking source and can never arm a demotion.
-    /// The set is bounded at
->>>>>>> origin/main
+    /// On a keyed run the same proof gates the involuntary path too:
+    /// a field claim's mid-run loss demotes the peer in place with no
+    /// `POST /demote` boundary ever running it, so the tracking path
+    /// verifies lazily instead
+    /// ([`adopt_announced_source`](Self::adopt_announced_source)) —
+    /// a recorded hint is a candidate, never a pull target. The set
+    /// is bounded at
     /// [`MAX_ANNOUNCED`], newest first: with several standbys every
     /// announcer stays a demotion candidate rather than the last pull
     /// silently evicting the rest. A dead, replayed, or forged hint
@@ -1095,8 +1086,13 @@ impl<'d> Monitor<'d> {
     /// diagnostics and the demote guard's "any candidate exists" test
     /// — not as the pull's destination.
     pub fn tracking_source(&self) -> Option<SocketAddr> {
-        self.pull_source()
-            .or_else(|| self.announced.lock().unwrap().front().copied())
+        self.pull_source().or_else(|| {
+            // The bare announced hint resolves only under the keyed
+            // contract — an unkeyed run could never prove the
+            // endpoint, so it is no tracking source at all there.
+            self.pair_key
+                .and_then(|_| self.announced.lock().unwrap().front().copied())
+        })
     }
 
     /// The checkpoint source a tracking pull may target without
@@ -1116,14 +1112,13 @@ impl<'d> Monitor<'d> {
             .or(self.driven.track)
             .or(self.standby_source)
             .or_else(|| *self.adopted.lock().unwrap())
-<<<<<<< HEAD
     }
 
     /// The checkpoint source a tracking cycle pulls now — the
     /// proven half of [`tracking_source`](Self::tracking_source)
     /// ([`pull_source`](Self::pull_source)), and when none stands
-    /// while the peer owns no field, the announced hint set probed
-    /// through the demote verify's own checks
+    /// while the peer owns no field on a keyed run, the announced
+    /// hint set probed through the demote verify's own checks
     /// ([`adopt_announced_source`](Self::adopt_announced_source)),
     /// a passing candidate pinning into `adopted`. A bare `?peer=`
     /// announce can therefore never redirect a pull — the involuntary
@@ -1135,15 +1130,6 @@ impl<'d> Monitor<'d> {
     /// unproven hints pulls nothing.
     pub fn verified_tracking_source(&self) -> Option<SocketAddr> {
         self.pull_source().or_else(|| self.adopt_announced_source())
-=======
-            .or_else(|| {
-                // The bare announced hint resolves only under the
-                // keyed contract — an unkeyed run could never prove
-                // the endpoint, so it must never pull from it.
-                self.pair_key
-                    .and_then(|_| self.announced.lock().unwrap().front().copied())
-            })
->>>>>>> origin/main
     }
 
     /// The address the listener is bound to.
@@ -2130,7 +2116,6 @@ impl<'d> Monitor<'d> {
             return Err(json(409, &SwitchError::NoTrackingSource));
         }
         let own = self.shared.lock().unwrap().peer.checkpoint();
-<<<<<<< HEAD
         match self.probe_announced_hints(&hints, &own) {
             Some(hint) => Ok(Some(hint)),
             None => Err(json(409, &SwitchError::NoTrackingSource)),
@@ -2141,51 +2126,36 @@ impl<'d> Monitor<'d> {
     /// shared prove-half of `POST /demote`'s verification
     /// ([`verify_demote_hint`](Self::verify_demote_hint)) and the
     /// involuntary path's
-    /// [`adopt_announced_source`](Self::adopt_announced_source). A
-    /// keyed run demands the proof only a key-holding peer of this
-    /// line can produce: the verify pulls carry a fresh nonce and
-    /// each returned document must carry the keyed line proof binding
-    /// that nonce to that document.
+    /// [`adopt_announced_source`](Self::adopt_announced_source). The
+    /// announced-source contract is keyed-only outright: an unkeyed
+    /// run can prove nothing about any hinted endpoint, so no hint
+    /// earns a pull there.
     ///
     /// Newest announcer first, one bounded pull each under
-    /// [`CHECKPOINT_PULL_TIMEOUT`]. A candidate serving the line as
-    /// field owner wins outright — where the pull may attest one:
-    /// only a key-attested answer may serve a field-owning
-    /// checkpoint, the stamp this run's own public `/checkpoint`
-    /// carries, so on an unproven pull every owner document, even
-    /// bumped ahead into the successor's tick shape, refuses as
-    /// replayable. A candidate that only tracks the line is
-    /// remembered as the fallback — adopted provisional, since the
-    /// orphan-resolution probe can still re-resolve onto the owner
-    /// the line later names. And every candidate answers this run's
-    /// command audit: a document whose receipt window forks the
-    /// settled log or whose internal `In` samples plant a value no
-    /// settled verdict produced is forged, not a continuation, and
-    /// loses to the next candidate. `None` when no hint proves out —
-    /// dead, unreachable, replayed, or foreign endpoints all lose the
-    /// same way.
+    /// [`CHECKPOINT_PULL_TIMEOUT`]. Every verify pull demands the
+    /// proof only a key-holding peer of this line can produce: a
+    /// fresh nonce whose returned document must carry the keyed
+    /// `line_proof` binding that nonce to that document — the
+    /// attestation the document checks run on. A candidate serving
+    /// the line as field owner wins outright — every pull reaching
+    /// the document checks is attested, so a strictly-ahead owner
+    /// document is a real successor's while one at or behind this
+    /// run's tick is replayable and refuses. A candidate that only
+    /// tracks the line is remembered as the fallback — adopted
+    /// provisional, since the orphan-resolution probe can still
+    /// re-resolve onto the owner the line later names. And every
+    /// candidate answers this run's command audit: a document whose
+    /// receipt window forks the settled log or whose internal `In`
+    /// samples plant a value no settled verdict produced is forged,
+    /// not a continuation, and loses to the next candidate. `None`
+    /// when no hint proves out — dead, unreachable, replayed, or
+    /// foreign endpoints all lose the same way.
     fn probe_announced_hints(&self, hints: &[SocketAddr], own: &Checkpoint) -> Option<SocketAddr> {
-        let nonce = self.pair_key.map(|_| mint_generation());
-=======
         // The verify pull demands the proof only a key-holding peer of
-        // this line can produce: a fresh nonce whose returned document
-        // must carry the keyed line proof binding that nonce to that
-        // document — the attestation the document checks below run on.
+        // this line can produce — an unkeyed run cannot authenticate
+        // any hinted endpoint, so no hint earns a pull there.
+        self.pair_key?;
         let nonce = Some(mint_generation());
-        // Newest announcer first, one bounded pull each. A candidate
-        // serving the line as field owner wins outright — under the
-        // keyed contract every pull that reaches the document checks
-        // is attested, so a strictly-ahead owner document is a real
-        // successor's while one at or behind this run's tick is
-        // replayable and refuses. A candidate that only tracks
-        // the line is remembered as the fallback — adopted
-        // provisional, since the orphan-resolution probe can still
-        // re-resolve onto the owner the line later names. And every
-        // candidate answers this run's command audit: a document whose
-        // receipt window forks the settled log or whose internal `In`
-        // samples plant a value no settled verdict produced is forged,
-        // not a continuation, and loses to the next candidate.
->>>>>>> origin/main
         let mut tracked = None;
         for &hint in hints {
             // A hint naming this monitor could only ever serve this
@@ -2202,15 +2172,8 @@ impl<'d> Monitor<'d> {
                 Ok(pulled) => pulled,
                 Err(_) => continue,
             };
-<<<<<<< HEAD
-            let proven = self.proven(&pulled, nonce);
-            let key_attested = self.pair_key.is_some() && proven;
-            if !proven
-                || verify_announced_checkpoint(&pulled, own, key_attested).is_err()
-=======
             if !self.proven(&pulled, nonce)
-                || verify_announced_checkpoint(&pulled, &own).is_err()
->>>>>>> origin/main
+                || verify_announced_checkpoint(&pulled, own).is_err()
                 || self
                     .shared
                     .lock()
@@ -2245,14 +2208,17 @@ impl<'d> Monitor<'d> {
     /// foreign monitor that announced itself onto a launched active
     /// can never strand the demoted peer pulling it, and the
     /// legitimate successor's hint wins the pass on its own proof.
-    /// When no hint proves a continuation, the recorded set still
+    /// The announced contract is keyed-only outright — an unkeyed run
+    /// can prove nothing about any hinted endpoint, so no hint earns
+    /// even a verify pull there. When no keyed hint proves a
+    /// continuation, the recorded set still
     /// gets the orphan-resolution probe's owner check
     /// ([`resolve_tracking_source`](Self::resolve_tracking_source)):
-    /// a successor that already claimed the field serves a
-    /// field-owning document the demote verify refuses unproven —
-    /// the stamp is this run's own public one — but the owner check
-    /// proves it serves this line's field, so the promoted
-    /// legitimate successor resolves where a dead or foreign
+    /// a successor that already claimed the field but ticks at or
+    /// behind this run serves a document the demote verify refuses —
+    /// the owner-stamp shape that cannot prove succession — while the
+    /// owner check proves it serves this line's field, so the
+    /// promoted legitimate successor resolves where a dead or foreign
     /// endpoint cannot. Every hint failing both passes leaves the
     /// peer sourceless — the same answer `POST /demote` gives an
     /// unproven hint — rather than following one verbatim, and the
@@ -2264,7 +2230,11 @@ impl<'d> Monitor<'d> {
     /// [`CHECKPOINT_PULL_TIMEOUT`] per hint — the stall bound is the
     /// verify pass, never a hint's own patience.
     fn adopt_announced_source(&self) -> Option<SocketAddr> {
-        if self.shared.lock().unwrap().peer.owns_field() {
+        // Keyed-only, exactly like `verify_demote_hint`: on an
+        // unkeyed run every document shape is derivable from this
+        // run's public `/checkpoint`, so no announced endpoint can
+        // ever prove itself — a bare hint is no tracking source.
+        if self.pair_key.is_none() || self.shared.lock().unwrap().peer.owns_field() {
             return None;
         }
         let hints: Vec<SocketAddr> = self.announced.lock().unwrap().iter().copied().collect();
@@ -2305,14 +2275,14 @@ impl<'d> Monitor<'d> {
             return Some(source);
         }
         // No hint proved this run's continuation — but a successor
-        // that already claimed the field serves a document the demote
-        // verify must refuse on an unkeyed run: `source_owns_field`
-        // is this run's own public stamp, replayable by any endpoint,
-        // so only a keyed pull attests it. The orphan-resolution
-        // probe's owner check is the scrutiny such a document can
-        // pass — the same one the post-demotion orphan cycle applies
-        // to these hints — so a promoted legitimate successor still
-        // earns the pulls while a dead or foreign endpoint cannot.
+        // that already claimed the field while ticking at or behind
+        // this run serves a document the demote verify must refuse:
+        // the owner-stamp shape cannot prove succession there. The
+        // orphan-resolution probe's owner check is the scrutiny such
+        // a document can pass — the same one the post-demotion orphan
+        // cycle applies to these hints — so a promoted legitimate
+        // successor still earns the pulls while a dead or foreign
+        // endpoint cannot.
         self.resolve_tracking_source()
     }
 

@@ -1103,12 +1103,8 @@ fn closed_port() -> SocketAddr {
 /// own thread until dropped.
 struct Hostile {
     addr: SocketAddr,
-<<<<<<< HEAD
-    body: Arc<Mutex<String>>,
-    hits: Arc<AtomicUsize>,
-=======
     body: Arc<Mutex<Checkpoint>>,
->>>>>>> origin/main
+    hits: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -1560,6 +1556,10 @@ fn a_reannounce_cannot_redirect_the_demoted_peers_tracking() {
 /// announcer the defect stranded it on.
 #[test]
 fn an_involuntary_demote_verifies_the_announced_hints_before_tracking() {
+    // The announced contract is keyed-only — the reproduction's pair
+    // carries the deployment's `--pair-token`; the foreign probe does
+    // not hold it, so its answers can never attest.
+    const KEY: u64 = 0x243f_6a88_85a3_08d3;
     let fencing = FencingDriver::start();
     let active = Serving::start(
         Monitor::bind_peer(
@@ -1567,7 +1567,8 @@ fn an_involuntary_demote_verifies_the_announced_hints_before_tracking() {
             Peer::active(fenced_executor(fencing), None),
             signal_index(),
         )
-        .unwrap(),
+        .unwrap()
+        .with_pair_key(KEY),
     );
 
     // The legitimate successor: a driven standby tracking the active
@@ -1585,6 +1586,7 @@ fn an_involuntary_demote_verifies_the_announced_hints_before_tracking() {
             signal_index(),
         )
         .unwrap()
+        .with_pair_key(KEY)
         .driven(Driven {
             track: Some(dialable(active.monitor.local_addr())),
             after_scan: None,
@@ -1693,6 +1695,9 @@ fn an_involuntary_demote_verifies_the_announced_hints_before_tracking() {
 /// tracking pull ever follows it.
 #[test]
 fn an_involuntary_demote_with_only_unproven_hints_pulls_nothing() {
+    // Keyed, like the verified leg — the announced contract resolves
+    // only under `--pair-token`; the foreign announcer holds no key.
+    const KEY: u64 = 0x6a09_e667_f3bc_c909;
     let fencing = FencingDriver::start();
     let active = Serving::start(
         Monitor::bind_peer(
@@ -1700,7 +1705,8 @@ fn an_involuntary_demote_with_only_unproven_hints_pulls_nothing() {
             Peer::active(fenced_executor(fencing), None),
             signal_index(),
         )
-        .unwrap(),
+        .unwrap()
+        .with_pair_key(KEY),
     );
     active.client.advance(3).unwrap();
 
