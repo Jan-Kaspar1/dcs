@@ -53,6 +53,15 @@ MIGRATIONS = [
       invocation TEXT PRIMARY KEY, owner TEXT NOT NULL, grps TEXT NOT NULL,
       category TEXT NOT NULL, useful INTEGER NOT NULL DEFAULT 0, at REAL NOT NULL);
     """,
+    # 5: append-only work and invocation transitions for explanation/metrics
+    """
+    CREATE TABLE IF NOT EXISTS work_events(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL, issue INTEGER, attempt INTEGER,
+      at REAL NOT NULL, source_key TEXT UNIQUE,
+      payload TEXT NOT NULL DEFAULT '{}');
+    CREATE INDEX IF NOT EXISTS work_events_issue ON work_events(issue,id);
+    """,
 ]
 
 
@@ -87,6 +96,29 @@ class State:
     def set(self, key, value):
         with self.db:
             self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)', (key, json.dumps(value)))
+
+    def record_event(self, kind, issue=None, attempt=None, payload=None, source_key=None):
+        """Append one redacted, idempotent transition to the durable work ledger."""
+        if not isinstance(kind, str) or not kind:
+            raise ValueError('Event kind required')
+        value = json.dumps(payload or {}, sort_keys=True)
+        with self.db:
+            self.db.execute(
+                'INSERT OR IGNORE INTO work_events(kind,issue,attempt,at,source_key,payload) '
+                'VALUES(?,?,?,?,?,?)',
+                (kind, issue, attempt, time.time(), source_key, value))
+
+    def events(self, issue=None, limit=100):
+        if not isinstance(limit, int) or limit < 1 or limit > 1000:
+            raise ValueError('Event limit must be between 1 and 1000')
+        sql = 'SELECT id,kind,issue,attempt,at,payload FROM work_events'
+        args = []
+        if issue is not None:
+            sql += ' WHERE issue=?'
+            args.append(issue)
+        sql += ' ORDER BY id DESC LIMIT ?'
+        args.append(limit)
+        return [dict(row) for row in self.db.execute(sql, args)]
 
     def paused(self):
         return bool(self.get('paused', False) or self.get('integrity_error'))
@@ -136,6 +168,8 @@ class State:
             now = time.time()
             self.db.execute('INSERT INTO jobs(issue,worker,concurrency_group,status,started,updated) VALUES(?,?,?,?,?,?)',
                             (issue, worker, group or 'issue-' + str(issue), 'working', now, now))
+            self.db.execute('INSERT INTO work_events(kind,issue,attempt,at,payload) VALUES(?,?,?,?,?)',
+                            ('reserved', issue, 1, now, json.dumps({'worker': worker})))
             self.db.commit()
             return self.job(issue)
         except sqlite3.IntegrityError:
@@ -154,8 +188,13 @@ class State:
             raise ValueError('Invalid status')
         fields['updated'] = time.time()
         with self.db:
+            previous = self.db.execute('SELECT status,attempt FROM jobs WHERE issue=?', (issue,)).fetchone()
             self.db.execute('UPDATE jobs SET ' + ','.join(k + '=?' for k in fields) + ' WHERE issue=?',
                             (*fields.values(), issue))
+            if previous and 'status' in fields and fields['status'] != previous['status']:
+                self.db.execute('INSERT INTO work_events(kind,issue,attempt,at,payload) VALUES(?,?,?,?,?)',
+                                ('status:' + fields['status'], issue, previous['attempt'],
+                                 fields['updated'], json.dumps({'from': previous['status']})))
 
     def repair(self, issue):
         with self.db:
@@ -169,6 +208,9 @@ class State:
         with self.db:
             cursor = self.db.execute("UPDATE jobs SET status='done',pid=NULL,updated=? WHERE issue=? AND status!='done'", (time.time(), issue))
             if cursor.rowcount:
+                attempt = self.db.execute('SELECT attempt FROM jobs WHERE issue=?', (issue,)).fetchone()[0]
+                self.db.execute('INSERT INTO work_events(kind,issue,attempt,at,payload) VALUES(?,?,?,?,?)',
+                                ('merged-and-closed', issue, attempt, time.time(), '{}'))
                 merges = self.get('merges', 0) + 1
                 self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)', ('merges', json.dumps(merges)))
                 for key in ('recovery:' + str(issue), 'retry:' + str(issue)):
@@ -178,7 +220,12 @@ class State:
         """Explicit operator retry. Keeps prior branch/clone recorded until replacement."""
         try:
             with self.db:
-                cursor = self.db.execute("UPDATE jobs SET status='working',attempt=attempt+1,repairs=0,pid=NULL,error=NULL,updated=? WHERE issue=? AND status='blocked'", (time.time(), issue))
+                now = time.time()
+                cursor = self.db.execute("UPDATE jobs SET status='working',attempt=attempt+1,repairs=0,pid=NULL,error=NULL,updated=? WHERE issue=? AND status='blocked'", (now, issue))
+                if cursor.rowcount:
+                    attempt = self.db.execute('SELECT attempt FROM jobs WHERE issue=?', (issue,)).fetchone()[0]
+                    self.db.execute('INSERT INTO work_events(kind,issue,attempt,at,payload) VALUES(?,?,?,?,?)',
+                                    ('retry-reserved', issue, attempt, now, '{}'))
                 return bool(cursor.rowcount)
         except sqlite3.IntegrityError:
             return False

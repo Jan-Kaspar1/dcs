@@ -27,6 +27,10 @@ This registers `DCS Local Devin Agents` for the current user's next login, repla
 
 ```sh
 dcs-agents status
+dcs-agents explain
+dcs-agents explain --issue 123
+dcs-agents timeline 123
+dcs-agents plan
 dcs-agents logs
 journalctl --user -u dcs-agents.service -n 100
 dcs-agents pause
@@ -36,7 +40,7 @@ dcs-agents start
 dcs-agents retry 123
 ```
 
-`status` reports reservations, capacity, merge count, planner metadata, product-area allocation, pause reason, and errors. The `areas` section shows each target percentage with recent completions, active work, open backlog, and ready backlog. `logs` prints recent supervisor events; per-invocation `output.log` files contain agent output. Treat logs as private because they may include task contents.
+`status` reports reservations, capacity, merge count, planner metadata, product-area allocation, pause reason, and errors. `explain` summarizes why the ready queue or provider capacity is limiting dispatch; `explain --issue N` classifies one issue against its dependencies and active jobs. `timeline N` reads durable work and invocation events for an issue. `plan` requests a planning pass on the next unpaused supervisor cycle. The `areas` section shows each target percentage with recent completions, active work, open backlog, and ready backlog. `logs` prints recent supervisor events; per-invocation `output.log` files contain agent output. Treat logs as private because they may include task contents.
 
 `pause` prevents new dispatch and merging while active processes may finish and publish their results. `resume` reopens dispatch unless an integrity failure remains. `stop` terminates managed processes through the service and preserves their checkouts. `retry` applies only to a blocked issue after the pool is resumed; inspect its error and workspace first. A retry is not evidence that the underlying blocker has been fixed.
 
@@ -46,7 +50,7 @@ The planner reads `docs/product-strategy.md`, the applicable `docs/requirements/
 
 Dispatch orders by priority first and then by rolling investment saturation (`recent completed + active` divided by target percentage). This means an under-invested area wins only among otherwise equal-priority ready tickets. QA-created defects are classified by the capability they affect; their rig or reference-plant venue does not become their area.
 
-The ordinary planner runs at least every two hours and checks for low work after fifteen minutes. Low work means fewer than six dependency-ready tasks; tickets carrying `agent:ready` behind open prerequisites do not suppress planning. A proposal may depend on another item in the same proposal by its stable key. The supervisor validates that DAG, creates its issues in dependency order, and persists only resolved GitHub issue numbers. This lets one pass publish a contract ticket plus its later parallel fan-out without inventing issue numbers or waiting for another two-hour cycle.
+The ordinary planner runs at least every two hours and checks for low work after fifteen minutes. Low work means fewer than six dependency-ready tasks or armed automatic retries; tickets carrying `agent:ready` behind open prerequisites do not suppress planning. An operator can request an immediate pass with `dcs-agents plan`. A proposal may depend on another item in the same proposal by its stable key. The supervisor validates that DAG, creates its issues in dependency order, and persists only resolved GitHub issue numbers. This lets one pass publish a contract ticket plus its later parallel fan-out without inventing issue numbers or waiting for another two-hour cycle.
 
 Each agent invocation has a two-hour default limit. CI repair attempts are limited to three. GitHub inventory polling defaults to sixty seconds and errors increase the delay. `python3 scripts/verify.py` shares four heavy-build slots across clones and limits Cargo to four build threads; direct Cargo commands bypass the shared semaphore.
 
