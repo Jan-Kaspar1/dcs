@@ -38,8 +38,8 @@ const N: u64 = 8;
 /// The fixture's writable setpoint input — the command target.
 const SETPOINT: PointId = PointId(10);
 /// The pair's shared tracking secret both monitors key with — the
-/// `--pair-token` deployment the announced-demotion contract requires:
-/// the active's demote below verifies the standby's announced hint
+/// `--pair-token` deployment a real redundant pair declares: the
+/// active's demote below verifies the standby's announced hint
 /// against the keyed `line_proof` and tracks it under proof.
 const PAIR_KEY: u64 = 0x517c_c1b7_2722_0a95;
 

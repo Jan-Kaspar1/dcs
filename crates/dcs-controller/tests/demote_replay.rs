@@ -9,13 +9,14 @@
 //! endpoint's *document* — which replaying the victim's own checkpoint
 //! satisfies — then pinned it, journaled the adoption, and let the
 //! endpoint's forged follow-up checkpoints re-domain the demoted peer.
-//! Under the fix an announced hint has to prove the endpoint: the keyed
-//! `line_proof` a `--pair-token` deployment demands. An unkeyed run
-//! cannot prove anything and refuses `no_tracking_source`; a keyed run
-//! demands the proof, and the transparent relay — which proxies even
-//! the `?prove=` nonce and returns genuinely signed answers — still
-//! fails because the signed document is the victim's own field-owning
-//! checkpoint, the replayable shape the document checks refuse.
+//! Under the fix the verify pull's document checks refuse the
+//! replayable shape: the victim's own `/checkpoint` is a field-owning
+//! document, and no unproven pull may serve one — verbatim, stale, or
+//! tick-bumped alike. A `--pair-token` run demands more: the keyed
+//! `line_proof` only a peer holding the token stamps — yet even a
+//! transparent relay that proxies the `?prove=` nonce and returns a
+//! genuinely signed answer still fails, because the signed document
+//! is the victim's own field-owning checkpoint.
 //!
 //! The reproduction is the issue's required shape: one controller
 //! process plus a standard-library TCP interposer serving the
@@ -139,8 +140,9 @@ fn replay_refusal(addr: SocketAddr) {
 }
 
 /// The reproduction on its own launch shape: no `--standby`, no
-/// `--pair-token` — there is no endpoint proof to demand, so the
-/// announced-only demotion refuses outright.
+/// `--pair-token` — the relayed answer is the victim's own field-owning
+/// document at the run's own tick, the replayable shape the demote-side
+/// document checks refuse on any unproven pull.
 #[test]
 fn an_unkeyed_lone_controller_refuses_a_demote_armed_by_its_replayed_checkpoint() {
     let mut controller: Spawned = spawn_logged(

@@ -142,12 +142,11 @@ on both sides of the protocol:
 docker run --rm -d --name ctrl-a --network dcs-rig -p 8080:8080 \
     -v "$PWD/crates/dcs-plant/fixtures/tank_loop.json:/model/plant.json:ro" \
     dcs-controller /model/plant.json --remote dcs-plant:9001 \
-        --scan-ms 100 --listen 0.0.0.0:8080 --pair-token dcs-rig-pair
+        --scan-ms 100 --listen 0.0.0.0:8080
 docker run --rm -d --name ctrl-b --network dcs-rig -p 8081:8081 \
     -v "$PWD/crates/dcs-plant/fixtures/tank_loop.json:/model/plant.json:ro" \
     dcs-controller /model/plant.json --remote dcs-plant:9001 \
-        --standby ctrl-a:8080 --scan-ms 100 --listen 0.0.0.0:8081 \
-        --pair-token dcs-rig-pair
+        --standby ctrl-a:8080 --scan-ms 100 --listen 0.0.0.0:8081
 ```
 
 The active (`ctrl-a`) owns the field: it steps the plant and its writes
@@ -155,20 +154,12 @@ pass. The standby (`ctrl-b`) pulls a checkpoint per scan from the
 active's monitoring address (`--standby ctrl-a:8080`), scans
 output-quiesced behind its write gate, and promotes through
 `POST /promote` on its own monitor — or self-promotes with
-`--auto-promote N`. Both peers carry the same
-`--pair-token TOKEN` — the keyed tracking contract the announced
-follow-peer path needs: a `POST /demote` on the launched active can
-only follow the address a tracking peer announced on its pulls, and
-the hinted endpoint proves itself by answering the verify pull's
-`?prove=<nonce>` challenge with the token-keyed `line_proof` only a
-peer holding the token produces — so an endpoint that merely replays
-or proxies the public `/checkpoint` can neither arm the demotion nor
-feed the demoted peer forged state, and every checkpoint the adopted
-source serves keeps proving. An unkeyed run has no proof to demand,
-so its announced-only demotion refuses `no_tracking_source` — the
-token is what arms the announced follow-peer contract at all (the
-value here is documentation material; a real deployment substitutes
-its own secret). In a cross-host rig the same commands hold with the
+`--auto-promote N`. Launching both peers with the same
+`--pair-token TOKEN` adds the keyed tracking contract: announced-source
+demotions and every checkpoint the adopted source serves must carry the
+token-keyed `line_proof`, so an endpoint that merely replays or
+fabricates the line's checkpoints can neither arm a demotion nor feed
+the demoted peer forged state. In a cross-host rig the same commands hold with the
 plant's published `host:port` in place of `dcs-plant:9001` and the
 active's published monitoring address in place of `ctrl-a:8080`.
 Alternatively the model can declare `sim-tcp` devices whose

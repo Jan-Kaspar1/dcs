@@ -94,14 +94,6 @@ CONVERGE_TICKS = 4
 HANDOVER_TICKS = 4
 ACTOR = "ci-pair"
 
-# The shared `--pair-token` every rig controller launches with — the
-# keyed tracking contract a real redundant deployment declares:
-# announced-source demotions verify against the token-keyed
-# `line_proof` and refuse `no_tracking_source` on an unkeyed run, so
-# the scripted pairs carry the secret the announced follow-peer
-# contract needs.
-PAIR_TOKEN = "dcs-ci-pair"
-
 
 def stop(process):
     """Terminate a spawned child, escalating to kill if it lingers."""
@@ -170,10 +162,6 @@ def spawn_peer(
     launch, the default an ephemeral loopback bind), `bound` an
     optional list the verbatim bound address is appended to — the
     leg's evidence the declared wildcard bind actually deployed.
-    Every peer carries the pair's `--pair-token` — the shared secret
-    the keyed tracking contract signs `line_proof` answers under, so
-    a duty controller's announced-source demotion verifies its
-    successor rather than refusing `no_tracking_source` unkeyed.
     Returns `(process, monitor_url, preamble)`: `monitor_url` is the
     dialable form of the reported bind — a wildcard bind normalized
     to loopback — or None when the process exits before reporting a
@@ -189,8 +177,6 @@ def spawn_peer(
         listen,
         "--dt",
         str(dt),
-        "--pair-token",
-        PAIR_TOKEN,
     ]
     if standby is not None:
         argv += ["--standby", standby]

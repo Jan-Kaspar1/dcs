@@ -131,8 +131,9 @@ fn write_value(point: u64, value: f64) -> Command {
 
 /// The pair's shared tracking secret the keyed rigs install — the
 /// deployment's `--pair-token` hashed through `pair_key`: an
-/// announced-source demotion verifies against the `line_proof` it
-/// signs and refuses `no_tracking_source` unkeyed.
+/// announced-source demotion verifies the hinted endpoint against
+/// the `line_proof` it signs, and the adopted source's checkpoints
+/// keep proving under fresh nonces.
 const PAIR_KEY: u64 = 0x517c_c1b7_2722_0a95;
 
 /// The answer bound the reproduction held `GET /role` to — `curl -m3`.

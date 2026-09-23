@@ -32,20 +32,6 @@
 # `standby` wiring alone never arms it: only the declared budget
 # does.
 #
-# Both controllers carry the same `--pair-token` — the pair's shared
-# tracking secret, hashed to the key the checkpoint `line_proof`
-# signs under. A duty controller's announced-source demotion needs
-# it: the hinted endpoint must answer the verify pull's `?prove=`
-# nonce with the keyed proof only a peer holding the token produces,
-# so an endpoint replaying or proxying this line's public
-# `/checkpoint` can neither arm the demotion nor feed the demoted
-# peer forged state — and the demoted peer keeps demanding the proof
-# on every checkpoint the adopted source serves. Unkeyed, an
-# announced-only demotion refuses `no_tracking_source` outright. The
-# checked-in value stands in for a deployment secret — a production
-# deployment substitutes its own token, delivered through its secret
-# machinery rather than committed.
-#
 # `ci/check.sh`'s `deploy` stage asserts this file and the manifest
 # agree on every field — a divergence fails `rig-mismatch` — and that
 # `docker compose config` (or the stage's fallback parser) accepts it.
@@ -113,8 +99,6 @@ services:
       - /var/tmp/state.json
       - --journal-file
       - /var/tmp/journal.jsonl
-      - --pair-token
-      - dcs-rig-pair
 
   ctrl-b:
     image: dcs-controller:v0.2.0
@@ -149,8 +133,6 @@ services:
       - /var/tmp/state.json
       - --journal-file
       - /var/tmp/journal.jsonl
-      - --pair-token
-      - dcs-rig-pair
 
 networks:
   dcs-rig:

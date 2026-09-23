@@ -26,8 +26,8 @@
 //! own netns and refuse forever, exactly the reported failure.
 //!
 //! The scenario is the issue's — on the keyed pair a real redundant
-//! deployment declares, since an announced-only demotion now verifies
-//! against the keyed `line_proof` and refuses unkeyed: the standby
+//! deployment declares, whose announced-only demotion verifies the
+//! hinted endpoint's keyed `line_proof`: the standby
 //! converges on `--standby <active>:<port>` while the launched active
 //! was never told a peer; the documented `POST /demote` then
 //! `POST /promote` switch moves the field; the demoted peer must reach `tracking` on

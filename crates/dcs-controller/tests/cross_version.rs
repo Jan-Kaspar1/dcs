@@ -71,8 +71,9 @@ const M: u64 = 5;
 const SETPOINT: PointId = PointId(10);
 const LEVEL: PointId = PointId(11);
 const VALVE: PointId = PointId(12);
-/// The pair secret both monitors key with — the keyed deployment the
-/// announced-demotion contract requires for its endpoint proof.
+/// The pair secret both monitors key with — the keyed deployment a
+/// real redundant pair declares, whose announced demotions verify the
+/// hinted endpoint's `line_proof`.
 const PAIR_KEY: u64 = 0x517c_c1b7_2722_0a95;
 /// The `format_version` the unsupported-version leg serves — outside
 /// `SUPPORTED_FORMAT_VERSIONS` at the newer end.

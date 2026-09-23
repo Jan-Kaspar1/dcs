@@ -146,34 +146,27 @@
 //! `--standby` is the only peer address the CLI used to take — yet a
 //! `POST /demote` turns it into a standby that must track *something*
 //! or strand `unsynchronized` and unpromotable forever. The demoted
-//! peer's checkpoint source is therefore the configured `--peer ADDR`
-//! when given — "active now, but here is my peer for later" — else
-//! the address a verified announced demotion adopted and pinned, else
-//! — on a keyed run only, every pull still demanding the proof — the
-//! recorded announce a field-claim-lost or unpaced demotion follows.
-//! The recorded `?peer=` announce is a hint, not a proof: the serving
-//! side cannot tell the puller's monitor port from any other port its
-//! connection's source claims, and `/checkpoint` is public, so every
-//! document an unproven endpoint serves is replayable — an unkeyed
-//! hint feeds no pull, and `POST /demote` toward an announced-only
-//! source first pulls one checkpoint from it armed with a fresh
-//! `?prove=` nonce.
-//! The pull proceeds only when the returned document continues this
-//! run's line in a way this run's own public `/checkpoint` could not
-//! have answered — a field-owning document not ahead of this run's
-//! tick is replayable, not a successor — *and* carries the keyed
-//! `line_proof` only a peer holding the pair's `--pair-token`
-//! produces, bound to that nonce and that document; then the verified
-//! adoption journals naming the source and pins it, so a later
-//! `?peer=` rewrite cannot redirect the demoted peer's pulls — and
-//! every checkpoint the adopted source later serves must keep proving
-//! under fresh nonces, so an endpoint that merely replays or
-//! fabricates this line's checkpoints can neither arm the demotion
-//! nor feed the demoted peer forged state. A dead, unreachable,
-//! replayed, forged, or unproven hint refuses `no_tracking_source`
-//! like an absent one — and so does any announced-only demotion on an
-//! unkeyed run, which has no endpoint proof to demand. The demoted
-//! instance pulls, applies, and
+//! peer's checkpoint source is therefore resolved per scan cycle: the
+//! configured `--peer ADDR` when given — "active now, but here is my
+//! peer for later" — else the address the tracking peer announced
+//! through its pulls. The announced fallback is a hint, not a proof:
+//! the serving side cannot tell the puller's monitor port from any
+//! other port its connection's source claims, so `POST /demote`
+//! toward an announced-only source first pulls one checkpoint from it
+//! and proceeds only when that checkpoint continues this run's line in
+//! a way this run's own public `/checkpoint` could not have answered —
+//! a field-owning document not ahead of this run's tick is replayable,
+//! not a successor — journaling the adopted source and pinning it, so
+//! a later `?peer=` rewrite cannot redirect the demoted peer's pulls —
+//! while a dead, unreachable, replayed, or forged hint refuses
+//! `no_tracking_source` like an absent one. When both peers launch
+//! with the same `--pair-token`, the verify pull and every checkpoint
+//! the adopted source later serves must additionally carry the keyed
+//! `line_proof` only a peer holding the token produces — bound to the
+//! pull's nonce and the served document — so an endpoint that merely
+//! replays or fabricates this line's checkpoints can neither arm the
+//! demotion nor feed the demoted peer forged state. Either way the
+//! demoted instance pulls, applies, and
 //! reconverges like any standby, and a later `POST /promote` fails
 //! back without a restart. A field owner with neither — nothing
 //! configured and no peer ever announced — refuses `POST /demote`
@@ -575,9 +568,8 @@ struct Options {
     /// holding the token can produce, so an endpoint that merely
     /// replays or fabricates this line's checkpoints can neither arm
     /// the demotion nor feed the demoted peer forged state. `None`
-    /// keeps the run unkeyed: `?prove=` answers stay plain and an
-    /// announced-only demotion refuses `no_tracking_source` — there
-    /// is no endpoint proof to demand.
+    /// keeps the unkeyed contract: announced demotions verify on the
+    /// document checks alone.
     pair_token: Option<String>,
 }
 
@@ -666,10 +658,8 @@ controller scan.
                   endpoint that only replays or fabricates this line's
                   checkpoints can neither arm the demotion nor feed the
                   demoted peer forged state. Requires --listen; unset,
-                  an announced-only demotion refuses no_tracking_source
-                  — without the shared secret there is no endpoint
-                  proof to demand, and a replayed or proxied checkpoint
-                  passes every document check
+                  announced demotions verify on the document checks
+                  alone
   --state-file PATH
                   persist the run's checkpoint to PATH at the end of
                   every scan cycle and at each accepted command's
@@ -914,8 +904,7 @@ fn fail(message: impl std::fmt::Display) -> ExitCode {
 /// deployment declared one — `--pair-token` hashed to the key the
 /// monitor's `?prove=` checkpoint answers sign and its adopted-source
 /// pulls verify. `None` keeps the run unkeyed: `?prove=` answers stay
-/// plain and an announced-only demotion refuses `no_tracking_source`,
-/// there being no endpoint proof to demand.
+/// plain and announced demotions verify on the document checks alone.
 fn keyed_monitor<'d>(monitor: Monitor<'d>, options: &Options) -> Monitor<'d> {
     match &options.pair_token {
         Some(token) => monitor.with_pair_key(dcs_monitor::pair_key(token)),
@@ -1580,18 +1569,13 @@ fn main() -> ExitCode {
 /// One paced scan cycle behind the monitor: the tracking pull first —
 /// while the peer does not own the field and a checkpoint source exists
 /// — then the scan itself. The source is re-resolved every cycle:
-/// the configured `--standby`/`--peer` target when set, else the
-/// endpoint a verified announced demotion adopted and pinned — the
+/// the configured `--standby`/`--peer` target when set, else the monitor
+/// address a tracking peer announced through its `?peer=` pulls — the
 /// follow-peer half that lets a demoted launched active find its
-/// successor without a restart — else, on a keyed run only, the
-/// recorded `?peer=` announce itself. The announce is an unproven
-/// same-source claim a demotion must first verify against the keyed
-/// `line_proof`, and the keyed fallback keeps it safe: every pull
-/// toward an announced source carries a fresh proof nonce the answer
-/// must satisfy, so an interposer replaying this run's public
-/// `/checkpoint` can neither arm the demotion nor feed the tracking
-/// peer, while an in-place demotion the request path never saw still
-/// finds its genuine key-holding peer. The
+/// successor without a restart, the serving side accepting the
+/// announce only as the pulling connection's own source address (a
+/// wildcard `--listen 0.0.0.0` announce resolving to it, so the
+/// recorded source is never an undialable bind address). The
 /// puller follows the resolved source, respawning when it changes, and
 /// announces this monitor's own address on every pull so the serving
 /// peer learns where to track back. A
@@ -1608,8 +1592,7 @@ fn tracked_cycle(
             // demotion must keep proving every checkpoint it serves —
             // an endpoint that only replays or fabricates this line's
             // documents feeds the demoted peer nothing. A configured
-            // source pulls unproven — operator-declared, no proof
-            // owed.
+            // source — or an unkeyed run — pulls unproven, as before.
             let fresh = match monitor.pull_proof_key(source) {
                 Some(key) => CheckpointPuller::with_pair_proof(source, announce, key),
                 None => CheckpointPuller::new(source, announce),

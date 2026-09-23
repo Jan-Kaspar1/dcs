@@ -163,17 +163,17 @@ pub fn spawn_piped(
 }
 
 /// The `--pair-token` every helper-spawned controller carries — the
-/// keyed deployment shape the announced follow-peer contract requires:
-/// an announced-only demotion verifies against the keyed `line_proof`
-/// and refuses `no_tracking_source` on an unkeyed run, so the scripted
-/// pairs run with the shared secret a real redundant deployment
-/// declares. A test that needs the unkeyed shape — the replaying
-/// interposer's reproduction — spawns its controller directly.
+/// keyed deployment shape a real redundant pair declares: an
+/// announced-source demotion then verifies the hinted endpoint's
+/// `line_proof`, and every checkpoint the adopted source serves keeps
+/// proving under fresh nonces. A test that needs the unkeyed shape —
+/// the replaying interposer's reproduction — spawns its controller
+/// directly.
 pub const PAIR_TOKEN: &str = "dcs-test-pair";
 
 /// Appends the shared `--pair-token` to `args` unless the caller
-/// already declared one — the keyed pair wiring every spawned
-/// controller needs for the announced-demotion contract.
+/// already declared one — the keyed pair wiring the scripted
+/// controllers run the announced-demotion contract under.
 fn pair_args(args: &mut Vec<String>, extra: &[String]) {
     if !extra.iter().any(|arg| arg == "--pair-token") {
         args.push("--pair-token".to_string());

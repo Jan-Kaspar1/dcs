@@ -64,8 +64,8 @@ fn signal_index() -> SignalIndex {
 const RECEIPT_CAPACITY: usize = 4;
 
 /// The pair's shared tracking secret both monitors key with — the
-/// `--pair-token` deployment the announced-demotion contract requires:
-/// the demote-then-track-back legs below verify and pull against the
+/// `--pair-token` deployment a real redundant pair declares: the
+/// demote-then-track-back legs below verify and pull against the
 /// keyed `line_proof` it signs.
 const PAIR_KEY: u64 = 0x517c_c1b7_2722_0a95;
 
