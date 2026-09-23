@@ -37,6 +37,18 @@
 //! a random source, so identical write and step sequences always produce
 //! identical [`Sample`](dcs_core::Sample)s.
 //!
+//! Every stored sample stays representable: a `Float` point never holds
+//! NaN or an infinity, because JSON — the wire and checkpoint spelling —
+//! has no literal for them (serde emits `null`, which no `Value` decode
+//! reads back). Writes carrying a non-finite `Float` are refused with
+//! [`IoError::InvalidValue`](dcs_core::IoError::InvalidValue), map and
+//! script validation reject non-finite seeds, checkpoint restores refuse
+//! them, and a step whose element arithmetic overflows commits nothing:
+//! the element holds its last finite state and reports it
+//! `Bad`/`out_of_range`, recovering on the first step whose arithmetic
+//! lands finite — where a committed non-finite result would have stayed
+//! corrupt until the field restarted.
+//!
 //! `SimDriver` also implements the driver half of the state-capture
 //! contract — [`IoDriver::capture_state`](dcs_core::IoDriver::capture_state)
 //! and [`IoDriver::restore_state`](dcs_core::IoDriver::restore_state) — so
