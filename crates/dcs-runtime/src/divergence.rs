@@ -6,15 +6,16 @@
 //! *would* issue — the staged field `Out` image — while its
 //! [`WriteGate`](crate::WriteGate) keeps them from the field. That staged
 //! image is evidence: if it disagrees with the field's actual values at
-//! the same tick, promoting this peer would write a different field than
-//! the active produced — skewed parameters, a plant restart, a state the
-//! checkpoint stream did not cover. [`Peer`](crate::Peer) therefore
-//! stashes each non-field-owning scan's staged image and, when a later
-//! checkpoint transfer lands at that same tick, compares it point by
-//! point against the peer's own reads of the same `Out` points —
+//! the same stream position, promoting this peer would write a different
+//! field than the active produced — skewed parameters, a plant restart,
+//! a state the checkpoint stream did not cover. [`Peer`](crate::Peer)
+//! therefore stashes each non-field-owning scan's staged image tagged
+//! with the checkpoint tick it predicts, and when a later transfer
+//! carries exactly that tick, compares it point by point against the
+//! peer's own reads of the same `Out` points —
 //! the field-observing path the decision allows. A mismatch moves the
 //! peer to the named `Diverged` synchronization state, blocks promotion,
-//! and journals the evidence; a fresh transfer whose same-tick
+//! and journals the evidence; a fresh transfer whose same-position
 //! comparison *read the field and matched* clears it — and only that:
 //! `Diverged` is the promotion-blocking "my staged outputs differ from
 //! the field" verdict, so an apply that ran no comparison, or a
@@ -57,12 +58,14 @@ pub fn values_diverge(staged: Value, field: Value) -> bool {
     }
 }
 
-/// One transfer's divergence verdict: the tick the compared staged image
-/// belongs to and the mismatched field `Out` points, in point order.
+/// One transfer's divergence verdict: the run tick the comparison stood
+/// on and the mismatched field `Out` points, in point order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DivergenceReport {
-    /// The tick both sides describe — the staged scan's tick, equal to
-    /// the applied checkpoint's tick by the check's pairing rule.
+    /// The run tick the comparison stood on — the staged scan's tick,
+    /// equal to the tick the paired checkpoint applied at; the compared
+    /// values describe the checkpoint's own stream tick, which the
+    /// check's pairing rule shares.
     pub tick: Tick,
     /// The mismatched field `Out` points, in ascending point order.
     pub mismatches: Vec<Divergence>,
@@ -70,16 +73,16 @@ pub struct DivergenceReport {
 
 /// One `Diverged` → `Tracking` transition — the resolution a successful
 /// checkpoint apply produced — carrying the applied tick and the
-/// same-tick field comparison the clear stands on.
+/// same-position field comparison the clear stands on.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolutionReport {
-    /// The applied checkpoint's tick — equal to the compared staged
-    /// image's tick by the check's pairing rule.
+    /// The run tick the clearing apply landed at — equal to the
+    /// compared staged image's scan tick by the check's pairing rule.
     pub tick: Tick,
     /// Every staged field `Out` point the clearing comparison verified
     /// matching, with both sides' values, in ascending point order: the
     /// positive evidence the clear stands on. A `Diverged` verdict
-    /// clears only on a same-tick comparison that read every staged
+    /// clears only on a same-position comparison that read every staged
     /// point and matched, so `compared` always names the full staged
     /// image — the proof the promotion gate reopened on.
     pub compared: Vec<Divergence>,

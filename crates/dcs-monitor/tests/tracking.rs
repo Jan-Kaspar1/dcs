@@ -724,7 +724,7 @@ fn driven_stale_apply_leaves_the_standby_diverged() {
                 if compared.len() == 1
                     && compared[0].point == PointId(20)
                     && compared[0].staged == compared[0].field
-                    && entry.tick == Tick(5)
+                    && entry.tick == Tick(6)
         )),
         "the clear must journal as divergence_resolved at the compared tick: {journal:?}"
     );

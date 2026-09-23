@@ -1282,7 +1282,12 @@ fn published_reads_cover_every_execution_mode() {
                     report.sync,
                     Some(StandbySync::Tracking { aligned: Tick(4) })
                 );
-                assert_published_surfaces(&standby, &standby_client, Tick(5));
+                // Tick 6, not 5: the second pull repeats the tick-4
+                // checkpoint and a tracking apply never rewinds the
+                // run's clock — it lands at the run's own tick, so the
+                // second requested scan produces tick 6 rather than
+                // re-recording tick 5.
+                assert_published_surfaces(&standby, &standby_client, Tick(6));
                 // The role gate holds: a command on the tracking peer
                 // takes the named `not_active` rejection receipt, never
                 // a phantom application.

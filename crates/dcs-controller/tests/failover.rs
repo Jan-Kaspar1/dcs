@@ -28,8 +28,8 @@
 use dcs_assembly::assemble;
 use dcs_controller::registry;
 use dcs_core::{
-    Command, CommandError, CommandOutcome, IoDriver, IoError, JournalEvent, PointId, Role,
-    StandbySync, TelemetrySnapshot, Tick, Value, ValueKind,
+    Command, CommandError, CommandOutcome, IoDriver, IoError, JournalEvent, PointId, Quality,
+    QualityReason, Role, StandbySync, TelemetrySnapshot, Tick, Value, ValueKind,
 };
 use dcs_model::PlantModel;
 use dcs_monitor::MonitorClient;
@@ -2192,6 +2192,245 @@ fn a_cold_restarted_source_resyncs_the_tracking_peer_without_rewinding() {
     assert!(
         standby_process.child.try_wait().unwrap().is_none(),
         "the resynced peer exited"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The QA finding
+/// `history-ring-tick-regression-on-checkpoint-realign`, on the driven
+/// failover rig — the same-generation half of the realign defect the
+/// cold-restart test above cannot reach. The field-owning source runs
+/// `--state-file`, so its kill-and-respawn is a *warm* resume: the
+/// file's generation carries, and the restarted run continues the
+/// tracked line at its persisted tick — exactly the rig's
+/// `docker stop`/`docker start` source. While the source is dead the
+/// unarmed standby keeps scanning on the frozen field — its tick
+/// advancing, its input reads going `Stale` — until it leads the
+/// persisted stream tick. The resumed source's checkpoints then lag
+/// the tracking run without regressing the stream: no generation
+/// boundary, no `source_restarted`, yet a realign that lands at the
+/// stream's tick would rewind the run's clock over samples and journal
+/// entries the rings already recorded — the double-covered tick range
+/// the finding's ring showed. The corrected apply lands the lagging
+/// stream's state at the run's own tick instead: every retained
+/// `/history` ring stays strictly ascending in tick — one sample per
+/// tick, no range covered twice — and the journal's tick attribution
+/// never decreases.
+#[test]
+fn a_warm_resumed_source_never_rewinds_the_tracking_peers_tick_axis() {
+    let dir = std::env::temp_dir().join(format!("dcs-failover-warmresync-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let state_file = dir.join("source-state.json");
+
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    // The level input carries the rig's freshness budget so the frozen
+    // field journals and records the stale interval the QA ring
+    // retained.
+    let mut document = sim_tcp_document(MODEL_SOURCE, pair_plant.addr, SimTcp::PerDevice);
+    for point in document["io_points"].as_array_mut().unwrap() {
+        if point["id"].as_u64() == Some(LEVEL.0) {
+            point["stale_after_ticks"] = 3.into();
+        }
+    }
+    let pair_model = write_model(&dir, "pair.json", &document).0;
+    // The field observer's setpoint lands before the controllers spawn:
+    // the launched active's startup claim fences this attachment from
+    // boot, so every later access is a read.
+    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.ensure_writer(SEED).unwrap();
+    field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    field.release_writer().unwrap();
+
+    // The source persists every completed scan; the standby is
+    // unarmed — the finding's "docker start before any failover" — so
+    // the outage degrades it without ever promoting it.
+    let mut active_process = spawn_controller(
+        &pair_model,
+        &["--state-file".to_string(), state_file.display().to_string()],
+        DT,
+    );
+    let relay = Relay::forwarding(active_process.addr);
+    let standby_process = spawn_controller(
+        &pair_model,
+        &["--standby".to_string(), relay.addr.to_string()],
+        DT,
+    );
+    let active = MonitorClient::new(active_process.addr);
+    let standby = MonitorClient::new(standby_process.addr);
+
+    // The defect the test watches for: the standby's run tick — the
+    // journal/history attribution domain — must never decrease.
+    let mut last_tick = 0u64;
+    let mut advance_standby = |ticks: u64| {
+        let snapshot = standby.advance(ticks).unwrap();
+        assert!(
+            snapshot.tick.0 >= last_tick,
+            "the standby's run tick rewound: {last_tick} -> {}",
+            snapshot.tick.0
+        );
+        last_tick = snapshot.tick.0;
+        snapshot
+    };
+
+    for _ in 0..N {
+        advance_standby(1);
+        active.advance(1).unwrap();
+    }
+    assert!(
+        matches!(
+            standby.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby never converged: {:?}",
+        standby.role().unwrap()
+    );
+
+    // The finding's trigger: the source stops mid-run — the plant
+    // freezes, the state file holds its last completed scan's tick —
+    // while the standby keeps scanning past it, its reads going stale
+    // on the frozen field. The freeze runs longer than the freshness
+    // budget but stays under any failover: unarmed, the misses only
+    // degrade.
+    kill(&mut active_process);
+    const FREEZE: u64 = 6;
+    for _ in 0..FREEZE {
+        advance_standby(1);
+    }
+    let held = standby.role().unwrap().tick;
+    assert_eq!(
+        held.0,
+        N + FREEZE,
+        "the unarmed standby must keep scanning on the frozen field"
+    );
+
+    // The source warm-resumes: the state file resumes it at its
+    // persisted tick under the file's generation — the tracked line
+    // itself, not a new one — still N + FREEZE - 1 ticks behind the
+    // standby's run. Its conditional startup grant lands once the
+    // plant reaps the killed owner's attachment.
+    let probe = RemoteDriver::connect(pair_plant.addr).unwrap();
+    let reap_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match probe.claim_writer_unless_held(0xf00d) {
+            Ok(_) => break,
+            Err(RemoteError::Fenced) => {
+                assert!(
+                    std::time::Instant::now() < reap_deadline,
+                    "the dead owner's claim was never reaped"
+                );
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("the conditional probe failed: {error}"),
+        }
+    }
+    probe.release_writer().unwrap();
+    let restarted_process = spawn_controller(
+        &pair_model,
+        &["--state-file".to_string(), state_file.display().to_string()],
+        DT,
+    );
+    let restarted = MonitorClient::new(restarted_process.addr);
+    relay.retarget(restarted_process.addr);
+    let owner = restarted.advance(1).unwrap();
+    assert_eq!(owner.tick.0, N + 1, "the state file resumes at its persisted tick");
+
+    // The realign: the standby pulls the resumed stream's checkpoint —
+    // same generation, still above the stale alignment, yet ticks
+    // behind the run's own clock. The apply adopts its state at the
+    // run's tick rather than rewinding the recorded stale window onto
+    // the stream's domain. The staged image the freeze's last scan
+    // left predicts a stream position the resumed line never reaches —
+    // its tick domain continued from the persisted tick, not the
+    // standby's — so no divergence compare pairs against it; the next
+    // checkpoint's same-position compare is the reconvergence proof.
+    let realigned = advance_standby(1);
+    assert_eq!(
+        realigned.tick.0,
+        N + FREEZE + 1,
+        "the lagging same-line apply must hold the run's clock"
+    );
+    assert!(
+        matches!(
+            standby.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby must reconverge on the resumed stream: {:?}",
+        standby.role().unwrap()
+    );
+
+    // Tracking continues upward — the resumed owner stepping the field
+    // again clears the staleness inside the freshness budget, and each
+    // apply's same-position compare keeps proving the field evidence.
+    for _ in 0..4 {
+        restarted.advance(1).unwrap();
+        advance_standby(1);
+    }
+    assert!(
+        matches!(
+            standby.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the resynced peer must stay a promotable tracking standby: {:?}",
+        standby.role().unwrap()
+    );
+
+    // Every retained ring presents a usable tick axis: strictly
+    // ascending, one sample per tick — the finding's regression made
+    // the post-realign stretch double-cover the recorded stale window.
+    // The stale interval itself is retained below the realign tick,
+    // followed by the recovered `Good` samples — one coverage each.
+    let mut saw_stale = false;
+    for point_history in standby.history(&[], 0).unwrap() {
+        let ticks: Vec<u64> = point_history
+            .samples
+            .iter()
+            .map(|sample| sample.sample.tick.0)
+            .collect();
+        assert!(
+            ticks.windows(2).all(|pair| pair[0] < pair[1]),
+            "point {:?} history is not strictly ascending — the ring \
+             double-covers a tick range: {ticks:?}",
+            point_history.point
+        );
+        if point_history.point == LEVEL {
+            saw_stale = point_history
+                .samples
+                .iter()
+                .any(|sample| {
+                    sample.sample.quality == Quality::Uncertain(QualityReason::Stale)
+                });
+        }
+    }
+    assert!(
+        saw_stale,
+        "the frozen window's staleness must be retained in the level ring"
+    );
+
+    // The journal's tick attribution never decreases either — the
+    // stale onset, its recovery, and any resync evidence all land on
+    // the run's own clock — and a same-line realign names no boundary:
+    // no `source_restarted` may journal for a stream that never
+    // crossed a generation.
+    let journal = standby.journal(0).unwrap();
+    let attributed: Vec<u64> = journal.iter().map(|entry| entry.tick.0).collect();
+    assert!(
+        attributed.windows(2).all(|pair| pair[0] <= pair[1]),
+        "journal ticks must be non-decreasing in seq order: {attributed:?}"
+    );
+    assert!(
+        journal.iter().any(|entry| matches!(
+            entry.event,
+            JournalEvent::QualityChanged { .. }
+        )),
+        "the freeze window's quality transitions must journal: {journal:?}"
+    );
+    assert!(
+        !journal.iter().any(|entry| matches!(
+            entry.event,
+            JournalEvent::SourceRestarted { .. }
+        )),
+        "a same-generation warm resume is no source restart: {journal:?}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
