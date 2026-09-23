@@ -5,7 +5,8 @@
 //! decisions, an active/standby pair is one logical controller to the
 //! monitoring UI: each instance reports a [`Role`] — `active`,
 //! `standby`, or one of the transition states — plus the standby's
-//! checkpoint convergence, together as the serde [`RoleReport`] the
+//! checkpoint convergence and the field's write-ownership claim as the
+//! run last observed it, together as the serde [`RoleReport`] the
 //! monitoring transport serves and promotion requests answer. Refusals of
 //! promotion, demotion, and checkpoint application are the named
 //! [`SwitchError`]s.
@@ -171,6 +172,51 @@ impl fmt::Display for StandbySync {
     }
 }
 
+/// The field's write-ownership claim as the reporting run last observed
+/// it — the arbitration half of field ownership, reported beside
+/// [`StandbySync`]'s tracked-line verdicts.
+///
+/// The claim and the tracked line answer different questions:
+/// [`StandbySync::Orphaned`] proves the *serving run* writes nothing —
+/// read off the checkpoint's `source_owns_field` stamp — while this
+/// vocabulary proves whether the *field's own arbitration* holds a
+/// writer at all. The two observably differ: a dead owner's standing
+/// claim reports [`Held`](FieldClaim::Held) while both peers report
+/// `orphaned`, and a restarted field reports
+/// [`Unclaimed`](FieldClaim::Unclaimed) while the tracked line may
+/// still report `tracking`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldClaim {
+    /// An owner holds the field's write-ownership claim — the
+    /// reporting run's own granted claim, or a standing owner the
+    /// field's arbitration named (a claim probe's `fenced` answer).
+    /// Mutations from non-holders stay fenced.
+    Held,
+    /// No attachment holds the field's write-ownership claim — the
+    /// fail-closed window a fresh or restarted field, or a released
+    /// claim, leaves: reads stay open while mutations refuse the
+    /// field's `unclaimed` verdict until a claim lands.
+    ///
+    /// On a promotable peer — a non-field-owning run whose `sync`
+    /// reports a converged state — this is the operator signal "field
+    /// unclaimed: needs promote": the documented remedy is `promote`,
+    /// whose unconditional claim takes the field and lifts the write
+    /// gate. On a field-owning peer it reports the run's own claim
+    /// lost, whose remedy is the driver's conditional re-arm, not
+    /// promotion.
+    Unclaimed,
+}
+
+impl fmt::Display for FieldClaim {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Held => "held",
+            Self::Unclaimed => "unclaimed",
+        })
+    }
+}
+
 /// The instance's reported role: the `GET /role` payload and the answer
 /// body of `POST /promote` and `POST /demote`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -186,6 +232,17 @@ pub struct RoleReport {
     /// becoming a tracking peer (`standby`, `promoting`, `demoting`);
     /// `None` for a settled `active`.
     pub sync: Option<StandbySync>,
+    /// The field's write-ownership claim as the reporting run last
+    /// observed it — `Some` only where the run carries field-side
+    /// evidence; `None` where none stands: a driver surface without
+    /// claim arbitration, a run that has not asked, or a report whose
+    /// producer predates the vocabulary. `None` is distinct from
+    /// [`FieldClaim::Held`] — "no claim question was answered" is not
+    /// "an owner stands". Absent on the wire under the served
+    /// contract's optional-field convention, so payloads written
+    /// before the field existed load and re-serve unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_claim: Option<FieldClaim>,
 }
 
 /// Why a switchover request was refused — the named errors of the
@@ -264,16 +321,25 @@ mod tests {
                 role: Role::Active,
                 tick: Tick(12),
                 sync: None,
+                field_claim: None,
+            },
+            RoleReport {
+                role: Role::Active,
+                tick: Tick(14),
+                sync: None,
+                field_claim: Some(FieldClaim::Held),
             },
             RoleReport {
                 role: Role::Standby,
                 tick: Tick(9),
                 sync: Some(StandbySync::Unsynchronized),
+                field_claim: None,
             },
             RoleReport {
                 role: Role::Promoting,
                 tick: Tick(30),
                 sync: Some(StandbySync::Tracking { aligned: Tick(25) }),
+                field_claim: None,
             },
             RoleReport {
                 role: Role::Demoting,
@@ -281,11 +347,19 @@ mod tests {
                 sync: Some(StandbySync::Degraded {
                     detail: "fetch failed".to_string(),
                 }),
+                field_claim: None,
             },
             RoleReport {
                 role: Role::Standby,
                 tick: Tick(38),
                 sync: Some(StandbySync::Orphaned { aligned: Tick(35) }),
+                field_claim: Some(FieldClaim::Held),
+            },
+            RoleReport {
+                role: Role::Standby,
+                tick: Tick(39),
+                sync: Some(StandbySync::Tracking { aligned: Tick(36) }),
+                field_claim: Some(FieldClaim::Unclaimed),
             },
             RoleReport {
                 role: Role::Standby,
@@ -304,6 +378,7 @@ mod tests {
                         },
                     ],
                 }),
+                field_claim: None,
             },
             RoleReport {
                 role: Role::Standby,
@@ -322,6 +397,7 @@ mod tests {
                         initialized: vec![],
                     }),
                 }),
+                field_claim: None,
             },
         ];
         for report in reports {
@@ -341,10 +417,42 @@ mod tests {
                 role: Role::Standby,
                 tick: Tick(30),
                 sync: Some(StandbySync::Tracking { aligned: Tick(25) }),
+                field_claim: None,
             })
             .unwrap(),
             r#"{"role":"standby","tick":30,"sync":{"tracking":{"aligned":25}}}"#
         );
+    }
+
+    #[test]
+    fn field_claim_uses_snake_case_names() {
+        assert_eq!(
+            serde_json::to_string(&FieldClaim::Held).unwrap(),
+            "\"held\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FieldClaim::Unclaimed).unwrap(),
+            "\"unclaimed\""
+        );
+        assert_eq!(FieldClaim::Unclaimed.to_string(), "unclaimed");
+        assert_eq!(FieldClaim::Held.to_string(), "held");
+    }
+
+    /// The optional-field convention on `field_claim`: a payload written
+    /// before the field existed loads unchanged and re-serves without
+    /// the key, and the grown wire type spells the claim state
+    /// snake_case beside `role`/`sync`.
+    #[test]
+    fn role_report_field_claim_is_additive() {
+        let legacy = r#"{"role":"standby","tick":30,"sync":{"tracking":{"aligned":25}}}"#;
+        let report = serde_json::from_str::<RoleReport>(legacy).unwrap();
+        assert_eq!(report.field_claim, None);
+        assert_eq!(serde_json::to_string(&report).unwrap(), legacy);
+
+        let grown = r#"{"role":"standby","tick":30,"sync":{"orphaned":{"aligned":25}},"field_claim":"unclaimed"}"#;
+        let report = serde_json::from_str::<RoleReport>(grown).unwrap();
+        assert_eq!(report.field_claim, Some(FieldClaim::Unclaimed));
+        assert_eq!(serde_json::to_string(&report).unwrap(), grown);
     }
 
     #[test]
