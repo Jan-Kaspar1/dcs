@@ -330,14 +330,20 @@ impl Driver {
         }
     }
 
-    /// Forgets this instance's recorded field-ownership claim — the
-    /// demotion counterpart of [`claim_writer`](Self::claim_writer):
-    /// after it, a re-attaching field driver does not re-arm a claim
-    /// this peer gave up, so a restarted plant's empty arbitration stays
-    /// free for the peer that legitimately owns the field.
+    /// Drops this instance's field-ownership hold — the demotion
+    /// counterpart of [`claim_writer`](Self::claim_writer): the
+    /// attachment forgets the recorded owner so a re-attach does not
+    /// re-assert a claim this peer gave up, and the claim itself stays
+    /// standing, marked yielded — the field never opens an unclaimed
+    /// window, while a successor's conditional claim can still tell
+    /// this deliberate step-down from a live incumbent's claim.
+    /// Best-effort: a dead plant drops the connection — and the hold
+    /// with it — anyway.
     fn release_claim(&self) {
         match self {
-            Self::Remote(remote) => remote.release_claim(),
+            Self::Remote(remote) => {
+                let _ = remote.release_writer_keep_claim();
+            }
             Self::Local(fanout) => fanout.release_field_claims(),
         }
     }
@@ -385,17 +391,21 @@ impl Driver {
 
     /// The launched-controller counterpart of
     /// [`claim_writer`](Self::claim_writer) — run once at startup
-    /// activation: takes the field's write-ownership under `owner` only
-    /// where no *live* attachment holds a different owner's claim —
+    /// activation, and by an orphaned peer's promotion as the
+    /// conditional claim the stale-island rule needs: takes the field's
+    /// write-ownership under `owner` only where no live *controller*
+    /// attachment holds a different owner's unyielded claim —
     /// `Ok(true)` — answering `Ok(false)` where a live incumbent
     /// stands. A restarted controller cannot prove its resumed state is
     /// current with that incumbent's — a stale `--state-file` would
     /// silently roll back commands the incumbent receipted and applied —
-    /// while a claim a dead owner left standing is still preempted,
-    /// the restart-as-active recovery path. A purely local simulated
-    /// model has no shared field to claim and answers `Ok(true)`
-    /// vacuously; field kinds that cannot distinguish live holders
-    /// fall back to the unconditional claim.
+    /// while a claim a dead owner left standing, a deliberately
+    /// yielded claim, or a field tool's hold is still preempted: the
+    /// restart-as-active recovery path, the demotion hand-off, and the
+    /// rogue-claim cleanup the promote recovery relies on. A purely
+    /// local simulated model has no shared field to claim and answers
+    /// `Ok(true)` vacuously; field kinds that cannot distinguish live
+    /// holders fall back to the unconditional claim.
     fn claim_writer_unless_held(&self, owner: u64) -> Result<bool, String> {
         match self {
             Self::Remote(remote) => match remote.claim_writer_unless_held(owner) {
@@ -420,17 +430,20 @@ impl Driver {
 
     /// The conditional counterpart of [`claim_writer`](Self::claim_writer)
     /// — the orphan-cycle probe a demoted ex-owner runs while the
-    /// tracked line reports no field owner: re-arms the claim under
-    /// `owner` only where the field stands unclaimed or already names
-    /// the token — `Ok(true)` — refusing `Ok(false)` while a different
-    /// owner stands, so a released claim re-arms instead of leaving the
-    /// field open to a foreign grab and no probe ever preempts. A
-    /// purely local simulated model has no shared field to claim and
-    /// answers `Ok(true)` vacuously.
+    /// tracked line reports no field owner: keeps the released claim
+    /// standing under `owner` where the field stands unclaimed or
+    /// already names the token — `Ok(true)` — refusing `Ok(false)`
+    /// while a different owner stands, so a released claim stays armed
+    /// instead of leaving the field open to a foreign grab and no probe
+    /// ever preempts. The probe is unbound: it never joins the claim's
+    /// holders, so the probing ex-owner cannot read as a live incumbent
+    /// to another owner's conditional claim. A purely local simulated
+    /// model has no shared field to claim and answers `Ok(true)`
+    /// vacuously.
     fn ensure_writer(&self, owner: u64) -> Result<bool, String> {
         match self {
-            Self::Remote(remote) => match remote.ensure_writer(owner) {
-                Ok(_) => Ok(true),
+            Self::Remote(remote) => match remote.ensure_writer_unbound(owner) {
+                Ok(()) => Ok(true),
                 Err(RemoteError::Fenced) => Ok(false),
                 Err(error) => Err(format!("plant write-ownership re-arm failed: {error}")),
             },
@@ -1079,7 +1092,11 @@ fn main() -> ExitCode {
                 Err(error) => return fail(error),
             };
             match RemoteDriver::connect(addr) {
-                Ok(remote) => Driver::Remote(remote),
+                // A controller's field attachment claims as a
+                // controller: its write-ownership claims record the
+                // marker a peer's conditional takeover refuses to
+                // preempt while they stand live.
+                Ok(remote) => Driver::Remote(remote.as_controller()),
                 Err(error) => {
                     return fail(format!("cannot connect to plant at {addr}: {error}"));
                 }
@@ -1198,6 +1215,7 @@ fn main() -> ExitCode {
         .with_field_claim(|| driver.claim_writer(owner))
         .with_field_release(|| driver.release_claim())
         .with_field_ensure(|| driver.ensure_writer(owner))
+        .with_field_orphan_claim(|| driver.claim_writer_unless_held(owner))
         .with_field_startup_claim(|| driver.claim_writer_unless_held(owner));
     let peer = match options.auto_promote {
         Some(budget) => peer.with_failover(budget),

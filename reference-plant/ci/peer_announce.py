@@ -34,12 +34,15 @@ as the manifest declares. The run:
   successor into `tracking` — and the source the demotion verified
   and adopted is pinned, so even a landed rewrite at that point
   could not redirect the pulls; a landed announce *before* the
-  demote is the case the hardened contract must answer — the
-  endpoint it names is unverified, so the demotion refuses
-  `no_tracking_source` rather than stranding the peer on a dead
-  pull. (A landed announce between the genuine ones could not
-  strand anything even before the pinning: the next pull's own
-  announce overwrites it — the honest healing path.);
+  demote is the case the hardened contract must answer — it joins
+  the bounded announced set beside the genuine ones instead of
+  evicting them, and the demotion's per-candidate verification skips
+  the endpoint no checkpoint pull can verify and adopts the verified
+  standby: the journaled `tracking_source_adopted` is the audit. (A
+  landed announce that ever outlived every genuine one still meets
+  the same verify-at-demote rule: with no verifiable candidate the
+  demotion refuses `no_tracking_source` rather than stranding the
+  peer on a dead pull.);
 - the restore — the same switch back leaves the manifest-declared
   duty controller `active` and its standby `tracking` again.
 
@@ -56,9 +59,11 @@ exits 1 — the check's `peer-announce-failed`. `--tamper
 landed-announce` doctors the crafted announce onto the pulling
 connection's own source address — a closed local port — so it lands
 exactly as it would on a controller whose acceptance check regressed,
-and the field owner's demotion refuses `no_tracking_source` against
-the unverifiable hint rather than stranding the demoted peer —
-proving the leg's demote-refusal assertion fires.
+and doctors the adoption assertion to require that planted address:
+a healthy demotion verifies past the dead hint, journals
+`tracking_source_adopted` naming the genuine standby, and the leg
+reports the mismatch — while a blind last-announcer adoption would
+satisfy the doctored expectation and pass silently.
 """
 
 import argparse
@@ -86,16 +91,39 @@ FOREIGN_HOST = "10.255.255.1"
 def crafted_peer(tamper):
     """The `?peer=` address the crafted announce names — a closed port
     either way, so a landed announce records a hint no checkpoint
-    pull can verify: the demotion it would arm refuses
-    `no_tracking_source` instead of stranding the peer on a dead
-    pull. The honest leg moves the just-released port onto
-    `FOREIGN_HOST`, naming a source the pulling connection does not
-    own; the `landed-announce` tamper keeps the loopback source so the
+    pull can verify: the demotion's per-candidate verification skips
+    it for the verified standby, and the doctored assertion expects
+    it to be the journaled `tracking_source_adopted` instead. The
+    honest leg moves the just-released port onto `FOREIGN_HOST`,
+    naming a source the pulling connection does not own; the
+    `landed-announce` tamper keeps the loopback source so the
     announce lands."""
     closed = pair.closed_port()
     if tamper == "landed-announce":
         return closed
     return f"{FOREIGN_HOST}:{closed.rsplit(':', 1)[1]}"
+
+
+def adopted_source(journal_path):
+    """The most recent `tracking_source_adopted` event's full
+    `host:port` the journal file records — the demotion's audit of
+    which announced endpoint it verified and pinned. Unlike
+    `pair.journal_records` the port is kept: the landed-announce
+    tamper's whole proof is which port the adoption named."""
+    adopted = None
+    with open(journal_path) as handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            entry = record.get("entry")
+            if not isinstance(entry, dict):
+                continue
+            event = entry.get("event", {}).get("tracking_source_adopted")
+            if isinstance(event, dict) and event.get("source"):
+                adopted = event["source"]
+    return adopted
 
 
 def crafted_announce(url, peer, tick, fingerprint, failures):
@@ -216,6 +244,27 @@ def announce_pass(args, tamper):
             }
         )
 
+        # The landed-announce tamper's assertion: the planted hint
+        # joined the announced set beside the genuine one, so the
+        # demotion's per-candidate verification — not the announce
+        # itself — is what answers it. The journaled
+        # `tracking_source_adopted` names which endpoint the demotion
+        # verified and pinned; the tamper doctors that expectation to
+        # require the planted address, so a healthy adoption — the
+        # verified standby over the unverifiable hint — reports the
+        # named mismatch while a blind last-announcer adoption would
+        # satisfy the doctored expectation and pass silently.
+        if tamper == "landed-announce":
+            adopted = adopted_source(rig.duty_files["journal_file"])
+            if adopted != crafted:
+                failures.append(
+                    "the demotion did not follow the landed announce — "
+                    "its journal's tracking_source_adopted names "
+                    f"{adopted or 'nothing'}, expected the planted "
+                    f"{crafted}"
+                )
+                raise Abort
+
         # Phase 4 — the restore: the same switch back leaves the pair
         # in the manifest's declared arrangement — the duty controller
         # `active`, its standby `tracking`.
@@ -260,9 +309,10 @@ def main():
         "--tamper",
         choices=["landed-announce"],
         help="doctor the crafted announce onto the pulling "
-        "connection's own source address so it lands — the field "
-        "owner's demotion must refuse no_tracking_source against "
-        "the unverifiable hint",
+        "connection's own source address so it lands — the "
+        "demotion's journaled tracking_source_adopted must name "
+        "that planted address, so a healthy verified adoption "
+        "reports the mismatch",
     )
     args = parser.parse_args()
 

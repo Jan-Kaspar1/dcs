@@ -47,18 +47,33 @@
 //! - `{"op":"list_points"}` — `SimDriver::points`; answers
 //!   `{"result":"points","points":[…]}` with every bound point's
 //!   direction, observed sample, and active fault, ordered by point id.
-//! - `{"op":"claim_writer","owner":7}` — takes the plant's
-//!   field-write ownership for the `owner` token; answers
+//! - `{"op":"claim_writer","owner":7,"controller":true}` — takes the
+//!   plant's field-write ownership for the `owner` token; answers
 //!   `{"result":"done"}`, or `{"result":"claimed_shared","owner":7}`
 //!   when another live attachment already holds the token.
-//! - `{"op":"ensure_writer","owner":7}` — the conditional re-grant a
-//!   re-attaching owner asserts; answers `done` while the field is
-//!   unclaimed or already claims `owner` — `claimed_shared` when other
-//!   live attachments hold the token — `fenced` while a different
-//!   owner stands.
-//! - `{"op":"release_writer"}` — drops this connection's hold on the
-//!   write claim, releasing the claim itself when the last holder
-//!   leaves; answers `done`.
+//!   `controller` records whether the claimer is a controller peer —
+//!   only a controller's live unyielded claim refuses the conditional
+//!   takeover below; a tool's claim never does. Payloads predating the
+//!   flag decode as `true`, the conservative verdict.
+//! - `{"op":"ensure_writer","owner":7,"rebind":true,"controller":true}`
+//!   — the conditional re-grant a re-attaching owner asserts; answers
+//!   `done` while the field is unclaimed or already claims `owner` —
+//!   `claimed_shared` when other live attachments hold the token —
+//!   `fenced` while a different owner stands. `rebind:false` raises or
+//!   confirms the claim without joining its holders — the demoted
+//!   ex-owner's orphan-cycle probe. `controller` is `claim_writer`'s
+//!   marker on the claim this grant raises.
+//! - `{"op":"claim_writer_unless_held","owner":7}` — the conditional
+//!   takeover grant a controller's startup activation and an orphaned
+//!   peer's promotion run; answers `done` while no live *controller*
+//!   attachment holds a different owner's unyielded claim, `fenced`
+//!   while one stands — a dead, yielded, or tool-held claim still
+//!   preempts, so a crashed owner's recovery and a rogue claim's
+//!   cleanup keep working where a live incumbent is protected.
+//! - `{"op":"release_writer","keep_claim":false}` — drops this
+//!   connection's hold on the write claim, releasing the claim itself
+//!   when the last holder leaves; answers `done`. `keep_claim:true` —
+//!   the demotion shape — keeps the claim standing, marked yielded.
 //!
 //! ## Field write-ownership fencing
 //!
@@ -111,7 +126,16 @@
 //! connection's hold, releasing the claim itself when the last holder
 //! leaves — the shape a mutation tool that claimed conditionally
 //! (`dcs-plant-ctl`) needs so its claim cannot outlive its connection
-//! and fence the owner's re-arm.
+//! and fence the owner's re-arm. Its `keep_claim` half is the
+//! demotion's: the ex-owner's hold drops but the claim stands, marked
+//! yielded — the token keeps fencing the field, and a successor's
+//! `claim_writer_unless_held` still preempts it despite other
+//! attachments holding the yielded token, where a live *controller's*
+//! unyielded claim refuses it: the field's own arbitration of "the
+//! owner deliberately stepped down" against "a live incumbent still
+//! stands", with the `controller` marker telling a real peer's claim
+//! from a tool's so the conditional grant never wedges a peer's
+//! recovery on a rogue or lingering tool hold.
 //!
 //! The `dcs-plant-ctl` binary in this crate is the protocol's
 //! development-tooling client: it lists, reads, and writes points and
