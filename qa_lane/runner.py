@@ -863,6 +863,13 @@ CONTAINER_JOURNAL_FILE = CONTAINER_RUN_DIR + '/journal.jsonl'
 # every other owner, and a standby holds no claim until it promotes.
 PLANT_OWNER_TOKENS = {'active': 424243, 'standby': 424244}
 
+# The shared --pair-token every rig controller launches with: the keyed
+# deployment shape the announced-demotion contract requires — a demote
+# toward an announced (not configured) tracking source verifies the
+# endpoint's keyed line_proof and refuses unkeyed, so the pair and every
+# scenario-launched peer (revised/foreign/driven) share one secret.
+PAIR_TOKEN = 'dcs-qa-pair'
+
 
 def _controller_dir(run_dir, name):
     """The run-dir state directory bind-mounted into controller `name`'s
@@ -1116,6 +1123,7 @@ def start_revised_controller(cfg, record, run_dir, model, active,
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
            '--standby', standby,
            '--revised',
+           '--pair-token', PAIR_TOKEN,
            '--scan-ms', '100', '--listen', '0.0.0.0:8082',
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE)
@@ -1174,6 +1182,7 @@ def start_foreign_controller(cfg, record, run_dir, model, active,
            '/model/foreign.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
            '--standby', standby,
+           '--pair-token', PAIR_TOKEN,
            '--scan-ms', '100', '--listen', '0.0.0.0:8082',
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE)
@@ -1243,6 +1252,7 @@ def start_driven_controller(cfg, record, run_dir, model, active,
            '/model/plant.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
            '--standby', standby,
+           '--pair-token', PAIR_TOKEN,
            '--driven', '--listen', '0.0.0.0:8082',
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE)
@@ -1394,6 +1404,7 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            '/model/plant.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
            '--owner-token', str(PLANT_OWNER_TOKENS['active']),
+           '--pair-token', PAIR_TOKEN,
            '--scan-ms', '100', '--listen', '0.0.0.0:8080',
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE)
@@ -1407,6 +1418,7 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            '/model/plant.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
            '--owner-token', str(PLANT_OWNER_TOKENS['standby']),
+           '--pair-token', PAIR_TOKEN,
            '--standby', prefix + '-a:8080',
            '--auto-promote', str(cfg['failover_misses']),
            '--scan-ms', '100', '--listen', '0.0.0.0:8081',

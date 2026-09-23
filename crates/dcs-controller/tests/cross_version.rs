@@ -71,6 +71,9 @@ const M: u64 = 5;
 const SETPOINT: PointId = PointId(10);
 const LEVEL: PointId = PointId(11);
 const VALVE: PointId = PointId(12);
+/// The pair secret both monitors key with — the keyed deployment the
+/// announced-demotion contract requires for its endpoint proof.
+const PAIR_KEY: u64 = 0x517c_c1b7_2722_0a95;
 /// The `format_version` the unsupported-version leg serves — outside
 /// `SUPPORTED_FORMAT_VERSIONS` at the newer end.
 const UNSUPPORTED_FORMAT_VERSION: u32 = 99;
@@ -342,6 +345,7 @@ fn run_scenario() -> Outcome {
     let active_step = &active_driver;
     let active_monitor = Monitor::bind_peer(("127.0.0.1", 0), active, model.signal_index())
         .unwrap()
+        .with_pair_key(PAIR_KEY)
         .driven(Driven {
             track: None,
             after_scan: Some(Box::new(move |peer: &Peer<'_>| {
@@ -376,6 +380,7 @@ fn run_scenario() -> Outcome {
     let standby_step = &standby_driver;
     let standby_monitor = Monitor::bind_peer(("127.0.0.1", 0), standby, model.signal_index())
         .unwrap()
+        .with_pair_key(PAIR_KEY)
         .driven(Driven {
             track: Some(fixture.addr),
             after_scan: Some(Box::new(move |peer: &Peer<'_>| {

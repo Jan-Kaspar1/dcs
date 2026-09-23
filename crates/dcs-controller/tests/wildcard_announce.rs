@@ -25,10 +25,12 @@
 //! recorded `0.0.0.0` tracking source would dial the demoted peer's
 //! own netns and refuse forever, exactly the reported failure.
 //!
-//! The scenario is the issue's: the standby converges on
-//! `--standby <active>:<port>` while the launched active was never
-//! told a peer; the documented `POST /demote` then `POST /promote`
-//! switch moves the field; the demoted peer must reach `tracking` on
+//! The scenario is the issue's — on the keyed pair a real redundant
+//! deployment declares, since an announced-only demotion now verifies
+//! against the keyed `line_proof` and refuses unkeyed: the standby
+//! converges on `--standby <active>:<port>` while the launched active
+//! was never told a peer; the documented `POST /demote` then
+//! `POST /promote` switch moves the field; the demoted peer must reach `tracking` on
 //! its announced successor inside the convergence grace — and the same
 //! switch back must restore the launch arrangement, proving the peer
 //! stayed re-promotable. Every degraded `sync` report the run sees is
@@ -102,7 +104,8 @@ def spawn_peer(tag, listen, *extra):
     logs.append(log)
     proc = subprocess.Popen(
         ["unshare", "-n", "--", CTL, MODEL,
-         "--scan-ms", "50", "--listen", listen, *extra],
+         "--scan-ms", "50", "--listen", listen,
+         "--pair-token", "dcs-test-pair", *extra],
         stdout=log, stderr=subprocess.STDOUT)
     peers.append(proc)
     return proc
