@@ -923,6 +923,82 @@ impl Drop for Hostile {
     }
 }
 
+/// A transparent TCP relay — the reproduction's interposer in its
+/// strongest shape: rather than serving a captured document it proxies
+/// every connection to the victim's real monitor, so a keyed verify
+/// pull's `?prove=` nonce returns a genuinely *signed* answer — the
+/// victim's own field-owning document, exactly the replayable shape
+/// the demote-side document checks refuse whatever the proof says.
+/// Runs on its own thread until dropped.
+struct Relay {
+    addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Relay {
+    fn serve(upstream: SocketAddr) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            while !stopping.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((client, _)) => {
+                        if let Ok(server) = std::net::TcpStream::connect(upstream) {
+                            thread::spawn(move || pump_relay(client, server));
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            addr,
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Relay {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// One proxied connection: two copy loops, one per direction, each
+/// ending by half-closing the other side so the request/response pair
+/// completes and the sockets close cleanly.
+fn pump_relay(client: std::net::TcpStream, server: std::net::TcpStream) {
+    use std::net::Shutdown;
+    let Ok(client_reader) = client.try_clone() else {
+        return;
+    };
+    let Ok(server_reader) = server.try_clone() else {
+        return;
+    };
+    let writer = thread::spawn(move || {
+        let mut from = client_reader;
+        let mut to = server;
+        let _ = std::io::copy(&mut from, &mut to);
+        let _ = to.shutdown(Shutdown::Write);
+    });
+    let mut from = server_reader;
+    let mut to = client;
+    let _ = std::io::copy(&mut from, &mut to);
+    let _ = to.shutdown(Shutdown::Write);
+    let _ = writer.join();
+}
+
 /// The QA finding `checkpoint-peer-hint-fabricates-tracking-source`'s
 /// first half: on a lone field owner with no configured source, a
 /// same-source `?peer=` announce naming a closed port lands as the
@@ -1344,6 +1420,58 @@ fn an_announced_tick_bumped_replay_cannot_unblock_no_tracking_source() {
     assert!(
         error.to_string().contains("no_tracking_source"),
         "a tick-bumped replay must not arm the demotion: {error}"
+    );
+    let report = lonely.client.role().unwrap();
+    assert_eq!(report.role, Role::Active);
+    assert_eq!(report.tick, tick);
+    assert!(
+        lonely
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .all(|entry| !matches!(
+                entry.event,
+                JournalEvent::TrackingSourceAdopted { .. } | JournalEvent::RoleChanged { .. }
+            )),
+        "a refused demotion journals neither an adoption nor a role change"
+    );
+}
+
+/// The replay in its strongest shape on a keyed run: the interposer
+/// does not serve a *captured* document — it relays every connection
+/// to the victim's own monitor live, so even the verify pull's
+/// `?prove=` nonce comes back genuinely signed. What the relayed
+/// answer cannot change is its content: the victim's checkpoint is a
+/// field-owning document not ahead of the run's tick — the replayable
+/// shape the document checks refuse whatever the proof says — so the
+/// demotion refuses `no_tracking_source`, no adoption journals, and
+/// the field owner is undisturbed. A forged same-generation document
+/// the interposer could serve afterward never gets the chance:
+/// nothing was adopted, so nothing follows it.
+#[test]
+fn an_announced_relay_of_the_victims_monitor_cannot_arm_a_keyed_demote() {
+    const KEY: u64 = 0x517c_c1b7_2722_0a95;
+    let lonely = lonely_owner(Some(KEY));
+    lonely.client.advance(3).unwrap();
+    let tick = lonely.client.role().unwrap().tick;
+
+    // The relaying interposer: every connection — including the
+    // verify pull's `?prove=` nonce — is proxied to the victim's real
+    // monitor, which signs its own document under the pull's nonce.
+    let relay = Relay::serve(lonely.monitor.local_addr());
+    lonely.client.checkpoint_announcing(relay.addr).unwrap();
+    assert_eq!(lonely.monitor.tracking_source(), Some(relay.addr));
+
+    // The signed answer is the victim's own document — field-owning
+    // at the run's own tick — the refused replayable shape: the proof
+    // attests content, and the content proves nothing about the
+    // endpoint being a successor.
+    let error = lonely.client.demote().unwrap_err();
+    assert!(
+        error.to_string().contains("no_tracking_source"),
+        "a signed replay of this run's own document must not arm the \
+         demotion: {error}"
     );
     let report = lonely.client.role().unwrap();
     assert_eq!(report.role, Role::Active);

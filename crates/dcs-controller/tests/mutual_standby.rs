@@ -30,8 +30,8 @@ use std::path::Path;
 mod support;
 
 use support::{
-    CONTROLLER, SimTcp, controller_model, image_value, kill, listening_on, spawn, spawn_controller,
-    spawn_plant,
+    CONTROLLER, PAIR_TOKEN, SimTcp, controller_model, image_value, kill, listening_on, spawn,
+    spawn_controller, spawn_plant,
 };
 
 /// The shared plant's model — the same tank loop the hot-swap rig runs.
@@ -296,6 +296,8 @@ fn demote_promote_restart_reports_orphaned_not_healthy_tracking() {
             "--driven".to_string(),
             "--dt".to_string(),
             DT.to_string(),
+            "--pair-token".to_string(),
+            PAIR_TOKEN.to_string(),
         ],
         listening_on,
     );
