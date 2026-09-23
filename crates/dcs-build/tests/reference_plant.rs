@@ -664,6 +664,23 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
             "the deploy stage's doctored pairs lack '{line}':\n{stdout}"
         );
     }
+    // The optional topology section's deploy-stage cases each held:
+    // the declared pairs validate — over the single pair and over a
+    // beyond-one-pair rig — while a member the rig does not declare,
+    // a member two pairs share, or a declared pair whose standby
+    // wiring does not close inside it each report the named mismatch.
+    for line in [
+        "topology-declared: optional declaration — the manifest and the rig agree",
+        "topology-multi-pair: optional declaration — the manifest and the rig agree",
+        "topology-undeclared-member refused: rig-mismatch",
+        "topology-shared-member refused: rig-mismatch",
+        "topology-unwired-pair refused: rig-mismatch",
+    ] {
+        assert!(
+            stdout.contains(line),
+            "the deploy stage's doctored pairs lack '{line}':\n{stdout}"
+        );
+    }
     // The pair contract's staged-vs-field divergence leg ran and held:
     // the withheld-pull window left the stale peer's served report
     // diverged naming the perturbed output, its promote refused
