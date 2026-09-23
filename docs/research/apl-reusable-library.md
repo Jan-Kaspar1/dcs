@@ -7,7 +7,7 @@
 
 ## Sources
 
-1. Siemens, *Advanced Process Library (V9.0)*, Siemens Industry Online Support entry 109812806: <https://support.industry.siemens.com/cs/ww/en/view/109812806>. The reviewed local copy was `C:\Users\Kaspar\Downloads\s7jal90a_de-DE.pdf`; page numbers below are PDF page numbers. The targeted sample was 41, 42, 59, 60, 71, 72, 75, 124, 234, 251, 257, 260, 347, 437, 1093, 1601, 1663, and 2369.
+1. Siemens, *Advanced Process Library*, Siemens Industry Online Support entry 109812806: <https://support.industry.siemens.com/cs/ww/en/view/109812806>. The supplied German-language PDF was sampled locally; page numbers below are PDF page numbers in that copy. The targeted sample was 41, 42, 59, 60, 71, 72, 75, 124, 234, 251, 257, 260, 347, 437, 1093, 1601, 1663, and 2369.
 2. Siemens, *Plant-wide automation in the water industry*, version 4.2, 09/2024, entry 109748869: <https://support.industry.siemens.com/cs/ww/en/view/109748869>. See the existing water-library research note for its supported findings and DCS proposals.
 
 ## Observations and DCS test prompts
