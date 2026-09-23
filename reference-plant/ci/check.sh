@@ -1916,16 +1916,19 @@ echo "  $FIRST"
 
 # The doctored case: a crafted announce naming the pulling
 # connection's own source — a closed local port — lands exactly as it
-# would on a controller whose acceptance check regressed. The
-# hardened contract answers it at the demote: the planted hint names
-# an endpoint no checkpoint pull can verify, so `POST /demote`
-# refuses `no_tracking_source` rather than stranding the demoted
-# peer on the dead pull; the leg must surface the named diagnostic —
-# never a silently poisoned pass.
+# would on a controller whose acceptance check regressed. It joins
+# the bounded announced set beside the genuine ones, and the
+# demotion's per-candidate verification is what answers it: the
+# planted hint names an endpoint no checkpoint pull can verify, so
+# the adoption keeps the verified standby — the journal's
+# tracking_source_adopted is the audit. The leg doctors its
+# assertion to require the planted address, so a healthy demotion
+# reports the adopted mismatch — a blind last-announcer adoption
+# would satisfy the doctored expectation and pass silently.
 if out="$(run_peer_announce --tamper landed-announce 2>&1)"; then
     fail "peer-announce-unchecked: a landed foreign announce passed the peer-announce leg"
 fi
-[[ "$out" == *"no_tracking_source"* ]] \
+[[ "$out" == *"tracking_source_adopted"* ]] \
     || fail "peer-announce-unchecked: the landed-announce case did not report its named diagnostic: $out"
 echo "  landed-announce: reported, peer-announce-failed"
 
@@ -2325,16 +2328,19 @@ echo "  $FIRST"
 # The doctored case: a crafted ?peer= announce naming the field
 # owner's own monitor address — a claim the pulling connection's own
 # source proves, so it lands exactly as a self-claim — plants a
-# self-addressed demotion hint: the self-pin defect shape this leg
-# exists to catch. The demotion's verify pull reads the owner's own
-# document — the replayable own-document shape an announced demotion
-# now refuses — so POST /demote answers 409 no_tracking_source and
-# the leg must report the refusal rather than let a self-pinned
-# demotion proceed.
+# self-addressed demotion hint beside the genuine announce: the
+# self-pin defect shape this leg exists to catch. The demotion's
+# verify pull on it reads the owner's own document — the replayable
+# own-document shape a candidate can never satisfy — so the verified
+# adoption keeps the genuine successor and the journal's
+# tracking_source_adopted names it. The leg doctors its adoption
+# audit to require the self-pin, so a healthy demotion reports the
+# mismatch — a self-pinning regression would satisfy the doctored
+# expectation and pass silently.
 if out="$(run_demote_reconvergence --tamper self-announce 2>&1)"; then
     fail "demote-reconvergence-unchecked: a self-addressed announce passed the demote-reconvergence leg"
 fi
-[[ "$out" == *"no_tracking_source"* ]] \
+[[ "$out" == *"tracking_source_adopted"* ]] \
     || fail "demote-reconvergence-unchecked: the self-announce case did not report its named diagnostic: $out"
 echo "  self-announce: reported, demote-reconvergence-failed"
 
