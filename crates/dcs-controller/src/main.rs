@@ -269,7 +269,7 @@
 
 use dcs_assembly::{DriverRegistry, FanoutDriver, StepError, assemble, resolve_drivers};
 use dcs_controller::registry;
-use dcs_core::{CarryoverReport, IoDriver, TelemetrySnapshot, Tick};
+use dcs_core::{CarryoverReport, FieldClaim, IoDriver, TelemetrySnapshot, Tick};
 use dcs_model::PlantModel;
 use dcs_monitor::{CheckpointPuller, CommandPersist, Driven, Monitor, MonitorConfig};
 use dcs_runtime::{Checkpoint, Executor, Peer, TrackReport, WriteGate, mint_generation};
@@ -437,6 +437,24 @@ impl Driver {
             Self::Local(fanout) => fanout
                 .ensure_field_writer(owner)
                 .map_err(|error| format!("plant write-ownership re-arm failed: {error}")),
+        }
+    }
+
+    /// The read-only half of the field claim — the per-scan observation
+    /// the peer reports as `RoleReport::field_claim`: the verdict a
+    /// mutation from this instance's attachments would meet, asked
+    /// without mutating — `Held` while an owner stands, `Unclaimed`
+    /// while none does. A purely local simulated model has no shared
+    /// field to arbitrate; its fan-out answers `Err` and the run's last
+    /// observation stands.
+    fn probe_field_claim(&self) -> Result<FieldClaim, String> {
+        match self {
+            Self::Remote(remote) => remote
+                .probe_writer()
+                .map_err(|error| format!("plant write-ownership probe failed: {error}")),
+            Self::Local(fanout) => fanout
+                .probe_field_claim()
+                .map_err(|error| format!("plant write-ownership probe failed: {error}")),
         }
     }
 
@@ -1198,7 +1216,8 @@ fn main() -> ExitCode {
         .with_field_claim(|| driver.claim_writer(owner))
         .with_field_release(|| driver.release_claim())
         .with_field_ensure(|| driver.ensure_writer(owner))
-        .with_field_startup_claim(|| driver.claim_writer_unless_held(owner));
+        .with_field_startup_claim(|| driver.claim_writer_unless_held(owner))
+        .with_field_probe(|| driver.probe_field_claim());
     let peer = match options.auto_promote {
         Some(budget) => peer.with_failover(budget),
         None => peer,

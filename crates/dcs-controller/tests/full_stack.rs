@@ -101,9 +101,9 @@
 
 use dcs_core::{
     AdaptedCommand, AdaptedEvent, Command, CommandAvailability, CommandError, CommandOutcome,
-    EmittedEvent, EventEmission, EventRetention, EventValue, JournalEntry, JournalEvent, PointId,
-    Quality, QualityReason, Role, RoleReport, Sample, StandbySync, SwitchError, TelemetrySnapshot,
-    Tick, Value, ValueKind,
+    EmittedEvent, EventEmission, EventRetention, EventValue, FieldClaim, JournalEntry,
+    JournalEvent, PointId, Quality, QualityReason, Role, RoleReport, Sample, StandbySync,
+    SwitchError, TelemetrySnapshot, Tick, Value, ValueKind,
 };
 use dcs_demo::showcase::{
     self, BATCH_STEP1_TICKS, FAULT_SCANS, INITIAL_SETPOINT, MOVED_SCANS, MOVED_SETPOINT,
@@ -1004,7 +1004,9 @@ fn run_full_stack(tag: &str) -> Outcome {
             role: Role::Active,
             tick: continued.tick,
             sync: None,
-            field_claim: None,
+            // The per-scan claim probe's observation: the promoted
+            // peer's own claim stands at the field.
+            field_claim: Some(FieldClaim::Held),
         }
     );
     let report = active.role().unwrap();

@@ -1666,6 +1666,36 @@ impl FanoutDriver {
         Ok(held)
     }
 
+    /// The read-only half of the field's write-ownership claim — the
+    /// per-scan observation a peer reports as
+    /// [`RoleReport::field_claim`](dcs_core::RoleReport::field_claim):
+    /// asks every field-facing backend that can answer for the verdict a
+    /// mutation from this attachment would meet, without mutating.
+    /// [`FieldClaim::Unclaimed`] while at least one answering backend
+    /// holds no claim — some of this field's writes would meet the
+    /// fail-closed refusal — and [`FieldClaim::Held`] while every
+    /// answering backend reports an owner standing. The probe asserts,
+    /// joins, and releases nothing: an observation cannot seize the
+    /// field it reports. `Err` reports that no field-facing backend
+    /// could answer — no observation, so the run's last one stands.
+    pub fn probe_field_claim(&self) -> Result<FieldClaim, StepError> {
+        let mut claim = None;
+        for backend in &self.backends {
+            if backend.field_facing
+                && let Some(probe) = &backend.probe
+            {
+                match probe()? {
+                    FieldClaim::Unclaimed => return Ok(FieldClaim::Unclaimed),
+                    FieldClaim::Held => claim = Some(FieldClaim::Held),
+                }
+            }
+        }
+        claim.ok_or_else(|| StepError::Backend {
+            backend: "field claim probe".to_string(),
+            detail: "no field-facing backend can answer the claim observation".to_string(),
+        })
+    }
+
     /// The field-facing devices whose backends cannot arbitrate a single
     /// writer — the ids a promotion cannot take a claim out on. The
     /// failover decision makes automatic promotion honest only when this
@@ -1943,6 +1973,7 @@ mod tests {
             release: None,
             ensure: None,
             startup_claim: None,
+            probe: None,
             inspect: None,
             field_facing: false,
         }

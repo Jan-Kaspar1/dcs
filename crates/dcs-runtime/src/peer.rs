@@ -145,6 +145,17 @@
 //! with its mismatches, the resolution with the compared points it
 //! stands on. A diverged peer's gate stays closed throughout — the
 //! check observes, it never writes.
+//!
+//! Beside the tracked-line verdicts the report carries the field's own
+//! arbitration state: [`with_field_probe`](Peer::with_field_probe)
+//! installs a read-only claim observation the peer runs once per scan,
+//! and [`report`](Peer::report) serves its last answer as
+//! `field_claim` — `held` while an owner stands, `unclaimed` while the
+//! field's fail-closed window is open and a `promote` is the documented
+//! remedy. The probe is the claim's observation half only: it asserts,
+//! joins, and releases nothing, so reporting `unclaimed` cannot seize
+//! the field — a peer that observes it keeps its role, its closed
+//! gate, and its sync verdict, and the observation journals nothing.
 
 use crate::checkpoint::{Checkpoint, RestoreError, SUPPORTED_FORMAT_VERSIONS};
 use crate::divergence::{
@@ -155,7 +166,8 @@ use crate::gate::WriteGate;
 use crate::revision::CarryoverError;
 use dcs_core::{
     CarryoverReport, Command, CommandError, CommandOutcome, CommandReceipt, Direction, Divergence,
-    PointId, Role, RoleReport, Sample, StandbySync, SwitchError, TelemetrySnapshot, Tick, Value,
+    FieldClaim, PointId, Role, RoleReport, Sample, StandbySync, SwitchError, TelemetrySnapshot,
+    Tick, Value,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -312,6 +324,18 @@ pub struct Peer<'d> {
     /// the write's own durable audit — journals through the ordinary
     /// settle path instead.
     pending_adoption_receipts: Vec<CommandReceipt>,
+    /// The claim's observational counterpart — the read-only probe the
+    /// peer runs once per scan to learn the field's write-ownership
+    /// state without disturbing it, installed by
+    /// [`with_field_probe`](Self::with_field_probe).
+    probe: Option<Probe<'d>>,
+    /// The field's write-ownership claim as the last probe observed it
+    /// — what [`report`](Self::report) serves as `field_claim`. `None`
+    /// until a probe answers (or when none is installed): "no claim
+    /// question was answered" stays distinct from
+    /// [`FieldClaim::Held`] — an uninstrumented driver surface must
+    /// never read as "an owner stands".
+    field_claim: Option<FieldClaim>,
 }
 
 /// The field-side write-ownership claim a promotion runs before the
@@ -373,6 +397,24 @@ struct StartupClaim<'d>(Box<dyn Fn() -> Result<bool, String> + Send + Sync + 'd>
 impl fmt::Debug for StartupClaim<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("field startup claim")
+    }
+}
+
+/// The read-only half of [`Claim`]: the claim-state observation the
+/// peer runs once per scan — the verdict a mutation from this run's
+/// attachments would meet, asked without mutating. `Ok` carries the
+/// field's answer — [`FieldClaim::Held`] while an owner stands (this
+/// run's own hold or a standing owner's, which the report need not
+/// distinguish), [`FieldClaim::Unclaimed`] while no claim stands —
+/// and `Err` reports the field could not be asked, which is no
+/// observation: the last answer stands. The probe asserts, joins, and
+/// releases nothing — an observation cannot seize the field it
+/// reports.
+struct Probe<'d>(Box<dyn Fn() -> Result<FieldClaim, String> + Send + Sync + 'd>);
+
+impl fmt::Debug for Probe<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("field claim probe")
     }
 }
 
@@ -672,6 +714,8 @@ impl<'d> Peer<'d> {
             pending_fencing: Vec::new(),
             pending_superseded: Vec::new(),
             pending_adoption_receipts: Vec::new(),
+            probe: None,
+            field_claim: None,
         }
     }
 
@@ -743,6 +787,25 @@ impl<'d> Peer<'d> {
         self
     }
 
+    /// Arms the claim's observational counterpart — run once per scan
+    /// to learn the field's write-ownership state without disturbing
+    /// it. `probe` answers the verdict a mutation from this run's
+    /// attachments would meet — [`FieldClaim::Held`] while an owner
+    /// stands, [`FieldClaim::Unclaimed`] while none does — asserting,
+    /// joining, and releasing nothing, so the observation cannot seize
+    /// the field it reports. The last answered verdict is what
+    /// [`report`](Self::report) serves as `field_claim`: a probe that
+    /// fails is no observation and leaves the last answer standing, and
+    /// a peer built without the hook reports `None` — on a driver
+    /// surface that cannot be asked, no claim question was answered.
+    pub fn with_field_probe(
+        mut self,
+        probe: impl Fn() -> Result<FieldClaim, String> + Send + Sync + 'd,
+    ) -> Self {
+        self.probe = Some(Probe(Box::new(probe)));
+        self
+    }
+
     /// Arms automatic failover: `budget` consecutive failed checkpoint
     /// pulls — one per scan cycle, the documented heartbeat cadence —
     /// make [`failover_due`](Self::failover_due) report, and
@@ -805,6 +868,8 @@ impl<'d> Peer<'d> {
             pending_fencing: Vec::new(),
             pending_superseded: Vec::new(),
             pending_adoption_receipts: Vec::new(),
+            probe: None,
+            field_claim: None,
         }
     }
 
@@ -898,10 +963,7 @@ impl<'d> Peer<'d> {
                 Role::Active => None,
                 _ => Some(self.sync.clone()),
             },
-            // The field-claim observation contract is defined but not
-            // yet produced: reports carry `None` until the claim-state
-            // chain lands.
-            field_claim: None,
+            field_claim: self.field_claim,
         }
     }
 
@@ -2154,6 +2216,15 @@ impl<'d> Peer<'d> {
     /// sees. The carried entries settle once at the promoted run's
     /// first field-owning scan.
     pub fn scan(&mut self) -> Tick {
+        // The per-scan claim observation: ask the field's arbitration
+        // what a mutation from this run's attachments would meet —
+        // read-only, so reporting an unclaimed field cannot seize it,
+        // and a failed probe is no observation: the last answer stands.
+        if let Some(probe) = &self.probe
+            && let Ok(observed) = probe.0()
+        {
+            self.field_claim = Some(observed);
+        }
         let quiesced = !self.owns_field();
         let tick = if quiesced {
             self.executor.scan_quiesced()
@@ -3932,6 +4003,171 @@ mod tests {
         );
         assert_eq!(peer.role(), Role::Standby);
         assert!(!gate.is_open());
+    }
+
+    /// A scripted field-claim arbitration — the plant server's rule in
+    /// miniature: `holder` carries the standing claim's owner token
+    /// while one stands and `None` while the field is unclaimed.
+    /// `claim` takes it unconditionally, as a promotion's arbitration
+    /// does; `probe` reads the standing state without touching it — an
+    /// observation cannot seize the field it reports.
+    struct ScriptedClaim {
+        holder: Mutex<Option<u64>>,
+    }
+
+    impl ScriptedClaim {
+        /// A field no attachment owns — the fail-closed window a
+        /// released or restarted claim leaves.
+        fn unclaimed() -> Self {
+            Self {
+                holder: Mutex::new(None),
+            }
+        }
+
+        /// The read-only observation: `held` while an owner stands —
+        /// this attachment's own hold or a standing owner's, which the
+        /// report need not distinguish — `unclaimed` while none does.
+        fn probe(&self) -> FieldClaim {
+            match *self.holder.lock().unwrap() {
+                Some(_) => FieldClaim::Held,
+                None => FieldClaim::Unclaimed,
+            }
+        }
+
+        /// The unconditional grant a promotion claims through.
+        fn claim(&self, owner: u64) {
+            *self.holder.lock().unwrap() = Some(owner);
+        }
+
+        /// The last holder's release — the field returns to unclaimed.
+        fn release(&self) {
+            *self.holder.lock().unwrap() = None;
+        }
+
+        /// The standing owner, for the test's own assertions.
+        fn holder(&self) -> Option<u64> {
+            *self.holder.lock().unwrap()
+        }
+    }
+
+    /// The unclaimed-field signal: a tracking peer's per-scan probe
+    /// reports the field's write-ownership through `field_claim` —
+    /// `unclaimed` while no claim stands — without seizing it. The
+    /// probe is the claim's read-only half: no claim ran, the gate
+    /// stays closed, the role does not move, and nothing queues for
+    /// the journal.
+    #[test]
+    fn an_unclaimed_field_reports_on_the_tracking_peer_without_seizing_it() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let field = ScriptedClaim::unclaimed();
+        let claimed = AtomicBool::new(false);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_field_claim(|| {
+                claimed.store(true, Ordering::Relaxed);
+                Ok(())
+            })
+            .with_field_probe(|| Ok(field.probe()));
+
+        // Before the first scan no claim question was answered — `None`
+        // is not `held`.
+        assert_eq!(peer.report().field_claim, None);
+
+        peer.scan();
+        let report = peer.report();
+        assert_eq!(report.field_claim, Some(FieldClaim::Unclaimed));
+        assert_eq!(report.role, Role::Standby);
+        assert!(!gate.is_open());
+        assert!(
+            !claimed.load(Ordering::Relaxed),
+            "the probe must never run the claim"
+        );
+        assert_eq!(
+            field.holder(),
+            None,
+            "reporting an unclaimed field must not seize it"
+        );
+        assert!(peer.take_role_changes().is_empty());
+        assert!(peer.take_fencing_losses().is_empty());
+        assert!(peer.take_orphans().is_empty());
+    }
+
+    /// `held` is the answer a standing owner gives — the fenced
+    /// observation (a different attachment holds the claim) and the
+    /// claimed one (this run's own hold) report identically: the
+    /// signal distinguishes "an owner stands" from "none does", not
+    /// whose it is.
+    #[test]
+    fn a_held_claim_reports_held_whether_the_owner_is_foreign_or_own() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let field = ScriptedClaim::unclaimed();
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_field_claim(|| {
+                field.claim(7);
+                Ok(())
+            })
+            .with_field_probe(|| Ok(field.probe()));
+
+        // A foreign owner stands: the probe's fenced verdict reports
+        // `held`, not `unclaimed`.
+        field.claim(9);
+        peer.scan();
+        assert_eq!(peer.report().field_claim, Some(FieldClaim::Held));
+
+        // The release leaves the field unclaimed: the next probe
+        // reports the fail-closed window.
+        field.release();
+        peer.scan();
+        assert_eq!(peer.report().field_claim, Some(FieldClaim::Unclaimed));
+
+        // Converged and promoted, the peer's own claim is the standing
+        // owner — the probe reports `held` again.
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(3);
+        peer.apply(&source.checkpoint()).unwrap();
+        peer.promote().unwrap();
+        peer.scan();
+        assert_eq!(peer.role(), Role::Active);
+        assert_eq!(field.holder(), Some(7));
+        assert_eq!(peer.report().field_claim, Some(FieldClaim::Held));
+    }
+
+    /// A probe the field cannot answer is no observation: the report
+    /// keeps the last answer rather than guessing — `None` before any
+    /// answer, the standing verdict afterward.
+    #[test]
+    fn a_failed_claim_probe_leaves_the_last_observation_standing() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let field = ScriptedClaim::unclaimed();
+        let reachable = AtomicBool::new(false);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate)).with_field_probe(|| {
+            if reachable.load(Ordering::Relaxed) {
+                Ok(field.probe())
+            } else {
+                Err("plant unreachable".to_string())
+            }
+        });
+
+        // A probe that never answered reports `None`.
+        peer.scan();
+        assert_eq!(peer.report().field_claim, None);
+
+        reachable.store(true, Ordering::Relaxed);
+        peer.scan();
+        assert_eq!(peer.report().field_claim, Some(FieldClaim::Unclaimed));
+
+        // The field changes hands behind a dead probe: the last
+        // observation stands until a probe answers again.
+        field.claim(9);
+        reachable.store(false, Ordering::Relaxed);
+        peer.scan();
+        assert_eq!(peer.report().field_claim, Some(FieldClaim::Unclaimed));
+        reachable.store(true, Ordering::Relaxed);
+        peer.scan();
+        assert_eq!(peer.report().field_claim, Some(FieldClaim::Held));
     }
 
     /// Without a failover budget the miss count still reports but never
