@@ -5537,4 +5537,87 @@ mod tests {
         );
         assert!(b.take_adoption_receipts().is_empty());
     }
+
+    /// The finding's own shape (#865): the rejoining peer never
+    /// submitted the reverted command — an ordinary tracking standby
+    /// adopted the field owner's `applied` settlement through its
+    /// checkpoint pulls. When the restarted run then adopts a staler
+    /// checkpoint the revert is audited exactly as the
+    /// locally-submitted half is: one `WriteValue` receipt applied at
+    /// the landing tick naming the adopting checkpoint.
+    #[test]
+    fn an_adopted_receipted_write_reverted_on_rejoin_journals_the_adoption() {
+        use crate::checkpoint::CommandAdmissionCounts;
+        const POINT: PointId = PointId(10);
+        let map = || {
+            PointMap::new().with_writable_internal(
+                POINT,
+                Direction::In,
+                ValueKind::Bool,
+                Value::Bool(false),
+            )
+        };
+        let write = |value| Command::WriteValue {
+            point: POINT,
+            kind: ValueKind::Bool,
+            value: Value::Bool(value),
+        };
+
+        // The field owner's line: the write receipted and applied —
+        // the honest checkpoint the standby tracks, and the stale
+        // pre-write checkpoint its restart will serve.
+        let a_driver = StubDriver::field(&[]);
+        let a_gate = WriteGate::closed(&a_driver);
+        let mut a = Peer::active(
+            Executor::new(&a_gate, map(), Vec::new()).unwrap(),
+            Some(&a_gate),
+        );
+        a.activate().unwrap();
+        for _ in 0..3 {
+            a.scan();
+        }
+        let mut stale = a.checkpoint();
+        // The staler line's window never reached the standby's adopted
+        // receipts — the finding's served-view shape.
+        stale.receipts.clear();
+        stale.command_admission = CommandAdmissionCounts::default();
+        a.submit_command(write(true));
+        a.scan();
+        let honest = a.checkpoint();
+
+        // The tracking standby: the applied settlement arrives through
+        // adoption, never through a local submission.
+        let b_driver = StubDriver::field(&[]);
+        let b_gate = WriteGate::closed(&b_driver);
+        let mut b = Peer::standby(
+            Executor::new(&b_gate, map(), Vec::new()).unwrap(),
+            Some(&b_gate),
+        );
+        b.apply(&honest).unwrap();
+        assert_eq!(
+            b.executor().sample(POINT).map(|sample| sample.value),
+            Some(Value::Bool(true))
+        );
+        assert!(matches!(
+            b.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { .. }
+        ));
+
+        // The rejoin: the resumed run adopts the restarted peer's
+        // staler checkpoint and the held value reverts.
+        b.apply(&stale).unwrap();
+        assert_eq!(
+            b.executor().sample(POINT).map(|sample| sample.value),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            b.take_adoption_receipts(),
+            vec![CommandReceipt {
+                command: write(false),
+                outcome: CommandOutcome::Applied { tick: Tick(4) },
+                actor: Some("checkpoint@3".to_string()),
+            }]
+        );
+        assert!(b.take_adoption_receipts().is_empty());
+    }
 }
