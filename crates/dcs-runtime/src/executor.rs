@@ -1499,6 +1499,22 @@ impl<'d> Executor<'d> {
         &self.forces
     }
 
+    /// The image's held internal `In` samples — the operator-commanded
+    /// and link-carried values a checkpoint's `internal` section
+    /// overlays on adoption, the same span
+    /// [`Checkpoint::internal`](crate::Checkpoint) carries. The peer
+    /// layer diffs them across the adoption so a held value the
+    /// adoption reverted against a settled write receipt can journal
+    /// its true cause.
+    pub(crate) fn held_internals(&self) -> BTreeMap<PointId, Sample> {
+        let image = self.image.borrow();
+        self.map
+            .iter()
+            .filter(|(_, spec)| spec.direction == Direction::In && spec.internal.is_some())
+            .filter_map(|(point, _)| image.get(&point).map(|&sample| (point, sample)))
+            .collect()
+    }
+
     /// The events the last completed scan's components emitted, in the
     /// order they were drained — component scan order, then each
     /// component's own emission order — each stamped with the producing
