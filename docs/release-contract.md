@@ -186,7 +186,20 @@ operator-action record that survives the process lifetime. Each
 declared path must live on writable deployment storage — a named
 volume in the checked-in rig definition — while the model and
 dynamics mounts stay read-only; a consumer without durable storage
-omits both fields, and the flags are then absent. The shape is a
+omits both fields, and the flags are then absent. An optional
+top-level `topology` section declares the deployment's named
+redundant pairs — the plant-index artifact decision 47 deferred —
+beyond the single-pair default:
+`"topology": {"pairs": [{"name": "<pair>", "members": ["<controller>",
+"<controller>"]}]}`. Each member names a `controllers` entry,
+memberships stay disjoint across pairs, and the pair's standby
+wiring closes inside it — one member tracking the other; the
+reference rig's `deploy` stage fails `rig-mismatch` on a member the
+manifest does not declare, a shared member, or wiring that leaves
+the declared pair. A single-pair manifest omits the section: URL
+`?pair=` configuration remains the interface the overview consumes,
+and the section carries no runtime, wire, or persisted-format
+change. The shape is a
 recorded contract, not yet a
 schema-enforced document — `reference-plant/deploy/manifest.json`
 instantiates it, `reference-plant/deploy/compose.yaml` instantiates
@@ -459,5 +472,5 @@ The checks' failures are named diagnostics:
 | `monitor-starvation-nondeterministic` | Two passes of the monitor-starvation leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
 | `rig-invalid` | The consumer's checked-in rig definition does not parse — `docker compose config` or the fallback YAML parser rejected it. Reported by the reference plant's `ci/check.sh`. |
 | `rig-unverifiable` | The rig-definition consistency check could not run: neither `docker compose` nor PyYAML is available to parse the definition. Reported by the reference plant's `ci/check.sh`. |
-| `rig-mismatch` | The consumer's checked-in rig definition diverges from its deployment manifest — images, mounted model or dynamics paths, the propagated model fingerprint, listen addresses, the controller pair's standby wiring, the standby's declared `failover_budget` against its `--auto-promote` flag (a declared budget with no flag, a flag with no declaration, a diverging value, or the field placed on the duty entry), or the declared persistence paths' mounts and flags disagree with what the manifest declares. Reported by the reference plant's `ci/check.sh`. |
+| `rig-mismatch` | The consumer's checked-in rig definition diverges from its deployment manifest — images, mounted model or dynamics paths, the propagated model fingerprint, listen addresses, the controller pair's standby wiring, the standby's declared `failover_budget` against its `--auto-promote` flag (a declared budget with no flag, a flag with no declaration, a diverging value, or the field placed on the duty entry), the declared persistence paths' mounts and flags, or the optional `topology` section's named pairs (a member the manifest does not declare, a member two pairs share, or a declared pair whose standby wiring does not close inside it) disagree with what the manifest declares. Reported by the reference plant's `ci/check.sh`. |
 | `<leg>-unchecked` | The paired self-check diagnostic every checked leg carries: `ci/check.sh` plants a negative case for each leg — a doctored input or tampered expectation the leg must refuse with its named diagnostic — and reports `<leg>-unchecked`, formed on the leg stem its failure (`<leg>-failed` or, for the divergence leg, `<leg>-missed`) and `<leg>-nondeterministic` diagnostics share, when the planted case passes or the leg answers a name other than its declared one (e.g. a drifted record artifact passing the interface-schema non-drift leg reports `schema-drift-unchecked`, not `schema-drift`). It is distinct from `<leg>-failed`: the failed diagnostic is the leg's contract check failing on a real divergence; the unchecked diagnostic is the leg's own negative self-test failing — the leg can no longer be trusted to catch what it names. Reported by the reference plant's `ci/check.sh`; the emitted set grows with each leg that plants a negative case — currently `schema-drift-unchecked`, `diff-mismatch-unchecked`, `alarm-validation-unchecked`, `fingerprint-unchecked`, `rig-mismatch-unchecked`, `restart-resume-unchecked`, `schema-mismatch-unchecked`, `pair-unchecked`, `negotiation-unchecked`, `startup-claim-unchecked`, `refusal-unchecked`, `handover-unchecked`, `takeover-unchecked`, `force-carryover-unchecked`, `tune-carryover-unchecked`, `force-release-unchecked`, `stale-checkpoint-unchecked`, `burst-order-unchecked`, `peer-announce-unchecked`, `availability-unchecked`, `failover-unchecked`, `divergence-unchecked`, `standby-restart-unchecked`, `report-unchecked`, `command-switch-unchecked`, `demote-pending-unchecked`, `managed-lifecycle-unchecked`, `carry-unchecked`, `staging-unchecked`, `oos-unchecked`, `power-trip-unchecked`, `monitor-starvation-unchecked`, `event-parity-unchecked` — and this convention entry declares each new name without a per-leg row. |

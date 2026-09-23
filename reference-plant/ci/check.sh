@@ -60,7 +60,10 @@
 #                declaration carried as its --auto-promote flag, and
 #                the optional per-controller persistence
 #                paths (state_file/journal_file) backed by writable
-#                mounts and flags — parsed and validated through
+#                mounts and flags, and the optional topology
+#                section's declared pairs — each naming two
+#                declared members whose standby wiring closes
+#                inside the pair — parsed and validated through
 #                `docker compose config` or the fallback parser, with
 #                the fields' divergence cases exercised against
 #                doctored copies
@@ -1052,7 +1055,13 @@ python3 ci/deploy_rig.py
 # report rig-mismatch — a declared path missing its mount or flag, a
 # flag or writable mount the manifest does not declare, a persistence
 # mount left read-only — while the fields omitted outright (with their
-# mounts and flags) stay a valid deployment.
+# mounts and flags) stay a valid deployment. The same harness proves
+# the optional topology section: a declared named pair validates —
+# over the single pair and over a beyond-one-pair rig — while a
+# member the rig does not declare, a member two pairs share, or a
+# declared pair whose standby wiring does not close inside it each
+# report rig-mismatch. The checked-in manifest carries no section —
+# the single-pair default every passing case starts from.
 RIG_DIR="$(mktemp -d)"
 mkdir -p "$RIG_DIR/deploy" "$RIG_DIR/ci" "$RIG_DIR/model"
 cp deploy/manifest.json deploy/compose.yaml "$RIG_DIR/deploy/"
@@ -1136,6 +1145,93 @@ elif case == "persistence-omitted":
         "      - --journal-file\n      - /var/tmp/journal.jsonl\n",
     ):
         compose = compose.replace(line, "")
+elif case == "topology-declared":
+    # The optional section naming the deployment's one pair —
+    # additive vocabulary a single-pair manifest may carry.
+    document = json.loads(manifest)
+    document["topology"] = {
+        "pairs": [{"name": "station", "members": ["ctrl-a", "ctrl-b"]}]
+    }
+    manifest = json.dumps(document, indent=2)
+elif case == "topology-multi-pair":
+    # Two named pairs over a four-controller rig — the
+    # beyond-one-pair declaration the section exists for. The rig
+    # grows the matching second pair's services and volumes, cloned
+    # from the first pair's blocks on fresh names and ports.
+    document = json.loads(manifest)
+    document["controllers"] += [
+        {
+            "name": "ctrl-c",
+            "listen": "0.0.0.0:8082",
+            "state_file": "/var/tmp/state.json",
+            "journal_file": "/var/tmp/journal.jsonl",
+        },
+        {
+            "name": "ctrl-d",
+            "listen": "0.0.0.0:8083",
+            "standby": "ctrl-c:8082",
+            "state_file": "/var/tmp/state.json",
+            "journal_file": "/var/tmp/journal.jsonl",
+        },
+    ]
+    document["topology"] = {
+        "pairs": [
+            {"name": "station-a", "members": ["ctrl-a", "ctrl-b"]},
+            {"name": "station-b", "members": ["ctrl-c", "ctrl-d"]},
+        ]
+    }
+    manifest = json.dumps(document, indent=2)
+    block_a = compose[
+        compose.index("  ctrl-a:"):compose.index("  ctrl-b:")
+    ]
+    block_b = compose[compose.index("  ctrl-b:"):compose.index("\nnetworks:")]
+    block_c = block_a.replace("ctrl-a", "ctrl-c").replace("8080", "8082")
+    block_d = (
+        block_b.replace("ctrl-b", "ctrl-d")
+        .replace("ctrl-a:8080", "ctrl-c:8082")
+        .replace("ctrl-a:", "ctrl-c:")
+        .replace("8081", "8083")
+        .replace('      - --auto-promote\n      - "3"\n', "")
+    )
+    compose = compose.replace(
+        "\nnetworks:",
+        "\n" + block_c + "\n" + block_d + "\nnetworks:",
+        1,
+    )
+    compose = compose.replace(
+        "  ctrl-a-data:\n  ctrl-b-data:\n",
+        "  ctrl-a-data:\n  ctrl-b-data:\n  ctrl-c-data:\n  ctrl-d-data:\n",
+        1,
+    )
+elif case == "topology-undeclared-member":
+    # A named pair member the rig does not declare.
+    document = json.loads(manifest)
+    document["topology"] = {
+        "pairs": [{"name": "station", "members": ["ctrl-a", "ctrl-z"]}]
+    }
+    manifest = json.dumps(document, indent=2)
+elif case == "topology-shared-member":
+    # Two named pairs claiming the same member.
+    document = json.loads(manifest)
+    document["topology"] = {
+        "pairs": [
+            {"name": "station-a", "members": ["ctrl-a", "ctrl-b"]},
+            {"name": "station-b", "members": ["ctrl-a", "ctrl-b"]},
+        ]
+    }
+    manifest = json.dumps(document, indent=2)
+elif case == "topology-unwired-pair":
+    # The declared pair's wiring does not close inside it: dropping
+    # the standby field and flag leaves two duty controllers the
+    # section still calls a pair.
+    document = json.loads(manifest)
+    document["topology"] = {
+        "pairs": [{"name": "station", "members": ["ctrl-a", "ctrl-b"]}]
+    }
+    del document["controllers"][1]["standby"]
+    manifest = json.dumps(document, indent=2)
+    compose = compose.replace(
+        "      - --standby\n      - ctrl-a:8080\n", "", 1)
 else:
     sys.exit("unknown rig case " + case)
 open(compose_path, "w").write(compose)
@@ -1143,13 +1239,19 @@ open(manifest_path, "w").write(manifest)
 PY
     local out
     if out="$(cd "$RIG_DIR" && python3 ci/deploy_rig.py 2>&1)"; then
-        [ "$1" = "persistence-omitted" ] \
-            || fail "rig-mismatch-unchecked: the $1 divergence passed the rig check"
-        echo "  $1: declared fields optional — the pair still agrees"
-        return
+        case "$1" in
+            persistence-omitted|topology-declared|topology-multi-pair)
+                echo "  $1: optional declaration — the manifest and the rig agree"
+                return
+                ;;
+        esac
+        fail "rig-mismatch-unchecked: the $1 divergence passed the rig check"
     fi
-    [ "$1" = "persistence-omitted" ] \
-        && fail "rig-mismatch-unchecked: omitting the persistence fields reported: $out"
+    case "$1" in
+        persistence-omitted|topology-declared|topology-multi-pair)
+            fail "rig-mismatch-unchecked: the $1 case reported: $out"
+            ;;
+    esac
     [[ "$out" == *"rig-mismatch"* ]] \
         || fail "rig-mismatch-unchecked: the $1 divergence did not report rig-mismatch: $out"
     echo "  $1 refused: rig-mismatch"
@@ -1159,7 +1261,9 @@ for divergence in persistence-mount-divergence persistence-flag-divergence \
         persistence-mount-read-only undeclared-persistence-flag \
         undeclared-writable-mount failover-flag-missing \
         failover-flag-undeclared failover-wrong-peer \
-        persistence-omitted; do
+        persistence-omitted topology-declared topology-multi-pair \
+        topology-undeclared-member topology-shared-member \
+        topology-unwired-pair; do
     rig_case "$divergence"
 done
 
