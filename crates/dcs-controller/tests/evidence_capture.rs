@@ -37,6 +37,11 @@ const DT: f64 = 0.1;
 const N: u64 = 8;
 /// The fixture's writable setpoint input — the command target.
 const SETPOINT: PointId = PointId(10);
+/// The pair's shared tracking secret both monitors key with — the
+/// `--pair-token` deployment the announced-demotion contract requires:
+/// the active's demote below verifies the standby's announced hint
+/// against the keyed `line_proof` and tracks it under proof.
+const PAIR_KEY: u64 = 0x517c_c1b7_2722_0a95;
 
 /// `shutdown` on drop, so a panicking test still lets the scoped serve
 /// threads exit instead of hanging the scope's join — the same pattern
@@ -122,6 +127,7 @@ fn receipts_and_journal_cover_the_run_on_every_peer_the_audit_reached() {
     let active_step = &active_driver;
     let active_monitor = Monitor::bind_peer(("127.0.0.1", 0), active, model.signal_index())
         .unwrap()
+        .with_pair_key(PAIR_KEY)
         .driven(Driven {
             track: None,
             after_scan: Some(Box::new(move |peer: &Peer<'_>| {
@@ -154,6 +160,7 @@ fn receipts_and_journal_cover_the_run_on_every_peer_the_audit_reached() {
     let standby_step = &standby_driver;
     let standby_monitor = Monitor::bind_peer(("127.0.0.1", 0), standby, model.signal_index())
         .unwrap()
+        .with_pair_key(PAIR_KEY)
         .driven(Driven {
             track: Some(active_monitor.local_addr()),
             after_scan: Some(Box::new(move |peer: &Peer<'_>| {

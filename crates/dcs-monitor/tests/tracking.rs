@@ -1297,8 +1297,7 @@ fn an_announced_interposer_cannot_arm_a_demote_then_serve_forged_state() {
                 .iter()
                 .all(|entry| !matches!(
                     entry.event,
-                    JournalEvent::TrackingSourceAdopted { .. }
-                        | JournalEvent::RoleChanged { .. }
+                    JournalEvent::TrackingSourceAdopted { .. } | JournalEvent::RoleChanged { .. }
                 )),
             "a refused demotion journals neither an adoption nor a \
              role change"
@@ -2009,8 +2008,7 @@ fn a_tracking_peer_journals_one_settle_per_admission() {
 #[test]
 fn a_demoted_peer_journals_one_settle_per_carried_admission() {
     use dcs_core::Command;
-    let (standby, active) =
-        DrivenStandby::start_with_keyed(None, held_executor, PAIR_KEY);
+    let (standby, active) = DrivenStandby::start_with_keyed(None, held_executor, PAIR_KEY);
 
     active.client.advance(3).unwrap();
     standby.standby.client.advance(1).unwrap();

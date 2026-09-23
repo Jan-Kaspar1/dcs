@@ -148,13 +148,16 @@
 //! or strand `unsynchronized` and unpromotable forever. The demoted
 //! peer's checkpoint source is therefore the configured `--peer ADDR`
 //! when given — "active now, but here is my peer for later" — else
-//! the address a verified announced demotion adopted and pinned. The
-//! recorded `?peer=` announce is a hint, not a proof: the serving
+//! the address a verified announced demotion adopted and pinned, else
+//! — on a keyed run only, every pull still demanding the proof — the
+//! recorded announce a field-claim-lost or unpaced demotion follows.
+//! The recorded `?peer=` announce is a hint, not a proof: the serving
 //! side cannot tell the puller's monitor port from any other port its
 //! connection's source claims, and `/checkpoint` is public, so every
-//! document an unproven endpoint serves is replayable — the hint feeds
-//! no pull, and `POST /demote` toward an announced-only source first
-//! pulls one checkpoint from it armed with a fresh `?prove=` nonce.
+//! document an unproven endpoint serves is replayable — an unkeyed
+//! hint feeds no pull, and `POST /demote` toward an announced-only
+//! source first pulls one checkpoint from it armed with a fresh
+//! `?prove=` nonce.
 //! The pull proceeds only when the returned document continues this
 //! run's line in a way this run's own public `/checkpoint` could not
 //! have answered — a field-owning document not ahead of this run's
@@ -1580,11 +1583,15 @@ fn main() -> ExitCode {
 /// the configured `--standby`/`--peer` target when set, else the
 /// endpoint a verified announced demotion adopted and pinned — the
 /// follow-peer half that lets a demoted launched active find its
-/// successor without a restart. The recorded `?peer=` announce itself
-/// never feeds a pull: it is an unproven same-source claim a demotion
-/// must first verify against the keyed `line_proof`, so an
-/// interposer replaying this run's public `/checkpoint` can neither
-/// arm the demotion nor redirect the demoted peer's tracking. The
+/// successor without a restart — else, on a keyed run only, the
+/// recorded `?peer=` announce itself. The announce is an unproven
+/// same-source claim a demotion must first verify against the keyed
+/// `line_proof`, and the keyed fallback keeps it safe: every pull
+/// toward an announced source carries a fresh proof nonce the answer
+/// must satisfy, so an interposer replaying this run's public
+/// `/checkpoint` can neither arm the demotion nor feed the tracking
+/// peer, while an in-place demotion the request path never saw still
+/// finds its genuine key-holding peer. The
 /// puller follows the resolved source, respawning when it changes, and
 /// announces this monitor's own address on every pull so the serving
 /// peer learns where to track back. A

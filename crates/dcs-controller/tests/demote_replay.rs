@@ -67,7 +67,9 @@ impl Relay {
         let thread = thread::spawn(move || {
             while !stopping.load(Ordering::Relaxed) {
                 match listener.accept() {
-                    Ok((client, _)) => thread::spawn(move || pump(client, upstream)),
+                    Ok((client, _)) => {
+                        thread::spawn(move || pump(client, upstream));
+                    }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(5));
                         continue;
@@ -128,14 +130,10 @@ fn replay_refusal(addr: SocketAddr) {
     assert_eq!(report.role, Role::Active);
     assert_eq!(report.tick, Tick(tick.0 + 1));
     assert!(
-        client
-            .journal(since)
-            .unwrap()
-            .iter()
-            .all(|entry| !matches!(
-                entry.event,
-                JournalEvent::TrackingSourceAdopted { .. } | JournalEvent::RoleChanged { .. }
-            )),
+        client.journal(since).unwrap().iter().all(|entry| !matches!(
+            entry.event,
+            JournalEvent::TrackingSourceAdopted { .. } | JournalEvent::RoleChanged { .. }
+        )),
         "a refused demotion journals neither an adoption nor a role change"
     );
 }
@@ -153,7 +151,7 @@ fn an_unkeyed_lone_controller_refuses_a_demote_armed_by_its_replayed_checkpoint(
             "127.0.0.1:0".to_string(),
             "--driven".to_string(),
             "--dt".to_string(),
-            "50ms".to_string(),
+            "0.05".to_string(),
         ],
         listening_on,
     )
@@ -170,7 +168,7 @@ fn an_unkeyed_lone_controller_refuses_a_demote_armed_by_its_replayed_checkpoint(
 /// checks refuse.
 #[test]
 fn a_keyed_lone_controller_refuses_a_demote_armed_by_a_relay_of_its_own_monitor() {
-    let mut controller = spawn_controller(Path::new(MODEL), &[], "50ms");
+    let mut controller = spawn_controller(Path::new(MODEL), &[], "0.05");
     replay_refusal(controller.addr);
     kill(&mut controller);
 }

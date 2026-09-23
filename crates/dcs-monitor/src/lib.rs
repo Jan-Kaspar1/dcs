@@ -732,7 +732,7 @@ pub struct Monitor<'d> {
     /// source for an unrelated client nor record one no peer can
     /// dial. Landing is not trusting: the serving side cannot tell the
     /// puller's monitor port from any other same-IP port the
-    /// connection's source claims, so a recorded hint stays unverified
+    /// connection's source claims, so a recorded hint stays unproven
     /// until a demotion proves it — `POST /demote` pulls one
     /// checkpoint from the hint and adopts it only when the checkpoint
     /// continues this run's line in a way this run's own `/checkpoint`
@@ -743,7 +743,12 @@ pub struct Monitor<'d> {
     /// unkeyed run cannot demand and so refuses the demotion —
     /// journaling the adopted source when it lands. A dead, replayed,
     /// forged, or unproven hint refuses `NoTrackingSource` instead of
-    /// stranding or adopting. Outside `shared`: the value is
+    /// stranding or adopting. On a keyed run the hint is also the
+    /// standing fallback [`tracking_source`](Self::tracking_source) —
+    /// every pull toward it demands the same proof, so an unproven
+    /// endpoint feeds a tracking peer nothing while a genuine
+    /// key-holding peer still reconverges the in-place demotions the
+    /// request path never sees. Outside `shared`: the value is
     /// request-path bookkeeping, never part of a scan's state.
     announced: Mutex<Option<SocketAddr>>,
     /// The tracking source a verified announced demotion pinned — the
@@ -754,8 +759,10 @@ pub struct Monitor<'d> {
     /// planted the hint — cannot move the tracking onto an endpoint
     /// the demotion never proved. `None` until an announced-only
     /// demotion verifies one; a configured source always outranks it,
-    /// and the next announced-only demotion re-proves and re-pins.
-    /// Outside `shared`: request-path bookkeeping like `announced`.
+    /// and a later demotion follows it without re-proving — the
+    /// standing pulls keep demanding the keyed proof it already
+    /// showed. Outside `shared`: request-path bookkeeping like
+    /// `announced`.
     adopted: Mutex<Option<SocketAddr>>,
     /// This run's half of the pair's shared tracking secret — the key
     /// [`with_pair_key`](Self::with_pair_key) installs from
@@ -951,22 +958,31 @@ impl<'d> Monitor<'d> {
     /// The checkpoint address this peer tracks — `Driven`'s `track` or
     /// the configured [`with_standby_source`](Self::with_standby_source)
     /// when set, else the pinned adoption a verified announced
-    /// demotion recorded. The recorded `?peer=` hint is deliberately
-    /// *not* a tracking source: it is an unproven claim — the serving
-    /// side cannot tell the puller's monitor port from any other
-    /// same-IP port the connection's source claims — and `/checkpoint`
-    /// is public, so every document an unproven endpoint serves is
-    /// replayable. A pull targeting it would apply whatever the
-    /// endpoint serves subject only to the apply gates, exactly the
-    /// redirect the `?peer=` hardening exists to refuse; a demotion
-    /// turns the hint into a source only by proving it first, and the
-    /// proof is keyed, so an unkeyed run's announced-only demotion
-    /// refuses `NoTrackingSource` instead.
+    /// demotion recorded, else — on a keyed run only — the recorded
+    /// `?peer=` hint itself. The hint is an unproven claim — the
+    /// serving side cannot tell the puller's monitor port from any
+    /// other same-IP port the connection's source claims — and
+    /// `/checkpoint` is public, so every document an unproven endpoint
+    /// serves is replayable. The keyed fallback is safe anyway: every
+    /// pull toward an announced source carries a fresh `?prove=` nonce
+    /// whose keyed `line_proof` the answer must match — a forged or
+    /// replayed answer fails the fetch and reports `degraded`, never
+    /// applies — so an in-place demotion that never passed the
+    /// demote-request verify (a `field_claim_lost` boundary) still
+    /// reconverges on a genuine key-holding peer instead of stranding.
+    /// Unkeyed, no proof exists to demand and the hint feeds nothing.
     pub fn tracking_source(&self) -> Option<SocketAddr> {
         self.driven
             .track
             .or(self.standby_source)
             .or_else(|| *self.adopted.lock().unwrap())
+            .or_else(|| {
+                if self.pair_key.is_some() {
+                    *self.announced.lock().unwrap()
+                } else {
+                    None
+                }
+            })
     }
 
     /// The monitor address a tracking peer announced through its
@@ -977,12 +993,14 @@ impl<'d> Monitor<'d> {
     /// sends, which resolves to that address — but the serving side
     /// cannot tell the puller's monitor port from any other same-IP
     /// port the source claims, and the endpoint's checkpoints are
-    /// public and replayable, so the recorded hint feeds no pull and
-    /// satisfies no guard until `POST /demote` proves it — the keyed
-    /// `line_proof` only a peer holding the pair's token can stamp,
-    /// which an unkeyed run cannot demand and so refuses the demotion
-    /// `NoTrackingSource`. A verified adoption — journaled naming its
-    /// source — is what turns the hint into a tracking source.
+    /// public and replayable. The hint satisfies no demote guard until
+    /// `POST /demote` proves it — the keyed `line_proof` only a peer
+    /// holding the pair's token can stamp, which an unkeyed run cannot
+    /// demand and so refuses the demotion `NoTrackingSource`. On a
+    /// keyed run a tracking pull may follow it before any adoption —
+    /// an in-place demotion the request path never sees still needs a
+    /// follow peer — but every such pull demands the same proof, so an
+    /// unproven or replaying endpoint feeds nothing.
     pub fn announced_hint(&self) -> Option<SocketAddr> {
         *self.announced.lock().unwrap()
     }
@@ -1751,15 +1769,19 @@ impl<'d> Monitor<'d> {
                 self.store.sync_receipts(peer.receipts());
             }
             peer.promote()
-        } else if !peer.owns_field() || self.configured_source().is_some() {
-            // A demotion with a configured source follows it without
-            // proving anything — operator-declared — and a non-owner's
-            // demotion is the peer's own named refusal. A field owner
-            // with neither — nothing configured and no standby that
-            // announced itself — already refused in
-            // `verify_demote_hint` rather than demoting into a
-            // permanently unsynchronized standby no pull can
-            // reconverge.
+        } else if !peer.owns_field()
+            || self.configured_source().is_some()
+            || self.adopted.lock().unwrap().is_some()
+        {
+            // A demotion with a configured source or an already-pinned
+            // adoption follows it without proving anything new —
+            // operator-declared or verified before — and a
+            // non-owner's demotion is the peer's own named refusal. A
+            // field owner with none of them — nothing configured, no
+            // verified adoption, no provable standby announce —
+            // already refused in `verify_demote_hint` rather than
+            // demoting into a permanently unsynchronized standby no
+            // pull can reconverge.
             peer.demote()
         } else {
             // An announced-only demotion: the hint must still be the
@@ -1802,18 +1824,27 @@ impl<'d> Monitor<'d> {
     }
 
     /// The pair key a pull toward `source` must prove under — `Some`
-    /// when `source` is the endpoint a verified announced demotion
-    /// adopted and this run is keyed: the demotion proved the endpoint
-    /// once, but every checkpoint it serves afterward must keep proving
-    /// it came from a key-holding peer of this line, so an adopted
+    /// when this run is keyed and `source` is an announced-contract
+    /// endpoint: the adoption a verified announced demotion pinned, or
+    /// the recorded `?peer=` hint a keyed tracking pull may follow.
+    /// The demotion proved the adopted endpoint once, but every
+    /// checkpoint either announced shape serves afterward must keep
+    /// proving it came from a key-holding peer of this line, so an
     /// endpoint that only replays or fabricates this line's documents
-    /// feeds the demoted peer nothing. `None` for a configured source
+    /// feeds the tracking peer nothing. `None` for a configured source
     /// — operator-declared, no proof owed — and whenever the run is
-    /// unkeyed, where `adopted` can never be set anyway.
+    /// unkeyed, where neither shape can ever feed a pull anyway.
     pub fn pull_proof_key(&self, source: SocketAddr) -> Option<u64> {
-        match (self.pair_key, *self.adopted.lock().unwrap()) {
-            (Some(key), Some(adopted)) if adopted == source => Some(key),
-            _ => None,
+        let key = self.pair_key?;
+        if self.configured_source() == Some(source) {
+            return None;
+        }
+        let adopted = *self.adopted.lock().unwrap();
+        let announced = *self.announced.lock().unwrap();
+        if adopted == Some(source) || announced == Some(source) {
+            Some(key)
+        } else {
+            None
         }
     }
 
@@ -1831,9 +1862,10 @@ impl<'d> Monitor<'d> {
 
     /// One checkpoint fetched from `source` the tracking pull's way —
     /// announcing this monitor's own address on it, and when `source`
-    /// is the adopted announced endpoint also carrying a fresh
-    /// `?prove=` nonce whose keyed `line_proof` the returned document
-    /// must match, or the fetch fails like any refused pull.
+    /// is an announced-contract endpoint — the pinned adoption or the
+    /// recorded hint — also carrying a fresh `?prove=` nonce whose
+    /// keyed `line_proof` the returned document must match, or the
+    /// fetch fails like any refused pull.
     fn fetch_checkpoint(&self, source: SocketAddr) -> Result<Checkpoint, String> {
         let client = MonitorClient::with_timeout(source, CHECKPOINT_PULL_TIMEOUT);
         let nonce = self.pull_proof_key(source).map(|_| mint_generation());
@@ -1856,8 +1888,9 @@ impl<'d> Monitor<'d> {
     /// that it continues this run's line and that the endpoint is a
     /// peer of this line. Returns the verified hint, or `None` when
     /// the demotion needs no proof — a configured source covers it,
-    /// or the peer owns no field — or the `409 NoTrackingSource`
-    /// refusal when the owner has only an unproven hint.
+    /// an already-pinned adoption is followed as-is, or the peer owns
+    /// no field — or the `409 NoTrackingSource` refusal when the
+    /// owner has only an unproven hint.
     ///
     /// The endpoint-identity half is what makes the proof keyed, not
     /// optional: `/checkpoint` is public and unauthenticated, so every
@@ -1875,6 +1908,14 @@ impl<'d> Monitor<'d> {
     /// the announced follow-peer contract at all.
     fn verify_demote_hint(&self) -> Result<Option<SocketAddr>, Response<Cursor<Vec<u8>>>> {
         if self.configured_source().is_some() {
+            return Ok(None);
+        }
+        if self.adopted.lock().unwrap().is_some() {
+            // A previously verified adoption is still the pinned
+            // tracking target — proved once, re-proved by every pull
+            // it answers — so a later demotion follows it without a
+            // new verify pull, and a `?peer=` rewrite landing
+            // meanwhile can neither redirect nor veto it.
             return Ok(None);
         }
         if !self.shared.lock().unwrap().peer.owns_field() {

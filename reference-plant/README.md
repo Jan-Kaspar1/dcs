@@ -1286,11 +1286,19 @@ the invocation's `--state-file`/`--journal-file` flags, while the
 model and dynamics mounts stay read-only. Each controller invocation
 carries the manifest's fingerprint in its `DCS_MODEL_FINGERPRINT`
 environment — the identity checkpoint negotiation verifies on the
-wire. The check's `deploy` stage parses the file through `docker
+wire — and the pair's shared `--pair-token`, the tracking secret the
+keyed `line_proof` signs under: a duty controller's announced-source
+demotion verifies the hinted endpoint's proof, refusing
+`no_tracking_source` on an unkeyed rig, so the declared pair needs
+one identical token on every peer (the checked-in value stands in for
+a deployment secret — substitute the deployment's own token through
+its secret machinery rather than committing it). The check's `deploy`
+stage parses the file through `docker
 compose config` (or an equivalent YAML parser) and asserts it agrees
 with the manifest on every field — release, images, mounts,
-fingerprint, listen addresses, pair wiring, and the standby's
-`failover_budget` against its `--auto-promote` flag — a declared
+fingerprint, listen addresses, pair wiring, the standby's
+`failover_budget` against its `--auto-promote` flag, and every
+controller's `--pair-token` presence with one shared value — a declared
 budget with no flag, a flag with no declaration, a diverging value,
 or the field placed on the duty entry each fail `rig-mismatch`, an
 unparsable file `rig-invalid`, a host with

@@ -28,6 +28,12 @@ declares:
   budget the manifest omits means the flag is absent, and the field
   belongs to a tracking standby only — a duty entry declaring it
   diverges the same way;
+- `--pair-token` — not a manifest field (the pair's tracking secret
+  stays deployment material), but a declared pair needs it: an
+  announced-source demotion on the duty controller verifies the hinted
+  endpoint against the token-keyed `line_proof` and refuses
+  `no_tracking_source` unkeyed, so every controller invocation must
+  carry the flag and all peers must share one value;
 - `controllers[].state_file` / `controllers[].journal_file` — the
   optional durability paths (decisions 35 and 36): each declared
   container path must be covered by a read-write mount and carried as
@@ -287,6 +293,7 @@ def main():
     )
     remote = f"{plant_name}:{plant_port}"
     declared = {}
+    tokens = {}
     for controller in manifest["controllers"]:
         name = controller["name"]
         declared[name] = controller
@@ -400,6 +407,20 @@ def main():
                 f"{name} does not order on the {plant_name} service",
             )
 
+        # The pair's tracking secret: every controller carries
+        # --pair-token — the key the checkpoint line_proof signs
+        # under, which a duty controller's announced-source demotion
+        # needs to verify its hinted successor — and all declared
+        # peers share one value, or a demotion's proof pull answers
+        # a foreign key.
+        token = flag(svc["argv"], "--pair-token")
+        expect(
+            token is not None,
+            f"{name} carries no --pair-token — an announced-source "
+            "demotion on this pair would refuse no_tracking_source",
+        )
+        tokens[name] = token
+
         # Durability: a declared state_file/journal_file must ride a
         # read-write mount — the innermost mount covering the path is
         # the one the file lands on — and the invocation flag must
@@ -445,6 +466,16 @@ def main():
         set(services) == set(declared) | ({plant_name} if plant_name else set()),
         f"the definition declares services {sorted(services)}, the manifest "
         f"the plant plus controllers {sorted(declared)}",
+    )
+
+    # Every declared peer must share the one --pair-token value — the
+    # keyed line_proof only verifies when both ends hold the same key.
+    distinct = {token for token in tokens.values() if token is not None}
+    expect(
+        len(distinct) <= 1,
+        f"the controllers declare distinct --pair-token values "
+        f"{sorted(distinct)!r} — a demotion's proof pull would answer "
+        "a foreign key",
     )
 
     # The manifest's own standby wiring: the peer address must name a
