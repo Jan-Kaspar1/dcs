@@ -74,4 +74,14 @@ only when the deliverable is QA, simulation, or conformance machinery itself.
 Priority remains authoritative. Within one priority, dispatch favors areas below
 their rolling target; targets guide portfolio balance and never manufacture work.
 
+## Delivery feedback budget
+
+Keep ordinary required PR feedback under five minutes on a warm CI cache.
+Record elapsed time for each gate and investigate a sustained breach before adding
+more work to that gate. Prefer independently buildable crates or packages and
+targeted checks when a measured critical path stays over budget; keep a release
+gate that assembles and tests their versioned interfaces together. Track completed
+merges in adjacent seven-day windows as a secondary flow signal. A decline over
+20% prompts investigation of the actual bottleneck, not an automatic refactor.
+
 The planner keeps the sequence above visible in `docs/plan.md`, checks current code and issues before proposing work, and favors a narrow vertical slice through the reference application over disconnected library breadth. `WW-ENG-003`, `WW-FND-003`, and `WW-FND-004` are implemented, so the sequencing authority is the pre-pilot tranche `docs/plan.md` records: its ordered milestones and its deferral list, whose recorded deferrals are not re-proposed until their named revisit conditions fire. Already-started slices and concrete reliability or hardware prerequisites may finish.
