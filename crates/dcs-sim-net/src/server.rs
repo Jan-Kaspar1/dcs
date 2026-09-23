@@ -435,6 +435,28 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
             }
             PlantResponse::Done
         }
+        PlantRequest::ProbeWriter => {
+            // The claim-state observation: the verdict a mutation from
+            // this connection would meet, without mutating — `Done`
+            // while this attachment holds the claim, `Fenced` while
+            // another owner does, `Unclaimed` while no claim stands.
+            // The probe touches the holder set not at all, so an
+            // unclaimed answer cannot seize the field it reports.
+            let writer = shared.writer.lock().unwrap();
+            match writer.as_ref() {
+                Some(claim) if claim.holders.contains(&connection) => PlantResponse::Done,
+                Some(_) => PlantResponse::Error {
+                    error: PlantError::Fenced {
+                        detail: "another attachment owns field writes".to_string(),
+                    },
+                },
+                None => PlantResponse::Error {
+                    error: PlantError::Unclaimed {
+                        detail: "no attachment holds field writes".to_string(),
+                    },
+                },
+            }
+        }
     }
 }
 
