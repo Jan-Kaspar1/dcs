@@ -6,9 +6,10 @@
 //! monitored loop's `track_cycle` does.
 
 use dcs_core::{
-    CommandOutcome, ComponentDescriptor, Direction, Divergence, EmittedEvent, EventDecl,
-    EventField, EventFieldKind, EventRetention, EventValue, IoDriver, IoError, JournalEvent,
-    PointId, Role, Sample, StandbySync, StateMap, SwitchError, Tick, Value, ValueKind,
+    Command, CommandAvailability, CommandDecl, CommandOutcome, ComponentDescriptor, Direction,
+    Divergence, EmittedEvent, EventDecl, EventField, EventFieldKind, EventRetention, EventValue,
+    IoDriver, IoError, JournalEvent, PointId, Role, Sample, StandbySync, StateMap, SwitchError,
+    Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorClient};
@@ -16,7 +17,7 @@ use dcs_runtime::{
     Checkpoint, Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap,
     StepError,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -184,6 +185,127 @@ fn executor(driver: &'static StubDriver) -> Executor<'static> {
 /// tracked emissions exercise every routed store.
 fn emitter_executor(driver: &'static StubDriver) -> Executor<'static> {
     Executor::new(driver, PointMap::new(), vec![Box::new(Emitter { n: 0 })]).unwrap()
+}
+
+/// The forged-internal-state rig's executor: the fixture's surface
+/// plus one image-carried writable `In` — the operator-held value a
+/// forged standby-shaped checkpoint plants, and the state the field
+/// owner's own audit proves or convicts.
+fn internal_executor(driver: &'static StubDriver) -> Executor<'static> {
+    let map = PointMap::new()
+        .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+        .with_point(PointId(20), Direction::Out, ValueKind::Float)
+        .with_point(PointId(30), Direction::Out, ValueKind::Float)
+        .with_writable_internal(
+            PointId(40),
+            Direction::In,
+            ValueKind::Bool,
+            Value::Bool(false),
+        );
+    Executor::new(driver, map, vec![Box::new(Scale)]).unwrap()
+}
+
+/// A component declaring a `KindDeclared` command whose standing
+/// predicate refuses at a checkpointed count — the served-verdict
+/// parity rig: `advance` counts toward the declared `LIMIT`, where
+/// probe and dispatch share the named refusal, while `reset` —
+/// `Always`-available — zeroes it. The checkpointed `count` carries
+/// the verdict across the tracking pull, so a standby's scans
+/// re-derive the active's published answer from the adopted state.
+struct Gate {
+    count: i64,
+}
+
+impl Gate {
+    /// The kind's declared `advance` ceiling.
+    const LIMIT: i64 = 2;
+
+    /// The standing predicate `command_refusal` publishes and
+    /// `invoke_command` enforces — one code path, as the contract
+    /// requires of probe and dispatch.
+    fn refusal(&self) -> Option<String> {
+        (self.count >= Self::LIMIT).then(|| "the gate is at its end; reset reopens it".to_string())
+    }
+}
+
+impl Component for Gate {
+    fn name(&self) -> &str {
+        "gate"
+    }
+
+    fn io_requirements(&self) -> Vec<IoRequirement> {
+        Vec::new()
+    }
+
+    fn step(&mut self, _io: &dyn ComponentIo, _tick: Tick) -> Result<(), StepError> {
+        Ok(())
+    }
+
+    fn describe(&self) -> ComponentDescriptor {
+        ComponentDescriptor {
+            name: "gate".to_string(),
+            kind: "gate".to_string(),
+            label: "gate".to_string(),
+            ports: Vec::new(),
+            parameters: Vec::new(),
+            commands: vec![
+                CommandDecl {
+                    name: "advance".to_string(),
+                    request: Vec::new(),
+                    availability: CommandAvailability::KindDeclared,
+                },
+                CommandDecl {
+                    name: "reset".to_string(),
+                    request: Vec::new(),
+                    availability: CommandAvailability::Always,
+                },
+            ],
+            events: Vec::new(),
+        }
+    }
+
+    fn command_refusal(&self, _command: &str) -> Option<String> {
+        self.refusal()
+    }
+
+    fn invoke_command(
+        &mut self,
+        command: &str,
+        _arguments: &BTreeMap<String, Value>,
+    ) -> Result<(), String> {
+        match command {
+            "advance" => {
+                if let Some(reason) = self.refusal() {
+                    return Err(reason);
+                }
+                self.count += 1;
+                Ok(())
+            }
+            "reset" => {
+                self.count = 0;
+                Ok(())
+            }
+            _ => unreachable!("submission validates the declared command name"),
+        }
+    }
+
+    fn capture_state(&self) -> StateMap {
+        let mut state = StateMap::new();
+        state.insert("count", Value::Int(self.count));
+        state
+    }
+
+    fn restore_state(&mut self, state: &StateMap) -> Result<(), dcs_core::StateError> {
+        state.ensure_known_fields("gate", &["count"])?;
+        self.count = state.require_i64("gate", "count")?;
+        Ok(())
+    }
+}
+
+/// The verdict-parity rig's executor: one `Gate` and no I/O surface —
+/// the tracked `count` exercises the served `KindDeclared` verdicts.
+fn gate_executor(driver: &'static StubDriver) -> Executor<'static> {
+    Executor::new(driver, PointMap::new(), vec![Box::new(Gate { count: 0 })]).unwrap()
 }
 
 /// The dialable form of a bound monitor address: in this in-process
@@ -843,10 +965,13 @@ fn closed_port() -> SocketAddr {
 
 /// A hostile checkpoint server on the test network — the QA
 /// reproduction's interposer: it answers every checkpoint pull with
-/// the forged document it was given, whatever that claims. Runs on
-/// its own thread until dropped.
+/// whatever document it currently serves, so a test can adopt the
+/// endpoint on one document and then have later pulls answer with
+/// another — the reproduction's flip after the one-shot verify.
+/// Runs on its own thread until dropped.
 struct Hostile {
     addr: SocketAddr,
+    body: Arc<Mutex<String>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -856,7 +981,8 @@ impl Hostile {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
-        let body = serde_json::to_string(forged).unwrap();
+        let body = Arc::new(Mutex::new(serde_json::to_string(forged).unwrap()));
+        let served = Arc::clone(&body);
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = Arc::clone(&stop);
         let thread = thread::spawn(move || {
@@ -881,6 +1007,7 @@ impl Hostile {
                                 Err(_) => break,
                             }
                         }
+                        let body = served.lock().unwrap().clone();
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
                              Content-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -899,9 +1026,17 @@ impl Hostile {
         });
         Self {
             addr,
+            body,
             stop,
             thread: Some(thread),
         }
+    }
+
+    /// Swaps the document later pulls answer with — the reproduction's
+    /// post-adoption flip, where the verified document and the tracked
+    /// ones are not the same.
+    fn set_body(&self, forged: &Checkpoint) {
+        *self.body.lock().unwrap() = serde_json::to_string(forged).unwrap();
     }
 }
 
@@ -1394,6 +1529,198 @@ fn an_announced_tick_bumped_replay_cannot_unblock_no_tracking_source() {
                 JournalEvent::TrackingSourceAdopted { .. } | JournalEvent::RoleChanged { .. }
             )),
         "a refused demotion journals neither an adoption nor a role change"
+    );
+}
+
+/// The QA finding `announced-source-verify-adopts-standby-shaped-
+/// checkpoint` (#850): the owner-document refusals cover the replayed
+/// `source_owns_field: true` shapes, but the standby document shape —
+/// the victim's own checkpoint with the stamp flipped `false` and the
+/// tick bumped inside the announced-ahead window — is exactly what a
+/// real tracking peer serves, so an unkeyed verify cannot refuse the
+/// shape itself. What it can refuse is the document's commanded
+/// state: a field owner holds the line's audit itself — its image
+/// carries every value its commands produced and its receipt log is
+/// the submission sequence — so a checkpoint planting an internal
+/// `In` value no settled verdict produced is provably not the tracked
+/// line's continuation. Across the whole `+1..=32` tick window the
+/// demotion refuses `no_tracking_source`, the run stays the field
+/// owner, and nothing adopts.
+#[test]
+fn an_announced_standby_shaped_forgery_cannot_unblock_no_tracking_source() {
+    let lonely_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let lonely = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(internal_executor(lonely_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    lonely.client.advance(3).unwrap();
+    let tick = lonely.client.role().unwrap().tick;
+
+    // The reproduction's interposer: the victim's own captured
+    // document, re-stamped `source_owns_field: false` — the shape the
+    // unkeyed verify must keep accepting — with a planted internal
+    // value the run never held and no command produced, served at
+    // every tick offset the announced-ahead window covers.
+    let captured = lonely.client.checkpoint().unwrap();
+    assert_eq!(
+        captured
+            .internal
+            .get(&PointId(40))
+            .map(|sample| sample.value),
+        Some(Value::Bool(false)),
+        "the rig's operator-held value starts unwritten: {captured:?}"
+    );
+    let hostile = Hostile::serve(&captured);
+    lonely.client.checkpoint_announcing(hostile.addr).unwrap();
+    assert_eq!(lonely.monitor.tracking_source(), Some(hostile.addr));
+
+    for ahead in 1..=32u64 {
+        let mut forged = captured.clone();
+        forged.source_owns_field = Some(false);
+        forged.tick = Tick(tick.0 + ahead);
+        forged
+            .internal
+            .insert(PointId(40), Sample::good(Value::Bool(true), forged.tick));
+        hostile.set_body(&forged);
+
+        let error = lonely.client.demote().unwrap_err();
+        assert!(
+            error.to_string().contains("no_tracking_source"),
+            "tick +{ahead}: a forged standby-shaped document must not arm \
+             the demotion: {error}"
+        );
+        let report = lonely.client.role().unwrap();
+        assert_eq!(report.role, Role::Active);
+        assert_eq!(report.tick, tick);
+    }
+    assert!(
+        lonely
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .all(|entry| !matches!(
+                entry.event,
+                JournalEvent::TrackingSourceAdopted { .. } | JournalEvent::RoleChanged { .. }
+            )),
+        "a refused demotion journals neither an adoption nor a role change"
+    );
+    // And the planted value never landed: the run's own document
+    // still carries the value its commands produced.
+    let served = lonely.client.checkpoint().unwrap();
+    assert_eq!(
+        served.internal.get(&PointId(40)).map(|sample| sample.value),
+        Some(Value::Bool(false))
+    );
+}
+
+/// The finding's post-adoption half: even where a standby-shaped
+/// document is truthful enough to verify — the shape an unkeyed
+/// deployment must keep accepting — the adoption binds the endpoint,
+/// not its contents. The reproduction's second move: once adopted,
+/// the interposer flips `source_owns_field` back to `true` to clear
+/// the orphan verdict the `false` stamp would raise, and keeps
+/// serving the planted internal value on the standing pulls nothing
+/// re-verified. The demoted peer's own audit still vets every pulled
+/// document: the forged one refuses like any rejected checkpoint —
+/// the peer reports `degraded` rather than adopting the planted
+/// state, and cannot promote onto it.
+#[test]
+fn an_adopted_announced_source_cannot_land_forged_commanded_state() {
+    let lonely_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let lonely = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(internal_executor(lonely_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    lonely.client.advance(3).unwrap();
+
+    // The verification document: standby-shaped and otherwise the
+    // run's own line — the endpoint adopts on it, the journaled
+    // adoption the announced-source contract requires.
+    let mut clean = lonely.client.checkpoint().unwrap();
+    clean.source_owns_field = Some(false);
+    clean.tick = Tick(clean.tick.0 + 1);
+    let hostile = Hostile::serve(&clean);
+    lonely.client.checkpoint_announcing(hostile.addr).unwrap();
+    assert_eq!(lonely.client.demote().unwrap().role, Role::Demoting);
+    assert!(
+        lonely
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .any(|entry| matches!(
+                entry.event,
+                JournalEvent::TrackingSourceAdopted { source } if source == hostile.addr
+            )),
+        "the verify-clean document adopts and journals its source: {:?}",
+        lonely.client.journal(0).unwrap()
+    );
+
+    // The reproduction's post-verify flip: the tracked documents now
+    // carry the planted internal value under an owner stamp — the
+    // orphan dodge — while the peer's tracking pulls keep coming.
+    let mut forged = clean.clone();
+    forged.source_owns_field = Some(true);
+    forged.tick = Tick(forged.tick.0 + 1);
+    forged
+        .internal
+        .insert(PointId(40), Sample::good(Value::Bool(true), forged.tick));
+    hostile.set_body(&forged);
+
+    // The pull refuses the forged document like any rejected
+    // checkpoint: the peer reports the named degraded state, applies
+    // nothing of it, and stays un promotable — the converge gate the
+    // promotion checks never opened on forged state.
+    lonely.client.advance(1).unwrap();
+    let report = lonely.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert!(
+        matches!(report.sync, Some(StandbySync::Degraded { .. })),
+        "a forged tracked document degrades the pull: {report:?}"
+    );
+    let error = lonely.client.promote().unwrap_err();
+    assert!(
+        error.to_string().contains("not_converged"),
+        "a peer that never converged on real state cannot promote: {error}"
+    );
+    let served = lonely.client.checkpoint().unwrap();
+    assert_eq!(
+        served.internal.get(&PointId(40)).map(|sample| sample.value),
+        Some(Value::Bool(false)),
+        "the planted internal value never applied: {served:?}"
+    );
+    assert!(
+        lonely
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .all(|entry| !matches!(
+                &entry.event,
+                JournalEvent::RoleChanged {
+                    to: Role::Promoting | Role::Active,
+                    ..
+                }
+            )),
+        "no promotion journaled on forged state: {:?}",
+        lonely.client.journal(0).unwrap()
     );
 }
 
@@ -1931,6 +2258,77 @@ fn a_tracking_standbys_resources_answer_the_same_routed_events() {
     // The parity itself: the standby's `events` is the same record —
     // same seqs, ticks, payloads, and retention marks.
     assert_eq!(events(&standby.standby.client), expected);
+}
+
+/// Verdict parity at the served surface: a tracking peer's post-scan
+/// probe re-derives the `KindDeclared` verdicts from the adopted
+/// state, so `GET /resources` on either peer answers the same
+/// `commands` rows — `advance` invocable below the limit, then the
+/// kind's named refusal once the receipted submissions complete it,
+/// and `reset` `Always`-available throughout.
+#[test]
+fn a_tracking_standbys_resources_answer_the_same_command_verdicts() {
+    let (standby, active) = DrivenStandby::start_with(None, gate_executor);
+
+    // Converge in lockstep — each requested standby scan pulls the
+    // active's checkpoint first — so both peers publish the gate's
+    // mid-table verdicts: `advance` invocable.
+    for _ in 0..2 {
+        standby.standby.client.advance(1).unwrap();
+        active.client.advance(1).unwrap();
+    }
+    assert_eq!(standby.standby.client.role().unwrap().role, Role::Standby);
+    let commands = |client: &MonitorClient| {
+        client
+            .resources()
+            .unwrap()
+            .components
+            .into_iter()
+            .find(|entry| entry.name == "gate")
+            .expect("the gate is served")
+            .commands
+    };
+    let expected = commands(&active.client);
+    let advance = expected
+        .iter()
+        .find(|command| command.name == "advance")
+        .unwrap();
+    assert!(advance.available);
+    assert_eq!(advance.refusal, None);
+    // The invocable direction's parity: the standby's served rows are
+    // the active's, name for name.
+    assert_eq!(commands(&standby.standby.client), expected);
+
+    // Drive the active's count to the limit through the receipted
+    // path — each `advance` settles `applied` at its own boundary —
+    // and the covering pull adopts the completed state: the standby's
+    // served rows carry the kind's named refusal, identical to the
+    // field owner's, while the submission path it guards stays the
+    // receipted one alone.
+    for _ in 0..Gate::LIMIT {
+        let receipt = active
+            .client
+            .command(&Command::Invoke {
+                component: "gate".to_string(),
+                command: "advance".to_string(),
+                arguments: BTreeMap::new(),
+            })
+            .unwrap();
+        assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+        active.client.advance(1).unwrap();
+        standby.standby.client.advance(1).unwrap();
+    }
+    let expected = commands(&active.client);
+    let advance = expected
+        .iter()
+        .find(|command| command.name == "advance")
+        .unwrap();
+    assert!(!advance.available);
+    assert_eq!(
+        advance.refusal.as_deref(),
+        Some("the gate is at its end; reset reopens it")
+    );
+    assert_eq!(commands(&standby.standby.client), expected);
 }
 
 /// The settle-audit rig's executor: one writable internal `In` point —

@@ -65,6 +65,16 @@ ci/simulate.py         the deterministic scripted-simulation runner;
                        --surface asserts the served operator surface —
                        signal index, interface registry, declared
                        commands, emitted events
+ci/dynamics_fingerprint.py  the dynamics-fingerprint authorization
+                       leg — the manifest-declared pair launched on
+                       the deployment's declared `dynamics.path`, the
+                       document it serves fingerprinted canonically
+                       and held equal to the manifest's optional
+                       `dynamics.fingerprint` and the checked-in
+                       artifact, a doctored served document with
+                       renumbered point references reporting the
+                       named mismatch with the expected vs served
+                       fingerprint and the first diverging element
 ci/restart.py          the restart-recovery leg — the driven
                        controller stopped mid-scenario and relaunched
                        onto the same state/journal files
@@ -295,6 +305,22 @@ ci/monitor_starvation.py  the pair contract's monitor-starvation leg
                        stay fenced, and closing the set restores
                        driven scans and a receipted command with the
                        pair's roles unchanged
+ci/commissioning.py    the pair contract's commissioning/handover
+                       record leg — the declared commissioning record
+                       materialized from one deterministic driven run
+                       on the deployed pair: the field census audited
+                       against the declared channel set (I/O checkout
+                       record), the measurement ladder and the
+                       receipted output loop (loop-check evidence),
+                       every managed alarm's declared record served
+                       verbatim on both peers (alarm rationalization
+                       sign-off), the documented demote/promote
+                       switch and restore, and the document set
+                       digested with each peer's fingerprint and
+                       durable files (documentation turnover) — the
+                       completeness audit failing a record missing
+                       any named artifact by name, two passes
+                       byte-identical
 ci/consumers.py        the consumer-boundary driver — replays the same
                        driven run under each consumer schedule
 ci/ctl.py              the dcs-ctl leg — the released operator CLI
@@ -425,6 +451,29 @@ component set verbatim — must report the mismatch and name the
 passes must produce the identical `fingerprint-digest`; a violated
 contract fails `fingerprint-failed`, a divergence
 `fingerprint-nondeterministic`.
+
+For dynamics the same canonical fingerprint contract applies:
+`ci/dynamics_fingerprint.py` launches the manifest-declared pair on
+the released tooling serving the manifest's declared `dynamics.path`
+— the document the rig mounts read-only and `dcs-plant-server
+--dynamics` merges; the plant protocol exposes no dynamics surface
+and none is added, so the leg pins the deployment-declared document
+the pair actually runs — and fingerprints it canonically (FNV-1a
+over the parsed document's reserialization, the same
+sixteen-hex-digit shape `model.fingerprint` carries). The served
+fingerprint must equal both the manifest's optional
+`dynamics.fingerprint` and the checked-in `model/dynamics.json`; any
+divergence reports `manifest-fingerprint-mismatch` naming the
+expected and served fingerprints and the first diverging element. A
+manifest omitting the optional field declares no dynamics pin; the
+served-vs-checked-in comparison still stands. The stage's doctored
+case proves the diagnostic fires: a served deployment whose point
+references were renumbered — identical element content — must
+report the mismatch, or the leg reports
+`dynamics-fingerprint-unchecked`. Two passes must produce the
+identical `dynamics-fingerprint-digest`; a violated contract fails
+`dynamics-fingerprint-failed`, a divergence
+`dynamics-fingerprint-nondeterministic`.
 
 ### 5. Run the simulation
 
@@ -1270,6 +1319,12 @@ and the redundant controller pair:
 - `model.path` / `model.fingerprint` — the checked-in model and the
   identity checkpoint negotiation verifies on the wire.
 - `dynamics.path` — the simulation dynamics `dcs-plant-server` merges.
+- `dynamics.fingerprint` — **optional**: the canonical fingerprint of
+  the approved dynamics document (FNV-1a over its parsed
+  reserialization, `ci/dynamics_fingerprint.py --fingerprint
+  model/dynamics.json` prints it). No wire role — the dynamics never
+  cross the protocol — it is the check-side pin authorizing the
+  document the deployment's `dynamics.path` serves.
 - `plant.listen` — the plant server's listen address.
 - `controllers` — the duty controller and its tracking standby
   (`standby` names the peer it follows).

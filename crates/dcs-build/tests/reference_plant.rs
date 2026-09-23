@@ -163,7 +163,18 @@
 //! foreign and owner tokens, and a rogue `claim_writer` resolving per
 //! the settled contract — its preempt's journaled `field_claim_lost`
 //! and in-place demotion on the superseded owner, then the pair
-//! restored to its launch roles — and the `upgrade` stage,
+//! restored to its launch roles — the pair contract's
+//! commissioning/handover record leg, which materializes the declared
+//! commissioning record from one deterministic driven run: the field
+//! census audited against the declared channel set (the I/O checkout
+//! record), the measurement ladder and the receipted output loop (the
+//! loop-check evidence), every managed alarm's declared record served
+//! verbatim on both peers (the alarm rationalization sign-off), the
+//! documented `demote`/`promote` switch and restore (the handover
+//! procedure), and the document set digested with each peer's
+//! checkpoint fingerprint and durable files (the documentation
+//! turnover) — the completeness audit naming any missing artifact,
+//! two passes producing identical digests — and the `upgrade` stage,
 //! which repins the materialized tree to the checkout's `HEAD`
 //! (seeded into the stand-in beside the recorded rev) and re-runs the
 //! full pipeline under the repin.
@@ -186,8 +197,9 @@
 //! `divergence-missed`/`divergence-nondeterministic`,
 //! `report-failed`/`report-nondeterministic`,
 //! `managed-lifecycle-failed`/`managed-lifecycle-nondeterministic`,
-//! `event-parity-failed`/`event-parity-nondeterministic`, and
-//! the `surface-mismatch` paths
+//! `event-parity-failed`/`event-parity-nondeterministic`,
+//! `commissioning-failed`/`commissioning-nondeterministic`/
+//! `commissioning-unchecked`, and the `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
 
@@ -480,6 +492,14 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         "managed alarm instances carry the declared record",
         "doctored documents refused",
         "a skipped-doctoring run refused: alarm-validation",
+        // The fingerprint stage's dynamics leg ran and held: the
+        // manifest-declared pair served the declared dynamics.path,
+        // its canonical fingerprint matched the recorded
+        // dynamics.fingerprint and the checked-in artifact, and the
+        // leg's own renumbered-points case reported its diagnostic.
+        "dynamics fingerprint",
+        "dynamics-fingerprint-digest",
+        "renumber-points: reported, manifest-fingerprint-mismatch",
     ] {
         assert!(
             stdout.contains(line),
@@ -820,6 +840,39 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         assert!(
             stdout.contains(&format!("{tamper}: reported, event-parity-failed")),
             "the event-parity leg's {tamper} case did not report its named diagnostic:\n{stdout}"
+        );
+    }
+    // The pair contract's commissioning/handover record leg ran and
+    // held: the declared commissioning record materialized from one
+    // deterministic driven run — its digest line reports each named
+    // artifact's evidence — and every missing-artifact doctored case
+    // reported its named diagnostic.
+    let commissioning_line = stdout
+        .lines()
+        .find(|line| line.contains("commissioning-digest"))
+        .unwrap_or_else(|| panic!("the commissioning leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "field points checked out",
+        "loop-check marks driven",
+        "managed alarm instances signed off",
+        "switched at tick",
+        "restored at tick",
+        "turnover documents digested",
+    ] {
+        assert!(
+            commissioning_line.contains(phrase),
+            "the commissioning digest names no '{phrase}' evidence: {commissioning_line}"
+        );
+    }
+    for tamper in [
+        "missing-io-checkout",
+        "missing-loop-check",
+        "missing-alarm-signoff",
+        "missing-documentation-turnover",
+    ] {
+        assert!(
+            stdout.contains(&format!("{tamper}: reported, commissioning-failed")),
+            "the commissioning leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
     assert!(
@@ -1399,7 +1452,11 @@ fn a_structurally_divergent_served_document_reports_schema_mismatch() {
 }
 
 /// A dynamics document the scenario's declared outcomes no longer hold
-/// against is the `scenario-failed` diagnostic.
+/// against is the `scenario-failed` diagnostic. The doctored copy
+/// re-records the manifest's `dynamics.fingerprint` over the changed
+/// bytes — a customer who revises the dynamics re-approves the
+/// document — so the fingerprint stage holds and the run reaches the
+/// simulate stage.
 #[test]
 fn a_changed_trajectory_reports_scenario_failed() {
     let tools = build_tools();
@@ -1413,11 +1470,66 @@ fn a_changed_trajectory_reports_scenario_failed() {
         source.replacen("\"off_rate\": 0.25", "\"off_rate\": 0.0", 1),
     )
     .unwrap();
+    let fingerprint = Command::new("python3")
+        .arg("ci/dynamics_fingerprint.py")
+        .arg("--fingerprint")
+        .arg("model/dynamics.json")
+        .current_dir(&copy.dir)
+        .output()
+        .expect("python3 fingerprints the doctored dynamics");
+    assert!(
+        fingerprint.status.success(),
+        "the fingerprint helper failed: {}",
+        String::from_utf8_lossy(&fingerprint.stderr)
+    );
+    let fingerprint = String::from_utf8_lossy(&fingerprint.stdout);
+    let fingerprint = fingerprint.trim();
+    let manifest = copy.dir.join("deploy/manifest.json");
+    let source = std::fs::read_to_string(&manifest).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&source).unwrap();
+    let recorded = parsed["dynamics"]["fingerprint"].as_str().unwrap();
+    let field = format!("\"fingerprint\": \"{recorded}\"");
+    assert!(
+        source.contains(&field),
+        "the manifest's dynamics fingerprint field moved"
+    );
+    std::fs::write(
+        &manifest,
+        source.replacen(&field, &format!("\"fingerprint\": \"{fingerprint}\""), 1),
+    )
+    .unwrap();
     let output = copy.check(&tools);
     assert!(!output.status.success(), "a broken scenario passed");
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("scenario-failed"),
         "expected the scenario-failed diagnostic, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A checked-in dynamics document diverging from the manifest's
+/// recorded `dynamics.fingerprint` is the `manifest-fingerprint-mismatch`
+/// diagnostic — the deployment declaration no longer names the approved
+/// dynamics bytes.
+#[test]
+fn a_doctored_dynamics_reports_manifest_fingerprint_mismatch() {
+    let tools = build_tools();
+    let copy = Materialized::new();
+    let dynamics = copy.dir.join("model/dynamics.json");
+    let source = std::fs::read_to_string(&dynamics).unwrap();
+    std::fs::write(
+        &dynamics,
+        source.replacen("\"off_rate\": 0.25", "\"off_rate\": 0.0", 1),
+    )
+    .unwrap();
+    let output = copy.check(&tools);
+    assert!(
+        !output.status.success(),
+        "a doctored dynamics document passed"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("manifest-fingerprint-mismatch"),
+        "expected the manifest-fingerprint-mismatch diagnostic, got:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }

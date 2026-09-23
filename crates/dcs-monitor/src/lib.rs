@@ -1879,7 +1879,12 @@ impl<'d> Monitor<'d> {
     /// nothing an attacker cannot serve — this run's own document
     /// verbatim, stale, tick-bumped, or re-stamped into the standby's
     /// `source_owns_field: false` shape — and an announced-only
-    /// demotion on an unkeyed run refuses outright.
+    /// demotion on an unkeyed run refuses outright. A signed answer
+    /// still answers to this run's command audit: a field owner holds
+    /// the line's receipt log and held-value image itself, so a
+    /// document whose receipt window forks that log or whose internal
+    /// `In` samples plant a value no settled verdict produced is
+    /// forged rather than a continuation, and refuses the same way.
     fn verify_demote_hint(&self) -> Result<Option<SocketAddr>, Response<Cursor<Vec<u8>>>> {
         if self.configured_source().is_some() {
             return Ok(None);
@@ -1910,7 +1915,22 @@ impl<'d> Monitor<'d> {
             Ok(pulled) => pulled,
             Err(_) => return Err(json(409, &SwitchError::NoTrackingSource)),
         };
-        if !self.proven(&pulled, nonce) || verify_announced_checkpoint(&pulled, &own).is_err() {
+        // A signed answer still answers to this run's command audit:
+        // the field owner holds the line's receipt log and held-value
+        // image itself, so a document whose receipt window forks that
+        // log or whose internal `In` samples plant a value no settled
+        // verdict produced is forged rather than a continuation, and
+        // refuses the same way.
+        if !self.proven(&pulled, nonce)
+            || verify_announced_checkpoint(&pulled, &own).is_err()
+            || self
+                .shared
+                .lock()
+                .unwrap()
+                .peer
+                .unaccounted(&pulled)
+                .is_some()
+        {
             return Err(json(409, &SwitchError::NoTrackingSource));
         }
         Ok(Some(hint))
@@ -2249,7 +2269,7 @@ pub fn pair_key(token: &str) -> u64 {
 /// relayed answer proves only the document it carried. Additive wire
 /// fields a build does not know stay outside the digest on both
 /// sides.
-fn line_proof(key: u64, nonce: u64, checkpoint: &Checkpoint) -> u64 {
+pub fn line_proof(key: u64, nonce: u64, checkpoint: &Checkpoint) -> u64 {
     let mut document = serde_json::to_value(checkpoint).unwrap_or_default();
     if let Some(object) = document.as_object_mut() {
         object.remove("line_proof");
