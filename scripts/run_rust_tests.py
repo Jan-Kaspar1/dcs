@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run all workspace Rust tests while splitting out the two nested-Cargo proofs."""
+"""Run all workspace Rust tests while splitting out nested build proofs."""
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
@@ -11,7 +11,7 @@ import time
 
 
 # Keep each expensive proof's exclusion and targeted rerun in one source.
-CONSUMER_PROOFS = (
+NESTED_PROOFS = (
     (
         "consumer-release",
         "consumer_release",
@@ -22,6 +22,16 @@ CONSUMER_PROOFS = (
         "consumer_upgrade",
         "a_repin_within_the_minor_series_is_a_drop_in_upgrade",
     ),
+    (
+        "reference-template",
+        "reference_plant",
+        "the_template_passes_its_own_clean_ci_outside_the_workspace",
+    ),
+    (
+        "reference-upgrade",
+        "reference_plant",
+        "the_upgrade_stage_proves_the_repin_and_the_named_crossings",
+    ),
 )
 
 OUTPUT_LOCK = threading.Lock()
@@ -29,11 +39,11 @@ OUTPUT_LOCK = threading.Lock()
 
 def command_plan():
     workspace = ["cargo", "test", "--workspace", "--locked", "--"]
-    for _, _, test_name in CONSUMER_PROOFS:
+    for _, _, test_name in NESTED_PROOFS:
         workspace.extend(("--skip", test_name))
 
     plan = {"workspace": workspace}
-    for label, target, test_name in CONSUMER_PROOFS:
+    for label, target, test_name in NESTED_PROOFS:
         plan[label] = [
             "cargo",
             "test",
@@ -49,8 +59,8 @@ def command_plan():
 
 def command_environment(label, root):
     env = dict(os.environ, CARGO_TARGET_DIR=str(root / "target"))
-    if label in {proof[0] for proof in CONSUMER_PROOFS}:
-        # The two scratch consumer builds run concurrently; one build job
+    if label in {proof[0] for proof in NESTED_PROOFS}:
+        # Scratch consumer and reference builds run concurrently; one build job
         # each avoids oversubscribing the CI runner.
         env["CARGO_BUILD_JOBS"] = "1"
     return env

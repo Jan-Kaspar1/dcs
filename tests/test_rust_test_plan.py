@@ -1,13 +1,13 @@
-"""The Rust test split must keep all workspace checks and rerun only exact slow proofs."""
+"""The Rust test split must keep all workspace checks and rerun exact slow proofs."""
 import unittest
 
-from scripts.run_rust_tests import CONSUMER_PROOFS, command_plan
+from scripts.run_rust_tests import NESTED_PROOFS, command_plan
 
 
 class RustTestPlanTests(unittest.TestCase):
-    def test_plan_names_the_two_nested_cargo_proofs(self):
+    def test_plan_names_the_nested_cargo_proofs(self):
         self.assertEqual(
-            CONSUMER_PROOFS,
+            NESTED_PROOFS,
             (
                 (
                     "consumer-release",
@@ -18,6 +18,16 @@ class RustTestPlanTests(unittest.TestCase):
                     "consumer-upgrade",
                     "consumer_upgrade",
                     "a_repin_within_the_minor_series_is_a_drop_in_upgrade",
+                ),
+                (
+                    "reference-template",
+                    "reference_plant",
+                    "the_template_passes_its_own_clean_ci_outside_the_workspace",
+                ),
+                (
+                    "reference-upgrade",
+                    "reference_plant",
+                    "the_upgrade_stage_proves_the_repin_and_the_named_crossings",
                 ),
             ),
         )
@@ -32,7 +42,7 @@ class RustTestPlanTests(unittest.TestCase):
         self.assertEqual(workspace[4], "--")
         self.assertEqual(
             workspace[5:],
-            [part for _, _, name in CONSUMER_PROOFS
+            [part for _, _, name in NESTED_PROOFS
              for part in ("--skip", name)],
         )
         self.assertNotIn("--no-run", workspace)
@@ -40,7 +50,7 @@ class RustTestPlanTests(unittest.TestCase):
     def test_each_skipped_consumer_proof_runs_once_as_a_targeted_test(self):
         plan = command_plan()
 
-        for label, target, test_name in CONSUMER_PROOFS:
+        for label, target, test_name in NESTED_PROOFS:
             self.assertEqual(
                 plan[label],
                 [
@@ -55,7 +65,7 @@ class RustTestPlanTests(unittest.TestCase):
                 ],
             )
 
-        self.assertEqual(len(plan), len(CONSUMER_PROOFS) + 1)
+        self.assertEqual(len(plan), len(NESTED_PROOFS) + 1)
 
 
 if __name__ == "__main__":
