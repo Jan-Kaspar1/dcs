@@ -45,7 +45,7 @@ mod support;
 
 use support::{
     CONTROLLER, SimTcp, controller_model, image_value, kill, pump, settled_receipts,
-    sim_tcp_document, spawn_controller, spawn_plant, write_model,
+    sim_tcp_document, spawn_controller, spawn_controller_logged, spawn_plant, write_model,
 };
 
 /// The shared plant's model — the dcs-plant tank loop: level raw (10)
@@ -2051,6 +2051,323 @@ fn a_cold_restarted_source_resyncs_the_tracking_peer_without_rewinding() {
     assert!(
         standby_process.child.try_wait().unwrap().is_none(),
         "the resynced peer exited"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The dead-incumbent half of the stale-checkpoint takeover defect —
+/// QA finding
+/// `standby-rejoin-adoption-reverts-receipted-commands-unaudited`.
+/// The live-incumbent refusal above closes the takeover path, but the
+/// same crash→command→second-crash sequence still reverts the
+/// rejoining peer's receipted commands when the restarted peer's
+/// stale line wins *legitimately*: the incumbent is dead when the
+/// stale claim lands. The acceptance bar from the takeover issue is
+/// that the revert must be audited — this leg drives the full
+/// restart-around-incumbent-writes sequence on the shared plant and
+/// requires the rejoining peer's journal to carry a `command_settled`
+/// entry per reverted write: the equivalent `WriteValue`, `applied`
+/// at the adoption's landing tick, its actor naming the adopting
+/// checkpoint — while the incumbent's original `applied` settlements
+/// survive in the durable journal the restarted run replays.
+#[test]
+fn a_restart_around_incumbent_writes_journals_the_adopted_reverts() {
+    let dir = std::env::temp_dir().join(format!("dcs-failover-rejoin-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    // The finding's protection-command surfaces, as in the
+    // live-incumbent leg: the managed-alarm acknowledgment and the
+    // pump out-of-service exclusion, both writable image-carried
+    // points.
+    let mut document = sim_tcp_document(MODEL_SOURCE, pair_plant.addr, SimTcp::PerDevice);
+    for point in [ALARM_ACK, PUMP_OOS] {
+        document["io_points"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": point.0,
+                "direction": "in",
+                "value_type": "bool",
+                "initial": { "bool": false },
+                "writable": true,
+            }));
+    }
+    let pair_model = write_model(&dir, "pair.json", &document).0;
+
+    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.ensure_writer(SEED).unwrap();
+    field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    field.release_writer().unwrap();
+
+    // The launched active persists every cycle-end checkpoint — the
+    // stale file its restart resumes onto, every bit of it predating
+    // the incumbent's commands.
+    let a_state = dir.join("a-state.json");
+    let mut a_process = spawn_controller(
+        &pair_model,
+        &[
+            "--state-file".to_string(),
+            a_state.to_str().unwrap().to_string(),
+        ],
+        DT,
+    );
+    // The standby's configured tracking source is the relay the test
+    // retargets at the restarted process: the relaunch binds a new
+    // ephemeral port, and `--standby` must keep reaching the stream.
+    let relay = Relay::forwarding(a_process.addr);
+    // The tracking peer persists both halves of its run — the state
+    // file carries the applied receipts and image its restart resumes
+    // onto, the journal file the append-only record the rejoin must
+    // keep telling the truth through.
+    let b_state = dir.join("b-state.json");
+    let b_journal = dir.join("b-journal.jsonl");
+    let mut b_process = spawn_controller(
+        &pair_model,
+        &[
+            "--standby".to_string(),
+            relay.addr.to_string(),
+            "--auto-promote".to_string(),
+            BUDGET.to_string(),
+            "--state-file".to_string(),
+            b_state.to_str().unwrap().to_string(),
+            "--journal-file".to_string(),
+            b_journal.to_str().unwrap().to_string(),
+        ],
+        DT,
+    );
+    let a = MonitorClient::new(a_process.addr);
+    let b = MonitorClient::new(b_process.addr);
+
+    for _ in 0..N {
+        b.advance(1).unwrap();
+        a.advance(1).unwrap();
+    }
+    assert!(
+        matches!(b.role().unwrap().sync, Some(StandbySync::Tracking { .. })),
+        "the standby never converged: {:?}",
+        b.role().unwrap()
+    );
+
+    // The first crash — `docker kill a`: the armed standby detects the
+    // loss through the heartbeat and self-promotes at the declared
+    // budget's scan boundary.
+    kill(&mut a_process);
+    for _ in 1..BUDGET {
+        b.advance(1).unwrap();
+        assert_eq!(b.role().unwrap().role, Role::Standby, "promoted early");
+    }
+    let promoted = b.advance(1).unwrap();
+    assert_eq!(b.role().unwrap().role, Role::Active);
+    assert_eq!(promoted.tick.0, N + BUDGET as u64);
+
+    // The incumbent's receipted protection commands — the finding's
+    // `write_value{302,true}` class — settle `applied` on its own
+    // line, and a further cycle persists them into its state file.
+    let ack = Command::WriteValue {
+        point: ALARM_ACK,
+        kind: ValueKind::Bool,
+        value: Value::Bool(true),
+    };
+    let oos = Command::WriteValue {
+        point: PUMP_OOS,
+        kind: ValueKind::Bool,
+        value: Value::Bool(true),
+    };
+    for command in [&ack, &oos] {
+        let receipt = b.command(command).unwrap();
+        assert!(
+            matches!(receipt.outcome, CommandOutcome::Accepted { .. }),
+            "the incumbent must accept its commands: {receipt:?}"
+        );
+    }
+    let owner = b.advance(1).unwrap();
+    for command in [&ack, &oos] {
+        assert!(
+            matches!(
+                b.receipts()
+                    .unwrap()
+                    .iter()
+                    .find(|receipt| &receipt.command == command)
+                    .map(|receipt| &receipt.outcome),
+                Some(CommandOutcome::Applied { .. })
+            ),
+            "the incumbent's command must settle applied: {:?}",
+            b.receipts().unwrap()
+        );
+    }
+    assert_eq!(image_value(&owner, ALARM_ACK), Value::Bool(true));
+    assert_eq!(image_value(&owner, PUMP_OOS), Value::Bool(true));
+    b.advance(1).unwrap();
+
+    // The second crash — `docker stop b`: the incumbent dies holding
+    // the field claim. Once the plant server reaps its attachment the
+    // holder set stands empty — the restart-as-active recovery case —
+    // and the relaunched peer's conditional startup grant preempts
+    // the dead claim legitimately, resuming its stale state.
+    kill(&mut b_process);
+    let probe = RemoteDriver::connect(pair_plant.addr).unwrap();
+    let reap_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match probe.claim_writer_unless_held(0xf00d) {
+            Ok(_) => break,
+            Err(RemoteError::Fenced) => {
+                assert!(
+                    std::time::Instant::now() < reap_deadline,
+                    "the dead incumbent's claim was never reaped"
+                );
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("the conditional probe failed: {error}"),
+        }
+    }
+    probe.release_writer().unwrap();
+
+    // The stale restart — `docker start a`: the resumed line's image
+    // still reads the pre-write values.
+    let (mut a_process, preamble) = spawn_controller_logged(
+        &pair_model,
+        &[
+            "--state-file".to_string(),
+            a_state.to_str().unwrap().to_string(),
+        ],
+        DT,
+    );
+    assert!(
+        preamble
+            .iter()
+            .any(|line| line.contains("resumed from state file")),
+        "the restart must report resuming its stale state: {preamble:?}"
+    );
+    relay.retarget(a_process.addr);
+    let a2 = MonitorClient::new(a_process.addr);
+    a2.advance(1).unwrap();
+    assert_eq!(a2.role().unwrap().role, Role::Active);
+    let stale_owner = a2.snapshot().unwrap();
+    assert_eq!(
+        image_value(&stale_owner, ALARM_ACK),
+        Value::Bool(false),
+        "the restarted line legitimately predates the incumbent's writes"
+    );
+    assert_eq!(image_value(&stale_owner, PUMP_OOS), Value::Bool(false));
+
+    // The rejoin — `docker start b`: the incumbent's own run resumes
+    // onto its persisted state — applied receipts and image included —
+    // and tracks the restarted peer's staler line. The adoption
+    // reverts the receipted values to the pre-write image.
+    let (mut b_process, preamble) = spawn_controller_logged(
+        &pair_model,
+        &[
+            "--standby".to_string(),
+            relay.addr.to_string(),
+            "--auto-promote".to_string(),
+            BUDGET.to_string(),
+            "--state-file".to_string(),
+            b_state.to_str().unwrap().to_string(),
+            "--journal-file".to_string(),
+            b_journal.to_str().unwrap().to_string(),
+        ],
+        DT,
+    );
+    assert!(
+        preamble
+            .iter()
+            .any(|line| line.contains("resumed from state file")),
+        "the rejoin must resume the incumbent's own run: {preamble:?}"
+    );
+    let b2 = MonitorClient::new(b_process.addr);
+    let mut adopted = None;
+    for _ in 0..2 * N {
+        let snapshot = b2.advance(1).unwrap();
+        a2.advance(1).unwrap();
+        if image_value(&snapshot, ALARM_ACK) == Value::Bool(false)
+            && image_value(&snapshot, PUMP_OOS) == Value::Bool(false)
+        {
+            adopted = Some(snapshot);
+            break;
+        }
+    }
+    let adopted = adopted.unwrap_or_else(|| {
+        panic!(
+            "the rejoin never adopted the stale line's pre-write image: {:?}",
+            b2.snapshot().unwrap()
+        )
+    });
+    let landing = adopted.tick;
+
+    // The audit the defect dropped: the reverted writes journal as
+    // `command_settled` entries — the equivalent `WriteValue` applied
+    // at the landing tick, the actor naming the adopting checkpoint —
+    // never a bare `point_changed` alone.
+    let journal = b2.journal(0).unwrap();
+    let settled = settled_receipts(&journal);
+    for (point, command) in [
+        (
+            ALARM_ACK,
+            Command::WriteValue {
+                point: ALARM_ACK,
+                kind: ValueKind::Bool,
+                value: Value::Bool(false),
+            },
+        ),
+        (
+            PUMP_OOS,
+            Command::WriteValue {
+                point: PUMP_OOS,
+                kind: ValueKind::Bool,
+                value: Value::Bool(false),
+            },
+        ),
+    ] {
+        assert!(
+            settled.iter().any(|receipt| {
+                receipt.command == command
+                    && matches!(receipt.outcome, CommandOutcome::Applied { .. })
+                    && receipt
+                        .actor
+                        .as_deref()
+                        .is_some_and(|actor| actor.starts_with("checkpoint"))
+            }),
+            "the reverted write on {point:?} must journal a settled receipt \
+             naming the adopting source at {landing:?}: {journal:?}"
+        );
+    }
+    // The receipted truth survives: the incumbent's `applied`
+    // settlements still stand in the durable journal — the append-only
+    // half of the finding's evidence, replayed across the restart.
+    for command in [&ack, &oos] {
+        assert!(
+            settled.iter().any(|receipt| {
+                &receipt.command == command
+                    && matches!(receipt.outcome, CommandOutcome::Applied { .. })
+            }),
+            "the incumbent's applied settlement for {command:?} must \
+             survive in the durable journal: {journal:?}"
+        );
+    }
+
+    // And the pair settles into the restarted line: the rejoined peer
+    // a tracking standby, the restarted owner still field-active.
+    let mut converged = false;
+    for _ in 0..2 * N {
+        a2.advance(1).unwrap();
+        b2.advance(1).unwrap();
+        if matches!(b2.role().unwrap().sync, Some(StandbySync::Tracking { .. })) {
+            converged = true;
+            break;
+        }
+    }
+    assert!(
+        converged,
+        "the rejoined peer never reconverged: {:?}",
+        b2.role().unwrap()
+    );
+    assert_eq!(a2.role().unwrap().role, Role::Active);
+    assert!(
+        a_process.child.try_wait().unwrap().is_none()
+            && b_process.child.try_wait().unwrap().is_none(),
+        "the recovered pair must stay up"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -473,6 +473,15 @@ impl IoDriver for BusDriver {
                 found: value,
             });
         }
+        // The bank refuses a non-finite `Float`; the same refusal a
+        // local driver reports, made before any request leaves — the
+        // write the device cannot represent is a caller error, not a
+        // link fault.
+        if let Value::Float(v) = value
+            && !v.is_finite()
+        {
+            return Err(IoError::InvalidValue { point });
+        }
         match self.request(&BusRequest::WriteRegister {
             register: mapping.register,
             value,
