@@ -1407,7 +1407,11 @@ fn a_structurally_divergent_served_document_reports_schema_mismatch() {
 }
 
 /// A dynamics document the scenario's declared outcomes no longer hold
-/// against is the `scenario-failed` diagnostic.
+/// against is the `scenario-failed` diagnostic. The doctored copy
+/// re-records the manifest's `dynamics.fingerprint` over the changed
+/// bytes — a customer who revises the dynamics re-approves the
+/// document — so the fingerprint stage holds and the run reaches the
+/// simulate stage.
 #[test]
 fn a_changed_trajectory_reports_scenario_failed() {
     let tools = build_tools();
@@ -1421,11 +1425,66 @@ fn a_changed_trajectory_reports_scenario_failed() {
         source.replacen("\"off_rate\": 0.25", "\"off_rate\": 0.0", 1),
     )
     .unwrap();
+    let fingerprint = Command::new("python3")
+        .arg("ci/dynamics_fingerprint.py")
+        .arg("--fingerprint")
+        .arg("model/dynamics.json")
+        .current_dir(&copy.dir)
+        .output()
+        .expect("python3 fingerprints the doctored dynamics");
+    assert!(
+        fingerprint.status.success(),
+        "the fingerprint helper failed: {}",
+        String::from_utf8_lossy(&fingerprint.stderr)
+    );
+    let fingerprint = String::from_utf8_lossy(&fingerprint.stdout);
+    let fingerprint = fingerprint.trim();
+    let manifest = copy.dir.join("deploy/manifest.json");
+    let source = std::fs::read_to_string(&manifest).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&source).unwrap();
+    let recorded = parsed["dynamics"]["fingerprint"].as_str().unwrap();
+    let field = format!("\"fingerprint\": \"{recorded}\"");
+    assert!(
+        source.contains(&field),
+        "the manifest's dynamics fingerprint field moved"
+    );
+    std::fs::write(
+        &manifest,
+        source.replacen(&field, &format!("\"fingerprint\": \"{fingerprint}\""), 1),
+    )
+    .unwrap();
     let output = copy.check(&tools);
     assert!(!output.status.success(), "a broken scenario passed");
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("scenario-failed"),
         "expected the scenario-failed diagnostic, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A checked-in dynamics document diverging from the manifest's
+/// recorded `dynamics.fingerprint` is the `manifest-fingerprint-mismatch`
+/// diagnostic — the deployment declaration no longer names the approved
+/// dynamics bytes.
+#[test]
+fn a_doctored_dynamics_reports_manifest_fingerprint_mismatch() {
+    let tools = build_tools();
+    let copy = Materialized::new();
+    let dynamics = copy.dir.join("model/dynamics.json");
+    let source = std::fs::read_to_string(&dynamics).unwrap();
+    std::fs::write(
+        &dynamics,
+        source.replacen("\"off_rate\": 0.25", "\"off_rate\": 0.0", 1),
+    )
+    .unwrap();
+    let output = copy.check(&tools);
+    assert!(
+        !output.status.success(),
+        "a doctored dynamics document passed"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("manifest-fingerprint-mismatch"),
+        "expected the manifest-fingerprint-mismatch diagnostic, got:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
