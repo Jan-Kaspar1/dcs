@@ -671,8 +671,11 @@ controller scan.
                   endpoint that only replays or fabricates this line's
                   checkpoints can neither arm the demotion nor feed the
                   demoted peer forged state. Requires --listen; unset,
-                  announced demotions verify on the document checks
-                  alone
+                  the announced-source contract is closed — /checkpoint
+                  is public, so no announced endpoint can prove itself
+                  and an announced-only demotion refuses
+                  no_tracking_source (a configured --peer still covers
+                  the switchover)
   --state-file PATH
                   persist the run's checkpoint to PATH at the end of
                   every scan cycle and at each accepted command's

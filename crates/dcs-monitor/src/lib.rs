@@ -2501,8 +2501,9 @@ pub fn pair_key(token: &str) -> u64 {
 /// server cannot pair a stolen proof with fabricated state, and a
 /// relayed answer proves only the document it carried. Additive wire
 /// fields a build does not know stay outside the digest on both
-/// sides.
-fn line_proof(key: u64, nonce: u64, checkpoint: &Checkpoint) -> u64 {
+/// sides. Public like [`pair_key`] so a key-holding peer — or a test
+/// endpoint exercising the keyed contract — can stamp its answers.
+pub fn line_proof(key: u64, nonce: u64, checkpoint: &Checkpoint) -> u64 {
     let mut document = serde_json::to_value(checkpoint).unwrap_or_default();
     if let Some(object) = document.as_object_mut() {
         object.remove("line_proof");
@@ -3463,10 +3464,7 @@ mod tests {
             let mut owner_ahead = checkpoint();
             owner_ahead.source_owns_field = Some(true);
             owner_ahead.tick = Tick(own.tick.0 + ahead);
-            assert_eq!(
-                verify_announced_checkpoint(&owner_ahead, &own),
-                Ok(())
-            );
+            assert_eq!(verify_announced_checkpoint(&owner_ahead, &own), Ok(()));
         }
         for lag in [0, 1, 50] {
             let mut replay = checkpoint();
@@ -3506,10 +3504,7 @@ mod tests {
         unminted_own.generation = None;
         let mut pulled = unminted_own.clone();
         pulled.tick = Tick(101);
-        assert_eq!(
-            verify_announced_checkpoint(&pulled, &unminted_own),
-            Ok(())
-        );
+        assert_eq!(verify_announced_checkpoint(&pulled, &unminted_own), Ok(()));
 
         // The reproduction's forgery: this line's identity at a tick
         // far ahead of the run's — refused.

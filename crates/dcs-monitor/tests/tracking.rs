@@ -1044,20 +1044,35 @@ fn closed_port() -> SocketAddr {
 /// whatever document it currently serves, so a test can adopt the
 /// endpoint on one document and then have later pulls answer with
 /// another — the reproduction's flip after the one-shot verify.
-/// Runs on its own thread until dropped.
+/// `serve_signed` gives the endpoint the pair's key: its answers then
+/// carry the `line_proof` a keyed pull's `?prove=` nonce demands —
+/// the strongest interposer shape, where every pulled document is
+/// genuinely signed and only its content can convict it. Runs on its
+/// own thread until dropped.
 struct Hostile {
     addr: SocketAddr,
-    body: Arc<Mutex<String>>,
+    body: Arc<Mutex<Checkpoint>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Hostile {
     fn serve(forged: &Checkpoint) -> Self {
+        Self::listen(forged, None)
+    }
+
+    /// The key-holding variant: every answer carries the keyed
+    /// `line_proof` binding the pull's `?prove=` nonce to the served
+    /// document — a signed forgery the proof alone cannot refuse.
+    fn serve_signed(forged: &Checkpoint, key: u64) -> Self {
+        Self::listen(forged, Some(key))
+    }
+
+    fn listen(forged: &Checkpoint, key: Option<u64>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
-        let body = Arc::new(Mutex::new(serde_json::to_string(forged).unwrap()));
+        let body = Arc::new(Mutex::new(forged.clone()));
         let served = Arc::clone(&body);
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = Arc::clone(&stop);
@@ -1083,7 +1098,12 @@ impl Hostile {
                                 Err(_) => break,
                             }
                         }
-                        let body = served.lock().unwrap().clone();
+                        let mut document = served.lock().unwrap().clone();
+                        if let (Some(key), Some(nonce)) = (key, request_prove(&seen)) {
+                            document.line_proof =
+                                Some(dcs_monitor::line_proof(key, nonce, &document));
+                        }
+                        let body = serde_json::to_string(&document).unwrap();
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
                              Content-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1112,8 +1132,20 @@ impl Hostile {
     /// post-adoption flip, where the verified document and the tracked
     /// ones are not the same.
     fn set_body(&self, forged: &Checkpoint) {
-        *self.body.lock().unwrap() = serde_json::to_string(forged).unwrap();
+        *self.body.lock().unwrap() = forged.clone();
     }
+}
+
+/// The `prove` nonce a checkpoint request's query carries — the
+/// attestation demand a signing hostile answers under its key.
+fn request_prove(request: &[u8]) -> Option<u64> {
+    let line = std::str::from_utf8(request).ok()?.lines().next()?;
+    let query = line.split_whitespace().nth(1)?.split_once('?')?.1;
+    query.split('&').find_map(|pair| {
+        pair.split_once('=')
+            .filter(|(key, _)| *key == "prove")
+            .and_then(|(_, value)| value.parse().ok())
+    })
 }
 
 impl Drop for Hostile {
@@ -1712,19 +1744,21 @@ fn an_announced_standby_shaped_forgery_cannot_unblock_no_tracking_source() {
     );
 }
 
-/// The finding's post-adoption half: even where a standby-shaped
-/// document is truthful enough to verify — the shape an unkeyed
-/// deployment must keep accepting — the adoption binds the endpoint,
-/// not its contents. The reproduction's second move: once adopted,
-/// the interposer flips `source_owns_field` back to `true` to clear
-/// the orphan verdict the `false` stamp would raise, and keeps
-/// serving the planted internal value on the standing pulls nothing
-/// re-verified. The demoted peer's own audit still vets every pulled
-/// document: the forged one refuses like any rejected checkpoint —
-/// the peer reports `degraded` rather than adopting the planted
-/// state, and cannot promote onto it.
+/// The finding's post-adoption half, in its strongest shape under the
+/// keyed contract: a key-holding endpoint — every answer genuinely
+/// signed, so the `line_proof` convicts nothing — adopts on a
+/// standby-shaped document and then flips. The reproduction's second
+/// move: once adopted, the interposer flips `source_owns_field` back
+/// to `true` to clear the orphan verdict the `false` stamp would
+/// raise, and keeps serving the planted internal value on the
+/// standing pulls. The adoption binds the endpoint, not its contents:
+/// the demoted peer's own audit still vets every pulled document, so
+/// the signed forgery refuses like any rejected checkpoint — the peer
+/// reports `degraded` rather than adopting the planted state, and
+/// cannot promote onto it.
 #[test]
 fn an_adopted_announced_source_cannot_land_forged_commanded_state() {
+    const KEY: u64 = 0x9e37_79b9_7f4a_7c15;
     let lonely_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
         (PointId(10), Value::Float(3.0)),
         (PointId(20), Value::Float(0.0)),
@@ -1736,17 +1770,19 @@ fn an_adopted_announced_source_cannot_land_forged_commanded_state() {
             Peer::active(internal_executor(lonely_driver), None),
             signal_index(),
         )
-        .unwrap(),
+        .unwrap()
+        .with_pair_key(KEY),
     );
     lonely.client.advance(3).unwrap();
 
     // The verification document: standby-shaped and otherwise the
-    // run's own line — the endpoint adopts on it, the journaled
-    // adoption the announced-source contract requires.
+    // run's own line, signed under the pair's key — the endpoint
+    // adopts on it, the journaled adoption the announced-source
+    // contract requires.
     let mut clean = lonely.client.checkpoint().unwrap();
     clean.source_owns_field = Some(false);
     clean.tick = Tick(clean.tick.0 + 1);
-    let hostile = Hostile::serve(&clean);
+    let hostile = Hostile::serve_signed(&clean, KEY);
     lonely.client.checkpoint_announcing(hostile.addr).unwrap();
     assert_eq!(lonely.client.demote().unwrap().role, Role::Demoting);
     assert!(
@@ -2543,7 +2579,12 @@ fn a_tracking_peer_journals_one_settle_per_admission() {
 #[test]
 fn a_demoted_peer_journals_one_settle_per_carried_admission() {
     use dcs_core::Command;
-    let (standby, active) = DrivenStandby::start_with(None, held_executor);
+    const KEY: u64 = 0x85a3_08d3_1319_8a2e;
+    // The announced-source contract is keyed-only — the demotion below
+    // follows the standby's `?peer=` hint, so the pair carries the
+    // `--pair-token` secret.
+    let (standby, active) =
+        DrivenStandby::start_binding(None, held_executor, "127.0.0.1:0", "127.0.0.1:0", Some(KEY));
 
     active.client.advance(3).unwrap();
     standby.standby.client.advance(1).unwrap();
