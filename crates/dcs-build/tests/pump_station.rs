@@ -1238,6 +1238,48 @@ fn hand_command_holds_the_declared_protections() {
         "a trusted moisture contact must re-admit the standing hand request"
     );
 
+    // Issue #826's fourth protection cause — the level-derived path:
+    // the failover-selected level is the interlock's `in`, so an
+    // untrusted measurement trips the command exactly as an asserted
+    // contact does. Both instruments Bad leaves the failover serving
+    // an untrusted value: the delivered command releases, and the
+    // measurement path's own managed alarms — `backup-active` for the
+    // failed primary, `backup-unhealthy` for the failed standby —
+    // annunciate the cause on the same reading, so the protective
+    // stop never stands unannounced.
+    sim.inject_fault(
+        layout.level_primary,
+        Fault::Quality(Quality::Bad(QualityReason::CommunicationFault)),
+    )
+    .unwrap();
+    sim.inject_fault(
+        layout.level_backup,
+        Fault::Quality(Quality::Bad(QualityReason::CommunicationFault)),
+    )
+    .unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| !point_bool(e, pump.cmd)),
+        "an untrusted selected level must release the hand command"
+    );
+    assert!(point_bool(&executor, pump.protect_tripped));
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| point_bool(
+            e,
+            layout.backup_active_alarm.alarm
+        )),
+        "the backup-serving alarm must annunciate the failed primary"
+    );
+    assert!(
+        point_bool(&executor, layout.backup_unhealthy_alarm.alarm),
+        "the standby-loss alarm must annunciate the failed backup"
+    );
+    sim.clear_fault(layout.level_primary).unwrap();
+    sim.clear_fault(layout.level_backup).unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 12, |e| point_bool(e, pump.cmd)),
+        "trusted measurements must re-admit the standing hand request"
+    );
+
     // The dry-run cutoff: the hand pump cannot run the well below the
     // declared level — a negative inflow draws the well down, the
     // command releases and stays released while the cutoff stands,
