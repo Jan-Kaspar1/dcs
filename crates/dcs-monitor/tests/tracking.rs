@@ -186,6 +186,24 @@ fn emitter_executor(driver: &'static StubDriver) -> Executor<'static> {
     Executor::new(driver, PointMap::new(), vec![Box::new(Emitter { n: 0 })]).unwrap()
 }
 
+/// The forged-internal-state rig's executor: the fixture's surface
+/// plus one image-carried writable `In` — the operator-held value a
+/// forged standby-shaped checkpoint plants, and the state the field
+/// owner's own audit proves or convicts.
+fn internal_executor(driver: &'static StubDriver) -> Executor<'static> {
+    let map = PointMap::new()
+        .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+        .with_point(PointId(20), Direction::Out, ValueKind::Float)
+        .with_point(PointId(30), Direction::Out, ValueKind::Float)
+        .with_writable_internal(
+            PointId(40),
+            Direction::In,
+            ValueKind::Bool,
+            Value::Bool(false),
+        );
+    Executor::new(driver, map, vec![Box::new(Scale)]).unwrap()
+}
+
 /// The dialable form of a bound monitor address: in this in-process
 /// rig a wildcard bind is reached through loopback — a deployment's
 /// answer to the same `local_addr` is the peer's `host:port` name.
@@ -852,10 +870,13 @@ fn closed_port() -> SocketAddr {
 
 /// A hostile checkpoint server on the test network — the QA
 /// reproduction's interposer: it answers every checkpoint pull with
-/// the forged document it was given, whatever that claims. Runs on
-/// its own thread until dropped.
+/// whatever document it currently serves, so a test can adopt the
+/// endpoint on one document and then have later pulls answer with
+/// another — the reproduction's flip after the one-shot verify.
+/// Runs on its own thread until dropped.
 struct Hostile {
     addr: SocketAddr,
+    body: Arc<Mutex<String>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -865,7 +886,8 @@ impl Hostile {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
-        let body = serde_json::to_string(forged).unwrap();
+        let body = Arc::new(Mutex::new(serde_json::to_string(forged).unwrap()));
+        let served = Arc::clone(&body);
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = Arc::clone(&stop);
         let thread = thread::spawn(move || {
@@ -890,6 +912,7 @@ impl Hostile {
                                 Err(_) => break,
                             }
                         }
+                        let body = served.lock().unwrap().clone();
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
                              Content-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -908,9 +931,17 @@ impl Hostile {
         });
         Self {
             addr,
+            body,
             stop,
             thread: Some(thread),
         }
+    }
+
+    /// Swaps the document later pulls answer with — the reproduction's
+    /// post-adoption flip, where the verified document and the tracked
+    /// ones are not the same.
+    fn set_body(&self, forged: &Checkpoint) {
+        *self.body.lock().unwrap() = serde_json::to_string(forged).unwrap();
     }
 }
 
@@ -1435,6 +1466,198 @@ fn an_announced_tick_bumped_replay_cannot_unblock_no_tracking_source() {
                 JournalEvent::TrackingSourceAdopted { .. } | JournalEvent::RoleChanged { .. }
             )),
         "a refused demotion journals neither an adoption nor a role change"
+    );
+}
+
+/// The QA finding `announced-source-verify-adopts-standby-shaped-
+/// checkpoint` (#850): the owner-document refusals cover the replayed
+/// `source_owns_field: true` shapes, but the standby document shape —
+/// the victim's own checkpoint with the stamp flipped `false` and the
+/// tick bumped inside the announced-ahead window — is exactly what a
+/// real tracking peer serves, so an unkeyed verify cannot refuse the
+/// shape itself. What it can refuse is the document's commanded
+/// state: a field owner holds the line's audit itself — its image
+/// carries every value its commands produced and its receipt log is
+/// the submission sequence — so a checkpoint planting an internal
+/// `In` value no settled verdict produced is provably not the tracked
+/// line's continuation. Across the whole `+1..=32` tick window the
+/// demotion refuses `no_tracking_source`, the run stays the field
+/// owner, and nothing adopts.
+#[test]
+fn an_announced_standby_shaped_forgery_cannot_unblock_no_tracking_source() {
+    let lonely_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let lonely = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(internal_executor(lonely_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    lonely.client.advance(3).unwrap();
+    let tick = lonely.client.role().unwrap().tick;
+
+    // The reproduction's interposer: the victim's own captured
+    // document, re-stamped `source_owns_field: false` — the shape the
+    // unkeyed verify must keep accepting — with a planted internal
+    // value the run never held and no command produced, served at
+    // every tick offset the announced-ahead window covers.
+    let captured = lonely.client.checkpoint().unwrap();
+    assert_eq!(
+        captured
+            .internal
+            .get(&PointId(40))
+            .map(|sample| sample.value),
+        Some(Value::Bool(false)),
+        "the rig's operator-held value starts unwritten: {captured:?}"
+    );
+    let hostile = Hostile::serve(&captured);
+    lonely.client.checkpoint_announcing(hostile.addr).unwrap();
+    assert_eq!(lonely.monitor.tracking_source(), Some(hostile.addr));
+
+    for ahead in 1..=32u64 {
+        let mut forged = captured.clone();
+        forged.source_owns_field = Some(false);
+        forged.tick = Tick(tick.0 + ahead);
+        forged
+            .internal
+            .insert(PointId(40), Sample::good(Value::Bool(true), forged.tick));
+        hostile.set_body(&forged);
+
+        let error = lonely.client.demote().unwrap_err();
+        assert!(
+            error.to_string().contains("no_tracking_source"),
+            "tick +{ahead}: a forged standby-shaped document must not arm \
+             the demotion: {error}"
+        );
+        let report = lonely.client.role().unwrap();
+        assert_eq!(report.role, Role::Active);
+        assert_eq!(report.tick, tick);
+    }
+    assert!(
+        lonely
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .all(|entry| !matches!(
+                entry.event,
+                JournalEvent::TrackingSourceAdopted { .. } | JournalEvent::RoleChanged { .. }
+            )),
+        "a refused demotion journals neither an adoption nor a role change"
+    );
+    // And the planted value never landed: the run's own document
+    // still carries the value its commands produced.
+    let served = lonely.client.checkpoint().unwrap();
+    assert_eq!(
+        served.internal.get(&PointId(40)).map(|sample| sample.value),
+        Some(Value::Bool(false))
+    );
+}
+
+/// The finding's post-adoption half: even where a standby-shaped
+/// document is truthful enough to verify — the shape an unkeyed
+/// deployment must keep accepting — the adoption binds the endpoint,
+/// not its contents. The reproduction's second move: once adopted,
+/// the interposer flips `source_owns_field` back to `true` to clear
+/// the orphan verdict the `false` stamp would raise, and keeps
+/// serving the planted internal value on the standing pulls nothing
+/// re-verified. The demoted peer's own audit still vets every pulled
+/// document: the forged one refuses like any rejected checkpoint —
+/// the peer reports `degraded` rather than adopting the planted
+/// state, and cannot promote onto it.
+#[test]
+fn an_adopted_announced_source_cannot_land_forged_commanded_state() {
+    let lonely_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let lonely = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(internal_executor(lonely_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    lonely.client.advance(3).unwrap();
+
+    // The verification document: standby-shaped and otherwise the
+    // run's own line — the endpoint adopts on it, the journaled
+    // adoption the announced-source contract requires.
+    let mut clean = lonely.client.checkpoint().unwrap();
+    clean.source_owns_field = Some(false);
+    clean.tick = Tick(clean.tick.0 + 1);
+    let hostile = Hostile::serve(&clean);
+    lonely.client.checkpoint_announcing(hostile.addr).unwrap();
+    assert_eq!(lonely.client.demote().unwrap().role, Role::Demoting);
+    assert!(
+        lonely
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .any(|entry| matches!(
+                entry.event,
+                JournalEvent::TrackingSourceAdopted { source } if source == hostile.addr
+            )),
+        "the verify-clean document adopts and journals its source: {:?}",
+        lonely.client.journal(0).unwrap()
+    );
+
+    // The reproduction's post-verify flip: the tracked documents now
+    // carry the planted internal value under an owner stamp — the
+    // orphan dodge — while the peer's tracking pulls keep coming.
+    let mut forged = clean.clone();
+    forged.source_owns_field = Some(true);
+    forged.tick = Tick(forged.tick.0 + 1);
+    forged
+        .internal
+        .insert(PointId(40), Sample::good(Value::Bool(true), forged.tick));
+    hostile.set_body(&forged);
+
+    // The pull refuses the forged document like any rejected
+    // checkpoint: the peer reports the named degraded state, applies
+    // nothing of it, and stays un promotable — the converge gate the
+    // promotion checks never opened on forged state.
+    lonely.client.advance(1).unwrap();
+    let report = lonely.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert!(
+        matches!(report.sync, Some(StandbySync::Degraded { .. })),
+        "a forged tracked document degrades the pull: {report:?}"
+    );
+    let error = lonely.client.promote().unwrap_err();
+    assert!(
+        error.to_string().contains("not_converged"),
+        "a peer that never converged on real state cannot promote: {error}"
+    );
+    let served = lonely.client.checkpoint().unwrap();
+    assert_eq!(
+        served.internal.get(&PointId(40)).map(|sample| sample.value),
+        Some(Value::Bool(false)),
+        "the planted internal value never applied: {served:?}"
+    );
+    assert!(
+        lonely
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .all(|entry| !matches!(
+                &entry.event,
+                JournalEvent::RoleChanged {
+                    to: Role::Promoting | Role::Active,
+                    ..
+                }
+            )),
+        "no promotion journaled on forged state: {:?}",
+        lonely.client.journal(0).unwrap()
     );
 }
 
