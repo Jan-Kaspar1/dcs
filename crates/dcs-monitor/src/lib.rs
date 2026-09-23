@@ -1948,8 +1948,9 @@ impl<'d> Monitor<'d> {
     /// field owner* wins where the pull attests that stamp — on a
     /// keyed run, the strictly-ahead owner document carrying a valid
     /// `line_proof`; every field-owning document on an unproven pull
-    /// is the replayable own-document shape and refuses — while an
-    /// announcer that only tracks this run, a sibling standby
+    /// is the replayable own-document shape and refuses, since this
+    /// run's own public `/checkpoint` serves that exact stamp — while
+    /// an announcer that only tracks this run, a sibling standby
     /// replaying this run's own line back, is remembered as the
     /// provisional fallback, adopted only when no owner verified, so
     /// the orphan-resolution probe can still re-resolve onto an owner
@@ -1959,7 +1960,15 @@ impl<'d> Monitor<'d> {
     /// refusal when the owner has only unproven hints: nothing
     /// announced, unreachable hints, or checkpoints that are not this
     /// run's continuation — and on a keyed run, hints answering no
-    /// valid `line_proof` either.
+    /// valid `line_proof` either: replaying this run's own checkpoint
+    /// or fabricating one that merely continues the line produces
+    /// neither. A standby-shaped document — the shape unkeyed
+    /// deployments must keep accepting — additionally answers to this
+    /// run's command audit: a field owner holds the line's receipt
+    /// log and held-value image itself, so a document whose receipt
+    /// window forks that log or whose internal `In` samples plant a
+    /// value no settled verdict produced is forged rather than a
+    /// continuation, and loses to the next candidate the same way.
     fn verify_demote_hint(&self) -> Result<Option<SocketAddr>, Response<Cursor<Vec<u8>>>> {
         if self.configured_source().is_some() {
             return Ok(None);
@@ -1986,7 +1995,11 @@ impl<'d> Monitor<'d> {
         // shape, refuses as replayable. A candidate that only tracks
         // the line is remembered as the fallback — adopted
         // provisional, since the orphan-resolution probe can still
-        // re-resolve onto the owner the line later names.
+        // re-resolve onto the owner the line later names. And every
+        // candidate answers this run's command audit: a document whose
+        // receipt window forks the settled log or whose internal `In`
+        // samples plant a value no settled verdict produced is forged,
+        // not a continuation, and loses to the next candidate.
         let mut tracked = None;
         for hint in hints {
             let pulled = match MonitorClient::with_timeout(hint, CHECKPOINT_PULL_TIMEOUT)
@@ -1997,7 +2010,16 @@ impl<'d> Monitor<'d> {
             };
             let proven = self.proven(&pulled, nonce);
             let key_attested = self.pair_key.is_some() && proven;
-            if !proven || verify_announced_checkpoint(&pulled, &own, key_attested).is_err() {
+            if !proven
+                || verify_announced_checkpoint(&pulled, &own, key_attested).is_err()
+                || self
+                    .shared
+                    .lock()
+                    .unwrap()
+                    .peer
+                    .unaccounted(&pulled)
+                    .is_some()
+            {
                 continue;
             }
             if pulled.source_owns_field == Some(true) {

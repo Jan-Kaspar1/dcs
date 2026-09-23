@@ -9,7 +9,8 @@
     "fingerprint": "510136287e2a4b6e"
   },
   "dynamics": {
-    "path": "model/dynamics.json"
+    "path": "model/dynamics.json",
+    "fingerprint": "9b4655a84d182194"
   },
   "plant": {
     "listen": "0.0.0.0:9001"
