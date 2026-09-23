@@ -39,7 +39,7 @@
 #                same record (alarm-validation-failed,
 #                alarm-validation-nondeterministic)
 #   fingerprint  the emitted model's fingerprint equals the manifest's
-#                recorded `model.fingerprint`, and the deployed pair's
+#                recorded `model.fingerprint`, the deployed pair's
 #                served model digest — each peer's /checkpoint-stamped
 #                fingerprint on the manifest-declared deployment —
 #                equals it too, so the record authorizes the served
@@ -47,10 +47,20 @@
 #                doctored served document — every point id renumbered
 #                over identical components — reports the named
 #                mismatch carrying the expected vs served fingerprint
-#                and the first diverging section; two passes produce
+#                and the first diverging section; and the dynamics
+#                document the manifest-declared deployment serves —
+#                the `dynamics.path` the rig mounts and
+#                `dcs-plant-server --dynamics` merges — fingerprints
+#                the recorded optional `dynamics.fingerprint` and the
+#                checked-in artifact identically on the launched
+#                pair, a doctored served document with renumbered
+#                point references over identical element content
+#                reporting the named mismatch; two passes produce
 #                identical digests (manifest-fingerprint-mismatch,
 #                fingerprint-failed, fingerprint-nondeterministic,
-#                fingerprint-unchecked)
+#                fingerprint-unchecked, dynamics-fingerprint-failed,
+#                dynamics-fingerprint-nondeterministic,
+#                dynamics-fingerprint-unchecked)
 #   deploy       the checked-in rig definition deploy/compose.yaml
 #                instantiates every field of deploy/manifest.json —
 #                release, images, mounted model and dynamics paths,
@@ -629,6 +639,27 @@
 #                with the pair's roles unchanged; two passes produce
 #                identical digests (monitor-starvation-failed,
 #                monitor-starvation-nondeterministic)
+#                The stage's journal-boundary leg,
+#                ci/journal_boundary.py on the same declared
+#                deployment — the consumer-side mirror of the
+#                rig-side journal-flood finding (#623, landed fix;
+#                WW-ENG-003, WW-LCM-001): the tracking standby
+#                restarted onto its declared files twice around two
+#                floods of receipted journal-producing commands past
+#                the served journal's retained bound, so its served
+#                GET /journal must still answer both lifetimes'
+#                run_boundary entries pinned ahead of the retained
+#                tail — the first flood's evicted marker recovered at
+#                the second restart's replay, the second's pinned
+#                live — with strict seq order, the evicted stretch
+#                reading as the usual numbering gap, and the ?since=
+#                cursor past the last boundary answering exactly the
+#                retained tail; the durable file retaining every
+#                marker in order with contiguous seqs, the field
+#                owner's single-lifetime record audited the same
+#                way, and the pair's roles unmoved; two passes
+#                produce identical digests (journal-boundary-failed,
+#                journal-boundary-nondeterministic)
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -1007,11 +1038,11 @@ MANIFEST_FP="$(python3 -c 'import json; print(json.load(open("deploy/manifest.js
     || fail "manifest-fingerprint-mismatch: emitted model fingerprints $EMITTED_FP but deploy/manifest.json records $MANIFEST_FP"
 echo "  fingerprint $EMITTED_FP matches the manifest"
 
-# The served-bytes half of the authorization: the recorded fingerprint
-# must name what the deployed pair actually serves, not just the
-# checked-in artifact — ci/fingerprint.py launches the manifest-declared
-# pair on the released tooling and pulls each peer's stamped model
-# digest through GET /checkpoint, reporting the named
+# The served-bytes half of the model authorization: the recorded
+# fingerprint must name what the deployed pair actually serves, not
+# just the checked-in artifact — ci/fingerprint.py launches the
+# manifest-declared pair on the released tooling and pulls each peer's
+# stamped model digest through GET /checkpoint, reporting the named
 # manifest-fingerprint-mismatch with the expected vs served fingerprint
 # and the first diverging document section on any divergence. Two
 # passes must produce identical digests.
@@ -1040,6 +1071,60 @@ if out="$(run_fingerprint --tamper renumber-points 2>&1)"; then
 fi
 [[ "$out" == *"manifest-fingerprint-mismatch"* && "$out" == *"io_points"* ]] \
     || fail "fingerprint-unchecked: the renumber-points case did not report its named diagnostic: $out"
+echo "  renumber-points: reported, manifest-fingerprint-mismatch"
+
+# The dynamics half of the authorization, under the same canonical
+# fingerprint contract: the optional `dynamics.fingerprint` must name
+# the dynamics document the deployment serves — the manifest's
+# declared `dynamics.path`, the read-only mount the rig instantiates
+# and `dcs-plant-server --dynamics` merges — and the checked-in
+# artifact must fingerprint it identically. A manifest omitting the
+# optional field declares no pin; the served-vs-checked-in comparison
+# still stands.
+DYN_FP="$(python3 ci/dynamics_fingerprint.py --fingerprint model/dynamics.json)"
+MANIFEST_DYN_FP="$(python3 -c 'import json; print(json.load(open("deploy/manifest.json")).get("dynamics", {}).get("fingerprint") or "")')"
+if [ -n "$MANIFEST_DYN_FP" ]; then
+    [ "$DYN_FP" = "$MANIFEST_DYN_FP" ] \
+        || fail "manifest-fingerprint-mismatch: the checked-in dynamics fingerprints $DYN_FP but deploy/manifest.json records $MANIFEST_DYN_FP"
+    echo "  dynamics fingerprint $DYN_FP matches the manifest"
+else
+    echo "  the manifest records no dynamics.fingerprint — the pin is undeclared"
+fi
+
+# The served-bytes half: ci/dynamics_fingerprint.py launches the
+# manifest-declared pair on the released tooling serving the
+# deployment's declared dynamics.path, fingerprints the document it
+# actually runs, and holds it equal to the recorded fingerprint and
+# the checked-in artifact — reporting manifest-fingerprint-mismatch
+# with the expected vs served fingerprint and the first diverging
+# element on any divergence. Two passes must produce identical
+# digests.
+run_dynamics_fingerprint() {
+    python3 ci/dynamics_fingerprint.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_dynamics_fingerprint)" \
+    || fail "dynamics-fingerprint-failed: the dynamics-fingerprint leg did not hold — its evidence lines are above"
+SECOND="$(run_dynamics_fingerprint)" \
+    || fail "dynamics-fingerprint-failed: the dynamics-fingerprint leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "dynamics-fingerprint-nondeterministic: two dynamics-fingerprint passes produced different digests"
+echo "  $FIRST"
+
+# The doctored case: the pair serving a dynamics document whose point
+# references were renumbered — identical element content — must
+# surface the named diagnostic; a silent pass would leave the
+# authorization unproven.
+if out="$(run_dynamics_fingerprint --tamper renumber-points 2>&1)"; then
+    fail "dynamics-fingerprint-unchecked: a served dynamics document with renumbered points passed the fingerprint leg"
+fi
+[[ "$out" == *"manifest-fingerprint-mismatch"* && "$out" == *"element 0"* ]] \
+    || fail "dynamics-fingerprint-unchecked: the renumber-points case did not report its named diagnostic: $out"
 echo "  renumber-points: reported, manifest-fingerprint-mismatch"
 
 echo "== deploy =="
@@ -2366,6 +2451,54 @@ for tamper in starved-reads peer-transition; do
     echo "  $tamper: reported, monitor-starvation-failed"
 done
 
+# The pair contract's journal-boundary flood leg, on the same
+# manifest-declared deployment: ci/journal_boundary.py converges the
+# pair, then restarts the tracking standby onto its declared
+# --state-file/--journal-file twice around two floods of
+# journal-producing commands past the served journal's 1024-entry
+# retained bound — the consumer-side mirror of the rig-side
+# journal-flood finding (#623, landed fix; WW-ENG-003, WW-LCM-001).
+# Each receipted write_value settles a `command_settled` on the field
+# owner and an adopted one on the tracking peer, so both durable
+# journals outgrow the bound: the standby's served GET /journal must
+# still answer both lifetimes' run_boundary entries ahead of the
+# retained tail — the first flood's eviction of run 2's marker
+# recovered at the second restart's replay, the second flood's of
+# run 3's pinned live — with strict seq order, the evicted stretch
+# reading as the usual numbering gap, and the ?since= cursor past the
+# last boundary answering exactly the retained tail; its durable file
+# must retain every run_boundary marker in order with contiguous
+# seqs; the field owner's single-lifetime journal stays bounded the
+# same way with its cold-start marker retained and no served
+# boundary by contract; and the pair's roles never move. Two passes
+# must produce identical digests.
+run_journal_boundary() {
+    python3 ci/journal_boundary.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_journal_boundary)" \
+    || fail "journal-boundary-failed: the journal-boundary flood leg did not hold — its evidence lines are above"
+SECOND="$(run_journal_boundary)" \
+    || fail "journal-boundary-failed: the journal-boundary flood leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "journal-boundary-nondeterministic: two journal-boundary passes produced different digests"
+echo "  $FIRST"
+
+# The doctored case: a leg whose served tail loses every run_boundary
+# while the durable file retains them must surface the named
+# diagnostic — never a silently unattributed pass.
+if out="$(run_journal_boundary --tamper dropped-boundaries 2>&1)"; then
+    fail "journal-boundary-unchecked: a dropped-boundaries case passed the journal-boundary leg"
+fi
+[[ "$out" == *"journal-boundary-failed"* ]] \
+    || fail "journal-boundary-unchecked: the dropped-boundaries case did not report journal-boundary-failed: $out"
+echo "  dropped-boundaries: reported, journal-boundary-failed"
+
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
@@ -2378,6 +2511,7 @@ for file in ci/alarm_rationalization.py ci/alarm_validation.py \
         ci/ctl.py ci/demote_pending.py ci/deploy_rig.py \
         ci/divergence.py ci/failover.py \
         ci/force_carryover.py ci/force_release.py ci/handover.py \
+        ci/journal_boundary.py \
         ci/managed_carryover.py ci/managed_lifecycle.py \
         ci/monitor_starvation.py \
         ci/negotiation.py ci/oos.py ci/pair.py \
