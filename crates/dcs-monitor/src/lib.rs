@@ -1850,7 +1850,13 @@ impl<'d> Monitor<'d> {
     /// own public `/checkpoint` serves that exact stamp — and on a
     /// keyed run, a hint that answers no valid `line_proof` either:
     /// replaying this run's own checkpoint or fabricating one that
-    /// merely continues the line produces neither.
+    /// merely continues the line produces neither. A standby-shaped
+    /// document — the shape unkeyed deployments must keep accepting —
+    /// additionally answers to this run's command audit: a field owner
+    /// holds the line's receipt log and held-value image itself, so a
+    /// document whose receipt window forks that log or whose internal
+    /// `In` samples plant a value no settled verdict produced is
+    /// forged rather than a continuation, and refuses the same way.
     fn verify_demote_hint(&self) -> Result<Option<SocketAddr>, Response<Cursor<Vec<u8>>>> {
         if self.configured_source().is_some() {
             return Ok(None);
@@ -1881,7 +1887,16 @@ impl<'d> Monitor<'d> {
         // an unproven endpoint serving it, even bumped ahead into the
         // successor's tick shape, may simply be replaying it.
         let key_attested = self.pair_key.is_some() && proven;
-        if !proven || verify_announced_checkpoint(&pulled, &own, key_attested).is_err() {
+        if !proven
+            || verify_announced_checkpoint(&pulled, &own, key_attested).is_err()
+            || self
+                .shared
+                .lock()
+                .unwrap()
+                .peer
+                .unaccounted(&pulled)
+                .is_some()
+        {
             return Err(json(409, &SwitchError::NoTrackingSource));
         }
         Ok(Some(hint))
