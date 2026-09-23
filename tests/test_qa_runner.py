@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from qa_lane import revision, runner, state as qa_state
+from qa_lane import revision, runner, scenarios, state as qa_state
 
 
 SHA_A = 'a' * 40
@@ -554,6 +554,314 @@ class RigStateFileTests(unittest.TestCase):
         finally:
             st.close()
         self.assertFalse(self.run_dir.exists())
+
+
+class OwnerTokenPinTests(unittest.TestCase):
+    """The per-controller --owner-token pins the run config records:
+    every controller the runner launches — the pair and the
+    scenario-action third peers — carries its endpoint's pinned
+    token, so a scenario plant-protocol attachment can share the
+    standing owner's claim through ensure_writer (the designed
+    harness path) instead of preempting it; ctx['plant_owner'] hands
+    the cases the same recorded map."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        self.run_dir.mkdir(parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+        self.model = self.src / self.cfg['model_fixture']
+        self.model.parent.mkdir(parents=True, exist_ok=True)
+        self.model.write_text(json.dumps(
+            {'version': 1,
+             'devices': [{'id': 1, 'kind': 'sim-di',
+                          'channels': [{'name': 'ch0',
+                                        'direction': 'in',
+                                        'value_type': 'bool'}]}],
+             'io_points': [
+                 {'id': 10, 'direction': 'in', 'value_type': 'bool',
+                  'channel': {'device': 1, 'channel': 'ch0'}},
+                 {'id': 300, 'direction': 'in', 'value_type': 'bool',
+                  'writable': True, 'initial': {'bool': False}}],
+             'signals': [{'id': 10300, 'name': 'oos', 'source': 300}],
+             'components': [], 'connections': []}))
+        dynamics = self.src / self.cfg['dynamics_fixture']
+        dynamics.parent.mkdir(parents=True, exist_ok=True)
+        dynamics.write_text('{}')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _record(self):
+        return {'run_id': 'qa-1', 'attempted_sha': SHA_A}
+
+    @staticmethod
+    def _docker(calls):
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+        return fake_docker
+
+    @staticmethod
+    def _launch(calls, container):
+        return next(c for c in calls
+                    if c[0] == 'run' and container in c)
+
+    @staticmethod
+    def _owner_token(launch):
+        return launch[launch.index('--owner-token') + 1]
+
+    def test_pair_launches_carry_the_config_pins(self):
+        calls = []
+
+        class FakeConn:
+            def close(self):
+                pass
+
+        with patch.object(runner, 'docker', self._docker(calls)), \
+                patch.object(runner.socket, 'create_connection',
+                             return_value=FakeConn()):
+            runner._start_rig(self.cfg, self._record(), self.src,
+                              self.run_dir, lambda e, d=None: None)
+        tokens = self.cfg['plant_owner_tokens']
+        for key, container in (('active', 'dcs-hw-qa-1-a'),
+                               ('standby', 'dcs-hw-qa-1-b')):
+            launch = self._launch(calls, container)
+            self.assertEqual(self._owner_token(launch),
+                             str(tokens[key]), key)
+        self.assertNotEqual(tokens['active'], tokens['standby'])
+
+    def test_pins_come_from_the_run_config_not_a_constant(self):
+        # A config-file override is what the launch carries — the pin
+        # is recorded in the run config, not buried in the code.
+        self.cfg['plant_owner_tokens'] = {
+            **self.cfg['plant_owner_tokens'], 'active': 424299}
+        calls = []
+
+        class FakeConn:
+            def close(self):
+                pass
+
+        with patch.object(runner, 'docker', self._docker(calls)), \
+                patch.object(runner.socket, 'create_connection',
+                             return_value=FakeConn()):
+            runner._start_rig(self.cfg, self._record(), self.src,
+                              self.run_dir, lambda e, d=None: None)
+        launch = self._launch(calls, 'dcs-hw-qa-1-a')
+        self.assertEqual(self._owner_token(launch), '424299')
+
+    def test_every_third_controller_launch_carries_its_pin(self):
+        calls, events = [], []
+        with patch.object(runner, 'docker', self._docker(calls)):
+            runner.start_revised_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'standby', lambda e, d=None: events.append((e, d)))
+            runner.start_foreign_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'standby', lambda e, d=None: events.append((e, d)))
+            runner.start_driven_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'standby', lambda e, d=None: events.append((e, d)))
+        tokens = self.cfg['plant_owner_tokens']
+        for key, container in (('revised', 'dcs-hw-qa-1-c'),
+                               ('foreign', 'dcs-hw-qa-1-foreign'),
+                               ('driven', 'dcs-hw-qa-1-d')):
+            launch = self._launch(calls, container)
+            self.assertEqual(self._owner_token(launch),
+                             str(tokens[key]), key)
+        self.assertEqual(
+            len({tokens[key] for key in
+                 ('revised', 'foreign', 'driven')}), 3)
+        # Each launch record names the pin it carried.
+        for event, detail in events:
+            if event in ('model-revision-start', 'negotiation-start',
+                         'driven-start'):
+                self.assertIn('--owner-token', detail, event)
+
+    def test_scenario_ctx_hands_cases_the_recorded_map(self):
+        ctx = runner._scenario_ctx(
+            self.cfg, self._record(), self.src, self.run_dir,
+            self.run_dir / 'evidence', 0, lambda e, d=None: None)
+        self.assertEqual(ctx['plant_owner'],
+                         self.cfg['plant_owner_tokens'])
+        self.assertEqual(set(ctx['plant_owner']),
+                         set(runner.OWNER_TOKEN_ENDPOINTS))
+
+    def test_a_duplicated_pin_fails_the_launch_loudly(self):
+        # Two endpoints on one token would silently defeat the sim's
+        # single-writer fencing — the config check refuses before any
+        # container launches.
+        self.cfg['plant_owner_tokens'] = {
+            **self.cfg['plant_owner_tokens'],
+            'standby': self.cfg['plant_owner_tokens']['active']}
+        calls = []
+        with patch.object(runner, 'docker', self._docker(calls)):
+            with self.assertRaises(RuntimeError) as caught:
+                runner._start_rig(self.cfg, self._record(), self.src,
+                                  self.run_dir, lambda e, d=None: None)
+            self.assertIn('distinct', str(caught.exception))
+            with self.assertRaises(RuntimeError):
+                runner.start_revised_controller(
+                    self.cfg, self._record(), self.run_dir, self.model,
+                    'standby', lambda e, d=None: None)
+        self.assertFalse(any(c[0] == 'run' for c in calls))
+
+    def test_a_missing_pin_fails_the_launch_loudly(self):
+        tokens = dict(self.cfg['plant_owner_tokens'])
+        del tokens['revised']
+        self.cfg['plant_owner_tokens'] = tokens
+        with patch.object(runner, 'docker', self._docker([])):
+            with self.assertRaises(RuntimeError) as caught:
+                runner.start_revised_controller(
+                    self.cfg, self._record(), self.run_dir, self.model,
+                    'standby', lambda e, d=None: None)
+        self.assertIn('revised', str(caught.exception))
+
+    def test_a_non_integer_pin_fails_the_launch_loudly(self):
+        self.cfg['plant_owner_tokens'] = {
+            **self.cfg['plant_owner_tokens'], 'driven': 'qa-d'}
+        with patch.object(runner, 'docker', self._docker([])):
+            with self.assertRaises(RuntimeError):
+                runner.start_driven_controller(
+                    self.cfg, self._record(), self.run_dir, self.model,
+                    'standby', lambda e, d=None: None)
+
+
+class EndpointPlacementTests(unittest.TestCase):
+    """The rig bridge-to-host reachability rule the qax-20260922-001,
+    qax-20260922-005, and qax-20260923-001 exploration runs
+    demonstrated, recorded in the run config: the host egress policy
+    drops every rig-network packet aimed at a host socket, so an
+    endpoint a rig peer must dial (forge/interposer/plant-probe) runs
+    bridge-placed in a labeled rig-bridge container while host-side
+    attachments reach rig services through the published loopback
+    ports only. _scenario_ctx hands the cases the recorded map and
+    the run's bridge name."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        self.run_dir.mkdir(parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _record(self):
+        return {'run_id': 'qa-1', 'attempted_sha': SHA_A}
+
+    def _ctx(self):
+        return runner._scenario_ctx(
+            self.cfg, self._record(), self.src, self.run_dir,
+            self.run_dir / 'evidence', 0, lambda e, d=None: None)
+
+    def test_default_config_records_every_lane_endpoint(self):
+        placements = self.cfg['endpoint_placement']
+        self.assertEqual(set(placements),
+                         set(runner.PLACEMENT_ENDPOINTS))
+        # The endpoints rig peers must dial are recorded 'bridge': a
+        # host socket is unreachable from the rig network.
+        for key in ('forge', 'interposer'):
+            self.assertEqual(placements[key], 'bridge', key)
+        for key in ('active', 'standby', 'revised', 'foreign',
+                    'driven', 'plant'):
+            self.assertEqual(placements[key], 'loopback', key)
+
+    def test_scenario_ctx_hands_cases_the_recorded_map(self):
+        ctx = self._ctx()
+        self.assertEqual(ctx['endpoint_placement'],
+                         self.cfg['endpoint_placement'])
+        self.assertEqual(set(ctx['endpoint_placement']),
+                         set(runner.PLACEMENT_ENDPOINTS))
+        self.assertEqual(ctx['rig_network'], 'dcs-hwtest-qa-1')
+
+    def test_selection_comes_from_the_run_config_not_a_constant(self):
+        # A config-file override is what the ctx carries — the
+        # placement is recorded in the run config, not buried in code.
+        self.cfg['endpoint_placement'] = {
+            **self.cfg['endpoint_placement'], 'forge': 'loopback'}
+        self.assertEqual(self._ctx()['endpoint_placement']['forge'],
+                         'loopback')
+
+    def test_a_missing_placement_fails_loudly(self):
+        placements = dict(self.cfg['endpoint_placement'])
+        del placements['forge']
+        self.cfg['endpoint_placement'] = placements
+        with self.assertRaises(RuntimeError) as caught:
+            self._ctx()
+        self.assertIn('forge', str(caught.exception))
+
+    def test_an_unknown_placement_fails_loudly(self):
+        self.cfg['endpoint_placement'] = {
+            **self.cfg['endpoint_placement'], 'interposer': 'host'}
+        with self.assertRaises(RuntimeError):
+            self._ctx()
+
+    def test_start_rig_fails_closed_on_a_bad_record(self):
+        # A malformed map stops the launch before any container moves.
+        self.cfg['endpoint_placement'] = {'active': 'loopback'}
+        for fixture in (self.cfg['model_fixture'],
+                        self.cfg['dynamics_fixture']):
+            path = self.src / fixture
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{}')
+        calls = []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            with self.assertRaises(RuntimeError):
+                runner._start_rig(self.cfg, self._record(), self.src,
+                                  self.run_dir, lambda e, d=None: None)
+        self.assertFalse(any(c[0] == 'run' for c in calls))
+
+    def test_start_rig_refuses_a_loopback_endpoint_marked_bridge(self):
+        # The pair's monitor ports and the plant probe port publish on
+        # host loopback — a config recording them 'bridge' describes a
+        # rig this launch does not build, so the launch refuses.
+        self.cfg['endpoint_placement'] = {
+            **self.cfg['endpoint_placement'], 'plant': 'bridge'}
+        for fixture in (self.cfg['model_fixture'],
+                        self.cfg['dynamics_fixture']):
+            path = self.src / fixture
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{}')
+        calls = []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            with self.assertRaises(RuntimeError) as caught:
+                runner._start_rig(self.cfg, self._record(), self.src,
+                                  self.run_dir, lambda e, d=None: None)
+        self.assertIn('plant', str(caught.exception))
+        self.assertFalse(any(c[0] == 'run' for c in calls))
+
+    def test_tracking_source_auth_leg_references_the_note(self):
+        # The tracking-source-auth docstring's forged-checkpoint
+        # server is placed per the recorded rule — 'bridge', never a
+        # host socket the rig cannot reach.
+        doc = scenarios.__doc__
+        auth = doc[doc.index('tracking-source-auth'):]
+        auth = auth[:auth.index('verified source owes')]
+        self.assertIn('endpoint_placement', auth)
+        self.assertIn('bridge', auth)
+
+    def test_shared_claim_legs_reference_the_note(self):
+        # The shared-claim paragraph records the plant-probe
+        # attachments' published-loopback placement and the
+        # bridge-placed alternative for rig-side attachments.
+        doc = scenarios.__doc__
+        self.assertGreaterEqual(doc.count('endpoint_placement'), 2)
+        shared = doc[doc.index('shared-claim'):]
+        self.assertIn('endpoint_placement', shared)
+        self.assertIn('published loopback port', shared)
 
 
 class DcsCtlBuildTests(unittest.TestCase):

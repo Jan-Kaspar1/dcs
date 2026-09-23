@@ -31,7 +31,8 @@ pub enum RemoteError {
     Timeout,
     /// The server reported a point-level failure: the [`IoError`] its
     /// `SimDriver` produced, carried verbatim — `UnknownPoint`,
-    /// `TypeMismatch`, or an injected fault's `Disconnected`/`Timeout`.
+    /// `TypeMismatch`, `InvalidValue`, or an injected fault's
+    /// `Disconnected`/`Timeout`.
     Io(IoError),
     /// The server refused the request itself — a [`PlantRequest::Step`]
     /// with a negative or non-finite `dt`, or a payload JSON cannot

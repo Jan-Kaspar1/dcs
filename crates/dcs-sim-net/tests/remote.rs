@@ -12,7 +12,8 @@ use dcs_runtime::{
     StepError, WriteGate,
 };
 use dcs_sim::{
-    ChannelId, ChannelMap, Fault, FirstOrderLag, Loopback, PointBinding, ProcessElement, SimDriver,
+    ChannelId, ChannelMap, Fault, FirstOrderLag, Integrator, Loopback, PointBinding,
+    ProcessElement, SimDriver,
 };
 use dcs_sim_net::{ClaimGrant, PlantError, PlantResponse, PlantServer, RemoteDriver, RemoteError};
 use std::io::{self, BufRead, BufReader, Write};
@@ -263,6 +264,102 @@ fn protocol_answers_map_to_named_io_errors() {
             Err(RemoteError::InvalidRequest(_))
         ));
         assert_eq!(remote.step(0.1), Ok(Tick(1)));
+    });
+}
+
+/// An integrator plant: point 1 is the writable inflow, point 10 the
+/// level it integrates — the shape the QA reproduction drives.
+fn integrator_map() -> ChannelMap {
+    ChannelMap::new()
+        .with_point(binding(1, Direction::In, Value::Float(0.0)))
+        .with_point(binding(10, Direction::In, Value::Float(0.0)))
+        .with_element(ProcessElement::Integrator(Integrator {
+            input: PointId(1),
+            output: PointId(10),
+            initial: 0.0,
+        }))
+}
+
+#[test]
+fn a_legal_step_that_overflows_an_element_degrades_the_sample_and_recovers() {
+    // QA `sim-net-nonfinite-plant-state-poisons-wire-permanently`:
+    // claim -> write 1e308 -> step dt=1e308 drove the integrator's
+    // accumulator past the f64 range; the stored non-finite sample
+    // serialized `{"float":null}` — a frame this protocol's own client
+    // must reject — and the element stayed corrupt under every later
+    // step until the server restarted. The field now holds the last
+    // finite state instead: the served sample decodes, marked
+    // `Bad`/`out_of_range`, and a finite input write plus a finite
+    // step recovers the element in place.
+    with_server(integrator_map(), |addr| {
+        let remote = RemoteDriver::connect(addr).unwrap();
+        remote.claim_writer(1).unwrap();
+        let driver: &dyn IoDriver = &remote;
+
+        driver.write(PointId(1), Value::Float(1e308)).unwrap();
+        remote.step(1e308).unwrap();
+        remote.step(1e308).unwrap();
+
+        // The frame decodes — the defect's Disconnected is gone — and
+        // the overflowed point reports its held finite value bad
+        // instead of an unrepresentable one.
+        let sample = driver.read(PointId(10)).unwrap();
+        assert_eq!(sample.value, Value::Float(0.0));
+        assert_eq!(sample.quality, Quality::Bad(QualityReason::OutOfRange));
+
+        // The census decodes wholesale — one bad point no longer
+        // poisons the whole response.
+        assert_eq!(remote.list_points().unwrap().len(), 2);
+
+        // A second attachment reads the same decodable degradation.
+        let standby = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(standby.read(PointId(10)).unwrap(), sample);
+
+        // The documented recovery path: a finite input write followed
+        // by a finite step resumes the element from the state it held —
+        // no plant restart.
+        driver.write(PointId(1), Value::Float(2.0)).unwrap();
+        remote.step(1.0).unwrap();
+        let recovered = driver.read(PointId(10)).unwrap();
+        assert_eq!(recovered.value, Value::Float(2.0));
+        assert!(recovered.quality.is_good());
+    });
+}
+
+#[test]
+fn a_non_finite_write_payload_is_refused_at_the_field_boundary() {
+    with_server(loopback_map(), |addr| {
+        // The wire is symmetric: JSON cannot spell a non-finite f64,
+        // and serde_json refuses an out-of-range literal at parse.
+        // A `{"float": 1e999}` write dies as InvalidRequest before any
+        // driver call — the stored sample is untouched and the
+        // connection stays up.
+        let mut stream = BufReader::new(TcpStream::connect(addr).unwrap());
+        stream
+            .get_mut()
+            .write_all(b"{\"op\":\"claim_writer\",\"owner\":1}\n")
+            .unwrap();
+        let mut line = String::new();
+        stream.read_line(&mut line).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<PlantResponse>(&line).unwrap(),
+            PlantResponse::Done
+        ));
+        stream
+            .get_mut()
+            .write_all(b"{\"op\":\"write\",\"point\":10,\"value\":{\"float\":1e999}}\n")
+            .unwrap();
+        line.clear();
+        stream.read_line(&mut line).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<PlantResponse>(&line).unwrap(),
+            PlantResponse::Error {
+                error: PlantError::InvalidRequest { .. }
+            }
+        ));
+
+        let remote = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(remote.read(PointId(10)).unwrap().value, Value::Float(0.0));
     });
 }
 

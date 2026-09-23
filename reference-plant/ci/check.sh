@@ -39,8 +39,18 @@
 #                same record (alarm-validation-failed,
 #                alarm-validation-nondeterministic)
 #   fingerprint  the emitted model's fingerprint equals the manifest's
-#                recorded `model.fingerprint`
-#                (manifest-fingerprint-mismatch)
+#                recorded `model.fingerprint`, and the deployed pair's
+#                served model digest — each peer's /checkpoint-stamped
+#                fingerprint on the manifest-declared deployment —
+#                equals it too, so the record authorizes the served
+#                model bytes rather than only the checked-in file; a
+#                doctored served document — every point id renumbered
+#                over identical components — reports the named
+#                mismatch carrying the expected vs served fingerprint
+#                and the first diverging section; two passes produce
+#                identical digests (manifest-fingerprint-mismatch,
+#                fingerprint-failed, fingerprint-nondeterministic,
+#                fingerprint-unchecked)
 #   deploy       the checked-in rig definition deploy/compose.yaml
 #                instantiates every field of deploy/manifest.json —
 #                release, images, mounted model and dynamics paths,
@@ -996,6 +1006,41 @@ MANIFEST_FP="$(python3 -c 'import json; print(json.load(open("deploy/manifest.js
 [ "$EMITTED_FP" = "$MANIFEST_FP" ] \
     || fail "manifest-fingerprint-mismatch: emitted model fingerprints $EMITTED_FP but deploy/manifest.json records $MANIFEST_FP"
 echo "  fingerprint $EMITTED_FP matches the manifest"
+
+# The served-bytes half of the authorization: the recorded fingerprint
+# must name what the deployed pair actually serves, not just the
+# checked-in artifact — ci/fingerprint.py launches the manifest-declared
+# pair on the released tooling and pulls each peer's stamped model
+# digest through GET /checkpoint, reporting the named
+# manifest-fingerprint-mismatch with the expected vs served fingerprint
+# and the first diverging document section on any divergence. Two
+# passes must produce identical digests.
+run_fingerprint() {
+    python3 ci/fingerprint.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_fingerprint)" \
+    || fail "fingerprint-failed: the manifest-fingerprint leg did not hold — its evidence lines are above"
+SECOND="$(run_fingerprint)" \
+    || fail "fingerprint-failed: the manifest-fingerprint leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "fingerprint-nondeterministic: two fingerprint-leg passes produced different digests"
+echo "  $FIRST"
+
+# The doctored case: the pair serving a model whose point ids were
+# renumbered — identical component content — must surface the named
+# diagnostic; a silent pass would leave the authorization unproven.
+if out="$(run_fingerprint --tamper renumber-points 2>&1)"; then
+    fail "fingerprint-unchecked: a served model with renumbered point ids passed the fingerprint leg"
+fi
+[[ "$out" == *"manifest-fingerprint-mismatch"* && "$out" == *"io_points"* ]] \
+    || fail "fingerprint-unchecked: the renumber-points case did not report its named diagnostic: $out"
+echo "  renumber-points: reported, manifest-fingerprint-mismatch"
 
 echo "== deploy =="
 # The rig-definition consistency check reports its own named

@@ -97,6 +97,14 @@ pub(crate) fn restore_points(
     for (point, kind) in points {
         let prefix = format!("point.{}", point.0);
         let value = state.require_kind(element, &format!("{prefix}.value"), kind)?;
+        // A stored `Float` must be finite like every value the point
+        // can hold live: a checkpoint carrying NaN or an infinity would
+        // restore a sample no wire contract can spell back.
+        if let Value::Float(v) = value
+            && !v.is_finite()
+        {
+            return Err(invalid(format!("{prefix}.value"), value));
+        }
         let quality_code = state.require_i64(element, &format!("{prefix}.quality"))?;
         let quality = decode_quality(quality_code)
             .ok_or_else(|| invalid(format!("{prefix}.quality"), Value::Int(quality_code)))?;

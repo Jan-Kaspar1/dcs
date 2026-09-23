@@ -744,13 +744,14 @@ pub struct Monitor<'d> {
     /// until a demotion proves it — `POST /demote` pulls one
     /// checkpoint from each hint and adopts a candidate only when the
     /// checkpoint continues this run's line in a way this run's own
-    /// `/checkpoint` could not have served (a field-owning document not
-    /// ahead of this run's tick is just a replayable answer, not a
-    /// successor), preferring a candidate that serves the line as
-    /// field owner over one that merely tracks it — and on a keyed
-    /// run when the document also carries the pull's `line_proof` —
-    /// journaling the adopted source either way. The set is bounded
-    /// at [`MAX_ANNOUNCED`], newest first: with several standbys every
+    /// `/checkpoint` could not have served — a field-owning document
+    /// being the replayable shape, so only a key-attested pull may
+    /// earn a strictly-ahead owner document the adoption — preferring
+    /// the candidate that serves the line as field owner over one
+    /// that merely tracks it, and on a keyed run requiring each
+    /// pulled document to carry the pull's `line_proof` — journaling
+    /// the adopted source either way. The set is bounded at
+    /// [`MAX_ANNOUNCED`], newest first: with several standbys every
     /// announcer stays a demotion candidate rather than the last pull
     /// silently evicting the rest. A dead, replayed, or forged hint
     /// refuses `NoTrackingSource` instead of stranding or adopting.
@@ -804,7 +805,9 @@ pub struct Monitor<'d> {
     /// adopted announced source — plus the one that verifies a
     /// demotion's announced hint — each carry a fresh nonce whose
     /// returned proof must match. Unset, `?prove=` answers are plain
-    /// and announced demotions verify on the document checks alone.
+    /// and announced demotions verify on the document checks alone —
+    /// which on an unproven pull means no field-owning document can
+    /// ever arm them.
     pair_key: Option<u64>,
 }
 
@@ -977,7 +980,9 @@ impl<'d> Monitor<'d> {
     /// checkpoints can neither arm the demotion nor feed the demoted
     /// peer forged state. Unset, the deployment configured no shared
     /// secret: `?prove=` answers stay plain and the announced demotion
-    /// verifies on the document checks alone.
+    /// verifies on the document checks alone — a field-owning
+    /// document being exactly what this run's own public
+    /// `/checkpoint` serves, so no unproven endpoint may serve one.
     pub fn with_pair_key(mut self, key: u64) -> Self {
         self.pair_key = Some(key);
         self
@@ -1764,8 +1769,10 @@ impl<'d> Monitor<'d> {
     /// only a `?peer=` hint recorded — first verifies the hint the
     /// same way outside the lock: one checkpoint pull against it that
     /// must continue this run's line without being a replayable copy
-    /// of this run's own document — and on a keyed run must carry the
-    /// `?prove=` nonce's keyed `line_proof` — or the demotion refuses
+    /// of this run's own document — a field-owning document, which an
+    /// unproven endpoint may only have replayed verbatim or bumped
+    /// ahead — and on a keyed run must carry the `?prove=` nonce's
+    /// keyed `line_proof` — or the demotion refuses
     /// `NoTrackingSource`. The verified adoption journals naming the
     /// source, ahead of the role change it enables.
     fn switchover(&self, promote: bool) -> Response<Cursor<Vec<u8>>> {
@@ -1937,19 +1944,22 @@ impl<'d> Monitor<'d> {
     /// same-IP port the connection claims, so a recorded hint is
     /// unverified until one checkpoint pulled from it proves it
     /// continues this run's line. With several standbys every
-    /// announcer is a candidate: the first serving this line *as its
-    /// field owner* wins — an announcer that only tracks this run, a
-    /// sibling standby replaying this run's own line back, can never
-    /// satisfy the demotion over a real successor — and only when no
-    /// owner answered does a merely-tracking candidate adopt, pinned
-    /// provisional so the orphan-resolution probe can still re-resolve
-    /// onto an owner that appears later. Returns the verified hint, or
-    /// `None` when the demotion needs no proof — a configured source
-    /// covers it, or the peer owns no field — or the `409
-    /// NoTrackingSource` refusal when the owner has only unproven
-    /// hints: nothing announced, unreachable hints, or checkpoints
-    /// that are not this run's continuation — and on a keyed run,
-    /// hints answering no valid `line_proof` either.
+    /// announcer is a candidate: a hint serving this line *as its
+    /// field owner* wins where the pull attests that stamp — on a
+    /// keyed run, the strictly-ahead owner document carrying a valid
+    /// `line_proof`; every field-owning document on an unproven pull
+    /// is the replayable own-document shape and refuses — while an
+    /// announcer that only tracks this run, a sibling standby
+    /// replaying this run's own line back, is remembered as the
+    /// provisional fallback, adopted only when no owner verified, so
+    /// the orphan-resolution probe can still re-resolve onto an owner
+    /// that appears later. Returns the verified hint, or `None` when
+    /// the demotion needs no proof — a configured source covers it,
+    /// or the peer owns no field — or the `409 NoTrackingSource`
+    /// refusal when the owner has only unproven hints: nothing
+    /// announced, unreachable hints, or checkpoints that are not this
+    /// run's continuation — and on a keyed run, hints answering no
+    /// valid `line_proof` either.
     fn verify_demote_hint(&self) -> Result<Option<SocketAddr>, Response<Cursor<Vec<u8>>>> {
         if self.configured_source().is_some() {
             return Ok(None);
@@ -1968,9 +1978,14 @@ impl<'d> Monitor<'d> {
         // binding that nonce to that document.
         let nonce = self.pair_key.map(|_| mint_generation());
         // Newest announcer first, one bounded pull each. A candidate
-        // serving the line as field owner wins outright; a candidate
-        // that only tracks it is remembered as the fallback — adopted
-        // provisional, since the orphaned-resolution probe can still
+        // serving the line as field owner wins outright — where the
+        // pull may attest one: only a key-attested answer may serve a
+        // field-owning checkpoint, the stamp this run's own public
+        // `/checkpoint` carries, so on an unproven pull every owner
+        // document, even bumped ahead into the successor's tick
+        // shape, refuses as replayable. A candidate that only tracks
+        // the line is remembered as the fallback — adopted
+        // provisional, since the orphan-resolution probe can still
         // re-resolve onto the owner the line later names.
         let mut tracked = None;
         for hint in hints {
@@ -1980,7 +1995,9 @@ impl<'d> Monitor<'d> {
                 Ok(pulled) => pulled,
                 Err(_) => continue,
             };
-            if verify_announced_checkpoint(&pulled, &own).is_err() || !self.proven(&pulled, nonce) {
+            let proven = self.proven(&pulled, nonce);
+            let key_attested = self.pair_key.is_some() && proven;
+            if !proven || verify_announced_checkpoint(&pulled, &own, key_attested).is_err() {
                 continue;
             }
             if pulled.source_owns_field == Some(true) {
@@ -2456,16 +2473,19 @@ enum AnnouncedCheckpointError {
         /// This run's own tick when the hint was verified.
         own: Tick,
     },
-    /// The pulled checkpoint takes the shape of this run's own
-    /// `/checkpoint` answer: it claims its source owns the field, yet
-    /// its tick is not ahead of this run's own. Every document this
-    /// run serves takes that shape, so an endpoint answering it —
-    /// `/checkpoint` being public and freely fetchable — may simply
-    /// be replaying one of this run's own documents, which proves
-    /// nothing about the endpoint. A tracking peer's production never
-    /// takes it: tracking standbys stamp `source_owns_field: false`,
-    /// and a successor that already owns the field continues this
-    /// run's line strictly ahead of it.
+    /// The pulled checkpoint claims its source owns the field — the
+    /// stamp every document this run's own `/checkpoint` answer
+    /// carries — and the pull could not show the endpoint earned it.
+    /// `/checkpoint` is public and freely fetchable, so an endpoint
+    /// serving a field-owning document may simply be replaying one of
+    /// this run's own: at or behind this run's tick the replay is
+    /// verbatim or stale, and bumped a few ticks ahead it wears the
+    /// successor shape — indistinguishable without a key. Two
+    /// productions never take this shape: a tracking standby stamps
+    /// `source_owns_field: false`, and a successor that already owns
+    /// the field continues this run's line strictly ahead of it — the
+    /// one owner document a key-attested pull may accept, the proof
+    /// being what separates it from the replayed bump.
     OwnDocument {
         /// The tick the pulled checkpoint claims.
         pulled: Tick,
@@ -2501,16 +2521,22 @@ enum AnnouncedCheckpointError {
 /// behind this run's tick is no rejection either — a lagging
 /// successor is still this line, and the demoted peer's pulls simply
 /// reconverge it. One document shape is refused outright: a
-/// field-owning source not ahead of this run's tick — the exact
-/// shape this run's own `/checkpoint` answers, which being public
-/// and unauthenticated any endpoint can replay verbatim, so
-/// accepting it would adopt a redirect that proves nothing. A real
-/// tracking peer's checkpoint never takes that shape — a standby
+/// field-owning source — the exact stamp this run's own
+/// `/checkpoint` answers, which being public and unauthenticated any
+/// endpoint can replay. At or behind this run's tick the replayed
+/// document is verbatim or stale; bumped a few ticks ahead it takes
+/// the honest successor's shape, which an unproven pull cannot tell
+/// from the bump — so `key_attested`, the keyed `line_proof`'s
+/// verdict on this pull, gates the strictly-ahead owner document
+/// while every unproven field-owning document refuses. A real
+/// tracking peer's checkpoint never needs the shape — a standby
 /// stamps `source_owns_field: false` — and a successor that already
-/// owns the field serves this line strictly ahead.
+/// owns the field serves this line strictly ahead under a proof only
+/// a key-holding peer produces.
 fn verify_announced_checkpoint(
     pulled: &Checkpoint,
     own: &Checkpoint,
+    key_attested: bool,
 ) -> Result<(), AnnouncedCheckpointError> {
     if !SUPPORTED_FORMAT_VERSIONS.contains(&pulled.format_version) {
         return Err(AnnouncedCheckpointError::UnreadableVersion {
@@ -2526,7 +2552,7 @@ fn verify_announced_checkpoint(
             own: own.tick,
         });
     }
-    if pulled.source_owns_field == Some(true) && pulled.tick.0 <= own.tick.0 {
+    if pulled.source_owns_field == Some(true) && (pulled.tick.0 <= own.tick.0 || !key_attested) {
         return Err(AnnouncedCheckpointError::OwnDocument {
             pulled: pulled.tick,
             own: own.tick,
@@ -3335,35 +3361,58 @@ mod tests {
         // few ticks ahead inside the skew window, and far behind — a
         // lagging successor is still this line. None of them stamps
         // field ownership, which a tracking peer's checkpoint never
-        // claims.
+        // claims — and none needs the pull's key attestation either.
         for ahead in [0, 1, MAX_ANNOUNCED_AHEAD] {
             let mut pulled = checkpoint();
             pulled.tick = Tick(own.tick.0 + ahead);
-            assert_eq!(verify_announced_checkpoint(&pulled, &own), Ok(()));
+            for attested in [false, true] {
+                assert_eq!(verify_announced_checkpoint(&pulled, &own, attested), Ok(()));
+            }
         }
         let mut lagging = checkpoint();
         lagging.tick = Tick(3);
-        assert_eq!(verify_announced_checkpoint(&lagging, &own), Ok(()));
+        assert_eq!(verify_announced_checkpoint(&lagging, &own, false), Ok(()));
         // A successor that already owns the field is this line's
         // continuation only strictly ahead of the run it replaces —
-        // at or behind the run's tick the document takes the shape of
-        // this run's own `/checkpoint` answer, which being public any
-        // endpoint can replay, so the demotion refuses it.
+        // and only when the pull proved the document under the pair's
+        // key. Every document this run's own `/checkpoint` answers
+        // takes that same field-owning shape, so on an unproven pull
+        // even a few ticks ahead it may just be the replayed answer
+        // with its tick bumped — the `demote-verify-own-document-
+        // check-bypassed-by-tick-bump` reproduction — which the
+        // demotion refuses.
         let mut owner_ahead = checkpoint();
         owner_ahead.source_owns_field = Some(true);
         owner_ahead.tick = Tick(own.tick.0 + 1);
-        assert_eq!(verify_announced_checkpoint(&owner_ahead, &own), Ok(()));
+        assert_eq!(
+            verify_announced_checkpoint(&owner_ahead, &own, true),
+            Ok(())
+        );
+        for ahead in [1, 10, MAX_ANNOUNCED_AHEAD] {
+            let mut bumped = checkpoint();
+            bumped.source_owns_field = Some(true);
+            bumped.tick = Tick(own.tick.0 + ahead);
+            assert_eq!(
+                verify_announced_checkpoint(&bumped, &own, false),
+                Err(AnnouncedCheckpointError::OwnDocument {
+                    pulled: bumped.tick,
+                    own: own.tick,
+                })
+            );
+        }
         for lag in [0, 1, 50] {
             let mut replay = checkpoint();
             replay.source_owns_field = Some(true);
             replay.tick = Tick(own.tick.0 - lag);
-            assert_eq!(
-                verify_announced_checkpoint(&replay, &own),
-                Err(AnnouncedCheckpointError::OwnDocument {
-                    pulled: replay.tick,
-                    own: own.tick,
-                })
-            );
+            for attested in [false, true] {
+                assert_eq!(
+                    verify_announced_checkpoint(&replay, &own, attested),
+                    Err(AnnouncedCheckpointError::OwnDocument {
+                        pulled: replay.tick,
+                        own: own.tick,
+                    })
+                );
+            }
         }
         // The reproduction verbatim: the victim's own checkpoint
         // document served back to it — stamped field-owning at the
@@ -3371,7 +3420,7 @@ mod tests {
         let mut verbatim = checkpoint();
         verbatim.source_owns_field = Some(true);
         assert_eq!(
-            verify_announced_checkpoint(&verbatim, &own),
+            verify_announced_checkpoint(&verbatim, &own, false),
             Err(AnnouncedCheckpointError::OwnDocument {
                 pulled: own.tick,
                 own: own.tick,
@@ -3383,7 +3432,7 @@ mod tests {
         // demote-side check lets the crossing through.
         let mut revised = checkpoint();
         revised.model_fingerprint = Some(dcs_core::ModelFingerprint(8));
-        assert_eq!(verify_announced_checkpoint(&revised, &own), Ok(()));
+        assert_eq!(verify_announced_checkpoint(&revised, &own, false), Ok(()));
         // An unidentified line — both unminted — still verifies on
         // generation and tick: the unminted test/legacy shape.
         let mut unminted_own = checkpoint();
@@ -3391,14 +3440,17 @@ mod tests {
         unminted_own.generation = None;
         let mut pulled = unminted_own.clone();
         pulled.tick = Tick(101);
-        assert_eq!(verify_announced_checkpoint(&pulled, &unminted_own), Ok(()));
+        assert_eq!(
+            verify_announced_checkpoint(&pulled, &unminted_own, false),
+            Ok(())
+        );
 
         // The reproduction's forgery: this line's identity at a tick
         // far ahead of the run's — refused.
         let mut forged = checkpoint();
         forged.tick = Tick(99999);
         assert_eq!(
-            verify_announced_checkpoint(&forged, &own),
+            verify_announced_checkpoint(&forged, &own, false),
             Err(AnnouncedCheckpointError::Ahead {
                 pulled: Tick(99999),
                 own: Tick(100),
@@ -3407,7 +3459,7 @@ mod tests {
         let mut just_past = checkpoint();
         just_past.tick = Tick(own.tick.0 + MAX_ANNOUNCED_AHEAD + 1);
         assert!(matches!(
-            verify_announced_checkpoint(&just_past, &own),
+            verify_announced_checkpoint(&just_past, &own, false),
             Err(AnnouncedCheckpointError::Ahead { .. })
         ));
         // A foreign generation — a restarted or unrelated stream, and
@@ -3416,20 +3468,20 @@ mod tests {
         let mut restarted = checkpoint();
         restarted.generation = Some(12);
         assert_eq!(
-            verify_announced_checkpoint(&restarted, &own),
+            verify_announced_checkpoint(&restarted, &own, false),
             Err(AnnouncedCheckpointError::ForeignGeneration)
         );
         let mut identified = checkpoint();
         identified.model_fingerprint = None;
         identified.generation = Some(11);
         assert_eq!(
-            verify_announced_checkpoint(&identified, &unminted_own),
+            verify_announced_checkpoint(&identified, &unminted_own, false),
             Err(AnnouncedCheckpointError::ForeignGeneration)
         );
         let mut unreadable = checkpoint();
         unreadable.format_version = 999;
         assert_eq!(
-            verify_announced_checkpoint(&unreadable, &own),
+            verify_announced_checkpoint(&unreadable, &own, false),
             Err(AnnouncedCheckpointError::UnreadableVersion { found: 999 })
         );
     }

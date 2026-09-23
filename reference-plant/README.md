@@ -36,6 +36,14 @@ ci/alarm_validation.py the alarm-validation leg — the emitted model's
                        --check`, and the driven run's served
                        components/parameters sections reporting the
                        same record
+ci/fingerprint.py      the manifest-fingerprint authorization leg —
+                       the declared pair launched on the released
+                       tooling and each peer's /checkpoint-stamped
+                       model digest held equal to the manifest's
+                       recorded fingerprint, a doctored served model
+                       with renumbered point ids reporting the named
+                       mismatch with the expected vs served
+                       fingerprint and the first diverging section
 ci/alarm_rationalization.py  the pair contract's alarm-
                        rationalization leg — the emitted model's
                        managed-alarm record asserted verbatim on the
@@ -398,6 +406,25 @@ identical `alarm-validation-digest`; a violated contract fails
 `alarm-validation-failed`, a divergence
 `alarm-validation-nondeterministic`, and a run whose skipped
 doctoring passes `alarm-validation-unchecked`.
+
+The `fingerprint` stage then authorizes the model bytes the deployed
+pair serves, not just the checked-in file: beside comparing the fresh
+emit's fingerprint against the manifest's recorded
+`model.fingerprint`, `ci/fingerprint.py` launches the
+manifest-declared pair on the released tooling and pulls each peer's
+`GET /checkpoint` — the `model_fingerprint` a peer stamps is the
+digest of the model document it was assembled from and serves. Any
+divergence from the recorded fingerprint, including a silent one the
+component set cannot see, fails `manifest-fingerprint-mismatch`
+naming the diverging peer, the expected and served fingerprints, and
+the first top-level document section the served model diverges in.
+The stage's doctored case proves that diagnostic fires: a served
+document whose point ids were renumbered — references carried, the
+component set verbatim — must report the mismatch and name the
+`io_points` section, or the leg reports `fingerprint-unchecked`. Two
+passes must produce the identical `fingerprint-digest`; a violated
+contract fails `fingerprint-failed`, a divergence
+`fingerprint-nondeterministic`.
 
 ### 5. Run the simulation
 

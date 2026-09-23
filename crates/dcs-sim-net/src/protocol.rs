@@ -283,8 +283,8 @@ pub enum PlantError {
     /// A point-level failure: the [`IoError`] the server's
     /// [`SimDriver`](dcs_sim::SimDriver) returned, carried verbatim so the
     /// client surfaces the identical `UnknownPoint`, `TypeMismatch`,
-    /// `Disconnected`, or `Timeout` a local driver would have produced —
-    /// including faults injected through the protocol.
+    /// `InvalidValue`, `Disconnected`, or `Timeout` a local driver would
+    /// have produced — including faults injected through the protocol.
     Io {
         /// The driver's error.
         error: IoError,
@@ -543,6 +543,11 @@ mod tests {
             PlantResponse::Error {
                 error: PlantError::Io {
                     error: IoError::Timeout(PointId(6)),
+                },
+            },
+            PlantResponse::Error {
+                error: PlantError::Io {
+                    error: IoError::InvalidValue { point: PointId(8) },
                 },
             },
             PlantResponse::Error {

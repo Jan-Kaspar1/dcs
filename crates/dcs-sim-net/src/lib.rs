@@ -32,6 +32,11 @@
 //!   `{"result":"sample","sample":{"value":…,"quality":…,"tick":…}}`.
 //! - `{"op":"write","point":2,"value":{"float":1.5}}` —
 //!   `IoDriver::write` with its kind check; answers `{"result":"done"}`.
+//!   A `Float` write the field cannot represent — NaN or an infinity,
+//!   which has no JSON spelling and so cannot arrive as anything but a
+//!   failed payload decode — is refused: `invalid_request` when the
+//!   value does not decode at all, the point's `IoError::InvalidValue`
+//!   when a peer's own encoding carries it.
 //! - `{"op":"step","dt":0.1}` — `SimDriver::step`; answers
 //!   `{"result":"stepped","tick":7}`. A negative or non-finite `dt` is
 //!   refused as `invalid_request`, never a panic.
@@ -141,7 +146,8 @@
 //! Failures answer `{"result":"error","error":…}` with a
 //! [`PlantError`]: `{"kind":"io","error":…}` carries the driver's
 //! [`IoError`](dcs_core::IoError) verbatim (`UnknownPoint`,
-//! `TypeMismatch`, or an injected fault's `Disconnected`/`Timeout`), and
+//! `TypeMismatch`, `InvalidValue`, or an injected fault's
+//! `Disconnected`/`Timeout`), and
 //! `{"kind":"invalid_request","detail":…}` covers an unparseable line or
 //! an invalid `step`. The write-ownership refusals are
 //! `{"kind":"fenced","detail":…}` while another owner stands and
@@ -154,6 +160,19 @@
 //! diverge, so the crate builds `serde_json` with its `float_roundtrip`
 //! feature — the precise float parser; any other implementation of this
 //! protocol needs the same guarantee for `f64` payloads.
+//!
+//! Bit-exactness has a boundary: JSON has no spelling for NaN or an
+//! infinity — serde emits `null`, which a `Value` decode must reject —
+//! so the plant holds every served sample finite. A `write` carrying a
+//! non-finite `Float` fails as above, and a `step` whose element
+//! arithmetic overflows — an integrator wound past the `f64` range, a
+//! `flow_sum` saturating — never commits the result: the element holds
+//! its last finite state and its output reports that value
+//! `Bad`/`out_of_range`, recovering on the first step whose arithmetic
+//! lands finite. Every `sample` and `points` answer therefore decodes
+//! under this protocol's own serde contract — a corrupt step degrades
+//! one point's quality instead of poisoning the field for every
+//! attachment until restart.
 //!
 //! `RemoteDriver` maps the remaining failure surface: a dead or severed
 //! link and any incoherent answer surface as `IoError::Disconnected`, an

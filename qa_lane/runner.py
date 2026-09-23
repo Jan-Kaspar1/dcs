@@ -113,6 +113,39 @@ DEFAULT_CONFIG = {
     # stale well inside the window, while a healthy container restart
     # (~3-5 s of misses) never reaches it.
     'failover_misses': 120,
+    # Deterministic plant-writer owner tokens pinned per controller
+    # endpoint key — every controller the runner launches carries its
+    # key's --owner-token, so a scenario plant-protocol attachment can
+    # `ensure_writer` under the standing owner's token and share the
+    # claim (the designed harness path, answering claimed_shared)
+    # instead of preempting the field writer. Each endpoint keeps its
+    # own token: the sim's writer claim still fences every other
+    # owner, and a standby holds no claim until it promotes. The
+    # launch helper refuses a duplicated or missing pin — two
+    # controllers on one token would silently defeat the fencing.
+    'plant_owner_tokens': {'active': 424243, 'standby': 424244,
+                           'revised': 424245, 'foreign': 424246,
+                           'driven': 424247},
+    # The rig bridge-to-host reachability rule the qax-20260922-001,
+    # qax-20260922-005, and qax-20260923-001 exploration runs
+    # demonstrated, recorded as the lane's endpoint-placement contract:
+    # the host egress policy drops every packet a rig-bridge container
+    # aims at the host itself (netpolicy's INPUT rules), so a socket
+    # bound on the host — loopback, the LAN address, or another
+    # stack's published port reached through it — is unreachable from
+    # the rig network. Every lane endpoint carries a recorded
+    # placement: 'loopback' marks the services host-side scenario
+    # attachments reach through their 127.0.0.1-published ports (the
+    # monitor endpoints and the published plant-probe port); 'bridge'
+    # marks endpoints a rig peer must dial — the tracking-source/auth
+    # legs' checkpoint interposer and forged-checkpoint server — which
+    # run in labeled containers on the run's rig network and are
+    # dialed by container name, never through a host address.
+    'endpoint_placement': {
+        'active': 'loopback', 'standby': 'loopback',
+        'revised': 'loopback', 'foreign': 'loopback',
+        'driven': 'loopback', 'plant': 'loopback',
+        'interposer': 'bridge', 'forge': 'bridge'},
     'model_fixture': 'crates/dcs-demo/fixtures/pump_station.json',
     # The lane's own dynamics declaration: the shared fixture leaves
     # the inflow channel to scripted forcing, while the unattended rig
@@ -855,13 +888,86 @@ CONTAINER_RUN_DIR = '/var/lib/dcs-run'
 CONTAINER_STATE_FILE = CONTAINER_RUN_DIR + '/state.json'
 CONTAINER_JOURNAL_FILE = CONTAINER_RUN_DIR + '/journal.jsonl'
 
-# Deterministic plant-writer owner tokens pinned per endpoint key so a
-# scenario attachment can `ensure_writer` with the standing owner's
-# token — the designed shared-claim path for a test harness driving
-# plant stimuli (the controller's --owner-token contract). Each
-# process keeps its own token: the sim's writer claim still fences
-# every other owner, and a standby holds no claim until it promotes.
-PLANT_OWNER_TOKENS = {'active': 424243, 'standby': 424244}
+# The endpoint keys whose controllers the runner launches — the pair
+# `_start_rig` brings up plus the three scenario-action peers.
+OWNER_TOKEN_ENDPOINTS = ('active', 'standby', 'revised', 'foreign',
+                         'driven')
+
+
+def _plant_owner_tokens(cfg):
+    """The run's per-controller --owner-token pins, recorded in the
+    run config under 'plant_owner_tokens' and validated before a
+    launch trusts them.
+
+    The pins are deterministic per endpoint key so a scenario
+    attachment can `ensure_writer` with the standing owner's token —
+    the designed shared-claim path for a test harness driving plant
+    stimuli (the controller's --owner-token contract). Each endpoint
+    keeps its own token: the sim's writer claim still fences every
+    other owner, and a standby holds no claim until it promotes. A
+    config missing a pin or repeating one across endpoints fails the
+    launch loudly — a duplicated token would answer `claimed_shared`
+    instead of preempting, silently defeating the single-writer
+    fencing the claim exists to provide.
+    """
+    tokens = cfg.get('plant_owner_tokens') or {}
+    missing = [key for key in OWNER_TOKEN_ENDPOINTS
+               if key not in tokens]
+    if missing:
+        raise RuntimeError('plant_owner_tokens pins no --owner-token '
+                           'for endpoint(s): ' + ', '.join(missing))
+    bad = {key: tokens[key] for key in OWNER_TOKEN_ENDPOINTS
+           if not isinstance(tokens[key], int)
+           or isinstance(tokens[key], bool)
+           or not 0 <= tokens[key] <= 0xFFFFFFFFFFFFFFFF}
+    if bad:
+        raise RuntimeError('plant_owner_tokens pins must be u64 '
+                           'integers: ' + json.dumps(bad))
+    pins = {key: tokens[key] for key in OWNER_TOKEN_ENDPOINTS}
+    if len(set(pins.values())) != len(pins):
+        raise RuntimeError('plant_owner_tokens must pin a distinct '
+                           '--owner-token per controller endpoint: '
+                           + json.dumps(pins, sort_keys=True))
+    return pins
+
+
+# The endpoint keys the run config records a placement for: the
+# monitor/plant services every scenario ctx carries plus the named
+# attachment endpoints the takeover-integrity legs (#573 and
+# successors) and the tracking-source/auth evidence place.
+PLACEMENT_ENDPOINTS = ('active', 'standby', 'revised', 'foreign',
+                       'driven', 'plant', 'interposer', 'forge')
+PLACEMENTS = ('loopback', 'bridge')
+
+
+def _endpoint_placement(cfg):
+    """The run's recorded endpoint placements, validated before a
+    launch trusts them — the rig bridge-to-host reachability rule
+    made configuration.
+
+    The host egress policy (qa_lane.netpolicy) drops every packet a
+    rig-bridge container aims at the host — the INPUT hook's
+    catch-all — so a rig-dialed endpoint can never be a host socket:
+    'bridge' placements run in labeled containers on the run's rig
+    network and rig peers dial them by container name, while
+    'loopback' placements are the host-side scenario-attachment
+    views through the 127.0.0.1-published ports. A config missing an
+    endpoint's placement or naming an unknown one fails the launch
+    loudly, same as a duplicated owner token.
+    """
+    placements = cfg.get('endpoint_placement') or {}
+    missing = [key for key in PLACEMENT_ENDPOINTS
+               if key not in placements]
+    if missing:
+        raise RuntimeError('endpoint_placement records no placement '
+                           'for endpoint(s): ' + ', '.join(missing))
+    bad = {key: placements[key] for key in PLACEMENT_ENDPOINTS
+           if placements[key] not in PLACEMENTS}
+    if bad:
+        raise RuntimeError('endpoint_placement values must be one of '
+                           + json.dumps(list(PLACEMENTS)) + ': '
+                           + json.dumps(bad, sort_keys=True))
+    return {key: placements[key] for key in PLACEMENT_ENDPOINTS}
 
 
 def _controller_dir(run_dir, name):
@@ -1098,6 +1204,7 @@ def start_revised_controller(cfg, record, run_dir, model, active,
     directory.mkdir(parents=True, exist_ok=True)
     directory.chmod(0o777)
     standby = prefix + '-' + peer_name + ':' + str(peer_port)
+    owner_token = _plant_owner_tokens(cfg)['revised']
     timeline('model-revision-start',
              'derive ' + revised_doc.name + ' (+points '
              + str(info['added_points']) + ', +signals '
@@ -1105,7 +1212,8 @@ def start_revised_controller(cfg, record, run_dir, model, active,
              + (', retyped point ' + str(info['retyped_point'])
                 if incompatible else '')
              + '); launch ' + container
-             + ' --standby ' + standby + ' --revised')
+             + ' --standby ' + standby + ' --revised'
+             + ' --owner-token ' + str(owner_token))
     docker(*_docker_run_args(cfg, run_id, container),
            '--network', 'dcs-hwtest-' + run_id,
            '-p', '127.0.0.1:' + str(cfg['revised_port']) + ':8082',
@@ -1114,6 +1222,7 @@ def start_revised_controller(cfg, record, run_dir, model, active,
            IMAGE_PREFIX + 'controller:' + sha,
            '/model/revised.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
+           '--owner-token', str(owner_token),
            '--standby', standby,
            '--revised',
            '--scan-ms', '100', '--listen', '0.0.0.0:8082',
@@ -1162,9 +1271,11 @@ def start_foreign_controller(cfg, record, run_dir, model, active,
     directory.chmod(0o777)
     container = prefix + '-foreign'
     standby = prefix + '-' + peer_name + ':' + str(peer_port)
+    owner_token = _plant_owner_tokens(cfg)['foreign']
     timeline('negotiation-start',
              'derive ' + foreign_doc.name + '; launch ' + container
-             + ' --standby ' + standby + ' (no --revised)')
+             + ' --standby ' + standby + ' (no --revised)'
+             + ' --owner-token ' + str(owner_token))
     docker(*_docker_run_args(cfg, run_id, container),
            '--network', 'dcs-hwtest-' + run_id,
            '-p', '127.0.0.1:' + str(cfg['foreign_port']) + ':8082',
@@ -1173,6 +1284,7 @@ def start_foreign_controller(cfg, record, run_dir, model, active,
            IMAGE_PREFIX + 'controller:' + sha,
            '/model/foreign.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
+           '--owner-token', str(owner_token),
            '--standby', standby,
            '--scan-ms', '100', '--listen', '0.0.0.0:8082',
            '--state-file', CONTAINER_STATE_FILE,
@@ -1232,8 +1344,10 @@ def start_driven_controller(cfg, record, run_dir, model, active,
     directory.chmod(0o777)
     container = prefix + '-d'
     standby = prefix + '-' + peer_name + ':' + str(peer_port)
+    owner_token = _plant_owner_tokens(cfg)['driven']
     timeline('driven-start', 'launch ' + container + ' --standby '
-             + standby + ' --driven')
+             + standby + ' --driven --owner-token '
+             + str(owner_token))
     docker(*_docker_run_args(cfg, run_id, container),
            '--network', 'dcs-hwtest-' + run_id,
            '-p', '127.0.0.1:' + str(cfg['driven_port']) + ':8082',
@@ -1242,6 +1356,7 @@ def start_driven_controller(cfg, record, run_dir, model, active,
            IMAGE_PREFIX + 'controller:' + sha,
            '/model/plant.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
+           '--owner-token', str(owner_token),
            '--standby', standby,
            '--driven', '--listen', '0.0.0.0:8082',
            '--state-file', CONTAINER_STATE_FILE,
@@ -1270,12 +1385,16 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
     answers on 'revised' once launched, the checkpoint-negotiation
     case's foreign peer on 'foreign', the dead-peer-latency case's
     driven standby on 'driven'), the published plant-protocol
-    endpoint, the pinned plant-writer owner token per endpoint key,
-    the run's evidence dir and deadline, the runner-owned
+    endpoint, the run config's pinned plant-writer owner token per
+    endpoint key — the pair's and every third peer's — the run's
+    evidence dir and deadline, the runner-owned
     controller restart/cold-restart, plant stop/start,
     model-revision, foreign-peer launch/teardown, and driven-peer
     launch/teardown actions, the shipped plant tool's docker-exec
-    invocation, and the host-side
+    invocation, the run config's recorded endpoint placements and the
+    run's rig bridge name — the placement rule a scenario attachment
+    follows when it needs an endpoint a rig peer must dial — and the
+    host-side
     per-controller state/journal files the restart and model-revision
     scenarios read."""
     run_id = record['run_id']
@@ -1288,10 +1407,20 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         'foreign': 'http://127.0.0.1:' + str(cfg['foreign_port']),
         'driven': 'http://127.0.0.1:' + str(cfg['driven_port']),
         'plant': '127.0.0.1:' + str(cfg['plant_host_port']),
-        # The pinned --owner-token per endpoint key: a scenario
-        # attachment ensures the writer claim under the active's token
-        # to drive plant stimuli on the designed shared-claim path.
-        'plant_owner': dict(PLANT_OWNER_TOKENS),
+        # The run config's pinned --owner-token per endpoint key: a
+        # scenario attachment ensures the writer claim under the
+        # active's token to drive plant stimuli on the designed
+        # shared-claim path.
+        'plant_owner': dict(_plant_owner_tokens(cfg)),
+        # The run config's recorded endpoint placements — the rig
+        # bridge-to-host reachability rule the scenario attachments
+        # follow: host-side attachments dial 'loopback' endpoints on
+        # their published 127.0.0.1 ports; a 'bridge' endpoint a rig
+        # peer must reach runs in a labeled container on
+        # ctx['rig_network'] — a host socket is unreachable from the
+        # rig bridge, so no rig-dialed endpoint may live on the host.
+        'endpoint_placement': dict(_endpoint_placement(cfg)),
+        'rig_network': 'dcs-hwtest-' + run_id,
         'evidence_dir': evidence_dir,
         'deadline': deadline,
         'restart_controller': lambda name: restart_controller(
@@ -1338,6 +1467,17 @@ def _start_rig(cfg, record, src, run_dir, timeline):
     run_id, sha = record['run_id'], record['attempted_sha']
     net = 'dcs-hwtest-' + run_id
     prefix = 'dcs-hw-' + run_id
+    tokens = _plant_owner_tokens(cfg)
+    placements = _endpoint_placement(cfg)
+    # The endpoints this launch publishes on host loopback must be
+    # recorded 'loopback' — a config describing them 'bridge' claims
+    # a rig this launch does not build.
+    for key in ('active', 'standby', 'plant'):
+        if placements[key] != 'loopback':
+            raise RuntimeError('endpoint_placement records ' + key
+                               + ' as ' + repr(placements[key])
+                               + ' but the rig publishes it on host '
+                               'loopback')
     model = src / cfg['model_fixture']
     dynamics = src / cfg['dynamics_fixture']
     for path in (model, dynamics):
@@ -1358,6 +1498,15 @@ def _start_rig(cfg, record, src, run_dir, timeline):
     # `--internal` is still rejected on purpose: it also blocks the
     # published ports the scenario driver needs. Disabled masquerade
     # remains as defense in depth beneath the firewall policy.
+    # The bridge-to-host half of that policy bounds endpoint
+    # placement: its INPUT drop refuses every packet a rig container
+    # aims at a host socket, so an endpoint a rig peer must dial —
+    # the tracking-source/auth legs' forge or interposer, a
+    # plant-probe listener — runs bridge-placed in a labeled
+    # container on this network, dialed by container name (the
+    # recorded endpoint_placement selection, validated above), while
+    # host-side scenario attachments only ever dial the
+    # 127.0.0.1-published ports.
     docker('network', 'create',
            '-o', 'com.docker.network.bridge.name=' + cfg['rig_ifname'],
            '-o', 'com.docker.network.bridge.enable_ip_masquerade=false',
@@ -1393,7 +1542,7 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            'dcs-hwtest/controller:' + sha,
            '/model/plant.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
-           '--owner-token', str(PLANT_OWNER_TOKENS['active']),
+           '--owner-token', str(tokens['active']),
            '--scan-ms', '100', '--listen', '0.0.0.0:8080',
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE)
@@ -1406,13 +1555,15 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            'dcs-hwtest/controller:' + sha,
            '/model/plant.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
-           '--owner-token', str(PLANT_OWNER_TOKENS['standby']),
+           '--owner-token', str(tokens['standby']),
            '--standby', prefix + '-a:8080',
            '--auto-promote', str(cfg['failover_misses']),
            '--scan-ms', '100', '--listen', '0.0.0.0:8081',
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE)
-    timeline('rig-up', 'plant + controller pair on ' + net)
+    timeline('rig-up', 'plant + controller pair on ' + net
+             + ' (owner tokens active=' + str(tokens['active'])
+             + ', standby=' + str(tokens['standby']) + ')')
 
 
 def _wait_monitor(cfg, timeline):
