@@ -1418,6 +1418,80 @@ standby.scan();
 assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(5.0)));
 ```
 
+## Composing the dynamics document
+
+The plant model is the control contract; the dynamics document beside it is
+the simulated world's physics. `dcs-plant-server --dynamics FILE` merges a
+JSON list of `ProcessElement` declarations into the served channel map —
+`first_order_lag`, `second_order_lag`, `integrator`, `dead_time`, `noise`,
+`bool_flow`, `flow_sum`, `scaled_flow`, `threshold` — and
+`dcs-sim-bus-device --dynamics` merges the same list over its register bank.
+The document is deliberately not `PlantModel` schema: process physics are
+simulation internals no controller reads.
+
+`dcs-build`'s `dynamics` module composes that document through the same
+typed seam as the model. The element structs are data mirrors of the
+`dcs-sim` serde vocabulary — the convention the kind specs already apply to
+component descriptors, so the model producer gains no `dcs-sim` dependency —
+and `dcs_build::tests::dynamics` pins each mirror against the vocabulary
+item it serializes as. `DynamicsBuilder` declares one element per method in
+stepping order; ends bind the point handles the model composition returns,
+narrowed by the kind each end requires, so a wrongly-kinded reference fails
+to compile:
+
+```rust
+use dcs_build::{Direction, DynamicsBuilder, PlantBuilder, PointId};
+
+let mut plant = PlantBuilder::new();
+let sim = plant.device("sim").id;
+let inflow_ch = plant.channel::<f64>(sim, "inflow", Direction::In);
+let net_flow_ch = plant.channel::<f64>(sim, "net-flow", Direction::In);
+let draw_ch = plant.channel::<f64>(sim, "pump-draw", Direction::In);
+let cmd_ch = plant.channel::<bool>(sim, "pump-cmd", Direction::Out);
+
+let inflow = plant.field_input::<f64>(PointId(12), inflow_ch, false);
+let net_flow = plant.field_input::<f64>(PointId(13), net_flow_ch, false);
+let draw = plant.field_input::<f64>(PointId(20), draw_ch, false);
+let cmd = plant.field_output::<bool>(PointId(100), cmd_ch);
+let model = plant.build().unwrap();
+
+// Float ends take `InPoint<f64>`/`OutPoint<f64>` handles; the `bool_flow`
+// gate and `threshold` contact take `bool` handles — a `Float` point in a
+// `Bool` end is a compile error, not a merge failure.
+let mut dynamics = DynamicsBuilder::new();
+dynamics
+    .bool_flow(cmd, draw, -10.0, 0.0, 0.0)
+    .flow_sum([inflow, draw], net_flow, 4.0, 4.0);
+
+let document = dynamics.emit(&model).unwrap();
+let json = serde_json::to_string_pretty(&document).unwrap();
+```
+
+`emit` resolves what the types cannot carry against the emitted model and
+reports a named `DynamicsError` — the failures the merge would otherwise
+name at server startup, raised where the document is authored:
+
+- `UnknownPoint` — an element references a point the model does not declare
+  (a stale or foreign handle);
+- `InternalPoint` — the reference names a channel-less internal point, which
+  lives in the scan image and has no simulated-field binding;
+- `PointKind` — the referenced point's declared kind differs from the end's
+  required kind (`Float` throughout, `Bool` on a `bool_flow` gate and a
+  `threshold` contact);
+- `InvalidParameter` / `DegenerateThreshold` — a declared value outside the
+  bounds the merge's channel-map validation enforces (finite and positive
+  `time_constant`/`delay`/`damping_ratio`, non-negative `amplitude`, finite
+  rates, `bias`, `gain`, bounds, and `initial`, and a `threshold`'s
+  distinct `on`/`off`);
+- `ConflictingDriver` — two elements drive the same point.
+
+The emitted list serializes under the document's existing grammar —
+`serde_json::to_string_pretty` produces the canonical bytes — so the
+composition is byte-deterministic and the checked-in artifact stays
+diffable. Runtime fault injection is not part of the document: `inject_fault`
+is a plant-protocol verb exercised by tests and `dcs-plant-ctl`, never a
+`ProcessElement` kind.
+
 ## Automatic versus supplied
 
 Once the two registrations exist, everything between a model declaration and
