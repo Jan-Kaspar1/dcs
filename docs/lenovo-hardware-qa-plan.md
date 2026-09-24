@@ -128,16 +128,44 @@ Implementation order: second, after [daily architecture review](daily-architectu
   numbers are spaced by 100 so a new leg inserts between neighbors
   without renumbering. `SCENARIOS` is discovered by sorted glob over
   `[0-9]*_*.py`, so a new leg is exactly one new file and edits no
-  shared file. Which window a leg may occupy is recorded in the
-  ordering comment above `SCENARIOS` in `__init__.py` (later cases
-  degrade to inconclusive when earlier rig state never landed; the
-  dcs-ctl case deliberately closes the schedule).
+  shared file. Which window a leg may occupy is declared in its own
+  module (later cases degrade to inconclusive when earlier rig state
+  never landed; the dcs-ctl case deliberately closes the schedule).
 - Motivation (scripts/merge_flow.py, #906): dispatch-to-merge lead
   time between adjacent 7-day windows collapsed — p50 0.64h -> 4.81h,
   p90 1.92h -> 61.92h — while redispatches went 58 -> 111 and
   WIP-preservation repairs 19 -> 41, because every open lane leg
   appended to the same ~19,900-line `scenarios.py` and serialized on
   identical regions.
+
+### Landed 2026-09-24 (scenario test-module split, #940)
+
+- `tests/test_qa_scenarios.py` (a ~16,400-line monolith) became one
+  test module per leg — `tests/test_qa_scenario_NNNN_<slug>.py`,
+  pairing by stem with `qa_lane/scenarios/NNNN_<slug>.py` — carrying
+  the leg's feed fakes and TestCase classes verbatim. Fakes and
+  helpers more than one leg's tests use live in the shared seam
+  `tests/qa_scenario_support.py`, which leg modules bind through
+  `from qa_scenario_support import *` — the same pattern the
+  scenario modules use on `common.py`, so `patch.object(scenarios,
+  ...)` seams keep resolving through the #928 facade.
+- The ordering pin is distributed: instead of appending to a shared
+  `EXPECTED_ORDER` list, each leg module declares the window it
+  needs — `RUNS_AFTER`/`RUNS_BEFORE` frozensets over `scenario_*`
+  names, `RUNS_LAST` for the dcs-ctl leg that closes the schedule —
+  beside the ordering prose that moved with it, and
+  `tests/test_qa_scenario_modules.py` derives the schedule check by
+  validating every declaration against the discovered run order.
+  Each leg test module also pins its own `EXPECTED_CASES` (its
+  `Class.test_*` set), and the same structure module asserts the
+  union reproduces the pre-split suite's coverage under unittest
+  discovery.
+- Convention: a new leg is exactly two new files —
+  `qa_lane/scenarios/NNNN_<slug>.py` (carrying its ordering
+  declarations) plus `tests/test_qa_scenario_NNNN_<slug>.py`
+  (carrying its fakes, cases, and `EXPECTED_CASES`) — and edits no
+  shared file; the pool tests prove a synthetic leg joins both the
+  run order and test discovery that way.
 
 ## Outcome
 

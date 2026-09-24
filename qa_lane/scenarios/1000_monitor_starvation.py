@@ -1,6 +1,13 @@
 """The monitor_starvation acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The monitor-starvation case runs in the same armed window: it needs
+# ctrl-b — the only peer launched --auto-promote — as the tracking
+# standby whose checkpoint pulls measure the starved ctrl-a monitor,
+# and it leaves the launch roles untouched, so it must run before the
+# tune case's a->b switch.
+RUNS_BEFORE = frozenset({'scenario_parameter_tune_carryover'})
+
 
 # --------------------------------------------------------------------
 # The serving-lane resilience contract (WW-FND-004, WW-LCM-001 — the

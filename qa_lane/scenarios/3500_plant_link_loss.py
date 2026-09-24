@@ -1,6 +1,12 @@
 """The plant_link_loss acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The plant-link-loss case follows later in the schedule: its plant
+# container cycling cannot contaminate an earlier case, and whichever
+# endpoint owns the field by then keeps it through the outage and
+# recovery the scenario drives.
+RUNS_AFTER = frozenset({'scenario_failover'})
+
 # --------------------------------------------------------------------
 # The plant-link boundary (WW-OPS-003's communication confidence and
 # WW-FND-002's remote-I/O evidence, ahead of HQ-5's hardware link-loss

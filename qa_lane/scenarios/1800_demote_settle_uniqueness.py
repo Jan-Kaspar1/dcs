@@ -1,6 +1,13 @@
 """The demote_settle_uniqueness acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The demote-settle-uniqueness case shares that window: it races
+# receipted submissions against the documented demote on whichever
+# peer owns the field, cycles the switch twice per pass, and lands
+# the pair back on the launch roles before the tune case's a->b
+# switch.
+RUNS_BEFORE = frozenset({'scenario_parameter_tune_carryover'})
+
 
 # --------------------------------------------------------------------
 # The single-terminal-outcome command settlement contract (WW-FND-004's

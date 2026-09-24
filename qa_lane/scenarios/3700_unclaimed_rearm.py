@@ -1,6 +1,11 @@
 """The unclaimed_rearm acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The unclaimed-rearm case is the same shape: its preempt-and-release
+# induction opens the ownerless window behind whichever peer owns the
+# field, watches the recorded owner's inline re-arm and the fencing
+# it restores, and leaves the claim state and launch roles as found.
+
 
 # --------------------------------------------------------------------
 # The unclaimed-field inline re-arm contract (WW-LCM-001's continuity

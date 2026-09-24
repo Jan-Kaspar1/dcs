@@ -1,6 +1,12 @@
 """The model_revision acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The model-revision case runs behind the failover: whichever peer
+# holds the field then is the one its third --revised controller
+# stands by on and supersedes, so every case after it already
+# exercises the revised model document.
+RUNS_AFTER = frozenset({'scenario_checkpoint_negotiation', 'scenario_doomed_startup_claim', 'scenario_failover', 'scenario_incompatible_revision'})
+
 REVISION_SETTLE_DEADLINE = 60     # bound on demote/promote role settles
 
 
