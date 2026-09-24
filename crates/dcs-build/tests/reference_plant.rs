@@ -207,7 +207,6 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::Mutex;
 
 use common::{CARGO, PIN_UNRESOLVABLE, head_rev, root};
 
@@ -290,74 +289,39 @@ fn git(dir: &Path, args: &[&str]) {
     );
 }
 
-/// Ensures the checkout's object store contains `rev`. CI checkouts
-/// are shallow (`actions/checkout` fetches at depth 1), so the
-/// recorded release commit may be absent; fetch it from `origin` — the
-/// published origin itself — when the store lacks it.
-fn ensure_commit(rev: &str) {
-    static FETCH_LOCK: Mutex<()> = Mutex::new(());
-    let _guard = FETCH_LOCK.lock().unwrap();
-    let present = Command::new("git")
-        .args(["cat-file", "-e", &format!("{rev}^{{commit}}")])
-        .current_dir(root())
-        .output()
-        .expect("git cat-file runs");
-    if present.status.success() {
-        return;
-    }
-    // A single SHA fetch on a hosted runner intermittently stalls
-    // until the transport's connect timeout — lowSpeed aborts a dead
-    // transfer fast so a retry gets a fresh connection, and a few
-    // rounds absorb the flake while a genuinely unresolvable pin
-    // still fails with the named diagnostic.
-    for _ in 0..3 {
-        for remote in ["origin", PUBLISHED_REMOTE] {
-            let fetch = Command::new("git")
-                .args([
-                    "-c",
-                    "http.lowSpeedLimit=1",
-                    "-c",
-                    "http.lowSpeedTime=15",
-                    "fetch",
-                    "--depth",
-                    "1",
-                    remote,
-                    rev,
-                ])
-                .current_dir(root())
-                .output()
-                .expect("git fetch runs");
-            if fetch.status.success() {
-                return;
-            }
-        }
-    }
-    panic!("{PIN_UNRESOLVABLE}: no remote could serve the pinned rev {rev}");
-}
-
 /// A `file://` stand-in for the published origin: a bare repository in
 /// the materialized scratch that serves exactly the recorded rev. The
 /// workspace checkout alone cannot play the remote in CI — its shallow
 /// object store lacks the pinned commit and serves no way to name it —
 /// so the stand-in is seeded with that commit, the same object the
-/// published origin serves for the recorded rev. The `upgrade` stage's
-/// repin target — the checkout's `HEAD`, a later commit in the same
-/// minor series — is seeded beside it so the repin resolves.
+/// published origin serves for the recorded rev. The seed lands in the
+/// per-test bare repository, never the shared checkout's store: the CI
+/// shards run these proofs as concurrent processes, and two fetches
+/// into one repository collide on its lock files. The `upgrade`
+/// stage's repin target — the checkout's `HEAD`, a later commit in the
+/// same minor series — is seeded beside it so the repin resolves.
 fn serve_pinned_rev(scratch: &Path) -> String {
     let rev = pinned_rev(scratch);
-    ensure_commit(&rev);
     let remote = scratch.join("dcs-remote.git");
     git(scratch, &["init", "--bare", "dcs-remote.git"]);
-    // The local transport serves the object directly; the published
-    // origin is the fallback when the checkout cannot.
-    let fetch = Command::new("git")
-        .args(["fetch", "--depth", "1", &root().display().to_string(), &rev])
-        .current_dir(&remote)
-        .output()
-        .expect("git fetch runs");
-    if !fetch.status.success() {
-        git(&remote, &["fetch", "--depth", "1", PUBLISHED_REMOTE, &rev]);
-    }
+    // The local transport serves the object directly when the
+    // checkout's store holds it; the published origin is the fallback
+    // when the shallow store cannot.
+    let served = [root().display().to_string(), PUBLISHED_REMOTE.to_string()]
+        .iter()
+        .any(|source| {
+            Command::new("git")
+                .args(["fetch", "--depth", "1", source, &rev])
+                .current_dir(&remote)
+                .output()
+                .expect("git fetch runs")
+                .status
+                .success()
+        });
+    assert!(
+        served,
+        "{PIN_UNRESOLVABLE}: no remote could serve the pinned rev {rev}"
+    );
     git(&remote, &["update-ref", "refs/heads/main", &rev]);
     let head = head_rev();
     git(
