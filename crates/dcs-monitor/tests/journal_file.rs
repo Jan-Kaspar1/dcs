@@ -8,7 +8,8 @@
 //! writer, `seq` numbering continuing across the run boundary.
 
 use dcs_core::{
-    Command, Direction, IoDriver, IoError, JournalEvent, PointId, Sample, Tick, Value, ValueKind,
+    Command, Direction, IoDriver, IoError, JournalEntry, JournalEvent, PointHistory, PointId,
+    Sample, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{Monitor, MonitorClient, MonitorConfig, read_journal_file};
@@ -68,6 +69,34 @@ fn scratch(test: &str) -> PathBuf {
         std::env::temp_dir().join(format!("dcs-monitor-journal-{test}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+/// Reads `point`'s served history envelopes — the whole ring plus the
+/// `since`-filtered page a cursor consumer polls — and the served
+/// journal while `monitor` serves. One serving session per call: a
+/// monitor's `serve` runs once, so both reads share it.
+fn served(
+    monitor: &Monitor<'_>,
+    point: PointId,
+    since: u64,
+) -> (PointHistory, PointHistory, Vec<JournalEntry>) {
+    thread::scope(|scope| {
+        scope.spawn(|| monitor.serve());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let client = MonitorClient::new(monitor.local_addr());
+            let history = |since: u64| {
+                client
+                    .history(&[point], since)
+                    .unwrap()
+                    .into_iter()
+                    .find(|history| history.point == point)
+                    .expect("the point's history envelope answers")
+            };
+            (history(0), history(since), client.journal(0).unwrap())
+        }));
+        monitor.shutdown();
+        result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
 }
 
 #[test]
@@ -438,6 +467,194 @@ fn a_state_restored_standby_still_journals_only_new_settlements() {
     restored.paced_scan();
     assert_eq!(settlements(), 2);
     drop(restored);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #884's regression, the tick-domain-continuing half: `/history` seqs
+/// rode a per-process append count, so a restart onto the run's
+/// continuing tick domain — the checkpoint-adopted standby — renumbered
+/// samples from 1 and a `since` cursor read the restart as phantom idle
+/// before stitching two process lifetimes contiguously. The seq axis
+/// now rides the tick domain itself: the restarted run's samples
+/// continue numbering from it, the never-served stretch answering as
+/// the numbering gap it is, and the envelope's `run` marker — the
+/// journal file's run count — advances with the process lifetime.
+#[test]
+fn a_restart_continuing_the_tick_domain_keeps_the_history_seq_axis() {
+    let dir = scratch("history-seq-continues");
+    let journal = dir.join("standby.jsonl");
+    let driver = StubDriver::new(&[(PointId(10), Value::Float(0.0))]);
+    let active_driver = StubDriver::new(&[(PointId(10), Value::Float(0.0))]);
+    let map = || PointMap::new().with_writable_point(PointId(10), Direction::In, ValueKind::Float);
+    let bind_standby = || {
+        let executor = Executor::new(&driver, map(), Vec::new()).unwrap();
+        Monitor::bind_peer_with(
+            "127.0.0.1:0",
+            Peer::standby(executor, None),
+            signal_index(),
+            MonitorConfig {
+                journal_file: Some(journal.clone()),
+                ..MonitorConfig::default()
+            },
+        )
+        .unwrap()
+    };
+
+    // The tracked line the standby follows.
+    let mut active = Peer::active(
+        Executor::new(&active_driver, map(), Vec::new()).unwrap(),
+        None,
+    );
+    for _ in 0..3 {
+        active.scan();
+    }
+
+    // First lifetime: adopt the line's checkpoint — the tick domain the
+    // ring's seqs ride — then scan on it. Seqs and ticks share the
+    // adopted domain: the served tail ends at the cursor the restart
+    // read must honor.
+    let first = bind_standby();
+    first.apply_checkpoint(&active.checkpoint()).unwrap();
+    for _ in 0..3 {
+        first.paced_scan();
+    }
+    let (before, _, _) = served(&first, PointId(10), 0);
+    assert_eq!(before.run, 1);
+    let cursor = before.samples.last().unwrap().seq;
+    assert_eq!(
+        before
+            .samples
+            .iter()
+            .map(|sample| (sample.seq, sample.sample.tick))
+            .collect::<Vec<_>>(),
+        vec![(4, Tick(4)), (5, Tick(5)), (6, Tick(6))],
+        "the first lifetime's seqs ride the adopted tick domain"
+    );
+    drop(first);
+
+    // The line advances while the standby is down — the stretch the
+    // restarted run never serves.
+    for _ in 0..4 {
+        active.scan();
+    }
+
+    // Second lifetime on the same journal file: the adoption resumes
+    // the tick domain at the line's current mark, so the restarted
+    // ring's seqs continue past the pre-restart cursor rather than
+    // renumbering from 1.
+    let second = bind_standby();
+    second.apply_checkpoint(&active.checkpoint()).unwrap();
+    for _ in 0..3 {
+        second.paced_scan();
+    }
+    // The defect's `since` read alongside the whole ring: the
+    // pre-restart cursor answers the new run's samples — the unserved
+    // stretch surfacing as the numbering gap it is — rather than the
+    // empty, idle-looking page that let two lifetimes stitch
+    // contiguously.
+    let (after, increment, journal) = served(&second, PointId(10), cursor);
+    assert_eq!(after.run, 2);
+    let seqs: Vec<u64> = after.samples.iter().map(|sample| sample.seq).collect();
+    assert!(
+        seqs.iter().all(|&seq| seq > cursor),
+        "the restarted run's seqs continue the tick domain past the \
+         pre-restart cursor {cursor}: {seqs:?}"
+    );
+    assert_eq!(increment.run, 2);
+    let first_seq = increment.samples.first().unwrap().seq;
+    assert_eq!(first_seq, seqs[0]);
+    assert!(
+        first_seq > cursor + 1,
+        "seqs {cursor}..{first_seq} were never served — the cursor read \
+         must surface the gap, not empty-then-resume"
+    );
+    // The journal's own attribution of the same seam: run 2's boundary
+    // is served — the marker the page's restart observation reads.
+    assert!(
+        journal
+            .iter()
+            .any(|entry| matches!(entry.event, JournalEvent::RunBoundary { run: 2 })),
+        "the served journal carries run 2's boundary: {journal:?}"
+    );
+    drop(second);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #884's regression, the cold-restart half: a restart onto a fresh
+/// tick domain — no checkpoint, no `--state-file` — legitimately
+/// renumbers the history seq axis with the domain's own restart. What
+/// makes the seam detectable is the envelope: every served
+/// `PointHistory` stamps the run's lifetime ordinal, so the
+/// `since`-cursor read the restarted axis still filters to empty
+/// answers with `run` advanced — attributable on the empty page itself
+/// rather than indistinguishable from idle.
+#[test]
+fn a_cold_restart_stamps_the_new_run_on_every_served_history_envelope() {
+    let dir = scratch("history-run-marker");
+    let journal = dir.join("monitor.jsonl");
+    let driver = StubDriver::new(&[(PointId(10), Value::Float(0.0))]);
+    let bind = || {
+        let map = PointMap::new().with_writable_point(PointId(10), Direction::In, ValueKind::Float);
+        let executor = Executor::new(&driver, map, Vec::new()).unwrap();
+        Monitor::bind_with(
+            "127.0.0.1:0",
+            executor,
+            signal_index(),
+            MonitorConfig {
+                journal_file: Some(journal.clone()),
+                ..MonitorConfig::default()
+            },
+        )
+        .unwrap()
+    };
+
+    // First lifetime: three scans of ring history behind run 1's
+    // envelopes.
+    let first = bind();
+    for _ in 0..3 {
+        first.paced_scan();
+    }
+    let (before, _, _) = served(&first, PointId(10), 0);
+    assert_eq!(before.run, 1);
+    let cursor = before.samples.last().unwrap().seq;
+    drop(first);
+
+    // The cold restart onto the same journal file: a fresh tick domain,
+    // so the new run's ring legitimately renumbers with its own ticks —
+    // but every envelope carries the advanced `run`, the marker a
+    // cursor consumer compares across polls.
+    let second = bind();
+    for _ in 0..2 {
+        second.paced_scan();
+    }
+    let (after, increment, journal) = served(&second, PointId(10), cursor);
+    assert_eq!(after.run, 2);
+    assert!(
+        after.samples.iter().all(|sample| sample.seq <= cursor),
+        "the restarted tick domain renumbers the axis: {:?}",
+        after
+            .samples
+            .iter()
+            .map(|sample| sample.seq)
+            .collect::<Vec<_>>()
+    );
+
+    // The defect's phantom-idle read: the pre-restart cursor still
+    // filters every restarted sample out — but the empty answer now
+    // carries the advanced run marker, so the seam is attributable on
+    // the empty page rather than silently resuming in sequence later.
+    assert!(increment.samples.is_empty());
+    assert_eq!(increment.run, 2);
+    assert!(
+        journal
+            .iter()
+            .any(|entry| matches!(entry.event, JournalEvent::RunBoundary { run: 2 })),
+        "the served journal carries the same run-2 boundary the \
+         envelope marker counts: {journal:?}"
+    );
+    drop(second);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
