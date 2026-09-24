@@ -265,6 +265,7 @@ fn a_parameter_edit_applies_at_the_scan_boundary_and_telemetry_reflects_it() {
                 command: command.clone(),
                 outcome: CommandOutcome::Applied { tick: Tick(2) },
                 actor: None,
+                reason: None,
             }]
         );
         assert!(

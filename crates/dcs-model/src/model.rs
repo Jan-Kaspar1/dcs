@@ -141,6 +141,16 @@ fn is_false(flag: &bool) -> bool {
 /// point: a continuously moving measurement belongs to the volatile
 /// history ring, not the low-volume durable record, and an operator's
 /// `Float` write is already durable in its attributed settled receipt.
+///
+/// `requires_reason` marks a writable point's commands reason-carrying:
+/// the operator's submission must declare a `reason` beside `actor` on
+/// the attributed envelope, and a reasonless command on the marked
+/// point refuses at admission with `reason_required` — the per-alarm
+/// mandatory-reason declaration the managed-lifecycle decision records
+/// for the shelve/out-of-service request points. The flag qualifies
+/// the command surface, so validation rejects it on any point that is
+/// not a writable `In` point — on one the command path never reaches,
+/// the mark is a dead declaration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IoPoint {
     /// Unique point identifier.
@@ -174,6 +184,16 @@ pub struct IoPoint {
     /// documents predating the flag load with `writable` unset.
     #[serde(default, skip_serializing_if = "is_false")]
     pub writable: bool,
+    /// Whether commands on the point must carry a declared `reason` —
+    /// the per-alarm mandatory-reason mark; see the type docs. Valid
+    /// only on `writable` `In` points —
+    /// [`PlantModel::validate`](crate::PlantModel::validate) reports the
+    /// flag on a point that takes no commands.
+    ///
+    /// Optional like [`IoPoint::writable`]: documents predating the flag
+    /// load with `requires_reason` unset.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub requires_reason: bool,
     /// The point's freshness budget in ticks, if declared: how far the
     /// driver-stamped tick on a returned sample may lag the scan tick
     /// before the image sample lands `Uncertain(Stale)` — `0` demands a
@@ -601,6 +621,41 @@ mod tests {
         let reloaded = PlantModel::load(&json).unwrap();
         assert!(!reloaded.io_points[0].journaled);
         assert!(reloaded.io_points[1].journaled);
+        assert_eq!(reloaded, model);
+        assert_eq!(serde_json::to_string_pretty(&reloaded).unwrap(), json);
+    }
+
+    #[test]
+    fn documents_predating_requires_reason_load_unchanged() {
+        // Points without the optional field deserialize
+        // `requires_reason` as `false`, and `false` serializes back
+        // without the key.
+        let model = PlantModel::load(MINIMAL).unwrap();
+        assert!(
+            model
+                .io_points
+                .iter()
+                .all(|point| !point.requires_reason)
+        );
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(!json.contains("\"requires_reason\""), "{json}");
+    }
+
+    #[test]
+    fn requires_reason_flag_parses_and_roundtrips() {
+        // The mark qualifies a writable `In` point's command admission:
+        // declare it on the writable internal point shape.
+        let mut model = PlantModel::load(MINIMAL).unwrap();
+        model.io_points[0].channel = None;
+        model.io_points[0].initial = Some(Value::Float(25.0));
+        model.io_points[0].writable = true;
+        model.io_points[0].requires_reason = true;
+        let json = serde_json::to_string_pretty(&model).unwrap();
+        assert!(json.contains("\"requires_reason\": true"), "{json}");
+
+        let reloaded = PlantModel::load(&json).unwrap();
+        assert!(reloaded.io_points[0].requires_reason);
+        assert!(!reloaded.io_points[1].requires_reason);
         assert_eq!(reloaded, model);
         assert_eq!(serde_json::to_string_pretty(&reloaded).unwrap(), json);
     }

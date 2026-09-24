@@ -1719,6 +1719,7 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
                 command: receipt.command.clone(),
                 outcome: CommandOutcome::Applied { tick: apply_tick },
                 actor: Some(OPERATOR.to_string()),
+                reason: None,
             }),
             "no journaled settle matches {receipt:?}"
         );

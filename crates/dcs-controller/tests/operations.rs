@@ -765,6 +765,7 @@ fn run_operations(tag: &str) -> serde_json::Value {
             command: attributed.clone(),
             outcome: CommandOutcome::Applied { tick: apply_tick },
             actor: Some(OPERATOR.to_string()),
+            reason: None,
         },
         "the journaled CommandSettled must carry the declared actor"
     );

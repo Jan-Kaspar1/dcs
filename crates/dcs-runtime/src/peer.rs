@@ -1820,6 +1820,7 @@ impl<'d> Peer<'d> {
                             },
                         },
                         actor: receipt.actor,
+                        reason: receipt.reason.clone(),
                     },
                 ));
             }
@@ -1869,6 +1870,7 @@ impl<'d> Peer<'d> {
                 command,
                 outcome: CommandOutcome::Applied { tick: landed },
                 actor: Some(adoption_actor(checkpoint)),
+                reason: None,
             });
         }
     }
@@ -1950,6 +1952,7 @@ impl<'d> Peer<'d> {
                 },
                 outcome: CommandOutcome::Applied { tick: landed },
                 actor: Some(adoption_actor(checkpoint)),
+                reason: None,
             });
         }
     }
@@ -2436,6 +2439,20 @@ impl<'d> Peer<'d> {
     /// carries the submitter's declared actor identity.
     pub fn submit_command_as(&mut self, command: Command, actor: Option<String>) -> CommandReceipt {
         self.executor.submit_command_as(command, actor)
+    }
+
+    /// The fully attributed variant of
+    /// [`submit_command`](Self::submit_command): the receipt — and the
+    /// journaled `CommandSettled` echoing it — carries the submitter's
+    /// declared actor identity and declared `reason` alike.
+    pub fn submit_command_attributed(
+        &mut self,
+        command: Command,
+        actor: Option<String>,
+        reason: Option<String>,
+    ) -> CommandReceipt {
+        self.executor
+            .submit_command_attributed(command, actor, reason)
     }
 
     /// The wrapped executor, e.g. for snapshots, receipts, and
@@ -6136,6 +6153,7 @@ mod tests {
                 },
                 outcome: CommandOutcome::Applied { tick: Tick(1) },
                 actor: Some("checkpoint@1".to_string()),
+                reason: None,
             }]
         );
         // The drain empties — one audit receipt per unbacked change.
@@ -6208,6 +6226,7 @@ mod tests {
                 command: Command::UnforcePoint { point: POINT },
                 outcome: CommandOutcome::Applied { tick: Tick(2) },
                 actor: Some("checkpoint@2".to_string()),
+                reason: None,
             }]
         );
     }
@@ -6575,6 +6594,7 @@ mod tests {
                 command: write(false),
                 outcome: CommandOutcome::Applied { tick: Tick(3) },
                 actor: Some("checkpoint@3".to_string()),
+                reason: None,
             }]
         );
         assert!(b.take_adoption_receipts().is_empty());
@@ -6669,6 +6689,7 @@ mod tests {
                 command: write(false),
                 outcome: CommandOutcome::Applied { tick: Tick(4) },
                 actor: Some("checkpoint@3".to_string()),
+                reason: None,
             }]
         );
         assert!(b.take_adoption_receipts().is_empty());

@@ -58,7 +58,9 @@
 //! - **most frequent** — the activation ranking, ties by component name;
 //! - **managed-state accounting** — per bound `shelved`/`suppressed`/
 //!   `out_of_service` state, the episode count, the total ticks in the
-//!   state, and whether it stands open;
+//!   state, whether it stands open, and the settled `shelve`/`oos`
+//!   request receipts driving it — each carrying the declared actor and
+//!   reason the shelving-reason decision journals;
 //! - **response times** — FIFO pairs of annunciations to the next
 //!   applied `ack` receipt, each checked against the instance's declared
 //!   `response_ticks`, with pending annunciations and unpaired acks
@@ -227,6 +229,14 @@ pub struct AlarmInstance {
     pub suppressed: Option<PointId>,
     /// The `out_of_service` status port's bound point, when bound.
     pub out_of_service: Option<PointId>,
+    /// The `shelve` request input's bound point — the point a settled
+    /// command receipt on which records the managed request into the
+    /// `shelved` accounting, its declared actor and reason carried —
+    /// when the kind declares one.
+    pub shelve: Option<PointId>,
+    /// The `oos` request input's bound point — the same request record
+    /// into the `out_of_service` accounting — when bound.
+    pub oos: Option<PointId>,
     /// The declared `priority` parameter, when the instance carries it.
     pub priority: Option<i64>,
     /// The declared `response_ticks` parameter — the allowable
@@ -258,11 +268,14 @@ pub fn alarm_instances(snapshot: &TelemetrySnapshot, index: &SignalIndex) -> Vec
         let Some(alarm) = status_point("alarm") else {
             continue;
         };
-        let ack = descriptor
-            .ports
-            .iter()
-            .find(|port| port.name == "ack" && port.direction == Direction::In)
-            .and_then(|port| port.point);
+        let input_point = |name: &str| {
+            descriptor
+                .ports
+                .iter()
+                .find(|port| port.name == name && port.direction == Direction::In)
+                .and_then(|port| port.point)
+        };
+        let ack = input_point("ack");
         let values = snapshot
             .parameters
             .iter()
@@ -284,6 +297,8 @@ pub fn alarm_instances(snapshot: &TelemetrySnapshot, index: &SignalIndex) -> Vec
             shelved: status_point("shelved"),
             suppressed: status_point("suppressed"),
             out_of_service: status_point("out_of_service"),
+            shelve: input_point("shelve"),
+            oos: input_point("oos"),
             priority: int("priority"),
             response_ticks: int("response_ticks").and_then(|v| u64::try_from(v).ok()),
         });
@@ -486,10 +501,41 @@ pub struct FrequentAlarm {
     pub activations: u64,
 }
 
+/// One settled command against an instance's managed request point —
+/// `shelve` or `oos`, either direction: the request record the
+/// shelving-reason decision pairs into the managed-state accounting,
+/// the receipt's declared actor and reason carried beside its
+/// settlement. Every settled receipt on the point lands here — a
+/// refused request is as auditable as an applied one — in journal
+/// `seq` order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ManagedRequest {
+    /// The instance's diagnostic name.
+    pub component: String,
+    /// The request port — `shelve` or `oos`.
+    pub request: String,
+    /// The settled receipt's journal `seq`.
+    pub receipt_seq: u64,
+    /// The request's settlement: an `applied` outcome's tick is the
+    /// producing scan's, a `rejected` one's the named refusal — the
+    /// refused attempt as auditable as the applied one.
+    pub outcome: CommandOutcome,
+    /// The level the request wrote — `true` raising the state, `false`
+    /// releasing it; `None` on a value-less command (`unforce_point`).
+    pub level: Option<bool>,
+    /// The actor the receipt attributes the request to.
+    pub actor: Option<String>,
+    /// The declared reason the receipt carries — the shelve/unshelve
+    /// or out-of-service/return justification, `None` when the
+    /// submission declared none.
+    pub reason: Option<String>,
+}
+
 /// One instance's accounting for one managed state: how often it
 /// entered, how long it stood, and whether it stands now — the
 /// shelving-duration and suppression accounting over the managed-state
-/// transitions.
+/// transitions — plus the settled request commands that drove it,
+/// each carrying the declared actor and reason.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ManagedAccounting {
     /// The instance's diagnostic name.
@@ -503,6 +549,13 @@ pub struct ManagedAccounting {
     pub total_ticks: u64,
     /// Whether the state stands asserted at the record's end.
     pub open: bool,
+    /// The settled receipts on the state's request point, in journal
+    /// order — `shelve` requests on `shelved`, `oos` requests on
+    /// `out_of_service`; `suppressed` takes no command (designed
+    /// suppression is declared wiring, decision 73) so its list is
+    /// always empty.
+    #[serde(default)]
+    pub requests: Vec<ManagedRequest>,
 }
 
 /// One paired annunciation→acknowledgment measurement.
@@ -657,6 +710,10 @@ struct Acc {
     responses: Vec<ResponsePair>,
     unpaired_acks: u64,
     managed: [ManagedAcc; 3],
+    /// The settled receipts on the instance's `shelve`/`oos` request
+    /// points, in journal order — the request record the managed-state
+    /// accounting carries.
+    requests: Vec<ManagedRequest>,
 }
 
 /// The value `point` was last known to carry: the fold's tracked value,
@@ -702,6 +759,11 @@ pub fn compute_report(
     // instance's position in `alarms`.
     let mut watched: HashMap<PointId, (usize, Watch)> = HashMap::new();
     let mut acks: HashMap<PointId, usize> = HashMap::new();
+    // The managed request points — `shelve`/`oos` — keyed to their
+    // instance's position and the request name, so a settled receipt on
+    // one lands in the managed-state accounting carrying its declared
+    // actor and reason.
+    let mut requests: HashMap<PointId, (usize, &'static str)> = HashMap::new();
     for (index, alarm) in alarms.iter().enumerate() {
         watched.insert(alarm.alarm, (index, Watch::Alarm));
         for (point, watch) in [
@@ -716,6 +778,11 @@ pub fn compute_report(
         }
         if let Some(ack) = alarm.ack {
             acks.insert(ack, index);
+        }
+        for (point, request) in [(alarm.shelve, "shelve"), (alarm.oos, "oos")] {
+            if let Some(point) = point {
+                requests.insert(point, (index, request));
+            }
         }
     }
 
@@ -811,10 +878,27 @@ pub fn compute_report(
             JournalEvent::CommandSettled { receipt } => {
                 let (point, value) = match &receipt.command {
                     Command::WriteValue { point, value, .. }
-                    | Command::ForcePoint { point, value, .. } => (*point, *value),
+                    | Command::ForcePoint { point, value, .. } => (*point, Some(*value)),
+                    Command::UnforcePoint { point } => (*point, None),
                     _ => continue,
                 };
-                let Some(&index) = acks.get(&point) else {
+                if let Some(&(index, request)) = requests.get(&point) {
+                    // The managed request record: every settled receipt
+                    // on the request point — applied or refused alike —
+                    // carrying the declared actor and reason into the
+                    // managed-state accounting.
+                    accs[index].requests.push(ManagedRequest {
+                        component: alarms[index].component.clone(),
+                        request: request.to_string(),
+                        receipt_seq: entry.seq,
+                        outcome: receipt.outcome.clone(),
+                        level: value.map(|value| asserted(&value)),
+                        actor: receipt.actor.clone(),
+                        reason: receipt.reason.clone(),
+                    });
+                    continue;
+                }
+                let (Some(&index), Some(value)) = (acks.get(&point), value) else {
                     continue;
                 };
                 if !asserted(&value) {
@@ -936,11 +1020,13 @@ pub fn compute_report(
             });
         }
 
-        // Managed-state accounting in the uniform vocabulary's order.
-        for (name, point, slot) in [
-            ("shelved", alarm.shelved, 0_usize),
-            ("suppressed", alarm.suppressed, 1_usize),
-            ("out_of_service", alarm.out_of_service, 2_usize),
+        // Managed-state accounting in the uniform vocabulary's order —
+        // each row carrying the settled receipts on its request point,
+        // `suppressed` taking none (declared wiring issues no command).
+        for (name, point, slot, request) in [
+            ("shelved", alarm.shelved, 0_usize, "shelve"),
+            ("suppressed", alarm.suppressed, 1_usize, ""),
+            ("out_of_service", alarm.out_of_service, 2_usize, "oos"),
         ] {
             if point.is_none() {
                 continue;
@@ -956,6 +1042,12 @@ pub fn compute_report(
                 episodes: managed.episodes,
                 total_ticks: total,
                 open: managed.open.is_some(),
+                requests: accs[index]
+                    .requests
+                    .iter()
+                    .filter(|entry| entry.request == request)
+                    .cloned()
+                    .collect(),
             });
         }
     }
@@ -1346,6 +1438,36 @@ mod tests {
                         tick: Tick(applied),
                     },
                     actor: None,
+                    reason: None,
+                },
+            },
+        }
+    }
+
+    /// A settled `WriteValue` receipt on a managed request point —
+    /// `shelve` or `oos` — carrying the declared actor and reason the
+    /// shelving-reason decision journals beside the settlement.
+    fn requested(
+        seq: u64,
+        point: u64,
+        level: bool,
+        outcome: CommandOutcome,
+        actor: Option<&str>,
+        reason: Option<&str>,
+    ) -> JournalEntry {
+        JournalEntry {
+            seq,
+            tick: Tick(seq),
+            event: JournalEvent::CommandSettled {
+                receipt: CommandReceipt {
+                    command: Command::WriteValue {
+                        point: PointId(point),
+                        kind: ValueKind::Bool,
+                        value: Value::Bool(level),
+                    },
+                    outcome,
+                    actor: actor.map(str::to_string),
+                    reason: reason.map(str::to_string),
                 },
             },
         }
@@ -1354,7 +1476,8 @@ mod tests {
     /// One managed-vocabulary instance over consecutive point ids —
     /// the six-point layout the kinds' descriptors declare:
     /// `alarm`, `unacknowledged`, `ack`, `shelved`, `suppressed`,
-    /// `out_of_service` at `base`..`base + 5`.
+    /// `out_of_service` at `base`..`base + 5`, plus the `shelve`/`oos`
+    /// request inputs at `base + 6`/`base + 7`.
     fn managed(name: &str, base: u64) -> AlarmInstance {
         AlarmInstance {
             component: name.to_string(),
@@ -1365,6 +1488,8 @@ mod tests {
             shelved: Some(PointId(base + 3)),
             suppressed: Some(PointId(base + 4)),
             out_of_service: Some(PointId(base + 5)),
+            shelve: Some(PointId(base + 6)),
+            oos: Some(PointId(base + 7)),
             priority: None,
             response_ticks: None,
         }
@@ -1735,6 +1860,138 @@ mod tests {
         // The standing alarm's row carries its asserted states.
         let standing = &report.standing[0];
         assert_eq!(standing.managed, vec!["suppressed".to_string()]);
+    }
+
+    #[test]
+    fn managed_requests_record_the_settled_receipts_attribution() {
+        let a = managed("a", 100);
+        let journal = vec![
+            // The shelve request's settled receipts — applied with the
+            // declared actor and reason, then the release the same way.
+            requested(
+                1,
+                106,
+                true,
+                CommandOutcome::Applied { tick: Tick(10) },
+                Some("op-1"),
+                Some("nuisance trips during pump work"),
+            ),
+            changed(2, 10, 103, Some(false), true),
+            requested(
+                3,
+                106,
+                false,
+                CommandOutcome::Applied { tick: Tick(20) },
+                Some("op-1"),
+                Some("maintenance complete"),
+            ),
+            changed(4, 20, 103, Some(true), false),
+            // The refused oos request is as auditable as an applied
+            // one — its rejection receipt carries the declared reason.
+            requested(
+                5,
+                107,
+                true,
+                CommandOutcome::Rejected {
+                    reason: dcs_core::CommandError::NotWritable {
+                        point: PointId(107),
+                    },
+                },
+                Some("op-2"),
+                Some("motor rewound — holding out of service"),
+            ),
+            requested(
+                6,
+                107,
+                true,
+                CommandOutcome::Applied { tick: Tick(30) },
+                Some("op-2"),
+                Some("motor rewound — holding out of service"),
+            ),
+            changed(7, 30, 105, Some(false), true),
+        ];
+        let report = report(&[a], &journal, &ReportConfig::default(), 100);
+
+        // The `shelved` accounting carries the two `shelve` receipts in
+        // journal order, actor and reason beside each settlement.
+        let shelved = &report.managed_states[0];
+        assert_eq!(shelved.state, "shelved");
+        assert_eq!(shelved.episodes, 1);
+        assert_eq!(
+            shelved
+                .requests
+                .iter()
+                .map(|request| {
+                    (
+                        request.request.as_str(),
+                        request.receipt_seq,
+                        request.level,
+                        request.actor.as_deref(),
+                        request.reason.as_deref(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "shelve",
+                    1,
+                    Some(true),
+                    Some("op-1"),
+                    Some("nuisance trips during pump work")
+                ),
+                ("shelve", 3, Some(false), Some("op-1"), Some("maintenance complete")),
+            ]
+        );
+        assert!(matches!(
+            shelved.requests[0].outcome,
+            CommandOutcome::Applied { .. }
+        ));
+
+        // `suppressed` takes no command — designed suppression is
+        // declared wiring — so its request list is always empty.
+        let suppressed = &report.managed_states[1];
+        assert_eq!(suppressed.state, "suppressed");
+        assert!(suppressed.requests.is_empty());
+
+        // The `out_of_service` accounting carries both `oos` receipts —
+        // the refused attempt and the applied one, in journal order.
+        let oos = &report.managed_states[2];
+        assert_eq!(oos.state, "out_of_service");
+        assert_eq!(oos.requests.len(), 2);
+        assert!(matches!(
+            oos.requests[0].outcome,
+            CommandOutcome::Rejected { .. }
+        ));
+        assert_eq!(oos.requests[0].actor.as_deref(), Some("op-2"));
+        assert_eq!(
+            oos.requests[0].reason.as_deref(),
+            Some("motor rewound — holding out of service")
+        );
+        assert!(matches!(
+            oos.requests[1].outcome,
+            CommandOutcome::Applied { .. }
+        ));
+    }
+
+    #[test]
+    fn a_pre_change_report_decodes_with_empty_request_lists() {
+        // The request collection is serde-defaulted: a report document
+        // predating the field decodes with an empty list, the additive
+        // field convention the receipts themselves follow.
+        let a = managed("a", 100);
+        let journal = vec![changed(1, 10, 103, Some(false), true)];
+        let report = report(&[a], &journal, &ReportConfig::default(), 100);
+        let mut json = serde_json::to_value(&report).unwrap();
+        for row in json["managed_states"].as_array_mut().unwrap() {
+            row.as_object_mut().unwrap().remove("requests");
+        }
+        let legacy: AlarmReport = serde_json::from_value(json).unwrap();
+        assert!(
+            legacy
+                .managed_states
+                .iter()
+                .all(|row| row.requests.is_empty())
+        );
     }
 
     #[test]

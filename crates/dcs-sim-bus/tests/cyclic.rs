@@ -651,6 +651,7 @@ fn point_map() -> PointMap {
                 kind: ValueKind::Float,
                 internal: None,
                 writable: false,
+                requires_reason: false,
                 stale_after_ticks: Some(1),
                 journaled: false,
             },

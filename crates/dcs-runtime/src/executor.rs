@@ -45,6 +45,15 @@ pub struct PointSpec {
     /// [`CommandError::NotWritable`](dcs_core::CommandError::NotWritable)
     /// regardless.
     pub writable: bool,
+    /// Whether the point's `io_point` declaration marks its commands
+    /// reason-carrying — the `requires_reason` flag carried through
+    /// assembly. A submission against a marked point declaring no
+    /// `reason` beside `actor` on the attributed envelope rejects
+    /// [`CommandError::ReasonRequired`](dcs_core::CommandError::ReasonRequired)
+    /// at admission; an unmarked point takes commands with or without
+    /// one. The model only admits the flag on a writable `In` point, so
+    /// the map serves it without repeating the shape check.
+    pub requires_reason: bool,
     /// The point's declared freshness budget — the `stale_after_ticks` a
     /// model `io_point` declaration carries through assembly.
     /// `Some(budget)` on a field `In` point asks the input phase to land
@@ -98,6 +107,7 @@ impl PointMap {
                 kind,
                 internal: None,
                 writable: false,
+                requires_reason: false,
                 stale_after_ticks: None,
                 journaled: false,
             },
@@ -133,6 +143,7 @@ impl PointMap {
                 kind,
                 internal: None,
                 writable: true,
+                requires_reason: false,
                 stale_after_ticks: None,
                 journaled: false,
             },
@@ -157,6 +168,7 @@ impl PointMap {
                 kind,
                 internal: Some(initial),
                 writable: false,
+                requires_reason: false,
                 stale_after_ticks: None,
                 journaled: false,
             },
@@ -184,6 +196,7 @@ impl PointMap {
                 kind,
                 internal: Some(initial),
                 writable: true,
+                requires_reason: false,
                 stale_after_ticks: None,
                 journaled: false,
             },
@@ -1406,25 +1419,44 @@ impl<'d> Executor<'d> {
     /// statically invalid command takes its named validation rejection
     /// even when the queue is full.
     ///
-    /// The receipt is unattributed; [`submit_command_as`](Self::submit_command_as)
+    /// The receipt is unattributed; [`submit_command_attributed`](Self::submit_command_attributed)
     /// is the attributed variant the audit path submits through.
     pub fn submit_command(&mut self, command: Command) -> CommandReceipt {
-        self.submit_command_as(command, None)
+        self.submit_command_attributed(command, None, None)
+    }
+
+    /// As [`submit_command_attributed`](Self::submit_command_attributed)
+    /// without a declared reason — the actor-only attribution shape the
+    /// original command-path audit-identity decision recorded, kept for
+    /// callers that predate the shelving-reason carriage.
+    pub fn submit_command_as(&mut self, command: Command, actor: Option<String>) -> CommandReceipt {
+        self.submit_command_attributed(command, actor, None)
     }
 
     /// As [`submit_command`](Self::submit_command), stamping the receipt
-    /// with the submitter's declared actor identity — the
-    /// audit-attribution field of the command-path audit-identity
-    /// decision. The actor is submission metadata: it rides the receipt
-    /// untouched by validation, so an attributed command validates,
-    /// queues, and settles exactly as an unattributed one, and the
-    /// journaled `CommandSettled` echoing this receipt carries the
-    /// attribution. `None` submits unattributed — identical to
+    /// with the submitter's declared actor identity and the declared
+    /// `reason` the shelving-reason decision carries through the
+    /// attributed command path — the per-request justification an
+    /// operator declares beside the command for the points whose model
+    /// declaration marks it mandatory, or voluntary metadata on any
+    /// other writable point. Both are submission metadata: they ride
+    /// the receipt untouched by validation, so an attributed command
+    /// validates, queues, and settles exactly as an unattributed one —
+    /// except that a command against a `requires_reason` point
+    /// declaring no `reason` rejects `ReasonRequired` at admission, the
+    /// one place the metadata feeds back into validation — and the
+    /// journaled `CommandSettled` echoing this receipt carries both
+    /// fields. `None`/`None` submits unattributed — identical to
     /// [`submit_command`](Self::submit_command).
-    pub fn submit_command_as(&mut self, command: Command, actor: Option<String>) -> CommandReceipt {
+    pub fn submit_command_attributed(
+        &mut self,
+        command: Command,
+        actor: Option<String>,
+        reason: Option<String>,
+    ) -> CommandReceipt {
         self.command_admission.attempts += 1;
-        let outcome = match self.check_command(&command) {
-            Err(reason) => CommandOutcome::Rejected { reason },
+        let outcome = match self.check_command(&command, reason.as_deref()) {
+            Err(error) => CommandOutcome::Rejected { reason: error },
             // Validation precedes admission: a statically invalid
             // command takes its named rejection even when the queue is
             // full, and a full queue refuses a valid command without
@@ -1447,6 +1479,7 @@ impl<'d> Executor<'d> {
             command,
             outcome,
             actor,
+            reason,
         };
         self.receipts.push(receipt.clone());
         if accepted {
@@ -2429,11 +2462,23 @@ impl<'d> Executor<'d> {
     /// availability predicate and the kind's own invariants decide
     /// there, and a refusal settles the receipt
     /// [`CommandError::CommandRefused`] carrying the kind's reason.
-    fn check_command(&self, command: &Command) -> Result<Resolved, CommandError> {
+    ///
+    /// `reason` is the attributed envelope's declared reason — the
+    /// submission metadata
+    /// [`submit_command_attributed`](Self::submit_command_attributed)
+    /// threads through: a point command against a `requires_reason`
+    /// point declaring none refuses [`CommandError::ReasonRequired`],
+    /// while a reason on an unmarked point, or on a component command,
+    /// rides the receipt without entering validation.
+    fn check_command(
+        &self,
+        command: &Command,
+        reason: Option<&str>,
+    ) -> Result<Resolved, CommandError> {
         match command {
             Command::WriteValue { point, kind, value }
             | Command::ForcePoint { point, kind, value } => {
-                let spec = self.check_command_point(*point)?;
+                let spec = self.check_command_point(*point, reason)?;
                 if *kind != spec.kind {
                     return Err(CommandError::TypeMismatch {
                         point: *point,
@@ -2474,7 +2519,7 @@ impl<'d> Executor<'d> {
                 })
             }
             Command::UnforcePoint { point } => {
-                self.check_command_point(*point)?;
+                self.check_command_point(*point, reason)?;
                 Ok(Resolved::Unforce { point: *point })
             }
             Command::SetParameter {
@@ -2575,14 +2620,25 @@ impl<'d> Executor<'d> {
     /// served ([`CommandError::UnknownPoint`]) and must be a writable
     /// `In` point — the command surface is the map's writable `In`
     /// points, so an unmarked point, and every `Out` point, refuses
-    /// before its payload is examined with [`CommandError::NotWritable`].
-    fn check_command_point(&self, point: PointId) -> Result<PointSpec, CommandError> {
+    /// before its payload is examined with [`CommandError::NotWritable`]
+    /// — and when the point's declaration marks commands
+    /// reason-carrying, the submission must declare a non-empty
+    /// `reason` beside `actor`, refusing [`CommandError::ReasonRequired`]
+    /// for an absent or blank one.
+    fn check_command_point(
+        &self,
+        point: PointId,
+        reason: Option<&str>,
+    ) -> Result<PointSpec, CommandError> {
         let spec = self
             .map
             .get(point)
             .ok_or(CommandError::UnknownPoint { point })?;
         if spec.direction != Direction::In || !spec.writable {
             return Err(CommandError::NotWritable { point });
+        }
+        if spec.requires_reason && reason.is_none_or(|r| r.trim().is_empty()) {
+            return Err(CommandError::ReasonRequired { point });
         }
         Ok(spec)
     }
@@ -2647,8 +2703,14 @@ impl<'d> Executor<'d> {
                 CommandOutcome::Accepted { apply_tick } => apply_tick.min(tick),
                 _ => tick,
             };
-            self.receipts[index].outcome = match self.check_command(&command) {
-                Err(reason) => CommandOutcome::Rejected { reason },
+            // Re-validate with the receipt's declared reason: a carried
+            // pending command re-checks against the promoted run's map,
+            // and the reason rides the receipt so the boundary sees the
+            // same submission metadata admission did.
+            let reason = self.receipts[index].reason.clone();
+            self.receipts[index].outcome = match self.check_command(&command, reason.as_deref())
+            {
+                Err(error) => CommandOutcome::Rejected { reason: error },
                 Ok(Resolved::Write { point, value }) => {
                     let internal = self
                         .map
@@ -3912,6 +3974,7 @@ mod tests {
                 kind: ValueKind::Float,
                 internal: None,
                 writable: false,
+                requires_reason: false,
                 stale_after_ticks: Some(budget),
                 journaled: false,
             },
@@ -4266,6 +4329,7 @@ mod tests {
                 kind: ValueKind::Float,
                 internal: None,
                 writable: true,
+                requires_reason: false,
                 stale_after_ticks: Some(2),
                 journaled: false,
             },
@@ -4547,6 +4611,7 @@ mod tests {
                     apply_tick: Tick(1)
                 },
                 actor: Some("operator-7".to_string()),
+                reason: None,
             }
         );
         executor.scan();
@@ -4570,6 +4635,151 @@ mod tests {
         assert_eq!(rejected.actor.as_deref(), Some("operator-7"));
     }
 
+    /// The setpoint rig with point 10 marked `requires_reason` — the
+    /// per-point mandatory-reason declaration a managed request point
+    /// carries through the model.
+    fn reasoned_rig(driver: &StubDriver) -> Executor<'_> {
+        let map = PointMap::new()
+            .with_spec(
+                PointId(10),
+                PointSpec {
+                    direction: Direction::In,
+                    kind: ValueKind::Float,
+                    internal: None,
+                    writable: true,
+                    requires_reason: true,
+                    stale_after_ticks: None,
+                    journaled: false,
+                },
+            )
+            .with_point(PointId(20), Direction::Out, ValueKind::Float)
+            .with_point(PointId(30), Direction::Out, ValueKind::Float);
+        Executor::new(
+            driver,
+            map,
+            vec![Box::new(Scale {
+                name: "a",
+                input: PointId(10),
+                output: PointId(20),
+                gain: 2.0,
+            })],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_reason_required_point_refuses_the_reasonless_and_blank_submissions() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut executor = reasoned_rig(&driver);
+        let command = write_value(10, ValueKind::Float, Value::Float(5.0));
+
+        // Absent and whitespace-only reasons refuse alike at admission —
+        // a blank declaration is no reason — and the refused receipt
+        // carries whatever the submission declared.
+        for reason in [None, Some("   ".to_string())] {
+            let receipt = executor.submit_command_attributed(
+                command.clone(),
+                Some("operator-7".to_string()),
+                reason.clone(),
+            );
+            assert_eq!(
+                receipt.outcome,
+                CommandOutcome::Rejected {
+                    reason: CommandError::ReasonRequired { point: PointId(10) }
+                }
+            );
+            assert_eq!(receipt.reason, reason);
+        }
+
+        // The declared reason admits and rides the settled receipt into
+        // the audit — the durable record the journaled CommandSettled
+        // echoes.
+        let receipt = executor.submit_command_attributed(
+            command.clone(),
+            Some("operator-7".to_string()),
+            Some("nuisance trips during pump work".to_string()),
+        );
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Accepted {
+                apply_tick: Tick(1)
+            }
+        );
+        executor.scan();
+        assert_eq!(
+            executor.receipts().last().unwrap(),
+            &CommandReceipt {
+                command,
+                outcome: CommandOutcome::Applied { tick: Tick(1) },
+                actor: Some("operator-7".to_string()),
+                reason: Some("nuisance trips during pump work".to_string()),
+            }
+        );
+        assert_eq!(driver_value(&driver, 20), Value::Float(10.0));
+
+        // A reason is voluntary metadata on an unmarked point — the
+        // ordinary command surface takes one or none.
+        let receipt = executor.submit_command_attributed(
+            write_value(30, ValueKind::Float, Value::Float(9.0)),
+            None,
+            Some("unmarked points take one anyway".to_string()),
+        );
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::NotWritable { point: PointId(30) }
+            }
+        );
+        assert_eq!(
+            receipt.reason.as_deref(),
+            Some("unmarked points take one anyway")
+        );
+    }
+
+    #[test]
+    fn a_checkpointed_pending_command_revalidates_with_its_carried_reason() {
+        // The mid-flight case: a reasoned write checkpointed
+        // still-`Accepted` re-queues on the standby and faces the
+        // promoted run's admission check again — against the marked
+        // point the carried reason is what admits it.
+        let active_driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut active = reasoned_rig(&active_driver);
+        active.submit_command_attributed(
+            write_value(10, ValueKind::Float, Value::Float(5.0)),
+            Some("operator-7".to_string()),
+            Some("declared before the swap".to_string()),
+        );
+        let checkpoint = active.checkpoint();
+
+        let standby_driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut standby = reasoned_rig(&standby_driver);
+        standby.apply(&checkpoint).unwrap();
+        standby.scan();
+        let settled = standby.receipts().last().unwrap();
+        assert_eq!(settled.outcome, CommandOutcome::Applied { tick: Tick(1) });
+        assert_eq!(settled.reason.as_deref(), Some("declared before the swap"));
+        assert_eq!(driver_value(&standby_driver, 20), Value::Float(10.0));
+
+        // And a receipt log captured without the field — the pre-
+        // change serialized shape — restores and replays unchanged.
+        let mut legacy = serde_json::to_value(&checkpoint).unwrap();
+        for receipt in legacy["receipts"].as_array_mut().unwrap() {
+            receipt.as_object_mut().unwrap().remove("reason");
+        }
+        let legacy: Checkpoint = serde_json::from_value(legacy).unwrap();
+        let restored_driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut restored = reasoned_rig(&restored_driver);
+        restored.apply(&legacy).unwrap();
+        assert_eq!(
+            restored
+                .receipts()
+                .iter()
+                .map(|receipt| receipt.reason.as_deref())
+                .collect::<Vec<_>>(),
+            vec![None]
+        );
+    }
+
     #[test]
     fn setpoint_command_applies_at_next_scan_and_holds() {
         let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
@@ -4585,6 +4795,7 @@ mod tests {
                     apply_tick: Tick(1)
                 },
                 actor: None,
+                reason: None,
             }
         );
         // Queued, not yet applied: the driver still holds the old value.
@@ -6388,6 +6599,7 @@ mod tests {
                     apply_tick: Tick(2)
                 },
                 actor: None,
+                reason: None,
             }
         );
         // Queued, not yet applied: the component still runs the old gain.
@@ -9367,6 +9579,7 @@ mod tests {
                     apply_tick: Tick(1)
                 },
                 actor: None,
+                reason: None,
             }
         );
         // Queued, not yet applied: the count still reports its start.

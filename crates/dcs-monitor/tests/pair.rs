@@ -344,6 +344,7 @@ fn commands_route_only_to_the_peer_reporting_active() {
                 apply_tick: Tick(2)
             },
             actor: None,
+            reason: None,
         }]
     );
     assert!(standby.client.receipts().unwrap().is_empty());
