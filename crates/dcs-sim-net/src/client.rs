@@ -112,7 +112,7 @@ impl std::error::Error for RemoteError {
 impl From<PlantError> for RemoteError {
     fn from(error: PlantError) -> Self {
         match error {
-            PlantError::Io { error } => Self::Io(error),
+            PlantError::Io { error, .. } => Self::Io(error),
             PlantError::InvalidRequest { detail } => Self::InvalidRequest(detail),
             PlantError::Fenced { .. } => Self::Fenced,
             PlantError::Unclaimed { .. } => Self::Unclaimed,
@@ -161,6 +161,13 @@ struct Connection {
     /// the `Disconnected`s every later access reports are its
     /// consequence, not new failures.
     last_error: Option<String>,
+    /// The owner token the field's standing claim named the last time
+    /// it fenced this attachment's request — the claimant a fenced-out
+    /// field owner's `field_claim_lost` audit attributes the
+    /// preemption to. `None` while no verdict names one: no fenced
+    /// answer received yet, the field's last verdict was `unclaimed`,
+    /// or the answering server predates the attribution field.
+    fenced_by: Option<u64>,
 }
 
 impl Connection {
@@ -199,8 +206,11 @@ impl Connection {
                 // shares the token.
                 Ok(PlantResponse::Done) | Ok(PlantResponse::ClaimedShared { .. }) => {}
                 Ok(PlantResponse::Error {
-                    error: PlantError::Fenced { .. },
-                }) => self.owner = None,
+                    error: PlantError::Fenced { owner, .. },
+                }) => {
+                    self.owner = None;
+                    self.fenced_by = owner;
+                }
                 Ok(_) => {
                     self.last_error = Some(
                         "the ensure_writer answer did not match the request — the peer is not a plant server"
@@ -394,6 +404,7 @@ impl RemoteDriver {
                 owner: None,
                 retry_at: Instant::now(),
                 last_error: None,
+                fenced_by: None,
             }),
             controller: false,
         })
@@ -734,6 +745,21 @@ impl RemoteDriver {
         self.connection.lock().unwrap().owner = None;
     }
 
+    /// The owner token the field's standing claim named the last time
+    /// it fenced one of this attachment's requests — the claimant the
+    /// field's own arbitration reported when it refused. A superseded
+    /// field owner reads it to attribute its `field_claim_lost`
+    /// journal record to the preempting claimant rather than an
+    /// anonymous "another". `None` while no verdict names a claimant:
+    /// no fenced answer has arrived, the field's last claim verdict
+    /// was `unclaimed`, or the answering server predates the
+    /// attribution field. The value is the verdict's own evidence, not
+    /// a fresh observation — an attachment only ever learns who
+    /// fenced it when the field says so.
+    pub fn fenced_by(&self) -> Option<u64> {
+        self.connection.lock().unwrap().fenced_by
+    }
+
     /// The read-only half of the writer claim — the claim-state
     /// observation a peer reports through its role surface as
     /// [`RoleReport::field_claim`](dcs_core::RoleReport::field_claim).
@@ -808,7 +834,30 @@ impl RemoteDriver {
             return Err(RemoteError::Disconnected);
         };
         match exchange(stream, request) {
-            Ok(response) => Ok(response),
+            Ok(response) => {
+                // Claim-state verdicts update the recorded fencing
+                // claimant: a `fenced` answer names the standing
+                // claim's owner — the claimant the fenced-out field
+                // owner's audit attributes the preemption to — and an
+                // `unclaimed` answer clears the record, the field
+                // naming no owner at all.
+                if let PlantResponse::Error { error } = &response {
+                    let verdict = match error {
+                        PlantError::Fenced { owner, .. } => Some(*owner),
+                        PlantError::Io { error, owner }
+                            if matches!(error, IoError::Fenced(_)) =>
+                        {
+                            Some(*owner)
+                        }
+                        PlantError::Unclaimed { .. } => Some(None),
+                        _ => None,
+                    };
+                    if let Some(owner) = verdict {
+                        connection.fenced_by = owner;
+                    }
+                }
+                Ok(response)
+            }
             Err(error) => {
                 connection.stream = None;
                 connection.last_error = Some(error.to_string());
@@ -847,7 +896,7 @@ impl RemoteDriver {
         match self.request(&PlantRequest::Write { point, value }) {
             Ok(PlantResponse::Done) => Ok(()),
             Ok(PlantResponse::Error {
-                error: PlantError::Io { error },
+                error: PlantError::Io { error, .. },
             }) => {
                 if matches!(error, IoError::Fenced(_)) {
                     self.connection.lock().unwrap().owner = None;
@@ -878,7 +927,7 @@ impl IoDriver for RemoteDriver {
             // A point-level failure is the `IoError` contract already:
             // the server's answer passes through unchanged.
             Ok(PlantResponse::Error {
-                error: PlantError::Io { error },
+                error: PlantError::Io { error, .. },
             }) => Err(error),
             Ok(_) => Err(self.protocol_violation().at_point(point)),
             Err(error) => Err(error.at_point(point)),
@@ -889,7 +938,7 @@ impl IoDriver for RemoteDriver {
         match self.request(&PlantRequest::Write { point, value }) {
             Ok(PlantResponse::Done) => Ok(()),
             Ok(PlantResponse::Error {
-                error: PlantError::Io { error },
+                error: PlantError::Io { error, .. },
             }) => {
                 if matches!(error, IoError::Fenced(_)) {
                     // As in `step`: a fenced mutation means the field's
