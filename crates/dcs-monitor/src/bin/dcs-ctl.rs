@@ -337,7 +337,11 @@ fn parse(args: &[String]) -> Result<(&str, Action), String> {
         },
         ("history", rest) => parse_history(rest).map_err(usage)?,
         ("write", rest) => {
-            let (positional, actor, reason) = command_args(rest).map_err(usage)?;
+            let CommandArgs {
+                positional,
+                actor,
+                reason,
+            } = command_args(rest).map_err(usage)?;
             match positional.as_slice() {
                 [point, value] => Action::Write {
                     point: parse_point(point).map_err(usage)?,
@@ -349,7 +353,11 @@ fn parse(args: &[String]) -> Result<(&str, Action), String> {
             }
         }
         ("set-parameter", rest) => {
-            let (positional, actor, reason) = command_args(rest).map_err(usage)?;
+            let CommandArgs {
+                positional,
+                actor,
+                reason,
+            } = command_args(rest).map_err(usage)?;
             match positional.as_slice() {
                 [component, name, value] => Action::SetParameter {
                     component: (*component).to_string(),
@@ -362,7 +370,11 @@ fn parse(args: &[String]) -> Result<(&str, Action), String> {
             }
         }
         ("force", rest) => {
-            let (positional, actor, reason) = command_args(rest).map_err(usage)?;
+            let CommandArgs {
+                positional,
+                actor,
+                reason,
+            } = command_args(rest).map_err(usage)?;
             match positional.as_slice() {
                 [point, value] => Action::Force {
                     point: parse_point(point).map_err(usage)?,
@@ -374,7 +386,11 @@ fn parse(args: &[String]) -> Result<(&str, Action), String> {
             }
         }
         ("unforce", rest) => {
-            let (positional, actor, reason) = command_args(rest).map_err(usage)?;
+            let CommandArgs {
+                positional,
+                actor,
+                reason,
+            } = command_args(rest).map_err(usage)?;
             match positional.as_slice() {
                 [point] => Action::Unforce {
                     point: parse_point(point).map_err(usage)?,
@@ -385,7 +401,11 @@ fn parse(args: &[String]) -> Result<(&str, Action), String> {
             }
         }
         ("invoke", rest) => {
-            let (positional, actor, reason) = command_args(rest).map_err(usage)?;
+            let CommandArgs {
+                positional,
+                actor,
+                reason,
+            } = command_args(rest).map_err(usage)?;
             match positional.as_slice() {
                 [component, command, arguments @ ..] => Action::Invoke {
                     component: (*component).to_string(),
@@ -457,9 +477,15 @@ fn parse_history(rest: &[String]) -> Result<Action, String> {
 /// text, so it takes the flag alone with no environment default. A flag
 /// missing its value, a repeated flag, or any other `--` flag is
 /// malformed usage.
-fn command_args(
-    rest: &[String],
-) -> Result<(Vec<&str>, Option<String>, Option<String>), String> {
+struct CommandArgs<'a> {
+    positional: Vec<&'a str>,
+    actor: Option<String>,
+    reason: Option<String>,
+}
+
+/// Splits a write-side subcommand's argument list into its
+/// [`CommandArgs`].
+fn command_args(rest: &[String]) -> Result<CommandArgs<'_>, String> {
     let mut positional = Vec::new();
     let mut actor = None;
     let mut reason = None;
@@ -485,7 +511,11 @@ fn command_args(
             positional.push(arg.as_str());
         }
     }
-    Ok((positional, actor.or_else(configured_actor), reason))
+    Ok(CommandArgs {
+        positional,
+        actor: actor.or_else(configured_actor),
+        reason,
+    })
 }
 
 /// The `invoke` subcommand's trailing `<name>=<value>` pairs — split

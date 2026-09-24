@@ -2708,8 +2708,7 @@ impl<'d> Executor<'d> {
             // and the reason rides the receipt so the boundary sees the
             // same submission metadata admission did.
             let reason = self.receipts[index].reason.clone();
-            self.receipts[index].outcome = match self.check_command(&command, reason.as_deref())
-            {
+            self.receipts[index].outcome = match self.check_command(&command, reason.as_deref()) {
                 Err(error) => CommandOutcome::Rejected { reason: error },
                 Ok(Resolved::Write { point, value }) => {
                     let internal = self

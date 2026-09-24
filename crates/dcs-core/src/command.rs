@@ -1040,7 +1040,6 @@ mod tests {
         // independent of actor.
         let reason_only = CommandReceipt {
             actor: None,
-            reason: None,
             ..reasoned.clone()
         };
         let json = serde_json::to_string(&reason_only).unwrap();
@@ -1074,10 +1073,7 @@ mod tests {
         let error = CommandError::ReasonRequired { point: PointId(9) };
         let json = serde_json::to_string(&error).unwrap();
         assert_eq!(json, r#"{"reason_required":{"point":9}}"#);
-        assert_eq!(
-            serde_json::from_str::<CommandError>(&json).unwrap(),
-            error
-        );
+        assert_eq!(serde_json::from_str::<CommandError>(&json).unwrap(), error);
         assert_eq!(error.point(), Some(PointId(9)));
         assert!(error.to_string().contains("9"));
     }

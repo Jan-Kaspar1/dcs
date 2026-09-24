@@ -394,6 +394,7 @@ impl Materialized {
             .current_dir(&self.dir)
             .env("DCS_REMOTE", &self.remote)
             .env("DCS_TOOLS", tools)
+            .env("DCS_RECORD_DIR", root().join("docs/releases"))
             .env("DCS_UPGRADE_REV", head_rev())
             .env("CARGO_TARGET_DIR", self.dir.join("target"))
             .output()

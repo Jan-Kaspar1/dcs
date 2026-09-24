@@ -615,10 +615,7 @@ fn the_alarm_journal_keeps_durable_transition_order() {
         // `requires_reason` point, so the request declares one.
         let receipt = managed_write(client, SHELVE1, true);
         assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
-        assert_eq!(
-            receipt.reason.as_deref(),
-            Some("pump maintenance window")
-        );
+        assert_eq!(receipt.reason.as_deref(), Some("pump maintenance window"));
         driver.write(PV1, Value::Float(95.0)).unwrap();
         client.advance(1).unwrap();
 
@@ -693,10 +690,7 @@ fn the_alarm_journal_keeps_durable_transition_order() {
             unreachable!();
         };
         assert_eq!(receipt.actor.as_deref(), Some("op-1"));
-        assert_eq!(
-            receipt.reason.as_deref(),
-            Some("pump maintenance window")
-        );
+        assert_eq!(receipt.reason.as_deref(), Some("pump maintenance window"));
     });
 }
 
@@ -788,10 +782,7 @@ fn the_marked_shelve_point_refuses_reasonless_and_journals_the_reason() {
             .iter()
             .find(|receipt| matches!(receipt.outcome, CommandOutcome::Applied { .. }))
             .unwrap();
-        assert_eq!(
-            applied.reason.as_deref(),
-            Some("pump maintenance window")
-        );
+        assert_eq!(applied.reason.as_deref(), Some("pump maintenance window"));
     });
 }
 

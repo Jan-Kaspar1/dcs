@@ -21,6 +21,9 @@
 //!   `initial`, a bound point forbids a non-null `initial`, `initial`'s
 //!   [`Value`](dcs_core::Value) variant must match `value_type`, and
 //!   `writable` may mark `In` points only;
+//! - the reason-requirement rule: `requires_reason: true` may mark a
+//!   writable `In` point only — the flag qualifies the command surface,
+//!   so it requires `direction: "in"` and `writable: true`;
 //! - the freshness-budget rule: a non-null `stale_after_ticks` may mark a
 //!   field `In` point only — it requires `direction: "in"` and a non-null
 //!   `channel`;
@@ -490,6 +493,7 @@ const SCHEMA_SOURCE: &str = r##"{
           "anyOf": [{ "$ref": "#/$defs/value" }, { "type": "null" }]
         },
         "writable": { "type": "boolean" },
+        "requires_reason": { "type": "boolean" },
         "stale_after_ticks": {
           "anyOf": [{ "$ref": "#/$defs/nonneg-int" }, { "type": "null" }]
         },
@@ -527,6 +531,19 @@ const SCHEMA_SOURCE: &str = r##"{
           },
           "then": {
             "properties": { "direction": { "const": "in" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["requires_reason"],
+            "properties": { "requires_reason": { "const": true } }
+          },
+          "then": {
+            "required": ["writable"],
+            "properties": {
+              "direction": { "const": "in" },
+              "writable": { "const": true }
+            }
           }
         },
         {

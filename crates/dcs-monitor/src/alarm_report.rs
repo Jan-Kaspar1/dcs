@@ -1939,7 +1939,13 @@ mod tests {
                     Some("op-1"),
                     Some("nuisance trips during pump work")
                 ),
-                ("shelve", 3, Some(false), Some("op-1"), Some("maintenance complete")),
+                (
+                    "shelve",
+                    3,
+                    Some(false),
+                    Some("op-1"),
+                    Some("maintenance complete")
+                ),
             ]
         );
         assert!(matches!(

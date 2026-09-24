@@ -624,7 +624,7 @@ fn run_operations(tag: &str) -> serde_json::Value {
         // The declared operator identity: configured by ?operator= and
         // carried by the card's link into the pair view.
         "urlParams.get(\"operator\")",
-        "actor: operator",
+        "body.actor = operator",
         "\"operator=\" + encodeURIComponent(operator)",
     ] {
         assert!(page.contains(needle), "page lacks {needle}");

@@ -558,12 +558,8 @@ impl PlantModel {
             // admission, so on a point that takes no commands — an
             // `Out` point, or an `In` point the model never marked
             // `writable` — the flag is a dead declaration.
-            if point.requires_reason
-                && (point.direction == Direction::Out || !point.writable)
-            {
-                errors.push(ValidationError::RequiresReasonNotWritable {
-                    point: point.id,
-                });
+            if point.requires_reason && (point.direction == Direction::Out || !point.writable) {
+                errors.push(ValidationError::RequiresReasonNotWritable { point: point.id });
             }
             let Some(reference) = &point.channel else {
                 // An internal point's initial value is its whole declared
@@ -1105,9 +1101,9 @@ mod tests {
         let mut model = minimal();
         model.io_points[1].requires_reason = true;
         assert!(
-            model.validate().contains(&ValidationError::RequiresReasonNotWritable {
-                point: PointId(11)
-            })
+            model
+                .validate()
+                .contains(&ValidationError::RequiresReasonNotWritable { point: PointId(11) })
         );
 
         // So is an `In` point the model never marked writable — the
@@ -1115,9 +1111,9 @@ mod tests {
         let mut model = minimal();
         model.io_points[0].requires_reason = true;
         assert!(
-            model.validate().contains(&ValidationError::RequiresReasonNotWritable {
-                point: PointId(10)
-            })
+            model
+                .validate()
+                .contains(&ValidationError::RequiresReasonNotWritable { point: PointId(10) })
         );
     }
 }

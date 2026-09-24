@@ -885,7 +885,7 @@ fn page_carries_the_pair_view_and_answers_cross_origin_role_reads() {
         "function pollRoles()",
         "function selectSource()",
         "function switchSource(next)",
-        "function submitCommand(command)",
+        "async function submitCommand(command, reason)",
         "not_active",
         "role_changed",
     ] {

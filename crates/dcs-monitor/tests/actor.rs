@@ -355,10 +355,7 @@ fn the_raw_reason_envelope_parses_and_a_stray_reason_is_refused() {
         assert_eq!(status, 200, "{body}");
         let receipt: CommandReceipt = serde_json::from_str(&body).unwrap();
         assert_eq!(receipt.actor, None);
-        assert_eq!(
-            receipt.reason.as_deref(),
-            Some("shelved for the washdown")
-        );
+        assert_eq!(receipt.reason.as_deref(), Some("shelved for the washdown"));
 
         // An envelope key the contract does not declare refuses —
         // strict fields, never a silently dropped attribution.
@@ -385,7 +382,9 @@ fn the_raw_reason_envelope_parses_and_a_stray_reason_is_refused() {
             )
             .unwrap();
         assert_eq!(status, 400);
-        assert!(client.receipts().unwrap().is_empty());
+        // Only the accepted submission reached the executor's receipt
+        // log — both refused envelopes were refused at the boundary.
+        assert_eq!(client.receipts().unwrap(), vec![receipt]);
     });
 }
 
@@ -425,7 +424,7 @@ fn the_served_page_supplies_the_configured_operator_identity() {
         // The ?operator= URL parameter is the configured identity…
         assert!(page.contains("urlParams.get(\"operator\")"), "{page}");
         // …stamped on every submission through the attributed envelope…
-        assert!(page.contains("actor: operator"), "{page}");
+        assert!(page.contains("body.actor = operator"), "{page}");
         // …and stated beside the command form.
         assert!(page.contains("command-actor"), "{page}");
     });

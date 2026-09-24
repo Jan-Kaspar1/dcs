@@ -631,12 +631,7 @@ mod tests {
         // `requires_reason` as `false`, and `false` serializes back
         // without the key.
         let model = PlantModel::load(MINIMAL).unwrap();
-        assert!(
-            model
-                .io_points
-                .iter()
-                .all(|point| !point.requires_reason)
-        );
+        assert!(model.io_points.iter().all(|point| !point.requires_reason));
         let json = serde_json::to_string(&model).unwrap();
         assert!(!json.contains("\"requires_reason\""), "{json}");
     }
