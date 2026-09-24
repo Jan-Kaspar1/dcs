@@ -1481,8 +1481,8 @@ impl<'d> Monitor<'d> {
     /// the peer reports itself degraded.
     ///
     /// The apply also runs the peer's staged-output divergence check; a
-    /// transition into `diverged` is journaled at the tick the compared
-    /// staged image belonged to.
+    /// transition into `diverged` is journaled at the run tick the
+    /// apply landed on.
     pub fn apply_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), ApplyError> {
         let mut shared = self.shared.lock().unwrap();
         let Shared { peer, recorder } = &mut *shared;

@@ -260,9 +260,25 @@ def select_snapshot(snapshot):
     """The run-state sections two converged peers must serve
     identically — the field image plus the checkpoint-carried force
     set and parameters. The monitor-stamped `publication` section is
-    monitor-local and excluded."""
+    monitor-local and excluded, and so is every run-domain tick
+    attribution — the snapshot's own `tick` and each point sample's:
+    a tracking apply never rewinds the run's clock, so a standby that
+    scanned ahead through a source outage keeps a standing lead over
+    the field owner's tick while the images the ticks annotate stay
+    identical (#887)."""
+    points = []
+    for entry in snapshot.get("points") or []:
+        entry = dict(entry)
+        sample = entry.get("sample")
+        if sample is not None:
+            sample = dict(sample)
+            sample.pop("tick", None)
+            entry["sample"] = sample
+        points.append(entry)
     return {
-        key: snapshot.get(key) for key in ("tick", "points", "forces", "parameters")
+        "points": points,
+        "forces": snapshot.get("forces"),
+        "parameters": snapshot.get("parameters"),
     }
 
 
@@ -389,7 +405,12 @@ def tick(tracked_url, owner_url, failures, diverged=None):
     following pull adopts the settlement. The tick absorbs exactly
     that: on a mismatch it runs one more tracking-first pair tick
     and requires convergence there — anything still diverged aborts
-    with the recorded wording. Returns `(tracked, owner)`."""
+    with the recorded wording. The run ticks themselves are not
+    compared: a tracking apply never rewinds the run's clock, so a
+    tracker that scanned ahead through a source outage legitimately
+    holds a standing lead — but it must never land *behind* the
+    owner's, the never-rewind invariant this asserts. Returns
+    `(tracked, owner)`."""
     tracked, owner = scan_pair(tracked_url, owner_url, failures)
     if select_snapshot(tracked) != select_snapshot(owner):
         tracked, owner = scan_pair(tracked_url, owner_url, failures)
@@ -402,6 +423,15 @@ def tick(tracked_url, owner_url, failures, diverged=None):
                 ).format(tick=owner["tick"])
             )
             raise Abort
+    if tracked["tick"] < owner["tick"]:
+        failures.append(
+            f"the tracking peer's run tick {tracked['tick']} lags the "
+            f"field owner's {owner['tick']} after a tracking-first pair "
+            "tick — a tracking apply lands at the later of the two "
+            "clocks, so the tracker can never trail the stream it "
+            "just applied"
+        )
+        raise Abort
     return tracked, owner
 
 
