@@ -1639,3 +1639,41 @@ fn an_orphaned_ex_owners_rearm_holds_no_live_holder_and_stays_preemptable() {
         assert!(matches!(b_peer.sync_state(), StandbySync::Tracking { .. }));
     });
 }
+
+/// The claimant-attribution the fencing-loss journal rides on: a
+/// write fenced by a standing foreign claim records the claim's owner
+/// token as `fenced_by`, and the record holds until a verdict names
+/// another owner or the field reports unclaimed.
+#[test]
+fn a_fenced_write_records_the_standing_claims_owner_as_fenced_by() {
+    with_server(loopback_map(), |addr| {
+        let owner = RemoteDriver::connect(addr).unwrap();
+        owner.claim_writer(1).unwrap();
+        assert_eq!(owner.fenced_by(), None);
+
+        let rogue = RemoteDriver::connect(addr).unwrap();
+        rogue.claim_writer(2).unwrap();
+
+        // The superseded owner's next write meets the point's fenced
+        // verdict — carrying the rogue claim's owner token, which the
+        // attachment records as the claimant its audit names.
+        assert_eq!(
+            owner.write(PointId(20), Value::Float(1.0)),
+            Err(IoError::Fenced(PointId(20)))
+        );
+        assert_eq!(owner.fenced_by(), Some(2));
+
+        // A step fenced by the same claim attributes identically; a
+        // probe of the standing claim does not clear the record.
+        assert_eq!(owner.step(0.1), Err(RemoteError::Fenced));
+        assert_eq!(owner.fenced_by(), Some(2));
+        assert_eq!(owner.probe_writer().unwrap(), FieldClaim::Held);
+        assert_eq!(owner.fenced_by(), Some(2));
+
+        // The release's unclaimed verdict clears the record — the field
+        // names no claimant once no claim stands.
+        rogue.release_writer().unwrap();
+        assert_eq!(owner.probe_writer().unwrap(), FieldClaim::Unclaimed);
+        assert_eq!(owner.fenced_by(), None);
+    });
+}

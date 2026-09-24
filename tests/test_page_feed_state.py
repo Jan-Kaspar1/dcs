@@ -168,8 +168,8 @@ PINS = [
     (3353, 'for (const entry of journalEntries.splice(0, journalEntries.length - JOURNAL_LIMIT)) {'),
     (3354, 'journalSeen.delete(journalKey(entry));'),
     # The cadence both tickers share.
-    (3795, 'setInterval(refreshOverview, POLL_MS);'),
-    (3996, 'setInterval(refresh, POLL_MS);'),
+    (3809, 'setInterval(refreshOverview, POLL_MS);'),
+    (4010, 'setInterval(refresh, POLL_MS);'),
 ]
 
 

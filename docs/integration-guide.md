@@ -590,7 +590,7 @@ A factory returns one of two `DeviceDriver` contributions:
   initial value). The fragment merges with every other `Sim` contribution
   and the synthesized internal points into one `SimDriver` backend, so a
   model can mix many `sim*` devices freely.
-- `DeviceDriver::Backend(DeviceBackend { io, step, claim, release, ensure, startup_claim, probe, inspect, field_facing })` — a
+- `DeviceDriver::Backend(DeviceBackend { io, step, claim, release, ensure, startup_claim, probe, reclaim, fenced_by, inspect, field_facing })` — a
   self-contained backend. `io` is the point-facing driver; `step` is an
   optional `StepHook` (`Fn(f64) -> Result<Tick, dcs_assembly::StepError>`)
   advancing the backend's simulated plant one `dt` per `FanoutDriver::step` —
@@ -643,6 +643,29 @@ A factory returns one of two `DeviceDriver` contributions:
   whose arbitration cannot be observed without taking it leaves it
   `None` and the served report carries `None` — no claim question was
   answered — rather than a guessed `held`.
+  `reclaim` is an optional `ReclaimHook`
+  (`Fn(u64) -> Result<bool, dcs_assembly::StepError>`) — the *bound*
+  conditional re-grant a fencing-demoted ex-owner probes each standby
+  scan while its loss mark stands: `FanoutDriver::reclaim_field_writer`
+  runs it to take the claim back under the run's token only where the
+  field stands unclaimed or already names it — `Ok(true)` — refusing
+  `Ok(false)` while a different owner stands, so a released preemption
+  ends with the ex-owner holding the field again and no probe ever
+  preempts. Unlike `ensure` the grant binds the probing attachment to
+  the claim's holders, because the peer's gate lifts on it and its
+  writes must pass the arbitration it re-took. `sim-tcp` installs the
+  plant server's bound `ensure_writer`; a kind without a bound
+  conditional grant leaves it `None` and the demoted peer keeps the
+  pre-hook wedge — an operator's promote unwedges.
+  `fenced_by` is an optional `FencedByHook` (`Fn() -> Option<u64>`) —
+  the claimant attribution a fencing-loss journal entry reads:
+  `FanoutDriver::fencing_claimant(point)` asks it for the owner token
+  the field's standing claim named the last time it fenced a mutation
+  on `point`'s backend, so `field_claim_lost` attributes the takeover
+  rather than recording an anonymous loss. `sim-tcp` installs
+  `RemoteDriver::fenced_by`; a kind whose fencing verdicts carry no
+  owner identity leaves it `None` and the entry records `claimant:
+  null`.
   `inspect` is an optional
   `Option<Arc<dyn Any + Send + Sync>>` typed handle the factory installs when
   the backend exposes more than the `IoDriver` surface — `sim-scripted`
@@ -829,6 +852,8 @@ fn memory_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         ensure: None,
         startup_claim: None,
         probe: None,
+        reclaim: None,
+        fenced_by: None,
         inspect: None,
         field_facing: false,
     }))
@@ -1302,6 +1327,8 @@ fn demo_bus(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         ensure: None,
         startup_claim: None,
         probe: None,
+        reclaim: None,
+        fenced_by: None,
         inspect: Some(inspect),
         field_facing: true,
     }))
