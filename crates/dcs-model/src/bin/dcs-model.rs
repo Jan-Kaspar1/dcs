@@ -28,6 +28,10 @@
 //!   registry's JSON Schema (draft 2020-12) — the document `GET /schema`
 //!   answers — so a non-Rust consumer can check the decision-82 contract
 //!   the same way.
+//! - `dcs-model deploy-schema` emits the deployment manifest's JSON Schema
+//!   (draft 2020-12) — the consumer-owned declaration the release contract
+//!   records — so non-Rust tooling can screen a `deploy/manifest.json`
+//!   against the recorded artifact before the rig-definition check runs.
 //!
 //! Malformed input — unreadable files, broken JSON, unsupported document
 //! versions, invalid models — produces error output naming the problem and
@@ -48,7 +52,8 @@ commands:
   diff <old> <new>         report what a model revision changes; --json emits it as JSON
   lint <file>              report advisory engineering-quality findings; --strict exits nonzero on them
   schema                   print the plant model's JSON Schema
-  interface-schema         print the served block-interface registry's JSON Schema";
+  interface-schema         print the served block-interface registry's JSON Schema
+  deploy-schema            print the deployment manifest's JSON Schema";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -78,6 +83,7 @@ fn run(args: &[String]) -> Result<String, String> {
         "lint" => lint(rest),
         "schema" => schema(rest),
         "interface-schema" => interface_schema(rest),
+        "deploy-schema" => deploy_schema(rest),
         _ => Err(format!("unknown command {command:?}\n{USAGE}")),
     }
 }
@@ -222,6 +228,20 @@ fn interface_schema(args: &[String]) -> Result<String, String> {
         return Err(format!("interface-schema takes no arguments\n{USAGE}"));
     }
     serde_json::to_string_pretty(&dcs_core::SchemaView::json_schema())
+        .map_err(|error| format!("cannot serialize the JSON Schema: {error}"))
+}
+
+/// `deploy-schema` prints the deployment manifest's JSON Schema — the
+/// [`deployment_manifest_schema`](dcs_model::deployment_manifest_schema)
+/// document, serialized canonically so the output is deterministic across
+/// runs. It takes no file: the manifest is consumer-owned data the
+/// platform never parses, so the schema is a first screen for external
+/// tooling rather than a document this binary loads.
+fn deploy_schema(args: &[String]) -> Result<String, String> {
+    if !args.is_empty() {
+        return Err(format!("deploy-schema takes no arguments\n{USAGE}"));
+    }
+    serde_json::to_string_pretty(&dcs_model::deployment_manifest_schema())
         .map_err(|error| format!("cannot serialize the JSON Schema: {error}"))
 }
 
