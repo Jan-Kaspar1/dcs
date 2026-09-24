@@ -305,14 +305,31 @@ fn ensure_commit(rev: &str) {
     if present.status.success() {
         return;
     }
-    for remote in ["origin", PUBLISHED_REMOTE] {
-        let fetch = Command::new("git")
-            .args(["fetch", "--depth", "1", remote, rev])
-            .current_dir(root())
-            .output()
-            .expect("git fetch runs");
-        if fetch.status.success() {
-            return;
+    // A single SHA fetch on a hosted runner intermittently stalls
+    // until the transport's connect timeout — lowSpeed aborts a dead
+    // transfer fast so a retry gets a fresh connection, and a few
+    // rounds absorb the flake while a genuinely unresolvable pin
+    // still fails with the named diagnostic.
+    for _ in 0..3 {
+        for remote in ["origin", PUBLISHED_REMOTE] {
+            let fetch = Command::new("git")
+                .args([
+                    "-c",
+                    "http.lowSpeedLimit=1",
+                    "-c",
+                    "http.lowSpeedTime=15",
+                    "fetch",
+                    "--depth",
+                    "1",
+                    remote,
+                    rev,
+                ])
+                .current_dir(root())
+                .output()
+                .expect("git fetch runs");
+            if fetch.status.success() {
+                return;
+            }
         }
     }
     panic!("{PIN_UNRESOLVABLE}: no remote could serve the pinned rev {rev}");
