@@ -54,6 +54,10 @@ const UNBOUND_CONFLICTING_DYNAMICS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/invalid/dynamics_unbound_and_conflicting.json"
 );
+const SELF_POINT_DYNAMICS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/invalid/dynamics_self_point.json"
+);
 const UNKNOWN_DEVICE_MODEL: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../dcs-assembly/fixtures/invalid/unknown_device_kind.json"
@@ -595,6 +599,63 @@ fn check_dynamics_rejects_invalid_documents_without_serving() {
         .expect("dcs-plant-server runs");
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("--check-dynamics"));
+}
+
+#[test]
+fn self_point_dynamics_are_refused_before_the_plant_serves() {
+    // QA finding dynamics-self-point-validation-panics-plant-server: a
+    // bool_flow or threshold whose input and output name the same Bool
+    // point passed the emitted schema and this preflight, then panicked
+    // the served plant's first step — the panic unwound out of the
+    // driver mutex, so every later request on every connection met a
+    // PoisonError and went unanswered while the listener stayed up.
+    // No point kind satisfies both legs, so the merge now refuses the
+    // document: the preflight names each offending element and the
+    // serving run exits before binding.
+    let output = run_fail(&[STATION_MODEL, "--check-dynamics", SELF_POINT_DYNAMICS]);
+    let message = stderr(&output);
+    for index in [0, 1] {
+        assert!(
+            message.contains(&format!("dynamics element {index} (driving point 20)")),
+            "{message}"
+        );
+    }
+    assert!(message.contains("Float"), "{message}");
+    assert!(!message.contains("listening on"), "{message}");
+
+    // The serving run reports the same merge rejection at startup
+    // instead of coming up and dying on the first step request.
+    let output = run_fail(&[
+        STATION_MODEL,
+        "--dynamics",
+        SELF_POINT_DYNAMICS,
+        "--listen",
+        "127.0.0.1:0",
+    ]);
+    let message = stderr(&output);
+    assert!(
+        message.contains("dynamics element 0 (driving point 20)"),
+        "{message}"
+    );
+    assert!(!message.contains("listening on"), "{message}");
+
+    // The same model serving an honest document answers the claim and
+    // the step — including from a second attachment, the requests the
+    // poisoned mutex used to leave unanswered.
+    let mut plant = spawn(&[
+        STATION_MODEL,
+        "--dynamics",
+        STATION_DYNAMICS,
+        "--listen",
+        "127.0.0.1:0",
+    ]);
+    let driver = RemoteDriver::connect(plant.addr).unwrap();
+    driver.claim_writer(1).unwrap();
+    driver.step(0.1).unwrap();
+    let observer = RemoteDriver::connect(plant.addr).unwrap();
+    assert!(observer.list_points().is_ok());
+    assert!(observer.read(PointId(10)).is_ok());
+    assert!(stop(&mut plant).success());
 }
 
 #[test]
