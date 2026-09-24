@@ -53,9 +53,39 @@ import subprocess
 import sys
 import tempfile
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
+
 import pair
 import simulate
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored cases: a leg expecting the failed pump to keep
+# duty, or expecting none_available never to report, must
+# surface the named diagnostic — never a silently wrong pass.
+LEG = {
+    "order": 50,
+    "title": "the duty-pump failure-handover leg",
+    "passes": "handover-leg",
+    "tampers": [
+        {
+            "name": "keeps-duty",
+            "passed": "a doctored duty expectation passed the handover leg",
+            "missed": "the keeps-duty case did not report its named diagnostic",
+            "evidence": ["keep duty"],
+        },
+        {
+            "name": "none-available-silent",
+            "passed": "a doctored none_available expectation passed the handover leg",
+            "missed": "the none-available-silent case did not report its named diagnostic",
+            "evidence": ["never to report"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)

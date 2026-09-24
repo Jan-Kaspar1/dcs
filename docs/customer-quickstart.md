@@ -59,19 +59,19 @@ Its `README.md` walks the full customer path:
    `manifest-fingerprint-mismatch`, …) rather than silent misbehavior.
 
 The check's `pair` stage proves the declared redundant pair runs — not
-just that its definition parses: `ci/pair.py` reads the standby wiring
+just that its definition parses: `ci/legs/pair.py` reads the standby wiring
 and persistence fields out of `deploy/manifest.json` and spawns the two
 declared controllers on released tooling, converging the standby to
 `tracking`, issuing the receipted `demote`/`promote` switchover, and
 asserting the run continues bumplessly with the adopted receipts and
 the durable journal files' transition records intact. The stage's
-refusal half (`ci/refusal.py`) proves the deployed pair refuses
+refusal half (`ci/legs/refusal.py`) proves the deployed pair refuses
 honestly at its role boundaries: `POST /promote` before the standby's
 first transfer answers the named `not_converged` refusal with no field
 hand-off, a receipted write to the tracking standby answers the named
 `not_active` rejection with no field effect or phantom audit, and the
 same promote succeeds once the standby tracks — the active undisturbed
-throughout. The stage's failure-handover leg (`ci/handover.py`) proves
+throughout. The stage's failure-handover leg (`ci/legs/handover.py`) proves
 the duty-failure behavior on the deployed pair: a proven duty-pump
 field-channel fault hands `duty` to the standby pump inside the
 declared bound while the operator surface annunciates it — the
@@ -80,7 +80,7 @@ fault alarm carrying journaled `point_changed` evidence — losing every
 pump raises `none_available`/`all_faulted` with their managed alarms,
 and restoring each input produces the declared recovery with the
 pair's controller roles unmoved throughout. The stage's
-automatic-failover leg (`ci/failover.py`) then
+automatic-failover leg (`ci/legs/failover.py`) then
 proves the unattended half: the declared `failover_budget` arms the
 standby's `--auto-promote`, the field-owning container is stopped, and
 the surviving peer self-promotes at the declared miss budget — its

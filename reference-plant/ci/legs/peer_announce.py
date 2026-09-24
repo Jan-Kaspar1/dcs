@@ -3,7 +3,7 @@
 proof that the checkpoint `?peer=` announce acceptance contract holds
 on the deployed redundant pair (WW-ENG-003, WW-LCM-001).
 
-The pair leg (`ci/pair.py`) proves the demoted peer follows the
+The pair leg (`ci/legs/pair.py`) proves the demoted peer follows the
 address a tracking peer announced on its pulls — the follow-peer half
 of the tracking-source contract. This leg proves the announce's
 *acceptance* half on the same customer-owned pair: the serving
@@ -69,10 +69,44 @@ satisfy the doctored expectation and pass silently.
 import argparse
 import hashlib
 import json
+import os
 import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
 
 import pair
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored case: a crafted announce naming the pulling
+# connection's own source — a closed local port — lands exactly
+# as it would on a controller whose acceptance check regressed.
+# It joins the bounded announced set beside the genuine ones,
+# and the demotion's per-candidate verification is what answers
+# it: the planted hint names an endpoint no checkpoint pull can
+# verify, so the adoption keeps the verified standby — the
+# journal's tracking_source_adopted is the audit. The leg
+# doctors its assertion to require the planted address, so a
+# healthy demotion reports the adopted mismatch — a blind
+# last-announcer adoption would satisfy the doctored
+# expectation and pass silently.
+LEG = {
+    "order": 120,
+    "title": "the peer-announce leg",
+    "passes": "peer-announce",
+    "tampers": [
+        {
+            "name": "landed-announce",
+            "passed": "a landed foreign announce passed the peer-announce leg",
+            "missed": "the landed-announce case did not report its named diagnostic",
+            "evidence": ["tracking_source_adopted"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)

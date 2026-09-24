@@ -56,12 +56,55 @@ exist, so the invocation must fail naming the unreadable file.
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
 
 import pair
 import simulate
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored cases: each tamper must surface the named
+# diagnostic — a leg asserting the driven alarm left no
+# activation must fail on the computed report's honest count,
+# and the doctored invocations — a dead monitor address, a
+# missing journal path — must fail the leg naming the refusal,
+# never a silent pass.
+LEG = {
+    "order": 170,
+    "title": "the alarm-report leg",
+    "passes": "report-leg",
+    "tools": {
+        "alarm-report": "dcs-alarm-report",
+    },
+    "tampers": [
+        {
+            "name": "expect-quiet",
+            "passed": "a expect-quiet case passed the report leg",
+            "missed": "the expect-quiet case did not report its named diagnostic",
+            "evidence": ["expected zero activations"],
+        },
+        {
+            "name": "unreachable-monitor",
+            "passed": "a unreachable-monitor case passed the report leg",
+            "missed": "the unreachable-monitor case did not report its named diagnostic",
+            "evidence": ["unreachable monitor"],
+        },
+        {
+            "name": "unreadable-journal",
+            "passed": "a unreadable-journal case passed the report leg",
+            "missed": "the unreadable-journal case did not report its named diagnostic",
+            "evidence": ["unreadable journal file"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)
