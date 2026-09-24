@@ -630,9 +630,9 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
         plant.internal_input::<bool>(PointId(carriers::POWER_TRIPPED_IN), false, false);
     // The `none-available` alarm's declared suppression: any pump held
     // in manual is the operator withdrawing it from the group's roster
-    // — "demand stands with no pump available" is then designed state,
-    // not a fault (decision 73's pattern). The carrier keeps reporting
-    // truth; the `suppressed` flag names the withholding.
+    // — no pump available to the group is then designed state, not a
+    // fault (decision 73's pattern). The carrier keeps reporting truth;
+    // the `suppressed` flag names the withholding.
     let any_manual = plant.internal_output::<bool>(PointId(carriers::ANY_MANUAL), false);
     let any_manual_in =
         plant.internal_input::<bool>(PointId(carriers::ANY_MANUAL_IN), false, false);
@@ -980,8 +980,10 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
             suppress: true,
             ..ManagedInputs::default()
         },
+        // The carrier asserts on availability alone — the consequence
+        // names the empty roster, never a standing demand (#825).
         rationalization(
-            "Demand stands with no pump available to meet it",
+            "No pump is available; the station cannot pump",
             "Restore a pump to service or clear its faults",
             "none-available-alarm",
         ),

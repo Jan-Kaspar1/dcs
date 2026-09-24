@@ -872,6 +872,7 @@ fn the_pages_pair_fault_kinds_match_the_versioned_contract() {
         spellings,
         [
             "dual_active",
+            "field_unclaimed",
             "no_active_peer",
             "peer_unreachable",
             "standby_degraded",
@@ -880,13 +881,13 @@ fn the_pages_pair_fault_kinds_match_the_versioned_contract() {
             "standby_unsynchronized_past_grace",
         ]
     );
-    assert_eq!(PAIR_FAULT_KINDS_VERSION, 2);
+    assert_eq!(PAIR_FAULT_KINDS_VERSION, 3);
 
     with_monitor(|_driver, client| {
         let page = client.page().unwrap();
         let compact: String = page.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(
-            compact.contains("constPAIR_FAULT_KINDS_VERSION=2;"),
+            compact.contains("constPAIR_FAULT_KINDS_VERSION=3;"),
             "page lacks the version constant"
         );
         assert!(
