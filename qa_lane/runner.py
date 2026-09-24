@@ -127,8 +127,9 @@ DEFAULT_CONFIG = {
                            'revised': 424245, 'foreign': 424246,
                            'driven': 424247},
     # The pair's shared tracking secret: the announced-source contract
-    # is keyed-only, so the rig's redundant pair — and the revised peer
-    # a model-revision roll promotes — carries the same --pair-token,
+    # is keyed-only, so the rig's redundant pair — the revised peer a
+    # model-revision roll promotes, and the driven peer a stale-island
+    # leg promotes — carries the same --pair-token,
     # letting a demoted owner's verify pull demand the keyed line_proof
     # only a peer holding the token stamps. A scenario endpoint that
     # merely replays or forges the line's public checkpoints — the
@@ -1347,10 +1348,12 @@ def start_driven_controller(cfg, record, run_dir, model, active,
     container carries the run's managed and run labels so teardown
     reconciles it with the rest of the rig, mounts the run's model
     read-only at /model/plant.json, publishes its monitor on
-    cfg['driven_port'], and gets its own runner-owned state/journal
-    directory. The launch is recorded on the run's action timeline; a
-    docker failure raises so the calling scenario reports the action
-    never completed.
+    cfg['driven_port'], gets its own runner-owned state/journal
+    directory, and carries the run's --pair-token so its checkpoint
+    answers sign the keyed line_proof an orphan-resolution probe's
+    ?prove= pull demands. The launch is recorded on the run's action
+    timeline; a docker failure raises so the calling scenario reports
+    the action never completed.
 
     Returns the launched container's name.
     """
@@ -1382,7 +1385,14 @@ def start_driven_controller(cfg, record, run_dir, model, active,
            '--standby', standby,
            '--driven', '--listen', '0.0.0.0:8082',
            '--state-file', CONTAINER_STATE_FILE,
-           '--journal-file', CONTAINER_JOURNAL_FILE)
+           '--journal-file', CONTAINER_JOURNAL_FILE,
+           # The stale-island leg promotes this peer onto the field
+           # and the islanded pair's orphan-resolution probes pull
+           # its checkpoint with ?prove= — under the keyed contract
+           # only a peer carrying the pair's token can sign the
+           # line_proof those verify pulls demand.
+           *(['--pair-token', str(cfg['pair_token'])]
+             if cfg.get('pair_token') else []))
     timeline('driven-up', container + ' serving a driven standby')
     return {'container': container}
 

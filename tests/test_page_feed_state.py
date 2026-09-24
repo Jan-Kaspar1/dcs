@@ -1730,6 +1730,58 @@ class AckReleaseRetry(unittest.TestCase):
         plant.advance()
         self.assertFalse(plant.points[11])
 
+    def test_release_with_no_active_peer_stays_armed_and_retries(self):
+        # The null-answer variant the finding names: the pair reports
+        # no settled-active peer — mid-transition — so submitCommand
+        # answers null without sending. The release must stay armed and
+        # retry once an active peer reports again rather than dropping
+        # with the input held.
+        page, transport, plant = self.rig()
+        plant.set_pv(95.0)
+        plant.advance()
+        page.refresh()
+        page.submit_ack(11)
+        plant.advance()
+        self.assertTrue(plant.points[11])
+        self.assertEqual({11: 2}, page.ack_releases)
+
+        # Both role reads the poll makes — the refresh's own and the
+        # re-poll inside submitCommand — report standby: the release
+        # has no legitimate target and nothing is posted.
+        transport.script('/role', [
+            Response({'role': 'standby', 'tick': 2, 'sync': None}),
+            Response({'role': 'standby', 'tick': 2, 'sync': None}),
+        ])
+        page.refresh()
+        self.assertIn(11, page.ack_releases,
+                      'the unsent release was dropped — the input '
+                      'stays held against every later press')
+        self.assertTrue(plant.points[11])
+        self.assertEqual(0,
+                         len(self.posted_writes(transport, 11, False)))
+        self.assertIn('not sent', page.receipt)
+
+        # The pair settles: the next poll retries the release, the
+        # accepted answer disarms the entry, and the write drops the
+        # input at its apply tick.
+        page.refresh()
+        self.assertNotIn(11, page.ack_releases)
+        self.assertEqual(1,
+                         len(self.posted_writes(transport, 11, False)))
+        plant.advance()
+        self.assertFalse(plant.points[11])
+
+        # A re-asserted alarm still acknowledges on the next press —
+        # the retried release left the input low for the edge.
+        plant.set_pv(50.0)
+        plant.advance()
+        plant.set_pv(95.0)
+        plant.advance()
+        self.assertTrue(plant.points[21])
+        page.submit_ack(11)
+        plant.advance()
+        self.assertFalse(plant.points[21])
+
     def test_lost_press_receipt_releases_via_the_held_input_audit(self):
         # The aborts-but-applies variant — the issue-948 reproduction:
         # the acknowledge write lands at its apply tick but the answer
