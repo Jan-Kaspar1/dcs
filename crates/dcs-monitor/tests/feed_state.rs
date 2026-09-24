@@ -10,7 +10,7 @@
 //! clears.
 
 use dcs_core::{
-    Direction, IoDriver, IoError, JournalEvent, PointId, Sample, Tick, Value, ValueKind,
+    Command, Direction, IoDriver, IoError, JournalEvent, PointId, Sample, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{Monitor, MonitorClient, MonitorConfig};
@@ -146,8 +146,10 @@ enum FeedState {
 /// read against the last rendered publication identity — the
 /// `publication` section's `published` seq beside the snapshot tick —
 /// then the since-cursor history and journal increments, whose first
-/// returned seq stepping over the cursor's successor is the served
-/// numbering gap. Cursors live per point like the page's per-trend
+/// returned seq stepping over the cursor's successor — or two
+/// consecutive served seqs stepping over an evicted stretch, the shape
+/// a pinned `run_boundary` ahead of the ring's tail serves — is the
+/// served numbering gap. Cursors live per point like the page's per-trend
 /// `lastSeq`, and the common history `since` follows the page's rule:
 /// the smallest seen seq once every point has seen one, else a whole
 /// refetch.
@@ -282,6 +284,20 @@ impl PageFeed {
                 from: self.journal_since + 1,
                 through: first.seq - 1,
             };
+        }
+        // The same discontinuity can sit wholly inside one answer: a
+        // pinned run_boundary precedes the ring's retained tail, so
+        // consecutive served seqs can step over an evicted stretch at
+        // any cursor — the whole re-read's 0 included. Ascending seqs
+        // give each later pair the wider `through`, matching the
+        // page's widest-gap note.
+        for pair in entries.windows(2) {
+            if pair[1].seq > pair[0].seq + 1 {
+                state = FeedState::Gap {
+                    from: pair[0].seq + 1,
+                    through: pair[1].seq - 1,
+                };
+            }
         }
         for entry in &entries {
             self.journal_since = self.journal_since.max(entry.seq);
@@ -482,12 +498,24 @@ fn scratch(test: &str) -> PathBuf {
 /// Binds the rig's monitor on `journal` — a fn rather than a closure
 /// because the returned `Monitor` borrows the driver.
 fn bind_on_journal<'d>(driver: &'d StubDriver, journal: &std::path::Path) -> Monitor<'d> {
+    bind_on_journal_bounded(driver, journal, MonitorConfig::default().journal_capacity)
+}
+
+/// `bind_on_journal` with a chosen journal tail bound — small enough
+/// that a handful of journaled entries evicts a `run_boundary` into
+/// the pinned stream.
+fn bind_on_journal_bounded<'d>(
+    driver: &'d StubDriver,
+    journal: &std::path::Path,
+    journal_capacity: usize,
+) -> Monitor<'d> {
     Monitor::bind_with(
         "127.0.0.1:0",
         Executor::new(driver, rig().1, vec![Box::new(Scale)]).unwrap(),
         signal_index(),
         MonitorConfig {
             journal_file: Some(journal.to_path_buf()),
+            journal_capacity,
             ..MonitorConfig::default()
         },
     )
@@ -546,6 +574,76 @@ fn a_same_source_restart_marks_the_feed_and_re_reads_the_streams() {
         // every later poll.
         client.advance(1).unwrap();
         assert_eq!(feed.poll(&client), FeedState::Fresh);
+    });
+    drop(second);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// qa-journal-pinned-boundary-internal-gap-unseen, consumer side: a
+/// `run_boundary` the bounded journal tail evicted survives pinned
+/// ahead of the ring, so one `GET /journal` answer reads
+/// `[boundary@low-seq, ring@high-seq]` — an evicted stretch wholly
+/// inside the response. A whole re-read (cursor 0) has no head check
+/// term for it at all, so only the consecutive-pair comparison names
+/// the jump — the defect's silent case.
+#[test]
+fn a_pinned_boundary_internal_gap_marks_the_feed() {
+    let dir = scratch("pinned-boundary-internal-gap");
+    let journal = dir.join("monitor.jsonl");
+
+    // The first lifetime on the file — its census seeds the record —
+    // so the second journals its run_boundary as an ordinary entry.
+    let (driver, _) = rig();
+    let first = bind_on_journal_bounded(&driver, &journal, 4);
+    first.paced_scan();
+    drop(first);
+
+    let (driver, _) = rig();
+    let second = bind_on_journal_bounded(&driver, &journal, 4);
+    serving(&second, || {
+        let client = MonitorClient::new(second.local_addr());
+        let mut feed = PageFeed::new(&client);
+        // The boundary merges while it still stands inside the ring:
+        // the poll names the restart, and the marker's merge key now
+        // dedupes it — so a later re-serve cannot mask the gap verdict
+        // behind a second restart observation.
+        assert_eq!(feed.poll(&client), FeedState::Restart);
+
+        // The reproduction's flood: journaled command settles past the
+        // tail's bound evict the boundary into the pinned stream.
+        for value in 0..12_u64 {
+            client
+                .command(&Command::WriteValue {
+                    point: PointId(10),
+                    kind: ValueKind::Float,
+                    value: Value::Float(value as f64),
+                })
+                .unwrap();
+            client.advance(1).unwrap();
+        }
+        // The served answer's own discontinuity — the pinned marker
+        // ahead of the retained tail — is the stretch the mark names.
+        let served = client.journal(0).unwrap();
+        assert!(
+            matches!(served[0].event, JournalEvent::RunBoundary { .. }),
+            "the pinned run_boundary must head the answer: {served:?}"
+        );
+        let pair = served
+            .windows(2)
+            .rfind(|pair| pair[1].seq > pair[0].seq + 1)
+            .expect("the flood must leave a pinned-marker discontinuity");
+        let (from, through) = (pair[0].seq + 1, pair[1].seq - 1);
+
+        // A whole re-read — the cursor a restart observation reset to
+        // 0 — steps over the internal jump: the named gap, not a
+        // restart — the boundary's key already merged.
+        feed.restart();
+        assert_eq!(
+            feed.poll(&client),
+            FeedState::Gap { from, through },
+            "the internal discontinuity must read as the named gap"
+        );
     });
     drop(second);
 

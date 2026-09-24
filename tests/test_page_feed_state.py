@@ -32,14 +32,14 @@ spans, in page.html 1-based lines:
 - `refreshTrends`' since cursor, run-marker restart check, gap note,
   and the refetch-gated watermark / seq fallback — L3215–3264
 - `journalKey`'s run-qualified merge identity and `refreshJournal`'s
-  cursor, gap note, attribution re-mark, dedupe, run_boundary restart
-  check, merge, the pending-submission settle resolution, ordering,
-  and bound — L3333–3425
+  cursor, head and consecutive-pair gap notes, attribution re-mark,
+  dedupe, run_boundary restart check, merge, the pending-submission
+  settle resolution, ordering, and bound — L3333–3442
 - `isAbortError`'s abort/timeout split, `abandonedSubmission`'s
   indeterminate verdict and pending record, `sameSubmission`'s
   settle-to-submission match, `postCommand`'s bounded POST,
   `isNotActive`, and `submitCommand`'s active-peer routing with the
-  not_active re-poll and the abort-verdict ordering — L3717–3890
+  not_active re-poll and the abort-verdict ordering — L3728–3901
 """
 import json
 import unittest
@@ -201,7 +201,7 @@ PINS = [
     (3262, 'state.samples.push(entry.sample);'),
     (3264, 'state.lastTick = entry.sample.tick;'),
     # journalKey — the run-qualified merge identity — and
-    # refreshJournal's served gap note, cursor advance, the boundary's
+    # refreshJournal's served gap notes, cursor advance, the boundary's
     # attribution re-mark ahead of the dedupe, the merge itself, the
     # run_boundary restart observation, the abandoned-submission
     # settle resolution, and the pane's ordering/bound.
@@ -209,46 +209,52 @@ PINS = [
     (3334, 'return entry.run + " " + entry.tick + " " + JSON.stringify(entry.event);'),
     (3344, 'const entries = await (await pollFetch(base + "/journal?since=" + journalSince)).json();'),
     (3349, 'if (journalSince === 0) journalRun = 0;'),
-    (3353, 'noteFeedGap("journal", journalSince + 1, entries[0].seq - 1);'),
-    (3356, 'journalSince = Math.max(journalSince, entry.seq);'),
-    (3362, 'journalRun = entry.event.run_boundary.run;'),
-    (3364, 'entry.run = journalRun;'),
-    (3365, 'const key = journalKey(entry);'),
-    (3366, 'if (journalSeen.has(key)) continue;'),
-    (3367, 'journalSeen.add(key);'),
-    (3368, 'journalEntries.push(entry);'),
-    (3374, 'if ("run_boundary" in entry.event) {'),
-    (3375, 'noteRestart("the journal recorded run " +'),
-    (3408, 'const abandoned = pendingCommands.findIndex(pending =>'),
-    (3409, 'sameSubmission(settled.receipt, pending));'),
-    (3411, 'const pending = pendingCommands.splice(abandoned, 1)[0];'),
-    (3422, 'journalEntries.sort((a, b) => a.tick - b.tick || a.seq - b.seq);'),
-    (3424, 'for (const entry of journalEntries.splice(0, journalEntries.length - JOURNAL_LIMIT)) {'),
-    (3425, 'journalSeen.delete(journalKey(entry));'),
+    (3359, 'noteFeedGap("journal", journalSince + 1, entries[0].seq - 1);'),
+    # The consecutive-pair half of the journal gap check: a pinned
+    # run_boundary ahead of the ring's evicted tail serves one answer
+    # with an internal discontinuity, at any cursor including 0.
+    (3361, 'for (let i = 1; i < entries.length; i++) {'),
+    (3362, 'if (entries[i].seq > entries[i - 1].seq + 1) {'),
+    (3363, 'noteFeedGap("journal", entries[i - 1].seq + 1, entries[i].seq - 1);'),
+    (3367, 'journalSince = Math.max(journalSince, entry.seq);'),
+    (3373, 'journalRun = entry.event.run_boundary.run;'),
+    (3375, 'entry.run = journalRun;'),
+    (3376, 'const key = journalKey(entry);'),
+    (3377, 'if (journalSeen.has(key)) continue;'),
+    (3378, 'journalSeen.add(key);'),
+    (3379, 'journalEntries.push(entry);'),
+    (3385, 'if ("run_boundary" in entry.event) {'),
+    (3386, 'noteRestart("the journal recorded run " +'),
+    (3419, 'const abandoned = pendingCommands.findIndex(pending =>'),
+    (3420, 'sameSubmission(settled.receipt, pending));'),
+    (3422, 'const pending = pendingCommands.splice(abandoned, 1)[0];'),
+    (3433, 'journalEntries.sort((a, b) => a.tick - b.tick || a.seq - b.seq);'),
+    (3435, 'for (const entry of journalEntries.splice(0, journalEntries.length - JOURNAL_LIMIT)) {'),
+    (3436, 'journalSeen.delete(journalKey(entry));'),
     # The indeterminate-outcome path — the abort split, the abandoned
     # submission's pending record and receipt-shaped answer, and the
     # settle match — then postCommand's bounded POST every command
     # rides, isNotActive's rejected-not_active shape, and
     # submitCommand's active-peer routing with the single re-poll/retry
     # the abort verdict precedes.
-    (3724, 'function isAbortError(error) {'),
-    (3726, '(error.name === "AbortError" || error.name === "TimeoutError");'),
-    (3755, 'function sameSubmission(receipt, pending) {'),
-    (3768, 'function abandonedSubmission(command, reason, error) {'),
-    (3771, 'outcome: { indeterminate: { detail: String(error) } },'),
-    (3779, 'pendingCommands.push({'),
-    (3807, 'async function postCommand(base, command, reason) {'),
-    (3818, 'signal: AbortSignal.timeout(POLL_MS),'),
-    (3823, 'function isNotActive(receipt) {'),
-    (3849, 'async function submitCommand(command, reason) {'),
-    (3863, 'answer = await postCommand(peers[target].base, command, reason);'),
-    (3865, 'if (isAbortError(error)) {'),
-    (3866, 'return abandonedSubmission(command, reason, error);'),
-    (3870, 'if (isNotActive(answer)) {'),
-    (3888, 'receipt.textContent = JSON.stringify(answer, null, 2);'),
+    (3735, 'function isAbortError(error) {'),
+    (3737, '(error.name === "AbortError" || error.name === "TimeoutError");'),
+    (3766, 'function sameSubmission(receipt, pending) {'),
+    (3779, 'function abandonedSubmission(command, reason, error) {'),
+    (3782, 'outcome: { indeterminate: { detail: String(error) } },'),
+    (3790, 'pendingCommands.push({'),
+    (3818, 'async function postCommand(base, command, reason) {'),
+    (3829, 'signal: AbortSignal.timeout(POLL_MS),'),
+    (3834, 'function isNotActive(receipt) {'),
+    (3860, 'async function submitCommand(command, reason) {'),
+    (3874, 'answer = await postCommand(peers[target].base, command, reason);'),
+    (3876, 'if (isAbortError(error)) {'),
+    (3877, 'return abandonedSubmission(command, reason, error);'),
+    (3881, 'if (isNotActive(answer)) {'),
+    (3899, 'receipt.textContent = JSON.stringify(answer, null, 2);'),
     # The cadence both tickers share.
-    (3993, 'setInterval(refreshOverview, POLL_MS);'),
-    (4194, 'setInterval(refresh, POLL_MS);'),
+    (4004, 'setInterval(refreshOverview, POLL_MS);'),
+    (4205, 'setInterval(refresh, POLL_MS);'),
 ]
 
 
@@ -817,9 +823,10 @@ class PageReplica:
                     state['lastTick'] = entry['sample']['tick']
 
     def refresh_journal(self):
-        # page.html:3343-3431 — the since-read, the run-attributed
-        # merge loop, the abandoned-submission settle resolution, and
-        # the pane's tick-order bounded render set.
+        # page.html:3343-3442 — the since-read, the head and
+        # consecutive-pair gap notes, the run-attributed merge loop,
+        # the abandoned-submission settle resolution, and the pane's
+        # tick-order bounded render set.
         entries = self.poll_fetch(
             '/journal?since=%s' % self.journal_since).json()
         # A whole re-read answers from the stream's oldest retained
@@ -831,6 +838,14 @@ class PageReplica:
                 and entries[0]['seq'] > self.journal_since + 1):
             self.note_feed_gap('journal', self.journal_since + 1,
                                entries[0]['seq'] - 1)
+        # page.html:3342-3346 — the same discontinuity can sit wholly
+        # inside one answer: a pinned run_boundary precedes the ring's
+        # retained tail, so consecutive served seqs step over an
+        # evicted stretch at any cursor, the whole re-read's 0 too.
+        for prev, nxt in zip(entries, entries[1:]):
+            if nxt['seq'] > prev['seq'] + 1:
+                self.note_feed_gap('journal', prev['seq'] + 1,
+                                   nxt['seq'] - 1)
         for entry in entries:
             self.journal_since = max(self.journal_since, entry['seq'])
             # A run_boundary re-marks the lifetime the entries after it
@@ -1122,6 +1137,97 @@ class FeedGapLatch(unittest.TestCase):
                         'feed.gap latched past an in-sequence poll: %r'
                         % page.feed_line)
         self.assertEqual(6, page.trends[1]['lastSeq'])
+
+
+class JournalPinnedBoundaryGap(unittest.TestCase):
+    """qa-journal-pinned-boundary-internal-gap-unseen: a run_boundary
+    the bounded journal tail evicted survives pinned ahead of the ring,
+    so one /journal answer reads [boundary@low-seq, ring@high-seq] — an
+    evicted stretch wholly inside the response. The head-only check was
+    blind to it: skipped outright at cursor 0 (a fresh page or a
+    post-restart refetch) and naming only the head stretch at a cursor
+    below the boundary. The consecutive-pair check marks the internal
+    jump at either."""
+
+    def rig(self, polls):
+        transport = StubTransport()
+        transport.script('/role', [Response({'role': 'active', 'tick': t,
+                                             'sync': None})
+                                   for t in range(1, polls + 1)])
+        transport.script('/schema', [Response({})] * polls)
+        transport.script('/resources', [Response({})] * polls)
+        return PageReplica(transport, points=(1,)), transport
+
+    @staticmethod
+    def jentry(seq, tick):
+        return {'seq': seq, 'tick': tick,
+                'event': {'point_changed': {'point': 1, 'from': None,
+                                            'to': {'float': 1.0}}}}
+
+    @staticmethod
+    def boundary(seq, run=2):
+        return {'seq': seq, 'tick': 0,
+                'event': {'run_boundary': {'run': run}}}
+
+    def test_internal_jump_marks_the_gap_at_cursor_zero(self):
+        # The QA reproduction's served shape: the restart journaled
+        # run 2's boundary at seq 450, a >capacity flood evicted the
+        # ring to 648+, and the fresh page's since=0 read answers
+        # [450, 648, 649, ...] — the internal jump the head-only check
+        # could not see.
+        page, transport = self.rig(polls=2)
+        transport.script('/snapshot', [Response(snapshot(10, 6)),
+                                       Response(snapshot(11, 7))])
+        transport.script('/history', [Response([]), Response([])])
+        transport.script('/journal', [
+            Response([self.boundary(450), self.jentry(648, 10),
+                      self.jentry(649, 10)]),
+            Response([self.jentry(650, 11)]),
+        ])
+
+        page.refresh()
+        self.assertEqual({'stream': 'journal', 'from': 451,
+                          'through': 647},
+                         page.feed['gap'])
+        self.assertFalse(page.feed_line['hidden'])
+        self.assertEqual('gap', page.feed_line['class'])
+        self.assertIn('publication gap: journal seqs 451–647',
+                      page.feed_line['text'])
+        # The merged boundary still names the restart beside the gap.
+        self.assertIn('source restarted', page.feed_line['text'])
+
+        # The next in-sequence poll clears both marks.
+        page.refresh()
+        self.assertIsNone(page.feed['gap'])
+        self.assertIsNone(page.feed['restart'])
+        self.assertTrue(page.feed_line['hidden'])
+
+    def test_internal_jump_marks_past_a_flagged_head_stretch(self):
+        # The cursor-below-the-boundary variant from the evidence: the
+        # head check already flags the 301–449 stretch it can see, but
+        # the internal 451–647 jump is the wider gap — the note must
+        # name it rather than stopping at the head.
+        page, transport = self.rig(polls=2)
+        transport.script('/snapshot', [Response(snapshot(10, 6)),
+                                       Response(snapshot(11, 7))])
+        transport.script('/history', [Response([]), Response([])])
+        transport.script('/journal', [
+            Response([self.jentry(298, 9), self.jentry(299, 9),
+                      self.jentry(300, 9)]),
+            Response([self.boundary(450), self.jentry(648, 10),
+                      self.jentry(649, 10)]),
+        ])
+
+        page.refresh()
+        self.assertTrue(page.feed_line['hidden'])
+        self.assertEqual(300, page.journal_since)
+
+        page.refresh()
+        self.assertEqual({'stream': 'journal', 'from': 451,
+                          'through': 647},
+                         page.feed['gap'])
+        self.assertIn('publication gap: journal seqs 451–647',
+                      page.feed_line['text'])
 
 
 class TickZeroSeqFallback(unittest.TestCase):
