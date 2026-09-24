@@ -1,22 +1,32 @@
 #!/usr/bin/env python3
 """Install a reviewed committed revision without starting it."""
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 
-def main():
-    source = Path(__file__).resolve().parents[1]
-    active = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', 'dcs-agents.service']).returncode == 0
-    if active:
-        raise SystemExit('Stop dcs-agents before upgrading its pinned release')
-    revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source, text=True).strip()
-    if subprocess.check_output(['git', 'status', '--porcelain'], cwd=source, text=True).strip():
-        raise SystemExit('Commit the reviewed source before installing a pinned release')
-    subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests'], cwd=source, check=True)
-    home = Path.home()
+SERVICE = 'dcs-agents.service'
+
+
+def service_active(service=SERVICE):
+    return subprocess.run(['systemctl', '--user', 'is-active', '--quiet', service]).returncode == 0
+
+
+def preflight_command():
+    """The installer gate is the CI supervisor-tests phase itself, so the
+    installer's preflight can never drift from the sharded Python gate."""
+    return [sys.executable, 'scripts/verify.py', '--phase', 'supervisor-tests']
+
+
+def run_preflight(source):
+    started = time.monotonic()
+    subprocess.run(preflight_command(), cwd=source, check=True)
+    print(f'install_agents.py: preflight status=passed elapsed_s={time.monotonic() - started:.3f}', flush=True)
+
+
+def install(source, home, revision):
     base = home / '.local/share/dcs-agents'
     release = base / 'releases' / revision
     release.mkdir(parents=True, exist_ok=True)
@@ -43,7 +53,24 @@ def main():
     units.mkdir(parents=True, exist_ok=True)
     (units / 'dcs-agents.service').write_text('[Unit]\nDescription=DCS local Devin worker supervisor\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=%h/.local/bin/dcs-agents run\nRestart=on-failure\nRestartSec=30\nTimeoutStopSec=45\nKillMode=control-group\nEnvironment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin\n\n[Install]\nWantedBy=default.target\n')
     subprocess.run(['systemctl','--user','daemon-reload'], check=True)
+
+
+def main(source=None, home=None):
+    source = Path(source) if source else Path(__file__).resolve().parents[1]
+    home = Path(home) if home else Path.home()
+    if service_active():
+        raise SystemExit('Stop dcs-agents before upgrading its pinned release')
+    revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source, text=True).strip()
+    if subprocess.check_output(['git', 'status', '--porcelain'], cwd=source, text=True).strip():
+        raise SystemExit('Commit the reviewed source before installing a pinned release')
+    # The gate runs before any release file is touched, so a failed shard can
+    # never move the installed 'current' pointer.
+    run_preflight(source)
+    started = time.monotonic()
+    install(source, home, revision)
+    print(f'install_agents.py: install elapsed_s={time.monotonic() - started:.3f}', flush=True)
     print('Installed revision ' + revision + '. Service remains stopped until explicitly started.')
+
 
 if __name__ == '__main__':
     main()
