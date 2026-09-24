@@ -250,13 +250,16 @@ fn invalid_dynamics_fixtures_carry_pinned_verdicts() {
     .unwrap();
     assert!(serde_json::from_str::<serde_json::Value>(&malformed).is_err());
     // The other invalid dynamics fixtures are well-formed element lists
-    // whose offenses — unbound points, driven-point conflicts — are
-    // merge-layer rules the schema language cannot express: the schema
-    // accepts them and `ChannelMap::validate` owns the rejection.
+    // whose offenses — unbound points, driven-point conflicts, an
+    // element's input and output naming the same point where the legs'
+    // kinds differ — are merge-layer rules the schema language cannot
+    // express: the schema accepts them and `ChannelMap::validate` owns
+    // the rejection.
     let validator = validator();
     for name in [
         "dynamics_unbound_point.json",
         "dynamics_unbound_and_conflicting.json",
+        "dynamics_self_point.json",
     ] {
         let relative = Path::new("crates/dcs-plant/fixtures/invalid").join(name);
         let text = std::fs::read_to_string(root.join(&relative)).unwrap();
