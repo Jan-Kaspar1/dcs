@@ -78,7 +78,10 @@ pub struct MonitorConfig {
     /// served journal answers continuously across a restart; a file
     /// that cannot be replayed fails the bind naming the file and the
     /// offending record, and a missing file is a cold start. Point
-    /// history stays volatile — only the journal persists. The sink is
+    /// history stays volatile — only the journal persists — but the
+    /// file's run count is the lifetime ordinal served history
+    /// envelopes carry, so a restart's restarted seq axis is
+    /// attributable there too. The sink is
     /// single-writer: the bind takes an exclusive lock on the path for
     /// the monitor's lifetime, so a second live process configured with
     /// the same path fails its bind naming the conflict rather than
@@ -202,7 +205,10 @@ impl Recorder {
     /// marker also journals once as a served `run_boundary` entry — the
     /// file marker's served form — so a `GET /journal` consumer can
     /// attribute the entries on either side of the seam to their
-    /// process lifetime.
+    /// process lifetime. The same run ordinal stamps every served
+    /// history envelope, so a `GET /history` consumer detects the seam
+    /// even while its `since` cursor still filters the restarted seq
+    /// axis's samples out.
     pub(super) fn new(config: MonitorConfig, tick: Tick) -> io::Result<Self> {
         let (sink, replay) = match &config.journal_file {
             Some(path) => {
@@ -211,13 +217,11 @@ impl Recorder {
             }
             None => (None, crate::journal_file::Replay::default()),
         };
-        // The store's served `run` mark is the same lifetime number
-        // this run's `run_boundary` journal marker carries — the
-        // replayed file's count plus one — so a `/history` consumer
-        // reads the restart the volatile rings' renumbering would
-        // otherwise hide. With no journal file there is no lifetime
-        // record to count: every lifetime serves run 1, the same
-        // anonymity the journal itself has without its file.
+        // This run's lifetime ordinal — the same count the run-boundary
+        // marker names — stamps every served `PointHistory` envelope, so
+        // a `since`-cursor history consumer detects a restarted seq axis
+        // by the changed `run` even while the cursor still filters every
+        // sample out.
         let store = Store::new(
             config.history_capacity,
             config.journal_capacity,
@@ -628,7 +632,7 @@ impl Recorder {
             let Some(sample) = telemetry.sample else {
                 continue;
             };
-            self.store.push_sample(telemetry.point, sample);
+            self.store.push_sample(telemetry.point, scan_tick, sample);
             let from = self.qualities.insert(telemetry.point, sample.quality);
             if from != Some(sample.quality) {
                 self.push(

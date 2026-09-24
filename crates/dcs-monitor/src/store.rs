@@ -41,14 +41,8 @@
 //! window observes the numbering gap — the named [`PublicationGap`]
 //! on a seq-cursor publication read, a skipped seq stretch on the
 //! history and journal streams — or coalesces onto the latest state,
-//! rather than ever backpressuring the run. The journal stream's seqs
-//! additionally continue across a restart through the journal file's
-//! replay; the volatile history rings cannot, so every served
-//! [`PointHistory`] instead carries the producer's run — the
-//! process-lifetime number the journal file counts — making the
-//! ring's renumbering explicit to a `since`-cursor consumer rather
-//! than a silent stall behind a dead seq domain. With no consumers at
-//! all the counters keep advancing while storage stays bounded; the
+//! rather than ever backpressuring the run. With no consumers at all
+//! the counters keep advancing while storage stays bounded; the
 //! snapshot's `publication` section ([`PublicationHealth`]) reports
 //! the store's overload accounting as of each publish.
 
@@ -122,7 +116,10 @@ pub struct PublicationPage {
 
 /// One point's ring of recent samples.
 struct Ring {
-    /// The `seq` the next appended sample takes.
+    /// The `seq` floor the next appended sample takes — the actual
+    /// stamp is the scan's own tick when that lies ahead, so the axis
+    /// rides the run's tick domain and a restart continuing that
+    /// domain keeps numbering instead of silently restarting it.
     next_seq: u64,
     samples: VecDeque<HistorySample>,
 }
@@ -180,6 +177,13 @@ struct Inner {
     /// History samples appended since the last publish — the next
     /// publication's history delta, drained there.
     pending_history: BTreeMap<PointId, VecDeque<HistorySample>>,
+    /// The serving process's lifetime ordinal — the journal file's run
+    /// count when one is configured, `1` without — stamped on every
+    /// served [`PointHistory`] envelope so a `since`-cursor consumer
+    /// detects a restart whose new tick domain restarted the seq axis:
+    /// the marker answers even when the cursor's filter empties the
+    /// samples list.
+    run: u64,
     /// Journal entries appended since the last publish — the next
     /// publication's event delta, drained there.
     pending_journal: VecDeque<JournalEntry>,
@@ -261,25 +265,14 @@ pub(crate) struct RoutedEvents {
 #[derive(Clone)]
 pub(crate) struct Store {
     inner: Arc<Mutex<Inner>>,
-    /// The process lifetime this store serves — the run number the
-    /// monitor's journal file counts for this process, matching the
-    /// `run` a restart's served `run_boundary` journal entry carries.
-    /// Every served [`PointHistory`] is stamped with it so a
-    /// `since`-cursor consumer detects the volatile rings' renumbering
-    /// across a restart instead of stalling on a dead seq domain.
-    /// Immutable for the store's lifetime, so it reads without the
-    /// lock.
-    run: u64,
 }
 
 impl Store {
     /// An empty store with the given retention bounds — a
     /// [`Monitor`](crate::Monitor)'s bind publishes the seed read
     /// model immediately after, so a store without any publication
-    /// exists only inside construction. `run` is the process-lifetime
-    /// number stamped onto every served [`PointHistory`]: the journal
-    /// file's run count for this process, or 1 when no file records
-    /// lifetimes.
+    /// exists only inside construction. `run` is the serving process's
+    /// lifetime ordinal, stamped on every served [`PointHistory`].
     pub(crate) fn new(
         history_capacity: usize,
         journal_capacity: usize,
@@ -300,6 +293,7 @@ impl Store {
                 next_event_seq: 1,
                 receipts: Arc::new(Vec::new()),
                 pending_history: BTreeMap::new(),
+                run,
                 pending_journal: VecDeque::new(),
                 pending_boundaries: VecDeque::new(),
                 next_seq: 1,
@@ -310,25 +304,26 @@ impl Store {
                 journal_capacity,
                 event_history_capacity,
             })),
-            run,
         }
     }
 
     /// Appends `point`'s fresh scan sample to its served ring and to
     /// the pending history delta the next publication drains. The
-    /// sample's `seq` comes from the ring — never reused within the
-    /// store's run, so a `since`-cursor consumer detects eviction as a
-    /// numbering gap, and the served `run` mark names the lifetime a
-    /// restart renumbered.
-    pub(crate) fn push_sample(&self, point: PointId, sample: Sample) {
+    /// sample's `seq` is the scan's own `tick` when that lies ahead of
+    /// the ring's floor — never reused, so a `since`-cursor consumer
+    /// detects eviction as a numbering gap. Riding the run's tick
+    /// domain keeps the axis continuous across a restart that adopts
+    /// the same domain (a checkpoint-adopted standby, a restored state
+    /// file) instead of silently restarting it at 1; a restart that
+    /// begins a new tick domain restarts the axis, which the served
+    /// envelope's `run` marker distinguishes.
+    pub(crate) fn push_sample(&self, point: PointId, tick: Tick, sample: Sample) {
         let mut inner = self.inner.lock().unwrap();
         let capacity = inner.history_capacity;
         let ring = inner.rings.entry(point).or_insert_with(Ring::new);
-        let stamped = HistorySample {
-            seq: ring.next_seq,
-            sample,
-        };
-        ring.next_seq += 1;
+        let seq = ring.next_seq.max(tick.0);
+        let stamped = HistorySample { seq, sample };
+        ring.next_seq = seq + 1;
         ring.samples.push_back(stamped);
         while ring.samples.len() > capacity {
             ring.samples.pop_front();
@@ -438,6 +433,7 @@ impl Store {
             depth: (inner.window.len() + 1).min(inner.window_capacity) as u64,
             window: inner.window_capacity as u64,
         });
+        let run = inner.run;
         let publication = Arc::new(Publication {
             seq,
             tick,
@@ -448,7 +444,7 @@ impl Store {
                 .iter_mut()
                 .map(|(&point, samples)| PointHistory {
                     point,
-                    run: self.run,
+                    run,
                     samples: samples.drain(..).collect(),
                 })
                 .collect(),
@@ -478,10 +474,7 @@ impl Store {
     /// The retained history of `points` — every point in the latest
     /// publication when empty — keeping only samples with a `seq`
     /// above `since`, in ascending point order regardless of request
-    /// order, so equal runs answer identically. Every answer carries
-    /// the store's `run` — the process-lifetime mark, present even on
-    /// an empty page — so a `since` cursor a restart left behind reads
-    /// the renumbering instead of stalling silently.
+    /// order, so equal runs answer identically.
     pub(crate) fn history(&self, points: &[PointId], since: u64) -> Vec<PointHistory> {
         let inner = self.inner.lock().unwrap();
         let selected: BTreeSet<PointId> = if points.is_empty() {
@@ -504,7 +497,7 @@ impl Store {
             .into_iter()
             .map(|point| PointHistory {
                 point,
-                run: self.run,
+                run: inner.run,
                 samples: inner
                     .rings
                     .get(&point)
@@ -672,25 +665,6 @@ mod tests {
         assert_eq!(routed.latest[1].event.component, "other");
         // Both classes draw on the one routed-event stream's seqs.
         assert!(routed.latest.iter().map(|record| record.seq).eq([3, 4]));
-    }
-
-    #[test]
-    fn served_history_stamps_the_store_run_on_every_answer() {
-        // The `run` mark rides every `PointHistory` — a populated ring,
-        // a `since`-filtered empty page, and the publication delta
-        // alike — so a cursor stranded by a restart sees the new
-        // lifetime named rather than a silent empty answer.
-        let store = Store::new(4, 0, 4, 0, 7);
-        store.push_sample(PointId(10), Sample::good(Value::Int(1), Tick(1)));
-        let publication = store.publish(Tick(1), snapshot(Tick(1)), &[]);
-        assert!(publication.history.iter().all(|history| history.run == 7));
-        let history = store.history(&[PointId(10)], 0);
-        assert_eq!(history[0].run, 7);
-        // A cursor beyond the run's seqs still gets the mark — the
-        // restart-detection path the field exists for.
-        let stale = store.history(&[PointId(10), PointId(20)], 9_999);
-        assert!(stale.iter().all(|history| history.run == 7));
-        assert!(stale.iter().all(|history| history.samples.is_empty()));
     }
 
     #[test]

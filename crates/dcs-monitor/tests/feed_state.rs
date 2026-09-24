@@ -1,21 +1,24 @@
 //! The page's feed-state surface — the consumer-side honesty the
 //! bounded-publication decision requires of the page as a consumer: a
 //! `since`-cursor poll stepping over an evicted stretch observes the
-//! served numbering gap, a changed `run` mark names the restart whose
-//! ring renumbered, and a snapshot re-serving the same publication's
-//! seq/tick observes a stall. The page's detection rule is mirrored
-//! here poll-for-poll against the same Monitor rig the other page
-//! tests use — the stub driver is the stubbed feed — driving a real
-//! eviction through small retained bounds and a real stall by simply
-//! not scanning, then asserting the named state renders and clears.
+//! served numbering gap, and a snapshot re-serving the same
+//! publication's seq/tick observes a stall. The page's detection rule
+//! is mirrored here poll-for-poll against the same Monitor rig the
+//! other page tests use — the stub driver is the stubbed feed — driving
+//! a real eviction through small retained bounds and a real stall by
+//! simply not scanning, then asserting the named state renders and
+//! clears.
 
-use dcs_core::{Direction, IoDriver, IoError, PointId, Sample, Tick, Value, ValueKind};
+use dcs_core::{
+    Direction, IoDriver, IoError, JournalEvent, PointId, Sample, Tick, Value, ValueKind,
+};
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{Monitor, MonitorClient, MonitorConfig};
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, PointMap, StepError,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::thread;
 
@@ -128,14 +131,15 @@ enum FeedState {
     /// from the bounded served stream before the page read it. The
     /// page's "publication gap".
     Gap { from: u64, through: u64 },
-    /// The same source's stream answered under a new `run` mark — the
-    /// producing process lifetime changed and the ring renumbered, so
-    /// the cursor reset rather than stalling behind seqs that can
-    /// never pass. The page's "stream restarted".
-    Restart { run: u64 },
     /// The snapshot re-served the publication identity the last poll
     /// already rendered — a stall. The page's "stale publication".
     Stale { published: Option<u64>, tick: Tick },
+    /// The serving process restarted — the publication identity
+    /// regressed, a new journal `run_boundary` landed, or a history
+    /// envelope's `run` marker changed — so the page's stream cursors
+    /// reset rather than stitch the new lifetime's numbering onto the
+    /// old stream's. The page's "source restarted".
+    Restart,
 }
 
 /// The page's feed-state rule, mirrored poll-for-poll: one snapshot
@@ -155,11 +159,16 @@ struct PageFeed {
     /// Per-point history cursors — the page's per-trend `lastSeq`,
     /// seeded for every index point like `buildTrends`.
     history_since: BTreeMap<PointId, u64>,
-    /// Per-point run marks — the page's per-trend `run`: the process
-    /// lifetime the cursor's seq domain belongs to.
+    /// Per-point served lifetime markers — the page's per-trend `run`:
+    /// a changed `run` under a standing cursor is the history stream's
+    /// own restart observation.
     history_run: BTreeMap<PointId, u64>,
     /// The journal cursor — the page's `journalSince`.
     journal_since: u64,
+    /// Entries already observed — the page's `journalSeen`, tick plus
+    /// serialized event — so a whole-journal re-fetch after a restart
+    /// reset does not re-fire a boundary already merged.
+    journal_seen: HashSet<String>,
 }
 
 impl PageFeed {
@@ -175,7 +184,20 @@ impl PageFeed {
                 .collect(),
             history_run: BTreeMap::new(),
             journal_since: 0,
+            journal_seen: HashSet::new(),
         }
+    }
+
+    /// The page's `noteRestart`: a same-source restart observed through
+    /// any served stream resets every stream cursor so the next reads
+    /// re-fetch whole — the new lifetime's numbering must never merge
+    /// onto the old stream's.
+    fn restart(&mut self) {
+        for seq in self.history_since.values_mut() {
+            *seq = 0;
+        }
+        self.history_run.clear();
+        self.journal_since = 0;
     }
 
     /// One page refresh's feed reads — `/snapshot` then the `/history`
@@ -183,14 +205,17 @@ impl PageFeed {
     /// renders. A poll observing both degradations answers the gap:
     /// the streams provably advanced past the cursor while the
     /// publication identity repeated cannot happen — a gap needs new
-    /// entries, which a repeated publication never carries.
+    /// entries, which a repeated publication never carries. A restart
+    /// observation outranks either: cursors reset and the poll reports
+    /// the seam, whatever the streams then answered.
     fn poll(&mut self, client: &MonitorClient) -> FeedState {
         let snapshot = client.snapshot().unwrap();
         let publication = (
             snapshot.publication.map(|health| health.published),
             snapshot.tick,
         );
-        let mut state = match self.publication {
+        let last_publication = self.publication;
+        let mut state = match last_publication {
             Some(last) if last == publication => FeedState::Stale {
                 published: publication.0,
                 tick: publication.1,
@@ -198,6 +223,16 @@ impl PageFeed {
             _ => FeedState::Fresh,
         };
         self.publication = Some(publication);
+        let mut restarted = false;
+        // A regressed identity — a lower `published` seq or an older
+        // tick — can only mean the source's store restarted.
+        if let Some((last_seq, last_tick)) = last_publication
+            && ((last_seq.is_some() && publication.0.is_some() && publication.0 < last_seq)
+                || publication.1 < last_tick)
+        {
+            restarted = true;
+            self.restart();
+        }
 
         let since =
             if !self.history_since.is_empty() && self.history_since.values().all(|seq| *seq > 0) {
@@ -206,16 +241,21 @@ impl PageFeed {
                 0
             };
         for history in client.history(&[], since).unwrap() {
-            // The served run mark names the producing lifetime: a
-            // changed run on the same source means the seq domain
-            // restarted, so the cursor resets rather than stalling
-            // behind a dead domain.
-            let adopted = self.history_run.get(&history.point).copied().unwrap_or(0);
-            if adopted != 0 && history.run != adopted {
-                self.history_since.insert(history.point, 0);
-                state = FeedState::Restart { run: history.run };
+            // The envelope's served lifetime marker: a `run` that
+            // changed under a standing cursor means the seq axis
+            // restarted with a new process lifetime. An envelope
+            // predating the marker serves `run` 0 and seeds nothing.
+            if history.run != 0 {
+                if self
+                    .history_run
+                    .get(&history.point)
+                    .is_some_and(|run| *run != history.run)
+                {
+                    restarted = true;
+                    self.restart();
+                }
+                self.history_run.insert(history.point, history.run);
             }
-            self.history_run.insert(history.point, history.run);
             let last = self.history_since.get(&history.point).copied().unwrap_or(0);
             if last > 0
                 && let Some(first) = history.samples.iter().find(|entry| entry.seq > last)
@@ -245,8 +285,21 @@ impl PageFeed {
         }
         for entry in &entries {
             self.journal_since = self.journal_since.max(entry.seq);
+            let key = format!(
+                "{} {}",
+                entry.tick.0,
+                serde_json::to_string(&entry.event).unwrap()
+            );
+            // A run_boundary the page had not yet merged is the journal
+            // stream's own restart marker.
+            if self.journal_seen.insert(key)
+                && matches!(entry.event, JournalEvent::RunBoundary { .. })
+            {
+                restarted = true;
+                self.restart();
+            }
         }
-        state
+        if restarted { FeedState::Restart } else { state }
     }
 }
 
@@ -273,25 +326,31 @@ fn page_carries_the_feed_state_indicator() {
         "id=\"feed-state\"",
         "publication gap",
         "stale publication",
-        "stream restarted",
+        "source restarted",
     ] {
         assert!(page.contains(needle), "page lacks {needle}");
     }
     // The detection machinery: the publication identity the freshness
-    // check compares, the since-cursor gap reads, and the renderer.
+    // check compares, the since-cursor gap reads, the restart
+    // observations — a regressed publication identity, a served
+    // run_boundary, a changed history run marker — funnelling into the
+    // cursor reset, and the renderer.
     for needle in [
         "function notePublication(snapshot)",
+        "function noteRestart(detail)",
         "function noteFeedGap(stream, from, through)",
         "function renderFeed()",
         "feed.publication",
         "feed.gap",
         "feed.stale",
+        "feed.restart",
         "snapshot.publication",
         "health.published",
         "noteFeedGap(\"history\"",
         "noteFeedGap(\"journal\"",
-        "noteFeedRestart(\"history\"",
-        "feed.restart",
+        "noteRestart(\"the source's publication identity regressed\")",
+        "\"run_boundary\" in entry.event",
+        "history.run !== undefined",
     ] {
         assert!(page.contains(needle), "page lacks {needle}");
     }
@@ -380,60 +439,6 @@ fn a_poll_through_eviction_and_stall_names_the_state_then_clears() {
     });
 }
 
-/// Issue #886's consumer side against the real monitor: the restarted
-/// process renumbers its rings under a new `run` mark, and the
-/// mirrored cursor rule reads the boundary instead of stalling behind
-/// a cursor the new domain's seqs cannot pass.
-#[test]
-fn a_monitor_restart_renders_the_run_boundary_then_clears() {
-    let dir = std::env::temp_dir().join(format!("dcs-monitor-feed-restart-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("journal.jsonl");
-    let (driver, map) = rig();
-    let bind = || {
-        let executor = Executor::new(&driver, map.clone(), vec![Box::new(Scale)]).unwrap();
-        Monitor::bind_with(
-            "127.0.0.1:0",
-            executor,
-            signal_index(),
-            MonitorConfig {
-                journal_file: Some(path.clone()),
-                ..MonitorConfig::default()
-            },
-        )
-        .unwrap()
-    };
-
-    // First lifetime: the cursor fills under run 1.
-    let monitor = bind();
-    let client = MonitorClient::new(monitor.local_addr());
-    let mut feed = serving(&monitor, || {
-        client.advance(2).unwrap();
-        let mut feed = PageFeed::new(&client);
-        assert_eq!(feed.poll(&client), FeedState::Fresh);
-        feed
-    });
-    drop(monitor);
-
-    // The restart: the ring renumbered under run 2, so the stale
-    // cursor's poll names the boundary instead of answering Fresh.
-    let monitor = bind();
-    let client = MonitorClient::new(monitor.local_addr());
-    serving(&monitor, || {
-        client.advance(2).unwrap();
-        match feed.poll(&client) {
-            FeedState::Restart { run } => assert_eq!(run, 2),
-            other => panic!("expected the named restart, got {other:?}"),
-        }
-        // Recovery: the resynced cursor tracks the new domain, and the
-        // next fresh in-sequence poll is clean again.
-        client.advance(1).unwrap();
-        assert_eq!(feed.poll(&client), FeedState::Fresh);
-    });
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 #[test]
 fn non_good_process_data_is_not_a_feed_state() {
     let (driver, map) = rig();
@@ -465,4 +470,84 @@ fn non_good_process_data_is_not_a_feed_state() {
             telemetry.sample
         );
     });
+}
+
+/// A scratch directory per test and process — tests run in parallel.
+fn scratch(test: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("dcs-monitor-feed-{test}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Binds the rig's monitor on `journal` — a fn rather than a closure
+/// because the returned `Monitor` borrows the driver.
+fn bind_on_journal<'d>(driver: &'d StubDriver, journal: &std::path::Path) -> Monitor<'d> {
+    Monitor::bind_with(
+        "127.0.0.1:0",
+        Executor::new(driver, rig().1, vec![Box::new(Scale)]).unwrap(),
+        signal_index(),
+        MonitorConfig {
+            journal_file: Some(journal.to_path_buf()),
+            ..MonitorConfig::default()
+        },
+    )
+    .unwrap()
+}
+
+/// #884's regression, consumer side: a monitor restart behind the same
+/// configured source left every served stream's seq axis renumbered
+/// from 1, so a cursor consumer read phantom idle then stitched the new
+/// lifetime's samples contiguously onto the old series. The page now
+/// notes the restart — the publication identity regressing, the served
+/// `run_boundary`, the changed history `run` marker — resets its
+/// cursors, and marks the feed "source restarted" for that poll,
+/// clearing on the next in-sequence one. Two binds on one journal file
+/// stand in for the restart, the PageFeed's cursors persisting across
+/// them like the page's do across a same-source process swap.
+#[test]
+fn a_same_source_restart_marks_the_feed_and_re_reads_the_streams() {
+    let dir = scratch("restart-feed");
+    let journal = dir.join("monitor.jsonl");
+
+    // First lifetime: scans and polls seat the page's cursors at the
+    // run's tail.
+    let (driver, _) = rig();
+    let first = bind_on_journal(&driver, &journal);
+    let mut feed = serving(&first, || {
+        let client = MonitorClient::new(first.local_addr());
+        let mut feed = PageFeed::new(&client);
+        client.advance(3).unwrap();
+        assert_eq!(feed.poll(&client), FeedState::Fresh);
+        feed
+    });
+    drop(first);
+
+    // The restart behind the same source: the second lifetime's store
+    // renumbers every seq axis from 1 while its journal replays the
+    // file's record and serves run 2's boundary. The first poll on the
+    // new process observes the regression — publication seq back at 1 —
+    // and names the restart instead of merging its numbering.
+    let driver = StubDriver::new(&[
+        (PointId(10), Value::Float(0.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ]);
+    let second = bind_on_journal(&driver, &journal);
+    serving(&second, || {
+        let client = MonitorClient::new(second.local_addr());
+        assert_eq!(
+            feed.poll(&client),
+            FeedState::Restart,
+            "the restart must name itself, never read as idle or \
+             in-sequence continuation"
+        );
+        // The restart's cursor reset re-read the streams whole: the
+        // served run boundary was merged once — it must not re-fire on
+        // every later poll.
+        client.advance(1).unwrap();
+        assert_eq!(feed.poll(&client), FeedState::Fresh);
+    });
+    drop(second);
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

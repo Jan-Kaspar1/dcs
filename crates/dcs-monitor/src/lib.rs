@@ -86,11 +86,14 @@
 //!   rings; `?point=<id>` (repeatable) selects points and
 //!   `?since=<seq>` returns only samples newer than the caller's last
 //!   seen sequence — an evicted stretch surfaces as a numbering gap.
-//!   Every answer also carries the producing process's `run` — the
-//!   lifetime number the journal file's `run_boundary` markers count —
-//!   on populated and empty pages alike, so a `since` cursor a restart
-//!   stranded in a dead seq domain reads the renumbering as a changed
-//!   `run` and resyncs instead of stalling
+//!   History `seq`s ride the run's tick domain, so a restart that
+//!   continues the domain (a checkpoint-adopted standby, a
+//!   `--state-file` resume) keeps numbering across the seam and the
+//!   unserved stretch reads as the gap it is; each served envelope also
+//!   stamps the run's lifetime ordinal (`run` — the same counter the
+//!   journal's `run_boundary` markers carry), so a restart beginning a
+//!   new tick domain is detectable on the envelope itself even while
+//!   the cursor still filters every restarted sample out
 //! - `GET /journal` → `200` `Vec<`[`JournalEntry`]`>` — the transition
 //!   journal in scan order; `?since=<seq>` filters likewise. The tail
 //!   is bounded, but `run_boundary` entries are pinned: evicting one
@@ -206,7 +209,13 @@
 //! detects an evicted stretch as a numbering gap — or, on the
 //! seq-cursor publication read ([`Monitor::publications_since`]), the
 //! named [`PublicationGap`] — and coalesces onto retained or latest
-//! state instead of ever backpressuring execution. The store's
+//! state instead of ever backpressuring execution. History samples draw
+//! their `seq` from the producing scan's tick rather than a per-process
+//! append count, so a restart that continues the tick domain keeps the
+//! axis — the unserved stretch reads as the numbering gap it is — and
+//! every served [`PointHistory`] stamps the run's lifetime ordinal, so
+//! a restart beginning a new tick domain is detectable even while a
+//! `since` cursor still filters its samples out. The store's
 //! overload accounting — publications produced, publications evicted
 //! and coalesced, retained depth, the configured window bound — rides
 //! each served snapshot's `publication` section: the documented
@@ -234,12 +243,10 @@
 //! `--state-file` diffs its first scan against the restored executor
 //! state and the replayed record's last observations, so the audit
 //! trail continues rather than re-journaling what it already recorded.
-//! Point history stays volatile; only the journal persists. The rings'
-//! renumbering is still explicit to consumers, though: every served
-//! [`PointHistory`] carries this run's number — the same count the
-//! `run_boundary` markers name — so a `since` cursor surviving the
-//! restart sees the new lifetime instead of an answer that looks like
-//! quiescence. The file is
+//! Point history stays volatile; only the journal persists — though the
+//! file's run count is the lifetime ordinal the volatile history's
+//! served envelopes stamp, so a restarted seq axis is attributable on
+//! the history read too. The file is
 //! single-writer: the bind holds an exclusive advisory lock on the path
 //! for the monitor's lifetime, so two monitors configured with the same
 //! `journal_file` cannot interleave duplicate `seq`s into one
@@ -3067,10 +3074,7 @@ impl MonitorClient {
 
     /// `GET /history`: the retained samples of `points` — or of every
     /// mapped point when empty — keeping only samples with a `seq` above
-    /// `since` (`0` fetches everything retained). Each [`PointHistory`]
-    /// also carries the serving process's `run`, so a cursor a restart
-    /// stranded above the renumbered ring reads the new lifetime rather
-    /// than a silent empty page.
+    /// `since` (`0` fetches everything retained).
     pub fn history(&self, points: &[PointId], since: u64) -> io::Result<Vec<PointHistory>> {
         let mut path = format!("/history?since={since}");
         for point in points {
