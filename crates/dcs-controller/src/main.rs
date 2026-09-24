@@ -97,24 +97,34 @@
 //! `--journal-file PATH` persists the transition journal the monitor
 //! records — the journal-persistence decision's durable audit trail:
 //! every journaled entry is appended to `PATH` as one line-delimited
-//! JSON record at the same recording point, and startup replays the
-//! file into the served ring with `seq` numbering continued where it
-//! left off, so `GET /journal` answers continuously across a restart.
-//! A run-boundary marker line separates process lifetimes within one
-//! file; a file that cannot be replayed exits nonzero naming the file
-//! and the offending record, and a missing file is a cold start. The
-//! journal requires `--listen` — the recorder lives in the monitor —
-//! and stays deliberately separate from `--state-file`: the checkpoint
-//! is overwritten per save and consumed by restore, the journal is
-//! append-only and consumed by review; a `--state-file`-resumed run
-//! keeps appending to the same journal file in the restored tick
-//! domain. The file is single-writer: the monitor bind holds an
-//! exclusive advisory lock on the path for the process lifetime, so a
-//! second live process pointed at the same `--journal-file` — a
-//! misconfiguration that would interleave duplicate `seq`s into an
-//! un-replayable record — exits nonzero naming the file and the
-//! conflict, while a dead holder's lock releases with its descriptor
-//! and a restart re-acquires it.
+//! JSON record in `seq` order, and startup replays the file into the
+//! served ring with `seq` numbering continued where it left off, so
+//! `GET /journal` answers continuously across a restart. The appends
+//! run on a dedicated writer behind a bounded queue (the monitor's
+//! `journal_drain_capacity`), so a slow or stalled sink lengthens
+//! neither a scan nor the executor lock's hold — the recording point
+//! hands each record off without waiting, and a queue that fills past
+//! the bound is the run's fatal point, named like every append
+//! failure. A sink's lag reads on the snapshot's
+//! `publication.journal_sink` health — `healthy`, `lagging`, or
+//! `failed` with the accepted/drained/lost accounting — and a request
+//! that answers with durable state attests the drain caught up before
+//! it responds. A run-boundary marker line separates process
+//! lifetimes within one file; a file that cannot be replayed exits
+//! nonzero naming the file and the offending record, and a missing
+//! file is a cold start. The journal requires `--listen` — the
+//! recorder lives in the monitor — and stays deliberately separate
+//! from `--state-file`: the checkpoint is overwritten per save and
+//! consumed by restore, the journal is append-only and consumed by
+//! review; a `--state-file`-resumed run keeps appending to the same
+//! journal file in the restored tick domain. The file is
+//! single-writer: the monitor bind holds an exclusive advisory lock
+//! on the path for the process lifetime, so a second live process
+//! pointed at the same `--journal-file` — a misconfiguration that
+//! would interleave duplicate `seq`s into an un-replayable record —
+//! exits nonzero naming the file and the conflict, while a dead
+//! holder's lock releases with its descriptor and a restart
+//! re-acquires it.
 //!
 //! Redundancy, per the peer-transport and switchover-semantics
 //! decisions: every instance whose driver surface reaches the shared
@@ -791,7 +801,9 @@ controller scan.
                   controller's scheduled-outage roll
   --journal-file PATH
                   persist the transition journal to PATH — one
-                  line-delimited JSON record per journaled entry — and
+                  line-delimited JSON record per journaled entry,
+                  appended by a dedicated writer behind a bounded
+                  queue so a slow sink never lengthens a scan — and
                   replay it at startup, seeding the served ring and
                   continuing seq numbering across a restart; a
                   run-boundary marker separates process lifetimes, a

@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::thread;
+use std::time::Duration;
 
 /// The same minimal in-memory driver the other monitor tests use.
 struct StubDriver {
@@ -144,6 +145,9 @@ fn a_second_monitor_on_the_same_journal_file_fails_its_bind_naming_the_conflict(
     drop(first);
     let second = bind().unwrap();
     second.paced_scan();
+    // The sink's writer appends off the executor lock — wait the
+    // drain out before reading the file.
+    second.flush_journal_sink(Duration::from_secs(10));
     let data = read_journal_file(&path).unwrap();
     assert_eq!(
         data.entries
@@ -317,7 +321,11 @@ fn a_cold_restarted_standby_does_not_rejournal_the_adopted_settlement() {
         )
         .unwrap()
     };
-    let settlements = || {
+    // The sink's writer appends off the executor lock — the file
+    // trails the served journal by the drain's beat, so a read waits
+    // the queue out on the monitor that owns it.
+    let settlements = |monitor: &Monitor| {
+        monitor.flush_journal_sink(Duration::from_secs(10));
         read_journal_file(&journal)
             .unwrap()
             .entries
@@ -347,7 +355,7 @@ fn a_cold_restarted_standby_does_not_rejournal_the_adopted_settlement() {
     let first = bind_standby();
     first.apply_checkpoint(&checkpoint).unwrap();
     first.paced_scan();
-    assert_eq!(settlements(), 1);
+    assert_eq!(settlements(&first), 1);
     drop(first);
 
     // The restart onto a missing `--state-file`: a cold executor
@@ -358,7 +366,7 @@ fn a_cold_restarted_standby_does_not_rejournal_the_adopted_settlement() {
     second.apply_checkpoint(&checkpoint).unwrap();
     second.paced_scan();
     assert_eq!(
-        settlements(),
+        settlements(&second),
         1,
         "the journaled settlement must not re-record across the run boundary"
     );
@@ -374,7 +382,7 @@ fn a_cold_restarted_standby_does_not_rejournal_the_adopted_settlement() {
     active.scan();
     second.apply_checkpoint(&active.checkpoint()).unwrap();
     second.paced_scan();
-    assert_eq!(settlements(), 2);
+    assert_eq!(settlements(&second), 2);
     drop(second);
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -392,7 +400,8 @@ fn a_state_restored_standby_still_journals_only_new_settlements() {
     let driver = StubDriver::new(&[(PointId(10), Value::Float(0.0))]);
     let active_driver = StubDriver::new(&[(PointId(10), Value::Float(0.0))]);
     let map = || PointMap::new().with_writable_point(PointId(10), Direction::In, ValueKind::Float);
-    let settlements = || {
+    let settlements = |monitor: &Monitor| {
+        monitor.flush_journal_sink(Duration::from_secs(10));
         read_journal_file(&journal)
             .unwrap()
             .entries
@@ -431,7 +440,7 @@ fn a_state_restored_standby_still_journals_only_new_settlements() {
     };
     first.apply_checkpoint(&active.checkpoint()).unwrap();
     first.paced_scan();
-    assert_eq!(settlements(), 1);
+    assert_eq!(settlements(&first), 1);
     let persisted = first.checkpoint();
     drop(first);
 
@@ -454,7 +463,7 @@ fn a_state_restored_standby_still_journals_only_new_settlements() {
     };
     restored.apply_checkpoint(&active.checkpoint()).unwrap();
     restored.paced_scan();
-    assert_eq!(settlements(), 1);
+    assert_eq!(settlements(&restored), 1);
 
     // The next settlement the file never saw still journals.
     active.submit_command(Command::WriteValue {
@@ -465,7 +474,7 @@ fn a_state_restored_standby_still_journals_only_new_settlements() {
     active.scan();
     restored.apply_checkpoint(&active.checkpoint()).unwrap();
     restored.paced_scan();
-    assert_eq!(settlements(), 2);
+    assert_eq!(settlements(&restored), 2);
     drop(restored);
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -656,5 +665,68 @@ fn a_cold_restart_stamps_the_new_run_on_every_served_history_envelope() {
     );
     drop(second);
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #942's named health state: the journal sink drains on its own
+/// writer off the executor lock, and its report rides every
+/// publication's `journal_sink` section beside the store's overload
+/// counters — the `healthy`/`lagging`/`failed` state plus the
+/// accepted/drained/lost accounting. `flush_journal_sink` is the
+/// durability-attesting wait a graceful boundary runs: it returns
+/// with `drained == accepted` once the file caught up, and the file
+/// then holds exactly the drained record.
+#[test]
+fn the_journal_sink_health_reports_the_drain_and_the_flush_attests_it() {
+    use dcs_core::JournalSinkState;
+
+    let dir = scratch("sink-health");
+    let path = dir.join("journal.jsonl");
+    let driver = StubDriver::new(&[(PointId(10), Value::Float(0.0))]);
+    let bind = || {
+        let map = PointMap::new().with_writable_point(PointId(10), Direction::In, ValueKind::Float);
+        let executor = Executor::new(&driver, map, Vec::new()).unwrap();
+        Monitor::bind_with(
+            "127.0.0.1:0",
+            executor,
+            signal_index(),
+            MonitorConfig {
+                journal_file: Some(path.clone()),
+                ..MonitorConfig::default()
+            },
+        )
+        .unwrap()
+    };
+
+    let monitor = bind();
+    monitor.paced_scan();
+    // The flush waits the writer out on the caller's thread: the file
+    // caught up through everything journaled, the state healthy.
+    let health = monitor
+        .flush_journal_sink(Duration::from_secs(10))
+        .expect("a journal-file monitor reports the sink's drain");
+    assert_eq!(health.state, JournalSinkState::Healthy);
+    assert_eq!(health.drained, health.accepted);
+    assert_eq!(health.lost, 0);
+    assert_eq!(health.depth, 0);
+    assert!(health.accepted >= 1);
+    assert_eq!(monitor.journal_sink_health(), Some(health));
+
+    // The same report is stamped onto every published snapshot — the
+    // overload surface a served consumer reads.
+    let stamped = monitor
+        .published()
+        .unwrap()
+        .snapshot
+        .publication
+        .unwrap()
+        .journal_sink
+        .expect("the publication stamps the journal sink's drain report");
+    assert_eq!(stamped.accepted, health.accepted);
+    assert_eq!(stamped.capacity, health.capacity);
+
+    // And the file holds exactly the record the drain accounted.
+    let data = read_journal_file(&path).unwrap();
+    assert_eq!(data.entries.len() as u64, health.drained);
     let _ = std::fs::remove_dir_all(&dir);
 }

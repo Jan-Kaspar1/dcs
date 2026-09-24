@@ -46,12 +46,15 @@
 //! snapshot's `publication` section ([`PublicationHealth`]) reports
 //! the store's overload accounting as of each publish.
 
+use crate::drain::{DrainHealth, DrainShared, DrainState};
 use dcs_core::{
     CommandReceipt, EmittedEvent, EventRecord, EventRetention, HistorySample, JournalEntry,
-    JournalEvent, PointHistory, PointId, PublicationHealth, Sample, TelemetrySnapshot, Tick,
+    JournalEvent, JournalSinkHealth, JournalSinkState, PointHistory, PointId, PublicationHealth,
+    Sample, TelemetrySnapshot, Tick,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// One immutable post-scan read model — the unit the store publishes.
 ///
@@ -207,6 +210,15 @@ struct Inner {
     journal_capacity: usize,
     /// Event-history retention bound — the `History`-retained ring's.
     event_history_capacity: usize,
+    /// The durable journal sink's drain counters — `Some` when a
+    /// journal file is configured: each publish stamps the standing
+    /// backpressure health into the snapshot's
+    /// `publication.journal_sink` section, and a durability-attesting
+    /// answer waits on the same counters. The journal-append
+    /// isolation decision (#942): the file's writer drains off the
+    /// executor lock, so the sink's lag reads here as telemetry,
+    /// never as lock hold.
+    journal_sink: Option<Arc<DrainShared>>,
 }
 
 /// Evicts `ring` down to `capacity` oldest-first, migrating each
@@ -303,8 +315,17 @@ impl Store {
                 history_capacity,
                 journal_capacity,
                 event_history_capacity,
+                journal_sink: None,
             })),
         }
+    }
+
+    /// Points the store at the journal sink's drain counters — set by
+    /// the recorder when a `journal_file` is configured, before the
+    /// bind-time publication, so every publish stamps the sink's
+    /// standing health into the snapshot's `publication` section.
+    pub(crate) fn set_journal_sink(&self, sink: Arc<DrainShared>) {
+        self.inner.lock().unwrap().journal_sink = Some(sink);
     }
 
     /// Appends `point`'s fresh scan sample to its served ring and to
@@ -432,6 +453,7 @@ impl Store {
             coalesced: inner.coalesced,
             depth: (inner.window.len() + 1).min(inner.window_capacity) as u64,
             window: inner.window_capacity as u64,
+            journal_sink: inner.journal_sink_health(),
         });
         let run = inner.run;
         let publication = Arc::new(Publication {
@@ -577,6 +599,53 @@ impl Store {
             coalesced: inner.coalesced,
             depth: inner.window.len() as u64,
             window: inner.window_capacity as u64,
+            journal_sink: inner.journal_sink_health(),
+        }
+    }
+
+    /// The journal sink's live drain report — `None` when no journal
+    /// file is configured.
+    pub(crate) fn journal_sink_health(&self) -> Option<JournalSinkHealth> {
+        self.inner.lock().unwrap().journal_sink_health()
+    }
+
+    /// Waits — at most `timeout` — for the journal sink's writer to
+    /// have appended or accounted every queued record, returning the
+    /// standing health either way: `drained + lost == accepted` says
+    /// the durable file caught up. `None` when no journal file is
+    /// configured. The wait rides the caller's thread alone — a
+    /// durability-attesting answer or a test's settle point, never
+    /// the executor lock.
+    pub(crate) fn wait_journal_drained(&self, timeout: Duration) -> Option<JournalSinkHealth> {
+        let probe = self.inner.lock().unwrap().journal_sink.clone();
+        probe.map(|shared| shared.wait_drained(timeout).into())
+    }
+}
+
+impl Inner {
+    /// The journal sink's standing health for the publication stamp —
+    /// read under the inner lock from the drain's lock-free counters.
+    fn journal_sink_health(&self) -> Option<JournalSinkHealth> {
+        self.journal_sink
+            .as_ref()
+            .map(|shared| shared.health().into())
+    }
+}
+
+impl From<DrainHealth> for JournalSinkHealth {
+    fn from(health: DrainHealth) -> Self {
+        Self {
+            state: match health.state {
+                DrainState::Healthy => JournalSinkState::Healthy,
+                DrainState::Lagging => JournalSinkState::Lagging,
+                DrainState::Failed => JournalSinkState::Failed,
+            },
+            accepted: health.accepted,
+            drained: health.drained,
+            lost: health.lost,
+            depth: health.depth,
+            high_water: health.high_water,
+            capacity: health.capacity,
         }
     }
 }

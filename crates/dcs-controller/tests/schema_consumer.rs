@@ -103,7 +103,7 @@ use std::time::{Duration, Instant};
 
 mod support;
 
-use support::{SimTcp, controller_model, spawn_controller, spawn_plant};
+use support::{SimTcp, controller_model, settle_sink_health, spawn_controller, spawn_plant};
 
 /// The showcase plant model the plant servers load — the #69 fixture.
 const PLANT_MODEL: &str = concat!(
@@ -392,12 +392,15 @@ fn leg_boundary(
     stages: &mut Vec<TelemetrySnapshot>,
     checkpoints: &mut Vec<Vec<u8>>,
 ) {
-    let view = pair.snapshot().unwrap();
+    let mut view = pair.snapshot().unwrap();
     let own = owner.snapshot().unwrap();
     assert_eq!(
         view, own,
         "{name}: the pair view must source the field owner"
     );
+    // The journal sink's live counters ride the writer thread's beat —
+    // pin the run-stable fields so the cross-run compare holds.
+    settle_sink_health(&mut view);
     stages.push(view);
     let owner_checkpoint = checkpoint_digest(owner);
     assert_eq!(
@@ -1714,15 +1717,34 @@ fn run_verification(tag: &str) -> Outcome {
         receipts: standby.receipts().unwrap(),
         emitted: emitted(&standby),
         journals: {
-            let mut journals: Vec<Vec<JournalEntry>> = [
+            let served = [
                 active.journal(0).unwrap(),
                 standby.journal(0).unwrap(),
                 reference.journal(0).unwrap(),
-                read_journal_file(&active_journal).unwrap().entries,
-                read_journal_file(&standby_journal).unwrap().entries,
-                read_journal_file(&reference_journal).unwrap().entries,
-            ]
-            .into();
+            ];
+            let mut journals: Vec<Vec<JournalEntry>> = served.to_vec();
+            // The durable file covers each served page — `GET
+            // /journal` waits the sink's drain out — but the paced
+            // run may journal post-flush appends behind it, so the
+            // comparison reads the file's served-length prefix.
+            for (path, served) in [&active_journal, &standby_journal, &reference_journal]
+                .iter()
+                .zip(served.iter())
+            {
+                let entries = read_journal_file(path).unwrap().entries;
+                assert!(
+                    entries.len() >= served.len(),
+                    "the durable journal {} is shorter than the served record",
+                    path.display()
+                );
+                assert_eq!(
+                    &entries[..served.len()],
+                    &served[..],
+                    "the durable journal {} must hold the served record",
+                    path.display()
+                );
+                journals.push(entries[..served.len()].to_vec());
+            }
             // The adopted-source entry names the peer's monitor
             // address — its ephemeral listen port run-unique by
             // nature — so the identical-runs comparison masks the
