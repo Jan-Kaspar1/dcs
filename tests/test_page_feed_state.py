@@ -15,26 +15,31 @@ that moves or rewrites the mirrored logic fails here naming the line,
 keeping the replica honest instead of silently drifting. The mirrored
 spans, in page.html 1-based lines:
 
-- `journalEntries`/`journalSeen`/`journalRun` records — L560–576;
-  `feed` record — L589; the `ackReleases` record — L627;
-  `POLL_MS`/`pollFetch` abort bound — L738–740
-- `pollRoles` fetch/error bookkeeping — L747–759; `selectSource`/
-  `switchSource` — L769–799; `activePeer`/`noActiveVerdict` —
-  L817–832; the "unreachable" pair render — L964
+- `journalEntries`/`journalSeen`/`journalRun` records — L571–587;
+  `feed` record — L600; the `ackReleases` record — L638; the
+  `pendingCommands` abandoned-submission records — L645–646;
+  `POLL_MS`/`pollFetch` abort bound — L757–759
+- `pollRoles` fetch/error bookkeeping — L766–774; `selectSource`/
+  `switchSource` — L788–818; `activePeer`/`noActiveVerdict` —
+  L836–851; the "unreachable" pair render — L983
 - `notePublication`/`noteRestart`/`noteFeedGap`/`renderFeed` —
-  L1006–1084
+  L1025–1103
 - `refresh()`'s feed ordering, the ack pulse's held-true arming audit
   and its retried-until-receipted release loop, and the failed-poll
-  stale mark — L1333–1423, L1455–1456, L1475–1476
+  stale mark — L1352–1441, L1474–1475, L1494–1495
 - `submitAck`'s press: the receipted write of true arming the release
-  on an accepted/applied outcome — L2971–2988
+  on an accepted/applied outcome — L2990–3007
 - `refreshTrends`' since cursor, run-marker restart check, gap note,
-  and the refetch-gated watermark / seq fallback — L3196–3245
+  and the refetch-gated watermark / seq fallback — L3215–3264
 - `journalKey`'s run-qualified merge identity and `refreshJournal`'s
   cursor, gap note, attribution re-mark, dedupe, run_boundary restart
-  check, merge, ordering, and bound — L3314–3389
-- `postCommand`'s bounded POST, `isNotActive`, and `submitCommand`'s
-  active-peer routing with the not_active re-poll — L3689–3741
+  check, merge, the pending-submission settle resolution, ordering,
+  and bound — L3333–3425
+- `isAbortError`'s abort/timeout split, `abandonedSubmission`'s
+  indeterminate verdict and pending record, `sameSubmission`'s
+  settle-to-submission match, `postCommand`'s bounded POST,
+  `isNotActive`, and `submitCommand`'s active-peer routing with the
+  not_active re-poll and the abort-verdict ordering — L3717–3890
 """
 import json
 import unittest
@@ -57,84 +62,87 @@ def page_line(number):
 PINS = [
     # The retained journal window, its run-qualified merge set, and the
     # lifetime attribution the served run_boundary markers re-mark.
-    (560, 'const journalEntries = [];'),
-    (567, 'const journalSeen = new Set();'),
-    (576, 'let journalRun = 0;'),
-    # The feed record, the armed ack releases, and the shared poll bound.
-    (589, 'const feed = { publication: null, gap: null, stale: null, restart: null };'),
-    (627, 'const ackReleases = new Map();'),
-    (738, 'const POLL_MS = 1000;'),
-    (739, 'function pollFetch(url) {'),
-    (740, 'return fetch(url, { signal: AbortSignal.timeout(POLL_MS) });'),
+    (571, 'const journalEntries = [];'),
+    (578, 'const journalSeen = new Set();'),
+    (587, 'let journalRun = 0;'),
+    # The feed record, the armed ack releases, the abandoned-submission
+    # pending record, and the shared poll bound.
+    (600, 'const feed = { publication: null, gap: null, stale: null, restart: null };'),
+    (638, 'const ackReleases = new Map();'),
+    (645, 'const pendingCommands = [];'),
+    (646, 'const PENDING_LIMIT = 16;'),
+    (757, 'const POLL_MS = 1000;'),
+    (758, 'function pollFetch(url) {'),
+    (759, 'return fetch(url, { signal: AbortSignal.timeout(POLL_MS) });'),
     # pollRoles — bounded role fetches, errors recorded not thrown.
-    (747, 'async function pollRoles() {'),
-    (750, 'const response = await pollFetch(peer.base + "/role");'),
-    (752, 'peerState[i].report = await response.json();'),
-    (753, 'peerState[i].error = null;'),
-    (755, 'peerState[i].error = String(error);'),
+    (766, 'async function pollRoles() {'),
+    (769, 'const response = await pollFetch(peer.base + "/role");'),
+    (771, 'peerState[i].report = await response.json();'),
+    (772, 'peerState[i].error = null;'),
+    (774, 'peerState[i].error = String(error);'),
     # Source selection and the switch's bookkeeping reset — the run
     # marker and lifetime attribution clear with the seq cursor since
     # each peer numbers its own.
-    (769, 'function selectSource() {'),
-    (785, 'function switchSource(next) {'),
-    (787, 'for (const state of trends.values()) {'),
-    (788, 'state.lastSeq = 0;'),
-    (789, 'state.run = null;'),
-    (791, 'journalSince = 0;'),
-    (792, 'journalRun = 0;'),
-    (796, 'feed.publication = null;'),
-    (797, 'feed.gap = null;'),
-    (798, 'feed.stale = null;'),
-    (799, 'feed.restart = null;'),
+    (788, 'function selectSource() {'),
+    (804, 'function switchSource(next) {'),
+    (806, 'for (const state of trends.values()) {'),
+    (807, 'state.lastSeq = 0;'),
+    (808, 'state.run = null;'),
+    (810, 'journalSince = 0;'),
+    (811, 'journalRun = 0;'),
+    (815, 'feed.publication = null;'),
+    (816, 'feed.gap = null;'),
+    (817, 'feed.stale = null;'),
+    (818, 'feed.restart = null;'),
     # The unique settled-active peer every command targets — and the
     # not-sent verdict while the pair has none.
-    (817, 'function activePeer() {'),
-    (825, 'function noActiveVerdict() {'),
+    (836, 'function activePeer() {'),
+    (844, 'function noActiveVerdict() {'),
     # The unreachable peer fault the role poll's error names.
-    (883, 'faults.push(was + peer.name + " unreachable");'),
-    (884, 'fault_kinds.push("peer_unreachable");'),
-    (964, 'const unreachable = state.error !== null;'),
+    (902, 'faults.push(was + peer.name + " unreachable");'),
+    (903, 'fault_kinds.push("peer_unreachable");'),
+    (983, 'const unreachable = state.error !== null;'),
     # Publication freshness bookkeeping — and the regressed-identity
     # restart observation.
-    (1006, 'function notePublication(snapshot) {'),
-    (1013, 'feed.stale = last !== null &&'),
-    (1014, 'current.published === last.published && current.tick <= last.tick'),
-    (1017, 'feed.publication = current;'),
-    (1018, 'if (last !== null && ((current.published !== null &&'),
-    (1021, 'noteRestart("the source\'s publication identity regressed");'),
+    (1025, 'function notePublication(snapshot) {'),
+    (1032, 'feed.stale = last !== null &&'),
+    (1033, 'current.published === last.published && current.tick <= last.tick'),
+    (1036, 'feed.publication = current;'),
+    (1037, 'if (last !== null && ((current.published !== null &&'),
+    (1040, 'noteRestart("the source\'s publication identity regressed");'),
     # The same-source restart seam every stream's observation funnels
     # into: cursors reset, and a restarted tick domain clears the drawn
     # series rather than stitching across lifetimes.
-    (1033, 'function noteRestart(detail) {'),
-    (1034, 'const freshDomain = [...trends.values()].some(state =>'),
-    (1035, 'state.lastTick !== null && feed.publication.tick <= state.lastTick);'),
-    (1036, 'for (const state of trends.values()) {'),
-    (1037, 'state.lastSeq = 0;'),
-    (1038, 'state.run = null;'),
-    (1039, 'if (freshDomain) {'),
-    (1040, 'state.samples = [];'),
-    (1041, 'state.lastTick = null;'),
-    (1044, 'journalSince = 0;'),
-    (1045, 'feed.restart = detail;'),
+    (1052, 'function noteRestart(detail) {'),
+    (1053, 'const freshDomain = [...trends.values()].some(state =>'),
+    (1054, 'state.lastTick !== null && feed.publication.tick <= state.lastTick);'),
+    (1055, 'for (const state of trends.values()) {'),
+    (1056, 'state.lastSeq = 0;'),
+    (1057, 'state.run = null;'),
+    (1058, 'if (freshDomain) {'),
+    (1059, 'state.samples = [];'),
+    (1060, 'state.lastTick = null;'),
+    (1063, 'journalSince = 0;'),
+    (1064, 'feed.restart = detail;'),
     # The gap note and the feed-state render — restart and gap share the
     # "gap" severity class, stale the quieter one.
-    (1053, 'function noteFeedGap(stream, from, through) {'),
-    (1055, 'feed.gap = { stream: stream, from: from, through: through };'),
-    (1063, 'function renderFeed() {'),
-    (1067, 'notices.push("source restarted — " + feed.restart +'),
-    (1071, 'notices.push("publication gap: " + feed.gap.stream + " seqs " +'),
-    (1076, 'notices.push("stale publication: " +'),
-    (1082, 'line.hidden = notices.length === 0;'),
-    (1084, 'feed.gap !== null || feed.restart !== null'),
+    (1072, 'function noteFeedGap(stream, from, through) {'),
+    (1074, 'feed.gap = { stream: stream, from: from, through: through };'),
+    (1082, 'function renderFeed() {'),
+    (1086, 'notices.push("source restarted — " + feed.restart +'),
+    (1090, 'notices.push("publication gap: " + feed.gap.stream + " seqs " +'),
+    (1095, 'notices.push("stale publication: " +'),
+    (1101, 'line.hidden = notices.length === 0;'),
+    (1103, 'feed.gap !== null || feed.restart !== null'),
     # refresh()'s feed ordering and its failed-poll stale mark — the
     # marks reset before notePublication so its restart observation
     # survives the poll.
-    (1333, 'async function refresh() {'),
-    (1337, 'await pollRoles();'),
-    (1346, 'pollFetch(base + "/snapshot").then(r => r.json()),'),
-    (1354, 'feed.gap = null;'),
-    (1355, 'feed.restart = null;'),
-    (1356, 'notePublication(snapshot);'),
+    (1352, 'async function refresh() {'),
+    (1356, 'await pollRoles();'),
+    (1365, 'pollFetch(base + "/snapshot").then(r => r.json()),'),
+    (1373, 'feed.gap = null;'),
+    (1374, 'feed.restart = null;'),
+    (1375, 'notePublication(snapshot);'),
     # The ack pulse's release half: a snapshot serving a writable `ack`
     # input held true arms its release at this tick — the serving scan
     # already observed the level, so an acknowledge write that applied
@@ -143,94 +151,109 @@ PINS = [
     # until the receipted write answers accepted or applied, an aborted
     # or refused submission retrying on a later poll rather than
     # dropping the release and latching the input against later presses.
-    (1380, 'for (const descriptor of snapshot.descriptors || []) {'),
-    (1382, 'p.name === "ack" && p.direction === "in" && p.kind === "bool");'),
-    (1383, 'if (!ack || ack.point == null || ackReleases.has(ack.point)) {'),
-    (1386, 'const meta = metaByPoint.get(ack.point);'),
-    (1387, 'const ackSample = (telemetry.get(ack.point) || {}).sample;'),
-    (1390, 'ackReleases.set(ack.point, snapshot.tick);'),
-    (1403, 'for (const [point, applyTick] of [...ackReleases]) {'),
-    (1405, 'const held = sample && sample.value && sample.value.bool === true;'),
-    (1406, 'if (snapshot.tick < applyTick && !held) continue;'),
-    (1407, 'if (sample && sample.value && sample.value.bool === false) {'),
-    (1408, 'ackReleases.delete(point);'),
-    (1412, 'const answer = await submitCommand({ write_value: {'),
-    (1413, 'point: point, kind: "bool", value: { bool: false } } });'),
-    (1415, '("accepted" in answer.outcome || "applied" in answer.outcome)) {'),
-    (1416, 'ackReleases.delete(point);'),
-    (1419, 'document.getElementById("receipt").textContent ='),
-    (1420, '"command failed: " + error;'),
-    (1455, 'await Promise.all([refreshTrends(base), refreshJournal(base)]);'),
-    (1456, 'renderFeed();'),
-    (1475, 'if (feed.stale === null && feed.publication !== null) {'),
-    (1476, 'feed.stale = feed.publication;'),
+    (1399, 'for (const descriptor of snapshot.descriptors || []) {'),
+    (1401, 'p.name === "ack" && p.direction === "in" && p.kind === "bool");'),
+    (1402, 'if (!ack || ack.point == null || ackReleases.has(ack.point)) {'),
+    (1405, 'const meta = metaByPoint.get(ack.point);'),
+    (1406, 'const ackSample = (telemetry.get(ack.point) || {}).sample;'),
+    (1409, 'ackReleases.set(ack.point, snapshot.tick);'),
+    (1422, 'for (const [point, applyTick] of [...ackReleases]) {'),
+    (1424, 'const held = sample && sample.value && sample.value.bool === true;'),
+    (1425, 'if (snapshot.tick < applyTick && !held) continue;'),
+    (1426, 'if (sample && sample.value && sample.value.bool === false) {'),
+    (1427, 'ackReleases.delete(point);'),
+    (1431, 'const answer = await submitCommand({ write_value: {'),
+    (1432, 'point: point, kind: "bool", value: { bool: false } } });'),
+    (1434, '("accepted" in answer.outcome || "applied" in answer.outcome)) {'),
+    (1435, 'ackReleases.delete(point);'),
+    (1438, 'document.getElementById("receipt").textContent ='),
+    (1439, '"command failed: " + error;'),
+    (1474, 'await Promise.all([refreshTrends(base), refreshJournal(base)]);'),
+    (1475, 'renderFeed();'),
+    (1494, 'if (feed.stale === null && feed.publication !== null) {'),
+    (1495, 'feed.stale = feed.publication;'),
     # submitAck — the press posting write_value true through the
     # receipted path and arming the release only on an accepted or
     # applied outcome, so a rejection never schedules a release and a
     # lost answer leaves the held-true audit to catch the latch.
-    (2971, 'async function submitAck(button) {'),
-    (2974, 'if (!meta || !meta.writable) return;'),
-    (2976, 'const answer = await submitCommand({ write_value: {'),
-    (2980, 'ackReleases.set(point, answer.outcome.accepted.apply_tick);'),
-    (2982, 'ackReleases.set(point, answer.outcome.applied.tick);'),
+    (2990, 'async function submitAck(button) {'),
+    (2993, 'if (!meta || !meta.writable) return;'),
+    (2995, 'const answer = await submitCommand({ write_value: {'),
+    (2999, 'ackReleases.set(point, answer.outcome.accepted.apply_tick);'),
+    (3001, 'ackReleases.set(point, answer.outcome.applied.tick);'),
     # refreshTrends: the common since cursor, the served run marker's
     # restart check, the served gap note, and the refetch-gated tick
     # watermark / seq fallback.
-    (3196, 'async function refreshTrends(base) {'),
-    (3202, 'const histories = await (await pollFetch(base + "/history?since=" + since)).json();'),
-    (3212, 'if (history.run !== undefined) {'),
-    (3213, 'if (state.run !== null && history.run !== state.run) {'),
-    (3214, 'noteRestart("the served history run marker advanced to run " +'),
-    (3217, 'state.run = history.run;'),
-    (3222, 'const first = history.samples.find(entry => entry.seq > state.lastSeq);'),
-    (3223, 'if (state.lastSeq > 0 && first && first.seq > state.lastSeq + 1) {'),
-    (3224, 'noteFeedGap("history", state.lastSeq + 1, first.seq - 1);'),
-    (3235, 'const refetch = state.lastSeq === 0;'),
-    (3236, 'const watermark = state.lastTick;'),
-    (3238, 'if (entry.seq <= state.lastSeq) continue;'),
-    (3239, 'state.lastSeq = entry.seq;'),
-    (3240, 'if (refetch && watermark !== null && entry.sample.tick <= watermark) {'),
-    (3243, 'state.samples.push(entry.sample);'),
-    (3245, 'state.lastTick = entry.sample.tick;'),
+    (3215, 'async function refreshTrends(base) {'),
+    (3221, 'const histories = await (await pollFetch(base + "/history?since=" + since)).json();'),
+    (3231, 'if (history.run !== undefined) {'),
+    (3232, 'if (state.run !== null && history.run !== state.run) {'),
+    (3233, 'noteRestart("the served history run marker advanced to run " +'),
+    (3236, 'state.run = history.run;'),
+    (3241, 'const first = history.samples.find(entry => entry.seq > state.lastSeq);'),
+    (3242, 'if (state.lastSeq > 0 && first && first.seq > state.lastSeq + 1) {'),
+    (3243, 'noteFeedGap("history", state.lastSeq + 1, first.seq - 1);'),
+    (3254, 'const refetch = state.lastSeq === 0;'),
+    (3255, 'const watermark = state.lastTick;'),
+    (3257, 'if (entry.seq <= state.lastSeq) continue;'),
+    (3258, 'state.lastSeq = entry.seq;'),
+    (3259, 'if (refetch && watermark !== null && entry.sample.tick <= watermark) {'),
+    (3262, 'state.samples.push(entry.sample);'),
+    (3264, 'state.lastTick = entry.sample.tick;'),
     # journalKey — the run-qualified merge identity — and
     # refreshJournal's served gap note, cursor advance, the boundary's
     # attribution re-mark ahead of the dedupe, the merge itself, the
-    # run_boundary restart observation, and the pane's ordering/bound.
-    (3314, 'function journalKey(entry) {'),
-    (3315, 'return entry.run + " " + entry.tick + " " + JSON.stringify(entry.event);'),
-    (3325, 'const entries = await (await pollFetch(base + "/journal?since=" + journalSince)).json();'),
-    (3330, 'if (journalSince === 0) journalRun = 0;'),
-    (3334, 'noteFeedGap("journal", journalSince + 1, entries[0].seq - 1);'),
-    (3337, 'journalSince = Math.max(journalSince, entry.seq);'),
-    (3343, 'journalRun = entry.event.run_boundary.run;'),
-    (3345, 'entry.run = journalRun;'),
-    (3346, 'const key = journalKey(entry);'),
-    (3347, 'if (journalSeen.has(key)) continue;'),
-    (3348, 'journalSeen.add(key);'),
-    (3349, 'journalEntries.push(entry);'),
-    (3355, 'if ("run_boundary" in entry.event) {'),
-    (3356, 'noteRestart("the journal recorded run " +'),
-    (3386, 'journalEntries.sort((a, b) => a.tick - b.tick || a.seq - b.seq);'),
-    (3388, 'for (const entry of journalEntries.splice(0, journalEntries.length - JOURNAL_LIMIT)) {'),
-    (3389, 'journalSeen.delete(journalKey(entry));'),
-    # postCommand — the bounded POST every command rides — isNotActive's
-    # rejected-not_active shape, and submitCommand's active-peer
-    # routing with its single re-poll/retry.
-    (3689, 'async function postCommand(base, command, reason) {'),
-    (3700, 'signal: AbortSignal.timeout(POLL_MS),'),
-    (3705, 'function isNotActive(receipt) {'),
-    (3720, 'async function submitCommand(command, reason) {'),
-    (3732, 'let answer = await postCommand(peers[target].base, command, reason);'),
-    (3733, 'if (isNotActive(answer)) {'),
-    (3739, 'receipt.textContent = JSON.stringify(answer, null, 2);'),
+    # run_boundary restart observation, the abandoned-submission
+    # settle resolution, and the pane's ordering/bound.
+    (3333, 'function journalKey(entry) {'),
+    (3334, 'return entry.run + " " + entry.tick + " " + JSON.stringify(entry.event);'),
+    (3344, 'const entries = await (await pollFetch(base + "/journal?since=" + journalSince)).json();'),
+    (3349, 'if (journalSince === 0) journalRun = 0;'),
+    (3353, 'noteFeedGap("journal", journalSince + 1, entries[0].seq - 1);'),
+    (3356, 'journalSince = Math.max(journalSince, entry.seq);'),
+    (3362, 'journalRun = entry.event.run_boundary.run;'),
+    (3364, 'entry.run = journalRun;'),
+    (3365, 'const key = journalKey(entry);'),
+    (3366, 'if (journalSeen.has(key)) continue;'),
+    (3367, 'journalSeen.add(key);'),
+    (3368, 'journalEntries.push(entry);'),
+    (3374, 'if ("run_boundary" in entry.event) {'),
+    (3375, 'noteRestart("the journal recorded run " +'),
+    (3408, 'const abandoned = pendingCommands.findIndex(pending =>'),
+    (3409, 'sameSubmission(settled.receipt, pending));'),
+    (3411, 'const pending = pendingCommands.splice(abandoned, 1)[0];'),
+    (3422, 'journalEntries.sort((a, b) => a.tick - b.tick || a.seq - b.seq);'),
+    (3424, 'for (const entry of journalEntries.splice(0, journalEntries.length - JOURNAL_LIMIT)) {'),
+    (3425, 'journalSeen.delete(journalKey(entry));'),
+    # The indeterminate-outcome path — the abort split, the abandoned
+    # submission's pending record and receipt-shaped answer, and the
+    # settle match — then postCommand's bounded POST every command
+    # rides, isNotActive's rejected-not_active shape, and
+    # submitCommand's active-peer routing with the single re-poll/retry
+    # the abort verdict precedes.
+    (3724, 'function isAbortError(error) {'),
+    (3726, '(error.name === "AbortError" || error.name === "TimeoutError");'),
+    (3755, 'function sameSubmission(receipt, pending) {'),
+    (3768, 'function abandonedSubmission(command, reason, error) {'),
+    (3771, 'outcome: { indeterminate: { detail: String(error) } },'),
+    (3779, 'pendingCommands.push({'),
+    (3807, 'async function postCommand(base, command, reason) {'),
+    (3818, 'signal: AbortSignal.timeout(POLL_MS),'),
+    (3823, 'function isNotActive(receipt) {'),
+    (3849, 'async function submitCommand(command, reason) {'),
+    (3863, 'answer = await postCommand(peers[target].base, command, reason);'),
+    (3865, 'if (isAbortError(error)) {'),
+    (3866, 'return abandonedSubmission(command, reason, error);'),
+    (3870, 'if (isNotActive(answer)) {'),
+    (3888, 'receipt.textContent = JSON.stringify(answer, null, 2);'),
     # The cadence both tickers share.
-    (3844, 'setInterval(refreshOverview, POLL_MS);'),
-    (4045, 'setInterval(refresh, POLL_MS);'),
+    (3993, 'setInterval(refreshOverview, POLL_MS);'),
+    (4194, 'setInterval(refresh, POLL_MS);'),
 ]
 
 
-POLL_MS = 1000           # page.html:738 — the shared poll cadence/bound
-JOURNAL_LIMIT = 300      # page.html:638 — the pane's retention bound
+POLL_MS = 1000           # page.html:757 — the shared poll cadence/bound
+JOURNAL_LIMIT = 300      # page.html:657 — the pane's retention bound
 HANG = object()          # a scripted listener that never answers
 
 
@@ -245,6 +268,25 @@ def journal_key(entry):
                          json.dumps(entry['event'],
                                     separators=(',', ':'),
                                     sort_keys=True))
+
+
+def describe_outcome(outcome):
+    """page.html:3603-3615 — the outcome's rendered verdict: applied
+    at tick / accepted for tick / rejected / the page-minted
+    indeterminate an abort-abandoned submission answers with. (The
+    rejected branch names its reason through describeReason on the
+    page; the replica, mirroring no renderer, dumps it.)"""
+    if 'applied' in outcome:
+        return 'applied at tick %s' % outcome['applied']['tick']
+    if 'accepted' in outcome:
+        return 'accepted for tick %s' % outcome['accepted']['apply_tick']
+    if 'rejected' in outcome:
+        return 'rejected: %s' % json.dumps(outcome['rejected']['reason'])
+    if 'indeterminate' in outcome:
+        return ('outcome unknown — the submission outlived the abort '
+                'bound and may still apply; the journaled settled '
+                'receipt is the verdict')
+    return json.dumps(outcome)
 
 
 class PollError(Exception):
@@ -318,21 +360,25 @@ class PageReplica:
                                'lastTick': None, 'run': None}
                        for point in points}
         self.journal_since = 0
-        # page.html:560,567,576 — the retained journal window the pane
+        # page.html:571,578,587 — the retained journal window the pane
         # renders from, its merge set, and the lifetime attribution the
         # served run_boundary markers re-mark.
         self.journal_entries = []
         self.journal_seen = set()
         self.journal_run = 0
-        # page.html:543,627 — the /signals metadata the command
+        # page.html:554,638,645 — the /signals metadata the command
         # affordances gate on (each meta a dict like the served
-        # PointSignal: writable, value_type), and the armed
-        # ack-release map — ack point -> the earliest snapshot tick its
-        # release write may go at.
+        # PointSignal: writable, value_type), the armed ack-release map
+        # — ack point -> the earliest snapshot tick its release write
+        # may go at — and the abandoned-submission pending records a
+        # journaled settle resolves (each {command, actor, reason,
+        # notice} like the page's).
         self.meta_by_point = dict(metas or {})
         self.ack_releases = {}
-        # The receipt pane's text — submitCommand's rendered answer or
-        # a caught submission's "command failed: …".
+        self.pending_commands = []
+        # The receipt pane's text — submitCommand's rendered answer, an
+        # abandoned submission's indeterminate "outcome unknown"
+        # notice, or a refused send's "command failed: …".
         self.receipt = ''
         self.polling = False
         self.now = 0
@@ -341,7 +387,7 @@ class PageReplica:
         self.feed_line = {'hidden': True, 'class': '', 'text': ''}
         self.peer_rows = ['—' for _ in self.peers]
 
-    # --- the bounded fetch every poll read rides: page.html:738-740 ---
+    # --- the bounded fetch every poll read rides: page.html:757-759 ---
 
     def poll_fetch(self, url):
         answer = self.transport.fetch(url)
@@ -354,7 +400,7 @@ class PageReplica:
             raise PollError('AbortError: signal timed out')
         return answer
 
-    # --- the role poll and pair render: page.html:747-759, 769-799 ---
+    # --- the role poll and pair render: page.html:766-774, 788-818 ---
 
     def poll_roles(self):
         for i, peer in enumerate(self.peers):
@@ -371,7 +417,7 @@ class PageReplica:
         self.select_source()
 
     def note_sync_age(self, state):
-        # page.html:720-731 — the convergence-grace clock.
+        # page.html:739-750 — the convergence-grace clock.
         if (state['error'] is None and state['report'] is not None
                 and state['report'].get('sync') == 'unsynchronized'):
             state['unsyncedSince'] = state['unsyncedSince'] or self.now
@@ -406,7 +452,7 @@ class PageReplica:
             self.switch_source(nxt)
 
     def switch_source(self, nxt):
-        # page.html:785-799 — the new peer's streams re-read whole and
+        # page.html:804-818 — the new peer's streams re-read whole and
         # the feed bookkeeping starts over.
         self.source = nxt
         for state in self.trends.values():
@@ -420,24 +466,24 @@ class PageReplica:
         self.feed['restart'] = None
 
     def render_pair(self):
-        # page.html:964 — the per-peer row's reachability column.
+        # page.html:983 — the per-peer row's reachability column.
         self.peer_rows = [
             'unreachable' if self.peer_state[i]['error'] is not None
             else ('serving' if i == self.source else 'reachable')
             for i in range(len(self.peers))
         ]
 
-    # --- the receipted command path: page.html:817-832, 3689-3741 ---
+    # --- the receipted command path: page.html:836-851, 3717-3890 ---
 
     def active_peer(self):
-        # page.html:817-820 — the pair's unique settled-active peer's
+        # page.html:836-839 — the pair's unique settled-active peer's
         # index, or -1 mid-transition, without one, or under the
         # dual-active fault.
         actives = self._actives()
         return actives[0] if len(actives) == 1 else -1
 
     def no_active_verdict(self):
-        # page.html:825-832 — the not-sent verdict a control surfaces
+        # page.html:844-851 — the not-sent verdict a control surfaces
         # when submitCommand found no legitimate target.
         actives = len(self._actives())
         if actives > 1:
@@ -447,8 +493,64 @@ class PageReplica:
         return ('not sent: no peer reports role active — the pair is '
                 'mid-transition')
 
+    @staticmethod
+    def is_abort_error(error):
+        # page.html:3724-3727 — the abort bound's two error names
+        # (the replica's PollError carries the name in its text):
+        # either means the wait ended, not provably the server's work.
+        return str(error).startswith(('AbortError', 'TimeoutError'))
+
+    @staticmethod
+    def same_command(a, b):
+        # page.html:3742-3747 — two wire Commands name the same
+        # operation when the same known variant carries structurally
+        # equal fields; Python's dict equality already numbers
+        # 1.0 == 1, the sameJson numeric-equivalence rule.
+        for variant in ('write_value', 'force_point', 'unforce_point',
+                        'set_parameter', 'invoke'):
+            if variant in a:
+                return variant in b and a[variant] == b[variant]
+        return False
+
+    @staticmethod
+    def same_submission(receipt, pending):
+        # page.html:3755-3759 — the settled receipt answers an
+        # abandoned submission when the command matches and the
+        # declared actor and reason the receipt echoes agree, so
+        # another console's identical command cannot claim the pending
+        # entry.
+        return (PageReplica.same_command(receipt.get('command') or {},
+                                         pending['command'])
+                and (receipt.get('actor') or None) == pending['actor']
+                and (receipt.get('reason') or None) == pending['reason'])
+
+    def abandoned_submission(self, command, reason, error):
+        # page.html:3768-3788 — the receipt-shaped indeterminate answer
+        # an abort-abandoned submission reports, the pending record the
+        # journaled settle resolves, and the receipt pane's "outcome
+        # unknown" notice — never "command failed". (The page's notice
+        # names the command through describeCommand; the replica, which
+        # mirrors no renderer, records the command itself.)
+        answer = {'command': command,
+                  'outcome': {'indeterminate': {'detail': str(error)}}}
+        if reason:
+            answer['reason'] = reason
+        notice = ('command outcome unknown — the request outlived the '
+                  '%s ms abort bound and may still apply: %s. The '
+                  'journaled settled receipt is the verdict — '
+                  'resubmitting now risks applying the command twice.'
+                  % (POLL_MS, json.dumps(command)))
+        self.pending_commands.append({'command': command,
+                                      'actor': None,
+                                      'reason': reason or None,
+                                      'notice': notice})
+        if len(self.pending_commands) > 16:   # page.html:646
+            self.pending_commands.pop(0)
+        self.receipt = notice
+        return answer
+
     def post_command(self, base, command, reason=None):
-        # page.html:3689-3703 — the attributed envelope when a reason
+        # page.html:3807-3821 — the attributed envelope when a reason
         # rides (the replica declares no operator identity), the POST
         # itself, and the same POLL_MS abort bound every poll read
         # rides: a hanging listener answers nothing and the bound
@@ -465,16 +567,20 @@ class PageReplica:
 
     @staticmethod
     def is_not_active(receipt):
-        # page.html:3705-3709 — the rejected receipt carrying the
+        # page.html:3823-3827 — the rejected receipt carrying the
         # not_active reason.
         rejected = ((receipt or {}).get('outcome') or {}).get('rejected')
         return bool(rejected) and 'not_active' in rejected.get('reason', {})
 
     def submit_command(self, command, reason=None):
-        # page.html:3720-3741 — active-peer routing, the roles re-poll
+        # page.html:3849-3890 — active-peer routing, the roles re-poll
         # while none reports, the one not_active re-poll/retry, the
         # receipt pane's rendered answer, and the answer itself (null
-        # when nothing was sent).
+        # when nothing was sent). The abort bound firing answers the
+        # indeterminate verdict instead of throwing — the request may
+        # already be buffered server-side — and never runs the retry:
+        # resending a command whose fate is unresolved doubles a landed
+        # one.
         target = self.active_peer()
         if target < 0:
             self.poll_roles()
@@ -483,19 +589,32 @@ class PageReplica:
         if target < 0:
             self.receipt = self.no_active_verdict()
             return None
-        answer = self.post_command(self.peers[target]['base'], command,
-                                   reason)
+        try:
+            answer = self.post_command(self.peers[target]['base'],
+                                       command, reason)
+        except PollError as error:
+            if self.is_abort_error(error):
+                return self.abandoned_submission(command, reason, error)
+            raise
         if self.is_not_active(answer):
             self.poll_roles()
             self.render_pair()
             target = self.active_peer()
             if target >= 0:
-                answer = self.post_command(self.peers[target]['base'],
-                                           command, reason)
+                try:
+                    answer = self.post_command(self.peers[target]['base'],
+                                               command, reason)
+                except PollError as error:
+                    # The first post answered a named refusal — only
+                    # the retry's fate is open when the bound fires.
+                    if self.is_abort_error(error):
+                        return self.abandoned_submission(command, reason,
+                                                         error)
+                    raise
         self.receipt = json.dumps(answer, indent=2)
         return answer
 
-    # --- the ack pulse's press half: page.html:2971-2988 ---
+    # --- the ack pulse's press half: page.html:2990-3007 ---
 
     def submit_ack(self, point):
         """The acknowledge press: an ordinary receipted write_value of
@@ -524,7 +643,7 @@ class PageReplica:
 
     def release_acks(self, snapshot):
         """The ack pulse's release half, mirrored from
-        page.html:1371-1423 — refresh() runs it over each landed
+        page.html:1390-1441 — refresh() runs it over each landed
         snapshot before the since-polls. A snapshot serving a writable
         `ack` input held true arms a release at that tick (the serving
         scan already observed the level, covering a press whose receipt
@@ -572,7 +691,7 @@ class PageReplica:
             except PollError as error:
                 self.receipt = 'command failed: %s' % error
 
-    # --- the feed record: page.html:1006-1084 ---
+    # --- the feed record: page.html:1025-1103 ---
 
     def note_publication(self, snapshot):
         health = snapshot.get('publication') or None
@@ -597,7 +716,7 @@ class PageReplica:
                 "the source's publication identity regressed")
 
     def note_restart(self, detail):
-        # page.html:1033-1046 — the same-source restart every stream's
+        # page.html:1052-1065 — the same-source restart every stream's
         # observation funnels into: all stream cursors reset so the
         # next reads re-fetch whole, and a restarted tick domain — the
         # served tick at or below a drawn sample's — clears the series
@@ -651,7 +770,7 @@ class PageReplica:
         }
         return self.feed_line
 
-    # --- the stream polls: page.html:3196-3245, 3324-3395 ---
+    # --- the stream polls: page.html:3215-3264, 3343-3431 ---
 
     def refresh_trends(self):
         states = list(self.trends.values())
@@ -698,8 +817,9 @@ class PageReplica:
                     state['lastTick'] = entry['sample']['tick']
 
     def refresh_journal(self):
-        # page.html:3324-3395 — the since-read, the run-attributed
-        # merge loop, and the pane's tick-order bounded render set.
+        # page.html:3343-3431 — the since-read, the run-attributed
+        # merge loop, the abandoned-submission settle resolution, and
+        # the pane's tick-order bounded render set.
         entries = self.poll_fetch(
             '/journal?since=%s' % self.journal_since).json()
         # A whole re-read answers from the stream's oldest retained
@@ -731,12 +851,33 @@ class PageReplica:
                     'the journal recorded run '
                     + str(entry['event']['run_boundary']['run'])
                     + ' beginning')
+            # The receipted contract's truth answering an abandoned
+            # submission (page.html:3403-3419): a settle matching a
+            # pending entry resolves the indeterminate verdict the
+            # abort left — the receipt pane's notice replaced only
+            # while that submission's notice still stands there.
+            settled = entry['event'].get('command_settled')
+            if settled:
+                for index, pending in enumerate(self.pending_commands):
+                    if self.same_submission(settled['receipt'], pending):
+                        pending = self.pending_commands.pop(index)
+                        if self.receipt == pending['notice']:
+                            self.receipt = (
+                                'the abandoned submission settled — '
+                                '%s — %s\n\n%s'
+                                % (json.dumps(settled['receipt']
+                                              ['command']),
+                                   describe_outcome(
+                                       settled['receipt']['outcome']),
+                                   json.dumps(settled['receipt'],
+                                              indent=2)))
+                        break
         self.journal_entries.sort(key=lambda e: (e['tick'], e['seq']))
         while len(self.journal_entries) > JOURNAL_LIMIT:
             self.journal_seen.discard(
                 journal_key(self.journal_entries.pop(0)))
 
-    # --- the poll ordering: page.html:1333-1482 ---
+    # --- the poll ordering: page.html:1352-1501 ---
 
     def refresh(self):
         """One poll's feed-relevant ordering: roles, the bounded
@@ -760,7 +901,7 @@ class PageReplica:
                     pass
             # The marks reset before notePublication so a regressed
             # identity's restart observation survives the poll —
-            # page.html:1354-1356.
+            # page.html:1373-1374.
             self.feed['gap'] = None
             self.feed['restart'] = None
             self.note_publication(snapshot)
@@ -1520,15 +1661,21 @@ class AckReleaseRetry(unittest.TestCase):
         self.assertFalse(plant.points[21])
 
         # The release POST blackholes past POLL_MS: the entry stays
-        # armed — the release is retried, not dropped — and the failure
-        # surfaces on the receipt pane.
+        # armed — the release is retried, not dropped — and the
+        # receipt pane reports the indeterminate outcome, not a
+        # failure: the abandoned request may still apply server-side.
         plant.blackhole_next = True
         page.refresh()
         self.assertIn(11, page.ack_releases,
                       'the aborted release was dropped — the input '
                       'stays held against every later press')
         self.assertTrue(plant.points[11])
-        self.assertTrue(page.receipt.startswith('command failed'))
+        self.assertTrue(
+            page.receipt.startswith('command outcome unknown'),
+            'an abort-abandoned submission must report an '
+            'indeterminate outcome, not a failure: %r' % page.receipt)
+        self.assertNotIn('command failed', page.receipt)
+        self.assertEqual(1, len(page.pending_commands))
         self.assertLessEqual(len(self.posted_writes(transport, 11, False)),
                              1)
 
@@ -1584,10 +1731,13 @@ class AckReleaseRetry(unittest.TestCase):
         self.assertFalse(plant.points[11])
 
     def test_lost_press_receipt_releases_via_the_held_input_audit(self):
-        # The aborts-but-applies variant: the acknowledge write lands at
-        # its apply tick but the answer never arrives — no receipt, no
-        # armed release. The poll's audit arms the release when the
-        # snapshot serves the input held true, and the pulse completes.
+        # The aborts-but-applies variant — the issue-948 reproduction:
+        # the acknowledge write lands at its apply tick but the answer
+        # never arrives — no receipt, no armed release. The page must
+        # report the indeterminate outcome rather than "command
+        # failed"; the journaled settle then resolves the pending
+        # record, and the poll's audit arms the release when the
+        # snapshot serves the input held true.
         page, transport, plant = self.rig()
         plant.set_pv(95.0)
         plant.advance()
@@ -1598,7 +1748,12 @@ class AckReleaseRetry(unittest.TestCase):
         page.submit_ack(11)
         self.assertEqual({}, page.ack_releases,
                          'the lost receipt armed a release anyway')
-        self.assertTrue(page.receipt.startswith('command failed'))
+        self.assertTrue(
+            page.receipt.startswith('command outcome unknown'),
+            'the abandoned press must report an indeterminate '
+            'outcome, not a failure: %r' % page.receipt)
+        self.assertNotIn('command failed', page.receipt)
+        self.assertEqual(1, len(page.pending_commands))
 
         # The queued write applies: the edge consumes the latch and the
         # input stands true with nothing scheduled to drop it.
@@ -1607,11 +1762,23 @@ class AckReleaseRetry(unittest.TestCase):
         self.assertFalse(plant.points[21])
 
         # The held-true observation arms and issues the release in the
-        # same poll; the accepted answer disarms the entry again.
+        # same poll; the accepted answer disarms the entry again. The
+        # journaled command_settled — the receipted contract's truth —
+        # retires the abandoned press's pending record.
+        press = {'write_value': {'point': 11, 'kind': 'bool',
+                                 'value': {'bool': True}}}
+        transport.script('journal', [Response([{
+            'seq': 1, 'tick': plant.tick,
+            'event': {'command_settled': {'receipt': {
+                'command': press,
+                'outcome': {'applied': {'tick': plant.tick}}}}}}])])
         page.refresh()
         self.assertEqual(1,
                          len(self.posted_writes(transport, 11, False)))
         self.assertNotIn(11, page.ack_releases)
+        self.assertEqual([], page.pending_commands,
+                         'the journaled settle left the abandoned '
+                         'press unresolved')
         plant.advance()
         self.assertFalse(plant.points[11])
 
@@ -1625,6 +1792,47 @@ class AckReleaseRetry(unittest.TestCase):
         page.submit_ack(11)
         plant.advance()
         self.assertFalse(plant.points[21])
+
+    def test_abandoned_submission_pane_notice_resolves_on_the_settle(self):
+        # The pane-facing half of the reproduction: a bare submitCommand
+        # — no intervening submission repaints the receipt — whose
+        # applied settle the journal then serves must replace the
+        # standing "outcome unknown" notice with the settled verdict.
+        # The write targets the alarm point, not the ack input, so the
+        # resolving poll arms no release post that would repaint the
+        # pane ahead of the settle.
+        page, transport, plant = self.rig()
+        plant.set_pv(95.0)
+        plant.advance()
+        page.refresh()
+
+        write = {'write_value': {'point': 20, 'kind': 'bool',
+                                 'value': {'bool': False}}}
+        plant.apply_then_hang = True
+        answer = page.submit_command(write)
+        self.assertEqual({'indeterminate': {
+                             'detail': 'AbortError: signal timed out'}},
+                         answer['outcome'])
+        self.assertTrue(
+            page.receipt.startswith('command outcome unknown'))
+        self.assertNotIn('command failed', page.receipt)
+        # No retry: the unresolved submission posted exactly once —
+        # resending a command whose fate is open doubles a landed one.
+        self.assertEqual(1, len(transport.posts))
+
+        plant.advance()
+        transport.script('journal', [Response([{
+            'seq': 1, 'tick': plant.tick,
+            'event': {'command_settled': {'receipt': {
+                'command': write,
+                'outcome': {'applied': {'tick': plant.tick}}}}}}])])
+        page.refresh()
+        self.assertEqual([], page.pending_commands)
+        self.assertTrue(
+            page.receipt.startswith('the abandoned submission settled'),
+            'the journaled settle must resolve the standing notice: '
+            '%r' % page.receipt)
+        self.assertIn('applied at tick', page.receipt)
 
 
 if __name__ == '__main__':
