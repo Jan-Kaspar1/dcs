@@ -1286,6 +1286,12 @@ point it drives):
   `bool_flow`'s gate `input`, which must be a `bool` point
   (`ElementGateKind`), and a `threshold`'s contact `output`, which must
   be a `bool` point (`ElementContactKind`);
+- an element's `output` must be an `in` point — the field-side value
+  the controller reads (`ElementOutputDirection`). Elements model
+  physics *answering* commands: a `bool_flow`'s gate or a
+  `scaled_flow`'s demand reads the `out` command point, but driving an
+  `out` point would rewrite the operator's command each step — the
+  merge rejects it;
 - `time_constant`, `damping_ratio`, and `delay` must be finite and
   positive (`InvalidTimeConstant`, `InvalidDamping`, `InvalidDelay`),
   `amplitude` finite and non-negative (`InvalidAmplitude`), `on_rate`,
