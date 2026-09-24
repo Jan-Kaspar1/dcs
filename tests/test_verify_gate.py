@@ -51,10 +51,31 @@ class PhaseTimingTests(unittest.TestCase):
         ])
         self.assertEqual(verify.phase_command("rust-tests"), [
             verify.sys.executable, "scripts/run_rust_tests.py",
+            "--scope", "workspace",
+        ])
+        self.assertEqual(verify.phase_command("rust-proofs"), [
+            verify.sys.executable, "scripts/run_rust_tests.py",
+            "--scope", "proofs",
         ])
         self.assertEqual(verify.phase_command("supervisor-tests"), [
             verify.sys.executable, "scripts/run_tests.py", "--workers", "4",
         ])
+
+    def test_phases_cover_both_gates_and_proofs_hold_a_build_slot(self):
+        self.assertEqual(
+            verify.PHASES,
+            (
+                "rust-format",
+                "supervisor-tests",
+                "rust-clippy",
+                "rust-tests",
+                "rust-proofs",
+            ),
+        )
+        self.assertEqual(
+            verify.RUST_PHASES,
+            frozenset(("rust-clippy", "rust-tests", "rust-proofs")),
+        )
 
 
 class BuildSlotTests(unittest.TestCase):

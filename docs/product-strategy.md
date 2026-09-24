@@ -80,7 +80,9 @@ Keep ordinary required PR feedback under five minutes on a warm CI cache.
 Record elapsed time for each gate and investigate a sustained breach before adding
 more work to that gate. Prefer independently buildable crates or packages and
 targeted checks when a measured critical path stays over budget; keep a release
-gate that assembles and tests their versioned interfaces together. Track completed
+gate that assembles and tests their versioned interfaces together — the nested
+consumer and reference-plant proofs run as that `rust-proofs` gate (#905).
+Track completed
 merges in adjacent seven-day windows as a secondary flow signal. A decline over
 20% prompts investigation of the actual bottleneck, not an automatic refactor.
 

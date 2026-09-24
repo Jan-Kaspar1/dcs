@@ -16,8 +16,8 @@ else:
 
 
 BUILD_SLOTS = 4
-PHASES = ("rust-format", "supervisor-tests", "rust-clippy", "rust-tests")
-RUST_PHASES = frozenset(("rust-clippy", "rust-tests"))
+PHASES = ("rust-format", "supervisor-tests", "rust-clippy", "rust-tests", "rust-proofs")
+RUST_PHASES = frozenset(("rust-clippy", "rust-tests", "rust-proofs"))
 
 
 def _try_lock(handle):
@@ -98,7 +98,8 @@ def phase_command(name):
         "rust-format": ["cargo", "fmt", "--all", "--", "--check"],
         "supervisor-tests": [sys.executable, "scripts/run_tests.py", "--workers", "4"],
         "rust-clippy": ["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"],
-        "rust-tests": [sys.executable, "scripts/run_rust_tests.py"],
+        "rust-tests": [sys.executable, "scripts/run_rust_tests.py", "--scope", "workspace"],
+        "rust-proofs": [sys.executable, "scripts/run_rust_tests.py", "--scope", "proofs"],
     }
     return commands[name]
 
@@ -123,9 +124,9 @@ def main(argv=None):
             # pass_fds is POSIX-only; on Windows the byte-range lock ends with
             # this process whether or not the child would inherit the handle.
             inherit = {"pass_fds": (slot.fileno(),)} if os.name == "posix" else {}
-            for name in ("rust-clippy", "rust-tests"):
+            for name in ("rust-clippy", "rust-tests", "rust-proofs"):
                 phase_env = env
-                if name == "rust-tests" and os.name == "posix":
+                if name in ("rust-tests", "rust-proofs") and os.name == "posix":
                     phase_env = dict(env, DCS_BUILD_SLOT_FD=str(slot.fileno()))
                 run_phase(name, phase_command(name), root, phase_env, **inherit)
         print(f"verify.py: cargo build slot held for {time.monotonic() - held:.1f}s", flush=True)
@@ -136,7 +137,7 @@ def main(argv=None):
                 held = time.monotonic()
                 inherit = {"pass_fds": (slot.fileno(),)} if os.name == "posix" else {}
                 phase_env = env
-                if name == "rust-tests" and os.name == "posix":
+                if name in ("rust-tests", "rust-proofs") and os.name == "posix":
                     phase_env = dict(env, DCS_BUILD_SLOT_FD=str(slot.fileno()))
                 run_phase(name, phase_command(name), root, phase_env, **inherit)
             print(f"verify.py: cargo build slot held for {time.monotonic() - held:.1f}s", flush=True)

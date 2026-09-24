@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
-"""Run all workspace Rust tests while splitting out nested build proofs."""
+"""Run workspace Rust tests, split by gate scope.
 
+The "workspace" scope is the fast required-PR leg: the whole workspace
+suite minus the nested clean-target proofs. The "proofs" scope is the
+release-assembly legs, each a targeted rerun of one skipped proof. The
+default "all" scope runs both — the local full gate.
+"""
+
+import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 from pathlib import Path
@@ -37,23 +44,26 @@ NESTED_PROOFS = (
 OUTPUT_LOCK = threading.Lock()
 
 
-def command_plan():
-    workspace = ["cargo", "test", "--workspace", "--locked", "--"]
-    for _, _, test_name in NESTED_PROOFS:
-        workspace.extend(("--skip", test_name))
-
-    plan = {"workspace": workspace}
-    for label, target, test_name in NESTED_PROOFS:
-        plan[label] = [
-            "cargo",
-            "test",
-            "-p",
-            "dcs-build",
-            "--test",
-            target,
-            "--locked",
-            test_name,
-        ]
+def command_plan(scope="all"):
+    """Return the commands one gate scope runs, keyed by task label."""
+    plan = {}
+    if scope in ("all", "workspace"):
+        workspace = ["cargo", "test", "--workspace", "--locked", "--"]
+        for _, _, test_name in NESTED_PROOFS:
+            workspace.extend(("--skip", test_name))
+        plan["workspace"] = workspace
+    if scope in ("all", "proofs"):
+        for label, target, test_name in NESTED_PROOFS:
+            plan[label] = [
+                "cargo",
+                "test",
+                "-p",
+                "dcs-build",
+                "--test",
+                target,
+                "--locked",
+                test_name,
+            ]
     return plan
 
 
@@ -113,9 +123,18 @@ def run_command(label, command, root, env, pass_fds):
     return returncode
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--scope",
+        choices=("all", "workspace", "proofs"),
+        default="all",
+        help="which gate scope to run; default runs every leg",
+    )
+    options = parser.parse_args(argv)
+
     root = Path(__file__).resolve().parents[1]
-    plan = command_plan()
+    plan = command_plan(options.scope)
     pass_fds = inherited_lock_fds()
     started = time.monotonic()
     failed = False

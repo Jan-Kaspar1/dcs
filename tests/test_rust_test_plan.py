@@ -67,6 +67,41 @@ class RustTestPlanTests(unittest.TestCase):
 
         self.assertEqual(len(plan), len(NESTED_PROOFS) + 1)
 
+    def test_workspace_scope_is_exactly_the_fast_leg(self):
+        plan = command_plan("workspace")
+
+        self.assertEqual(list(plan), ["workspace"])
+        self.assertEqual(plan, {"workspace": command_plan()["workspace"]})
+
+    def test_proofs_scope_is_exactly_the_targeted_reruns(self):
+        plan = command_plan("proofs")
+
+        self.assertEqual(len(plan), len(NESTED_PROOFS))
+        self.assertNotIn("workspace", plan)
+        for label, _, _ in NESTED_PROOFS:
+            self.assertEqual(plan[label], command_plan()[label])
+
+    def test_scopes_partition_the_full_plan_without_overlap(self):
+        full = command_plan()
+        workspace = command_plan("workspace")
+        proofs = command_plan("proofs")
+
+        self.assertTrue(set(workspace).isdisjoint(proofs))
+        self.assertEqual(full, {**workspace, **proofs})
+        # Every skipped proof has exactly one targeted rerun and vice
+        # versa: no proof is dropped and none runs twice in one scope.
+        skipped = [
+            name
+            for index, part in enumerate(workspace["workspace"])
+            if part == "--skip"
+            for name in (workspace["workspace"][index + 1],)
+        ]
+        self.assertEqual(skipped, [name for _, _, name in NESTED_PROOFS])
+        self.assertEqual(
+            sorted(command[-1] for command in proofs.values()),
+            sorted(name for _, _, name in NESTED_PROOFS),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,7 +2,9 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -17,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARGO_BUILD_JOBS: 4
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
       - name: Show Rust toolchain
@@ -25,6 +28,7 @@ jobs:
           rustup show
           echo "version=$(rustc --version | cut -d ' ' -f2)" >> "$GITHUB_OUTPUT"
       - name: Cache Cargo registry
+        id: registry-cache
         uses: actions/cache@v4
         with:
           path: |
@@ -32,11 +36,13 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/registry/src
             ~/.cargo/git/db
+            ~/.cargo/git/checkouts
           key: cargo-registry-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
             cargo-registry-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}-
             cargo-registry-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-
       - name: Cache Clippy artifacts
+        id: target-cache
         uses: actions/cache@v4
         with:
           path: target
@@ -45,10 +51,17 @@ jobs:
             cargo-target-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}-clippy-
       - name: Timed Clippy check
         run: python3 scripts/verify.py --phase rust-clippy
+      - name: Report feedback metrics
+        if: always()
+        run: |
+          echo "registry-cache-hit=${{ steps.registry-cache.outputs.cache-hit }}"
+          echo "target-cache-hit=${{ steps.target-cache.outputs.cache-hit }}"
+          du -sh ~/.cargo/registry ~/.cargo/git target 2>/dev/null || true
   rust-tests:
     runs-on: ubuntu-latest
     env:
       CARGO_BUILD_JOBS: 4
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
       - name: Show Rust toolchain
@@ -57,6 +70,7 @@ jobs:
           rustup show
           echo "version=$(rustc --version | cut -d ' ' -f2)" >> "$GITHUB_OUTPUT"
       - name: Cache Cargo registry
+        id: registry-cache
         uses: actions/cache@v4
         with:
           path: |
@@ -64,11 +78,13 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/registry/src
             ~/.cargo/git/db
+            ~/.cargo/git/checkouts
           key: cargo-registry-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
             cargo-registry-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}-
             cargo-registry-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-
       - name: Cache test artifacts
+        id: target-cache
         uses: actions/cache@v4
         with:
           path: target
@@ -77,6 +93,64 @@ jobs:
             cargo-target-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}-tests-
       - name: Timed workspace tests
         run: python3 scripts/verify.py --phase rust-tests
+      - name: Report feedback metrics
+        if: always()
+        run: |
+          echo "registry-cache-hit=${{ steps.registry-cache.outputs.cache-hit }}"
+          echo "target-cache-hit=${{ steps.target-cache.outputs.cache-hit }}"
+          du -sh ~/.cargo/registry ~/.cargo/git target 2>/dev/null || true
+  # The release-assembly gate (issue #905): the nested clean-target
+  # consumer and reference-plant proofs. Not in the merge-required set —
+  # the tradeoff is recorded in docs/agent-operations.md — but it runs on
+  # every PR as an early signal and unconditionally on every main commit
+  # and v* tag, and docs/release-contract.md requires it green on a
+  # tagged commit before release.
+  rust-proofs:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_JOBS: 4
+      CARGO_INCREMENTAL: "0"
+    steps:
+      # Full history: the repin proofs resolve the recorded release rev
+      # out of git history, which a shallow checkout cannot serve.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Show Rust toolchain
+        id: rust-version
+        run: |
+          rustup show
+          echo "version=$(rustc --version | cut -d ' ' -f2)" >> "$GITHUB_OUTPUT"
+      - name: Cache Cargo registry
+        id: registry-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+          key: cargo-registry-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}-
+            cargo-registry-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-
+      - name: Cache proof artifacts
+        id: target-cache
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: cargo-target-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}-proofs-${{ github.sha }}
+          restore-keys: |
+            cargo-target-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}-proofs-
+      - name: Timed release-assembly proofs
+        run: python3 scripts/verify.py --phase rust-proofs
+      - name: Report feedback metrics
+        if: always()
+        run: |
+          echo "registry-cache-hit=${{ steps.registry-cache.outputs.cache-hit }}"
+          echo "target-cache-hit=${{ steps.target-cache.outputs.cache-hit }}"
+          du -sh ~/.cargo/registry ~/.cargo/git target 2>/dev/null || true
   supervisor-tests:
     runs-on: ubuntu-latest
     steps:
