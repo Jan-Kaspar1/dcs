@@ -43,8 +43,9 @@ pub struct PointBinding {
     pub channel: ChannelId,
     /// Whether the controller reads (`In`) or writes (`Out`) the point.
     ///
-    /// Direction is enforced where it carries meaning — [`Loopback`] ends —
-    /// but not on [`IoDriver`](dcs_core::IoDriver) access: writes to an `In`
+    /// Direction is enforced where it carries meaning — [`Loopback`] ends
+    /// and the point an element drives — but not on
+    /// [`IoDriver`](dcs_core::IoDriver) access: writes to an `In`
     /// point are how tests and field-side models force input values.
     pub direction: Direction,
     /// The channel's value before the first write or element step. Its
@@ -347,7 +348,10 @@ impl Threshold {
 /// reports it; a [`FlowSum`] reads a declared list, the vocabulary's
 /// one multi-input shape, and [`inputs`](Self::inputs) covers every
 /// variant. Every variant drives a `Float` point except a
-/// [`Threshold`], whose contact output is a `Bool` point.
+/// [`Threshold`], whose contact output is a `Bool` point. The driven
+/// point must be an `In` point — field-side physics the controller
+/// reads; driving an `Out` point would rewrite the controller's
+/// command each step, which [`ChannelMap::validate`] rejects.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessElement {
@@ -504,7 +508,12 @@ impl ChannelMap {
     ///   input and a `threshold`'s contact output, which must be `Bool`
     ///   points, the requirement attaching to each leg's role so an
     ///   element reading and driving the same point faces both legs'
-    ///   checks — `time_constant`, `delay`, and `damping_ratio` are
+    ///   checks — and the point an element drives must be an `In`
+    ///   point, since elements model field-side physics answering the
+    ///   controller's commands: driving an `Out` point would rewrite
+    ///   the command itself each step
+    ///   ([`ConfigError::ElementOutputDirection`]);
+    /// - `time_constant`, `delay`, and `damping_ratio` are
     ///   finite and positive, `amplitude` is finite and non-negative,
     ///   `on_rate`, `off_rate`, `gain`, and `bias` are finite, a
     ///   `threshold`'s `on`/`off` bounds are finite and distinct —
@@ -603,6 +612,19 @@ impl ChannelMap {
                 return Err(ConfigError::ElementPointKind {
                     point,
                     kind: bound.kind(),
+                });
+            }
+            // The driven point must be an `In` point: elements model
+            // field-side physics answering the controller's commands,
+            // so an element driving an `Out` point would rewrite the
+            // command itself each step — the write the operator issued
+            // lost at the next step boundary. Reading an `Out` point
+            // stays legal: it is the actuator-wire seam a `bool_flow`
+            // gate or a `scaled_flow` demand answers.
+            if bound.direction != Direction::In {
+                return Err(ConfigError::ElementOutputDirection {
+                    point,
+                    direction: bound.direction,
                 });
             }
             if let ProcessElement::BoolFlow(flow) = element {
@@ -762,6 +784,17 @@ pub enum ConfigError {
         /// The kind the point declares.
         kind: ValueKind,
     },
+    /// An element's driven point is not an `In` point. Elements model
+    /// field-side physics answering the controller's commands, so the
+    /// point an element drives must be one the controller reads;
+    /// driving an `Out` point would rewrite the command itself each
+    /// step.
+    ElementOutputDirection {
+        /// The point the element drives.
+        point: PointId,
+        /// The direction `point` actually declares.
+        direction: Direction,
+    },
     /// A lag's `time_constant` is not finite and positive.
     InvalidTimeConstant {
         /// The lag's output point.
@@ -903,6 +936,11 @@ impl fmt::Display for ConfigError {
             Self::ElementContactKind { point, kind } => write!(
                 f,
                 "a threshold element's contact must drive a Bool point, but point {} is {kind:?}",
+                point.0
+            ),
+            Self::ElementOutputDirection { point, direction } => write!(
+                f,
+                "process element driving point {} must drive an in point the controller reads, but the point is {direction} — an element on an out point rewrites the command each step",
                 point.0
             ),
             Self::InvalidTimeConstant { point, value } => write!(

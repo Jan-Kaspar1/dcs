@@ -15,11 +15,11 @@
 //!   first screen over exactly the grammar the merge reads, including
 //!   the serde re-serialization of each document;
 //! - a dynamics fixture under `invalid/` carries a pinned verdict —
-//!   their offenses (unbound points, driven-point conflicts) are
-//!   merge-layer rules the schema language cannot express, so the
-//!   schema legitimately accepts what `ChannelMap::validate` rejects
-//!   (the recorded split, see `src/schema.rs` and
-//!   `docs/architecture.md`).
+//!   their offenses (unbound points, driven-point conflicts, an
+//!   element driving an `out` point) are merge-layer rules the schema
+//!   language cannot express, so the schema legitimately accepts what
+//!   `ChannelMap::validate` rejects (the recorded split, see
+//!   `src/schema.rs` and `docs/architecture.md`).
 
 use dcs_core::PointId;
 use dcs_sim::{
@@ -252,14 +252,15 @@ fn invalid_dynamics_fixtures_carry_pinned_verdicts() {
     // The other invalid dynamics fixtures are well-formed element lists
     // whose offenses — unbound points, driven-point conflicts, an
     // element's input and output naming the same point where the legs'
-    // kinds differ — are merge-layer rules the schema language cannot
-    // express: the schema accepts them and `ChannelMap::validate` owns
-    // the rejection.
+    // kinds differ, an element driving an `out` command point — are
+    // merge-layer rules the schema language cannot express: the schema
+    // accepts them and `ChannelMap::validate` owns the rejection.
     let validator = validator();
     for name in [
         "dynamics_unbound_point.json",
         "dynamics_unbound_and_conflicting.json",
         "dynamics_self_point.json",
+        "dynamics_out_point.json",
     ] {
         let relative = Path::new("crates/dcs-plant/fixtures/invalid").join(name);
         let text = std::fs::read_to_string(root.join(&relative)).unwrap();
