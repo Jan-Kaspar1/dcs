@@ -614,13 +614,23 @@ fn an_unresponsive_peer_surfaces_timeout_on_every_access() {
 #[test]
 fn connecting_to_a_dead_port_fails_cleanly() {
     // Bind once to learn a free port, then drop the listener so the
-    // address refuses connections.
-    let addr = TcpListener::bind(("127.0.0.1", 0))
-        .unwrap()
-        .local_addr()
-        .unwrap();
-    let error = RemoteDriver::connect(addr).unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+    // address refuses connections. A concurrently bound fixture can
+    // legitimately take the freed port — the connect then succeeds —
+    // so retry until a probed port stays refused.
+    for _ in 0..20 {
+        let addr = TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        match RemoteDriver::connect(addr) {
+            Err(error) => {
+                assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+                return;
+            }
+            Ok(_) => continue,
+        }
+    }
+    panic!("twenty dead ports each connected — a concurrent listener keeps taking the freed port");
 }
 
 #[test]

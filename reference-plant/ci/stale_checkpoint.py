@@ -648,6 +648,7 @@ def stale_checkpoint_pass(args, tamper):
             standby_url.removeprefix("http://"),
             duty_files,
             listen=f"{old_host}:{old_port}",
+            pair_token=pair.PAIR_TOKEN,
         )
         rig.duty_url = duty_url
         if duty_url is None:

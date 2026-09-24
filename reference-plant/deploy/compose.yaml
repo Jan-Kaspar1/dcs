@@ -32,6 +32,15 @@
 # `standby` wiring alone never arms it: only the declared budget
 # does.
 #
+# Both controllers carry the same `--pair-token` — the pair's shared
+# tracking secret the keyed announced-source contract runs on: a
+# demoted owner's verify pull demands the keyed line proof only a peer
+# holding the token stamps, so an endpoint that merely replays or
+# forges the line's public checkpoints can neither arm a demotion nor
+# feed the demoted peer. The token is a deployment secret — a real
+# plant injects its own, never the checked-in demonstration value —
+# rather than manifest data, so it lands on the invocation alone.
+#
 # `ci/check.sh`'s `deploy` stage asserts this file and the manifest
 # agree on every field — a divergence fails `rig-mismatch` — and that
 # `docker compose config` (or the stage's fallback parser) accepts it.
@@ -86,7 +95,7 @@ services:
       - ../model/plant.json:/model/plant.json:ro
       - ctrl-a-data:/var/tmp
     environment:
-      DCS_MODEL_FINGERPRINT: "510136287e2a4b6e"
+      DCS_MODEL_FINGERPRINT: "9d4c956fab85654c"
     command:
       - /model/plant.json
       - --remote
@@ -99,6 +108,8 @@ services:
       - /var/tmp/state.json
       - --journal-file
       - /var/tmp/journal.jsonl
+      - --pair-token
+      - dcs-reference-pair
 
   ctrl-b:
     image: dcs-controller:v0.2.0
@@ -116,7 +127,7 @@ services:
       - ../model/plant.json:/model/plant.json:ro
       - ctrl-b-data:/var/tmp
     environment:
-      DCS_MODEL_FINGERPRINT: "510136287e2a4b6e"
+      DCS_MODEL_FINGERPRINT: "9d4c956fab85654c"
     command:
       - /model/plant.json
       - --remote
@@ -133,6 +144,8 @@ services:
       - /var/tmp/state.json
       - --journal-file
       - /var/tmp/journal.jsonl
+      - --pair-token
+      - dcs-reference-pair
 
 networks:
   dcs-rig:

@@ -148,30 +148,42 @@
 //! or strand `unsynchronized` and unpromotable forever. The demoted
 //! peer's checkpoint source is therefore resolved per scan cycle: the
 //! configured `--peer ADDR` when given — "active now, but here is my
-//! peer for later" — else the address the tracking peer announced
-//! through its pulls. The announced fallback is a hint, not a proof:
+//! peer for later" — else, on a `--pair-token` keyed run only, the
+//! address the tracking peer announced through its pulls. The
+//! announced fallback is a hint, not a proof:
 //! the serving side cannot tell the puller's monitor port from any
 //! other port its connection's source claims, so `POST /demote`
 //! toward an announced-only source first pulls one checkpoint from it
-//! and proceeds only when that checkpoint continues this run's line in
+//! and proceeds only when the answer carries the `?prove=` nonce's
+//! keyed `line_proof` — the attestation only a peer holding the pair's
+//! token produces — *and* that checkpoint continues this run's line in
 //! a way this run's own public `/checkpoint` could not have answered —
 //! a field-owning document not ahead of this run's tick is replayable,
 //! not a successor — journaling the adopted source and pinning it, so
 //! a later `?peer=` rewrite cannot redirect the demoted peer's pulls —
-//! while a dead, unreachable, replayed, or forged hint refuses
-//! `no_tracking_source` like an absent one. When both peers launch
-//! with the same `--pair-token`, the verify pull and every checkpoint
-//! the adopted source later serves must additionally carry the keyed
-//! `line_proof` only a peer holding the token produces — bound to the
-//! pull's nonce and the served document — so an endpoint that merely
-//! replays or fabricates this line's checkpoints can neither arm the
-//! demotion nor feed the demoted peer forged state. Either way the
+//! while a dead, unreachable, unsigned, replayed, or forged hint
+//! refuses `no_tracking_source` like an absent one. The announced
+//! contract is keyed-only outright: `/checkpoint` is public, so on an
+//! unkeyed run every document shape an announced endpoint could serve —
+//! the standby's `source_owns_field: false` included — is derivable
+//! from this run's own answers and proves nothing about who serves it,
+//! and an announced-only demotion refuses whatever the hint would
+//! serve; the configured `--peer` remains the unkeyed switchover path.
+//! The same scrutiny gates the involuntary demotion a preempted field
+//! claim forces: with no `POST /demote` boundary to run it on, the
+//! tracking cycle verifies the recorded hints lazily — a dead or
+//! foreign announcer loses to the legitimate successor's own proof
+//! inside one bounded pass, and a peer with only unproven hints pulls
+//! nothing rather than following one verbatim. On a keyed run every
+//! checkpoint the adopted source later serves keeps proving under
+//! fresh nonces, so an endpoint that merely replays or fabricates this
+//! line's checkpoints feeds the demoted peer nothing. Either way the
 //! demoted instance pulls, applies, and
 //! reconverges like any standby, and a later `POST /promote` fails
 //! back without a restart. A field owner with neither — nothing
-//! configured and no peer ever announced — refuses `POST /demote`
-//! outright (`no_tracking_source`) rather than silently marooning
-//! itself.
+//! configured and no announced source it can prove — refuses
+//! `POST /demote` outright (`no_tracking_source`) rather than silently
+//! marooning itself.
 //!
 //! The field's single-writer claim is taken at every transition into
 //! field ownership — a promotion, and a launched active's startup:
@@ -689,8 +701,11 @@ controller scan.
                   endpoint that only replays or fabricates this line's
                   checkpoints can neither arm the demotion nor feed the
                   demoted peer forged state. Requires --listen; unset,
-                  announced demotions verify on the document checks
-                  alone
+                  the announced-source contract is closed — /checkpoint
+                  is public, so no announced endpoint can prove itself
+                  and an announced-only demotion refuses
+                  no_tracking_source (a configured --peer still covers
+                  the switchover)
   --state-file PATH
                   persist the run's checkpoint to PATH at the end of
                   every scan cycle and at each accepted command's
@@ -1606,23 +1621,29 @@ fn main() -> ExitCode {
 /// One paced scan cycle behind the monitor: the tracking pull first —
 /// while the peer does not own the field and a checkpoint source exists
 /// — then the scan itself. The source is re-resolved every cycle:
-/// the configured `--standby`/`--peer` target when set, else the monitor
-/// address a tracking peer announced through its `?peer=` pulls — the
-/// follow-peer half that lets a demoted launched active find its
-/// successor without a restart, the serving side accepting the
-/// announce only as the pulling connection's own source address (a
-/// wildcard `--listen 0.0.0.0` announce resolving to it, so the
-/// recorded source is never an undialable bind address). The
-/// puller follows the resolved source, respawning when it changes, and
-/// announces this monitor's own address on every pull so the serving
-/// peer learns where to track back. A
+/// the configured `--standby`/`--peer` target when set, else a proven
+/// announced source — the monitor address a tracking peer announced
+/// through its `?peer=` pulls once the demote verify's checks passed
+/// on it — the follow-peer half that lets a demoted launched active
+/// find its successor without a restart, the serving side accepting
+/// the announce only as the pulling connection's own source address
+/// (a wildcard `--listen 0.0.0.0` announce resolving to it, so the
+/// recorded source is never an undialable bind address). An
+/// involuntary demotion — the field claim's mid-run loss — runs that
+/// verification lazily here the first sourceless cycle after it: each
+/// recorded hint gets one bounded pull, a dead or foreign announcer
+/// loses to the legitimate successor's own proof, and only unproven
+/// hints leaves the peer pulling nothing rather than following one.
+/// The puller follows the resolved source, respawning when it
+/// changes, and announces this monitor's own address on every pull so
+/// the serving peer learns where to track back. A
 /// field-owning cycle's [`Monitor::track_cycle`] short-circuits before
 /// the pull, so the puller's fetch thread idles until a demotion.
 fn tracked_cycle(
     monitor: &Monitor<'_>,
     puller: &mut Option<(SocketAddr, CheckpointPuller)>,
 ) -> Tick {
-    if let Some(source) = monitor.tracking_source() {
+    if let Some(source) = monitor.verified_tracking_source() {
         if puller.as_ref().map(|(bound, _)| *bound) != Some(source) {
             let announce = Some(monitor.local_addr());
             // A source a keyed run adopted through an announced

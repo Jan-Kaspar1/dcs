@@ -27,6 +27,10 @@ This registers `DCS Local Devin Agents` for the current user's next login, repla
 
 ```sh
 dcs-agents status
+dcs-agents explain
+dcs-agents explain --issue 123
+dcs-agents timeline 123
+dcs-agents plan
 dcs-agents logs
 journalctl --user -u dcs-agents.service -n 100
 dcs-agents pause
@@ -36,19 +40,32 @@ dcs-agents start
 dcs-agents retry 123
 ```
 
-`status` reports reservations, capacity, merge count, planner metadata, product-area allocation, pause reason, and errors. The `areas` section shows each target percentage with recent completions, active work, open backlog, and ready backlog. `logs` prints recent supervisor events; per-invocation `output.log` files contain agent output. Treat logs as private because they may include task contents.
+`status` reports reservations, capacity, merge count, a rolling seven-day merge comparison, planner metadata, product-area allocation, pause reason, and errors. `explain` summarizes why the ready queue or provider capacity is limiting dispatch; `explain --issue N` classifies one issue against its dependencies and active jobs. `timeline N` reads durable work and invocation events for an issue. `plan` requests a planning pass on the next unpaused supervisor cycle. The `areas` section shows each target percentage with recent completions, active work, open backlog, and ready backlog. `logs` prints recent supervisor events; per-invocation `output.log` files contain agent output. Treat logs as private because they may include task contents.
 
 `pause` prevents new dispatch and merging while active processes may finish and publish their results. `resume` reopens dispatch unless an integrity failure remains. `stop` terminates managed processes through the service and preserves their checkouts. `retry` applies only to a blocked issue after the pool is resumed; inspect its error and workspace first. A retry is not evidence that the underlying blocker has been fixed.
 
 The personal `/home/kaspar/workspace/dcs` checkout is separate from managed clones under `/home/kaspar/workspace/dcs-agent-pool`. Worker clones are allocated as needed. Successful automated merge-and-issue-closure reconciliations raise capacity from five to ten after five merges, and to twenty after fifteen. One planner may run alongside workers. Only dependencies and worker-slot capacity can leave slots idle; concurrency groups are descriptive metadata and no longer serialize dispatch, so same-group tickets run in parallel and overlapping edits are resolved through serialized merges and conflict repairs.
 
-The planner reads `docs/product-strategy.md`, the applicable `docs/requirements/` files, and cited notes under `docs/research/` before proposing work. Product issue scopes begin with stable requirement IDs. Every proposal also carries exactly one `area` value from the product taxonomy; the supervisor publishes the matching `area:*` label and reconciles it with managed metadata. When customer-specific semantics or measurable acceptance criteria lack evidence, the planner creates a `docs/research` issue first. The assigned worker then runs as the research role: it updates a cited research note and requirement status, and implementation waits for a later planning pass. This separates evidence gathering from the planner's backlog and dependency decisions without requiring a permanently running research session.
+The planner receives the rolling merge comparison as a secondary signal. A decline above 20% calls for bottleneck investigation; delivery-platform work still needs a measured cause and acceptance evidence. The planner reads `docs/product-strategy.md`, the applicable `docs/requirements/` files, and cited notes under `docs/research/` before proposing work. Product issue scopes begin with stable requirement IDs. Every proposal also carries exactly one `area` value from the product taxonomy; the supervisor publishes the matching `area:*` label and reconciles it with managed metadata. When customer-specific semantics or measurable acceptance criteria lack evidence, the planner creates a `docs/research` issue first. The assigned worker then runs as the research role: it updates a cited research note and requirement status, and implementation waits for a later planning pass. This separates evidence gathering from the planner's backlog and dependency decisions without requiring a permanently running research session.
 
 Dispatch orders by priority first and then by rolling investment saturation (`recent completed + active` divided by target percentage). This means an under-invested area wins only among otherwise equal-priority ready tickets. QA-created defects are classified by the capability they affect; their rig or reference-plant venue does not become their area.
 
-The ordinary planner runs at least every two hours and checks for low work after fifteen minutes. Low work means fewer than six dependency-ready tasks; tickets carrying `agent:ready` behind open prerequisites do not suppress planning. A proposal may depend on another item in the same proposal by its stable key. The supervisor validates that DAG, creates its issues in dependency order, and persists only resolved GitHub issue numbers. This lets one pass publish a contract ticket plus its later parallel fan-out without inventing issue numbers or waiting for another two-hour cycle.
+The ordinary planner runs at least every two hours and checks for low work after fifteen minutes. Low work means fewer than six dependency-ready tasks or armed automatic retries; tickets carrying `agent:ready` behind open prerequisites do not suppress planning. An operator can request an immediate pass with `dcs-agents plan`. A proposal may depend on another item in the same proposal by its stable key. The supervisor validates that DAG, creates its issues in dependency order, and persists only resolved GitHub issue numbers. This lets one pass publish a contract ticket plus its later parallel fan-out without inventing issue numbers or waiting for another two-hour cycle.
 
 Each agent invocation has a two-hour default limit. CI repair attempts are limited to three. GitHub inventory polling defaults to sixty seconds and errors increase the delay. `python3 scripts/verify.py` shares four heavy-build slots across clones and limits Cargo to four build threads; direct Cargo commands bypass the shared semaphore.
+
+## Merge-flow report
+
+`python3 scripts/merge_flow.py` prints a read-only measurement behind `status`'s rolling merge comparison, for use when the decline exceeds the 20% investigation threshold. It scans first-parent commits on the integration ref — worker clones are shallow, so run it against a full clone (`--repo-dir`) or replay captured output (`--git-log`) — resolves each merge to its issue through the squash-merge body, and reports per named window (`previous`, `current`; `--window-days`, `--now`): merge counts, dispatch-to-merge lead-time percentiles where the job ledger (`--state-db`, auto-detected from the install) supplies a reservation, the per-area breakdown via `dcs-task` metadata, repair incidence (WIP-preservation and mid-flight `origin/main` integrations inside merge bodies, plus ledger `repairs`/`attempt` counters), and the open backlog's ready/blocked label share at report time. Issue inventory comes from `gh issue list --state all` unless `--issues`/`--no-issues` is given; every input is injectable so the report is deterministic for tests and replays. It changes no dispatcher, worker, or CI behavior.
+
+First recorded reading (2026-09-24, 7-day windows ending ~04:45 UTC, full clone + state ledger + issue inventory):
+
+- Merges: current 169 vs previous 256 (−34.0% by git history; the supervisor ledger reads 155 vs 228, −32%). Caveat on the comparison: the repository's first commit is 2026-09-14, so the previous window holds only ~3 days of bootstrap history — per-day throughput fell ~86 to ~24 merges/day (−72%), steeper than the window totals show.
+- Lead time (dispatch to merge, identity-resolved): p50 0.64h → 5.2h, p90 1.9h → 62.4h, max 116.6h.
+- Repair incidence: ledger repairs 55/256 (21%) → 49/169 (29%); re-dispatched jobs 58 (23%) → 105 (62%); merges carrying WIP-preservation commits 19 → 38 (46 preserved-work commits); mid-flight `origin/main` integrations ~0 in both windows.
+- Backlog at report time: 82 open — ready 17 (21%; 11 dependency-blocked, so ~6 dispatchable), blocked 53 (65%), working 4, pr-open 3, unlabeled 5. Blocked-job median dwell ≈3.7 days, dominated by killed or timed-out invocations (exit −15).
+
+Measured bottleneck: publish/repair churn surfacing as blocked-label dwell — not ready-queue starvation and not the CI critical path. Repairs touch only 29% of current merges and merge bodies show no mid-flight main integrations, so merge serialization is not the constraint; the ready queue is thin (~6 dependency-clear) but nonempty. The dominant pattern is dispatch → invocation killed or timed out → blocked → manual `dcs-agents retry` dwell → re-dispatch: 62% of current-window merges consumed more than one dispatch, and the lead-time tail (p90 62h) is dwell between attempts, not scan/CI time. Delivery-platform work should attack invocation survival and blocked-job recovery before touching dispatch or CI.
 
 ## Admission control
 
@@ -120,9 +137,13 @@ dcs-agents status
 
 Ordinary merges do not switch the installed supervisor release. The explicit upgrade changes the installation's `current` pointer; prior releases remain available for investigation. Avoid reinstalling while the service is active.
 
+The installer's Python preflight is the CI `supervisor-tests` phase itself — `scripts/install_agents.py` invokes `scripts/verify.py --phase supervisor-tests`, which runs `scripts/run_tests.py --workers 4` and reports per-phase elapsed time. The gate runs before any release file is touched, so a failed shard leaves `current` on the previous release. Measured on this WSL host on 2026-09-24 (1,076 tests): gate 281.8 s, install 0.003 s — the service stop window between `dcs-agents stop` and the `current` switch is about five minutes, dominated by the suite. Job state in `state.sqlite3` is untouched by the install and reconciles on `dcs-agents start` exactly as before; the service stays stopped until that explicit start.
+
 ## Merge policy and acceptance evidence
 
 The supervisor serializes squash merges and requires the named `rust-format`, `rust-clippy`, `rust-tests`, and `supervisor-tests` checks for the PR revision. Branch updates require fresh checks. A job is completed only after GitHub confirms both PR merge and linked issue closure.
+
+`rust-tests` is the fast required leg: the whole workspace suite — unit, integration, and doc tests under `--locked` — minus the four nested clean-target proofs. Those proofs run as the separate `rust-proofs` assembly gate, on every PR as a non-blocking early signal and unconditionally on every `main` commit and `v*` tag; `docs/release-contract.md` requires it green on a tagged commit before release. The recorded tradeoff (#905): a regression only a nested proof catches can reach `main` before its post-merge `rust-proofs` run reports — accepted because those legs recompile the released crates in clean scratch targets and kept the required `rust-tests` gate over the five-minute feedback budget on a cold runner (10m17s on #889 against a 200.6s warm WSL run). No test is skipped: the workspace leg excludes exactly the four proofs and the gate reruns each by name. Measured on the worker WSL box at the split's revision: workspace leg 168.4s cold / 130.4s warm, proofs leg 233.2s cold / 214.9s warm — the four proofs alone exceeded the whole required gate. Every cached Rust CI job reports its cache-hit flags and cache sizes, and every phase logs its elapsed seconds; ordinary PR feedback latency is the required checks' wall time.
 
 This is supervisor policy, not server-side branch protection. If GitHub branch protection is unavailable for the repository's plan, an unrelated direct push or manual merge can bypass it. Workers operate on software and simulated I/O only; physical equipment access and live deployment are outside the autonomous loop.
 

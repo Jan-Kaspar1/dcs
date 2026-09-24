@@ -94,6 +94,15 @@ CONVERGE_TICKS = 4
 HANDOVER_TICKS = 4
 ACTOR = "ci-pair"
 
+# The declared pair's shared tracking secret: the announced-source
+# contract is keyed-only, so both members carry the same --pair-token —
+# a demoted owner's verify pull then demands the keyed `line_proof`
+# only a peer holding the token stamps, and an endpoint that merely
+# replays or fabricates the line's public checkpoints arms nothing. A
+# real deployment's token is its own secret; the leg's fixed value only
+# has to match across the pair's members.
+PAIR_TOKEN = "dcs-reference-pair"
+
 
 def stop(process):
     """Terminate a spawned child, escalating to kill if it lingers."""
@@ -151,6 +160,7 @@ def spawn_peer(
     auto_promote=None,
     listen="127.0.0.1:0",
     bound=None,
+    pair_token=None,
 ):
     """Spawn `dcs-controller <model> --remote … --driven` for one pair
     peer — `standby` the manifest's tracking wiring (None on the field
@@ -161,8 +171,11 @@ def spawn_peer(
     declared wildcard host on a runner port under a declared-binds
     launch, the default an ephemeral loopback bind), `bound` an
     optional list the verbatim bound address is appended to — the
-    leg's evidence the declared wildcard bind actually deployed.
-    Returns `(process, monitor_url, preamble)`: `monitor_url` is the
+    leg's evidence the declared wildcard bind actually deployed —
+    `pair_token` the deployment's shared tracking secret a pair member
+    carries (None leaves the run unkeyed — the foreign and lone peers
+    the negotiation and startup legs spawn). Returns `(process,
+    monitor_url, preamble)`: `monitor_url` is the
     dialable form of the reported bind — a wildcard bind normalized
     to loopback — or None when the process exits before reporting a
     listener, the preamble then carrying the startup refusal's stderr
@@ -182,6 +195,8 @@ def spawn_peer(
         argv += ["--standby", standby]
     if auto_promote is not None:
         argv += ["--auto-promote", str(auto_promote)]
+    if pair_token is not None:
+        argv += ["--pair-token", pair_token]
     for field, flag in (
         ("state_file", "--state-file"),
         ("journal_file", "--journal-file"),
@@ -663,7 +678,9 @@ def launch_pair(args, manifest, tamper=None, auto_promote=None,
     model and dynamics, then the two released `dcs-controller
     --driven --remote` peers — the field owner first, then the
     standby wired at the owner's monitor (or, under the
-    `broken-peer-flag` tamper, at an address nothing serves) — each
+    `broken-peer-flag` tamper, at an address nothing serves), both
+    keyed on the leg's shared `PAIR_TOKEN` so the announced-source
+    demotion contract the switch legs exercise runs attested — each
     spawn's startup refusal reported through `Abort`. `manifest` is
     the manifest path or `manifest_pair`'s resolved `(manifest, duty,
     standby)` — callers resolving it themselves keep their own
@@ -700,6 +717,7 @@ def launch_pair(args, manifest, tamper=None, auto_promote=None,
             rig.duty_files,
             listen=listen_bind(rig.duty_decl) if declared_binds else "127.0.0.1:0",
             bound=rig.duty_bound,
+            pair_token=PAIR_TOKEN,
         )
         if rig.duty_url is None:
             raise Abort(
@@ -724,6 +742,7 @@ def launch_pair(args, manifest, tamper=None, auto_promote=None,
             auto_promote=auto_promote,
             listen=listen_bind(rig.standby_decl) if declared_binds else "127.0.0.1:0",
             bound=rig.standby_bound,
+            pair_token=PAIR_TOKEN,
         )
         if rig.standby_url is None:
             raise Abort(

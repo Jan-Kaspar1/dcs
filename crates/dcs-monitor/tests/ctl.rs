@@ -1443,22 +1443,36 @@ fn scan_runs_on_an_unpaced_monitor_and_is_refused_on_a_paced_one() {
 #[test]
 fn an_unreachable_monitor_exits_nonzero_naming_the_address() {
     // Bind once to learn a free port, then drop the listener so the
-    // address refuses connections.
-    let addr = TcpListener::bind(("127.0.0.1", 0))
-        .unwrap()
-        .local_addr()
-        .unwrap();
-    for args in [
-        ["snapshot"].as_slice(),
-        ["write", "11", "5"].as_slice(),
-        ["invoke", "seq", "advance"].as_slice(),
-        ["promote"].as_slice(),
-    ] {
-        let output = ctl(addr, args);
-        assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
-        let stderr = stderr(&output);
-        assert!(stderr.contains(&addr.to_string()), "{args:?}: {stderr}");
+    // address refuses connections. A concurrently bound fixture can
+    // legitimately take the freed port — a probe then answers — so
+    // retry until a probed port stays refused.
+    for _ in 0..20 {
+        let addr = TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let mut rebound = false;
+        for args in [
+            ["snapshot"].as_slice(),
+            ["write", "11", "5"].as_slice(),
+            ["invoke", "seq", "advance"].as_slice(),
+            ["promote"].as_slice(),
+        ] {
+            let output = ctl(addr, args);
+            if output.status.success() {
+                rebound = true;
+                break;
+            }
+            let stderr = stderr(&output);
+            assert!(stderr.contains(&addr.to_string()), "{args:?}: {stderr}");
+        }
+        if !rebound {
+            return;
+        }
     }
+    panic!(
+        "twenty dead ports each answered — a concurrent listener keeps taking the freed port or the tool accepts a refused address"
+    );
 }
 
 #[test]

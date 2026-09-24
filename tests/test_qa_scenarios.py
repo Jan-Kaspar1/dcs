@@ -2643,7 +2643,84 @@ class CommandAvailabilityTests(unittest.TestCase):
             self.assertEqual(data, second[name], name)
 
 
-class FakePlantPeer:
+class _SocketPeerLifecycle:
+    """Shared shutdown for the real loopback peers used by scenario tests."""
+
+    def _start_peer_thread(self):
+        self._stop_event = threading.Event()
+        self._peer_lock = threading.Lock()
+        self.conns = set()
+        self._handler_threads = set()
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self):
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    conn, _ = self.listener.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    return
+                with self._peer_lock:
+                    if self._stop_event.is_set():
+                        conn.close()
+                        return
+                    self.conns.add(conn)
+                    handler = threading.Thread(
+                        target=self._handle_tracked, args=(conn,),
+                        daemon=True)
+                    self._handler_threads.add(handler)
+                    handler.start()
+        finally:
+            self.listener.close()
+
+    def _handle_tracked(self, conn):
+        try:
+            self._handle(conn)
+        finally:
+            with self._peer_lock:
+                self.conns.discard(conn)
+                self._handler_threads.discard(threading.current_thread())
+
+    def close(self):
+        self._stop_event.set()
+        try:
+            # Closing a listening socket from another thread does not wake
+            # accept() reliably on Linux. A loopback connection does.
+            with socket.create_connection(self.listener.getsockname(),
+                                          timeout=0.5):
+                pass
+        except OSError:
+            pass
+        self.listener.close()
+
+        with self._peer_lock:
+            connections = list(self.conns)
+        for conn in connections:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            conn.close()
+
+        self.thread.join(timeout=1)
+        deadline = time.monotonic() + 1
+        with self._peer_lock:
+            handlers = list(self._handler_threads)
+        for handler in handlers:
+            handler.join(timeout=max(0, deadline - time.monotonic()))
+
+        alive = [thread.name for thread in handlers if thread.is_alive()]
+        if self.thread.is_alive() or alive:
+            raise RuntimeError(
+                "socket peer did not stop cleanly: "
+                f"server={self.thread.is_alive()}, "
+                f"handlers={alive}")
+
+
+class FakePlantPeer(_SocketPeerLifecycle):
     """A plant-protocol peer on 127.0.0.1: a real listener speaking the
     documented newline-JSON request/response surface — list_points,
     read, inject_fault, clear_fault — over a fixed table of stable
@@ -2664,23 +2741,10 @@ class FakePlantPeer:
                                  1)
         self.listener.bind(('127.0.0.1', 0))
         self.listener.listen(4)
-        self.listener.settimeout(30)
+        self.listener.settimeout(0.5)
         self.address = '127.0.0.1:' \
             + str(self.listener.getsockname()[1])
-        self.thread = threading.Thread(target=self._serve, daemon=True)
-        self.thread.start()
-
-    def _serve(self):
-        try:
-            while True:
-                try:
-                    conn, _ = self.listener.accept()
-                except OSError:
-                    return
-                threading.Thread(target=self._handle, args=(conn,),
-                                 daemon=True).start()
-        finally:
-            self.listener.close()
+        self._start_peer_thread()
 
     def _handle(self, conn):
         try:
@@ -2774,11 +2838,6 @@ class FakePlantPeer:
             return _ctl_process(stderr=json.dumps(body.get('error')),
                                 returncode=1)
         return _ctl_process(body)
-
-    def close(self):
-        self.listener.close()
-        self.thread.join(timeout=5)
-
 
 class FieldFaultFeed:
     """A stubbed monitor pair for the field-fault scenario. Each
@@ -2920,7 +2979,7 @@ class FieldFaultTests(unittest.TestCase):
         report.validate_scenario(record)
 
 
-class ClaimPlantPeer:
+class ClaimPlantPeer(_SocketPeerLifecycle):
     """A plant-protocol peer enforcing the single-writer field claim
     the field-claim scenario exercises: claim_writer preempts
     unconditionally, ensure_writer grants only into an unclaimed or
@@ -2945,7 +3004,6 @@ class ClaimPlantPeer:
         self.shared_conns = set()  # holders that joined via ensure
         self.next_conn = 0
         self.conn_ids = {}
-        self.conns = set()
         self.requests = []
         self.lock = threading.Lock()
         # Fault injection for the named-failure cases.
@@ -2962,11 +3020,10 @@ class ClaimPlantPeer:
                                  socket.SO_REUSEADDR, 1)
         self.listener.bind(('127.0.0.1', 0))
         self.listener.listen()
+        self.listener.settimeout(0.5)
         self.address = ('127.0.0.1:'
                         + str(self.listener.getsockname()[1]))
-        self.thread = threading.Thread(target=self._serve,
-                                       daemon=True)
-        self.thread.start()
+        self._start_peer_thread()
 
     def ctl(self, *args):
         """The ctx['plant_ctl'] seam the scenario's field census
@@ -3003,21 +3060,6 @@ class ClaimPlantPeer:
             self.next_conn += 1
         return self.conn_ids[key]
 
-    def _serve(self):
-        while True:
-            try:
-                conn, _ = self.listener.accept()
-            except OSError:
-                return
-            self.conns.add(conn)
-            threading.Thread(target=self._handle, args=(conn,),
-                             daemon=True).start()
-
-    def close(self):
-        self.listener.close()
-        for conn in list(self.conns):
-            conn.close()
-
     def _fenced(self):
         return {'result': 'error',
                 'error': {'kind': 'fenced',
@@ -3043,8 +3085,8 @@ class ClaimPlantPeer:
         finally:
             # Disconnect releases nothing: the claim outlives a dead
             # owner so the field fails closed until another claim.
-            self.conn_ids.pop(id(conn), None)
-            self.conns.discard(conn)
+            with self.lock:
+                self.conn_ids.pop(id(conn), None)
             conn.close()
 
     def _respond(self, conn, request):

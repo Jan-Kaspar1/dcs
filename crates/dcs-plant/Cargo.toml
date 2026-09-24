@@ -21,4 +21,7 @@ signal-hook = "0.3.18"
 
 [dev-dependencies]
 dcs-core = { path = "../dcs-core" }
+# The dynamics-schema drift test's validator; remote-ref resolution is
+# unused, so the default resolver/TLS features stay off.
+jsonschema = { version = "=0.55.0", default-features = false }
 serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
