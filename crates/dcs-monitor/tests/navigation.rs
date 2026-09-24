@@ -120,6 +120,7 @@ fn journaled_out() -> PointSpec {
         kind: ValueKind::Bool,
         internal: None,
         writable: false,
+        requires_reason: false,
         stale_after_ticks: None,
         journaled: true,
     }
@@ -133,6 +134,7 @@ fn journaled_in() -> PointSpec {
         kind: ValueKind::Bool,
         internal: None,
         writable: false,
+        requires_reason: false,
         stale_after_ticks: None,
         journaled: true,
     }

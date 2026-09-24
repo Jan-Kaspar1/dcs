@@ -378,6 +378,7 @@ fn commands_are_journaled_with_their_final_outcomes() {
                         command: accepted.command,
                         outcome: CommandOutcome::Applied { tick: Tick(3) },
                         actor: None,
+                        reason: None,
                     },
                 },
             }]
@@ -410,6 +411,7 @@ fn commands_are_journaled_with_their_final_outcomes() {
                         },
                     },
                     actor: None,
+                    reason: None,
                 },
             }
         );
@@ -504,6 +506,7 @@ fn stale_map() -> PointMap {
                 kind: ValueKind::Float,
                 internal: None,
                 writable: false,
+                requires_reason: false,
                 stale_after_ticks: Some(2),
                 journaled: false,
             },
@@ -612,6 +615,7 @@ fn journaled_map() -> PointMap {
                 kind: ValueKind::Bool,
                 internal: None,
                 writable: true,
+                requires_reason: false,
                 stale_after_ticks: None,
                 journaled: true,
             },
@@ -623,6 +627,7 @@ fn journaled_map() -> PointMap {
                 kind: ValueKind::Bool,
                 internal: Some(Value::Bool(false)),
                 writable: false,
+                requires_reason: false,
                 stale_after_ticks: None,
                 journaled: true,
             },
@@ -771,6 +776,7 @@ fn a_receipted_write_to_a_journaled_point_journals_receipt_and_transition() {
                             command: receipt.command,
                             outcome: CommandOutcome::Applied { tick: Tick(2) },
                             actor: None,
+                            reason: None,
                         },
                     },
                 },

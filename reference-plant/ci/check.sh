@@ -184,6 +184,21 @@
 #                unset, the check installs them from $DCS_REMOTE at
 #                $DCS_REV — the contract's `cargo install --git`
 #                mechanism — into a scratch root.
+#   DCS_RECORD_DIR
+#                a directory holding the release record tree
+#                (`docs/releases/<tag>/…`) the schema-drift leg
+#                compares the tooling's emissions against. When unset
+#                — the contract's own shape — the record is fetched
+#                from $DCS_REMOTE at $DCS_REV. The workspace-side
+#                proof substitutes the checkout's own docs/releases:
+#                its tooling stand-ins emit the checkout's schemas,
+#                which legitimately drift from the pinned release's
+#                recorded artifacts between cuts (the contract's
+#                additive serde-optional fields land without a version
+#                bump), so the record the checkout carries is the
+#                comparator. The pinned-rev fetch still runs either
+#                way, proving the record stays reachable through the
+#                consumer mechanism.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -192,6 +207,7 @@ DCS_REMOTE="${DCS_REMOTE:-https://github.com/Jan-Kaspar1/dcs.git}"
 DCS_REV="${DCS_REV:-c2b5694d9fd6f6168b85c1dfc2e1542b369b3a3f}"
 DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-$DCS_REV}"
 DCS_TOOLS="${DCS_TOOLS:-}"
+DCS_RECORD_DIR="${DCS_RECORD_DIR:-}"
 TOOLS=""
 TOOLS_REV=""
 UPGRADE_DIR=""
@@ -348,6 +364,16 @@ for artifact in block-interfaces.schema.json plant-model.schema.json; do
         > "$RECORD/$artifact" \
         || fail "pin-unresolvable: the pinned rev serves no docs/releases/$DCS_RELEASE/$artifact"
 done
+if [ -n "$DCS_RECORD_DIR" ]; then
+    # The workspace-side proof's tooling stand-ins emit the checkout's
+    # schemas, so the checkout's own record tree is the comparator;
+    # the fetch above still proves the record stays fetchable at the
+    # pinned rev through the consumer mechanism.
+    for artifact in block-interfaces.schema.json plant-model.schema.json; do
+        cp "$DCS_RECORD_DIR/$DCS_RELEASE/$artifact" "$RECORD/$artifact" \
+            || fail "record-missing: $DCS_RECORD_DIR serves no $DCS_RELEASE/$artifact"
+    done
+fi
 
 # `dcs-model <subcommand>` emitted at the pinned rev must equal the
 # recorded artifact byte-for-byte — the consumer's non-drift leg for
