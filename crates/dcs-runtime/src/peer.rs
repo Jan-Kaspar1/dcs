@@ -2120,7 +2120,7 @@ impl<'d> Peer<'d> {
     /// A produced-nothing pull carries no field evidence, so a standing
     /// [`Diverged`](StandbySync::Diverged) verdict stands through the
     /// miss: the peer's promotability-blocking truth — its staged
-    /// outputs differ from the field — is unresolved until a same-tick
+    /// outputs differ from the field — is unresolved until a same-position
     /// comparison reads the field and matches, while the miss still
     /// counts toward the failover budget and reports in
     /// [`TrackReport::Missed`].
@@ -2376,8 +2376,8 @@ impl<'d> Peer<'d> {
 
     /// Drains divergence detections queued since the last call — one
     /// [`DivergenceReport`] per transition into
-    /// [`StandbySync::Diverged`], each carrying the tick the staged
-    /// image belonged to — for the transition journal the monitoring
+    /// [`StandbySync::Diverged`], each carrying the run tick the
+    /// apply landed on — for the transition journal the monitoring
     /// layer records them into.
     pub fn take_divergences(&mut self) -> Vec<DivergenceReport> {
         std::mem::take(&mut self.pending_divergences)
@@ -2385,7 +2385,7 @@ impl<'d> Peer<'d> {
 
     /// Drains divergence resolutions queued since the last call — one
     /// [`ResolutionReport`] per `Diverged` → [`StandbySync::Tracking`]
-    /// transition, each carrying the applied tick and the same-tick
+    /// transition, each carrying the applied tick and the same-position
     /// field comparison the clear stands on — for the transition
     /// journal the monitoring layer records them into.
     pub fn take_resolutions(&mut self) -> Vec<ResolutionReport> {
@@ -3693,11 +3693,11 @@ mod tests {
 
     /// The QA finding `diverged-clears-without-valid-field-comparison`:
     /// `Diverged` is the promotion-blocking "staged outputs differ from
-    /// the field" verdict and clears only on a same-tick comparison
+    /// the field" verdict and clears only on a same-position comparison
     /// that actually read the field and matched. A stale checkpoint
-    /// apply runs zero reads, and a same-tick compare whose field reads
-    /// fail observes nothing — neither reopens the promote gate while
-    /// the divergence evidence stands unresolved.
+    /// apply runs zero reads, and a same-position compare whose field
+    /// reads fail observes nothing — neither reopens the promote gate
+    /// while the divergence evidence stands unresolved.
     #[test]
     fn diverged_standby_clears_only_on_a_fully_read_same_tick_compare() {
         // The shared field; the standby observes it through a
@@ -3835,11 +3835,11 @@ mod tests {
     }
 
     /// The promotion boundary's `final_sync` sets the staged image
-    /// aside for its own transfer — a same-tick comparison there would
-    /// flag the one-tick command lag spuriously — but a promote the
-    /// standing verdict refuses must hand it back: on a diverged peer
-    /// it is the only evidence the next same-tick apply can clear the
-    /// verdict on.
+    /// aside for its own transfer — a same-position comparison there
+    /// would flag the one-tick command lag spuriously — but a promote
+    /// the standing verdict refuses must hand it back: on a diverged
+    /// peer it is the only evidence the next same-position apply can
+    /// clear the verdict on.
     #[test]
     fn a_refused_promotions_boundary_sync_keeps_the_divergence_evidence() {
         let field = StubDriver::field(&[(INPUT, Value::Float(2.0)), (OUTPUT, Value::Float(0.0))]);
@@ -3921,11 +3921,11 @@ mod tests {
         assert!(gate.is_open());
     }
 
-    /// A diverged peer whose next apply runs no same-tick field
-    /// comparison — the staged image's tick never matched the applied
-    /// checkpoint's — stays diverged: the apply carried no
-    /// field-matching evidence, so the promotion-blocking verdict
-    /// stands and no resolution queues.
+    /// A diverged peer whose next apply runs no same-position field
+    /// comparison — the staged image's predicted position never matched
+    /// the applied checkpoint's tick — stays diverged: the apply
+    /// carried no field-matching evidence, so the promotion-blocking
+    /// verdict stands and no resolution queues.
     #[test]
     fn diverged_verdict_stands_on_an_apply_that_ran_no_compare() {
         let field = StubDriver::field(&[(INPUT, Value::Float(2.0)), (OUTPUT, Value::Float(0.0))]);

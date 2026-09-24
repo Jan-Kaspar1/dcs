@@ -28,9 +28,9 @@
 //! fault is neither divergence evidence nor convergence evidence — is
 //! absent from [`compare_staged_points`]'s answer, so the caller can
 //! tell a partially-observed comparison from a fully-read one; a staged
-//! image whose tick no transferred checkpoint has reached yet runs no
-//! comparison at all, so the check only ever acts on same-tick,
-//! same-field observations.
+//! image whose predicted stream position no transferred checkpoint has
+//! reached yet runs no comparison at all, so the check only ever acts
+//! on same-position, same-field observations.
 
 use dcs_core::{Divergence, IoDriver, PointId, Sample, Tick, Value};
 use std::collections::BTreeMap;
@@ -110,7 +110,7 @@ pub fn compare_staged(
         .collect()
 }
 
-/// The full same-tick comparison of a staged field `Out` image against
+/// The full same-position comparison of a staged field `Out` image against
 /// the field: every staged point the driver answered, in `PointId`
 /// order, each entry carrying both sides' values — the evidence record a
 /// divergence resolution journals, agreements and mismatches alike.

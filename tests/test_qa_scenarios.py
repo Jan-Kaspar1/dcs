@@ -874,9 +874,9 @@ class SourceRestartFeed:
     field — each cold restart drops its tick to the resume mark and
     opens a new run on its --journal-file — while ctrl-b tracks its
     checkpoint stream: every ctrl-b request is one completed tracking
-    cycle, the pull applying under the generation-offset rule —
-    regressed streams journal one source_restarted and adopt at the
-    run tick, never rewinding it — unless a fault flag stages the
+    cycle, the pull applying under the never-rewind rule — lagging
+    streams adopt at the run tick, regressed ones journal one
+    source_restarted — unless a fault flag stages the
     finding's defect. ctrl-b's --journal-file is a real append-only
     file the feed writes; the plant's single-writer claim the fencing
     probes answer is a token the feed's claim/demote/cold-start
@@ -886,7 +886,6 @@ class SourceRestartFeed:
         self.a_tick = 400
         self.b_tick = 400
         self.aligned = 400        # ctrl-b's applied stream alignment
-        self.offset = 0           # ctrl-b's generation tick_offset
         self.a_up = True
         self.a_role = 'active'
         self.b_role = 'standby'
@@ -947,14 +946,13 @@ class SourceRestartFeed:
         self.b_role = 'standby'
         if not self.keeps_alignment:
             self.aligned = None
-            self.offset = 0
         self.b_tracking = False
 
     def _b_scan(self):
         """One tracking cycle on ctrl-b: while it owns the field the
         scan writes — a preempted claim fences it into demotion — and
-        while it stands by, the pull applies under the
-        generation-offset rule before the scan's tick advance."""
+        while it stands by, the pull applies under the never-rewind
+        rule before the scan's tick advance."""
         if self.b_role == 'promoting':
             self.b_role = 'active'
         if self.repromotes and self.b_role == 'standby' \
@@ -974,11 +972,9 @@ class SourceRestartFeed:
                 else ckpt < self.b_tick
             if regressed:
                 was_aligned = self.aligned
-                # The generation offset: the adopt lands at the run
-                # tick and later checkpoints land under it — the
-                # defect form lands at the stream's own tick instead.
-                self.offset = 0 if self.rewinds \
-                    else self.b_tick - ckpt
+                # The adopt lands at the run tick — the never-rewind
+                # hold every lagging apply gets — and the defect form
+                # lands at the stream's own tick instead.
                 if self.rewinds:
                     self.b_tick = ckpt
                 if not self.skips_journal:
@@ -992,9 +988,11 @@ class SourceRestartFeed:
                 self.aligned = ckpt
                 self.b_tracking = True
             else:
-                # An ordinary apply lands under the standing offset.
+                # An ordinary apply lands at the later of the two
+                # clocks: the run's tick holds above a lagging stream
+                # and rejoins the stream's domain once it catches up.
                 self.aligned = ckpt
-                self.b_tick = ckpt + self.offset
+                self.b_tick = max(self.b_tick, ckpt)
                 self.b_tracking = True
         else:
             # The pull missed — the heartbeat degrades until the
@@ -8038,12 +8036,14 @@ class FreshnessFeed:
     dynamics-driven stamp advances with it. ctrl-b is the tracking
     standby — its own scan tick advances per snapshot read, its sync
     reports `degraded` while the writer's checkpoint pulls miss, and the
-    budgeted point's served quality follows the declared five-tick lag
-    rule over the frozen stamp while the undeclared comparison keeps
-    Good. The writer's restart realigns the standby's tick — the resumed
-    checkpoint stream's rewind — and /history keeps the recorded
-    interval. Fault flags stage each named outcome the issue calls
-    out."""
+    budgeted point's served quality follows the declared five-tick
+    freshness rule: stale once the driver report has gone unchanged for
+    more than the budget in the run's own tick domain, fresh again on
+    the first change. The writer's restart realigns the standby's state
+    at its own tick — the run clock never rewinds — the resumed
+    stepping's changed reports clearing the staleness, and /history
+    keeps the recorded interval. Fault flags stage each named outcome
+    the issue calls out."""
 
     BUDGET = 5
     B_POINT = 13   # net-flow — the model's declared stale_after_ticks
@@ -8058,6 +8058,12 @@ class FreshnessFeed:
         self.promoted = False
         self.stale_seen = False
         self.relapsed = False
+        # Change-detection freshness in the run's own tick domain: the
+        # driver report last observed and the scan tick it changed at.
+        self.observed = self.plant
+        self.since = self.b_tick
+        self.blind = False       # a never-recovering peer's frozen view
+        self.rewind_ring = False  # the realign rewinds the run's tick
         self.hist = {self.B_POINT: [], self.C_POINT: []}
         self.seq = 1
         self.stops = []
@@ -8082,10 +8088,16 @@ class FreshnessFeed:
         if self.start_fails:
             raise RuntimeError('docker start failed: no such container')
         self.writer_up = True
-        if not self.promoted and not self.no_recover:
-            # The resumed checkpoint stream rewinds the tracking peer's
-            # tick domain to the plant's — the documented realign.
+        if self.rewind_ring and not self.promoted:
+            # The finding's defect: the realign rewinds the run's tick
+            # axis onto the resumed stream's — later ring samples stamp
+            # inside the retained freeze window, double-covering it.
             self.b_tick = self.plant
+            self.since = self.b_tick
+        if self.no_recover and not self.promoted:
+            # The named defect: the resumed stream never lands and the
+            # peer's reads never refresh — the staleness never clears.
+            self.blind = True
 
     def _frozen(self):
         # Stamps freeze while no peer steps the plant. A promoted
@@ -8098,7 +8110,9 @@ class FreshnessFeed:
         """One standby scan: its own tick advances, the plant's stamp
         advances only while a writer steps it, and a downed writer's
         pulls miss — the armed budget promoting at the configured
-        count."""
+        count. Freshness is judged on the driver report's last observed
+        change in the run's own tick domain, never on a cross-domain
+        stamp comparison."""
         self.b_tick += 1
         if not self._frozen():
             self.plant += 1
@@ -8107,10 +8121,18 @@ class FreshnessFeed:
         else:
             self.misses += 1
             if self.promote and self.misses >= self.PROMOTE_MISSES:
+                # The promoted run steps the plant again — but the
+                # staged defect latches the freshness view: its reads
+                # never re-observe the resumed field, so the budgeted
+                # point never returns Good.
                 self.promoted = True
+                self.blind = True
+        if not self.blind and self.plant != self.observed:
+            self.observed = self.plant
+            self.since = self.b_tick
 
     def _b_quality(self):
-        lag = max(0, self.b_tick - self.plant)
+        lag = self.b_tick - self.since
         if lag > self.BUDGET and not self.never_stale:
             if self.relapse and self.stale_seen and not self.relapsed:
                 self.relapsed = True
@@ -8120,7 +8142,7 @@ class FreshnessFeed:
         return 'good'
 
     def _c_quality(self):
-        lag = max(0, self.b_tick - self.plant)
+        lag = self.b_tick - self.since
         if self.leak and lag > self.BUDGET:
             return {'uncertain': 'stale'}
         return 'good'
@@ -8128,7 +8150,7 @@ class FreshnessFeed:
     def _record(self, point, quality):
         self.hist[point].append({'seq': self.seq, 'sample': {
             'value': {'float': 1.0}, 'quality': quality,
-            'tick': self.plant}})
+            'tick': self.b_tick}})
         self.seq += 1
 
     def _standby(self, method, route, query):
@@ -8155,10 +8177,10 @@ class FreshnessFeed:
             return 200, {'tick': self.b_tick, 'points': [
                 {'point': self.B_POINT, 'sample': {
                     'value': {'float': 1.0}, 'quality': qb,
-                    'tick': self.plant}},
+                    'tick': self.b_tick}},
                 {'point': self.C_POINT, 'sample': {
                     'value': {'float': 1.0}, 'quality': qc,
-                    'tick': self.plant}}]}
+                    'tick': self.b_tick}}]}
         if (method, route) == ('GET', '/history'):
             params = [part.split('=', 1) for part in query.split('&')]
             wanted = [int(v) for k, v in params if k == 'point']
@@ -8267,10 +8289,21 @@ class StaleFreshnessTests(unittest.TestCase):
         self.assertIn('did not return Good', record.get('detail', ''))
         report.validate_scenario(record)
 
+    def test_rewound_history_ticks_fail(self):
+        # The finding's defect: the realign rewinds the run's tick
+        # axis, so the post-restart ring samples stamp inside the
+        # retained freeze window — a double-covered tick range.
+        self.feed.rewind_ring = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('double-covered', record.get('detail', ''))
+        report.validate_scenario(record)
+
     def test_promoted_peer_never_recovering_fails(self):
         # The armed failover bound firing mid-freeze: the promoted peer
-        # reclaims the writer and resumes stepping, but its scan ticks
-        # lead the frozen stamps by the outage — the lag never closes.
+        # reclaims the writer and resumes stepping, but the staged
+        # latch leaves its freshness view frozen — the point never
+        # returns Good.
         self.feed.promote = True
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'failed', record)

@@ -3083,12 +3083,13 @@ def scenario_controller_restart(ctx):
 # (merged as #535): a tracking standby whose checkpoint source
 # cold-restarts or is replaced — the stream's served tick falling below
 # the last alignment, or below the run's own tick before any alignment
-# stood — adopts the regressed state at its own run tick under a
-# generation offset (crates/dcs-runtime/src/peer.rs `SourceRestart` /
-# `tick_offset`), never rewinding the tick domain /history and
-# /journal attribute into, and journals exactly one `source_restarted`
-# entry per regression carrying the resync tick, the prior alignment,
-# and the resumed stream tick (JournalEvent::SourceRestarted).
+# stood — adopts the regressed state at its own run tick under the
+# live-derived apply offset (crates/dcs-runtime/src/peer.rs
+# `SourceRestart` / `stream_offset`), never rewinding the tick domain
+# /history and /journal attribute into, and journals exactly one
+# `source_restarted` entry per regression carrying the resync tick,
+# the prior alignment, and the resumed stream tick
+# (JournalEvent::SourceRestarted).
 #
 # The induction needs a cold start the state-file-preserving
 # `restart_controller` cannot produce: ctx['cold_restart_controller']
@@ -3796,8 +3797,8 @@ def scenario_source_restart(ctx):
 # the undeclared `level-primary` keeps reporting Good. The outage is
 # bounded by the standby's armed failover budget — the writer's restart
 # lands inside it, the resumed checkpoint stream realigns the tracking
-# peer's tick domain to the plant's, and the budgeted point returns
-# Good. Should the restart ever land late, the armed self-promotion is
+# peer's state at its own (never-rewound) tick, and the budgeted point
+# returns Good. Should the restart ever land late, the armed self-promotion is
 # the documented bound: the promoted peer reclaims the writer and
 # resumes stepping, and the case reports whether the point recovers on
 # that path instead. `GET /history` preserves the stale interval either
@@ -3993,9 +3994,10 @@ def scenario_stale_freshness(ctx):
         case.observe('writer restart issued')
 
         # Recovery on the observing peer: the budgeted point back to
-        # Good. On the restart path the resumed checkpoints rewind the
-        # tracking peer's tick to the plant's — the lag closes and the
-        # declared budget clears.
+        # Good. On the restart path the resumed checkpoints adopt at
+        # the tracking peer's own tick — the run clock never rewinds —
+        # and the resumed plant stepping changes the driver sample, so
+        # the change-judged freshness budget clears.
         def back_to_good():
             try:
                 report = _role(ctx, peer_base)
@@ -4098,6 +4100,12 @@ def scenario_stale_freshness(ctx):
             return case.finish('failed', 'the /history record does not '
                                'preserve the stale interval live '
                                'polling observed')
+        disorder = _history_disorder(history_body, 0)
+        if disorder is not None:
+            return case.finish('failed', 'the peer\'s /history ring '
+                               'rewound its tick axis across the '
+                               'realign — a retained range double-'
+                               'covered: ' + disorder)
         if interval['good_inside']:
             return case.finish('failed', 'a healthy last-known value '
                                'sits inside the recorded stale interval')
