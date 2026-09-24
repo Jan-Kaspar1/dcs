@@ -124,6 +124,8 @@ dcs-agents status
 
 Ordinary merges do not switch the installed supervisor release. The explicit upgrade changes the installation's `current` pointer; prior releases remain available for investigation. Avoid reinstalling while the service is active.
 
+The installer's Python preflight is the CI `supervisor-tests` phase itself — `scripts/install_agents.py` invokes `scripts/verify.py --phase supervisor-tests`, which runs `scripts/run_tests.py --workers 4` and reports per-phase elapsed time. The gate runs before any release file is touched, so a failed shard leaves `current` on the previous release. Measured on this WSL host on 2026-09-24 (1,076 tests): gate 281.8 s, install 0.003 s — the service stop window between `dcs-agents stop` and the `current` switch is about five minutes, dominated by the suite. Job state in `state.sqlite3` is untouched by the install and reconciles on `dcs-agents start` exactly as before; the service stays stopped until that explicit start.
+
 ## Merge policy and acceptance evidence
 
 The supervisor serializes squash merges and requires the named `rust-format`, `rust-clippy`, `rust-tests`, and `supervisor-tests` checks for the PR revision. Branch updates require fresh checks. A job is completed only after GitHub confirms both PR merge and linked issue closure.

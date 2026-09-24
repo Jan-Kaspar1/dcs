@@ -9,6 +9,13 @@ reference are platform conformance tests owned by this repository,
 not customer-project examples; a customer plant is an external consumer
 of a pinned release (decision 79).
 
+Every externally reachable transport the artifacts below stand up —
+the monitor HTTP surface, the peer checkpoint link, the remote-driver
+plant protocol, the sim-bus register protocol, and the EtherCAT cyclic
+binding — is enumerated with its bind posture and authentication
+boundary in `docs/conduit-boundaries.md`, the artifact a deployment's
+zone-and-conduit design consumes.
+
 ## Controller container image
 
 The root `Dockerfile` packages the `dcs-controller` binary as a container
