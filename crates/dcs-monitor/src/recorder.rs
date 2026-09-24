@@ -433,9 +433,19 @@ impl Recorder {
     /// Journals a field-claim loss — the shared field fenced a write of
     /// this instance's, meaning another attachment preempted the
     /// single-writer claim — attributed to the tick the fenced scan was
-    /// observed at.
-    pub(super) fn note_field_claim_lost(&mut self, tick: Tick, point: PointId) {
-        self.push(tick, JournalEvent::FieldClaimLost { point });
+    /// observed at, `claimant` carrying the owner token the field's
+    /// arbitration named when it fenced, so the audit trail attributes
+    /// the takeover rather than an anonymous loss. `None` where no
+    /// verdict named a claimant — a driver surface whose fencing
+    /// answer carries no owner identity — and the entry records the
+    /// loss unattributed rather than guessing.
+    pub(super) fn note_field_claim_lost(
+        &mut self,
+        tick: Tick,
+        point: PointId,
+        claimant: Option<u64>,
+    ) {
+        self.push(tick, JournalEvent::FieldClaimLost { point, claimant });
     }
 
     /// Journals an orphan detection — a tracking peer's applied

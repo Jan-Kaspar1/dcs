@@ -34,7 +34,7 @@ spans, in page.html 1-based lines:
   cursor, gap note, attribution re-mark, dedupe, run_boundary restart
   check, merge, ordering, and bound — L3314–3389
 - `postCommand`'s bounded POST, `isNotActive`, and `submitCommand`'s
-  active-peer routing with the not_active re-poll — L3675–3727
+  active-peer routing with the not_active re-poll — L3689–3741
 """
 import json
 import unittest
@@ -216,16 +216,16 @@ PINS = [
     # postCommand — the bounded POST every command rides — isNotActive's
     # rejected-not_active shape, and submitCommand's active-peer
     # routing with its single re-poll/retry.
-    (3675, 'async function postCommand(base, command, reason) {'),
-    (3686, 'signal: AbortSignal.timeout(POLL_MS),'),
-    (3691, 'function isNotActive(receipt) {'),
-    (3706, 'async function submitCommand(command, reason) {'),
-    (3718, 'let answer = await postCommand(peers[target].base, command, reason);'),
-    (3719, 'if (isNotActive(answer)) {'),
-    (3725, 'receipt.textContent = JSON.stringify(answer, null, 2);'),
+    (3689, 'async function postCommand(base, command, reason) {'),
+    (3700, 'signal: AbortSignal.timeout(POLL_MS),'),
+    (3705, 'function isNotActive(receipt) {'),
+    (3720, 'async function submitCommand(command, reason) {'),
+    (3732, 'let answer = await postCommand(peers[target].base, command, reason);'),
+    (3733, 'if (isNotActive(answer)) {'),
+    (3739, 'receipt.textContent = JSON.stringify(answer, null, 2);'),
     # The cadence both tickers share.
-    (3830, 'setInterval(refreshOverview, POLL_MS);'),
-    (4031, 'setInterval(refresh, POLL_MS);'),
+    (3844, 'setInterval(refreshOverview, POLL_MS);'),
+    (4045, 'setInterval(refresh, POLL_MS);'),
 ]
 
 
@@ -427,7 +427,7 @@ class PageReplica:
             for i in range(len(self.peers))
         ]
 
-    # --- the receipted command path: page.html:817-832, 3675-3727 ---
+    # --- the receipted command path: page.html:817-832, 3689-3741 ---
 
     def active_peer(self):
         # page.html:817-820 — the pair's unique settled-active peer's
@@ -448,7 +448,7 @@ class PageReplica:
                 'mid-transition')
 
     def post_command(self, base, command, reason=None):
-        # page.html:3675-3689 — the attributed envelope when a reason
+        # page.html:3689-3703 — the attributed envelope when a reason
         # rides (the replica declares no operator identity), the POST
         # itself, and the same POLL_MS abort bound every poll read
         # rides: a hanging listener answers nothing and the bound
@@ -465,13 +465,13 @@ class PageReplica:
 
     @staticmethod
     def is_not_active(receipt):
-        # page.html:3691-3695 — the rejected receipt carrying the
+        # page.html:3705-3709 — the rejected receipt carrying the
         # not_active reason.
         rejected = ((receipt or {}).get('outcome') or {}).get('rejected')
         return bool(rejected) and 'not_active' in rejected.get('reason', {})
 
     def submit_command(self, command, reason=None):
-        # page.html:3706-3727 — active-peer routing, the roles re-poll
+        # page.html:3720-3741 — active-peer routing, the roles re-poll
         # while none reports, the one not_active re-poll/retry, the
         # receipt pane's rendered answer, and the answer itself (null
         # when nothing was sent).
@@ -651,7 +651,7 @@ class PageReplica:
         }
         return self.feed_line
 
-    # --- the stream polls: page.html:3161-3210, 3289-3360 ---
+    # --- the stream polls: page.html:3196-3245, 3324-3395 ---
 
     def refresh_trends(self):
         states = list(self.trends.values())
@@ -698,7 +698,7 @@ class PageReplica:
                     state['lastTick'] = entry['sample']['tick']
 
     def refresh_journal(self):
-        # page.html:3289-3360 — the since-read, the run-attributed
+        # page.html:3324-3395 — the since-read, the run-attributed
         # merge loop, and the pane's tick-order bounded render set.
         entries = self.poll_fetch(
             '/journal?since=%s' % self.journal_since).json()
@@ -736,7 +736,7 @@ class PageReplica:
             self.journal_seen.discard(
                 journal_key(self.journal_entries.pop(0)))
 
-    # --- the poll ordering: page.html:1333-1447 ---
+    # --- the poll ordering: page.html:1333-1482 ---
 
     def refresh(self):
         """One poll's feed-relevant ordering: roles, the bounded

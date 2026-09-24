@@ -37,15 +37,18 @@ whole lifecycle:
   silently: a refusal leaves the claim and the owner untouched, and
   the unconditional preempt the contract grants must surface its
   supersession — on the current release the superseded owner journals
-  `field_claim_lost` and demotes in place (degrade, never death), then
-  the leg re-promotes it so the pair's launch roles stand unchanged.
-  The preempt window also carries the state-vs-receipt audit: a
-  receipted write on the model's writable internal `In` point
-  admitted after the preempt but before the superseded owner's
-  detection scan must settle `superseded` on both peers' receipt
-  logs while every image — the demoted peer's, the tracking peer's
-  adopted checkpoint, and the re-promoted line's — still reads the
-  baseline; a superseded write that landed would contradict the
+  `field_claim_lost` — attributed to the rogue's owner token, the
+  claimant the field's own fencing verdict named — and demotes in
+  place (degrade, never death); then the rogue's release lets the
+  demoted owner's bound conditional reclaim take the field back
+  without an operator call, so the pair's launch roles stand
+  unchanged. The preempt window also carries the state-vs-receipt
+  audit: a receipted write on the model's writable internal `In`
+  point admitted after the preempt lands but before the superseded
+  owner's detection scan must settle `superseded` on both peers'
+  receipt logs while every image — the demoted peer's, the tracking
+  peer's adopted checkpoint, and the reclaimed line's — still reads
+  the baseline; a superseded write that landed would contradict the
   journal both peers record;
   on the older claim-only release the superseded owner stays `active`
   but its scans start refusing on the fenced write — the disturbance
@@ -201,9 +204,10 @@ def converged_sync(report):
     line's serving run holds no field claim. In this leg's restore
     window the rogue token owns the field and the successor's run
     serves checkpoints without one, so the demoted owner's honest
-    report is `orphaned` — a promotable convergence — until its
-    re-promotion preempts the rogue. A release line that predates the
-    stamp reports `tracking` for the same convergence."""
+    report is `orphaned` — a promotable convergence — until the
+    rogue's release lets its fencing-loss reclaim re-take the field.
+    A release line that predates the stamp reports `tracking` for the
+    same convergence."""
     sync = report.get("sync") if isinstance(report, dict) else None
     return report.get("role") == "standby" and isinstance(
         sync, dict
@@ -675,6 +679,19 @@ def claim_fencing_pass(args, tamper):
                     "owner's journal recorded no field_claim_lost"
                 )
                 raise Abort
+            # The audit half of the finding: every loss record names
+            # the claimant — the owner token the field's own fencing
+            # verdict reported, so the takeover attributes to the rogue
+            # rather than an anonymous "another".
+            if any(
+                loss.get("claimant") != rogue_token for loss in losses
+            ):
+                failures.append(
+                    "the field_claim_lost records do not attribute "
+                    f"the takeover to the rogue token {rogue_token:#x}: "
+                    f"{losses}"
+                )
+                raise Abort
             transitions = [
                 (frm, to)
                 for _tick, frm, to in pair.role_transitions(added)
@@ -802,9 +819,16 @@ def claim_fencing_pass(args, tamper):
             # while the rogue's claim stands (the tracked line's
             # serving run owns nothing, the named verdict the wedge
             # fix reports instead of healthy tracking), `tracking` on
-            # a stamp-less release line — then re-promotes: the
-            # promotion claim preempts the rogue token, so the field
-            # stays claimed throughout.
+            # a stamp-less release line — then the rogue attachment
+            # hands the field back, and the wedge escapes by itself:
+            # the demoted owner's fencing-loss mark drives the bound
+            # conditional reclaim every standby scan — refused while
+            # the rogue token stood, granted the first scan the field
+            # stands unclaimed — so the run re-takes the claim under
+            # its own token and walks standby → promoting → active
+            # with no operator call. The claim is genuinely the
+            # owner's again: the grant bound the run's attachments to
+            # its holders, so the re-lifted gate's writes pass it.
             report = None
             for _ in range(RECONVERGE_SCANS):
                 report = pair.get(
@@ -820,9 +844,31 @@ def claim_fencing_pass(args, tamper):
                     f"{report}"
                 )
                 raise Abort
-            promoted = rig.promote(
-                owner_url, failures, what="the demoted field owner"
-            )
+            released = probe_io.request({"op": "release_writer"})
+            if released.get("result") != "done":
+                failures.append(
+                    f"the rogue claim's release_writer refused: "
+                    f"{released}"
+                )
+                raise Abort
+            watch = []
+            promoted = None
+            for _ in range(RECONVERGE_SCANS):
+                pair.scan(owner_url, failures)
+                report = pair.get(
+                    f"{owner_url}/role", "GET /role", failures
+                )
+                watch.append(report.get("role"))
+                if report.get("role") == "active":
+                    promoted = report
+                    break
+            if promoted is None:
+                failures.append(
+                    "the demoted owner never reclaimed the released "
+                    f"field — the reclaim left GET /role walking "
+                    f"{watch}"
+                )
+                raise Abort
             handover = []
             for _ in range(pair.HANDOVER_TICKS):
                 _tracked, owner = rig.tick(
@@ -830,7 +876,7 @@ def claim_fencing_pass(args, tamper):
                     owner_url,
                     failures,
                     diverged="the restored pair's images diverged at "
-                    "tick {tick} — the re-promotion was not bumpless",
+                    "tick {tick} — the reclaim was not bumpless",
                 )
                 handover.append(owner["tick"])
             owner_role = pair.get(
@@ -841,7 +887,7 @@ def claim_fencing_pass(args, tamper):
             )
             if owner_role.get("role") != "active":
                 failures.append(
-                    "the re-promoted owner never settled active — "
+                    "the reclaimed owner never settled active — "
                     f"GET /role answers {owner_role}"
                 )
                 raise Abort
@@ -903,6 +949,7 @@ def claim_fencing_pass(args, tamper):
             digest_entries.append(
                 {
                     "phase": "restore",
+                    "reclaim": watch,
                     "promote": promoted,
                     "ticks": handover,
                     "owner_role": owner_role,

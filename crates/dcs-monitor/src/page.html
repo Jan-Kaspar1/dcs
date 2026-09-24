@@ -3419,6 +3419,9 @@ function describeEventField(field) {
 // same-tick evidence, so an empty list marks an entry an older build
 // journaled — |
 // {"reinitialized": {report}} |
+// {"field_claim_lost": {point, claimant?}} — the fenced write's
+// supersession, claimant naming the preempting owner token where the
+// field's verdict carried one — |
 // {"source_restarted": {was_aligned, resumed_at}} — the tracked
 // stream's generation boundary — | {"run_boundary": {run}} — a new
 // process lifetime's marker on a restarted journal file.
@@ -3503,6 +3506,17 @@ function describeEvent(event) {
             formatValue(r.checkpointed) + " → " +
             formatValue(r.declared)).join(", ")
         : "");
+  }
+  if ("field_claim_lost" in event) {
+    const lost = event.field_claim_lost;
+    // The claimant is the field's own arbitration verdict — the owner
+    // token the preempting claim was taken under. Entries an older
+    // build journaled carry none and read unattributed.
+    return "field write-ownership lost: " + pointName(lost.point) +
+      " fenced" +
+      (lost.claimant === null || lost.claimant === undefined
+        ? ""
+        : " — preempted by owner token " + lost.claimant);
   }
   if ("event_emitted" in event) {
     const emitted = event.event_emitted.event;

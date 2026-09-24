@@ -233,14 +233,14 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
     let applied = |result: Result<(), IoError>| match result {
         Ok(()) => PlantResponse::Done,
         Err(error) => PlantResponse::Error {
-            error: PlantError::Io { error },
+            error: PlantError::Io { error, owner: None },
         },
     };
     match request {
         PlantRequest::Read { point } => match shared.driver.read(point) {
             Ok(sample) => PlantResponse::Sample { sample },
             Err(error) => PlantResponse::Error {
-                error: PlantError::Io { error },
+                error: PlantError::Io { error, owner: None },
             },
         },
         // `Write` and `Step` mutate the shared field, so they fence on
@@ -250,10 +250,14 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
         PlantRequest::Write { point, value } => {
             let writer = shared.writer.lock().unwrap();
             match writer.as_ref() {
+                // The fencing verdict names the standing claim's
+                // owner: the superseded field owner's audit trail can
+                // attribute the preemption to the claimant's token.
                 Some(claim) if !claim.holders.contains(&connection) => {
                     return PlantResponse::Error {
                         error: PlantError::Io {
                             error: IoError::Fenced(point),
+                            owner: Some(claim.owner),
                         },
                     };
                 }
@@ -284,6 +288,7 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
                     return PlantResponse::Error {
                         error: PlantError::Fenced {
                             detail: "another attachment owns field writes".to_string(),
+                            owner: Some(claim.owner),
                         },
                     };
                 }
@@ -346,6 +351,7 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
                             detail: "a live controller holds the field's write-ownership \
                                  claim"
                                 .to_string(),
+                            owner: Some(claim.owner),
                         },
                     }
                 }
@@ -374,6 +380,7 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
                 Some(claim) if claim.owner != owner => PlantResponse::Error {
                     error: PlantError::Fenced {
                         detail: "another attachment owns field writes".to_string(),
+                        owner: Some(claim.owner),
                     },
                 },
                 Some(claim) => {
@@ -445,9 +452,10 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
             let writer = shared.writer.lock().unwrap();
             match writer.as_ref() {
                 Some(claim) if claim.holders.contains(&connection) => PlantResponse::Done,
-                Some(_) => PlantResponse::Error {
+                Some(claim) => PlantResponse::Error {
                     error: PlantError::Fenced {
                         detail: "another attachment owns field writes".to_string(),
+                        owner: Some(claim.owner),
                     },
                 },
                 None => PlantResponse::Error {
