@@ -844,11 +844,10 @@ impl RemoteDriver {
                 if let PlantResponse::Error { error } = &response {
                     let verdict = match error {
                         PlantError::Fenced { owner, .. } => Some(*owner),
-                        PlantError::Io { error, owner }
-                            if matches!(error, IoError::Fenced(_)) =>
-                        {
-                            Some(*owner)
-                        }
+                        PlantError::Io {
+                            error: IoError::Fenced(_),
+                            owner,
+                        } => Some(*owner),
                         PlantError::Unclaimed { .. } => Some(None),
                         _ => None,
                     };

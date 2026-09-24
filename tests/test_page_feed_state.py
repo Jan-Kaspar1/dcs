@@ -145,8 +145,8 @@ PINS = [
     (3282, 'if ("run_boundary" in entry.event) {'),
     (3283, 'noteRestart("the journal recorded run " +'),
     # The cadence both tickers share.
-    (3758, 'setInterval(refreshOverview, POLL_MS);'),
-    (3959, 'setInterval(refresh, POLL_MS);'),
+    (3772, 'setInterval(refreshOverview, POLL_MS);'),
+    (3973, 'setInterval(refresh, POLL_MS);'),
 ]
 
 

@@ -210,9 +210,15 @@
 //! `claim_writer`, or a promote posted before the old peer was demoted
 //! — demotes the superseded owner at its first fenced write: the gate
 //! re-closes and the reported role settles to `standby`, with
-//! `field_claim_lost` and the role changes journaled — a fenced active
-//! degrades instead of exiting, so a misordered promotion or a
-//! restarted superseded process cannot crash-loop the pair.
+//! `field_claim_lost` carrying the preempting owner token and the role
+//! changes journaled — a fenced active degrades instead of exiting, so
+//! a misordered promotion or a restarted superseded process cannot
+//! crash-loop the pair. The demotion leaves a fencing-loss mark, and
+//! a `standby` peer still carrying it probes a bound conditional
+//! re-grant every scan — refused while the preemptor's claim stands,
+//! granted once the field frees — so a released rogue claim ends with
+//! the ex-owner holding the field again, walking `promoting` back to
+//! `active` without an operator call.
 //!
 //! Rolling a revised plant model into production, per the rolling
 //! model-revision decision: start the standby with `--revised` against
@@ -281,7 +287,7 @@
 
 use dcs_assembly::{DriverRegistry, FanoutDriver, StepError, assemble, resolve_drivers};
 use dcs_controller::registry;
-use dcs_core::{CarryoverReport, FieldClaim, IoDriver, TelemetrySnapshot, Tick};
+use dcs_core::{CarryoverReport, FieldClaim, IoDriver, PointId, TelemetrySnapshot, Tick};
 use dcs_model::PlantModel;
 use dcs_monitor::{CheckpointPuller, CommandPersist, Driven, Monitor, MonitorConfig};
 use dcs_runtime::{Checkpoint, Executor, Peer, TrackReport, WriteGate, mint_generation};
@@ -480,6 +486,54 @@ impl Driver {
             Self::Local(fanout) => fanout
                 .probe_field_claim()
                 .map_err(|error| format!("plant write-ownership probe failed: {error}")),
+        }
+    }
+
+    /// The fencing-loss counterpart of [`ensure_writer`](Self::ensure_writer)
+    /// — the *bound* conditional re-grant a fencing-demoted ex-owner
+    /// probes each scan while its loss mark stands: takes the field's
+    /// write-ownership under `owner` where the field stands unclaimed
+    /// or already names the token — `Ok(true)` — answering `Ok(false)`
+    /// while a different owner stands, so a still-held preemptor's
+    /// claim keeps the field until it releases and the probe never
+    /// preempts. Unlike the orphan cycle's unbound probe the grant
+    /// joins this instance's attachments to the claim's holders — the
+    /// gate the reclaim re-lifts must pass the arbitration it re-took.
+    /// A purely local simulated model has no shared field to claim and
+    /// answers `Ok(true)` vacuously; a fan-out with no reclaim-capable
+    /// field backend answers `Ok(false)` — nothing probed.
+    fn reclaim_writer(&self, owner: u64) -> Result<bool, String> {
+        match self {
+            Self::Remote(remote) => match remote.ensure_writer(owner) {
+                Ok(ClaimGrant::Exclusive) => Ok(true),
+                Ok(ClaimGrant::Shared) => {
+                    eprintln!(
+                        "warning: field write-ownership claim for owner token {owner} is \
+                         shared with another live attachment — expected only for a \
+                         deliberate same-owner attachment; a second controller pinned to \
+                         the same --owner-token defeats single-writer fencing"
+                    );
+                    Ok(true)
+                }
+                Err(RemoteError::Fenced) => Ok(false),
+                Err(error) => Err(format!("plant write-ownership reclaim failed: {error}")),
+            },
+            Self::Local(fanout) => fanout
+                .reclaim_field_writer(owner)
+                .map_err(|error| format!("plant write-ownership reclaim failed: {error}")),
+        }
+    }
+
+    /// The owner token the field's standing claim named the last time
+    /// it fenced a mutation from this instance's attachments — the
+    /// claimant a superseded field owner's `field_claim_lost` journal
+    /// record attributes the preemption to. `None` where no verdict
+    /// named a claimant — a driver surface whose fencing answer carries
+    /// no owner identity — and the loss then records unattributed.
+    fn fencing_claimant(&self, point: PointId) -> Option<u64> {
+        match self {
+            Self::Remote(remote) => remote.fenced_by(),
+            Self::Local(fanout) => fanout.fencing_claimant(point),
         }
     }
 
@@ -1250,7 +1304,9 @@ fn main() -> ExitCode {
         .with_field_ensure(|| driver.ensure_writer(owner))
         .with_field_orphan_claim(|| driver.claim_writer_unless_held(owner))
         .with_field_startup_claim(|| driver.claim_writer_unless_held(owner))
-        .with_field_probe(|| driver.probe_field_claim());
+        .with_field_probe(|| driver.probe_field_claim())
+        .with_field_claimant(|point| driver.fencing_claimant(point))
+        .with_field_reclaim(|| driver.reclaim_writer(owner));
     let peer = match options.auto_promote {
         Some(budget) => peer.with_failover(budget),
         None => peer,
@@ -1483,10 +1539,16 @@ fn main() -> ExitCode {
                             );
                         }
                         for loss in peer.take_fencing_losses() {
-                            eprintln!(
-                                "standby: field write-ownership claim lost at tick {}: {:?} fenced",
-                                loss.tick.0, loss.point
-                            );
+                            match loss.claimant {
+                                Some(claimant) => eprintln!(
+                                    "standby: field write-ownership claim lost at tick {}: {:?} fenced, preempted by owner token {claimant}",
+                                    loss.tick.0, loss.point
+                                ),
+                                None => eprintln!(
+                                    "standby: field write-ownership claim lost at tick {}: {:?} fenced",
+                                    loss.tick.0, loss.point
+                                ),
+                            }
                         }
                         scanned
                     },
@@ -1593,10 +1655,16 @@ fn main() -> ExitCode {
                         let mut peer = peer.borrow_mut();
                         let scanned = peer.scan();
                         for loss in peer.take_fencing_losses() {
-                            eprintln!(
-                                "field write-ownership claim lost at tick {}: {:?} fenced",
-                                loss.tick.0, loss.point
-                            );
+                            match loss.claimant {
+                                Some(claimant) => eprintln!(
+                                    "field write-ownership claim lost at tick {}: {:?} fenced, preempted by owner token {claimant}",
+                                    loss.tick.0, loss.point
+                                ),
+                                None => eprintln!(
+                                    "field write-ownership claim lost at tick {}: {:?} fenced",
+                                    loss.tick.0, loss.point
+                                ),
+                            }
                         }
                         for change in peer.take_role_changes() {
                             eprintln!(

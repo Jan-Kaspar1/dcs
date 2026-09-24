@@ -625,7 +625,7 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     assert!(
         active.journal(0).unwrap().iter().any(|entry| matches!(
             entry.event,
-            JournalEvent::FieldClaimLost { point } if point == VALVE
+            JournalEvent::FieldClaimLost { point, .. } if point == VALVE
         )),
         "the fenced owner's journal must record the claim loss"
     );
@@ -752,7 +752,7 @@ fn the_launched_active_claims_the_field_and_a_rogue_claim_is_journaled() {
     assert!(
         active.journal(0).unwrap().iter().any(|entry| matches!(
             entry.event,
-            JournalEvent::FieldClaimLost { point } if point == VALVE
+            JournalEvent::FieldClaimLost { point, .. } if point == VALVE
         )),
         "the fenced owner's journal must record the claim loss"
     );
@@ -870,7 +870,7 @@ fn a_misordered_promotion_degrades_the_superseded_active() {
     assert!(
         journal.iter().any(|entry| matches!(
             entry.event,
-            JournalEvent::FieldClaimLost { point } if point == VALVE
+            JournalEvent::FieldClaimLost { point, .. } if point == VALVE
         )),
         "the fenced owner's journal must record the claim loss: {journal:?}"
     );
@@ -1635,7 +1635,7 @@ fn a_fenced_peer_suspends_the_commands_its_detection_scan_settled() {
     assert!(
         journal.iter().any(|entry| matches!(
             entry.event,
-            JournalEvent::FieldClaimLost { point } if point == VALVE
+            JournalEvent::FieldClaimLost { point, .. } if point == VALVE
         )),
         "the fenced owner's journal must record the claim loss: {journal:?}"
     );

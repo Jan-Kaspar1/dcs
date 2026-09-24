@@ -211,6 +211,16 @@ pub enum JournalEvent {
     FieldClaimLost {
         /// The point whose write the field fenced.
         point: PointId,
+        /// The owner token the preempting claim was taken under — the
+        /// claimant the field's own arbitration named when it fenced
+        /// this run's mutation, so the audit attributes the takeover
+        /// to whoever holds the field now rather than an anonymous
+        /// "another". `None` where no verdict named one: a driver
+        /// surface whose fencing answer carries no claimant identity,
+        /// or an entry an older build journaled before the record
+        /// carried attribution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        claimant: Option<u64>,
     },
     /// A tracking peer's applied checkpoint stamped its serving run as
     /// not owning field writes — the checkpoint's `source_owns_field`
@@ -438,7 +448,10 @@ mod tests {
             JournalEntry {
                 seq: 11,
                 tick: Tick(13),
-                event: JournalEvent::FieldClaimLost { point: PointId(20) },
+                event: JournalEvent::FieldClaimLost {
+                    point: PointId(20),
+                    claimant: Some(424242),
+                },
             },
             JournalEntry {
                 seq: 12,
@@ -510,6 +523,23 @@ mod tests {
         assert!(json.contains("\"source_restarted\""), "{json}");
         assert!(json.contains("\"tracking_source_adopted\""), "{json}");
         assert!(json.contains("\"run_boundary\""), "{json}");
+        // A `field_claim_lost` entry an older build journaled carried
+        // no claimant field; it still decodes, the verdict reading as
+        // unattributed rather than failing the file.
+        assert_eq!(
+            serde_json::from_str::<JournalEntry>(
+                r#"{"seq":3,"tick":9,"event":{"field_claim_lost":{"point":20}}}"#
+            )
+            .unwrap(),
+            JournalEntry {
+                seq: 3,
+                tick: Tick(9),
+                event: JournalEvent::FieldClaimLost {
+                    point: PointId(20),
+                    claimant: None,
+                },
+            }
+        );
     }
 
     #[test]

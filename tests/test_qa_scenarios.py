@@ -3189,10 +3189,13 @@ class FieldClaimFeed:
     its own sim-net attachment, ctrl-b a tracking standby. Each
     ctrl-a request is one scan boundary: an active scan writes the
     field through the held claim, a fenced answer drives the
-    contract's degrade path — field_claim_lost journaled, demoting
-    then standby — a standby reconverges over a fixed count of scans,
-    and POST /promote re-claims under the pinned token. Fault flags
-    stage each named failure the scenario reports."""
+    contract's degrade path — field_claim_lost journaled with the
+    claimant the verdict named, demoting then standby — and the
+    standby's fencing-loss mark drives the bound conditional reclaim
+    every scan: refused while the rogue claim's holders stand, granted
+    once the release frees the field, walking promoting -> active with
+    no operator call. Fault flags stage each named failure the
+    scenario reports."""
 
     TOKEN_A = 0xD5C00A
     TOKEN_B = 0xD5C00B
@@ -3209,12 +3212,15 @@ class FieldClaimFeed:
         self.holds = False
         self.dead = False
         self.peer_up = False           # ctrl-b promoted and stayed
+        self.fencing_lost = False      # the demotion's loss mark —
+                                       # the standby-scan reclaim
+                                       # probes while it stands
         # Fault injection for the named-failure cases.
         self.no_journal = False        # the loss demotes unrecorded
+        self.no_claimant = False       # the loss journal names no one
         self.dies_on_fence = False     # the preempted owner exits
         self.no_demote = False         # the loss never moves the role
-        self.never_converges = False   # the demoted peer re-promotes
-        self.never_reclaims = False    # the promotion re-takes nothing
+        self.never_reclaims = False    # the standby never re-takes
         self.peer_promotes = False     # ctrl-b reports active later
         self.stalls = False            # the active's tick never grows
         if not unclaimed:
@@ -3251,12 +3257,19 @@ class FieldClaimFeed:
 
     def _supersede(self):
         # The contract's degrade path: count the fenced write,
-        # journal the loss, and walk demoting -> standby.
+        # journal the loss — attributed to the claimant the field's
+        # own fencing verdict named — and walk demoting -> standby,
+        # the loss mark standing for the standby-scan reclaim.
         self.failed_writes += 1
         self.holds = False
         self.peer_up = True
+        self.fencing_lost = True
         if not self.no_journal:
-            self._journal({'field_claim_lost': {'point': 200}})
+            loss = {'point': 200}
+            if not self.no_claimant:
+                loss['claimant'] = (self.plant.claim or {}).get(
+                    'owner')
+            self._journal({'field_claim_lost': loss})
         if self.dies_on_fence:
             self.dead = True
             return
@@ -3276,6 +3289,21 @@ class FieldClaimFeed:
         if self.role == 'standby':
             if self.reconverge:
                 self.reconverge -= 1
+            # The fencing-loss reclaim: the demoted ex-owner probes the
+            # bound conditional re-grant every standby scan — refused
+            # while a different owner's claim stands at all, granted
+            # the first scan the field frees or already names the
+            # token — then walks promoting -> active on the
+            # field-owning scans.
+            if self.fencing_lost and not self.never_reclaims:
+                if not self._fenced(self._roundtrip(
+                        {'op': 'ensure_writer',
+                         'owner': self.TOKEN_A})):
+                    self.holds = True
+                    self.fencing_lost = False
+                    self.role = 'promoting'
+                    self._journal({'role_changed': {
+                        'from': 'standby', 'to': 'promoting'}})
             return
         # A field-owning role writes every scan; the gate follows the
         # role, so a promoted peer that re-claimed nothing meets the
@@ -3333,8 +3361,7 @@ class FieldClaimFeed:
             return 200, [entry for entry in self.journal
                          if entry['seq'] > since]
         if (method, route) == ('POST', '/promote'):
-            if self.role != 'standby' or self.reconverge \
-                    or self.never_converges:
+            if self.role != 'standby' or self.reconverge:
                 self._refuse(url)
             if not self.never_reclaims:
                 self._roundtrip({'op': 'claim_writer',
@@ -3459,7 +3486,8 @@ class FieldClaimTests(unittest.TestCase):
                          'field-claim-lifecycle.json',
                          'field-claim-rogue.json',
                          'field-claim-superseded.json',
-                         'field-claim-promote.json',
+                         'field-claim-release.json',
+                         'field-claim-reclaim.json',
                          'field-claim-restored.json'):
                 path = os.path.join(evidence, name)
                 self.assertTrue(os.path.exists(path), name)
@@ -3557,23 +3585,25 @@ class FieldClaimTests(unittest.TestCase):
             self.assertIn('never demoted',
                           record.get('detail', ''))
 
-    def test_fails_when_the_peer_never_repomotes(self):
+    def test_fails_when_the_loss_names_no_claimant(self):
+        # A field_claim_lost that cannot name the preempting owner is
+        # the audit gap the finding reports: the takeover must
+        # attribute to the rogue token the field's verdict carried.
         with tempfile.TemporaryDirectory() as evidence:
             _, _, record = self._run(
-                evidence, feed_flags={'never_converges': True})
+                evidence, feed_flags={'no_claimant': True})
             self.assertEqual(record['outcome'], 'failed')
-            self.assertIn('never re-promoted',
-                          record.get('detail', ''))
+            self.assertIn('attribute', record.get('detail', ''))
 
-    def test_fails_when_the_promotion_reclaims_nothing(self):
-        # A promotion that never re-takes the claim meets the standing
-        # claim's fence on its next write and supersedes again — the
-        # pair never settles back onto the field owner.
+    def test_fails_when_the_reclaim_never_recovers(self):
+        # A demoted owner whose bound reclaim never re-takes the
+        # released field stays standby forever — the wedge the fix
+        # exists to escape.
         with tempfile.TemporaryDirectory() as evidence:
             _, _, record = self._run(
                 evidence, feed_flags={'never_reclaims': True})
             self.assertEqual(record['outcome'], 'failed')
-            self.assertIn('never settled active',
+            self.assertIn('never reclaimed',
                           record.get('detail', ''))
 
     def test_fails_when_the_peer_ends_active(self):
