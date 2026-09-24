@@ -51,6 +51,21 @@ All remaining arguments are the binary's own (`--ticks N` bounds the run
 deterministically and prints the final telemetry snapshot; see
 `docker run --rm dcs-controller --help`).
 
+A `--scan-ms` run without `--ticks` also prints one telemetry-snapshot
+JSON line per scan on stdout. That stream is a bounded consumer of the
+scan loop (decision 83): each line is handed to a dedicated writer
+thread through a 64-line queue, so a consumer that stops draining
+stdout — an unflushed or filled process pipe — never paces the scan.
+Once the queue saturates, further lines drop under the named
+`stdout_snapshot_drops` counter, reported on stderr at the episode's
+start, at each doubling of the count, and once more when the reader
+drains; a failed stdout write (a closed pipe) is reported once and
+later lines drop on the same counter. `io_health.scan_overruns` and the
+failover miss budget are unaffected by a stalled stdout consumer.
+Consumers that need every scan's telemetry should use the `--listen`
+monitor endpoints, not the stdout stream. (Mechanism adopted from
+review finding #545.)
+
 ### Redundant pair
 
 A redundant pair is two of these containers on separate hosts, both built

@@ -25,6 +25,16 @@
 //! options are given. `--dt T` sets the simulated process time advanced per
 //! scan; it defaults to the scan period in seconds, or 1.0 unpaced.
 //!
+//! A continuous run — `--scan-ms` without `--ticks` — reports the run's
+//! state on stdout as one telemetry-snapshot JSON line per scan. That
+//! stream is a bounded consumer of the scan loop (decision 83): each
+//! line is handed to a dedicated writer through a 64-line queue, so a
+//! consumer that stops draining stdout — an unflushed or filled process
+//! pipe — never paces the scan; once the queue saturates, further lines
+//! drop under the named `stdout_snapshot_drops` counter, reported on
+//! stderr at a doubling rate until the reader drains. The `--ticks`
+//! run's single final snapshot keeps a direct print.
+//!
 //! `--listen ADDR` serves the `dcs-monitor` endpoints alongside the paced
 //! scan, sharing the executor behind the monitor's mutex so a request
 //! never observes a half-run scan. Under pacing the wall clock owns the
@@ -295,6 +305,8 @@ use dcs_sim_net::{ClaimGrant, RemoteDriver, RemoteError};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 /// The field driver this instance runs: the [`FanoutDriver`] the driver
@@ -689,7 +701,12 @@ controller scan.
                   options do not apply
   --ticks N       run N deterministic ticks, then print the telemetry snapshot
   --scan-ms MS    pace scans to a wall-clock period of MS milliseconds;
-                  runs until stopped, or for N scans when --ticks is given too
+                  runs until stopped, or for N scans when --ticks is given
+                  too. Without --ticks each scan prints one
+                  telemetry-snapshot JSON line on stdout through a bounded
+                  (64-line) sink — a consumer that stops draining degrades
+                  delivery under the stdout_snapshot_drops counter
+                  reported on stderr, never the scan's cadence
   --dt T          simulated process time per scan (default: scan period in
                   seconds, or 1.0 when unpaced)
   --listen ADDR   serve the monitoring endpoints on ADDR while the paced
@@ -1789,6 +1806,185 @@ fn run_monitored(
     })
 }
 
+/// The bound on [`SnapshotSink`]'s handoff queue: at most this many
+/// serialized per-scan snapshot lines may wait on the stdout writer
+/// before the scan loop drops further lines under the
+/// `stdout_snapshot_drops` counter. The bound is the sink's only
+/// buffering — a consumer that keeps draining sees every line, while a
+/// stalled one degrades delivery, never cadence.
+const SNAPSHOT_SINK_BOUND: usize = 64;
+
+/// The bound on the sink's report queue: the degradation lines
+/// [`SnapshotSink`] hands to stderr ride their own bounded channel to a
+/// reporter thread, because stderr is a potentially blocking write too
+/// — a deployment that stalls both streams must still not reach the
+/// scan cycle. A saturated report queue drops the advisory line; the
+/// `stdout_snapshot_drops` count the surviving reports carry stays
+/// accurate regardless.
+const SNAPSHOT_REPORT_BOUND: usize = 8;
+
+/// The bounded handoff between the scan loop and stdout, adopted from
+/// review finding #545: a continuous run emits one telemetry-snapshot
+/// JSON line per scan, and a consumer that stops draining stdout — an
+/// unflushed or filled process pipe — must never pace the loop by
+/// backpressure, the bounded-consumer rule decision 83 sets for every
+/// consumer-facing delivery. A dedicated writer thread drains a
+/// bounded channel into the locked stdout, so [`emit`](Self::emit)
+/// only ever *offers* the line: a saturated sink drops it under the
+/// `stdout_snapshot_drops` counter — reported on stderr at the
+/// episode's start, at each doubling of the count, and once more when
+/// the consumer drains — the named delivery gap, while scan cadence,
+/// `io_health.scan_overruns` truthfulness, and the failover miss
+/// budget all run untouched. A writer thread that dies on a failed
+/// stdout write — a closed pipe — is reported once with its error and
+/// every later line drops on the same counter; delivery loss never
+/// becomes a plant shutdown condition.
+struct SnapshotSink {
+    sender: mpsc::SyncSender<String>,
+    /// Lines handed off but not yet written — the sink's outstanding
+    /// depth, decremented by the writer after each successful write.
+    /// Signed because the writer can finish a queued line before the
+    /// emit side's increment lands; a transient negative corrects
+    /// itself on the next send.
+    pending: Arc<std::sync::atomic::AtomicI64>,
+    /// The writer thread's terminal stdout error, recorded before its
+    /// receiver drops so the emit side can name it once.
+    failure: Arc<Mutex<Option<String>>>,
+    /// The degradation reports' bounded handoff to the reporter
+    /// thread — stderr writes stay off the scan cycle exactly like
+    /// stdout's do.
+    reports: mpsc::SyncSender<String>,
+    /// Total lines the sink refused — the `stdout_snapshot_drops`
+    /// counter the degradation reports carry.
+    dropped: u64,
+    /// The next `dropped` value that logs a progress line — doubling
+    /// from 1, so a permanently stalled consumer costs a bounded
+    /// report trail rather than one line per scan.
+    next_report: u64,
+    /// Whether the sink is inside a saturated episode — cleared only
+    /// when a send finds the queue drained, so a consumer hovering at
+    /// the boundary does not flap the report pair every scan.
+    saturated: bool,
+    /// Whether the writer's loss was already reported.
+    writer_lost: bool,
+}
+
+impl SnapshotSink {
+    /// Starts the sink reporting on stderr: `writer` — stdout in the
+    /// run loop — is drained on its own thread, so the only blocking
+    /// write lives off the scan cycle's critical path.
+    fn start(writer: impl std::io::Write + Send + 'static) -> Self {
+        Self::reporting(writer, |line| eprintln!("{line}"))
+    }
+
+    /// The injectable form: `writer` is anything `Write + Send` and
+    /// `report` receives the degradation lines — stderr in the run,
+    /// anything `Send` in tests — each on its own thread, so neither
+    /// stream's backpressure reaches the caller of
+    /// [`emit`](Self::emit).
+    fn reporting(
+        writer: impl std::io::Write + Send + 'static,
+        mut report: impl FnMut(&str) + Send + 'static,
+    ) -> Self {
+        let (sender, receiver) = mpsc::sync_channel(SNAPSHOT_SINK_BOUND);
+        let (reports, report_lines) = mpsc::sync_channel::<String>(SNAPSHOT_REPORT_BOUND);
+        let pending = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let failure = Arc::new(Mutex::new(None));
+        let writer_thread = (pending.clone(), failure.clone());
+        std::thread::spawn(move || {
+            let (pending, failure) = writer_thread;
+            let mut writer = writer;
+            while let Ok(line) = receiver.recv() {
+                match writeln!(writer, "{line}") {
+                    Ok(()) => {
+                        pending.fetch_sub(1, Ordering::SeqCst);
+                    }
+                    Err(error) => {
+                        *failure.lock().unwrap() = Some(error.to_string());
+                        return;
+                    }
+                }
+            }
+        });
+        std::thread::spawn(move || {
+            while let Ok(line) = report_lines.recv() {
+                report(&line);
+            }
+        });
+        Self {
+            sender,
+            pending,
+            failure,
+            reports,
+            dropped: 0,
+            next_report: 1,
+            saturated: false,
+            writer_lost: false,
+        }
+    }
+
+    /// Queues one degradation line for the reporter. Advisory only: a
+    /// saturated report queue drops the line rather than blocking the
+    /// scan cycle — the `stdout_snapshot_drops` count the surviving
+    /// lines carry remains the accurate total.
+    fn report(&self, line: String) {
+        let _ = self.reports.try_send(line);
+    }
+
+    /// Offers one serialized snapshot line to the writer. Never blocks
+    /// the caller: a full queue — or a writer gone after a failed
+    /// write — drops the line under `stdout_snapshot_drops` instead,
+    /// the named degradation replacing finding #545's stall.
+    fn emit(&mut self, line: String) {
+        match self.sender.try_send(line) {
+            Ok(()) => {
+                let outstanding = self.pending.fetch_add(1, Ordering::SeqCst) + 1;
+                // Recovery counts only once the backlog actually
+                // drained — our line the only one outstanding — so a
+                // consumer that frees a single slot per scan does not
+                // retrigger the report pair every cycle.
+                if self.saturated && outstanding <= 1 {
+                    self.saturated = false;
+                    self.report(format!(
+                        "snapshot sink: stdout drained — per-scan snapshot lines resumed \
+                         (stdout_snapshot_drops={})",
+                        self.dropped
+                    ));
+                }
+            }
+            Err(mpsc::TrySendError::Full(_)) => {
+                self.dropped += 1;
+                self.saturated = true;
+                if self.dropped >= self.next_report {
+                    self.report(format!(
+                        "snapshot sink: stdout not draining — dropping per-scan snapshot \
+                         lines (stdout_snapshot_drops={})",
+                        self.dropped
+                    ));
+                    self.next_report = self.dropped.saturating_mul(2).max(self.dropped + 1);
+                }
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                self.dropped += 1;
+                if !self.writer_lost {
+                    self.writer_lost = true;
+                    let detail = self
+                        .failure
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .unwrap_or_else(|| "writer thread ended".to_string());
+                    self.report(format!(
+                        "snapshot sink: stdout write failed ({detail}) — dropping per-scan \
+                         snapshot lines for the rest of the run (stdout_snapshot_drops={})",
+                        self.dropped
+                    ));
+                }
+            }
+        }
+    }
+}
+
 /// The scan loop every run mode shares: `scan` performs one executor
 /// scan — directly, through the monitor's lock when serving, or after a
 /// standby's checkpoint pull — and `snapshot` reads the resulting
@@ -1824,6 +2020,16 @@ fn scan_loop(
     period: Option<Duration>,
 ) -> ExitCode {
     let mut scanned = 0_u64;
+    // The continuous run's per-scan snapshot stream is a bounded
+    // consumer of this loop (decision 83): lines go through the sink,
+    // so a stdout reader that stops draining degrades delivery under
+    // `stdout_snapshot_drops` rather than pacing the scan — review
+    // finding #545. A `--ticks` run prints only its final snapshot, a
+    // one-shot write after the last scan, and keeps the direct print.
+    let mut sink = options
+        .ticks
+        .is_none()
+        .then(|| SnapshotSink::start(std::io::stdout()));
     loop {
         let started = Instant::now();
         scan();
@@ -1848,9 +2054,11 @@ fn scan_loop(
                 };
             }
         } else {
-            // Continuous operation: report the run's state as JSON lines.
+            // Continuous operation: report the run's state as JSON
+            // lines — through the sink, so this write can never stall
+            // the cycle the `elapsed` measurement below closes.
             match serde_json::to_string(&snapshot()) {
-                Ok(snapshot) => println!("{snapshot}"),
+                Ok(snapshot) => sink.as_mut().unwrap().emit(snapshot),
                 Err(error) => return fail(format!("cannot serialize snapshot: {error}")),
             }
         }
@@ -1865,5 +2073,194 @@ fn scan_loop(
                 overrun();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A writer whose every write blocks forever — the consumer that
+    /// stopped draining, finding #545's stall reproduced as a type.
+    struct StalledWriter;
+
+    impl std::io::Write for StalledWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            loop {
+                std::thread::park();
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A writer that fails every write — the closed pipe the sink must
+    /// name once and then drop against.
+    struct FailingWriter;
+
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "closed pipe",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A writer gated on `open`: closed it blocks in `write` — the
+    /// stalled consumer — and opened it drains, so a test scripts the
+    /// exact stall-then-recover episode the drain report covers.
+    struct GatedWriter {
+        open: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl std::io::Write for GatedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            while !self.open.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Collects the report lines a sink hands its reporter thread.
+    fn collector() -> (impl FnMut(&str) + Send + 'static, Arc<Mutex<Vec<String>>>) {
+        let collected = Arc::new(Mutex::new(Vec::new()));
+        let sink = collected.clone();
+        (
+            move |line: &str| sink.lock().unwrap().push(line.to_string()),
+            collected,
+        )
+    }
+
+    /// Polls `condition` until it holds or `deadline` elapses — the
+    /// sink's writer and reporter threads run concurrently with the
+    /// test, so their effects arrive asynchronously.
+    fn eventually(mut condition: impl FnMut() -> bool, deadline: Duration, what: &str) {
+        let started = Instant::now();
+        while !condition() {
+            assert!(started.elapsed() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn a_stalled_consumer_drops_under_the_named_counter_without_blocking() {
+        let (report, collected) = collector();
+        let mut sink = SnapshotSink::reporting(StalledWriter, report);
+
+        // Far more lines than the bound: every emit returns without
+        // blocking — the loop completing is the cadence proof — and
+        // all but the writer-held and queued lines drop.
+        let lines = (SNAPSHOT_SINK_BOUND * 4) as u64;
+        for index in 0..lines {
+            sink.emit(format!("line {index}"));
+        }
+        assert!(sink.dropped >= lines - SNAPSHOT_SINK_BOUND as u64 - 1);
+        // Queued-but-unwritten plus dropped accounts for every line —
+        // nothing duplicated, nothing silently lost.
+        assert_eq!(
+            sink.dropped as i64 + sink.pending.load(Ordering::SeqCst),
+            lines as i64
+        );
+
+        // The named degradation is reported.
+        eventually(
+            || !collected.lock().unwrap().is_empty(),
+            Duration::from_secs(5),
+            "the stdout_snapshot_drops report",
+        );
+        let reports = collected.lock().unwrap().clone();
+        assert!(
+            reports
+                .iter()
+                .any(|line| line.contains("stdout not draining")
+                    && line.contains("stdout_snapshot_drops=")),
+            "{reports:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_writer_is_named_once_and_every_later_line_drops() {
+        let (report, collected) = collector();
+        let mut sink = SnapshotSink::reporting(FailingWriter, report);
+
+        // The writer takes the first queued line and dies on it; emit
+        // until the receiver's drop turns sends into the Disconnected
+        // leg.
+        sink.emit("first".to_string());
+        eventually(
+            || {
+                sink.emit("probe".to_string());
+                sink.writer_lost
+            },
+            Duration::from_secs(5),
+            "the failed writer to be named",
+        );
+        for _ in 0..10 {
+            sink.emit("more".to_string());
+        }
+        assert!(sink.dropped >= 10);
+
+        eventually(
+            || !collected.lock().unwrap().is_empty(),
+            Duration::from_secs(5),
+            "the writer-failure report",
+        );
+        let reports = collected.lock().unwrap().clone();
+        let failures: Vec<_> = reports
+            .iter()
+            .filter(|line| line.contains("stdout write failed"))
+            .collect();
+        assert_eq!(failures.len(), 1, "{reports:?}");
+        assert!(failures[0].contains("closed pipe"), "{failures:?}");
+        assert!(failures[0].contains("stdout_snapshot_drops="));
+    }
+
+    #[test]
+    fn a_draining_consumer_resumes_delivery_and_reports_once() {
+        let (report, collected) = collector();
+        let open = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut sink = SnapshotSink::reporting(GatedWriter { open: open.clone() }, report);
+
+        // Stall: the queue saturates and lines drop under the counter.
+        let lines = (SNAPSHOT_SINK_BOUND * 4) as u64;
+        for index in 0..lines {
+            sink.emit(format!("line {index}"));
+        }
+        assert!(sink.saturated);
+
+        // Drain: the consumer comes back; the next emit finds the
+        // backlog cleared and reports the resume.
+        open.store(true, Ordering::Relaxed);
+        eventually(
+            || {
+                sink.emit("after drain".to_string());
+                collected
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|line| line.contains("stdout drained"))
+            },
+            Duration::from_secs(5),
+            "the drain report",
+        );
+        let reports = collected.lock().unwrap().clone();
+        let drains: Vec<_> = reports
+            .iter()
+            .filter(|line| line.contains("stdout drained"))
+            .collect();
+        assert_eq!(drains.len(), 1, "{reports:?}");
+        assert!(drains[0].contains("stdout_snapshot_drops="));
     }
 }
