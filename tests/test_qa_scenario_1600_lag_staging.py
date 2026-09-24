@@ -563,6 +563,10 @@ class LagStagingTests(unittest.TestCase):
             order.index(scenarios.scenario_peer_announce))
         self.assertEqual(
             order.index(scenarios.scenario_peer_announce) + 1,
+            order.index(scenarios.scenario_demote_forged_standby_source))
+        self.assertEqual(
+            order.index(scenarios.scenario_demote_forged_standby_source)
+            + 1,
             order.index(scenarios.scenario_parameter_tune_carryover))
         self.assertIs(verify.case_function('lag-staging'),
                       scenarios.scenario_lag_staging)
