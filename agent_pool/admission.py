@@ -206,8 +206,14 @@ class Admission:
             names = json.loads(lease['grps']) if lease else self.group_names(meta.get('model') or '')
             if lease:
                 self.db.execute('DELETE FROM admission_leases WHERE owner=?', (owner,))
+            outcome_id = invocation or owner + '@' + str(now)
             self.db.execute('INSERT INTO admission_outcomes(invocation,owner,grps,category,at) VALUES(?,?,?,?,?)',
-                            (invocation or owner + '@' + str(now), owner, json.dumps(names), category, now))
+                            (outcome_id, owner, json.dumps(names), category, now))
+            issue = int(owner[4:]) if owner.startswith('job:') and owner[4:].isdigit() else None
+            self.db.execute(
+                'INSERT OR IGNORE INTO work_events(kind,issue,at,source_key,payload) VALUES(?,?,?,?,?)',
+                ('invocation:' + category, issue, now, 'outcome:' + outcome_id,
+                 json.dumps({'owner': owner, 'quota_groups': names})))
             for name in names:
                 group = self._group(name)
                 if category in ('rate', 'endpoint'):

@@ -15,12 +15,12 @@ use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorClient};
 use dcs_runtime::{
     Checkpoint, Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap,
-    StepError,
+    StepError, mint_generation,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -58,6 +58,48 @@ impl IoDriver for StubDriver {
         let sample = points.get_mut(&point).ok_or(IoError::UnknownPoint(point))?;
         *sample = Sample::good(value, Tick::ZERO);
         Ok(())
+    }
+}
+
+/// A driver front that fences field writes on demand — the in-process
+/// stand-in for the shared field's arbitration preempting this
+/// attachment's claim: once `preempt` runs, every write returns
+/// `IoError::Fenced`, exactly what a foreign `claim_writer` makes the
+/// superseded owner's next field-owning scan observe.
+struct FencingDriver {
+    inner: StubDriver,
+    preempted: AtomicBool,
+}
+
+impl FencingDriver {
+    fn start() -> &'static Self {
+        Box::leak(Box::new(Self {
+            inner: StubDriver::new(&[
+                (PointId(10), Value::Float(3.0)),
+                (PointId(20), Value::Float(0.0)),
+                (PointId(30), Value::Float(0.0)),
+            ]),
+            preempted: AtomicBool::new(false),
+        }))
+    }
+
+    /// The foreign `claim_writer` preemption: every write fences from
+    /// here on — the claim a dead token keeps standing.
+    fn preempt(&self) {
+        self.preempted.store(true, Ordering::Relaxed);
+    }
+}
+
+impl IoDriver for FencingDriver {
+    fn read(&self, point: PointId) -> Result<Sample, IoError> {
+        self.inner.read(point)
+    }
+
+    fn write(&self, point: PointId, value: Value) -> Result<(), IoError> {
+        if self.preempted.load(Ordering::Relaxed) {
+            return Err(IoError::Fenced(point));
+        }
+        self.inner.write(point, value)
     }
 }
 
@@ -174,6 +216,16 @@ fn signal_index() -> SignalIndex {
 }
 
 fn executor(driver: &'static StubDriver) -> Executor<'static> {
+    let map = PointMap::new()
+        .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+        .with_point(PointId(20), Direction::Out, ValueKind::Float)
+        .with_point(PointId(30), Direction::Out, ValueKind::Float);
+    Executor::new(driver, map, vec![Box::new(Scale)]).unwrap()
+}
+
+/// The `executor` fixture over a fencing front — the launched active's
+/// build in the involuntary-demotion reproduction.
+fn fenced_executor(driver: &'static FencingDriver) -> Executor<'static> {
     let map = PointMap::new()
         .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
         .with_point(PointId(20), Direction::Out, ValueKind::Float)
@@ -1052,6 +1104,7 @@ fn closed_port() -> SocketAddr {
 struct Hostile {
     addr: SocketAddr,
     body: Arc<Mutex<Checkpoint>>,
+    hits: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -1074,12 +1127,15 @@ impl Hostile {
         let addr = listener.local_addr().unwrap();
         let body = Arc::new(Mutex::new(forged.clone()));
         let served = Arc::clone(&body);
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counting = Arc::clone(&hits);
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = Arc::clone(&stop);
         let thread = thread::spawn(move || {
             while !stopping.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        counting.fetch_add(1, Ordering::Relaxed);
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                         let mut seen = Vec::new();
                         let mut buf = [0u8; 4096];
@@ -1123,9 +1179,17 @@ impl Hostile {
         Self {
             addr,
             body,
+            hits,
             stop,
             thread: Some(thread),
         }
+    }
+
+    /// How many connections the endpoint has served — the count an
+    /// unproven announcer must never see grow past its bounded verify
+    /// probes.
+    fn hits(&self) -> usize {
+        self.hits.load(Ordering::Relaxed)
     }
 
     /// Swaps the document later pulls answer with — the reproduction's
@@ -1475,6 +1539,228 @@ fn a_reannounce_cannot_redirect_the_demoted_peers_tracking() {
         "the run's clock stayed off the forged domain: {report:?}"
     );
     assert_eq!(active.client.promote().unwrap().role, Role::Promoting);
+}
+
+/// The QA finding `involuntary-demote-unverified-announced-hint`
+/// (#873): an active launched without `--peer` records every `?peer=`
+/// announce as an unproven hint — the serving side cannot tell the
+/// puller's monitor port from any other same-IP claim. `POST /demote`
+/// proves each hint before following it; the involuntary path — a
+/// foreign `claim_writer` preempting the field, `field_claim_lost`
+/// demoting the owner mid-scan with no demote boundary ever running
+/// the verify — must apply the same scrutiny: the demoted peer's
+/// first sourceless cycle probes the recorded hints under the demote
+/// verify's checks, the dead and foreign endpoints lose to the
+/// legitimate successor's own proof inside one bounded pass, and the
+/// run adopts, journals, and pulls that one — never the unproven
+/// announcer the defect stranded it on.
+#[test]
+fn an_involuntary_demote_verifies_the_announced_hints_before_tracking() {
+    // The announced contract is keyed-only — the reproduction's pair
+    // carries the deployment's `--pair-token`; the foreign probe does
+    // not hold it, so its answers can never attest.
+    const KEY: u64 = 0x243f_6a88_85a3_08d3;
+    let fencing = FencingDriver::start();
+    let active = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(fenced_executor(fencing), None),
+            signal_index(),
+        )
+        .unwrap()
+        .with_pair_key(KEY),
+    );
+
+    // The legitimate successor: a driven standby tracking the active
+    // and announcing its own address on every pull — the `--standby`
+    // half of the reproduction's pair.
+    let standby_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let standby = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(standby_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .with_pair_key(KEY)
+        .driven(Driven {
+            track: Some(dialable(active.monitor.local_addr())),
+            after_scan: None,
+        }),
+    );
+    let successor = standby.monitor.local_addr();
+
+    active.client.advance(3).unwrap();
+    standby.client.advance(1).unwrap();
+    assert!(
+        matches!(
+            standby.client.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby converged and announced itself to the active"
+    );
+    assert_eq!(active.monitor.tracking_source(), Some(successor));
+
+    // The reproduction's interloper: a foreign monitor announcing
+    // itself through a routine `?peer=` pull — served here by a
+    // hostile endpoint answering a foreign-generation document, the
+    // probe the QA run watched the demoted peer strand on — and a
+    // dead address recorded the same way. Both land as recorded
+    // hints, dead last so it heads the set, and both are unproven.
+    let mut foreign = active.client.checkpoint().unwrap();
+    foreign.generation = Some(mint_generation());
+    let probe = Hostile::serve(&foreign);
+    let dead = closed_port();
+    active.client.checkpoint_announcing(probe.addr).unwrap();
+    active.client.checkpoint_announcing(dead).unwrap();
+    assert_eq!(active.monitor.tracking_source(), Some(dead));
+
+    // Preempt the field claim: the superseded owner's next field
+    // write fences and the documented `field_claim_lost` path demotes
+    // it in place — no `POST /demote` ever runs.
+    fencing.preempt();
+    active.client.advance(1).unwrap();
+    assert_eq!(active.client.role().unwrap().role, Role::Demoting);
+    assert!(
+        active
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .any(|entry| matches!(entry.event, JournalEvent::FieldClaimLost { .. })),
+        "the fencing loss must journal on the superseded owner"
+    );
+
+    // The demoted peer's first tracking cycle runs the demote verify
+    // lazily over the recorded set: the dead hint's pull fails inside
+    // its bound and falls back, the foreign stream refuses the
+    // continuation checks, and the standby's own document proves the
+    // line — so the run adopts the legitimate successor, journals it,
+    // and pulls it, reporting the unowned line `orphaned` rather than
+    // stranding on the foreign endpoint.
+    active.client.advance(1).unwrap();
+    let report = active.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert!(
+        matches!(report.sync, Some(StandbySync::Orphaned { .. })),
+        "the demoted peer tracks the announced successor — owning \
+         nothing until promoted — not the foreign probe: {report:?}"
+    );
+    assert_eq!(active.monitor.tracking_source(), Some(successor));
+    assert!(
+        active
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .any(|entry| matches!(
+                entry.event,
+                JournalEvent::TrackingSourceAdopted { source } if source == successor
+            )),
+        "the lazy verification journals the adopted source: {:?}",
+        active.client.journal(0).unwrap()
+    );
+    assert!(
+        probe.hits() <= 2,
+        "the foreign endpoint saw at most the verify probe and the \
+         orphan-resolution probe — never a tracking pull: {}",
+        probe.hits()
+    );
+
+    // And the pair reconverges the way the reproduction needed the
+    // operator to force: the successor promotes, the demoted peer's
+    // next pull converges `tracking` on it, and fail-back works.
+    assert_eq!(standby.client.promote().unwrap().role, Role::Promoting);
+    standby.client.advance(1).unwrap();
+    active.client.advance(1).unwrap();
+    let report = active.client.role().unwrap();
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted peer reconverges on the promoted successor: {report:?}"
+    );
+    assert_eq!(active.client.promote().unwrap().role, Role::Promoting);
+}
+
+/// The refuse leg of the same finding: with only unproven announced
+/// hints — here a foreign endpoint is the lone announcer — the
+/// involuntarily demoted peer pulls nothing, the same answer
+/// `POST /demote` gives an unproven hint. The failed set is
+/// remembered rather than re-probed every cycle, so the unproven
+/// endpoint sees one bounded verification pass — the demote
+/// verify's pull and the owner-resolution probe's — and no
+/// tracking pull ever follows it.
+#[test]
+fn an_involuntary_demote_with_only_unproven_hints_pulls_nothing() {
+    // Keyed, like the verified leg — the announced contract resolves
+    // only under `--pair-token`; the foreign announcer holds no key.
+    const KEY: u64 = 0x6a09_e667_f3bc_c909;
+    let fencing = FencingDriver::start();
+    let active = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(fenced_executor(fencing), None),
+            signal_index(),
+        )
+        .unwrap()
+        .with_pair_key(KEY),
+    );
+    active.client.advance(3).unwrap();
+
+    // The foreign monitor's routine `?peer=` announce — recorded as
+    // the only hint, unproven like every announce.
+    let mut foreign = active.client.checkpoint().unwrap();
+    foreign.generation = Some(mint_generation());
+    let probe = Hostile::serve(&foreign);
+    active.client.checkpoint_announcing(probe.addr).unwrap();
+    assert_eq!(active.monitor.tracking_source(), Some(probe.addr));
+
+    fencing.preempt();
+    active.client.advance(1).unwrap();
+    assert_eq!(active.client.role().unwrap().role, Role::Demoting);
+    assert!(
+        active
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .any(|entry| matches!(entry.event, JournalEvent::FieldClaimLost { .. })),
+        "the fencing loss must journal on the superseded owner"
+    );
+
+    // The demoted peer's cycles refuse the hint the way the demote
+    // path would: one verification pass — the demote verify's pull
+    // and the owner-resolution probe's — proves the stream foreign,
+    // nothing adopts, and no tracking pull ever targets it — the run
+    // reports standby/unsynchronized instead of stranding degraded on
+    // the foreign endpoint.
+    active.client.advance(3).unwrap();
+    let report = active.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert_eq!(report.sync, Some(StandbySync::Unsynchronized));
+    assert!(
+        active
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .all(|entry| !matches!(entry.event, JournalEvent::TrackingSourceAdopted { .. })),
+        "an unproven hint must never journal an adoption"
+    );
+    assert!(
+        probe.hits() <= 2,
+        "the unproven hint earned one bounded verify pass — the \
+         demote-verify pull and the owner-resolution probe — and \
+         nothing else: {}",
+        probe.hits()
+    );
+    // The recorded hint stays the recorded answer, but the proven
+    // resolution stays empty: no pull ever follows it.
+    assert_eq!(active.monitor.tracking_source(), Some(probe.addr));
+    assert_eq!(active.monitor.verified_tracking_source(), None);
 }
 
 /// A lone field owner fixture for the announced-demotion tests —

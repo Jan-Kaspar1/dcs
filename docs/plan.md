@@ -2,7 +2,7 @@
 
 ## Product direction and traceability
 
-`docs/product-strategy.md` sets the market and delivery sequence. Water and wastewater is the first target; pharmaceutical and chemical batch control is deferred. The current foundation is validated through the water requirements in `docs/requirements/water-wastewater.md`, beginning with a simulated duty/standby pumping station. Product tickets cite requirement IDs in their scope; an enabling ticket states which requirement or milestone it unlocks. When evidence is insufficient for observable acceptance criteria, research lands in `docs/research/` before implementation is planned.
+`docs/product-strategy.md` and `docs/market-roadmap.md` set the ordered market sequence: water and wastewater, food and beverage, cement, chemical, pharmaceutical, then oil and gas. Water and wastewater remains the active implementation market; this plan continues to follow its accepted requirements and existing pre-pilot tranche. Later market scope advances only through its evidence gate. Batch control remains deferred under `docs/requirements/batch-control.md`. The current foundation is validated through `docs/requirements/water-wastewater.md`, beginning with a simulated duty/standby pumping station. Product tickets cite requirement IDs in their scope; an enabling ticket states which requirement or milestone it unlocks. When evidence is insufficient for observable acceptance criteria, research lands in `docs/research/` before implementation is planned.
 
 ## Current baseline
 
@@ -91,7 +91,7 @@ So the planner's research-to-planning gate applies without new research notes, e
 - **`WW-SEC-001` stays candidate** — until a first client names role tiers. Revisit: a first-client security specification or applicable regulation names obligations the platform itself must carry — role-tiered authorization, gated or dual-approved actions, a stated journal-retention or tamper-evidence requirement, or an assigned SL-T — or a pilot deployment demonstrates the decision-48 fronting seam cannot carry a required control.
 - **`WW-REP-001` stays candidate** — until a first client names report formats. Revisit: a first-client specification names a periodic report artifact or export format, a historian-feed or CMMS-export contract, a durable recording duty for named points, a journal retention/integrity requirement, or in-contract derived metrics — or implementing `WW-CTL-004`/`WW-CTL-005` needs durable process history or computed derived values for its own acceptance evidence.
 - **`WW-ENG-002` stays candidate** — until a client names I/O-list/tag conventions. Revisit: a first-client specification names an I/O-list or tag-database deliverable format, an owner tag convention the model must carry, or a deliverable set the platform must generate — or a multi-station or plant-scale model makes per-point engineering demonstrably unworkable under the existing seams.
-- **Batch control stays deferred** behind this tranche (`docs/requirements/batch-control.md`): the water/wastewater foundation and first pilot workflow come first, and the separate requirements baseline plus representative batch application remain the entry condition.
+- **Batch control stays deferred** under `docs/requirements/batch-control.md` and the ordered market gates in `docs/market-roadmap.md`: water and wastewater, food and beverage, and cement precede the chemical and pharmaceutical stages. A separate customer- or domain-supported requirements baseline and representative batch application remain required before implementation.
 
 ## Milestones
 
