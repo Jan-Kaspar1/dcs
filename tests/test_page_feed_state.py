@@ -15,17 +15,17 @@ that moves or rewrites the mirrored logic fails here naming the line,
 keeping the replica honest instead of silently drifting. The mirrored
 spans, in page.html 1-based lines:
 
-- `feed` record — L511; `POLL_MS`/`pollFetch` abort bound — L651–653
-- `pollRoles` fetch/error bookkeeping — L660–668; `selectSource`/
-  `switchSource` — L682–711; the "unreachable" pair render — L864
+- `feed` record — L566; `POLL_MS`/`pollFetch` abort bound — L714–716
+- `pollRoles` fetch/error bookkeeping — L723–736; `selectSource`/
+  `switchSource` — L745–774; the "unreachable" pair render — L927
 - `notePublication`/`noteRestart`/`noteFeedGap`/`renderFeed` —
-  L899–980
+  L962–1044
 - `refresh()`'s feed ordering and its failed-poll stale mark —
-  L1220–1243, L1302–1303, L1316–1317
+  L1289–1312, L1376–1377, L1396–1397
 - `refreshTrends`' since cursor, run-marker restart check, gap note,
-  and the refetch-gated watermark / seq fallback — L2758–2814
+  and the refetch-gated watermark / seq fallback — L3055–3112
 - `refreshJournal`'s cursor, gap note, and run_boundary restart check —
-  L2868–2889
+  L3171–3192
 """
 import json
 import unittest
@@ -150,7 +150,7 @@ PINS = [
 ]
 
 
-POLL_MS = 1000           # page.html:645 — the shared poll cadence/bound
+POLL_MS = 1000           # page.html:714 — the shared poll cadence/bound
 HANG = object()          # a scripted listener that never answers
 
 
@@ -222,7 +222,7 @@ class PageReplica:
         self.feed_line = {'hidden': True, 'class': '', 'text': ''}
         self.peer_rows = ['—' for _ in self.peers]
 
-    # --- the bounded fetch every poll read rides: page.html:651-653 ---
+    # --- the bounded fetch every poll read rides: page.html:714-716 ---
 
     def poll_fetch(self, url):
         answer = self.transport.fetch(url)
@@ -235,7 +235,7 @@ class PageReplica:
             raise PollError('AbortError: signal timed out')
         return answer
 
-    # --- the role poll and pair render: page.html:660-668, 682-711 ---
+    # --- the role poll and pair render: page.html:723-736, 745-774 ---
 
     def poll_roles(self):
         for i, peer in enumerate(self.peers):
@@ -252,7 +252,7 @@ class PageReplica:
         self.select_source()
 
     def note_sync_age(self, state):
-        # page.html:628-635 — the convergence-grace clock.
+        # page.html:695-708 — the convergence-grace clock.
         if (state['error'] is None and state['report'] is not None
                 and state['report'].get('sync') == 'unsynchronized'):
             state['unsyncedSince'] = state['unsyncedSince'] or self.now
@@ -287,7 +287,7 @@ class PageReplica:
             self.switch_source(nxt)
 
     def switch_source(self, nxt):
-        # page.html:698-711 — the new peer's streams re-read whole and
+        # page.html:761-774 — the new peer's streams re-read whole and
         # the feed bookkeeping starts over.
         self.source = nxt
         for state in self.trends.values():
@@ -300,14 +300,14 @@ class PageReplica:
         self.feed['restart'] = None
 
     def render_pair(self):
-        # page.html:864 — the per-peer row's reachability column.
+        # page.html:927 — the per-peer row's reachability column.
         self.peer_rows = [
             'unreachable' if self.peer_state[i]['error'] is not None
             else ('serving' if i == self.source else 'reachable')
             for i in range(len(self.peers))
         ]
 
-    # --- the feed record: page.html:899-980 ---
+    # --- the feed record: page.html:962-1044 ---
 
     def note_publication(self, snapshot):
         health = snapshot.get('publication') or None
@@ -332,7 +332,7 @@ class PageReplica:
                 "the source's publication identity regressed")
 
     def note_restart(self, detail):
-        # page.html:926-939 — the same-source restart every stream's
+        # page.html:989-1002 — the same-source restart every stream's
         # observation funnels into: all stream cursors reset so the
         # next reads re-fetch whole, and a restarted tick domain — the
         # served tick at or below a drawn sample's — clears the series
@@ -386,7 +386,7 @@ class PageReplica:
         }
         return self.feed_line
 
-    # --- the stream polls: page.html:2758-2814, 2868-2889 ---
+    # --- the stream polls: page.html:3055-3112, 3171-3192 ---
 
     def refresh_trends(self):
         states = list(self.trends.values())
@@ -455,7 +455,7 @@ class PageReplica:
                     + str(entry['event']['run_boundary']['run'])
                     + ' beginning')
 
-    # --- the poll ordering: page.html:1220-1319 ---
+    # --- the poll ordering: page.html:1289-1404 ---
 
     def refresh(self):
         """One poll's feed-relevant ordering: roles, the bounded
@@ -479,7 +479,7 @@ class PageReplica:
                     pass
             # The marks reset before notePublication so a regressed
             # identity's restart observation survives the poll —
-            # page.html:1241-1243.
+            # page.html:1310-1312.
             self.feed['gap'] = None
             self.feed['restart'] = None
             self.note_publication(snapshot)
