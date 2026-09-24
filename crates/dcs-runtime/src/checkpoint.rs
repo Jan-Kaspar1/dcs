@@ -152,8 +152,10 @@ pub struct Checkpoint {
     /// involving one journals the restart exactly as it always did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<u64>,
-    /// The executor's tick at capture; the restored executor resumes
-    /// numbering from here.
+    /// The capturing run's run tick at capture; the restored executor
+    /// resumes numbering from here. A tracking peer reads it as a source
+    /// tick — the tracked stream's own counter — and lands it at
+    /// `tick + tick_offset` in its own run domain.
     pub tick: Tick,
     /// Each component's captured state, keyed by the component's
     /// [`name`](crate::Component::name) — its identity within the run.

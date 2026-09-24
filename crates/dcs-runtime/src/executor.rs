@@ -50,8 +50,9 @@ pub struct PointSpec {
     /// `Some(budget)` on a field `In` point asks the input phase to land
     /// the image sample as
     /// [`Quality::Uncertain`]`(`[`QualityReason::Stale`]`)` when the
-    /// driver-returned sample has not changed in more than `budget`
-    /// scan ticks; `None` disables the check, and the budget is
+    /// driver-returned sample has not changed in more than `budget` run
+    /// ticks — the run's own scan counter, never the driver's tick
+    /// domain; `None` disables the check, and the budget is
     /// inert on internal points (never driver-read) and `Out` points
     /// (never read).
     pub stale_after_ticks: Option<u64>,
@@ -371,7 +372,7 @@ impl fmt::Display for WiringError {
 impl std::error::Error for WiringError {}
 
 /// One budgeted field `In` point's freshness evidence: the driver
-/// sample last read and the scan tick at which that observation last
+/// sample last read and the run tick at which that observation last
 /// changed — the run-domain record the `stale_after_ticks` budget
 /// measures, so a driver stamping in its own tick domain still yields
 /// a lag inside the run's.
@@ -381,9 +382,9 @@ struct Freshness {
     /// marker: a fresh acquisition re-stamps it, so an unchanged
     /// report is held data aging under the budget.
     observed: Sample,
-    /// The scan tick `observed` last changed at — or, on the first
-    /// observation, the earlier of that tick and the driver's own
-    /// stamp: a stamp already behind the scan tick is aged evidence
+    /// The run tick `observed` last changed at — or, on the first
+    /// observation, the earlier of that run tick and the driver's own
+    /// stamp: a stamp already behind the run tick is aged evidence
     /// the run trusts only as far as the stamp claims, while a stamp
     /// in a domain running ahead of the run seeds at the observation
     /// itself — the freshest thing the run has seen.
@@ -639,7 +640,7 @@ pub const DEFAULT_RECEIPT_LOG_CAPACITY: usize = 1024;
 /// The scan order is the order `components` were registered in — explicit
 /// and configured by the caller. Each [`scan`](Executor::scan):
 ///
-/// 1. advances the virtual tick by one — the executor's tick is the only
+/// 1. advances the run tick by one — the executor's run tick is the only
 ///    timestamp authority;
 /// 2. applies every queued operator [`Command`] in submission order —
 ///    this is the documented point where commands submitted between scans
@@ -655,15 +656,16 @@ pub const DEFAULT_RECEIPT_LOG_CAPACITY: usize = 1024;
 ///    reads that follow. Non-cyclic drivers skip the phase entirely;
 /// 4. refreshes the image's `In` points: every field `In` point is read
 ///    from the driver — the latched image under the cyclic contract —
-///    stamping the new tick — a failed read keeps the last known value
+///    stamping the new run tick — a failed read keeps the last known value
 ///    marked [`Quality::Bad`] rather than aborting the scan, and a
 ///    `stale_after_ticks` budget on the point merges
 ///    [`Quality::Uncertain`]`(`[`QualityReason::Stale`]`)` onto a sample
 ///    whose driver report has not changed within the budget — the lag
-///    measured in scan ticks, so a driver stamping in a foreign tick
+///    measured in run ticks, so a driver stamping in a foreign tick
 ///    domain still ages held data and releases fresh data correctly;
 ///    over a cyclic driver the stamp is the producing exchange's
-///    acquisition tick, so the budget measures exchange freshness —
+///    acquisition stamp — itself a run tick — so the budget measures
+///    exchange freshness —
 ///    and every internal link routes its `Out` point's image
 ///    sample onto its `In` point, so a port-to-port carrier delivers the
 ///    value one scan after it was written;
@@ -876,9 +878,9 @@ pub struct Executor<'d> {
     io_health: IoHealth,
     /// Per-point freshness evidence for field `In` points carrying a
     /// `stale_after_ticks` budget — the driver sample last observed and
-    /// the scan tick that observation last changed, kept in the run's
-    /// own tick domain so a driver stamping in a foreign domain (a
-    /// remote plant's, say) cannot strand the verdict. Run-local
+    /// the run tick that observation last changed, kept in the run-tick
+    /// domain so a driver stamping in a foreign domain (a remote
+    /// plant's plant ticks, say) cannot strand the verdict. Run-local
     /// observation state: checkpoints neither carry nor reset it.
     freshness: HashMap<PointId, Freshness>,
     /// The first point whose output write the shared field fenced —
@@ -913,6 +915,9 @@ pub struct Executor<'d> {
     /// one. `None` while the run was never given one — the unminted
     /// test/legacy shape — or when the last adoption carried none.
     generation: Option<u64>,
+    /// The run tick: the executor's own scan counter and the run's
+    /// journal, history, and receipt attribution domain — distinct from
+    /// the driver-served plant tick and a tracked stream's source tick.
     tick: Tick,
 }
 
@@ -1163,8 +1168,8 @@ impl<'d> Executor<'d> {
         self.model_fingerprint
     }
 
-    /// The executor's current virtual tick: [`Tick::ZERO`] before the first
-    /// scan, thereafter the tick the last scan ran at.
+    /// The executor's current run tick: [`Tick::ZERO`] before the first
+    /// scan, thereafter the run tick the last scan ran at.
     pub fn tick(&self) -> Tick {
         self.tick
     }
@@ -1557,9 +1562,9 @@ impl<'d> Executor<'d> {
         self.io_health.scan_overruns += 1;
     }
 
-    /// Runs `scans` scans and returns the tick the last one ran at.
+    /// Runs `scans` scans and returns the run tick the last one ran at.
     ///
-    /// `run(0)` is a no-op returning the current tick.
+    /// `run(0)` is a no-op returning the current run tick.
     pub fn run(&mut self, scans: u64) -> Tick {
         for _ in 0..scans {
             self.scan();
@@ -1568,8 +1573,8 @@ impl<'d> Executor<'d> {
     }
 
     /// Executes one scan — apply commands, read inputs, step components,
-    /// write outputs — and returns the tick it ran at. See the type docs
-    /// for the phase order. Field-side faults never abort the scan:
+    /// write outputs — and returns the run tick it ran at. See the type
+    /// docs for the phase order. Field-side faults never abort the scan:
     /// they degrade into `io_health` counters and held `Bad` samples,
     /// so the returned tick always reports a completed scan.
     pub fn scan(&mut self) -> Tick {
@@ -1616,7 +1621,8 @@ impl<'d> Executor<'d> {
 
     /// Captures the run's transferable state as a [`Checkpoint`].
     ///
-    /// The checkpoint bundles the current tick, every component's
+    /// The checkpoint bundles the current run tick — what a pulling peer
+    /// reads as a source tick — every component's
     /// [`capture_state`](Component::capture_state) keyed by name (empty
     /// for stateless components), the driver's captured state when it
     /// implements the contract, the image-carried point samples: the
@@ -2964,8 +2970,9 @@ impl<'d> Executor<'d> {
     }
 
     /// Refreshes the image's `In` points for the scan: every field `In`
-    /// point is read from the driver, stamping `tick` — a failed read
-    /// keeps the last known value, a neutral one if none, marked `Bad`,
+    /// point is read from the driver, stamping `tick` — the scan's run
+    /// tick — a failed read keeps the last known value, a neutral one if
+    /// none, marked `Bad`,
     /// so a field fault degrades inputs instead of stopping the
     /// controller — while every internal link routes its `Out` point's
     /// image sample onto its `In` point, delivering the value one scan
@@ -2974,19 +2981,18 @@ impl<'d> Executor<'d> {
     ///
     /// A field `In` point carrying a `stale_after_ticks` budget gets the
     /// freshness check before the re-stamp: when the sample the driver
-    /// returns has not changed in more than `budget` scan ticks, the
+    /// returns has not changed in more than `budget` run ticks, the
     /// landed sample's quality merges
     /// [`Quality::Uncertain`]`(`[`QualityReason::Stale`]`)` — the
     /// worst-of merge, so a driver-reported `Bad` or worse-named
     /// `Uncertain` is never improved to `Stale`, and the first changed
     /// sample inside the budget again returns the driver's own quality.
-    /// The lag is measured in the run's own tick domain — the scans
-    /// since the driver report last changed — not against the stamp the
-    /// sample carries: a remote driver stamps in the plant's tick
-    /// domain, whose offset from the scan tick a stopped-then-resumed
-    /// field leaves permanently lagging, so a cross-domain comparison
-    /// would latch stale on fresh data. The image stamp stays the scan
-    /// tick either way.
+    /// The lag is measured in the run-tick domain — the scans since the
+    /// driver report last changed — not against the stamp the sample
+    /// carries: a remote driver stamps plant ticks, whose offset from
+    /// the run tick a stopped-then-resumed field leaves permanently
+    /// lagging, so a cross-domain comparison would latch stale on fresh
+    /// data. The image stamp stays the run tick either way.
     ///
     /// A forced `In` point skips both channels: the driver is not read
     /// — so a field fault on a forced point counts no failed read —
@@ -3012,13 +3018,15 @@ impl<'d> Executor<'d> {
             let sample = match self.driver.read(point) {
                 Ok(sample) => {
                     self.io_health.consecutive_failures = 0;
-                    // Freshness is judged in the run's own tick domain —
+                    // Freshness is judged in the run-tick domain —
                     // the driver-returned sample is change evidence,
                     // never the image's timestamp: a remote driver
-                    // stamps in the plant's tick domain, whose offset
-                    // from the scan tick a stopped-then-resumed field
-                    // leaves permanently lagging, so comparing the two
+                    // stamps plant ticks, whose offset from the run
+                    // tick a stopped-then-resumed field leaves
+                    // permanently lagging, so comparing the two
                     // domains directly would latch stale on fresh data.
+                    // The subtraction below stays same-domain — `tick`
+                    // and `freshness.since` are both run ticks.
                     let quality = match spec.stale_after_ticks {
                         Some(budget) => {
                             let freshness = self.freshness.entry(point).or_insert(Freshness {

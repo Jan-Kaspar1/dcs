@@ -50,7 +50,7 @@ pub enum PlantRequest {
         /// declared kind.
         value: Value,
     },
-    /// Advances the shared plant one tick of `dt` time units —
+    /// Advances the shared plant one plant tick of `dt` time units —
     /// `SimDriver::step`. Stepping is an explicit protocol operation so a
     /// controller scan can advance the shared plant deterministically and
     /// a second client observes the same stepped values. `dt` must be
@@ -247,12 +247,14 @@ pub enum PlantResponse {
     /// Answer to [`PlantRequest::Read`]: the point's latest sample.
     Sample {
         /// The stored sample — value, quality, and the plant tick that
-        /// produced it.
+        /// produced it: the simulated field's own step counter, a
+        /// different tick domain from any reading run's.
         sample: Sample,
     },
     /// Answer to [`PlantRequest::Step`]: the plant's new tick.
     Stepped {
-        /// The tick the step advanced to.
+        /// The plant tick the step advanced to — the simulated field's
+        /// step counter, not a run tick of any client.
         tick: Tick,
     },
     /// Answer to [`PlantRequest::ListPoints`]: every bound point's

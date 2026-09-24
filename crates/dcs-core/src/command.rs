@@ -557,14 +557,14 @@ impl std::error::Error for CommandError {}
 #[serde(rename_all = "snake_case")]
 pub enum CommandOutcome {
     /// The command passed validation and is queued to apply at `apply_tick`
-    /// — the tick the next scan runs at.
+    /// — the run tick the next scan runs at.
     Accepted {
-        /// The scan tick the command is scheduled to apply at.
+        /// The run tick the command is scheduled to apply at.
         apply_tick: Tick,
     },
-    /// The command was applied at the recorded scan tick.
+    /// The command was applied at the recorded run tick.
     Applied {
-        /// The scan tick the command applied at.
+        /// The run tick the command applied at.
         tick: Tick,
     },
     /// The command was refused; `reason` names why.

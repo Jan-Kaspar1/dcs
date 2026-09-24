@@ -91,7 +91,7 @@ pub struct ComponentParameters {
 /// hit.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct IoFault {
-    /// The scan tick the failure hit.
+    /// The run tick the failure hit.
     pub tick: Tick,
     /// The point the failure was attributed to — the error's
     /// [`IoError::point`], carried explicitly so a consumer reads the
@@ -275,8 +275,8 @@ pub struct ComponentCommands {
 /// runs serialize identically.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelemetrySnapshot {
-    /// The producer's tick when the snapshot was taken; [`Tick::ZERO`]
-    /// before the first scan.
+    /// The producer's run tick when the snapshot was taken;
+    /// [`Tick::ZERO`] before the first scan.
     pub tick: Tick,
     /// The latest sample of every point the producer knows, ordered by
     /// point id.
