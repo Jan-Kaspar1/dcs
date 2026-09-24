@@ -54,6 +54,19 @@ The ordinary planner runs at least every two hours and checks for low work after
 
 Each agent invocation has a two-hour default limit. CI repair attempts are limited to three. GitHub inventory polling defaults to sixty seconds and errors increase the delay. `python3 scripts/verify.py` shares four heavy-build slots across clones and limits Cargo to four build threads; direct Cargo commands bypass the shared semaphore.
 
+## Merge-flow report
+
+`python3 scripts/merge_flow.py` prints a read-only measurement behind `status`'s rolling merge comparison, for use when the decline exceeds the 20% investigation threshold. It scans first-parent commits on the integration ref — worker clones are shallow, so run it against a full clone (`--repo-dir`) or replay captured output (`--git-log`) — resolves each merge to its issue through the squash-merge body, and reports per named window (`previous`, `current`; `--window-days`, `--now`): merge counts, dispatch-to-merge lead-time percentiles where the job ledger (`--state-db`, auto-detected from the install) supplies a reservation, the per-area breakdown via `dcs-task` metadata, repair incidence (WIP-preservation and mid-flight `origin/main` integrations inside merge bodies, plus ledger `repairs`/`attempt` counters), and the open backlog's ready/blocked label share at report time. Issue inventory comes from `gh issue list --state all` unless `--issues`/`--no-issues` is given; every input is injectable so the report is deterministic for tests and replays. It changes no dispatcher, worker, or CI behavior.
+
+First recorded reading (2026-09-24, 7-day windows ending ~04:45 UTC, full clone + state ledger + issue inventory):
+
+- Merges: current 169 vs previous 256 (−34.0% by git history; the supervisor ledger reads 155 vs 228, −32%). Caveat on the comparison: the repository's first commit is 2026-09-14, so the previous window holds only ~3 days of bootstrap history — per-day throughput fell ~86 to ~24 merges/day (−72%), steeper than the window totals show.
+- Lead time (dispatch to merge, identity-resolved): p50 0.64h → 5.2h, p90 1.9h → 62.4h, max 116.6h.
+- Repair incidence: ledger repairs 55/256 (21%) → 49/169 (29%); re-dispatched jobs 58 (23%) → 105 (62%); merges carrying WIP-preservation commits 19 → 38 (46 preserved-work commits); mid-flight `origin/main` integrations ~0 in both windows.
+- Backlog at report time: 82 open — ready 17 (21%; 11 dependency-blocked, so ~6 dispatchable), blocked 53 (65%), working 4, pr-open 3, unlabeled 5. Blocked-job median dwell ≈3.7 days, dominated by killed or timed-out invocations (exit −15).
+
+Measured bottleneck: publish/repair churn surfacing as blocked-label dwell — not ready-queue starvation and not the CI critical path. Repairs touch only 29% of current merges and merge bodies show no mid-flight main integrations, so merge serialization is not the constraint; the ready queue is thin (~6 dependency-clear) but nonempty. The dominant pattern is dispatch → invocation killed or timed out → blocked → manual `dcs-agents retry` dwell → re-dispatch: 62% of current-window merges consumed more than one dispatch, and the lead-time tail (p90 62h) is dwell between attempts, not scan/CI time. Delivery-platform work should attack invocation survival and blocked-job recovery before touching dispatch or CI.
+
 ## Admission control
 
 Every managed invocation — worker, retry, repair, planner, and reviewer — must reserve a durable inference lease in SQLite before it spawns. Inference capacity is accounted separately from workspace: a PR awaiting CI keeps its clone reservation in `jobs` while releasing its inference lease. `model_caps` still orders worker preference in dispatch, but the lease is the authoritative check on every launch path, including preserved-clone retries.
