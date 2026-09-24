@@ -298,6 +298,14 @@ pub enum PlantError {
     Io {
         /// The driver's error.
         error: IoError,
+        /// When `error` is the fencing verdict — the write-ownership
+        /// claim refused this attachment's mutation — the standing
+        /// claim's owner token: who the field serves instead. `None`
+        /// on every other point error and absent on the wire from
+        /// servers predating the field, where the fence's claimant is
+        /// recorded only as "another".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<u64>,
     },
     /// The request itself could not be served: a line that does not parse
     /// as a [`PlantRequest`], or a [`PlantRequest::Step`] whose `dt` is
@@ -315,6 +323,13 @@ pub enum PlantError {
     Fenced {
         /// Why the request was refused.
         detail: String,
+        /// The standing claim's owner token — who the field's
+        /// arbitration serves instead of this attachment. Carried so a
+        /// fenced-out field owner's durable audit can name the
+        /// preempting claimant, not just "another". Absent on the wire
+        /// from servers predating the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<u64>,
     },
     /// The request mutates the shared field but no write-ownership
     /// claim stands at all — the server is fresh or restarted, or the
@@ -544,6 +559,7 @@ mod tests {
             PlantResponse::Error {
                 error: PlantError::Io {
                     error: IoError::UnknownPoint(PointId(4)),
+                    owner: None,
                 },
             },
             PlantResponse::Error {
@@ -553,16 +569,19 @@ mod tests {
                         expected: ValueKind::Float,
                         found: Value::Bool(true),
                     },
+                    owner: None,
                 },
             },
             PlantResponse::Error {
                 error: PlantError::Io {
                     error: IoError::Timeout(PointId(6)),
+                    owner: None,
                 },
             },
             PlantResponse::Error {
                 error: PlantError::Io {
                     error: IoError::InvalidValue { point: PointId(8) },
+                    owner: None,
                 },
             },
             PlantResponse::Error {
@@ -573,6 +592,7 @@ mod tests {
             PlantResponse::Error {
                 error: PlantError::Fenced {
                     detail: "another attachment owns field writes".to_string(),
+                    owner: Some(424242),
                 },
             },
             PlantResponse::Error {
@@ -618,6 +638,7 @@ mod tests {
             serde_json::to_string(&PlantResponse::Error {
                 error: PlantError::Io {
                     error: IoError::UnknownPoint(PointId(4)),
+                    owner: None,
                 },
             })
             .unwrap(),
@@ -631,6 +652,55 @@ mod tests {
             })
             .unwrap(),
             r#"{"result":"error","error":{"kind":"unclaimed","detail":"no attachment holds field writes"}}"#
+        );
+        // The fencing verdicts name the standing claim's owner — the
+        // claimant the fenced-out owner's audit trail records — while
+        // a `None` keeps the pre-field payload shape byte-identical.
+        assert_eq!(
+            serde_json::to_string(&PlantResponse::Error {
+                error: PlantError::Fenced {
+                    detail: "another attachment owns field writes".to_string(),
+                    owner: Some(424242),
+                },
+            })
+            .unwrap(),
+            r#"{"result":"error","error":{"kind":"fenced","detail":"another attachment owns field writes","owner":424242}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PlantResponse::Error {
+                error: PlantError::Io {
+                    error: IoError::Fenced(PointId(101)),
+                    owner: Some(424242),
+                },
+            })
+            .unwrap(),
+            r#"{"result":"error","error":{"kind":"io","error":{"fenced":101},"owner":424242}}"#
+        );
+        // A fenced answer from a build predating the field carries no
+        // owner and decodes to the unattributed verdict.
+        assert_eq!(
+            serde_json::from_str::<PlantResponse>(
+                r#"{"result":"error","error":{"kind":"fenced","detail":"another attachment owns field writes"}}"#
+            )
+            .unwrap(),
+            PlantResponse::Error {
+                error: PlantError::Fenced {
+                    detail: "another attachment owns field writes".to_string(),
+                    owner: None,
+                },
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<PlantResponse>(
+                r#"{"result":"error","error":{"kind":"io","error":{"fenced":101}}}"#
+            )
+            .unwrap(),
+            PlantResponse::Error {
+                error: PlantError::Io {
+                    error: IoError::Fenced(PointId(101)),
+                    owner: None,
+                },
+            }
         );
     }
 
@@ -677,6 +747,7 @@ mod tests {
                         expected: ValueKind::Float,
                         found: Value::Bool(true),
                     },
+                    owner: None,
                 },
             }
         );

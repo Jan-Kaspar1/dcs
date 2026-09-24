@@ -356,6 +356,26 @@ pub struct Peer<'d> {
     /// state without disturbing it, installed by
     /// [`with_field_probe`](Self::with_field_probe).
     probe: Option<Probe<'d>>,
+    /// The claimant-attribution lookup the fencing path asks at the
+    /// scan whose field write the field fenced — the owner token the
+    /// field's arbitration named when it refused, carried on the
+    /// queued [`FencingLoss`] so the journaled `field_claim_lost`
+    /// attributes the preemption. Installed by
+    /// [`with_field_claimant`](Self::with_field_claimant); a peer built
+    /// without it records each loss unattributed.
+    claimant: Option<Claimant<'d>>,
+    /// The claim's fencing-loss counterpart — the *bound* conditional
+    /// re-grant a fencing-demoted ex-owner probes each scan while its
+    /// loss mark stands, installed by
+    /// [`with_field_reclaim`](Self::with_field_reclaim). Granted only
+    /// where the field stands unclaimed or already names this run's
+    /// token, so the reclaim never preempts a standing owner — a
+    /// still-held rogue claim keeps the field until it releases — and
+    /// bound, unlike the orphan cycle's unbound probe, because the
+    /// peer's gate lifts on it: the run's attachments must stand in
+    /// the claim's holders for its writes to pass the arbitration it
+    /// just re-took.
+    reclaim: Option<Reclaim<'d>>,
     /// The field's write-ownership claim as the last probe observed it
     /// — what [`report`](Self::report) serves as `field_claim`. `None`
     /// until a probe answers (or when none is installed): "no claim
@@ -464,6 +484,42 @@ impl fmt::Debug for Probe<'_> {
     }
 }
 
+/// The claimant-attribution counterpart of [`Probe`]: asked at the
+/// scan whose field write the field fenced, it answers the owner token
+/// the field's arbitration named when it refused — the claimant a
+/// [`FencingLoss`] carries so the journaled `field_claim_lost`
+/// attributes the preemption. `None` answers mean the verdict named
+/// no claimant — a driver surface whose fencing answer carries no
+/// owner identity — and the loss records unattributed rather than
+/// guessing.
+struct Claimant<'d>(Box<dyn Fn(PointId) -> Option<u64> + Send + Sync + 'd>);
+
+impl fmt::Debug for Claimant<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("fencing claimant")
+    }
+}
+
+/// The fencing-loss counterpart of [`Ensure`]: the *bound* conditional
+/// re-grant a fencing-demoted ex-owner probes each scan while its loss
+/// mark stands — the wedge escape a released preemption owes the pair.
+/// Granted only where the field stands unclaimed or already names this
+/// run's token — `Ok(true)` — answering `Ok(false)` while a different
+/// owner stands and `Err` where the field could not be asked, so the
+/// reclaim never preempts a standing owner: a live incumbent — even a
+/// rogue's still-held claim — keeps the field until it releases. The
+/// grant is bound, unlike the orphan cycle's unbound probe, because
+/// the peer's gate lifts on it: the run's attachments must stand in
+/// the claim's holders for its writes to pass the arbitration it just
+/// re-took.
+struct Reclaim<'d>(Box<dyn Fn() -> Result<bool, String> + Send + Sync + 'd>);
+
+impl fmt::Debug for Reclaim<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("field reclaim")
+    }
+}
+
 /// One reported-role transition, queued for the transition journal: the
 /// tick it is attributed to and the reported roles before and after.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -489,6 +545,14 @@ pub struct FencingLoss {
     pub tick: Tick,
     /// The point whose write the field fenced.
     pub point: PointId,
+    /// The owner token the preempting claim was taken under — the
+    /// claimant the field's own arbitration named in its fencing
+    /// verdict, recorded so the `field_claim_lost` journal entry
+    /// attributes the takeover rather than an anonymous "another".
+    /// `None` where no verdict named a claimant: a driver surface
+    /// whose fencing answer carries no owner identity, or a peer built
+    /// without the claimant hook.
+    pub claimant: Option<u64>,
 }
 
 /// A tracking peer's applied checkpoint reported its serving run owns
@@ -762,6 +826,8 @@ impl<'d> Peer<'d> {
             pending_superseded: Vec::new(),
             pending_adoption_receipts: Vec::new(),
             probe: None,
+            claimant: None,
+            reclaim: None,
             field_claim: None,
         }
     }
@@ -882,6 +948,48 @@ impl<'d> Peer<'d> {
         self
     }
 
+    /// Arms the claimant-attribution lookup the fencing path asks at
+    /// the scan whose field write the field fenced: `claimant` answers
+    /// the owner token the field's arbitration named when it refused
+    /// the point's mutation — carried on the queued [`FencingLoss`] so
+    /// the journaled `field_claim_lost` attributes the preemption
+    /// rather than an anonymous loss. `None` answers record the loss
+    /// unattributed — a driver surface whose fencing verdict carries
+    /// no owner identity — rather than guessing a claimant. See
+    /// [`Claimant`].
+    pub fn with_field_claimant(
+        mut self,
+        claimant: impl Fn(PointId) -> Option<u64> + Send + Sync + 'd,
+    ) -> Self {
+        self.claimant = Some(Claimant(Box::new(claimant)));
+        self
+    }
+
+    /// Arms the claim's fencing-loss counterpart — the *bound*
+    /// conditional re-grant a fencing-demoted ex-owner probes each
+    /// scan while its loss mark stands. `reclaim` takes the field's
+    /// write-ownership under this run's token only where the field
+    /// stands unclaimed or already names the token — `Ok(true)` — and
+    /// answers `Ok(false)` while a different owner stands, so a
+    /// still-held preemptor's claim keeps the field until it releases
+    /// and the probe never preempts. Unlike the orphan cycle's unbound
+    /// probe the grant joins the run's attachments to the claim's
+    /// holders — the gate it re-lifts must pass the arbitration it
+    /// re-took. On `Ok(true)` the peer clears the loss mark, lifts the
+    /// field gate the demotion closed, and reports
+    /// [`FieldClaim::Held`] from the claim it just re-took; `Ok(false)`
+    /// and `Err` leave the mark standing for the next scan. A peer
+    /// built without the hook keeps the pre-reclaim behavior — the
+    /// wedge stands until an operator's promote unwedges. See
+    /// [`Reclaim`].
+    pub fn with_field_reclaim(
+        mut self,
+        reclaim: impl Fn() -> Result<bool, String> + Send + Sync + 'd,
+    ) -> Self {
+        self.reclaim = Some(Reclaim(Box::new(reclaim)));
+        self
+    }
+
     /// Arms automatic failover: `budget` consecutive failed checkpoint
     /// pulls — one per scan cycle, the documented heartbeat cadence —
     /// make [`failover_due`](Self::failover_due) report, and
@@ -946,6 +1054,8 @@ impl<'d> Peer<'d> {
             pending_superseded: Vec::new(),
             pending_adoption_receipts: Vec::new(),
             probe: None,
+            claimant: None,
+            reclaim: None,
             field_claim: None,
         }
     }
@@ -2191,6 +2301,15 @@ impl<'d> Peer<'d> {
         }
         let detail = match pull() {
             Ok(checkpoint) => {
+                // A tracked line reporting a field owner means the
+                // preemption the fencing-loss mark covers already
+                // resolved through succession: the mark's reclaim must
+                // not linger to preempt that incumbent's later yield —
+                // takeovers from here are the ordinary promote and
+                // failover paths' to arbitrate.
+                if checkpoint.source_owns_field == Some(true) {
+                    self.fencing_lost = false;
+                }
                 let orphaned = checkpoint.source_owns_field == Some(false);
                 return match self.transfer(&checkpoint) {
                     Ok(transfer) => {
@@ -2244,6 +2363,42 @@ impl<'d> Peer<'d> {
             && let Some(ensure) = &self.ensure
         {
             let _ = ensure.0();
+        }
+    }
+
+    /// The fencing-loss reclaim — the released-preemption wedge escape
+    /// [`with_field_reclaim`](Self::with_field_reclaim) arms. Only a
+    /// `standby` peer still carrying the loss mark probes: the mark is
+    /// set solely by the fenced-write demotion and cleared solely by
+    /// the next granted claim, so its standing means "this run owned
+    /// the field and the claim was preempted under it" — the ex-owner
+    /// the reclaim exists for. The probe is the *bound* conditional
+    /// grant: `Ok(true)` takes the field's write-ownership back under
+    /// this run's token — the field stood unclaimed or already named
+    /// the token — joining the run's attachments to the claim's
+    /// holders so the re-lifted gate's writes pass the arbitration it
+    /// re-took, then reports `promoting` exactly as a promotion's
+    /// granted claim does, the next field-owning scan settling
+    /// `active`. `Ok(false)` — a different owner's claim still stands
+    /// — and `Err` leave mark and gate untouched for the next scan:
+    /// the reclaim never preempts a standing owner, so a still-held
+    /// rogue claim keeps the field until it releases and a concurrent
+    /// reclaimer's grant refuses the loser. A peer built without the
+    /// hook probes nothing — the wedge stands until an operator's
+    /// promote unwedges, the pre-hook behavior.
+    fn reclaim_field_claim(&mut self, tick: Tick) {
+        if self.role != Role::Standby || !self.fencing_lost {
+            return;
+        }
+        if let Some(reclaim) = &self.reclaim
+            && let Ok(true) = reclaim.0()
+        {
+            self.open_gate();
+            self.change(tick, Role::Promoting);
+            // The probe granted the claim rather than observing it —
+            // report the held claim the grant just took without
+            // waiting on next scan's observation.
+            self.field_claim = Some(FieldClaim::Held);
         }
     }
 
@@ -2326,7 +2481,19 @@ impl<'d> Peer<'d> {
         {
             if !self.fencing_lost {
                 self.fencing_lost = true;
-                self.pending_fencing.push(FencingLoss { tick, point });
+                self.pending_fencing.push(FencingLoss {
+                    tick,
+                    point,
+                    // The field's own arbitration names the preempting
+                    // claim's owner — the claimant the journaled
+                    // `field_claim_lost` attributes the takeover to.
+                    // `None` where no hook is installed or the verdict
+                    // carried no owner identity.
+                    claimant: self
+                        .claimant
+                        .as_ref()
+                        .and_then(|claimant| claimant.0(point)),
+                });
             }
             // Superseded: the field's single-writer claim belongs to
             // another attachment now. The scan completed degraded; the
@@ -2352,6 +2519,7 @@ impl<'d> Peer<'d> {
             Role::Demoting => self.change(tick, Role::Standby),
             _ => {}
         }
+        self.reclaim_field_claim(tick);
         if self.owns_field() {
             self.staged = None;
         } else {
@@ -3246,7 +3414,8 @@ mod tests {
             peer.take_fencing_losses(),
             vec![FencingLoss {
                 tick: Tick(2),
-                point: OUTPUT
+                point: OUTPUT,
+                claimant: None,
             }]
         );
         assert_eq!(peer.role(), Role::Demoting);
@@ -3295,7 +3464,8 @@ mod tests {
             peer.take_fencing_losses(),
             vec![FencingLoss {
                 tick: Tick(4),
-                point: OUTPUT
+                point: OUTPUT,
+                claimant: None,
             }]
         );
         assert_eq!(peer.scan(), Tick(5));
@@ -3320,6 +3490,166 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// The released-preemption recovery the demotion wedge needs: a
+    /// fencing-demoted ex-owner probes the bound conditional re-grant
+    /// each standby scan — refused while the preemptor's claim still
+    /// stands, so the probe never preempts — and once the field stands
+    /// unclaimed again the grant takes the claim back under the run's
+    /// own token, re-lifts the gate the demotion closed, and walks the
+    /// peer back `promoting` → `active` so its writes and steps resume.
+    /// The loss record carries the claimant the field's fencing
+    /// verdict named.
+    #[test]
+    fn a_fencing_demoted_owner_reclaims_the_field_once_the_preemptor_releases() {
+        const OWNER: u64 = 7;
+        const FOREIGN: u64 = 999;
+        let field = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let fenced = FencingDriver {
+            inner: &field,
+            armed: AtomicBool::new(false),
+        };
+        let gate = WriteGate::closed(&fenced);
+        let claim = ScriptedClaim::unclaimed();
+        let mut peer = Peer::active(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        )
+        .with_field_claim(|| {
+            claim.claim(OWNER);
+            Ok(())
+        })
+        .with_field_probe(|| Ok(claim.probe()))
+        .with_field_claimant(|_| claim.holder())
+        .with_field_reclaim(|| Ok(claim.ensure(OWNER)));
+        peer.activate().unwrap();
+        assert_eq!(peer.scan(), Tick(1));
+        assert_eq!(claim.holder(), Some(OWNER));
+
+        // The preemption: the foreign attachment takes the claim, the
+        // owner's next write fences, and the demote path runs — the
+        // loss record attributing the takeover to the claimant the
+        // field's verdict named.
+        claim.claim(FOREIGN);
+        fenced.armed.store(true, Ordering::Relaxed);
+        assert_eq!(peer.scan(), Tick(2));
+        assert_eq!(
+            peer.take_fencing_losses(),
+            vec![FencingLoss {
+                tick: Tick(2),
+                point: OUTPUT,
+                claimant: Some(FOREIGN),
+            }]
+        );
+        assert_eq!(peer.role(), Role::Demoting);
+
+        // While the preemptor's claim still stands the reclaim probe
+        // refuses every scan — the demotion settles standby and the
+        // field stays the foreign owner's: the probe never preempts.
+        assert_eq!(peer.scan(), Tick(3));
+        assert_eq!(peer.role(), Role::Standby);
+        for tick in 4..=6 {
+            assert_eq!(peer.scan(), Tick(tick));
+        }
+        assert_eq!(
+            peer.role(),
+            Role::Standby,
+            "a standing foreign owner must refuse the reclaim"
+        );
+        assert_eq!(claim.holder(), Some(FOREIGN));
+        assert!(!gate.is_open());
+
+        // The release: the next standby scan's bound grant takes the
+        // unclaimed field back under the run's own token — gate
+        // re-lifted, `promoting` reported — and the following
+        // field-owning scan settles `active`, its writes passing the
+        // claim it just re-took.
+        claim.release();
+        fenced.armed.store(false, Ordering::Relaxed);
+        assert_eq!(peer.scan(), Tick(7));
+        assert_eq!(peer.role(), Role::Promoting);
+        assert_eq!(claim.holder(), Some(OWNER));
+        assert!(gate.is_open());
+        assert_eq!(peer.report().field_claim, Some(FieldClaim::Held));
+        assert_eq!(peer.scan(), Tick(8));
+        assert_eq!(peer.role(), Role::Active);
+        assert_eq!(
+            field.value(OUTPUT),
+            Value::Float(1.0),
+            "the reclaimed owner's writes must pass the claim it re-took"
+        );
+        assert!(peer.take_fencing_losses().is_empty());
+        assert_eq!(
+            peer.take_role_changes(),
+            vec![
+                RoleChange {
+                    tick: Tick(2),
+                    from: Role::Active,
+                    to: Role::Demoting
+                },
+                RoleChange {
+                    tick: Tick(3),
+                    from: Role::Demoting,
+                    to: Role::Standby
+                },
+                RoleChange {
+                    tick: Tick(7),
+                    from: Role::Standby,
+                    to: Role::Promoting
+                },
+                RoleChange {
+                    tick: Tick(8),
+                    from: Role::Promoting,
+                    to: Role::Active
+                },
+            ]
+        );
+    }
+
+    /// The pre-hook behavior a driver surface without the reclaim
+    /// grant keeps: a fencing-demoted ex-owner stays `standby` across
+    /// the preemptor's release — the wedge an operator's promote
+    /// unwedges.
+    #[test]
+    fn a_fencing_demoted_owner_without_the_reclaim_hook_stays_wedged() {
+        let field = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let fenced = FencingDriver {
+            inner: &field,
+            armed: AtomicBool::new(false),
+        };
+        let gate = WriteGate::closed(&fenced);
+        let claim = ScriptedClaim::unclaimed();
+        let mut peer = Peer::active(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        )
+        .with_field_claim(|| {
+            claim.claim(7);
+            Ok(())
+        })
+        .with_field_probe(|| Ok(claim.probe()))
+        .with_field_claimant(|_| claim.holder());
+        peer.activate().unwrap();
+        peer.scan();
+
+        claim.claim(9);
+        fenced.armed.store(true, Ordering::Relaxed);
+        peer.scan();
+        assert_eq!(peer.role(), Role::Demoting);
+        peer.scan();
+        assert_eq!(peer.role(), Role::Standby);
+
+        // The preemptor releases and the field stands unclaimed — but
+        // with no reclaim hook nothing takes it back: the peer keeps
+        // reporting the wedge until an operator promotes.
+        claim.release();
+        for _ in 0..3 {
+            peer.scan();
+        }
+        assert_eq!(peer.role(), Role::Standby);
+        assert_eq!(peer.report().field_claim, Some(FieldClaim::Unclaimed));
+        assert!(!gate.is_open());
     }
 
     /// A peer whose claim was preempted between scans still reports
@@ -4191,6 +4521,21 @@ mod tests {
         /// The unconditional grant a promotion claims through.
         fn claim(&self, owner: u64) {
             *self.holder.lock().unwrap() = Some(owner);
+        }
+
+        /// The conditional grant the reclaim probes: takes the claim
+        /// for `owner` only while the field stands unclaimed or already
+        /// names the token — refused while a different owner stands,
+        /// so the probe never preempts.
+        fn ensure(&self, owner: u64) -> bool {
+            let mut holder = self.holder.lock().unwrap();
+            match *holder {
+                Some(standing) if standing != owner => false,
+                _ => {
+                    *holder = Some(owner);
+                    true
+                }
+            }
         }
 
         /// The last holder's release — the field returns to unclaimed.
