@@ -1758,14 +1758,18 @@ fn none_available_annunciation_never_claims_standing_demand() {
         )),
         "none_available never asserted with every pump out of service"
     );
+    // The alarm's condition reads the carrier a scan later.
+    assert!(
+        drive_until(&mut executor, &driver, 4, |e| point_bool(
+            e,
+            layout.none_available_alarm.alarm
+        )),
+        "the alarm must still annunciate the empty roster"
+    );
     assert_eq!(
         int(executor.sample(layout.demand).unwrap()),
         0,
         "the reproduction requires demand at zero"
-    );
-    assert!(
-        point_bool(&executor, layout.none_available_alarm.alarm),
-        "the alarm must still annunciate the empty roster"
     );
     assert!(
         point_bool(&executor, layout.none_available_alarm.unacknowledged),
