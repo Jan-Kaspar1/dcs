@@ -457,6 +457,17 @@ own surface: the HMI alarm path is never presented as the safeguard.</p>
 // reason stand beside it. A point the model marks requires_reason
 // refuses a blank declaration with the reason_required rejection.
 //
+// Abandoned submissions (the indeterminate-outcome rule): the command
+// POST's AbortSignal.timeout cancels the page's wait, never the
+// server's work — the request may already sit buffered in the listen
+// backlog — so an aborted submission's outcome is genuinely unknown.
+// The page answers the indeterminate "outcome unknown" verdict rather
+// than asserting failure, never retries a submission whose fate is
+// unresolved — a landed invoke would apply twice — and holds the
+// declared {command, actor, reason} in pendingCommands so the journaled
+// command_settled entry, the receipted contract's truth about the
+// command, resolves the standing notice when the settle lands.
+//
 // Plant overview (the plant-wide-supervision decision): repeated
 // ?pair=<name>=<host:port>,<host:port>,… URL parameters switch the page
 // into an overview mode rendering one summary card per configured pair
@@ -625,6 +636,14 @@ const interfaceOpen = new Map();
 // write is receipted, or by the poll finding the input held true with no
 // release armed (a receipt lost past the abort bound, or a reload).
 const ackReleases = new Map();
+// The submissions the abort bound abandoned before a receipt answered,
+// each {command, actor, reason, notice}: the outcome is indeterminate
+// until a journaled command_settled — the receipted contract's truth —
+// matches the declared fields, and `notice` is the receipt-pane text
+// the landing settle replaces while it still stands there. Bounded
+// like every page-side collection; the oldest unresolved entry drops.
+const pendingCommands = [];
+const PENDING_LIMIT = 16;
 // The equipment pane's selection — the owning component the last
 // alarm-surface navigation named, or null while none stands: the pane
 // stays hidden until a row or journal entry selects its owner.
@@ -2406,7 +2425,7 @@ async function submitInterfaceCommand(button) {
       : String(answer);
   setCommandStatus(component, name, {
     text: verdict,
-    warn: false,
+    warn: isIndeterminate(answer),
     bad: !answer || !answer.outcome || "rejected" in answer.outcome,
   });
 }
@@ -3392,6 +3411,23 @@ async function refreshJournal(base) {
           bad: "rejected" in settled.receipt.outcome,
         });
       }
+      // The receipted contract's truth answering an abandoned
+      // submission: a settle matching a pendingCommands entry resolves
+      // the indeterminate verdict the abort left — the receipt pane's
+      // notice is replaced only while that submission's notice still
+      // stands there.
+      const abandoned = pendingCommands.findIndex(pending =>
+        sameSubmission(settled.receipt, pending));
+      if (abandoned >= 0) {
+        const pending = pendingCommands.splice(abandoned, 1)[0];
+        const pane = document.getElementById("receipt");
+        if (pane.textContent === pending.notice) {
+          pane.textContent = "the abandoned submission settled — " +
+            describeCommand(settled.receipt.command) + " — " +
+            describeOutcome(settled.receipt.outcome) + "\n\n" +
+            JSON.stringify(settled.receipt, null, 2);
+        }
+      }
     }
   }
   journalEntries.sort((a, b) => a.tick - b.tick || a.seq - b.seq);
@@ -3571,7 +3607,10 @@ function describeCommand(command) {
 }
 
 // An outcome serializes as {"accepted": {apply_tick}} |
-// {"applied": {tick}} | {"rejected": {reason}}.
+// {"applied": {tick}} | {"rejected": {reason}} — or the page-minted
+// {"indeterminate": {detail}} an abort-abandoned submission answers
+// with: the bound cancelled the wait, not provably the work, so no
+// verdict on the command exists until the journaled settle lands.
 function describeOutcome(outcome) {
   if ("applied" in outcome) return "applied at tick " + outcome.applied.tick;
   if ("accepted" in outcome) {
@@ -3579,6 +3618,10 @@ function describeOutcome(outcome) {
   }
   if ("rejected" in outcome) {
     return "rejected: " + describeReason(outcome.rejected.reason);
+  }
+  if ("indeterminate" in outcome) {
+    return "outcome unknown — the submission outlived the abort bound " +
+      "and may still apply; the journaled settled receipt is the verdict";
   }
   return JSON.stringify(outcome);
 }
@@ -3682,6 +3725,79 @@ function commandValue(kind, text) {
   return { float: parseFloat(text) };
 }
 
+// Whether a postCommand rejection is the abort bound firing rather
+// than the transport refusing the request: AbortSignal.timeout
+// rejects with TimeoutError where the DOMException naming landed and
+// AbortError elsewhere, and either verdict means the page's wait ended
+// — not provably the server's work, the request possibly already
+// buffered in the listen backlog. A refused connect or a failed send
+// throws anything else and does prove the request never left.
+function isAbortError(error) {
+  return !!error &&
+    (error.name === "AbortError" || error.name === "TimeoutError");
+}
+
+// JSON-tree equality with numeric equivalence: a receipt's echoed
+// command needn't match the submitted literal's key order or number
+// spelling (1.0 vs 1), so matching compares structure, not text.
+function sameJson(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null ||
+      typeof a !== "object" || typeof b !== "object") return false;
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length &&
+    keys.every(key => key in b && sameJson(a[key], b[key]));
+}
+
+// Whether two wire Commands name the same operation — the same
+// variant carrying structurally equal fields.
+function sameCommand(a, b) {
+  for (const variant of
+      ["write_value", "force_point", "unforce_point", "set_parameter", "invoke"]) {
+    if (variant in a) return variant in b && sameJson(a[variant], b[variant]);
+  }
+  return false;
+}
+
+// Whether a journaled settled receipt is the authority's answer to an
+// abandoned submission: the command matches structurally and the
+// declared actor and reason the receipt echoes agree, so another
+// console's identical command cannot claim the pending entry.
+function sameSubmission(receipt, pending) {
+  return sameCommand(receipt.command, pending.command) &&
+    (receipt.actor || null) === pending.actor &&
+    (receipt.reason || null) === pending.reason;
+}
+
+// The answer an abort-abandoned submission reports: a receipt-shaped
+// {command, outcome, actor, reason} carrying the page-minted
+// indeterminate outcome describeOutcome names, so every submitCommand
+// caller renders it through the ordinary receipt path. The submission
+// joins pendingCommands — the journaled settle resolves the standing
+// notice — and the pane states the uncertainty plus the double-apply
+// hazard a blind retry of a landed command would run.
+function abandonedSubmission(command, reason, error) {
+  const answer = {
+    command: command,
+    outcome: { indeterminate: { detail: String(error) } },
+  };
+  if (operator !== null) answer.actor = operator;
+  if (reason) answer.reason = reason;
+  const notice = "command outcome unknown — the request outlived the " +
+    POLL_MS + " ms abort bound and may still apply: " +
+    describeCommand(command) + ". The journaled settled receipt is " +
+    "the verdict — resubmitting now risks applying the command twice.";
+  pendingCommands.push({
+    command: command,
+    actor: operator,
+    reason: reason || null,
+    notice: notice,
+  });
+  if (pendingCommands.length > PENDING_LIMIT) pendingCommands.shift();
+  document.getElementById("receipt").textContent = notice;
+  return answer;
+}
+
 // POSTs the command to a peer: the attributed envelope
 // {"command":…,"actor":…,"reason":…} when ?operator= configured an
 // identity or a declared reason rides the submission, the bare Command
@@ -3696,7 +3812,9 @@ function commandValue(kind, text) {
 // post that outruns the bound names a hung listener — and the
 // ack-release awaits a submission inside refresh(), where an unbounded
 // hang would hold `polling` forever, freezing the feed marks the loop
-// exists to recompute.
+// exists to recompute. The bound cancels the wait only, so a post that
+// outruns it leaves the command's outcome indeterminate — the
+// indeterminate-outcome rule, not a failure.
 async function postCommand(base, command, reason) {
   let body = command;
   if (operator !== null || reason) {
@@ -3719,6 +3837,14 @@ function isNotActive(receipt) {
     "not_active" in receipt.outcome.rejected.reason;
 }
 
+// Whether a submitCommand answer is the page-minted indeterminate
+// outcome an abort-abandoned submission reports — status cells show it
+// as a warning, never the failure red, because no verdict says the
+// command did not land.
+function isIndeterminate(answer) {
+  return !!(answer && answer.outcome && "indeterminate" in answer.outcome);
+}
+
 // Submits an operator command to the peer reporting settled "active" —
 // never to a standby. A not_active rejection means the pair moved
 // mid-flight: roles are re-polled and the command retried once against
@@ -3727,7 +3853,10 @@ function isNotActive(receipt) {
 // the declared justification the shelving-reason decision carries.
 // Answers the peer's response — normally the command's receipt — so the
 // caller can surface it beside the control that submitted; null when
-// nothing was sent.
+// nothing was sent. The abort bound firing answers the indeterminate
+// outcome instead of throwing: the request may already be buffered
+// server-side, so a retry whose fate is unresolved is never sent — a
+// landed command would apply twice.
 async function submitCommand(command, reason) {
   const receipt = document.getElementById("receipt");
   let target = activePeer();
@@ -3740,12 +3869,32 @@ async function submitCommand(command, reason) {
     receipt.textContent = noActiveVerdict();
     return null;
   }
-  let answer = await postCommand(peers[target].base, command, reason);
+  let answer;
+  try {
+    answer = await postCommand(peers[target].base, command, reason);
+  } catch (error) {
+    if (isAbortError(error)) {
+      return abandonedSubmission(command, reason, error);
+    }
+    throw error;
+  }
   if (isNotActive(answer)) {
     await pollRoles();
     renderPair();
     target = activePeer();
-    if (target >= 0) answer = await postCommand(peers[target].base, command, reason);
+    if (target >= 0) {
+      try {
+        answer = await postCommand(peers[target].base, command, reason);
+      } catch (error) {
+        // The first post answered a named refusal — the command never
+        // queued — so only the retry's fate is open when the bound
+        // fires here.
+        if (isAbortError(error)) {
+          return abandonedSubmission(command, reason, error);
+        }
+        throw error;
+      }
+    }
   }
   receipt.textContent = JSON.stringify(answer, null, 2);
   return answer;
@@ -3792,7 +3941,7 @@ async function submitParameter(button) {
   setParamStatus(component, name, {
     text: (parsed.warnings.length > 0
       ? "warning: " + parsed.warnings.join("; ") + " — " : "") + verdict,
-    warn: parsed.warnings.length > 0,
+    warn: parsed.warnings.length > 0 || isIndeterminate(answer),
     bad: !answer || !answer.outcome || "rejected" in answer.outcome,
   });
 }

@@ -8,7 +8,8 @@ import time
 import unittest
 from unittest.mock import patch
 
-from agent_pool.runtime import Runtime, atomic_json, is_alive, process_identity, runner
+from agent_pool.runtime import (Runtime, atomic_json, is_alive, process_activity,
+                                process_identity, process_tree, runner)
 
 # agent_pool.runtime is a Linux/WSL runtime: process identity reads /proc,
 # timeout and stop paths signal process groups via os.killpg, and spawn
@@ -166,6 +167,98 @@ class RuntimeTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 10)
         self.assertEqual(result['status'], 'failed')
         self.assertIn('hang', result.get('error', ''))
+
+    @posix_only
+    def test_runner_busy_descendant_survives_stall_window(self):
+        probes = []
+
+        def activity(pid):
+            probes.append(pid)
+            return True, {pid: 'busy-child'}
+
+        spec = {'command': [sys.executable, '-c', 'import time; time.sleep(1)'],
+                'cwd': str(self.source), 'timeout': 30, 'stall_seconds': .3,
+                'error_stall_seconds': .2,
+                'log': str(self.root / 'log'), 'receipt': str(self.root / 'receipt.json'),
+                'metadata': str(self.root / 'process.json')}
+        path = self.root / 'spec.json'
+        atomic_json(path, spec)
+        runner(path, activity=activity)
+        result = json.loads(Path(spec['receipt']).read_text())
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['exit_code'], 0)
+        self.assertNotIn('error', result)
+        self.assertTrue(probes)
+
+    @posix_only
+    def test_runner_idle_tree_stall_records_process_tree(self):
+        tree = {4321: 'opencode', 4322: 'cargo', 4323: 'rustc'}
+        spec = {'command': [sys.executable, '-c', 'import time; time.sleep(30)'],
+                'cwd': str(self.source), 'timeout': 30, 'stall_seconds': .4,
+                'error_stall_seconds': .3,
+                'log': str(self.root / 'log'), 'receipt': str(self.root / 'receipt.json'),
+                'metadata': str(self.root / 'process.json')}
+        path = self.root / 'spec.json'
+        atomic_json(path, spec)
+        started = time.monotonic()
+        runner(path, activity=lambda pid: (False, tree))
+        result = json.loads(Path(spec['receipt']).read_text())
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(result['status'], 'failed')
+        error = result.get('error', '')
+        self.assertIn('No agent output for', error)
+        self.assertIn('treating as hang', error)
+        for member, comm in tree.items():
+            self.assertIn('%d(%s)' % (member, comm), error)
+        self.assertIn('log tail at byte 0', error)
+
+    @posix_only
+    def test_runner_stream_error_fast_path_ignores_busy_tree(self):
+        spec = {'command': [sys.executable, '-c',
+                            'print("stream error: rate limit exceeded", flush=True); '
+                            'import time; time.sleep(30)'],
+                'cwd': str(self.source), 'timeout': 30, 'stall_seconds': 60,
+                'error_stall_seconds': .4,
+                'log': str(self.root / 'log'), 'receipt': str(self.root / 'receipt.json'),
+                'metadata': str(self.root / 'process.json')}
+        path = self.root / 'spec.json'
+        atomic_json(path, spec)
+        started = time.monotonic()
+        runner(path, activity=lambda pid: (True, {pid: 'busy'}))
+        result = json.loads(Path(spec['receipt']).read_text())
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(result['status'], 'failed')
+        self.assertIn('treating as hang', result.get('error', ''))
+
+    @posix_only
+    def test_process_activity_detects_idle_and_busy_children(self):
+        if not Path('/proc/self/stat').exists():
+            self.skipTest('process activity probe requires Linux /proc')
+        sleeper = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+                                   start_new_session=True)
+        try:
+            deadline = time.monotonic() + 5
+            while sleeper.pid not in process_tree(sleeper.pid):
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(.02)
+            busy, snapshot = process_activity(sleeper.pid, interval=.1)
+            self.assertFalse(busy)
+            self.assertIn(sleeper.pid, snapshot)
+        finally:
+            sleeper.terminate()
+            sleeper.wait(timeout=5)
+        burner = subprocess.Popen([sys.executable, '-c',
+                                   'import time\n'
+                                   'end = time.monotonic() + 5\n'
+                                   'while time.monotonic() < end: pass'],
+                                  start_new_session=True)
+        try:
+            busy, snapshot = process_activity(burner.pid, interval=.2)
+            self.assertTrue(busy)
+            self.assertIn(burner.pid, snapshot)
+        finally:
+            burner.terminate()
+            burner.wait(timeout=5)
 
     @posix_only
     def test_runner_error_stall_kills_stream_error_faster(self):
