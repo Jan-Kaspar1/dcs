@@ -8,14 +8,14 @@
 use dcs_core::{
     Command, CommandAvailability, CommandDecl, CommandOutcome, ComponentDescriptor, Direction,
     Divergence, EmittedEvent, EventDecl, EventField, EventFieldKind, EventRetention, EventValue,
-    IoDriver, IoError, JournalEvent, PointId, Role, Sample, StandbySync, StateMap, SwitchError,
-    Tick, Value, ValueKind,
+    IoDriver, IoError, JournalEvent, PointId, Quality, QualityReason, Role, Sample, StandbySync,
+    StateMap, SwitchError, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorClient};
 use dcs_runtime::{
     Checkpoint, Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap,
-    StepError, mint_generation,
+    PointSpec, StepError, mint_generation,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
@@ -222,6 +222,33 @@ fn executor(driver: &'static StubDriver) -> Executor<'static> {
         .with_point(PointId(30), Direction::Out, ValueKind::Float);
     Executor::new(driver, map, vec![Box::new(Scale)]).unwrap()
 }
+
+/// The realign finding's executor: the fixture's surface with a
+/// `stale_after_ticks` budget on the field `In` — the declared
+/// freshness bound the tracker's own scans outrun while the frozen
+/// checkpoint stream holds the field sample unchanged.
+fn stale_executor(driver: &'static StubDriver) -> Executor<'static> {
+    let map = PointMap::new()
+        .with_spec(
+            PointId(10),
+            PointSpec {
+                direction: Direction::In,
+                kind: ValueKind::Float,
+                internal: None,
+                writable: true,
+                stale_after_ticks: Some(STALE_BUDGET),
+                journaled: false,
+            },
+        )
+        .with_point(PointId(20), Direction::Out, ValueKind::Float)
+        .with_point(PointId(30), Direction::Out, ValueKind::Float);
+    Executor::new(driver, map, vec![Box::new(Scale)]).unwrap()
+}
+
+/// Point 10's declared freshness budget on the realign rig — long
+/// enough to span the converging scans, short enough that a handful of
+/// degraded scans crosses it.
+const STALE_BUDGET: u64 = 4;
 
 /// The `executor` fixture over a fencing front — the launched active's
 /// build in the involuntary-demotion reproduction.
@@ -776,7 +803,7 @@ fn driven_stale_apply_leaves_the_standby_diverged() {
                 if compared.len() == 1
                     && compared[0].point == PointId(20)
                     && compared[0].staged == compared[0].field
-                    && entry.tick == Tick(5)
+                    && entry.tick == Tick(6)
         )),
         "the clear must journal as divergence_resolved at the compared tick: {journal:?}"
     );
@@ -1230,6 +1257,7 @@ impl Drop for Hostile {
 /// Runs on its own thread until dropped.
 struct Relay {
     addr: SocketAddr,
+    partitioned: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -1239,12 +1267,18 @@ impl Relay {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
+        let partitioned = Arc::new(AtomicBool::new(false));
+        let cutting = Arc::clone(&partitioned);
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = Arc::clone(&stop);
         let thread = thread::spawn(move || {
             while !stopping.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((client, _)) => {
+                        if cutting.load(Ordering::Relaxed) {
+                            drop(client);
+                            continue;
+                        }
                         if let Ok(server) = std::net::TcpStream::connect(upstream) {
                             thread::spawn(move || pump_relay(client, server));
                         }
@@ -1258,9 +1292,18 @@ impl Relay {
         });
         Self {
             addr,
+            partitioned,
             stop,
             thread: Some(thread),
         }
+    }
+
+    /// Cuts or restores the relayed stream — the frozen-source window
+    /// the realign finding pauses: accepted connections close
+    /// unanswered while cut, so the tracker's pulls fail fast like the
+    /// reproduction's paused active.
+    fn partition(&self, cut: bool) {
+        self.partitioned.store(cut, Ordering::Relaxed);
     }
 }
 
@@ -2932,5 +2975,280 @@ fn a_demoted_peer_journals_one_settle_per_carried_admission() {
     assert!(
         ticks.windows(2).all(|pair| pair[0] <= pair[1]),
         "the journal's ticks must be non-decreasing: {ticks:?}"
+    );
+}
+
+/// QA finding `tracker-realign-regresses-journal-tick-axis` (#830): the
+/// reported run paused the active for seconds while the standby kept
+/// scanning; the tracker ran its own tick past the point's
+/// `stale_after_ticks` budget and journaled the `good → stale` mark at
+/// that run tick — then the realigning apply rewound the executor's
+/// clock to the stream's tick, so the recovery's `stale → good`
+/// transition journaled below the assertion's tick and tick-order
+/// consumers read the clearance first.
+///
+/// Replayed on the driven pair with a partitionable relay freezing the
+/// checkpoint stream the way `docker pause` froze the source: the
+/// tracker's degraded scans cross the freshness budget and journal the
+/// stale mark at the run's held clock; the restored pull's apply lands
+/// at the run's own tick — `landed`, never the stream's — so the
+/// recovery and the adopted settlement the covering checkpoint carries
+/// attribute at or after the mark they follow. The receipt's own
+/// `Applied{tick}` still names the line's apply tick — the one audit
+/// the pair shares — but the journal's seq axis never rewinds.
+#[test]
+fn a_realign_after_a_degraded_window_never_rewinds_the_journal_axis() {
+    let active_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let active = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(stale_executor(active_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    // The standby tracks the active through the relay, so the frozen
+    // window is a cut stream — unanswered pulls — not a stopped client.
+    let relay = Relay::serve(dialable(active.monitor.local_addr()));
+    let standby_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let standby = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(stale_executor(standby_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(relay.addr),
+            after_scan: None,
+        }),
+    );
+
+    // Converge the standby on the line, then land the command on the
+    // field owner between scans — the pending receipt the covering
+    // checkpoint later adopts.
+    active.client.advance(3).unwrap();
+    standby.client.advance(1).unwrap();
+    assert_eq!(
+        standby.client.role().unwrap().sync,
+        Some(StandbySync::Tracking { aligned: Tick(3) })
+    );
+    let command = Command::WriteValue {
+        point: PointId(10),
+        kind: ValueKind::Float,
+        value: Value::Float(9.0),
+    };
+    let receipt = active.client.command(&command).unwrap();
+    assert_eq!(
+        receipt.outcome,
+        CommandOutcome::Accepted {
+            apply_tick: Tick(4)
+        }
+    );
+
+    // The frozen window: the stream cuts while the standby keeps
+    // scanning — each cycle's pull misses and the run's own tick
+    // outruns the stale budget the field sample can no longer refresh
+    // inside.
+    relay.partition(true);
+    standby.client.advance(4).unwrap();
+    assert!(
+        matches!(
+            standby.client.role().unwrap().sync,
+            Some(StandbySync::Degraded { .. })
+        ),
+        "the cut stream degrades the tracker: {:?}",
+        standby.client.role().unwrap()
+    );
+    let stale = standby
+        .client
+        .journal(0)
+        .unwrap()
+        .into_iter()
+        .find(|entry| {
+            matches!(
+                &entry.event,
+                JournalEvent::QualityChanged { point: PointId(10), to, .. }
+                    if *to == Quality::Uncertain(QualityReason::Stale)
+            )
+        })
+        .expect("the degraded window journals the stale mark");
+    assert!(
+        stale.tick.0 > 4,
+        "the mark stamps the run's held clock, ahead of the stream: {stale:?}"
+    );
+
+    // The stream restores: the line's covering checkpoint carries the
+    // settled receipt and lands at the run's tick — the held clock
+    // never rewinds to the stream's — and the journaled axis holds.
+    relay.partition(false);
+    active.client.advance(1).unwrap();
+    standby.client.advance(1).unwrap();
+    assert!(
+        matches!(
+            standby.client.role().unwrap().sync,
+            Some(StandbySync::Tracking { aligned: Tick(4) })
+        ),
+        "the restored pull realigns the tracker: {:?}",
+        standby.client.role().unwrap()
+    );
+
+    // The recovery: the standby's own driver finally reports a changed
+    // field sample — the freshness evidence the frozen window held —
+    // and the stale mark clears at the scanning run's tick.
+    standby_driver
+        .write(PointId(10), Value::Float(9.0))
+        .unwrap();
+    standby.client.advance(1).unwrap();
+
+    let journal = standby.client.journal(0).unwrap();
+    let ticks: Vec<u64> = journal.iter().map(|entry| entry.tick.0).collect();
+    assert!(
+        ticks.windows(2).all(|pair| pair[0] <= pair[1]),
+        "the journal's ticks must be non-decreasing across the realign: \
+         {ticks:?} — {journal:?}"
+    );
+
+    // The adopted settle journals once, the receipt still naming the
+    // line's apply tick — the pair's one command audit — while its
+    // entry attribution rides the run's non-rewinding axis.
+    let outcomes = |client: &MonitorClient| {
+        settles(client, &command)
+            .into_iter()
+            .map(|(_, outcome)| outcome)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        outcomes(&standby.client),
+        outcomes(&active.client),
+        "the adopted settle's outcome matches the line's"
+    );
+    let settle = settles(&standby.client, &command);
+    assert_eq!(settle.len(), 1, "{settle:?}");
+    assert_eq!(
+        settle[0].1,
+        CommandOutcome::Applied { tick: Tick(4) },
+        "the receipt carries the line's apply tick: {settle:?}"
+    );
+    assert!(
+        settle[0].0 >= stale.tick.0,
+        "the adopted settle attributes at the standing axis, not the \
+         lagging stream tick: {settle:?} vs stale mark {stale:?}"
+    );
+
+    // The recovery clears the mark in order — the clearance's tick
+    // never reads before the assertion's.
+    let cleared = journal
+        .iter()
+        .find(|entry| {
+            matches!(
+                &entry.event,
+                JournalEvent::QualityChanged { point: PointId(10), from, to }
+                    if *from == Some(Quality::Uncertain(QualityReason::Stale))
+                        && *to == Quality::Good
+            )
+        })
+        .expect("the recovery journals the stale mark's clearance");
+    assert!(
+        cleared.tick.0 >= stale.tick.0 && cleared.seq > stale.seq,
+        "the clearance follows the assertion in seq and tick order: \
+         {stale:?} then {cleared:?}"
+    );
+}
+
+/// QA finding `held-internal-point-tick-zero-misdates-adopted-values`
+/// (#852), driven end to end: a checkpoint adoption overlaid internal
+/// `In` samples verbatim, so an adopted held value served stamped
+/// `Tick::ZERO` — the seed stamp claiming the new value dated from run
+/// start — while a `WriteValue` at the same boundary stamps the
+/// applying scan (the finding's point-300 contrast). The reproduction's
+/// shape, replayed through the pull path: the interposer serves the
+/// standby's own model's document with a planted held value stamped
+/// `Tick::ZERO`, and the driven cycle's adopt-then-scan must serve the
+/// change stamped at the apply's landing tick. A held value the
+/// document leaves untouched keeps the seed stamp — the documented
+/// zero-stamp contract.
+#[test]
+fn a_driven_standby_stamps_an_adopted_held_value_at_the_apply_tick() {
+    let driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[])));
+    // The document the finding describes: the standby's own model's
+    // checkpoint, its held point carrying a planted value still stamped
+    // `Tick::ZERO` — the mis-date the verbatim overlay served.
+    let mut forged = held_executor(driver).checkpoint();
+    forged.tick = Tick(7);
+    forged
+        .internal
+        .insert(PointId(40), Sample::good(Value::Bool(true), Tick::ZERO));
+    let hostile = Hostile::serve(&forged);
+
+    let standby_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[])));
+    let standby = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(held_executor(standby_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(hostile.addr),
+            after_scan: None,
+        }),
+    );
+
+    // Before the adoption the zero stamp is honest: the held value has
+    // stood since before the run's first scan.
+    let seed = standby.client.snapshot().unwrap();
+    assert_eq!(
+        seed.points
+            .iter()
+            .find(|point| point.point == PointId(40))
+            .and_then(|point| point.sample),
+        Some(Sample::good(Value::Bool(false), Tick::ZERO)),
+        "the never-written held value serves the zero stamp: {seed:?}"
+    );
+
+    // One driven cycle: the pull adopts the document at its tick and
+    // the quiesced scan serves the adopted image.
+    standby.client.advance(1).unwrap();
+    let adopted = standby.client.snapshot().unwrap();
+    assert_eq!(
+        adopted
+            .points
+            .iter()
+            .find(|point| point.point == PointId(40))
+            .and_then(|point| point.sample),
+        Some(Sample::good(Value::Bool(true), Tick(7))),
+        "the adoption-changed held value stamps the apply's landing \
+         tick, not the document's `Tick::ZERO`: {adopted:?}"
+    );
+
+    // A later document carrying the same value adopts its own stamp —
+    // the line's claim of when the value last changed, which the
+    // standby's image now agrees with.
+    let mut unchanged = forged.clone();
+    unchanged.tick = Tick(9);
+    unchanged
+        .internal
+        .insert(PointId(40), Sample::good(Value::Bool(true), Tick(4)));
+    hostile.set_body(&unchanged);
+    standby.client.advance(1).unwrap();
+    let converged = standby.client.snapshot().unwrap();
+    assert_eq!(
+        converged
+            .points
+            .iter()
+            .find(|point| point.point == PointId(40))
+            .and_then(|point| point.sample),
+        Some(Sample::good(Value::Bool(true), Tick(4))),
+        "an unchanged held value adopts the captured stamp verbatim: \
+         {converged:?}"
     );
 }

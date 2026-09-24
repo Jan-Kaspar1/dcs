@@ -1029,7 +1029,11 @@ impl<'d> Executor<'d> {
         // Internal points are seeded into the image at their declared
         // initial values — a held operator value or a carrier's start —
         // so every internal point has a defined sample before the first
-        // scan.
+        // scan. The seed stamp is `Tick::ZERO`, honestly: the declared
+        // value has stood since before the run's first boundary, and a
+        // sample the run never changed keeps that stamp until a command
+        // or an adoption moves it — the zero-stamp contract held `In`
+        // points serve.
         let image = RefCell::new(HashMap::new());
         for (point, spec) in map.iter() {
             if let Some(initial) = spec.internal {
@@ -1790,7 +1794,10 @@ impl<'d> Executor<'d> {
     /// driver and each component restore their captured state, the tick
     /// resumes from `checkpoint.tick`, the output image becomes
     /// exactly the checkpoint's while its internal `In` samples overlay
-    /// the image's held values, and the receipt log becomes the
+    /// the image's held values — carrying their captured stamps
+    /// verbatim except a `Tick::ZERO` stamp on a value the adoption
+    /// changes, which re-stamps at the apply's landing tick — and the
+    /// receipt log becomes the
     /// checkpoint's — the pair's one command audit, entries still
     /// `Accepted` re-queued for this run's next boundary — extended by
     /// this run's own still-unreached tail when the adopted window's
@@ -1872,9 +1879,33 @@ impl<'d> Executor<'d> {
             checkpoint
                 .outputs
                 .iter()
-                .chain(checkpoint.internal.iter())
                 .map(|(&point, &sample)| (point, sample)),
         );
+        // The carried stamp is the line's claim of when the held value
+        // last changed, and the pair serves one tick domain: a tracked
+        // peer's snapshot stays identical to the line's, so real stamps
+        // adopt verbatim. The exception is a stamp that cannot be the
+        // claim it reads as: `Tick::ZERO` means "unchanged since before
+        // the line's first scan", which only the seed value can
+        // honestly carry — a changed value stamped zero mis-dates its
+        // origin to run start, so the adoption's own boundary stamps
+        // it instead, the same stamp a `WriteValue` applying there
+        // would carry.
+        for (&point, &sample) in &checkpoint.internal {
+            let adopted = if sample.tick == Tick::ZERO
+                && image
+                    .get(&point)
+                    .is_none_or(|held| held.value != sample.value)
+            {
+                Sample {
+                    tick: checkpoint.tick,
+                    ..sample
+                }
+            } else {
+                sample
+            };
+            image.insert(point, adopted);
+        }
         drop(image);
         // The checkpoint's force set is the base image — the standby
         // forces exactly what the active forced — except where this
@@ -7851,6 +7882,80 @@ mod tests {
         assert_eq!(
             standby.sample(PointId(10)),
             Some(Sample::good(Value::Float(7.0), Tick(1)))
+        );
+    }
+
+    /// QA finding `held-internal-point-tick-zero-misdates-adopted-values`
+    /// (#852): an adoption overlaid internal `In` samples verbatim, so a
+    /// document whose held value differs from the image's served the
+    /// adopted value stamped `Tick::ZERO` — the seed stamp claiming it
+    /// stood since run start — where a `WriteValue` at the same boundary
+    /// stamps the applying scan. `Tick::ZERO` can honestly mark only the
+    /// seed value, so a changed value carrying it re-stamps at the
+    /// apply's landing tick; every other captured stamp is the line's
+    /// claim of when the value last changed and adopts verbatim — the
+    /// pair shares one tick domain, so a tracked peer's served samples
+    /// stay identical to the line's.
+    #[test]
+    fn an_apply_restamps_a_zero_stamped_held_value_it_changes() {
+        let driver = StubDriver::new(&[], &[]);
+        let mut standby = internal_rig(&driver);
+        for _ in 0..3 {
+            standby.scan();
+        }
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(Sample::good(Value::Float(2.5), Tick::ZERO)),
+            "the never-written held value keeps the zero stamp"
+        );
+
+        // The reproduction's document: a held value the image never
+        // held, still stamped `Tick::ZERO` — what a checkpoint written
+        // before the point's first write carries. The zero stamp cannot
+        // name the change, so the apply's landing tick stamps it — the
+        // `WriteValue` stamp the same change would carry at this
+        // boundary.
+        let mut checkpoint = standby.checkpoint();
+        checkpoint.tick = Tick(7);
+        checkpoint
+            .internal
+            .insert(PointId(10), Sample::good(Value::Float(7.0), Tick::ZERO));
+        standby.apply(&checkpoint).unwrap();
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(Sample::good(Value::Float(7.0), Tick(7))),
+            "a zero-stamped change stamps the apply's landing tick"
+        );
+
+        // A document carrying a changed value under a real stamp keeps
+        // it: the stamp is the line's own record of when the value last
+        // changed, and verbatim adoption is what keeps the tracked
+        // peer's served samples identical to the line's.
+        let mut written = standby.checkpoint();
+        written.tick = Tick(9);
+        written
+            .internal
+            .insert(PointId(10), Sample::good(Value::Float(9.5), Tick(6)));
+        standby.apply(&written).unwrap();
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(Sample::good(Value::Float(9.5), Tick(6))),
+            "a change carrying a real stamp adopts the line's claim verbatim"
+        );
+
+        // And a value the document carries unchanged adopts the captured
+        // stamp too — including the honest `Tick::ZERO` a never-written
+        // point still wears.
+        let mut unchanged = standby.checkpoint();
+        unchanged.tick = Tick(11);
+        unchanged
+            .internal
+            .insert(PointId(10), Sample::good(Value::Float(9.5), Tick(4)));
+        standby.apply(&unchanged).unwrap();
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(Sample::good(Value::Float(9.5), Tick(4))),
+            "an unchanged held value adopts the captured stamp verbatim"
         );
     }
 

@@ -63,9 +63,10 @@
 //! restarted or replaced source beginning a new tick generation, not a
 //! continuation of the tracked line. Its state still applies — the
 //! tracked source is the live one — but the run resumes it at the run's
-//! own tick, carrying the offset every later checkpoint lands under,
-//! and the boundary queues one [`SourceRestart`] for the journal rather
-//! than silently rewinding scans the run already ran and recorded.
+//! own tick, the live lead over the stream being the offset every
+//! later checkpoint lands under, and the boundary queues one
+//! [`SourceRestart`] for the journal rather than silently rewinding
+//! scans the run already ran and recorded.
 //! The regression heuristic alone cannot tell that boundary from the
 //! peer's own tracking reset — [`demote`](Peer::demote) clears the
 //! alignment, so a demoted peer's first pull on a healthy successor
@@ -75,13 +76,19 @@
 //! regression journals nothing while a different one is the source's
 //! new tick domain. An unidentified generation on either side can
 //! prove no continuation, so it keeps the conservative verdict.
-//! The carried offset is re-evaluated on each apply
-//! against the run's live lead over the stream — it covers at most the
-//! gap that remains and clears when the stream recovers to the run's
-//! tick — so a tracking apply can hold or realign the run's clock but
-//! never land it ahead of both clocks, the bound that keeps two
-//! mutually tracking peers' offsets from compounding into each other's
-//! served ticks.
+//! The hold-the-clock rule is not limited to stream regressions: any
+//! apply whose stream tick still lags the run's own lands at the
+//! run's tick, because a stale alignment can leave a lagging stream —
+//! a warm-resumed source continuing its own generation inside the
+//! degraded window's gap — inside the range where the regression
+//! comparison alone would still realign the run backward, re-issuing
+//! ticks the retained history and journal already recorded. The
+//! offset is re-derived on each apply as the gap that remains, so it
+//! clears when the stream recovers to the run's tick and a tracking
+//! apply can hold the run's clock or land it on the stream's, but
+//! never rewinds it and never lands it ahead of both clocks — the
+//! bound that keeps two mutually tracking peers' run ticks from
+//! compounding into each other's served ticks.
 //!
 //! The field-ownership claim installed by
 //! [`with_field_claim`](Peer::with_field_claim) runs at every transition
@@ -133,13 +140,15 @@
 //! Convergence alone does not prove the standby would write the field the
 //! active writes, so a tracking peer also runs the standby-divergence
 //! check of [`crate::divergence`]: each non-field-owning scan's staged
-//! field `Out` image — the writes it would have issued — is stashed, and
-//! each applied checkpoint whose tick matches that image compares it
-//! against the peer's own reads of the same points. A mismatch moves the
-//! peer to [`StandbySync::Diverged`], which promotion refuses like any
-//! non-tracking state; only a same-tick comparison that read the field
-//! and matched returns the peer to `Tracking` — an apply that ran no
-//! comparison, a comparison whose field reads failed, and a pull that
+//! field `Out` image — the writes it would have issued — is stashed
+//! tagged with the stream position it predicts, and an applied
+//! checkpoint at that position compares it against the peer's own reads
+//! of the same points — the field then holds the active's write the
+//! image describes. A mismatch moves the peer to
+//! [`StandbySync::Diverged`], which promotion refuses like any
+//! non-tracking state; only a same-position comparison that read the
+//! field and matched returns the peer to `Tracking` — an apply that ran
+//! no comparison, a comparison whose field reads failed, and a pull that
 //! produced nothing all carry no such evidence, so the verdict stands.
 //! Both transitions queue for the transition journal — the detection
 //! with its mismatches, the resolution with the compared points it
@@ -196,29 +205,32 @@ pub struct Peer<'d> {
     /// `sync` so `aligned_tick` still reports it across a `Degraded` or
     /// `Diverged` state.
     aligned: Option<Tick>,
-    /// The run tick's lead over the tracked stream's own tick — the
-    /// generation offset [`apply`](Self::apply) lands each checkpoint
-    /// at `tick + tick_offset`. Zero while the stream continues the
-    /// run's generation; a regressed stream — the source restarted
-    /// cold or was replaced — resets it so the apply lands at the
-    /// run's current tick rather than rewinding scans the run already
-    /// ran and journaled. Re-evaluated against the run's live lead on
-    /// every apply — see [`stream_offset`](Self::stream_offset) — so a
-    /// recovering tracked stream shrinks it to the gap that remains
-    /// and clears it at the run's own tick.
-    tick_offset: u64,
+    /// The run tick's lead over the tracked stream at the last apply —
+    /// `landed - checkpoint.tick`. The run's clock may hold above a
+    /// lagging stream while the staged image's truth stays in the
+    /// stream's domain: a scan at run tick `t` predicts the field write
+    /// at stream position `t - applied_offset`, the position the
+    /// divergence check pairs the image against — a checkpoint at
+    /// exactly that position means the field now carries the write the
+    /// staged image describes. `None` before any apply and after a
+    /// demotion — an unaligned staged image has no stream meaning.
+    applied_offset: Option<u64>,
     /// Reported-role transitions not yet consumed for journaling.
     pending_changes: Vec<RoleChange>,
-    /// The last non-field-owning scan's staged field `Out` image and its
-    /// tick — the divergence check's "would have written" evidence,
-    /// compared against the field when a checkpoint lands at that tick.
+    /// The last non-field-owning scan's staged field `Out` image and
+    /// the stream position it predicts — the divergence check's
+    /// "would have written" evidence, compared against the field when
+    /// a checkpoint at that position applies. The tag is a *stream*
+    /// position, not the scan's run tick: under a held clock the
+    /// domains differ, and only a checkpoint at the predicted position
+    /// carries the field write the image describes.
     staged: Option<(Tick, BTreeMap<PointId, Sample>)>,
     /// Divergence detections not yet consumed for journaling — one per
     /// transition into [`StandbySync::Diverged`].
     pending_divergences: Vec<DivergenceReport>,
     /// Divergence resolutions not yet consumed for journaling — one per
     /// `Diverged` → `Tracking` transition, each carrying the applied
-    /// tick and the same-tick field comparison the clear stands on.
+    /// tick and the same-position field comparison the clear stands on.
     pending_resolutions: Vec<ResolutionReport>,
     /// Consecutive checkpoint pulls that produced no applied checkpoint
     /// — the heartbeat miss count the failover budget compares against.
@@ -727,7 +739,7 @@ impl<'d> Peer<'d> {
             role: Role::Active,
             sync: StandbySync::Unsynchronized,
             aligned: None,
-            tick_offset: 0,
+            applied_offset: None,
             pending_changes: Vec::new(),
             staged: None,
             pending_divergences: Vec::new(),
@@ -911,7 +923,7 @@ impl<'d> Peer<'d> {
             role: Role::Standby,
             sync: StandbySync::Unsynchronized,
             aligned: None,
-            tick_offset: 0,
+            applied_offset: None,
             pending_changes: Vec::new(),
             staged: None,
             pending_divergences: Vec::new(),
@@ -1184,7 +1196,7 @@ impl<'d> Peer<'d> {
         self.executor.suspend_pending_commands();
         self.sync = StandbySync::Unsynchronized;
         self.aligned = None;
-        self.tick_offset = 0;
+        self.applied_offset = None;
         self.staged = None;
         self.misses = 0;
         self.converged = false;
@@ -1225,18 +1237,18 @@ impl<'d> Peer<'d> {
     /// carried into its divergence comparison: the staged evidence
     /// describes the tracking line the applied checkpoint abandons —
     /// what the quiesced scan *would* have written — and at the
-    /// promotion boundary a same-tick comparison would flag the
+    /// promotion boundary a same-position comparison would flag the
     /// one-tick lag a field-carried command write inherently leaves on
     /// a peer that cannot issue it: the standby's own scan ran on the
     /// field's pre-command value, the checkpoint carries the post-write
     /// state, and the promoted run continues from the checkpoint, not
     /// from the staged what-if. Set aside, though — not discarded: a
     /// boundary that ends in refusal leaves the peer tracking, and the
-    /// staged image stays the cadence's evidence for the next same-tick
-    /// apply — on a diverged peer, the only comparison that can return
-    /// it to `Tracking`. Only a transfer that itself crossed a
-    /// boundary — a stream regression's new generation, a rolling
-    /// revision's new model — retires the image outright.
+    /// staged image stays the cadence's evidence for the next
+    /// same-position apply — on a diverged peer, the only comparison
+    /// that can return it to `Tracking`. Only a transfer that itself
+    /// crossed a boundary — a stream regression's new generation, a
+    /// rolling revision's new model — retires the image outright.
     ///
     /// The reported standing is the cadence's, whatever the pull does:
     /// the executor side of a landed transfer — state, receipt log,
@@ -1270,7 +1282,7 @@ impl<'d> Peer<'d> {
         // consumed: the apply must not compare against it (the one-tick
         // lag a field-carried command leaves would flag spuriously),
         // but a boundary that ends in refusal hands it back — it is the
-        // cadence's own evidence, still owed to the next same-tick
+        // cadence's own evidence, still owed to the next same-position
         // apply, and on a diverged peer it is the only path back to
         // `Tracking`. Only the transfer's own crossings retire it: a
         // regressed stream's staged evidence belongs to the old
@@ -1289,7 +1301,7 @@ impl<'d> Peer<'d> {
             // image stays the cadence's evidence: the boundary apply
             // ran no comparison against it — it cannot have queued a
             // resolution — and a refused promotion leaves it owed to
-            // the next same-tick apply.
+            // the next same-position apply.
             self.staged = staged;
         }
     }
@@ -1299,31 +1311,36 @@ impl<'d> Peer<'d> {
     /// contract, in place on the running executor.
     ///
     /// The run's tick is its journal and history attribution domain and
-    /// never rewinds across a source-generation boundary: a checkpoint
-    /// whose tick fell below the run's last alignment — or below the
-    /// run's own tick before any alignment stood — while naming a
-    /// generation the run's own stream does not carry is not a
-    /// continuation of the tracked line but the signature of a
-    /// cold-restarted or replaced source beginning a new tick
-    /// generation. Its state still applies — the tracked source is the
-    /// live one — but the run resumes it at the run's current tick, the
-    /// `tick + tick_offset` landing every later checkpoint on the new
-    /// stream takes, and one [`SourceRestart`] queues for the journal:
-    /// a restart that rewound nothing still changes what the stream
-    /// means. A checkpoint on the tracked line itself — a repeat or a
-    /// post-miss catch-up, which may still lag the run's tick — keeps
-    /// the standing offset: that realignment is the line's own, not a
-    /// new generation. And a regression that names the run's own
+    /// never rewinds: a checkpoint whose tick still lags the run's own
+    /// clock — whether it fell below the run's last alignment, below
+    /// the run's own tick before any alignment stood, or simply
+    /// continued the tracked line while a degraded window let the run
+    /// out-scan it — lands at the run's current tick under the offset
+    /// the live gap names ([`stream_offset`](Self::stream_offset)),
+    /// not at the stream's own: rewinding would re-issue ticks the
+    /// run already journaled and recorded into the history rings, and
+    /// a stale alignment can leave a resumed source's stream inside
+    /// the window where the regression comparison alone would still
+    /// realign the run backward onto it.
+    ///
+    /// A regressed stream that also names a generation the run's own
+    /// stream does not carry is not a continuation of the tracked line
+    /// but the signature of a cold-restarted or replaced source
+    /// beginning a new tick generation. Its state still applies — the
+    /// tracked source is the live one — under the same hold-the-clock
+    /// landing, and one [`SourceRestart`] queues for the journal: a
+    /// restart that rewound nothing still changes what the stream
+    /// means. A regression that names the run's own
     /// generation — a demoted peer's first pull on its uninterrupted
     /// successor, the demotion having cleared the alignment the tick
     /// comparison stood on — is the peer's tracking reset rather than
     /// the source's restart: the state adopts under the same
     /// monotone-clock rule, but no boundary crossed, so nothing
-    /// journals. Kept, but re-evaluated — the offset covers at
-    /// most the run's live lead over the stream
-    /// ([`stream_offset`](Self::stream_offset)), so an apply can hold
-    /// the run's tick or realign it backward but never land it ahead
-    /// of both clocks.
+    /// journals. And a same-line catch-up — a repeat or a lagging
+    /// pull still naming the line's generation — holds the clock the
+    /// same way and journals nothing: no boundary crossed there
+    /// either, and the live-lead offset lands every later checkpoint
+    /// at the run's tick until the stream recovers to it.
     ///
     /// A field-owning instance refuses with [`ApplyError::OwnsField`]: a
     /// checkpoint landing on the active would clobber the run it is
@@ -1334,12 +1351,15 @@ impl<'d> Peer<'d> {
     /// transfer.
     ///
     /// A successful apply also runs the standby-divergence check when
-    /// the tick the checkpoint landed at equals the stashed staged
-    /// image's tick —
+    /// the checkpoint's tick is the stream position the stashed staged
+    /// image predicts —
     /// under the documented pull-per-scan cadence that pairing lands one
     /// transfer after the staged scan, the stated detection bound: the
-    /// field then holds the active's write for the tick the staged image
-    /// describes. Mismatches move the peer to
+    /// field then holds the active's write for the position the staged
+    /// image describes. A held run clock does not move the pairing —
+    /// the tag is the stream position, so a lagging or repeated
+    /// checkpoint whose tick the prediction passed still performs zero
+    /// field reads. Mismatches move the peer to
     /// [`StandbySync::Diverged`] and queue a
     /// [`DivergenceReport`] for the journal — one per transition, not
     /// per transfer — while a comparison on a diverged peer that read
@@ -1353,7 +1373,7 @@ impl<'d> Peer<'d> {
     /// overtaken — and a comparison whose field reads failed both
     /// observe nothing, and the verdict stands. A staged image the
     /// checkpoint stream has not caught up to — or has overtaken — is
-    /// discarded: only a same-tick comparison is honest evidence.
+    /// discarded: only a same-position comparison is honest evidence.
     pub fn apply(&mut self, checkpoint: &Checkpoint) -> Result<(), ApplyError> {
         if self.owns_field() {
             return Err(ApplyError::OwnsField);
@@ -1427,12 +1447,11 @@ impl<'d> Peer<'d> {
                 self.note_abandoned_commands(pending);
                 self.note_adopted_forces(&prior_forces, checkpoint, landed);
                 self.note_adopted_writes(&prior_internals, &prior_receipts, checkpoint, landed);
-                self.tick_offset = offset;
                 if regressed {
-                    // The staged image pairs its run tick against the
-                    // stream position it was staged on — a regressed
-                    // apply moved that pairing, so the evidence cannot
-                    // compare and is discarded whether or not the
+                    // The staged image's tag is a stream position under
+                    // the alignment it was staged on — a regressed
+                    // apply re-bases the stream, so the evidence cannot
+                    // pair and is discarded whether or not the
                     // generation changed. Only the generation boundary
                     // journals: a same-generation regression is the
                     // peer's own tracking reset, not the source's
@@ -1447,6 +1466,7 @@ impl<'d> Peer<'d> {
                     }
                 }
                 self.aligned = Some(checkpoint.tick);
+                self.applied_offset = Some(offset);
                 let was_diverged = matches!(self.sync, StandbySync::Diverged { .. });
                 // The checkpoint's `source_owns_field` stamp is the
                 // tracked line's verdict on field ownership:
@@ -1489,17 +1509,20 @@ impl<'d> Peer<'d> {
                     return Ok(());
                 }
                 // The field evidence this apply carries: a comparison
-                // runs only when the checkpoint landed at the stashed
-                // staged image's tick — any other apply performs zero
-                // reads — and `compared` answers only the reads that
-                // succeeded, so `compared.len() != staged.len()` marks
-                // the field partially observed. Neither is the
-                // field-matching evidence a standing `Diverged` verdict
-                // clears on: only a fully-read same-tick match returns
-                // a diverged peer to `Tracking`.
+                // runs only when the applied checkpoint's tick is the
+                // stream position the stashed staged image predicts —
+                // any other apply performs zero reads — and `compared`
+                // answers only the reads that succeeded, so
+                // `compared.len() != staged.len()` marks the field
+                // partially observed. Neither is the field-matching
+                // evidence a standing `Diverged` verdict clears on:
+                // only a fully-read same-position match returns a
+                // diverged peer to `Tracking`. Reports journal at the
+                // apply's run tick — `landed`, equal to the staged
+                // scan's own run tick whenever the pairing holds.
                 let comparison = match self.staged.take() {
-                    Some((tick, staged)) if tick == landed => Some((
-                        tick,
+                    Some((position, staged)) if position == checkpoint.tick => Some((
+                        landed,
                         staged.len(),
                         compare_staged_points(self.executor.driver(), &staged),
                     )),
@@ -1546,10 +1569,10 @@ impl<'d> Peer<'d> {
                         }
                     }
                     None => {
-                        // No same-tick comparison ran: the apply carries
-                        // no field-matching evidence, so a standing
-                        // `Diverged` verdict stands while any other
-                        // state reconverges to `Tracking`.
+                        // No same-position comparison ran: the apply
+                        // carries no field-matching evidence, so a
+                        // standing `Diverged` verdict stands while any
+                        // other state reconverges to `Tracking`.
                         if !was_diverged {
                             self.sync = StandbySync::Tracking {
                                 aligned: checkpoint.tick,
@@ -1711,44 +1734,33 @@ impl<'d> Peer<'d> {
     /// alignment stood, is the signature of a source-side reset — a
     /// cold-restarted or replaced source, or the peer's own demotion
     /// clearing the alignment the comparison stood on. The generation
-    /// check in [`apply`](Self::apply) separates the two; the offset
-    /// mechanics are the same either way. The
-    /// offset a regression resets to — `run - checkpoint.tick` —
-    /// lands the apply at the run's current tick, so the run's clock
-    /// never rewinds scans it already ran and journaled; a
-    /// same-generation pull keeps the standing offset, and a first
-    /// alignment at or above the run's tick lands at the checkpoint's
-    /// own.
+    /// check in [`apply`](Self::apply) separates which regressions
+    /// journal; the offset mechanics are the same either way.
     ///
-    /// The standing offset is re-evaluated against the run's live lead
-    /// on every same-generation apply rather than carried verbatim: it
-    /// exists to keep the run's clock monotone across the restart that
-    /// seeded it, so it may cover at most the gap that remains. A
-    /// tracked stream still below the run's tick lands the apply at
-    /// the run's tick — never ahead of it — and one that has recovered
-    /// to or past the run's tick clears the offset entirely, so the
-    /// run's clock rejoins the stream's domain. A stale offset can
-    /// therefore realign the run backward onto the line or hold it in
-    /// place, but it can never land the apply ahead of both clocks —
-    /// the bound that keeps two mutually tracking peers' seeded
-    /// offsets from feeding back into each other's served ticks.
+    /// The offset is the run's live lead over the stream —
+    /// `run - checkpoint.tick` — recomputed on every apply rather
+    /// than carried, so a tracked stream still below the run's tick
+    /// lands the apply at the run's own tick and one that has reached
+    /// or passed it lands at the stream's own — the run's clock
+    /// rejoining the stream's domain as it recovers. The run's tick is
+    /// the journal and history attribution domain and never rewinds:
+    /// the hold applies whether the lagging stream regressed across a
+    /// source restart or merely kept its own line while the run
+    /// out-scanned it through a degraded window — a warm-resumed
+    /// source resumes mid-range, still above the stale alignment but
+    /// below the run's clock, and realigning the run backward onto it
+    /// would re-issue ticks the run already journaled and recorded.
+    /// Landing at the run's own tick also never lands the apply ahead
+    /// of both clocks — the bound that keeps two mutually tracking
+    /// peers' run ticks from feeding back into each other's served
+    /// ticks.
     fn stream_offset(&self, checkpoint: &Checkpoint) -> (u64, bool) {
         let run = self.executor.tick();
         let regressed = match self.aligned {
             Some(aligned) => checkpoint.tick < aligned,
             None => checkpoint.tick < run,
         };
-        if regressed {
-            (run.0 - checkpoint.tick.0, true)
-        } else if self.aligned.is_none() {
-            (0, false)
-        } else {
-            (
-                self.tick_offset
-                    .min(run.0.saturating_sub(checkpoint.tick.0)),
-                false,
-            )
-        }
+        (run.0.saturating_sub(checkpoint.tick.0), regressed)
     }
 
     /// Whether a regressed checkpoint stream crossed a source
@@ -2070,7 +2082,6 @@ impl<'d> Peer<'d> {
                 self.note_abandoned_commands(pending);
                 self.note_adopted_forces(&prior_forces, checkpoint, landed);
                 self.note_adopted_writes(&prior_internals, &prior_receipts, checkpoint, landed);
-                self.tick_offset = offset;
                 if boundary {
                     self.pending_restarts.push(SourceRestart {
                         tick: landed,
@@ -2085,6 +2096,7 @@ impl<'d> Peer<'d> {
                     report: Box::new(report.clone()),
                 };
                 self.aligned = Some(checkpoint.tick);
+                self.applied_offset = Some(offset);
                 // Staged evidence belongs to the old alignment — the
                 // divergence check does not pair against a crossing.
                 self.staged = None;
@@ -2111,7 +2123,7 @@ impl<'d> Peer<'d> {
     /// A produced-nothing pull carries no field evidence, so a standing
     /// [`Diverged`](StandbySync::Diverged) verdict stands through the
     /// miss: the peer's promotability-blocking truth — its staged
-    /// outputs differ from the field — is unresolved until a same-tick
+    /// outputs differ from the field — is unresolved until a same-position
     /// comparison reads the field and matches, while the miss still
     /// counts toward the failover budget and reports in
     /// [`TrackReport::Missed`].
@@ -2343,7 +2355,18 @@ impl<'d> Peer<'d> {
         if self.owns_field() {
             self.staged = None;
         } else {
-            self.staged = Some((tick, self.executor.staged_field_outputs()));
+            // The staged image's tag is the stream position it
+            // predicts — the next checkpoint tick whose field write
+            // this scan's output describes. The run's own clock may
+            // hold above a lagging stream, so the tag is the scan tick
+            // minus the apply's recorded lead, never the run tick
+            // itself.
+            self.staged = self.applied_offset.map(|offset| {
+                (
+                    Tick(tick.0.saturating_sub(offset)),
+                    self.executor.staged_field_outputs(),
+                )
+            });
         }
         tick
     }
@@ -2356,8 +2379,8 @@ impl<'d> Peer<'d> {
 
     /// Drains divergence detections queued since the last call — one
     /// [`DivergenceReport`] per transition into
-    /// [`StandbySync::Diverged`], each carrying the tick the staged
-    /// image belonged to — for the transition journal the monitoring
+    /// [`StandbySync::Diverged`], each carrying the run tick the
+    /// apply landed on — for the transition journal the monitoring
     /// layer records them into.
     pub fn take_divergences(&mut self) -> Vec<DivergenceReport> {
         std::mem::take(&mut self.pending_divergences)
@@ -2365,7 +2388,7 @@ impl<'d> Peer<'d> {
 
     /// Drains divergence resolutions queued since the last call — one
     /// [`ResolutionReport`] per `Diverged` → [`StandbySync::Tracking`]
-    /// transition, each carrying the applied tick and the same-tick
+    /// transition, each carrying the applied tick and the same-position
     /// field comparison the clear stands on — for the transition
     /// journal the monitoring layer records them into.
     pub fn take_resolutions(&mut self) -> Vec<ResolutionReport> {
@@ -3687,11 +3710,11 @@ mod tests {
 
     /// The QA finding `diverged-clears-without-valid-field-comparison`:
     /// `Diverged` is the promotion-blocking "staged outputs differ from
-    /// the field" verdict and clears only on a same-tick comparison
+    /// the field" verdict and clears only on a same-position comparison
     /// that actually read the field and matched. A stale checkpoint
-    /// apply runs zero reads, and a same-tick compare whose field reads
-    /// fail observes nothing — neither reopens the promote gate while
-    /// the divergence evidence stands unresolved.
+    /// apply runs zero reads, and a same-position compare whose field
+    /// reads fail observes nothing — neither reopens the promote gate
+    /// while the divergence evidence stands unresolved.
     #[test]
     fn diverged_standby_clears_only_on_a_fully_read_same_tick_compare() {
         // The shared field; the standby observes it through a
@@ -3811,7 +3834,12 @@ mod tests {
         assert_eq!(
             standby.take_resolutions(),
             vec![ResolutionReport {
-                tick: Tick(7),
+                // The apply held the run's clock at its own tick — the
+                // journal and history attribution domain never rewinds
+                // — so the same-tick compare pairs the image staged at
+                // that tick and the resolution journals there, not at
+                // the stream's 7.
+                tick: Tick(8),
                 compared: vec![Divergence {
                     point: OUTPUT,
                     staged: Value::Float(2.0),
@@ -3824,11 +3852,11 @@ mod tests {
     }
 
     /// The promotion boundary's `final_sync` sets the staged image
-    /// aside for its own transfer — a same-tick comparison there would
-    /// flag the one-tick command lag spuriously — but a promote the
-    /// standing verdict refuses must hand it back: on a diverged peer
-    /// it is the only evidence the next same-tick apply can clear the
-    /// verdict on.
+    /// aside for its own transfer — a same-position comparison there
+    /// would flag the one-tick command lag spuriously — but a promote
+    /// the standing verdict refuses must hand it back: on a diverged
+    /// peer it is the only evidence the next same-position apply can
+    /// clear the verdict on.
     #[test]
     fn a_refused_promotions_boundary_sync_keeps_the_divergence_evidence() {
         let field = StubDriver::field(&[(INPUT, Value::Float(2.0)), (OUTPUT, Value::Float(0.0))]);
@@ -3910,11 +3938,11 @@ mod tests {
         assert!(gate.is_open());
     }
 
-    /// A diverged peer whose next apply runs no same-tick field
-    /// comparison — the staged image's tick never matched the applied
-    /// checkpoint's — stays diverged: the apply carried no
-    /// field-matching evidence, so the promotion-blocking verdict
-    /// stands and no resolution queues.
+    /// A diverged peer whose next apply runs no same-position field
+    /// comparison — the staged image's predicted position never matched
+    /// the applied checkpoint's tick — stays diverged: the apply
+    /// carried no field-matching evidence, so the promotion-blocking
+    /// verdict stands and no resolution queues.
     #[test]
     fn diverged_verdict_stands_on_an_apply_that_ran_no_compare() {
         let field = StubDriver::field(&[(INPUT, Value::Float(2.0)), (OUTPUT, Value::Float(0.0))]);
@@ -5577,13 +5605,20 @@ mod tests {
         );
     }
 
-    /// The contrast case the offset must not break: a post-miss
+    /// The QA finding
+    /// `history-ring-tick-regression-on-checkpoint-realign`: a post-miss
     /// catch-up checkpoint lags the run's tick but continues the same
-    /// generation — the apply still realigns the run to the stream's
-    /// own tick, the rewind the freshness budgets are measured
-    /// against.
+    /// generation — and still must not move the run's clock back. The
+    /// stale alignment hides the lag from the regression comparison,
+    /// but the run's tick is the journal and history attribution
+    /// domain: rewinding it re-issues ticks the retained rings already
+    /// recorded, double-covering the range. The apply adopts the
+    /// lagging stream's state at the run's own tick instead — the same
+    /// hold-the-clock landing a regression gets — and the live-lead
+    /// offset lands each later checkpoint at the run's tick until the
+    /// stream recovers to it.
     #[test]
-    fn a_same_generation_catch_up_still_realigns_the_run_tick() {
+    fn a_same_generation_catch_up_holds_the_run_tick() {
         let driver = StubDriver::new(PointId(1), Value::Float(0.0));
         let gate = WriteGate::closed(&driver);
         let mut peer = Peer::standby(executor(&gate), Some(&gate));
@@ -5602,20 +5637,37 @@ mod tests {
         assert_eq!(peer.tick(), Tick(6));
 
         // The source's resumed stream — warm-restarted or merely
-        // lagging — still realigns the run at its own tick: same
-        // generation, not a restart, so the apply does move the clock
-        // back to the stream's line.
+        // lagging — lags the run's clock while continuing the line:
+        // same generation, not a restart, so nothing journals, but the
+        // run's tick stands — the apply lands at 6 rather than
+        // rewinding the recorded 5..6 stretch to the stream's 5.
         source.run(1);
         peer.apply(&source.checkpoint()).unwrap();
-        assert_eq!(peer.tick(), Tick(5));
+        assert_eq!(peer.tick(), Tick(6));
         assert_eq!(peer.aligned_tick(), Some(Tick(5)));
+        assert!(peer.take_source_restarts().is_empty());
+
+        // Each later checkpoint lands under the live lead — the apply
+        // keeps holding the run's clock while the stream lags — and
+        // once the stream recovers to the run's tick the run rejoins
+        // the stream's domain outright.
+        source.run(1);
+        peer.scan();
+        peer.apply(&source.checkpoint()).unwrap();
+        assert_eq!(peer.tick(), Tick(7));
+        assert_eq!(peer.aligned_tick(), Some(Tick(6)));
+        source.run(2);
+        peer.apply(&source.checkpoint()).unwrap();
+        assert_eq!(peer.tick(), Tick(8));
+        assert_eq!(peer.aligned_tick(), Some(Tick(8)));
         assert!(peer.take_source_restarts().is_empty());
     }
 
     /// QA finding `mutual-tracking-regressed-offset-ratchets-run-tick`:
     /// under mutual tracking — two standby peers applying each other's
     /// checkpoints, the transient every demote creates — a regressed
-    /// apply that seeds a nonzero `tick_offset` must never feed back:
+    /// apply that seeds a nonzero lead over the stream must never feed
+    /// back:
     /// each apply lands the run at the tracked tick or holds it at its
     /// own, never ahead of both, so alternating applies keep both run
     /// ticks bounded by the scan count instead of compounding each
