@@ -1,6 +1,14 @@
 """The checkpoint_negotiation acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The checkpoint-negotiation case sits between them and the model-
+# revision case: it needs the pair still on the mounted fingerprint
+# so the recipe-derived document is foreign, and it removes its
+# foreign peer before the revision launch takes the third-controller
+# seat.
+RUNS_AFTER = frozenset({'scenario_failover'})
+RUNS_BEFORE = frozenset({'scenario_model_revision'})
+
 
 # --------------------------------------------------------------------
 # The named rejection of incompatible state — WW-LCM-001's

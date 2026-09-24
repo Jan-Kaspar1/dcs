@@ -1,6 +1,13 @@
 """The source_failover acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The source-failover case shares that window: the complementary
+# primary-faulted leg faults the field source the selection currently
+# rides, watches the failover-select engage the backup and the wired
+# alarm's two-flag lifecycle, acks, clears, and restores — field,
+# latch, and launch roles as found.
+RUNS_BEFORE = frozenset({'scenario_parameter_tune_carryover'})
+
 
 # --------------------------------------------------------------------
 # The source-failover leg (WW-OPS-003's declared-failover clause and

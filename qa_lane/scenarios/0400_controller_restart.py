@@ -1,6 +1,12 @@
 """The controller_restart acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The restart case runs ahead of the failover case: the peer it stops
+# is ctrl-a — launched without --standby, so its resumed process
+# comes back active — while ctrl-b is the tracking standby the settle
+# check watches reconverge.
+RUNS_BEFORE = frozenset({'scenario_failover', 'scenario_parameter_tune_carryover'})
+
 RESTART_POLL = 1.0              # cadence watching the pair mid-restart
 RESTART_RETURN_DEADLINE = 60  # bound on the restarted monitor's return
 RESTART_SETTLE_DEADLINE = 60  # bound on active/standby roles settling

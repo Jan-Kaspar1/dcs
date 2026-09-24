@@ -1,6 +1,12 @@
 """The source_restart acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The source-restart case runs in the same pre-switch window — it
+# needs ctrl-a field owner so ctrl-b is the tracked adopter, drives
+# its own a->b leg for the demoted-peer regression, and ends back on
+# the launch roles with ctrl-a owning the field again.
+RUNS_BEFORE = frozenset({'scenario_parameter_tune_carryover'})
+
 
 # --------------------------------------------------------------------
 # WW-LCM-001's continuity clause on the contract QA finding #532 landed

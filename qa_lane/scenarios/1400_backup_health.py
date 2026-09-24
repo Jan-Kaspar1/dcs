@@ -1,6 +1,13 @@
 """The backup_health acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The backup-health case sits in the same restored window: only with
+# the pair settled and tracking does a backup-only field fault have a
+# standby whose takeover the annunciation must precede — the leg
+# injects, annunciates, acks, clears, and restores without moving the
+# selection or the roles.
+RUNS_BEFORE = frozenset({'scenario_parameter_tune_carryover'})
+
 
 # --------------------------------------------------------------------
 # The backup-instrument-health annunciation (WW-OPS-003's redundant-

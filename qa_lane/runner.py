@@ -132,8 +132,12 @@ DEFAULT_CONFIG = {
     # letting a demoted owner's verify pull demand the keyed line_proof
     # only a peer holding the token stamps. A scenario endpoint that
     # merely replays or forges the line's public checkpoints — the
-    # bridge-placed forge or interposer — holds no token and arms
-    # nothing; the labeled foreign peer stays unkeyed on purpose.
+    # bridge-placed forge or interposer — arms nothing in its default
+    # tokenless posture; the forged-standby leg also launches the same
+    # endpoint keyed so its answers are genuinely signed and only the
+    # pulled document's content can convict it — the shape that reaches
+    # the demote verify's command-record audit. The labeled foreign
+    # peer stays unkeyed on purpose.
     'pair_token': 'dcs-qa-pair',
     # The rig bridge-to-host reachability rule the qax-20260922-001,
     # qax-20260922-005, and qax-20260923-001 exploration runs
@@ -817,14 +821,17 @@ def _build_images(src, cfg, run_dir, timeline, run_id):
            'cd /src && cargo build --release --locked '
            '-p dcs-controller -p dcs-plant -p dcs-sim-net '
            '&& cargo build --release --locked '
-           '-p dcs-monitor --bin dcs-ctl',
+           '-p dcs-monitor --bin dcs-ctl --bin dcs-forge',
            timeout=cfg['builder_timeout'])
     # Extra binaries each image ships beside its entrypoint: the plant
     # image carries dcs-plant-ctl — the plant-side tool the lane execs
     # inside the container against the server's loopback listener, so
     # the covered plant ops run through the shipped binary rather than
-    # a second Python implementation of the wire protocol.
-    ship = {'plant': ['dcs-plant-ctl']}
+    # a second Python implementation of the wire protocol; the
+    # controller image carries dcs-forge — the announced-source legs'
+    # bridge-placed checkpoint endpoint the runner launches with
+    # --entrypoint dcs-forge.
+    ship = {'plant': ['dcs-plant-ctl'], 'controller': ['dcs-forge']}
     digests = {}
     for crate, binary, tag in (
             ('controller', 'dcs-controller', 'dcs-hwtest/controller'),
@@ -1393,6 +1400,116 @@ def stop_driven_controller(run_id, timeline):
     timeline('driven-stopped', container + ' removed')
 
 
+# The forged-checkpoint endpoint's monitor port inside the rig bridge —
+# never published to the host: only the rig's own peers dial it.
+FORGE_PORT = 8090
+
+
+def start_forge_endpoint(cfg, record, run_dir, document, owner,
+                         timeline, keyed=True):
+    """The scenario-callable forged-checkpoint endpoint launch — the
+    demote-forged-standby-source leg's hostile announce target: the
+    run's labeled rig-bridge container running the shipped `dcs-forge`
+    binary out of the controller image, serving `document` as its
+    /checkpoint answer while announcing itself to the named owner's
+    monitor so its bridge address is the recorded tracking hint a
+    POST /demote must verify.
+
+    `document` is the checkpoint-shaped dict the endpoint serves —
+    staged to a bind-mounted file inside the run directory that
+    dcs-forge re-reads on every pull, so the leg's next forged shape
+    lands by rewriting the returned 'document' path between demote
+    calls without a relaunch. `owner` is the ctx endpoint key of the
+    field-owning peer whose monitor the endpoint announces to
+    ('active' is ctrl-a's container, 'standby' ctrl-b's). `keyed`
+    selects whether the endpoint signs `?prove=` answers under the
+    run's --pair-token: the key-holding shape — every pulled document
+    genuinely signed, so only its content can convict it — is what
+    the forged legs need to reach the demote verify's command-record
+    audit rather than the proof gate; unkeyed is the unproven leg's
+    tokenless hostile endpoint. A run config carrying no pair token
+    launches unkeyed regardless — matching the contract's keyed-only
+    posture.
+
+    The container carries the run's managed and run labels so teardown
+    reconciles it with the rig, binds no host port — only the rig's
+    peers dial it — and refuses to launch unless the recorded
+    endpoint_placement marks 'forge' bridge-placed: the host egress
+    policy makes a host socket unreachable from the rig. The launch
+    is recorded on the run's action timeline; a docker failure raises
+    so the calling scenario reports the action never completed.
+
+    Returns {'container', 'dir', 'document', 'hits', 'keyed', 'port'}:
+    the forge's run-dir working directory, the served-document path
+    the leg rewrites, the hits ledger the binary appends every served
+    pull and announce to — the self-verifying record that the verify
+    pull reached the endpoint and whether its answer was signed — the
+    keyed posture actually launched, and the endpoint's announced
+    bridge port a journaled adoption names.
+    """
+    run_id, sha = record['run_id'], record['attempted_sha']
+    prefix = 'dcs-hw-' + run_id
+    peers = {'active': ('a', 8080), 'standby': ('b', 8081)}
+    if owner not in peers:
+        raise RuntimeError('start_forge expects the field-owning '
+                           'endpoint key, got ' + repr(owner))
+    placements = _endpoint_placement(cfg)
+    if placements['forge'] != 'bridge':
+        raise RuntimeError('endpoint_placement records forge as '
+                           + repr(placements['forge'])
+                           + ' but the endpoint must sit on the rig '
+                           'bridge — a host socket is unreachable '
+                           'from the rig')
+    directory = Path(run_dir) / 'forge'
+    directory.mkdir(parents=True, exist_ok=True)
+    directory.chmod(0o777)
+    document_path = directory / 'checkpoint.json'
+    # Host-side atomic staging: the container re-reads this file per
+    # pull, so a rename lands the next shape without a torn read.
+    staged = directory / 'checkpoint.staging.json'
+    staged.write_text(json.dumps(document))
+    staged.replace(document_path)
+    hits = directory / 'hits.jsonl'
+    hits.unlink(missing_ok=True)
+    container = prefix + '-forge'
+    # A leftover forge from an aborted pass leaves the same name; its
+    # staged document and hits ledger are refreshed above regardless.
+    docker('rm', '-f', container, check=False, timeout=60)
+    peer_name, peer_port = peers[owner]
+    announce = prefix + '-' + peer_name + ':' + str(peer_port)
+    keyed = bool(keyed and cfg.get('pair_token'))
+    timeline('forge-start', 'launch ' + container + ' serving '
+             + document_path.name + ', announcing to ' + announce
+             + (' (keyed)' if keyed else ' (unkeyed)'))
+    docker(*_docker_run_args(cfg, run_id, container),
+           '--network', 'dcs-hwtest-' + run_id,
+           '-v', str(directory) + ':/forge',
+           '--entrypoint', 'dcs-forge',
+           IMAGE_PREFIX + 'controller:' + sha,
+           '--listen', '0.0.0.0:' + str(FORGE_PORT),
+           '--document', '/forge/checkpoint.json',
+           '--hits', '/forge/hits.jsonl',
+           '--announce', announce,
+           *(['--pair-token', str(cfg['pair_token'])]
+             if keyed else []))
+    timeline('forge-up', container + ' serving the staged document')
+    return {'container': container, 'dir': str(directory),
+            'document': str(document_path), 'hits': str(hits),
+            'keyed': keyed, 'port': FORGE_PORT}
+
+
+def stop_forge_endpoint(run_id, timeline):
+    """The forged-checkpoint endpoint's teardown: `docker rm -f` on
+    the run's forge container — removed outright so the hint the demote
+    verify dials is a dead endpoint again. Recorded on the run's action
+    timeline like the other lifecycle actions; a docker failure raises
+    so the calling scenario reports the teardown never completed."""
+    container = 'dcs-hw-' + run_id + '-forge'
+    timeline('forge-stop', 'docker rm -f ' + container)
+    docker('rm', '-f', container, timeout=90)
+    timeline('forge-stopped', container + ' removed')
+
+
 def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
                   timeline):
     """The scenario driver's view of the running rig: monitor base URLs
@@ -1404,9 +1521,12 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
     endpoint key — the pair's and every third peer's — the run's
     evidence dir and deadline, the runner-owned
     controller restart/cold-restart, plant stop/start,
-    model-revision, foreign-peer launch/teardown, and driven-peer
-    launch/teardown actions, the shipped plant tool's docker-exec
-    invocation, the run config's recorded endpoint placements and the
+    model-revision, foreign-peer launch/teardown, driven-peer
+    launch/teardown, and forged-checkpoint-endpoint
+    launch/teardown actions, the run's shared --pair-token the
+    announced-source legs' keyed posture answers, the shipped plant
+    tool's docker-exec invocation, the run config's recorded endpoint
+    placements and the
     run's rig bridge name — the placement rule a scenario attachment
     follows when it needs an endpoint a rig peer must dial — and the
     host-side
@@ -1467,6 +1587,18 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
             timeline),
         'stop_driven': lambda: stop_driven_controller(
             run_id, timeline),
+        # The run's shared --pair-token — the keyed posture the
+        # announced-source legs need: absent means the rig verifies
+        # nothing and the legs report inconclusive rather than failed.
+        'pair_token': cfg.get('pair_token'),
+        # The forged-checkpoint endpoint's launch/teardown — the
+        # demote-forged-standby leg's hostile announced source. The
+        # staged document path the launch returns is the leg's rewrite
+        # seam between demote calls.
+        'start_forge': lambda document, owner, keyed=True:
+            start_forge_endpoint(cfg, record, run_dir, document,
+                                 owner, timeline, keyed),
+        'stop_forge': lambda: stop_forge_endpoint(run_id, timeline),
         'state_files': {key: str(_controller_dir(run_dir, peer)
                                  / 'state.json')
                         for key, peer in names.items()},

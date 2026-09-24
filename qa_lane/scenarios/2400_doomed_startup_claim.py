@@ -1,6 +1,12 @@
 """The doomed_startup_claim acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The doomed-startup-claim case shares that foreign seat beside it —
+# launched onto a corrupt journal file against the settled pair and
+# torn down before either revision case claims the seat.
+RUNS_AFTER = frozenset({'scenario_failover'})
+RUNS_BEFORE = frozenset({'scenario_incompatible_revision', 'scenario_model_revision'})
+
 
 # The doomed-startup claim-ordering case's cadence: polls through the
 # window a doomed foreign launch runs in — the abort lands inside the

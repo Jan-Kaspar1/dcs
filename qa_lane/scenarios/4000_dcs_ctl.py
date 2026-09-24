@@ -1,6 +1,11 @@
 """The dcs_ctl acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The dcs-ctl case closes the schedule: it observes the post-failover
+# role layout and perturbs nothing earlier cases established.
+RUNS_AFTER = frozenset({'scenario_failover'})
+RUNS_LAST = True
+
 
 def _ctl_write_legs(ctx, case, ctl, signals, schema, roles):
     """The dcs-ctl case's mutation legs over the closure's ctl: the

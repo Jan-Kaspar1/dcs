@@ -183,6 +183,70 @@ pub struct PublicationHealth {
     pub depth: u64,
     /// The retained window's configured bound.
     pub window: u64,
+    /// The durable journal sink's drain report when the monitor
+    /// appends the journal to a file — `None` (absent on the wire)
+    /// without one. The sink drains on its own writer off the
+    /// executor lock: `lagging` reports records still queued for it,
+    /// `failed` a sink write that is already failing the run at its
+    /// next push. Absent from snapshots serialized before the section
+    /// existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal_sink: Option<JournalSinkHealth>,
+}
+
+/// The named health state of the durable journal sink's drain — the
+/// backpressure report the journal-append isolation decision
+/// requires. The queue's bound is declared in `capacity`: a sink
+/// behind the run's recording rate reports `Lagging`, and a sink
+/// write that failed reports `Failed` — the run dies at its next
+/// journaled entry naming the file, the fatal-on-append-failure rule
+/// moved to the queue's handoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JournalSinkState {
+    /// The writer is keeping up — no record waits in the drain queue.
+    Healthy,
+    /// Records wait for the writer — the sink is behind the run's
+    /// recording rate. A lag that fills `capacity` is fatal at the
+    /// next journaled entry rather than silently dropping one.
+    Lagging,
+    /// A sink write failed — the run is failing fatally at the
+    /// recorded point; `lost` accounts the accepted records the file
+    /// never took.
+    Failed,
+}
+
+/// The durable journal sink's drain accounting — the overload
+/// surface beside the publication store's own counters, stamped into
+/// the snapshot's `publication` section as of each publish and
+/// readable live through the monitor.
+///
+/// The queue sits between the executor lock's recording point and the
+/// writer thread that appends records to the file in `seq` order:
+/// `accepted` counts every record handed over, `drained` the ones the
+/// file durably took, and `lost` the ones a failed writer consumed
+/// without appending — the honest loss accounting for a record the
+/// run's audit trail claimed but the file never held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalSinkHealth {
+    /// The sink's standing state.
+    pub state: JournalSinkState,
+    /// Journaled records handed to the drain queue since bind.
+    pub accepted: u64,
+    /// Records the writer has appended — `accepted` minus `lost`
+    /// minus the in-flight and queued remainder.
+    pub drained: u64,
+    /// Records the queue admitted but the sink never appended —
+    /// nonzero only after a writer failure: the loss the durable file
+    /// cannot carry, counted rather than hidden.
+    pub lost: u64,
+    /// Records waiting in the queue now — what `lagging` reports on.
+    pub depth: u64,
+    /// The deepest the queue has run.
+    pub high_water: u64,
+    /// The queue's configured bound — a journaled entry finding it
+    /// full fails the run fatally at the push.
+    pub capacity: u64,
 }
 
 /// The snapshot's command-ingress section: admission metrics for the
@@ -523,6 +587,7 @@ mod tests {
                 coalesced: 3,
                 depth: 4,
                 window: 8,
+                journal_sink: None,
             }),
         };
         let json = serde_json::to_string(&snapshot).unwrap();

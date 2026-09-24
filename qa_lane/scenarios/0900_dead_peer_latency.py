@@ -1,6 +1,13 @@
 """The dead_peer_latency acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The dead-peer-latency case sits in the same restored window: it
+# isolates ctrl-a — the source ctrl-b and its driven third peer pull
+# from — restores it before the armed failover bound, and removes the
+# driven peer, so the launch roles still hold for the cases that
+# follow.
+RUNS_BEFORE = frozenset({'scenario_parameter_tune_carryover'})
+
 LATENCY_POLL = 0.4       # the sampling cadence inside the window
 LATENCY_WINDOW = 8.0     # the dead-peer sampling window — inside the
                          # armed failover bound (~12s at

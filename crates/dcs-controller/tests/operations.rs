@@ -165,6 +165,25 @@ fn file_boundaries(path: &Path) -> Vec<(u64, u64)> {
         .collect()
 }
 
+/// The durable record covers the served page: `served` was fetched
+/// through `GET /journal`, which waits the sink's drain out, so the
+/// file holds every served entry in order — while the paced run keeps
+/// journaling, the tail a post-flush append may add behind them.
+fn assert_file_covers(path: &Path, served: &[JournalEntry]) {
+    let file = file_entries(path);
+    assert!(
+        file.len() >= served.len(),
+        "the durable journal {} is shorter than the served record",
+        path.display()
+    );
+    assert_eq!(
+        &file[..served.len()],
+        served,
+        "the durable journal {} must hold the served record in order",
+        path.display()
+    );
+}
+
 /// One configured overview pair, as a `?pair=<name>=<host:port>,…`
 /// parameter parses it: the card's identity plus its peers' monitor
 /// addresses.
@@ -494,7 +513,7 @@ fn run_operations(tag: &str) -> serde_json::Value {
         !before_restart.is_empty(),
         "the pre-restart run must have journaled entries"
     );
-    assert_eq!(file_entries(&journal_a_standby), before_restart);
+    assert_file_covers(&journal_a_standby, &before_restart);
     assert_eq!(file_boundaries(&journal_a_standby), vec![(1, 0)]);
 
     // The restart: the process dies; its replacement resumes the run
@@ -548,13 +567,18 @@ fn run_operations(tag: &str) -> serde_json::Value {
         before_restart.last().unwrap().seq + 1,
         "the first post-restart entry continues the seq numbering"
     );
-    assert_eq!(file_entries(&journal_a_standby), after_restart);
+    assert_file_covers(&journal_a_standby, &after_restart);
 
     // The file's record order separates the lifetimes: the run-1
     // marker, the run-1 entries, the run-2 marker at the restored
     // tick, then the resumed run's entries.
     let records = file_records(&journal_a_standby);
-    assert_eq!(records.len(), after_restart.len() + 2);
+    assert!(
+        records.len() >= after_restart.len() + 2,
+        "the file holds both lifetimes' records — post-flush appends \
+         may add behind them: {}",
+        records.len()
+    );
     assert_eq!(
         records[0],
         serde_json::json!({ "run_boundary": { "run": 1, "tick": 0 } })
@@ -588,10 +612,8 @@ fn run_operations(tag: &str) -> serde_json::Value {
     // Pair A's active journaled the uninterrupted run to its own file;
     // pair B's controllers hold their run-1 records too.
     assert_eq!(file_boundaries(&journal_a_active), vec![(1, 0)]);
-    assert_eq!(
-        file_entries(&journal_a_active),
-        a_active.journal(0).unwrap()
-    );
+    let a_active_served = a_active.journal(0).unwrap();
+    assert_file_covers(&journal_a_active, &a_active_served);
     for path in [&journal_b_active, &journal_b_standby] {
         assert_eq!(file_boundaries(path), vec![(1, 0)]);
         assert!(!file_entries(path).is_empty());
@@ -798,7 +820,7 @@ fn run_operations(tag: &str) -> serde_json::Value {
     // The durable file carries the same record the endpoint serves —
     // the attributed entry included.
     let served_journal = a_active.journal(0).unwrap();
-    assert_eq!(file_entries(&journal_a_active), served_journal);
+    assert_file_covers(&journal_a_active, &served_journal);
 
     // Strings that legitimately differ run to run — every address is
     // an ephemeral port — are masked before the digests compare; the

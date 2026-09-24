@@ -1,6 +1,11 @@
 """The failover acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The failover leg runs behind the tune case's a->b switch: it
+# demotes whichever peer reports settled active and promotes the
+# converged one back.
+RUNS_AFTER = frozenset({'scenario_parameter_tune_carryover'})
+
 
 def scenario_failover(ctx):
     """Demote the active, promote the converged standby."""

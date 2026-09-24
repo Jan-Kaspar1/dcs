@@ -81,6 +81,6 @@ pub use signal::{
 pub use state::{StateError, StateMap};
 pub use telemetry::{
     CommandQueueDiagnostics, CommandVerdict, ComponentCommands, ComponentDiagnostics,
-    ComponentParameters, ForcedPoint, IoFault, IoHealth, PointTelemetry, PublicationHealth,
-    TelemetrySnapshot,
+    ComponentParameters, ForcedPoint, IoFault, IoHealth, JournalSinkHealth, JournalSinkState,
+    PointTelemetry, PublicationHealth, TelemetrySnapshot,
 };

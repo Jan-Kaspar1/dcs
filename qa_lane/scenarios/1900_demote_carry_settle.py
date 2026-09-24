@@ -1,6 +1,14 @@
 """The demote_carry_settle acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The demote-carry-settle case shares that window: it races receipted
+# submissions on whichever peer owns the field around a rogue claim's
+# preemption — the involuntary demote the #829 boundary contract
+# covers — lets the tracking peer carry the suspended admissions,
+# promotes it, and lands the pair back on the launch roles before the
+# tune case's a->b switch.
+RUNS_BEFORE = frozenset({'scenario_parameter_tune_carryover'})
+
 
 # --------------------------------------------------------------------
 # The demote-carry boundary's single-outcome contract — the #829 fix's

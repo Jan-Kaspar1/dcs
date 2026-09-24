@@ -101,8 +101,9 @@ Implementation order: second, after [daily architecture review](daily-architectu
   demonstrated is recorded: the host egress policy drops every
   rig-network packet aimed at a host socket, so a lane endpoint a
   rig container must dial (a checkpoint interposer, the
-  forged-checkpoint server the tracking-source/auth legs announce,
-  or a plant-probe listener) runs bridge-placed in a labeled
+  forged-checkpoint endpoint the demote-forged-standby-source leg
+  announces, or a plant-probe listener) runs bridge-placed in a
+  labeled
   rig-bridge container dialed by container name, while host-side
   attachments use the published loopback ports only.
   `qa_lane/runner.py` records the selection in the run config's
@@ -128,16 +129,75 @@ Implementation order: second, after [daily architecture review](daily-architectu
   numbers are spaced by 100 so a new leg inserts between neighbors
   without renumbering. `SCENARIOS` is discovered by sorted glob over
   `[0-9]*_*.py`, so a new leg is exactly one new file and edits no
-  shared file. Which window a leg may occupy is recorded in the
-  ordering comment above `SCENARIOS` in `__init__.py` (later cases
-  degrade to inconclusive when earlier rig state never landed; the
-  dcs-ctl case deliberately closes the schedule).
+  shared file. Which window a leg may occupy is declared in its own
+  module (later cases degrade to inconclusive when earlier rig state
+  never landed; the dcs-ctl case deliberately closes the schedule).
 - Motivation (scripts/merge_flow.py, #906): dispatch-to-merge lead
   time between adjacent 7-day windows collapsed — p50 0.64h -> 4.81h,
   p90 1.92h -> 61.92h — while redispatches went 58 -> 111 and
   WIP-preservation repairs 19 -> 41, because every open lane leg
   appended to the same ~19,900-line `scenarios.py` and serialized on
   identical regions.
+
+### Landed 2026-09-24 (scenario test-module split, #940)
+
+- `tests/test_qa_scenarios.py` (a ~16,400-line monolith) became one
+  test module per leg — `tests/test_qa_scenario_NNNN_<slug>.py`,
+  pairing by stem with `qa_lane/scenarios/NNNN_<slug>.py` — carrying
+  the leg's feed fakes and TestCase classes verbatim. Fakes and
+  helpers more than one leg's tests use live in the shared seam
+  `tests/qa_scenario_support.py`, which leg modules bind through
+  `from qa_scenario_support import *` — the same pattern the
+  scenario modules use on `common.py`, so `patch.object(scenarios,
+  ...)` seams keep resolving through the #928 facade.
+- The ordering pin is distributed: instead of appending to a shared
+  `EXPECTED_ORDER` list, each leg module declares the window it
+  needs — `RUNS_AFTER`/`RUNS_BEFORE` frozensets over `scenario_*`
+  names, `RUNS_LAST` for the dcs-ctl leg that closes the schedule —
+  beside the ordering prose that moved with it, and
+  `tests/test_qa_scenario_modules.py` derives the schedule check by
+  validating every declaration against the discovered run order.
+  Each leg test module also pins its own `EXPECTED_CASES` (its
+  `Class.test_*` set), and the same structure module asserts the
+  union reproduces the pre-split suite's coverage under unittest
+  discovery.
+- Convention: a new leg is exactly two new files —
+  `qa_lane/scenarios/NNNN_<slug>.py` (carrying its ordering
+  declarations) plus `tests/test_qa_scenario_NNNN_<slug>.py`
+  (carrying its fakes, cases, and `EXPECTED_CASES`) — and edits no
+  shared file; the pool tests prove a synthetic leg joins both the
+  run order and test discovery that way.
+
+### Landed 2026-09-24 (forged standby-source demote-verify leg, #882)
+
+- The announced-source demote-verify contract (#850, landed #863
+  a9b2a6f) is exercised on the deployed pair by scenario leg
+  `2050_demote_forged_standby_source` in service of WW-LCM-001's
+  takeover continuity and WW-FND-004's command integrity. Each pass
+  opens the announced-only demotion window — the tracking peer
+  stopped, the field owner warm-restarted — then stands the
+  bridge-placed forged-checkpoint endpoint: `dcs-forge`, a
+  monitor-crate binary the controller image ships beside
+  dcs-controller and the runner launches with `--entrypoint
+  dcs-forge` through the new ctx['start_forge']/ctx['stop_forge']
+  actions, announcing `?peer=0.0.0.0:<port>` to the named owner's
+  monitor so its bridge address is the hint POST /demote verifies.
+- The endpoint serves a checkpoint document staged as a
+  bind-mounted file inside the run dir — the scenario rewrites it
+  between demote calls to run the receipt-window-forked and
+  internal-`In`-planted forgeries, then the honest standby-shaped
+  continuation — signs `?prove=` answers under the run's
+  `--pair-token` only when launched keyed (the tokenless launch is
+  the unproven leg's shape), and appends a hits JSONL ledger the
+  scenario audits for the verify pull's arrival and signature. A
+  refused demote must journal no tracking-source adoption and no
+  role change, leave the peer field owner, and settle
+  `no_tracking_source`; the honest document must adopt, journal its
+  adoption naming the forge's address, and leave the demoted peer
+  reconverged (orphaned) and re-promotable. Two passes must produce
+  identical digests; named diagnostics are
+  `demote-forged-standby-failed` and
+  `demote-forged-standby-nondeterministic`.
 
 ## Outcome
 

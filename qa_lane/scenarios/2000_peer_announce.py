@@ -1,6 +1,13 @@
 """The peer_announce acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The peer-announce case shares that window: it guards the demotion's
+# announced tracking source with a foreign checkpoint announce,
+# drives its own demote-then-promote switch for the reconvergence and
+# fencing legs, and restores the launch roles before the tune case's
+# a->b switch.
+RUNS_BEFORE = frozenset({'scenario_parameter_tune_carryover'})
+
 
 # --------------------------------------------------------------------
 # The checkpoint `?peer=` announce acceptance contract — the settled

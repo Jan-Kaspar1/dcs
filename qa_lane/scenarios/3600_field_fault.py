@@ -1,6 +1,10 @@
 """The field_fault acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The field-fault case is self-contained on either role layout —
+# including the post-recovery rig — and leaves the rig as it found
+# it.
+
 
 # --------------------------------------------------------------------
 # The field-fault schedule (WW-OPS-003's signal-confidence clause and

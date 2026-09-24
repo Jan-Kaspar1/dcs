@@ -10,7 +10,8 @@
 #![allow(dead_code)]
 
 use dcs_core::{
-    CommandReceipt, JournalEntry, JournalEvent, PointId, Sample, TelemetrySnapshot, Value,
+    CommandReceipt, JournalEntry, JournalEvent, JournalSinkState, PointId, Sample,
+    TelemetrySnapshot, Value,
 };
 use dcs_model::PlantModel;
 use std::io::{BufRead, BufReader};
@@ -58,6 +59,25 @@ impl Drop for Spawned {
 pub fn kill(spawned: &mut Spawned) {
     spawned.child.kill().unwrap();
     spawned.child.wait().unwrap();
+}
+
+/// Pins a snapshot's journal-sink drain report to its run-stable
+/// fields. `state`, `drained`, `depth`, and `high_water` ride the sink
+/// writer thread's beat — where the writer stood when the publication
+/// stamped — so identical scripted runs legitimately differ there and
+/// the digest comparisons normalize them; `accepted`, `lost`, and
+/// `capacity` are the run's own accounting and stay in the comparison.
+pub fn settle_sink_health(snapshot: &mut TelemetrySnapshot) {
+    if let Some(sink) = snapshot
+        .publication
+        .as_mut()
+        .and_then(|health| health.journal_sink.as_mut())
+    {
+        sink.state = JournalSinkState::Healthy;
+        sink.drained = sink.accepted;
+        sink.depth = 0;
+        sink.high_water = 0;
+    }
 }
 
 /// The announcement `dcs-controller` and `dcs-plant-server` print once

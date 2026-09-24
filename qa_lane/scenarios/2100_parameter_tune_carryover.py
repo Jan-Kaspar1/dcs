@@ -1,6 +1,14 @@
 """The parameter_tune_carryover acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The parameter-tune case also runs ahead of the failover leg: only
+# ctrl-b tracks (its --standby source is ctrl-a), so a tuned value
+# can cross a checkpoint only from ctrl-a to ctrl-b, and the
+# promotion it performs is the run's one a->b switch — the failover
+# leg behind it demotes whichever peer reports settled active and
+# promotes the converged one back.
+RUNS_BEFORE = frozenset({'scenario_failover'})
+
 
 # --------------------------------------------------------------------
 # The receipted parameter-tuning path and its carryover across
