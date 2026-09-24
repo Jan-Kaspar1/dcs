@@ -9,8 +9,8 @@
 //! dropped so its port refuses connections.
 
 use dcs_core::{
-    Command, CommandError, CommandOutcome, CommandReceipt, Direction, IoDriver, IoError,
-    JournalEvent, PointId, Role, Sample, StandbySync, Tick, Value, ValueKind,
+    Command, CommandError, CommandOutcome, CommandReceipt, Direction, FieldClaim, IoDriver,
+    IoError, JournalEvent, PointId, Role, Sample, StandbySync, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{
@@ -131,6 +131,22 @@ impl PeerRig {
     /// tracking source — the configured `--peer`/`--standby` half of
     /// the follow-peer contract a demotion tracks.
     fn start_tracking(role: Role, source: Option<SocketAddr>) -> Self {
+        Self::assemble(role, source, None)
+    }
+
+    /// [`start`](Self::start) with a scripted field-claim probe: the
+    /// peer's per-scan claim observation answers whatever `claim`
+    /// currently holds, so a test drives `field_claim` through `held` /
+    /// `unclaimed` without field-side arbitration.
+    fn start_probed(role: Role, claim: Arc<Mutex<FieldClaim>>) -> Self {
+        Self::assemble(role, None, Some(claim))
+    }
+
+    fn assemble(
+        role: Role,
+        source: Option<SocketAddr>,
+        claim: Option<Arc<Mutex<FieldClaim>>>,
+    ) -> Self {
         let driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
             (PointId(10), Value::Float(0.0)),
             (PointId(20), Value::Float(0.0)),
@@ -144,6 +160,10 @@ impl PeerRig {
         let peer = match role {
             Role::Active => Peer::active(executor, None),
             _ => Peer::standby(executor, None),
+        };
+        let peer = match claim {
+            Some(claim) => peer.with_field_probe(move || Ok(*claim.lock().unwrap())),
+            None => peer,
         };
         let monitor = Monitor::bind_peer("127.0.0.1:0", peer, signal_index()).unwrap();
         let monitor = match source {
@@ -207,7 +227,7 @@ fn pair_health_fault_kinds_roundtrip() {
             fault_kinds: vec![kind],
         };
         let json = serde_json::to_value(&health).unwrap();
-        assert_eq!(json["fault_kinds_version"], 2);
+        assert_eq!(json["fault_kinds_version"], 3);
         assert_eq!(json["fault_kinds"], serde_json::json!([kind]));
         assert_eq!(serde_json::from_value::<PairHealth>(json).unwrap(), health);
     }
@@ -238,7 +258,7 @@ fn healthy_pair_health_omits_empty_fault_kinds_and_roundtrips() {
         fault_kinds: vec![],
     };
     let json = serde_json::to_value(&health).unwrap();
-    assert_eq!(json["fault_kinds_version"], 2);
+    assert_eq!(json["fault_kinds_version"], 3);
     assert!(json.get("fault_kinds").is_none());
     assert_eq!(serde_json::from_value::<PairHealth>(json).unwrap(), health);
 }
@@ -754,6 +774,92 @@ fn an_orphaned_standby_is_a_named_fault() {
     assert_eq!(health.active, Some(active.addr));
     assert!(health.faults.is_empty(), "{:?}", health.faults);
     assert_fault_kinds(&health, &[]);
+
+    active.stop();
+    standby.stop();
+}
+
+/// The unclaimed-field verdict as pair health: a reporting peer whose
+/// served `field_claim` stands `unclaimed` — the field's own
+/// arbitration answering "no owner stands" — is named the
+/// `field_unclaimed` redundancy fault, distinctly from the
+/// orphaned/degraded sync verdicts, and clears on the first poll after
+/// a holder claims. `POST /promote` on a converged peer is the
+/// documented remedy the fault names.
+#[test]
+fn an_unclaimed_field_report_is_a_named_fault_until_a_holder_claims() {
+    let active = PeerRig::start(Role::Active);
+    let claim = Arc::new(Mutex::new(FieldClaim::Held));
+    let standby = PeerRig::start_probed(Role::Standby, Arc::clone(&claim));
+    let mut pair = PairClient::new([active.addr, standby.addr]);
+
+    // A held claim is no fault: one scan lands the probe's `held`
+    // answer in the served report and the pair reads healthy — the
+    // unprobed active serves no `field_claim` at all, rendering
+    // exactly as before.
+    standby.client.advance(1).unwrap();
+    pair.poll_roles();
+    match status_of(&pair, standby.addr) {
+        PeerStatus::Reporting(report) => {
+            assert_eq!(report.field_claim, Some(FieldClaim::Held))
+        }
+        other => panic!("expected the standby's report, got {other:?}"),
+    }
+    match status_of(&pair, active.addr) {
+        PeerStatus::Reporting(report) => assert_eq!(report.field_claim, None),
+        other => panic!("expected the active's report, got {other:?}"),
+    }
+    let health = pair.health();
+    assert_eq!(health.active, Some(active.addr));
+    assert!(health.faults.is_empty(), "{:?}", health.faults);
+    assert_fault_kinds(&health, &[]);
+
+    // The claim released — no field owner stands: the next polled
+    // report names the unclaimed field as its own redundancy fault.
+    *claim.lock().unwrap() = FieldClaim::Unclaimed;
+    standby.client.advance(1).unwrap();
+    pair.poll_roles();
+    match status_of(&pair, standby.addr) {
+        PeerStatus::Reporting(report) => {
+            assert_eq!(report.field_claim, Some(FieldClaim::Unclaimed))
+        }
+        other => panic!("expected the standby's report, got {other:?}"),
+    }
+    let health = pair.health();
+    assert_eq!(health.active, Some(active.addr));
+    assert_fault_kinds(&health, &[PairFaultKind::FieldUnclaimed]);
+    assert!(
+        health
+            .faults
+            .iter()
+            .any(|fault| fault.contains(&standby.addr.to_string()) && fault.contains("unclaimed")),
+        "expected the unclaimed field named as a redundancy fault, got {:?}",
+        health.faults
+    );
+
+    // The first poll after a holder claims clears the fault —
+    // poll-driven, not sticky.
+    *claim.lock().unwrap() = FieldClaim::Held;
+    standby.client.advance(1).unwrap();
+    pair.poll_roles();
+    let health = pair.health();
+    assert_eq!(health.active, Some(active.addr));
+    assert!(health.faults.is_empty(), "{:?}", health.faults);
+    assert_fault_kinds(&health, &[]);
+
+    // The page's pair-health section names the same verdict
+    // distinctly from the orphaned and degraded sync faults: the
+    // versioned kind, the report field it reads, and the named
+    // remedy.
+    let page = dcs_monitor::PAGE;
+    for needle in [
+        "\"field_unclaimed\"",
+        "field_claim === \"unclaimed\"",
+        "the field unclaimed",
+        "promote is the documented remedy",
+    ] {
+        assert!(page.contains(needle), "page lacks {needle}");
+    }
 
     active.stop();
     standby.stop();
