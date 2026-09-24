@@ -145,8 +145,8 @@ PINS = [
     (2886, 'if ("run_boundary" in entry.event) {'),
     (2887, 'noteRestart("the journal recorded run " +'),
     # The cadence both tickers share.
-    (3343, 'setInterval(refreshOverview, POLL_MS);'),
-    (3518, 'setInterval(refresh, POLL_MS);'),
+    (3349, 'setInterval(refreshOverview, POLL_MS);'),
+    (3524, 'setInterval(refresh, POLL_MS);'),
 ]
 
 
@@ -892,6 +892,20 @@ class HangingPollDegradation(unittest.TestCase):
         self.assertEqual([1.0, 2.0],
                          [s['value']['float']
                           for s in page.trends[1]['samples']])
+
+    def test_command_post_inside_the_poll_carries_the_same_bound(self):
+        # postCommand is the one fetch refresh() awaits that is not a
+        # pollFetch — the ack-release's write inside the poll loop. A
+        # listener answering nothing there would hold `polling` forever,
+        # and every feed mark set before the hang would stay set: the
+        # page's read bound must cover the command post too.
+        body = PAGE.read_text()
+        start = body.index('async function postCommand')
+        end = body.index('return response.json()', start)
+        self.assertIn(
+            'signal: AbortSignal.timeout(POLL_MS)', body[start:end],
+            'postCommand lost its abort bound — an unanswered /command '
+            'POST wedges the poll loop and freezes the feed marks')
 
 
 if __name__ == '__main__':
