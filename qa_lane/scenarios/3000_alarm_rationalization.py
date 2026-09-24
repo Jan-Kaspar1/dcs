@@ -1,6 +1,11 @@
 """The alarm_rationalization acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The alarm-rationalization case rides beside them — the same
+# registry surface plus the field owner's durable journal, the same
+# either-layout self-containment, and one receipted retune it
+# restores before returning.
+
 
 # --------------------------------------------------------------------
 # Decision 70's declared-once alarm rationalization record on the

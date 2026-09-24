@@ -1,6 +1,10 @@
 """The unavailable_fallback acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The unavailable-fallback case is self-contained on either role
+# layout as well: it drives per-point faults on the shared field
+# through the shipped plant tool and clears them all in teardown.
+
 
 # --------------------------------------------------------------------
 # The all-level-sources-bad declared fallback (WW-OPS-003's

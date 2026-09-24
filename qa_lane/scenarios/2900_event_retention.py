@@ -1,6 +1,10 @@
 """The event_retention acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The event-retention case rides beside the served-interface case —
+# the same registry surface, the same either-layout self-containment,
+# and nothing but receipted drives on the field-owning peer.
+
 
 # --------------------------------------------------------------------
 # Declared-event retention routing (WW-FND-003's EventRetention

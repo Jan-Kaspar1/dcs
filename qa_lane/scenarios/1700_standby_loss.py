@@ -1,6 +1,12 @@
 """The standby_loss acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The standby-loss case sits in the same restored window: it needs a
+# tracking standby to refuse and to lose, drives its own a->b switch
+# for the promotion-gate leg, and demote/promotes back to the launch
+# roles, so it runs before the tune case's a->b switch.
+RUNS_BEFORE = frozenset({'scenario_parameter_tune_carryover'})
+
 
 # --------------------------------------------------------------------
 # WW-LCM-001's peer-lifecycle clauses and WW-OPS-003's tolerated

@@ -1,6 +1,12 @@
 """The fenced_writer_degrade acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The fenced-writer-degrade case shares that restored window: the
+# tracking standby takes the misordered promote, the superseded peer
+# demotes in place, and the documented demote/promote order lands the
+# pair back on the launch roles before the cases that follow.
+RUNS_BEFORE = frozenset({'scenario_parameter_tune_carryover'})
+
 
 # --------------------------------------------------------------------
 # The settled fenced-writer degrade contract — QA finding #508's

@@ -1,6 +1,13 @@
 """The lag_staging acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The lag-staging case sits in the same restored window: the settled
+# pair's pinned owner token is the shared claim its inflow drive
+# needs, and the leg writes, stages, annunciates, acks, drains, and
+# restores — inflow back to baseline, the ack input re-armed, no pump
+# operator state touched, no role moved.
+RUNS_BEFORE = frozenset({'scenario_parameter_tune_carryover'})
+
 
 # --------------------------------------------------------------------
 # The threshold-chain lag-staging and high-level annunciation leg

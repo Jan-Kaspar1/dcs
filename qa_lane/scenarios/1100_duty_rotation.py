@@ -1,6 +1,12 @@
 """The duty_rotation acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The duty-rotation case shares that restored window: it cycles
+# demand through the writable maintenance points, runs its own mid-
+# cycle a->b switch for the carried rotation position, and fails back
+# to the launch roles before the force case.
+RUNS_BEFORE = frozenset({'scenario_force_carryover'})
+
 
 # --------------------------------------------------------------------
 # The declared duty-rotation contract and its carryover across

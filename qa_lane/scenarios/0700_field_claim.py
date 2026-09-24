@@ -1,6 +1,13 @@
 """The field_claim acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The field-claim case shares that window: the settled pair's pinned
+# owner token is the standing claim its third attachment probes,
+# shares, and rogue-preempts, and its demote and re-promote of the
+# same peer lands the pair back on the launch roles before the cases
+# that follow.
+RUNS_BEFORE = frozenset({'scenario_parameter_tune_carryover'})
+
 
 # --------------------------------------------------------------------
 # The plant's single-writer field claim (the failover decision's

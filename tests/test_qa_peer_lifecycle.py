@@ -4,7 +4,7 @@ import socket
 import time
 import unittest
 
-from test_qa_scenarios import ClaimPlantPeer, FakePlantPeer
+from qa_scenario_support import ClaimPlantPeer, FakePlantPeer
 
 
 class SocketPeerLifecycleTests(unittest.TestCase):

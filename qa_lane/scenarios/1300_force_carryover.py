@@ -1,6 +1,12 @@
 """The force_carryover acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The force-carryover case runs on the same pre-switch window —
+# ctrl-a active, ctrl-b tracking — driving its own a->b leg for the
+# forced-point evidence and failing back to the launch roles before
+# the tune case runs its switch.
+RUNS_BEFORE = frozenset({'scenario_parameter_tune_carryover'})
+
 
 # --------------------------------------------------------------------
 # The receipted force set as carried run state (WW-LCM-001's
