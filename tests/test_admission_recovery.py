@@ -5,6 +5,7 @@ cool down only its own quota group, requeue once per failed invocation, wait
 when every group is saturated, and recover through a single probe — never a
 global pause, never a retry wave, and never past an admission lease.
 """
+import json
 import tempfile
 import time
 import unittest
@@ -87,7 +88,7 @@ class ScopedRecoveryTests(unittest.TestCase):
         # probes, the union job is untouched, and the pool does not pause.
         sup.reconcile_workers(sup.github.items)
         self.assertEqual(sup.state.job(2)['status'], 'blocked')
-        self.assertTrue(sup.state.get('retry:2'))
+        self.assertEqual(sup.state.get('retry:2'), 'quota-requeue')
         self.assertFalse(sup.state.paused())
         self.assertEqual(sup.state.job(1)['status'], 'working')
         self.assertEqual(sup.admission.summary()['groups']['swe-2-high']['mode'], 'probing')
@@ -101,6 +102,9 @@ class ScopedRecoveryTests(unittest.TestCase):
         self.assertEqual(len(sup.runtime.spawned), 3)
         self.assertEqual(sup.runtime.spawned[-1]['model'], 'opencode/union-alpha')
         self.assertEqual(sup.admission.summary()['groups']['swe-2-high']['mode'], 'probing')
+        attributed = [(e['kind'], json.loads(e['payload']).get('cause'))
+                      for e in sup.state.events(2)]
+        self.assertIn(('redispatch', 'quota-requeue'), attributed)
 
         # The migrated job dies to a rate limit too: union goes into its own
         # probing cooldown and the requeue budget decrements once more.

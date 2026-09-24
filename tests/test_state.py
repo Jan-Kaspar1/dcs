@@ -1,4 +1,5 @@
 import concurrent.futures
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,10 +36,10 @@ class StateTests(unittest.TestCase):
     def test_repairs_pause_and_retry_conflict(self):
         self.state.reserve(1,'one','a')
         for _ in range(3):
-            self.assertTrue(self.state.repair(1))
-        self.assertFalse(self.state.repair(1))
+            self.assertTrue(self.state.repair(1,'merge-conflict'))
+        self.assertFalse(self.state.repair(1,'merge-conflict'))
         self.state.reserve(2,'one','a')
-        self.assertFalse(self.state.retry(1))
+        self.assertFalse(self.state.retry(1,'worker-failure'))
         self.state.pause()
         self.assertIsNone(self.state.reserve(3,'three','c'))
         self.state.resume()
@@ -46,6 +47,47 @@ class StateTests(unittest.TestCase):
         self.state.integrity('conflicting PRs')
         with self.assertRaises(RuntimeError):
             self.state.resume()
+
+    def test_repair_and_retry_record_one_attributed_row_each(self):
+        self.state.reserve(1, 'one', 'a')
+        self.assertTrue(self.state.repair(1, 'ci-failure'))
+        self.state.update_job(1, status='blocked', error='failed checks')
+        self.assertTrue(self.state.retry(1, 'quota-requeue'))
+        events = list(reversed(self.state.events(1)))
+        self.assertEqual([event['kind'] for event in events],
+                         ['reserved', 'repair', 'status:blocked',
+                          'retry-reserved', 'redispatch'])
+        causes = [json.loads(event['payload']).get('cause') for event in events]
+        self.assertEqual(causes, [None, 'ci-failure', None, None, 'quota-requeue'])
+
+    def test_repair_and_retry_reject_unbounded_causes(self):
+        self.state.reserve(1, 'one', 'a')
+        with self.assertRaises(ValueError):
+            self.state.repair(1, 'something-else')
+        with self.assertRaises(ValueError):
+            self.state.retry(1, 'ci-failure')
+        self.assertTrue(self.state.repair(1, 'publish-error'))
+        self.assertEqual([event['kind'] for event in self.state.events(1)],
+                         ['repair', 'reserved'])
+
+    def test_exhausted_repair_writes_no_attributed_row(self):
+        self.state.reserve(1, 'one', 'a')
+        for _ in range(3):
+            self.assertTrue(self.state.repair(1, 'merge-conflict'))
+        self.assertFalse(self.state.repair(1, 'merge-conflict'))
+        repairs = [e for e in self.state.events(1) if e['kind'] == 'repair']
+        self.assertEqual(len(repairs), 3)
+        self.assertEqual(self.state.job(1)['status'], 'blocked')
+
+    def test_merge_flow_reports_repairs_and_redispatches_by_cause(self):
+        self.state.reserve(1, 'one', 'a')
+        self.state.repair(1, 'merge-conflict')
+        self.state.update_job(1, status='blocked', error='x')
+        self.state.retry(1, 'worker-failure')
+        flow = self.state.merge_flow()
+        self.assertEqual(flow['repairs_by_cause']['current'], {'merge-conflict': 1})
+        self.assertEqual(flow['redispatches_by_cause']['current'], {'worker-failure': 1})
+        self.assertEqual(flow['repairs_by_cause']['previous'], {})
 
     def test_ramp_and_restart(self):
         for number in range(1,16):
