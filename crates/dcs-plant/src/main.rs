@@ -2,6 +2,7 @@
 //!
 //! Usage: `dcs-plant-server <model-file> [--dynamics <file>] --listen <addr>`
 //!        `dcs-plant-server <model-file> --check-dynamics <file>`
+//!        `dcs-plant-server --dynamics-schema`
 //!
 //! The binary loads and validates the plant model, resolves the simulated
 //! channel map through [`dcs_assembly::sim_channel_map`] — so the served
@@ -34,6 +35,11 @@
 //! so a consumer's CI can validate the document without starting the
 //! server.
 //!
+//! `--dynamics-schema` prints the dynamics document's draft 2020-12 JSON
+//! Schema — the [`ProcessElement::json_schema`] emission — so non-Rust
+//! tooling can check a document against the recorded artifact before the
+//! merge's own validation runs.
+//!
 //! Load, validation, and bind failures exit nonzero naming the offending
 //! element or address; argument errors print usage and exit 2. Shutdown
 //! is graceful: a signal stops the accept loop and closes client
@@ -50,13 +56,17 @@ use std::process::ExitCode;
 
 /// Parsed command line.
 struct Options {
-    /// The plant model document to serve.
-    model: PathBuf,
+    /// The plant model document to serve — `None` only under
+    /// `--dynamics-schema`, which reads no documents.
+    model: Option<PathBuf>,
     /// The optional process-element list to merge into the channel map.
     dynamics: Option<PathBuf>,
     /// `--check-dynamics FILE`: preflight a dynamics document against
     /// the model's channel map and exit — the mode binds no listener.
     check_dynamics: Option<PathBuf>,
+    /// `--dynamics-schema`: print the dynamics document's emitted JSON
+    /// Schema and exit — the mode needs no model and binds no listener.
+    dynamics_schema: bool,
     /// The address the plant protocol is served on — `None` only under
     /// `--check-dynamics`, which binds nothing.
     listen: Option<String>,
@@ -65,6 +75,7 @@ struct Options {
 const USAGE: &str = "\
 Usage: dcs-plant-server <model-file> [--dynamics <file>] --listen <addr>
        dcs-plant-server <model-file> --check-dynamics <file>
+       dcs-plant-server --dynamics-schema
 
 Loads and validates the plant model, resolves its simulated channel map,
 and serves the shared simulated plant on ADDR until signaled
@@ -87,6 +98,10 @@ no listener binds.
                    --dynamics applies, each rejection named by its
                    element index and driving point; exits nonzero on any
                    rejection or on a model load failure
+  --dynamics-schema
+                   print the dynamics document's JSON Schema (draft
+                   2020-12) — the grammar --dynamics and --check-dynamics
+                   merge — and exit; takes no other arguments
   -h, --help       show this text";
 
 impl Options {
@@ -94,6 +109,7 @@ impl Options {
         let mut model = None;
         let mut dynamics = None;
         let mut check_dynamics = None;
+        let mut dynamics_schema = false;
         let mut listen = None;
         let mut args = args;
         while let Some(arg) = args.next() {
@@ -106,6 +122,7 @@ impl Options {
                 "--check-dynamics" => {
                     check_dynamics = Some(PathBuf::from(value("--check-dynamics")?));
                 }
+                "--dynamics-schema" => dynamics_schema = true,
                 "--listen" => listen = Some(value("--listen")?),
                 "-h" | "--help" => {
                     println!("{USAGE}");
@@ -117,6 +134,37 @@ impl Options {
                 _ if model.is_none() => model = Some(PathBuf::from(arg)),
                 _ => return Err(format!("unexpected argument {arg:?}")),
             }
+        }
+        if dynamics_schema {
+            // The emitted schema describes the element vocabulary
+            // itself — no document takes part — so every other
+            // argument is rejected rather than silently ignored.
+            let mut rejected = Vec::new();
+            if model.is_some() {
+                rejected.push("<model-file>");
+            }
+            for (flag, present) in [
+                ("--dynamics", dynamics.is_some()),
+                ("--check-dynamics", check_dynamics.is_some()),
+                ("--listen", listen.is_some()),
+            ] {
+                if present {
+                    rejected.push(flag);
+                }
+            }
+            if !rejected.is_empty() {
+                return Err(format!(
+                    "--dynamics-schema emits the schema standalone; {} do not apply",
+                    rejected.join(", ")
+                ));
+            }
+            return Ok(Self {
+                model: None,
+                dynamics: None,
+                check_dynamics: None,
+                dynamics_schema: true,
+                listen: None,
+            });
         }
         let model = model.ok_or_else(|| "missing <model-file>".to_string())?;
         if check_dynamics.is_some() {
@@ -139,17 +187,19 @@ impl Options {
                 ));
             }
             return Ok(Self {
-                model,
+                model: Some(model),
                 dynamics: None,
                 check_dynamics,
+                dynamics_schema: false,
                 listen: None,
             });
         }
         let listen = listen.ok_or_else(|| "missing --listen <addr>".to_string())?;
         Ok(Self {
-            model,
+            model: Some(model),
             dynamics,
             check_dynamics,
+            dynamics_schema: false,
             listen: Some(listen),
         })
     }
@@ -261,7 +311,11 @@ fn element_kind(element: &ProcessElement) -> &'static str {
 /// constructed, no listener bound. On success returns the merged map for
 /// the summary report.
 fn check(options: &Options, path: &Path) -> Result<ChannelMap, Vec<String>> {
-    let source = read_file(&options.model, "model").map_err(|error| vec![error])?;
+    let model = options
+        .model
+        .as_deref()
+        .expect("Options::parse requires <model-file> outside --dynamics-schema");
+    let source = read_file(model, "model").map_err(|error| vec![error])?;
     let model = PlantModel::load(&source).map_err(|error| vec![error.to_string()])?;
     let map = sim_channel_map(&model).map_err(|error| vec![error.to_string()])?;
     let source = read_file(path, "dynamics").map_err(|error| vec![error])?;
@@ -272,7 +326,11 @@ fn check(options: &Options, path: &Path) -> Result<ChannelMap, Vec<String>> {
 /// report before serving begins, as a message naming the responsible
 /// element or address.
 fn build(options: &Options) -> Result<PlantServer, String> {
-    let source = read_file(&options.model, "model")?;
+    let model = options
+        .model
+        .as_deref()
+        .expect("Options::parse requires <model-file> outside --dynamics-schema");
+    let source = read_file(model, "model")?;
     let model = PlantModel::load(&source).map_err(|error| error.to_string())?;
     let mut channel_map = sim_channel_map(&model).map_err(|error| error.to_string())?;
     if let Some(path) = &options.dynamics {
@@ -296,6 +354,21 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
+    // The schema emission: the recorded grammar the dynamics-check
+    // modes and external consumers validate against, printed in its
+    // canonical serialization so the release record pins its bytes.
+    if options.dynamics_schema {
+        return match serde_json::to_string_pretty(&ProcessElement::json_schema()) {
+            Ok(schema) => {
+                println!("{schema}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => fail(format!(
+                "cannot serialize the dynamics JSON Schema: {error}"
+            )),
+        };
+    }
 
     // The dynamics preflight: the same model load, channel-map
     // resolution, and per-element merge rules a serving run applies —
