@@ -64,6 +64,12 @@ MIGRATIONS = [
     """,
 ]
 
+# Bounded cause classes persisted on 'repair'/'redispatch' work_events rows so
+# the rolling merge comparison can attribute repair traffic without reading
+# invocation logs. jobs.error keeps the free-text detail; the event keeps class.
+REPAIR_CAUSES = frozenset(('merge-conflict', 'ci-failure', 'publish-error'))
+REDISPATCH_CAUSES = frozenset(('worker-failure', 'quota-requeue'))
+
 
 class State:
     def __init__(self, path):
@@ -131,9 +137,23 @@ class State:
         current_count = sum(row['updated'] >= boundary for row in rows)
         prior_count = len(rows) - current_count
         decline_percent = round(100 * (prior_count - current_count) / prior_count, 1) if prior_count else None
+        causes = {'repair': {'previous': {}, 'current': {}},
+                  'redispatch': {'previous': {}, 'current': {}}}
+        for row in self.db.execute(
+                "SELECT kind,at,payload FROM work_events "
+                "WHERE kind IN ('repair','redispatch') AND at>=?", (previous,)):
+            bucket = causes[row['kind']]['current' if row['at'] >= boundary else 'previous']
+            try:
+                cause = json.loads(row['payload']).get('cause')
+            except (ValueError, AttributeError):
+                cause = None
+            cause = cause if isinstance(cause, str) and cause else 'unclassified'
+            bucket[cause] = bucket.get(cause, 0) + 1
         return {'window_days': round(window_seconds / 86400, 2),
                 'current_merges': current_count, 'previous_merges': prior_count,
-                'decline_percent': decline_percent}
+                'decline_percent': decline_percent,
+                'repairs_by_cause': causes['repair'],
+                'redispatches_by_cause': causes['redispatch']}
 
     def paused(self):
         return bool(self.get('paused', False) or self.get('integrity_error'))
@@ -211,12 +231,20 @@ class State:
                                 ('status:' + fields['status'], issue, previous['attempt'],
                                  fields['updated'], json.dumps({'from': previous['status']})))
 
-    def repair(self, issue):
+    def repair(self, issue, cause):
+        if cause not in REPAIR_CAUSES:
+            raise ValueError('Invalid repair cause')
         with self.db:
-            cursor = self.db.execute("UPDATE jobs SET repairs=repairs+1,status='working',updated=? WHERE issue=? AND repairs<3 AND status IN ('working','pr-open')", (time.time(), issue))
+            now = time.time()
+            cursor = self.db.execute("UPDATE jobs SET repairs=repairs+1,status='working',updated=? WHERE issue=? AND repairs<3 AND status IN ('working','pr-open')", (now, issue))
             if cursor.rowcount:
+                row = self.db.execute('SELECT attempt,repairs FROM jobs WHERE issue=?', (issue,)).fetchone()
+                self.db.execute('INSERT OR IGNORE INTO work_events(kind,issue,attempt,at,source_key,payload) VALUES(?,?,?,?,?,?)',
+                                ('repair', issue, row['attempt'], now,
+                                 'repair:%s:%s:%s' % (issue, row['attempt'], row['repairs']),
+                                 json.dumps({'cause': cause})))
                 return True
-            self.db.execute("UPDATE jobs SET status='blocked',error='Repair limit exhausted',updated=? WHERE issue=? AND status!='done'", (time.time(), issue))
+            self.db.execute("UPDATE jobs SET status='blocked',error='Repair limit exhausted',updated=? WHERE issue=? AND status!='done'", (now, issue))
             return False
 
     def complete(self, issue):
@@ -231,8 +259,10 @@ class State:
                 for key in ('recovery:' + str(issue), 'retry:' + str(issue)):
                     self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)', (key, 'null'))
 
-    def retry(self, issue):
+    def retry(self, issue, cause):
         """Explicit operator retry. Keeps prior branch/clone recorded until replacement."""
+        if cause not in REDISPATCH_CAUSES:
+            raise ValueError('Invalid redispatch cause')
         try:
             with self.db:
                 now = time.time()
@@ -241,6 +271,10 @@ class State:
                     attempt = self.db.execute('SELECT attempt FROM jobs WHERE issue=?', (issue,)).fetchone()[0]
                     self.db.execute('INSERT INTO work_events(kind,issue,attempt,at,payload) VALUES(?,?,?,?,?)',
                                     ('retry-reserved', issue, attempt, now, '{}'))
+                    self.db.execute('INSERT OR IGNORE INTO work_events(kind,issue,attempt,at,source_key,payload) VALUES(?,?,?,?,?,?)',
+                                    ('redispatch', issue, attempt, now,
+                                     'redispatch:%s:%s' % (issue, attempt),
+                                     json.dumps({'cause': cause})))
                 return bool(cursor.rowcount)
         except sqlite3.IntegrityError:
             return False

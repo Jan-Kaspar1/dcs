@@ -1,4 +1,5 @@
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -80,6 +81,11 @@ class SupervisorTests(unittest.TestCase):
     def tearDown(self):
         self.supervisor.state.close()
         self.tmp.cleanup()
+
+    def attributed_events(self, number):
+        return [(e['kind'], json.loads(e['payload']).get('cause'))
+                for e in self.supervisor.state.events(number)
+                if e['kind'] in ('repair', 'redispatch')]
 
     def test_research_issue_worker_prompt_defines_research_role(self):
         research_issue = issue(group='docs/research')
@@ -214,6 +220,63 @@ class SupervisorTests(unittest.TestCase):
         s.integrate(self.github.items)
         self.assertEqual(s.state.job(1)['repairs'],1)
         self.assertEqual(self.runtime.spawn.call_args.kwargs['resume_session'],'session-one')
+        self.assertIn(('repair','ci-failure'), self.attributed_events(1))
+
+    def test_merge_conflict_repair_records_merge_conflict_cause(self):
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        s.reconcile_workers(self.github.items)
+        self.github.includes_main=lambda head, base: False
+        def run_git(cwd, *args):
+            if args and args[0] == 'merge':
+                raise subprocess.CalledProcessError(1, 'merge', '', 'conflict')
+            return 'base'
+        self.runtime.run_git.side_effect=run_git
+        s.integrate(self.github.items)
+        self.assertEqual(s.state.job(1)['repairs'],1)
+        self.assertIn(('repair','merge-conflict'), self.attributed_events(1))
+
+    def test_publish_error_repair_records_publish_cause(self):
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        self.runtime.inspect_result.side_effect=ValueError('unclean result')
+        s.reconcile_workers(self.github.items)
+        self.assertIn(('repair','publish-error'), self.attributed_events(1))
+
+    def test_blocked_worker_retry_records_worker_failure_cause(self):
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        self.runtime.poll.return_value={'exit_code':1}
+        s.reconcile_workers(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'blocked')
+        self.runtime.pool_root=Path(self.config['pool_root'])
+        s.state.set('recovery:1', {'branch':'codex/issue-1-1',
+                                   'clone':s.state.job(1)['clone'],
+                                   'work':False,'phase':'captured'})
+        s.state.set('retry:1', True)
+        s.retries(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'working')
+        self.assertIn(('redispatch','worker-failure'), self.attributed_events(1))
+
+    def test_quota_requeue_records_quota_requeue_cause(self):
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        self.runtime.poll.return_value={'exit_code':1}
+        log = Path(self.tmp.name)/'quota.log'
+        log.write_text('Reached free model rate limit')
+        record = s.state.get('process:1')
+        record['log']=str(log)
+        s.state.set('process:1', record)
+        s.reconcile_workers(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'blocked')
+        self.assertEqual(s.state.get('retry:1'),'quota-requeue')
+        s.admission.reset('swe-2-high')
+        self.runtime.pool_root=Path(self.config['pool_root'])
+        s.state.set('recovery:1', {'branch':'codex/issue-1-1',
+                                   'clone':s.state.job(1)['clone'],
+                                   'work':False,'phase':'captured'})
+        s.retries(self.github.items)
+        self.assertIn(('redispatch','quota-requeue'), self.attributed_events(1))
 
     def test_missing_checks_do_not_merge_or_repair(self):
         s=self.supervisor

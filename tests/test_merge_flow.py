@@ -34,6 +34,13 @@ def job(number, started, updated, status="done", repairs=0, attempt=1):
             "status": status, "repairs": repairs, "attempt": attempt}
 
 
+def event(kind, at, issue_number=1, cause=None, payload=None):
+    if payload is None:
+        payload = json.dumps({"cause": cause}) if cause else "{}"
+    return {"kind": kind, "issue": issue_number, "attempt": 1,
+            "at": at, "payload": payload}
+
+
 class ParseGitLogTests(unittest.TestCase):
     def test_parses_squash_merge_records(self):
         text = git_log_text(
@@ -138,6 +145,61 @@ class WindowReportTests(unittest.TestCase):
         self.assertEqual(report["areas"], {})
         self.assertIsNone(report["lead_time_hours"]["p50"])
         self.assertEqual(report["lead_time_hours"]["count"], 0)
+        repair = report["repair_incidence"]
+        self.assertEqual(repair["repairs_by_cause"], {})
+        self.assertEqual(repair["redispatches_by_cause"], {})
+
+
+class RepairCauseTests(unittest.TestCase):
+    def test_repairs_and_redispatches_grouped_by_cause_per_window(self):
+        boundary = NOW - WEEK
+        events = [
+            event("repair", NOW - 10, 1, "merge-conflict"),
+            event("repair", NOW - 20, 2, "ci-failure"),
+            event("repair", NOW - 30, 3, "ci-failure"),
+            event("repair", NOW - 40, 4, "publish-error"),
+            event("redispatch", NOW - 50, 5, "worker-failure"),
+            event("redispatch", NOW - 60, 6, "quota-requeue"),
+            event("repair", boundary - 10, 7, "merge-conflict"),
+            event("redispatch", boundary - 20, 8, "worker-failure"),
+            event("redispatch", boundary - 30, 8, "quota-requeue"),
+            # Outside the window pair and unrelated kinds are ignored.
+            event("repair", NOW - 3 * WEEK, 9, "ci-failure"),
+            event("reserved", NOW - 5, 1),
+            event("status:blocked", NOW - 5, 1),
+        ]
+        bounds = merge_flow.window_bounds(NOW, WEEK)
+        cur = merge_flow.window_report([], *bounds["current"], {}, {}, events)
+        prev = merge_flow.window_report([], *bounds["previous"], {}, {}, events)
+        self.assertEqual(cur["repair_incidence"]["repairs_by_cause"],
+                         {"ci-failure": 2, "merge-conflict": 1,
+                          "publish-error": 1})
+        self.assertEqual(cur["repair_incidence"]["redispatches_by_cause"],
+                         {"quota-requeue": 1, "worker-failure": 1})
+        self.assertEqual(prev["repair_incidence"]["repairs_by_cause"],
+                         {"merge-conflict": 1})
+        self.assertEqual(prev["repair_incidence"]["redispatches_by_cause"],
+                         {"quota-requeue": 1, "worker-failure": 1})
+
+    def test_events_payload_may_be_predecoded_or_missing_cause(self):
+        events = [
+            event("repair", NOW - 10, 1, "ci-failure"),
+            dict(event("repair", NOW - 20, 2), payload={"cause": "merge-conflict"}),
+            event("repair", NOW - 30, 3, payload="not-json"),
+            event("redispatch", NOW - 40, 4),
+        ]
+        report = merge_flow.window_report([], NOW - WEEK, NOW, {}, {}, events)
+        repair = report["repair_incidence"]
+        self.assertEqual(repair["repairs_by_cause"],
+                         {"ci-failure": 1, "merge-conflict": 1,
+                          "unclassified": 1})
+        self.assertEqual(repair["redispatches_by_cause"], {"unclassified": 1})
+
+    def test_empty_events_report_empty_causes(self):
+        report = merge_flow.window_report([], NOW - WEEK, NOW, {}, {}, [])
+        repair = report["repair_incidence"]
+        self.assertEqual(repair["repairs_by_cause"], {})
+        self.assertEqual(repair["redispatches_by_cause"], {})
 
 
 class BacklogTests(unittest.TestCase):
@@ -185,12 +247,21 @@ class BuildReportTests(unittest.TestCase):
         jobs = [job(1, NOW - 3700, NOW - 100),
                 job(2, boundary - 1000, boundary - 100),
                 job(3, boundary - 2000, boundary - 200)]
-        report = merge_flow.build_report(commits, issues, jobs, NOW, 7)
+        events = [event("repair", NOW - 50, 1, "merge-conflict"),
+                  event("redispatch", boundary - 50, 2, "worker-failure")]
+        report = merge_flow.build_report(commits, issues, jobs, NOW, 7, events)
         self.assertEqual(report["windows"]["current"]["merges"], 1)
         self.assertEqual(report["windows"]["previous"]["merges"], 2)
         self.assertEqual(report["merge_decline_percent"], 50.0)
         self.assertEqual(report["windows"]["current"]["areas"], {"operations": 1})
         self.assertEqual(report["ledger"]["ledger_merges"], {"previous": 2, "current": 1})
+        self.assertEqual(report["ledger"]["events"], 2)
+        self.assertEqual(
+            report["windows"]["current"]["repair_incidence"]["repairs_by_cause"],
+            {"merge-conflict": 1})
+        self.assertEqual(
+            report["windows"]["previous"]["repair_incidence"]["redispatches_by_cause"],
+            {"worker-failure": 1})
         self.assertTrue(report["history"]["covers_window_pair"])
         self.assertIsNotNone(report["backlog"])
 
@@ -220,10 +291,14 @@ class CliTests(unittest.TestCase):
                 [issue(1, area="operations", state="CLOSED")]))
             (tmp / "jobs.json").write_text(json.dumps(
                 [job(1, NOW - 4000, NOW - 100)]))
+            (tmp / "events.json").write_text(json.dumps(
+                [event("repair", NOW - 50, 1, "merge-conflict"),
+                 event("redispatch", NOW - 60, 1, "worker-failure")]))
             out = io.StringIO()
             argv = ["--git-log", str(tmp / "log.txt"),
                     "--issues", str(tmp / "issues.json"),
                     "--jobs", str(tmp / "jobs.json"),
+                    "--events", str(tmp / "events.json"),
                     "--now", str(NOW), "--json"]
             with contextlib.redirect_stdout(out):
                 self.assertEqual(merge_flow.main(argv), 0)
@@ -234,6 +309,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(first, json.loads(out.getvalue()))
             self.assertEqual(first["windows"]["current"]["merges"], 1)
             self.assertEqual(first["ref"], "origin/main")
+            repair = first["windows"]["current"]["repair_incidence"]
+            self.assertEqual(repair["repairs_by_cause"], {"merge-conflict": 1})
+            self.assertEqual(repair["redispatches_by_cause"],
+                             {"worker-failure": 1})
 
 
 if __name__ == "__main__":
