@@ -40,6 +40,7 @@ of this repository.
 | `dcs-alarm-report` CLI | The shipped alarm flood and performance report — `dcs-alarm-report <addr>` computes the declared `AlarmReport` metric set over the monitor's served journal; `dcs-alarm-report <addr> --journal-file <path>` computes it over the durable journal file, the restart-surviving dataset; `--config <path>` carries the declared report thresholds. Tooling-side aggregation over the served surface and the file — it adds no served endpoint. | `cargo install --git <repo> --tag v<X.Y.Z> dcs-monitor` — the binary ships in the `dcs-monitor` package — or a binary built from the tag |
 | Plant-model JSON Schema | `dcs-model schema`'s emitted draft 2020-12 schema for non-Rust tooling (decision 40). | Recorded in the release record at `docs/releases/<tag>/plant-model.schema.json`, fetchable at the tag; its sha256 is in the record |
 | Served-registry JSON Schema | `dcs-model interface-schema`'s emitted draft 2020-12 schema for the `GET /schema` block-interface registry document (decision 82's served contract) — a non-Rust consumer checks the served surface against it. | Recorded in the release record at `docs/releases/<tag>/block-interfaces.schema.json`, fetchable at the tag; its sha256 is in the record |
+| Dynamics-document JSON Schema | `dcs-plant-server --dynamics-schema`'s emitted draft 2020-12 schema for the `--dynamics`/`--check-dynamics` declaration list (decision 24's document, decision 92's emission) — a non-Rust consumer checks the dynamics document the manifest names against it before the merge's own validation runs. | Recorded in the release record at `docs/releases/<tag>/dynamics.schema.json`, fetchable at the tag; its sha256 is in the record |
 | Deployment manifest | The consumer-owned deployment declaration — the documented shape below. | A file in the consumer repository pinning the release's artifacts |
 
 All `git` pins resolve through Cargo's git support: a tag names the
@@ -243,6 +244,8 @@ it follows:
    - `plant-model.schema.json` — `dcs-model schema` emitted at the tag.
    - `block-interfaces.schema.json` — `dcs-model interface-schema`
      emitted at the tag.
+   - `dynamics.schema.json` — `dcs-plant-server --dynamics-schema`
+     emitted at the tag.
 4. Build and publish the `dcs-controller` and `dcs-plant-server`
    images; record their digests in `record.md`.
 
@@ -258,8 +261,10 @@ schema`'s output by the drift test in
 digests for the images. The tag itself and the record's image-digest
 fields are filled when the release is cut. `v0.1.0`'s recorded commit
 predates the served block-interface registry (#375), so its record
-carries no `block-interfaces.schema.json`; release records carry it
-from the first tag whose tooling emits it.
+carries no `block-interfaces.schema.json`, and `v0.2.0`'s predates
+the dynamics-document schema emission (#870), so neither record
+carries `dynamics.schema.json`; release records carry each schema
+artifact from the first tag whose tooling emits it.
 
 ## The consumer-resolution check
 

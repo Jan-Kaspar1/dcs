@@ -1251,6 +1251,14 @@ it into the resolved `sim_channel_map`, and test rigs do the same by
 adding `ProcessElement`s to a `ChannelMap` before constructing
 `SimDriver`.
 
+`dcs-plant-server --dynamics-schema` prints the document's draft
+2020-12 JSON Schema — the `ProcessElement::json_schema` emission
+(decision 92) — so non-Rust tooling can check a document against the
+recorded artifact: structure, field types, and the numeric bounds the
+schema language can express. The merge-time rules below stay with
+`ChannelMap::validate`; the schema is a first screen, not the
+validator.
+
 Each list entry is one `dcs_sim::ProcessElement` — an externally tagged
 object whose single key is the snake_case element name:
 
