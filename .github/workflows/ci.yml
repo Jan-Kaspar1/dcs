@@ -11,25 +11,75 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
-      - run: cargo fmt --all -- --check
+      - name: Timed formatting check
+        run: python3 scripts/verify.py --phase rust-format
   rust-clippy:
     runs-on: ubuntu-latest
     env:
       CARGO_BUILD_JOBS: 4
     steps:
       - uses: actions/checkout@v4
-      - run: rustup show
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Show Rust toolchain
+        id: rust-version
+        run: |
+          rustup show
+          echo "version=$(rustc --version | cut -d ' ' -f2)" >> "$GITHUB_OUTPUT"
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+          key: cargo-registry-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}-
+            cargo-registry-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-
+      - name: Cache Clippy artifacts
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: cargo-target-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}-clippy-${{ github.sha }}
+          restore-keys: |
+            cargo-target-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}-clippy-
+      - name: Timed Clippy check
+        run: python3 scripts/verify.py --phase rust-clippy
   rust-tests:
     runs-on: ubuntu-latest
     env:
       CARGO_BUILD_JOBS: 4
     steps:
       - uses: actions/checkout@v4
-      - run: rustup show
-      - run: cargo test --workspace --locked
+      - name: Show Rust toolchain
+        id: rust-version
+        run: |
+          rustup show
+          echo "version=$(rustc --version | cut -d ' ' -f2)" >> "$GITHUB_OUTPUT"
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+          key: cargo-registry-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}-
+            cargo-registry-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-
+      - name: Cache test artifacts
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: cargo-target-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}-tests-${{ github.sha }}
+          restore-keys: |
+            cargo-target-${{ runner.os }}-${{ steps.rust-version.outputs.version }}-${{ hashFiles('Cargo.lock') }}-tests-
+      - name: Timed workspace tests
+        run: python3 scripts/verify.py --phase rust-tests
   supervisor-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: python3 -m unittest discover -s tests -v
+      - name: Timed supervisor tests
+        run: python3 scripts/verify.py --phase supervisor-tests
