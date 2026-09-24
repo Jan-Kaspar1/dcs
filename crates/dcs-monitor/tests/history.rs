@@ -811,6 +811,104 @@ fn a_receipted_write_to_a_journaled_point_journals_receipt_and_transition() {
     });
 }
 
+/// Issue #886's regression: a monitor restart renumbers the volatile
+/// history rings from 1 while a `since` cursor held from the old
+/// lifetime silently stalls — the answer looks like quiescence for as
+/// long as the new run takes to climb back past the dead cursor. The
+/// served `run` mark is the boundary signal the journal's
+/// `run_boundary` markers already provide: every `PointHistory`
+/// carries the producing lifetime, so the stale cursor's answer names
+/// the new run instead of returning a bare empty page.
+#[test]
+fn a_restart_renumbers_history_under_a_served_run_mark() {
+    let dir = std::env::temp_dir().join(format!("dcs-monitor-history-run-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("journal.jsonl");
+    let driver = StubDriver::new(&[(PointId(10), Value::Float(0.0))]);
+    let bind = || {
+        let map = PointMap::new().with_point(PointId(10), Direction::In, ValueKind::Float);
+        let executor = Executor::new(&driver, map, Vec::new()).unwrap();
+        Monitor::bind_with(
+            "127.0.0.1:0",
+            executor,
+            signal_index(),
+            MonitorConfig {
+                journal_file: Some(path.clone()),
+                ..MonitorConfig::default()
+            },
+        )
+        .unwrap()
+    };
+
+    // First lifetime: the driven run fills the ring; the consumer's
+    // cursor rests at the run's max seq.
+    let old_max = serve(&driver, bind(), |_driver, client| {
+        client.advance(3).unwrap();
+        let history = client.history(&[PointId(10)], 0).unwrap();
+        assert_eq!(history[0].run, 1);
+        assert_eq!(
+            history[0]
+                .samples
+                .iter()
+                .map(|sample| sample.seq)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        history[0].samples.last().unwrap().seq
+    });
+
+    // The restart: the ring renumbers under the file's second lifetime.
+    serve(&driver, bind(), |_driver, client| {
+        client.advance(2).unwrap();
+        let history = client.history(&[PointId(10)], 0).unwrap();
+        assert_eq!(history[0].run, 2, "the new lifetime is marked");
+        assert_eq!(
+            history[0]
+                .samples
+                .iter()
+                .map(|sample| sample.seq)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        // The stale cursor's answer is not silently empty: the run mark
+        // names the new lifetime on the empty page, so the consumer
+        // resyncs instead of stalling behind seqs that can never pass.
+        let stale = client.history(&[PointId(10)], old_max).unwrap();
+        assert_eq!(stale[0].run, 2);
+        assert!(stale[0].samples.is_empty());
+
+        // The mark is the same numbering the journal's served
+        // `run_boundary` carries — one lifetime count across both
+        // streams.
+        assert!(
+            client
+                .journal(0)
+                .unwrap()
+                .iter()
+                .any(|entry| matches!(entry.event, JournalEvent::RunBoundary { run: 2 }))
+        );
+
+        // The recovered consumer: resync on the changed mark, then the
+        // cursor tracks the new domain normally.
+        let resynced = client.history(&[PointId(10)], 0).unwrap();
+        let new_cursor = resynced[0].samples.last().unwrap().seq;
+        client.advance(1).unwrap();
+        let next = client.history(&[PointId(10)], new_cursor).unwrap();
+        assert_eq!(next[0].run, 2);
+        assert_eq!(
+            next[0]
+                .samples
+                .iter()
+                .map(|sample| sample.seq)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+    });
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn journaled_transitions_evict_with_visible_seq_gaps() {
     let config = MonitorConfig {
