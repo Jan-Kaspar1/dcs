@@ -446,6 +446,7 @@ The checks' failures are named diagnostics:
 | Diagnostic | Meaning |
 |---|---|
 | `pin-unresolvable` | The pinned source does not resolve: an unfetchable ref/tag, or a revision whose crates satisfy no declared release requirement (e.g. `version = ">=99"`). |
+| `record-missing` | The substituted `DCS_RECORD_DIR` tree serves no `docs/releases/<tag>/` artifact the schema-drift leg compares against — only reachable when a record-tree substitution is in effect; the contract's own shape fetches the record through the pinned rev and reports `pin-unresolvable` instead. Reported by the reference plant's `ci/check.sh`. |
 | `surface-incompatible` | The release crates resolved but the consumer's use of the supported API fails to compile — an incompatible pin reaching compile time. |
 | `path-dependency-leak` | The consumer lockfile records a `path` source for a released crate — the no-path-dependency proof itself failed. |
 | `emit-nondeterministic` | Two emission runs produced different bytes. |

@@ -697,6 +697,7 @@ fn budgeted_map(point: u64, budget: u64) -> PointMap {
                 kind: ValueKind::Float,
                 internal: None,
                 writable: false,
+                requires_reason: false,
                 stale_after_ticks: Some(budget),
                 journaled: false,
             },

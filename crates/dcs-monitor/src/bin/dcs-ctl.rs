@@ -73,11 +73,14 @@
 //! source beside the page's `?operator=` parameter: `--actor <name>`
 //! on a write-side subcommand declares it for that invocation, and the
 //! `DCS_ACTOR` environment variable is the configured default the flag
-//! overrides. A declared actor rides the attributed envelope
-//! `POST /command` accepts onto the returned [`CommandReceipt`] and so
-//! into the journaled `CommandSettled` entry; an invocation declaring
-//! neither submits the bare [`Command`] body and journals
-//! unattributed, exactly as before. `promote`/`demote` are switch
+//! overrides, and `--reason <text>` declares the reason the attributed
+//! envelope carries beside it — the per-request justification a
+//! `requires_reason` point's declaration makes mandatory, voluntary
+//! metadata on any other writable point. A declared actor or reason
+//! rides the attributed envelope `POST /command` accepts onto the
+//! returned [`CommandReceipt`] and so into the journaled
+//! `CommandSettled` entry; an invocation declaring neither submits the
+//! bare [`Command`] body and journals unattributed, exactly as before. `promote`/`demote` are switch
 //! requests outside the `Command` path — the landed contract carries
 //! no actor on them, so they take no flag and journal their role
 //! change unattributed.
@@ -118,15 +121,15 @@ read commands:
                               retained samples of the selected points
 
 operator commands:
-  write <point> <value> [--actor <name>]
+  write <point> <value> [--actor <name>] [--reason <text>]
                               write <value> to a writable point
-  set-parameter <component> <name> <value> [--actor <name>]
+  set-parameter <component> <name> <value> [--actor <name>] [--reason <text>]
                               tune a component's declared parameter
-  force <point> <value> [--actor <name>]
+  force <point> <value> [--actor <name>] [--reason <text>]
                               pin a writable In point to <value>
-  unforce <point> [--actor <name>]
+  unforce <point> [--actor <name>] [--reason <text>]
                               release a forced point
-  invoke <component> <command> [<name>=<value>]... [--actor <name>]
+  invoke <component> <command> [<name>=<value>]... [--actor <name>] [--reason <text>]
                               invoke a component's declared command;
                               arguments parse per the served schema's
                               declared request kinds
@@ -138,8 +141,11 @@ operator commands:
 actor: --actor <name> declares the identity the command's receipt and
 journaled CommandSettled entry carry; DCS_ACTOR is the configured
 default the flag overrides, and an invocation declaring neither submits
-unattributed — never a rejection. promote/demote carry no actor: the
-switch-request contract has no field for one.
+unattributed — never a rejection. --reason <text> declares the reason
+the same record carries — required by a point declared requires_reason,
+advisory elsewhere — with no environment default: a reason belongs to
+one submission. promote/demote carry no actor: the switch-request
+contract has no field for one.
 
 values: <value> parses per the declared value kind — true|false for
 Bool, an integer for Int, a finite number for Float — declared by the
@@ -252,21 +258,25 @@ enum Action {
         point: PointId,
         text: String,
         actor: Option<String>,
+        reason: Option<String>,
     },
     SetParameter {
         component: String,
         name: String,
         text: String,
         actor: Option<String>,
+        reason: Option<String>,
     },
     Force {
         point: PointId,
         text: String,
         actor: Option<String>,
+        reason: Option<String>,
     },
     Unforce {
         point: PointId,
         actor: Option<String>,
+        reason: Option<String>,
     },
     Invoke {
         component: String,
@@ -275,6 +285,7 @@ enum Action {
         /// declared request kinds rule their parse at execution.
         arguments: Vec<(String, String)>,
         actor: Option<String>,
+        reason: Option<String>,
     },
     Promote,
     Demote,
@@ -326,57 +337,82 @@ fn parse(args: &[String]) -> Result<(&str, Action), String> {
         },
         ("history", rest) => parse_history(rest).map_err(usage)?,
         ("write", rest) => {
-            let (positional, actor) = command_args(rest).map_err(usage)?;
+            let CommandArgs {
+                positional,
+                actor,
+                reason,
+            } = command_args(rest).map_err(usage)?;
             match positional.as_slice() {
                 [point, value] => Action::Write {
                     point: parse_point(point).map_err(usage)?,
                     text: (*value).to_string(),
                     actor,
+                    reason,
                 },
                 _ => return Err(usage(format!("wrong arguments for {command:?}"))),
             }
         }
         ("set-parameter", rest) => {
-            let (positional, actor) = command_args(rest).map_err(usage)?;
+            let CommandArgs {
+                positional,
+                actor,
+                reason,
+            } = command_args(rest).map_err(usage)?;
             match positional.as_slice() {
                 [component, name, value] => Action::SetParameter {
                     component: (*component).to_string(),
                     name: (*name).to_string(),
                     text: (*value).to_string(),
                     actor,
+                    reason,
                 },
                 _ => return Err(usage(format!("wrong arguments for {command:?}"))),
             }
         }
         ("force", rest) => {
-            let (positional, actor) = command_args(rest).map_err(usage)?;
+            let CommandArgs {
+                positional,
+                actor,
+                reason,
+            } = command_args(rest).map_err(usage)?;
             match positional.as_slice() {
                 [point, value] => Action::Force {
                     point: parse_point(point).map_err(usage)?,
                     text: (*value).to_string(),
                     actor,
+                    reason,
                 },
                 _ => return Err(usage(format!("wrong arguments for {command:?}"))),
             }
         }
         ("unforce", rest) => {
-            let (positional, actor) = command_args(rest).map_err(usage)?;
+            let CommandArgs {
+                positional,
+                actor,
+                reason,
+            } = command_args(rest).map_err(usage)?;
             match positional.as_slice() {
                 [point] => Action::Unforce {
                     point: parse_point(point).map_err(usage)?,
                     actor,
+                    reason,
                 },
                 _ => return Err(usage(format!("wrong arguments for {command:?}"))),
             }
         }
         ("invoke", rest) => {
-            let (positional, actor) = command_args(rest).map_err(usage)?;
+            let CommandArgs {
+                positional,
+                actor,
+                reason,
+            } = command_args(rest).map_err(usage)?;
             match positional.as_slice() {
                 [component, command, arguments @ ..] => Action::Invoke {
                     component: (*component).to_string(),
                     command: (*command).to_string(),
                     arguments: parse_invoke_arguments(arguments).map_err(usage)?,
                     actor,
+                    reason,
                 },
                 _ => return Err(usage(format!("wrong arguments for {command:?}"))),
             }
@@ -434,14 +470,25 @@ fn parse_history(rest: &[String]) -> Result<Action, String> {
 }
 
 /// A write-side subcommand's argument list split into its positional
-/// arguments and the declared actor: `--actor <name>` anywhere in the
-/// list supplies it — the same flag convention `history` scans — and
-/// `DCS_ACTOR` is the configured default an absent flag leaves in
-/// place. A flag missing its name, a repeated `--actor`, or any other
-/// `--` flag is malformed usage.
-fn command_args(rest: &[String]) -> Result<(Vec<&str>, Option<String>), String> {
+/// arguments and the declared attribution: `--actor <name>` and
+/// `--reason <text>` anywhere in the list supply them — the same flag
+/// convention `history` scans — and `DCS_ACTOR` is the configured
+/// default an absent `--actor` leaves in place; a reason is per-request
+/// text, so it takes the flag alone with no environment default. A flag
+/// missing its value, a repeated flag, or any other `--` flag is
+/// malformed usage.
+struct CommandArgs<'a> {
+    positional: Vec<&'a str>,
+    actor: Option<String>,
+    reason: Option<String>,
+}
+
+/// Splits a write-side subcommand's argument list into its
+/// [`CommandArgs`].
+fn command_args(rest: &[String]) -> Result<CommandArgs<'_>, String> {
     let mut positional = Vec::new();
     let mut actor = None;
+    let mut reason = None;
     let mut args = rest.iter();
     while let Some(arg) = args.next() {
         if arg == "--actor" {
@@ -451,13 +498,24 @@ fn command_args(rest: &[String]) -> Result<(Vec<&str>, Option<String>), String> 
             if actor.replace(name.clone()).is_some() {
                 return Err("--actor takes a single name".to_string());
             }
+        } else if arg == "--reason" {
+            let text = args
+                .next()
+                .ok_or_else(|| "--reason expects a reason text".to_string())?;
+            if reason.replace(text.clone()).is_some() {
+                return Err("--reason takes a single reason text".to_string());
+            }
         } else if arg.starts_with("--") {
             return Err(format!("unknown flag {arg:?}"));
         } else {
             positional.push(arg.as_str());
         }
     }
-    Ok((positional, actor.or_else(configured_actor)))
+    Ok(CommandArgs {
+        positional,
+        actor: actor.or_else(configured_actor),
+        reason,
+    })
 }
 
 /// The `invoke` subcommand's trailing `<name>=<value>` pairs — split
@@ -577,7 +635,12 @@ fn execute(client: &MonitorClient, addr: SocketAddr, action: &Action) -> Result<
                 .map_err(|e| transport(addr, e))?,
             addr,
         ),
-        Action::Write { point, text, actor } => {
+        Action::Write {
+            point,
+            text,
+            actor,
+            reason,
+        } => {
             let declared = declared_point_kind(client, addr, *point)?;
             let value = parse_operand(declared, text).map_err(Failure::usage)?;
             command(
@@ -592,6 +655,7 @@ fn execute(client: &MonitorClient, addr: SocketAddr, action: &Action) -> Result<
                     value,
                 },
                 actor.as_deref(),
+                reason.as_deref(),
             )
         }
         Action::SetParameter {
@@ -599,6 +663,7 @@ fn execute(client: &MonitorClient, addr: SocketAddr, action: &Action) -> Result<
             name,
             text,
             actor,
+            reason,
         } => {
             let kind = declared_parameter_kind(client, addr, component, name)?;
             let value = parse_operand(kind, text).map_err(Failure::usage)?;
@@ -611,9 +676,15 @@ fn execute(client: &MonitorClient, addr: SocketAddr, action: &Action) -> Result<
                     value,
                 },
                 actor.as_deref(),
+                reason.as_deref(),
             )
         }
-        Action::Force { point, text, actor } => {
+        Action::Force {
+            point,
+            text,
+            actor,
+            reason,
+        } => {
             let declared = declared_point_kind(client, addr, *point)?;
             let value = parse_operand(declared, text).map_err(Failure::usage)?;
             command(
@@ -625,19 +696,26 @@ fn execute(client: &MonitorClient, addr: SocketAddr, action: &Action) -> Result<
                     value,
                 },
                 actor.as_deref(),
+                reason.as_deref(),
             )
         }
-        Action::Unforce { point, actor } => command(
+        Action::Unforce {
+            point,
+            actor,
+            reason,
+        } => command(
             client,
             addr,
             Command::UnforcePoint { point: *point },
             actor.as_deref(),
+            reason.as_deref(),
         ),
         Action::Invoke {
             component,
             command: name,
             arguments,
             actor,
+            reason,
         } => {
             let arguments = invoke_arguments(client, addr, component, name, arguments)?;
             command(
@@ -649,6 +727,7 @@ fn execute(client: &MonitorClient, addr: SocketAddr, action: &Action) -> Result<
                     arguments,
                 },
                 actor.as_deref(),
+                reason.as_deref(),
             )
         }
         Action::Promote => switchover(client, addr, "/promote", "promote"),
@@ -842,17 +921,19 @@ fn parse_literal(arg: &str) -> Result<Value, String> {
 /// answer — printed whether the command was accepted or rejected — and
 /// a rejection additionally fails the invocation, naming the
 /// [`CommandError`]. `actor` is the submitter's declared identity from
-/// `--actor`/`DCS_ACTOR`: `Some` sends the attributed envelope the
-/// receipt and journaled `CommandSettled` carry, `None` sends the bare
+/// `--actor`/`DCS_ACTOR` and `reason` the declared justification from
+/// `--reason`: either `Some` sends the attributed envelope the receipt
+/// and journaled `CommandSettled` carry, both `None` sends the bare
 /// `Command` body and journals unattributed.
 fn command(
     client: &MonitorClient,
     addr: SocketAddr,
     command: Command,
     actor: Option<&str>,
+    reason: Option<&str>,
 ) -> Result<String, Failure> {
     let receipt: CommandReceipt = client
-        .command_as(&command, actor)
+        .command_attributed(&command, actor, reason)
         .map_err(|e| transport(addr, e))?;
     let answer = print_json(&receipt, addr)?;
     match &receipt.outcome {

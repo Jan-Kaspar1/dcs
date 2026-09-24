@@ -128,6 +128,7 @@ fn entry(point: PointId, direction: Direction, kind: ValueKind, writable: bool) 
         description: None,
         group: None,
         writable,
+        requires_reason: false,
     }
 }
 
@@ -721,6 +722,7 @@ fn write_parses_per_the_declared_kind_and_reports_receipts() {
                     apply_tick: Tick(2)
                 },
                 actor: None,
+                reason: None,
             }
         );
         let receipt: CommandReceipt =
@@ -1062,6 +1064,7 @@ fn invoke_submits_declared_commands_and_prints_the_receipt() {
                     apply_tick: Tick(2)
                 },
                 actor: None,
+                reason: None,
             }
         );
 

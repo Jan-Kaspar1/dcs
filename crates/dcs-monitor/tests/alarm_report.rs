@@ -128,6 +128,7 @@ fn journaled_out() -> PointSpec {
         kind: ValueKind::Bool,
         internal: None,
         writable: false,
+        requires_reason: false,
         stale_after_ticks: None,
         journaled: true,
     }
@@ -292,6 +293,24 @@ fn write(client: &MonitorClient, point: PointId, value: bool) {
     assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
 }
 
+/// The managed request's receipted write carrying the declared actor
+/// and reason — the shelving-reason decision's record obligation on
+/// `shelve`/`oos` in both directions.
+fn managed_request(client: &MonitorClient, point: PointId, value: bool, reason: &str) {
+    let receipt = client
+        .command_attributed(
+            &Command::WriteValue {
+                point,
+                kind: ValueKind::Bool,
+                value: Value::Bool(value),
+            },
+            Some("op-1"),
+            Some(reason),
+        )
+        .unwrap();
+    assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+}
+
 /// One invocation of the tool — the pretty JSON report on success.
 fn report(addr: SocketAddr, journal: Option<&Path>, config: Option<&Path>) -> Output {
     let mut command = Process::new(REPORT);
@@ -377,7 +396,7 @@ fn the_scripted_run_yields_each_declared_metric_from_the_durable_record() {
     //
     // alarm3 stays tripped — the standing alarm the restart carries.
     serve(&driver, &journal_path, |client, _addr| {
-        write(client, SHELVE1, true);
+        managed_request(client, SHELVE1, true, "nuisance trips during pump work");
         client.advance(1).unwrap();
         driver.write(PV1, Value::Float(95.0)).unwrap();
         driver.write(PV2, Value::Float(95.0)).unwrap();
@@ -388,7 +407,7 @@ fn the_scripted_run_yields_each_declared_metric_from_the_durable_record() {
         write(client, ACK3, true);
         client.advance(1).unwrap();
         driver.write(PV1, Value::Float(50.0)).unwrap();
-        write(client, SHELVE1, false);
+        managed_request(client, SHELVE1, false, "maintenance complete");
         write(client, ACK1, false);
         write(client, ACK3, false);
         client.advance(1).unwrap();
@@ -407,11 +426,11 @@ fn the_scripted_run_yields_each_declared_metric_from_the_durable_record() {
         driver.write(PV2, Value::Float(95.0)).unwrap();
         client.advance(1).unwrap();
         driver.write(PV2, Value::Float(50.0)).unwrap();
-        write(client, OOS1_IN, true);
-        write(client, OOS2_IN, true);
+        managed_request(client, OOS1_IN, true, "impeller inspection");
+        managed_request(client, OOS2_IN, true, "contactor swap");
         write(client, ACK2, true);
         client.advance(1).unwrap();
-        write(client, OOS1_IN, false);
+        managed_request(client, OOS1_IN, false, "inspection complete");
         write(client, ACK2, false);
         client.advance(1).unwrap();
     });

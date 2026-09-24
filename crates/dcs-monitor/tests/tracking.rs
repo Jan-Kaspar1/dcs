@@ -236,6 +236,7 @@ fn stale_executor(driver: &'static StubDriver) -> Executor<'static> {
                 kind: ValueKind::Float,
                 internal: None,
                 writable: true,
+                requires_reason: false,
                 stale_after_ticks: Some(STALE_BUDGET),
                 journaled: false,
             },
