@@ -40,6 +40,11 @@
 //!   gate `input` and a `threshold`'s contact `output`, which are
 //!   `bool` (`ElementPointKind`, `ElementGateKind`,
 //!   `ElementContactKind`);
+//! - end direction: the point an element drives must be an `in` point
+//!   (`ElementOutputDirection`) — elements model field-side physics
+//!   answering commands, so driving an `out` point would rewrite the
+//!   command each step; the schema cannot see the served map's
+//!   directions;
 //! - a `threshold`'s `on`/`off` being distinct (`NonPositiveBand`) —
 //!   comparing two fields is beyond the vocabulary;
 //! - driven-point uniqueness across differing elements

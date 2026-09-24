@@ -58,6 +58,10 @@ const SELF_POINT_DYNAMICS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/invalid/dynamics_self_point.json"
 );
+const OUT_POINT_DYNAMICS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/invalid/dynamics_out_point.json"
+);
 const UNKNOWN_DEVICE_MODEL: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../dcs-assembly/fixtures/invalid/unknown_device_kind.json"
@@ -655,6 +659,65 @@ fn self_point_dynamics_are_refused_before_the_plant_serves() {
     let observer = RemoteDriver::connect(plant.addr).unwrap();
     assert!(observer.list_points().is_ok());
     assert!(observer.read(PointId(10)).is_ok());
+    assert!(stop(&mut plant).success());
+}
+
+#[test]
+fn elements_driving_out_points_are_refused_before_the_plant_serves() {
+    // QA finding dynamics-element-drives-controller-out-point: a
+    // threshold whose contact output named a pump's bool `out` command
+    // point passed the emitted schema and this preflight, then the
+    // served element rewrote the operator's command every step — a
+    // write of `true` to the command read back `false` after one step,
+    // the element and the writer fighting over the same point. The
+    // merge now refuses the class: an element drives an `in` point —
+    // field-side physics the controller reads — never the command
+    // point itself. The preflight names each offending element and the
+    // direction rule; the serving run exits before binding.
+    let output = run_fail(&[STATION_MODEL, "--check-dynamics", OUT_POINT_DYNAMICS]);
+    let message = stderr(&output);
+    for (index, point) in [(0, 20), (1, 21)] {
+        assert!(
+            message.contains(&format!("dynamics element {index} (driving point {point})")),
+            "{message}"
+        );
+    }
+    // The rejection names the direction rule, not just the point.
+    assert!(message.contains("in point"), "{message}");
+    assert!(message.contains("out"), "{message}");
+    assert!(!message.contains("listening on"), "{message}");
+
+    // The serving run reports the same merge rejection at startup
+    // instead of serving a plant whose elements stomp command points.
+    let output = run_fail(&[
+        STATION_MODEL,
+        "--dynamics",
+        OUT_POINT_DYNAMICS,
+        "--listen",
+        "127.0.0.1:0",
+    ]);
+    let message = stderr(&output);
+    assert!(
+        message.contains("dynamics element 0 (driving point 20)"),
+        "{message}"
+    );
+    assert!(!message.contains("listening on"), "{message}");
+
+    // The same model serving an honest document keeps command points
+    // operator-owned: a written command survives the step that used to
+    // overwrite it.
+    let mut plant = spawn(&[
+        STATION_MODEL,
+        "--dynamics",
+        STATION_DYNAMICS,
+        "--listen",
+        "127.0.0.1:0",
+    ]);
+    let driver = RemoteDriver::connect(plant.addr).unwrap();
+    driver.claim_writer(1).unwrap();
+    driver.write(PointId(20), Value::Bool(true)).unwrap();
+    driver.step(0.1).unwrap();
+    assert_eq!(driver.read(PointId(20)).unwrap().value, Value::Bool(true));
     assert!(stop(&mut plant).success());
 }
 

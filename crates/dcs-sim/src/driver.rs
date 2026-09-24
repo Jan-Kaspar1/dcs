@@ -3458,6 +3458,61 @@ mod tests {
     }
 
     #[test]
+    fn element_driving_an_out_point_is_rejected() {
+        // QA finding dynamics-element-drives-controller-out-point: a
+        // threshold whose contact output named a bool `Out` command
+        // point merged cleanly, then rewrote the operator's command
+        // every step — the wire showed the element's value, never the
+        // commanded one. Elements model field-side physics answering
+        // commands, so the point an element drives must be an `In`
+        // point; the merge now rejects the class.
+        let map = ChannelMap::new()
+            .with_point(float_point(10, Direction::In))
+            .with_point(binding(20, Direction::Out, Value::Bool(false)))
+            .with_element(ProcessElement::Threshold(Threshold {
+                input: PointId(10),
+                output: PointId(20),
+                on: 1.0,
+                off: 0.0,
+                initial: false,
+            }));
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementOutputDirection {
+                point: PointId(20),
+                direction: Direction::Out,
+            }
+        );
+        // The driver refuses the map outright — nothing serves to step.
+        assert!(SimDriver::new(map).is_err());
+
+        // A Float-output element on a Float `Out` point faces the same
+        // rule — the check is direction, not kind.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_point(float_point(2, Direction::Out))
+            .with_element(ProcessElement::Integrator(Integrator {
+                input: PointId(1),
+                output: PointId(2),
+                initial: 0.0,
+            }));
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementOutputDirection {
+                point: PointId(2),
+                direction: Direction::Out,
+            }
+        );
+
+        // Reading an `Out` point stays legal — the actuator-wire seam
+        // a `bool_flow` gate or a `scaled_flow` demand answers. The
+        // maps every other element test builds pin this: their command
+        // inputs are `Out` points.
+        assert!(bool_flow_map(-10.0, 0.5).validate().is_ok());
+        assert!(scaled_flow_map(0.5).validate().is_ok());
+    }
+
+    #[test]
     fn threshold_accessors_cover_the_variant() {
         let element = ProcessElement::Threshold(Threshold {
             input: PointId(1),
