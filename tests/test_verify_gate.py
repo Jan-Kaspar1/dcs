@@ -2,6 +2,7 @@
 import contextlib
 import io
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -76,6 +77,68 @@ class PhaseTimingTests(unittest.TestCase):
             verify.RUST_PHASES,
             frozenset(("rust-clippy", "rust-tests", "rust-proofs")),
         )
+
+
+class CiWorkflowGateTests(unittest.TestCase):
+    """ci.yml must carry every verify phase as a job, keep the required
+    set on the fast legs, and run the assembly gate on PRs, main, and
+    release tags with the history its proofs resolve against."""
+
+    WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = cls.WORKFLOW.read_text()
+
+    def job_names(self):
+        body = self.text.split("\njobs:\n", 1)[1]
+        return re.findall(r"^  ([a-z0-9-]+):$", body, re.M)
+
+    def job_body(self, name):
+        match = re.search(
+            rf"^  {re.escape(name)}:\n(.*?)(?=^  [a-z0-9-]+:$|\Z)",
+            self.text, re.M | re.S)
+        self.assertIsNotNone(match, f"no workflow job named {name}")
+        return match.group(1)
+
+    def test_every_verify_phase_is_a_workflow_job(self):
+        jobs = self.job_names()
+        for phase in verify.PHASES:
+            self.assertIn(phase, jobs)
+
+    def test_each_job_runs_its_named_verify_phase(self):
+        for name in self.job_names():
+            self.assertIn(f"verify.py --phase {name}", self.job_body(name))
+
+    def test_required_checks_are_the_fast_legs_and_proofs_are_separate(self):
+        from agent_pool.config import DEFAULT_CHECKS
+
+        for check in DEFAULT_CHECKS:
+            self.assertIn(check, verify.PHASES)
+        self.assertNotIn("rust-proofs", DEFAULT_CHECKS)
+        self.assertIn("rust-proofs", self.job_names())
+
+    def test_assembly_gate_triggers_cover_pr_main_and_release_tags(self):
+        match = re.search(r"^on:\n((?: {2}[^\n]*\n)+)", self.text, re.M)
+        self.assertIsNotNone(match)
+        triggers = match.group(1)
+        self.assertIn("pull_request:", triggers)
+        self.assertIn("branches: [main]", triggers)
+        self.assertIn('"v*"', triggers)
+        self.assertIn("workflow_dispatch:", triggers)
+
+    def test_proofs_job_checks_out_full_history_and_reports_metrics(self):
+        # The repin proofs resolve the recorded release rev out of git
+        # history; a shallow checkout would silently degrade them.
+        body = self.job_body("rust-proofs")
+        self.assertIn("verify.py --phase rust-proofs", body)
+        self.assertIn("fetch-depth: 0", body)
+
+    def test_cached_rust_jobs_report_feedback_metrics(self):
+        for name in ("rust-clippy", "rust-tests", "rust-proofs"):
+            body = self.job_body(name)
+            self.assertIn("Report feedback metrics", body)
+            self.assertIn("cache-hit", body)
 
 
 class BuildSlotTests(unittest.TestCase):
