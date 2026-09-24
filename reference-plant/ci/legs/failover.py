@@ -6,7 +6,7 @@ standby self-promoting at its declared miss budget, claiming the
 field writer, and continuing the run with no operator request
 (WW-ENG-003, WW-LCM-001).
 
-The pair leg (`ci/pair.py`) proves the receipted demote/promote
+The pair leg (`ci/legs/pair.py`) proves the receipted demote/promote
 switch under the manifest's wiring; the `deploy` stage proves the
 manifest's `failover_budget` declaration and the rig definition's
 `--auto-promote` flag agree. This leg runs the armed pair — the rig
@@ -101,10 +101,47 @@ import os
 import re
 import sys
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
+
 import managed_lifecycle
 import pair
 import simulate
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored cases: legs expecting the standby promoted before
+# the declared budget, the station still controlling on the bad
+# primary, or a nonzero fallback demand must surface the named
+# diagnostic — never a silently unexercised contract.
+LEG = {
+    "order": 140,
+    "title": "the failover leg",
+    "passes": "failover-leg",
+    "tampers": [
+        {
+            "name": "early-promotion",
+            "passed": "a doctored early-promotion expectation passed the failover leg",
+            "missed": "the early-promotion case did not report its named diagnostic",
+            "evidence": ["expected the standby active at miss"],
+        },
+        {
+            "name": "controls-on-bad",
+            "passed": "a doctored controls-on-bad expectation passed the failover leg",
+            "missed": "the controls-on-bad case did not report its named diagnostic",
+            "evidence": ["expected the station still controlling on the bad primary"],
+        },
+        {
+            "name": "nonzero-fallback",
+            "passed": "a doctored nonzero-fallback expectation passed the failover leg",
+            "missed": "the nonzero-fallback case did not report its named diagnostic",
+            "evidence": ["expected the fallback demand nonzero"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)

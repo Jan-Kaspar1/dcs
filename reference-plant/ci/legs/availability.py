@@ -4,7 +4,7 @@ consumer-side proof that the per-command verdicts `GET /resources`
 serves on the deployed redundant pair agree with what the receipted
 path settles (WW-ENG-003, WW-FND-003).
 
-The pair leg (`ci/pair.py`) proves the manifest-declared pair runs and
+The pair leg (`ci/legs/pair.py`) proves the manifest-declared pair runs and
 switches; the surface stage proves the served registry and its live
 verdicts on a lone driven controller. This leg exercises the verdicts
 the pair's monitors actually serve — a read model reporting a command
@@ -80,11 +80,44 @@ proves its identical-verdicts assertion fires.
 import argparse
 import hashlib
 import json
+import os
 import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
 
 import pair
 import simulate
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored cases: a served-available command settling a
+# refusal — the available probe submitted to the tracking
+# standby's role gate — and a standby reporting different
+# verdicts must each surface the named diagnostic rather than
+# pass silently.
+LEG = {
+    "order": 130,
+    "title": "the command-availability leg",
+    "passes": "availability-leg",
+    "tampers": [
+        {
+            "name": "refused-available",
+            "passed": "a refused-available passed the availability leg",
+            "missed": "the refused-available case did not report its named diagnostic",
+            "evidence": ["expected an accepted receipt"],
+        },
+        {
+            "name": "diverged-standby",
+            "passed": "a diverged-standby passed the availability leg",
+            "missed": "the diverged-standby case did not report its named diagnostic",
+            "evidence": ["availability diverged across the pair"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)

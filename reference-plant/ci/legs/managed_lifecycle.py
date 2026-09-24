@@ -4,7 +4,7 @@ model's declared managed surface exercised end to end on the deployed
 consumer pair.
 
 ci/check.sh runs this script twice against the same declared
-deployment as ci/pair.py — `dcs-plant-server` serving the emitted
+deployment as ci/legs/pair.py — `dcs-plant-server` serving the emitted
 model and dynamics, plus the two manifest-declared `dcs-controller
 --driven --remote` peers, the standby wired at the field owner's
 monitor. With the pair converged and tracking, the leg drives the
@@ -73,9 +73,41 @@ import json
 import os
 import sys
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
+
 import pair
 import simulate
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored cases: a leg asserting the never-shelvable shelve
+# write settled applied — shelving landing where the model
+# declares none — and a leg asserting the shelved flag still
+# stands after the declared bound's auto-release must each
+# surface the named diagnostic rather than passing silently.
+LEG = {
+    "order": 210,
+    "title": "the managed-alarm lifecycle leg",
+    "passes": "managed-lifecycle",
+    "tampers": [
+        {
+            "name": "expect-applied",
+            "passed": "a expect-applied case passed the managed-lifecycle leg",
+            "missed": "the expect-applied case did not report its named diagnostic",
+            "evidence": ["expected an applied receipt"],
+        },
+        {
+            "name": "expect-standing",
+            "passed": "a expect-standing case passed the managed-lifecycle leg",
+            "missed": "the expect-standing case did not report its named diagnostic",
+            "evidence": ["still standing"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)

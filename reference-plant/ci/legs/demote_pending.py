@@ -5,7 +5,7 @@ field owner and demoted past inside its pending window settles
 exactly once on the deployed redundant pair (WW-ENG-003, WW-LCM-001 —
 the settled demote-pending contract).
 
-The pair leg (`ci/pair.py`) proves the declared pair switches
+The pair leg (`ci/legs/pair.py`) proves the declared pair switches
 bumplessly; the refusal leg proves admission-time refusals; the
 command-switch leg carries an `Accepted` invoke through the restore
 promotion. None of them audit the pending window itself on the
@@ -75,11 +75,43 @@ import json
 import os
 import sys
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
+
 import force_carryover
 import pair
 import simulate
 import takeover
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored cases: a leg expecting the phantom applied settle
+# the fenced image must never journal, and one expecting the
+# pending entry vanished from every receipt surface and journal
+# — the unaudited-drop shape — must each surface the named
+# diagnostic rather than passing silently.
+LEG = {
+    "order": 190,
+    "title": "the demote-pending leg",
+    "passes": "demote-pending",
+    "tampers": [
+        {
+            "name": "phantom-applied",
+            "passed": "a phantom-applied case passed the demote-pending leg",
+            "missed": "the phantom-applied case did not report its named diagnostic",
+            "evidence": ["phantom applied settle"],
+        },
+        {
+            "name": "unaudited-drop",
+            "passed": "a unaudited-drop case passed the demote-pending leg",
+            "missed": "the unaudited-drop case did not report its named diagnostic",
+            "evidence": ["unaudited drop"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)

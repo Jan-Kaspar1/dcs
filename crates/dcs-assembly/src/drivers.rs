@@ -1884,19 +1884,30 @@ impl IoDriver for FanoutDriver {
 
 /// The fan-out's cyclic surface: each backend owns its process image, so
 /// the aggregate `exchange` calls every cyclic backend's exchange in
-/// turn — one call publishing and latching each bus's image. The first
-/// failing backend ends the call with its error, matching the fan-out's
-/// per-point dispatch semantics: an aggregate is only as strong as its
-/// parts, and a bus the call never reached simply holds its image for
-/// the next scan's exchange.
+/// backend order — one call publishing and latching each bus's image.
+///
+/// Every cyclic backend gets its attempt each scan (#547): the iteration
+/// is bounded and never returns early, so a failure on one bus cannot
+/// skip another's exchange — each backend's exchange counters, miss
+/// streak, and `last_error` record its own boundary outcome, and its
+/// declared `exchange_miss_threshold` escalation tracks its own link.
+/// A scan in which any exchange failed returns the first failing
+/// backend's error in backend order — the single-failure shape the
+/// boundary's [`IoError`] carries; every failed bus's own diagnostics
+/// still name it through the aggregate
+/// [`diagnostics`](IoDriver::diagnostics) merge, which prefixes each
+/// reporting backend's `last_error` with its device.
 impl CyclicIoDriver for FanoutDriver {
     fn exchange(&self, tick: Tick) -> Result<(), IoError> {
+        let mut failure = None;
         for backend in &self.backends {
-            if let Some(cyclic) = backend.io.cyclic() {
-                cyclic.exchange(tick)?;
+            if let Some(cyclic) = backend.io.cyclic()
+                && let Err(error) = cyclic.exchange(tick)
+            {
+                failure.get_or_insert(error);
             }
         }
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
 }
 
@@ -1922,37 +1933,73 @@ mod tests {
 
     /// A cyclic backend stub: `exchange` is the only transport call,
     /// counted and ticked; while `fail` stands every exchange misses.
+    /// The stub keeps the contract's per-bus bookkeeping — a miss
+    /// streak escalating `read` at `miss_threshold`, and the boundary
+    /// failure's record in `last_error` — so tests can assert each
+    /// backend's diagnostics reflect its own outcome.
     struct CyclicBackend {
+        /// The point the bus attributes its boundary errors to.
+        point: PointId,
+        miss_threshold: u64,
         attempted: AtomicU64,
         succeeded: AtomicU64,
+        misses: AtomicU64,
         last_tick: Mutex<Option<Tick>>,
+        last_error: Mutex<Option<String>>,
         fail: AtomicBool,
     }
 
     impl CyclicBackend {
-        fn new() -> Self {
+        fn new(point: PointId, miss_threshold: u64) -> Self {
             Self {
+                point,
+                miss_threshold,
                 attempted: AtomicU64::new(0),
                 succeeded: AtomicU64::new(0),
+                misses: AtomicU64::new(0),
                 last_tick: Mutex::new(None),
+                last_error: Mutex::new(None),
                 fail: AtomicBool::new(false),
             }
         }
     }
 
     impl IoDriver for CyclicBackend {
+        /// The held image serves while the miss streak stays under the
+        /// threshold, then escalates — the contract's per-bus
+        /// `exchange_miss_threshold` rule.
         fn read(&self, point: PointId) -> Result<Sample, IoError> {
-            Err(IoError::Disconnected(point))
+            if point != self.point {
+                return Err(IoError::UnknownPoint(point));
+            }
+            if self.misses.load(Ordering::Relaxed) >= self.miss_threshold {
+                return Err(IoError::Disconnected(point));
+            }
+            Ok(Sample::good(
+                Value::Float(0.0),
+                self.last_tick.lock().unwrap().unwrap_or(Tick::ZERO),
+            ))
         }
 
+        /// Staging is local and never escalates.
         fn write(&self, point: PointId, _value: Value) -> Result<(), IoError> {
-            Err(IoError::Disconnected(point))
+            if point != self.point {
+                return Err(IoError::UnknownPoint(point));
+            }
+            Ok(())
         }
 
+        /// The per-bus diagnostics surface: the link reports any
+        /// standing miss, `last_error` the most recent boundary
+        /// failure.
         fn diagnostics(&self) -> Option<DriverDiagnostics> {
             Some(DriverDiagnostics {
-                link: LinkState::Connected,
-                last_error: None,
+                link: if self.misses.load(Ordering::Relaxed) > 0 {
+                    LinkState::Disconnected
+                } else {
+                    LinkState::Connected
+                },
+                last_error: self.last_error.lock().unwrap().clone(),
                 exchange: Some(ExchangeDiagnostics {
                     attempted: self.attempted.load(Ordering::Relaxed),
                     succeeded: self.succeeded.load(Ordering::Relaxed),
@@ -1972,8 +2019,12 @@ mod tests {
         fn exchange(&self, tick: Tick) -> Result<(), IoError> {
             self.attempted.fetch_add(1, Ordering::Relaxed);
             if self.fail.load(Ordering::Relaxed) {
-                return Err(IoError::Disconnected(PointId(0)));
+                self.misses.fetch_add(1, Ordering::Relaxed);
+                let error = IoError::Disconnected(self.point);
+                *self.last_error.lock().unwrap() = Some(error.to_string());
+                return Err(error);
             }
+            self.misses.store(0, Ordering::Relaxed);
             self.succeeded.fetch_add(1, Ordering::Relaxed);
             *self.last_tick.lock().unwrap() = Some(tick);
             Ok(())
@@ -2010,8 +2061,8 @@ mod tests {
         // A fan-out with cyclic backends answers `Some`, and one
         // `exchange` turns each cyclic backend's image in order —
         // the point-wise backend has no exchange to run.
-        let bus_a = Arc::new(CyclicBackend::new());
-        let bus_b = Arc::new(CyclicBackend::new());
+        let bus_a = Arc::new(CyclicBackend::new(PointId(31), 2));
+        let bus_b = Arc::new(CyclicBackend::new(PointId(33), 2));
         let fanout = FanoutDriver {
             backends: vec![
                 backend(1, bus_a.clone()),
@@ -2027,15 +2078,18 @@ mod tests {
         assert_eq!(bus_a.attempted.load(Ordering::Relaxed), 1);
         assert_eq!(bus_b.attempted.load(Ordering::Relaxed), 1);
 
-        // A failing backend's error propagates and ends the call —
-        // bus_b, later in order, never saw this exchange.
+        // A failing backend's error propagates — the scan's reported
+        // failure is the first failing bus's own — but the exchange
+        // still reaches bus_b that scan: a failure on one bus never
+        // skips another's exchange (#547).
         bus_a.fail.store(true, Ordering::Relaxed);
         assert_eq!(
             cyclic.exchange(Tick(8)),
-            Err(IoError::Disconnected(PointId(0)))
+            Err(IoError::Disconnected(PointId(31)))
         );
         assert_eq!(bus_a.attempted.load(Ordering::Relaxed), 2);
-        assert_eq!(bus_b.attempted.load(Ordering::Relaxed), 1);
+        assert_eq!(bus_b.attempted.load(Ordering::Relaxed), 2);
+        assert_eq!(bus_b.succeeded.load(Ordering::Relaxed), 2);
 
         // The aggregate diagnostics merge each reporting backend's
         // exchange section: counters sum, the freshest exchange every
@@ -2044,12 +2098,120 @@ mod tests {
         assert_eq!(
             diagnostics.exchange,
             Some(ExchangeDiagnostics {
-                attempted: 3,
-                succeeded: 2,
+                attempted: 4,
+                succeeded: 3,
                 working_counter_mismatches: 0,
                 last_exchange_tick: Some(Tick(7)),
                 missed_deadlines: 0,
             })
         );
+    }
+
+    #[test]
+    fn a_failed_cyclic_exchange_skips_no_later_backend() {
+        // #547's shape: two cyclic backends, the first's exchange
+        // fails — the second must still get its attempt that scan,
+        // each backend's counters and miss streak recording its own
+        // boundary outcome.
+        let bus_a = Arc::new(CyclicBackend::new(PointId(31), 2));
+        let bus_b = Arc::new(CyclicBackend::new(PointId(32), 2));
+        let fanout = FanoutDriver {
+            backends: vec![backend(1, bus_a.clone()), backend(2, bus_b.clone())],
+            points: HashMap::from([(PointId(31), 0), (PointId(32), 1)]),
+            routes: Vec::new(),
+            sim: None,
+        };
+        let cyclic = fanout.cyclic().unwrap();
+
+        bus_a.fail.store(true, Ordering::Relaxed);
+        assert_eq!(
+            cyclic.exchange(Tick(1)),
+            Err(IoError::Disconnected(PointId(31))),
+            "the reported failure is the first failing bus's own error"
+        );
+        // bus_b still exchanged — its counters show its own completed
+        // boundary, not a skip.
+        assert_eq!(bus_b.attempted.load(Ordering::Relaxed), 1);
+        assert_eq!(bus_b.succeeded.load(Ordering::Relaxed), 1);
+        assert_eq!(*bus_b.last_tick.lock().unwrap(), Some(Tick(1)));
+        // bus_a's counters and miss streak show its own failure.
+        assert_eq!(bus_a.attempted.load(Ordering::Relaxed), 1);
+        assert_eq!(bus_a.succeeded.load(Ordering::Relaxed), 0);
+        assert_eq!(bus_a.misses.load(Ordering::Relaxed), 1);
+
+        // The aggregate diagnostics name the failing bus by device;
+        // the still-healthy bus contributes no error.
+        let diagnostics = fanout.diagnostics().unwrap();
+        assert_eq!(diagnostics.link, LinkState::Disconnected);
+        let last_error = diagnostics.last_error.unwrap();
+        assert!(last_error.contains("device 1"), "{last_error}");
+        assert!(!last_error.contains("device 2"), "{last_error}");
+
+        // Miss-threshold escalation tracks each bus independently:
+        // bus_a's second consecutive miss reaches its declared
+        // threshold and its reads escalate, while bus_b — still
+        // exchanging every scan — keeps serving.
+        assert_eq!(
+            cyclic.exchange(Tick(2)),
+            Err(IoError::Disconnected(PointId(31)))
+        );
+        assert_eq!(
+            fanout.read(PointId(31)),
+            Err(IoError::Disconnected(PointId(31)))
+        );
+        assert!(fanout.read(PointId(32)).is_ok());
+        assert_eq!(bus_b.succeeded.load(Ordering::Relaxed), 2);
+
+        // bus_a's recovery is its own too: its next completed exchange
+        // resets its miss streak while bus_b never missed.
+        bus_a.fail.store(false, Ordering::Relaxed);
+        cyclic.exchange(Tick(3)).unwrap();
+        assert_eq!(bus_a.misses.load(Ordering::Relaxed), 0);
+        assert!(fanout.read(PointId(31)).is_ok());
+    }
+
+    #[test]
+    fn a_later_cyclic_failure_still_reports_its_own_bus() {
+        // The reverse-order case: the failing backend sits behind a
+        // healthy one — the earlier bus's exchange is untouched and
+        // the reported error names the bus that actually failed.
+        let bus_a = Arc::new(CyclicBackend::new(PointId(31), 2));
+        let bus_b = Arc::new(CyclicBackend::new(PointId(32), 2));
+        let fanout = FanoutDriver {
+            backends: vec![backend(1, bus_a.clone()), backend(2, bus_b.clone())],
+            points: HashMap::from([(PointId(31), 0), (PointId(32), 1)]),
+            routes: Vec::new(),
+            sim: None,
+        };
+        let cyclic = fanout.cyclic().unwrap();
+
+        bus_b.fail.store(true, Ordering::Relaxed);
+        assert_eq!(
+            cyclic.exchange(Tick(1)),
+            Err(IoError::Disconnected(PointId(32)))
+        );
+        // bus_a's own boundary completed and shows it.
+        assert_eq!(bus_a.attempted.load(Ordering::Relaxed), 1);
+        assert_eq!(bus_a.succeeded.load(Ordering::Relaxed), 1);
+        assert_eq!(*bus_a.last_tick.lock().unwrap(), Some(Tick(1)));
+        assert_eq!(bus_a.misses.load(Ordering::Relaxed), 0);
+        // bus_b's own boundary failed and shows it.
+        assert_eq!(bus_b.attempted.load(Ordering::Relaxed), 1);
+        assert_eq!(bus_b.succeeded.load(Ordering::Relaxed), 0);
+        assert_eq!(bus_b.misses.load(Ordering::Relaxed), 1);
+
+        // Both buses failing in one scan still visits each: the
+        // reported error is the first failing bus's in backend order —
+        // the documented single-failure shape — while every failed bus
+        // names itself in the merged diagnostics.
+        bus_a.fail.store(true, Ordering::Relaxed);
+        assert_eq!(
+            cyclic.exchange(Tick(2)),
+            Err(IoError::Disconnected(PointId(31)))
+        );
+        assert_eq!(bus_b.attempted.load(Ordering::Relaxed), 2);
+        let last_error = fanout.diagnostics().unwrap().last_error.unwrap();
+        assert!(last_error.contains("device 1"), "{last_error}");
+        assert!(last_error.contains("device 2"), "{last_error}");
     }
 }

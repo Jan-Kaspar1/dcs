@@ -5,7 +5,7 @@ the consumer-side proof that the declared pair's spawned
 a third attachment while a pair peer owns the field (WW-ENG-003,
 WW-OPS-003).
 
-The pair leg (`ci/pair.py`) proves convergence, the receipted switch,
+The pair leg (`ci/legs/pair.py`) proves convergence, the receipted switch,
 and the declared persistence — but no pair-stage leg attaches a third
 plant-protocol client to the consumer plant, so the claim surface the
 redundancy contract stands on went unexercised here. This leg mirrors
@@ -79,8 +79,13 @@ each must fail the pass naming the evidence it saw.
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
+
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "legs")
+)
 
 import failover
 import force_carryover

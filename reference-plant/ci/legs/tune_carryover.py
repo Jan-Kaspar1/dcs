@@ -4,7 +4,7 @@ proof that a customer's receipted parameter tuning survives a promotion
 on the deployed redundant pair (WW-ENG-003, WW-LCM-001's
 runtime-tuning-continuity clause).
 
-The pair leg (`ci/pair.py`) proves the declared pair runs and switches
+The pair leg (`ci/legs/pair.py`) proves the declared pair runs and switches
 bumplessly; the force-carryover leg proves the continuity clause for
 forcing. This leg proves it for parameter tuning — the clause the
 lane's parameter-tune-carryover scenario evidences on the platform rig,
@@ -67,12 +67,38 @@ parameter's original value — a genuine carryover must fail it.
 import argparse
 import hashlib
 import json
+import os
 import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
 
 import pair
 import simulate
 import takeover
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored case: a leg asserting the parameter's original
+# value after the tune must surface the named diagnostic — the
+# tuned value rides the checkpoint, never a silently reverted
+# pass.
+LEG = {
+    "order": 80,
+    "title": "the tune-carryover leg",
+    "passes": "tune-carryover",
+    "tampers": [
+        {
+            "name": "expect-original",
+            "passed": "a doctored original-value expectation passed the carryover leg",
+            "missed": "the expect-original case did not report its named diagnostic",
+            "evidence": ["expected the original value"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)

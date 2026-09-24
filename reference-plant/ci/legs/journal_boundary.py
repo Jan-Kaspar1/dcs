@@ -5,7 +5,7 @@ attribution survives ordinary event volume: the rig-side
 journal-flood finding's (#623, landed fix) mirror on the
 customer-owned pair (WW-ENG-003, WW-LCM-001).
 
-The restart legs (`ci/restart.py`, `ci/standby_restart.py`) prove a
+The restart legs (`ci/restart.py`, `ci/legs/standby_restart.py`) prove a
 run-boundary marker lands in the durable journal across a restart;
 this leg proves the marker still reaches a `GET /journal` consumer
 after the served tail's bound evicts everything around it. The rig
@@ -61,12 +61,37 @@ silently.
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
 
 import pair
 import simulate
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored case: a leg whose served tail loses every
+# run_boundary while the durable file retains them must surface
+# the named diagnostic — never a silently unattributed pass.
+LEG = {
+    "order": 250,
+    "title": "the journal-boundary flood leg",
+    "passes": "journal-boundary",
+    "tampers": [
+        {
+            "name": "dropped-boundaries",
+            "passed": "a dropped-boundaries case passed the journal-boundary leg",
+            "missed": "the dropped-boundaries case did not report journal-boundary-failed",
+            "evidence": ["journal-boundary-failed"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)

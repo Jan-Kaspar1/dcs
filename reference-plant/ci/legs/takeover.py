@@ -4,7 +4,7 @@ consumer-side proof that the emitted model's declared per-pump mode
 contract holds on the deployed redundant pair (WW-ENG-003,
 WW-OPS-001, WW-CTL-002).
 
-The pair leg (`ci/pair.py`) proves the manifest-declared pair runs and
+The pair leg (`ci/legs/pair.py`) proves the manifest-declared pair runs and
 switches; the refusal leg proves its role-gated refusals. This leg
 exercises the operator seam those deployments exist for: a customer's
 operator taking one pump to manual through the receipted command path
@@ -71,11 +71,36 @@ assertion fires rather than passing an unexercised contract.
 import argparse
 import hashlib
 import json
+import os
 import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
 
 import pair
 import simulate
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored case: a leg asserting the delivered command still
+# follows the group while mode stands manual must surface the
+# named diagnostic — never a silently unexercised pass.
+LEG = {
+    "order": 60,
+    "title": "the manual-takeover leg",
+    "passes": "takeover-leg",
+    "tampers": [
+        {
+            "name": "follows-group",
+            "passed": "a doctored follows-group expectation passed the takeover leg",
+            "missed": "the follows-group case did not report its named diagnostic",
+            "evidence": ["did not follow the group"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)

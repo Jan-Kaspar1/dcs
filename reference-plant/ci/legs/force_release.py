@@ -6,8 +6,8 @@ clears, the point's live value resumes, and both transitions journal
 through the settled receipts (WW-ENG-003, WW-OPS-003 — decision 21's
 release half).
 
-The pair leg (`ci/pair.py`) proves the declared pair runs and
-switches; the carryover leg (`ci/force_carryover.py`) proves a
+The pair leg (`ci/legs/pair.py`) proves the declared pair runs and
+switches; the carryover leg (`ci/legs/force_carryover.py`) proves a
 standing force rides the promotion's adopted state. This leg proves
 the release half the carry leaves unproven: an `unforce_point` that
 cleared the badge while the substituted value kept driving control, or
@@ -77,11 +77,43 @@ import json
 import os
 import sys
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
+
 import force_carryover
 import pair
 import simulate
 import takeover
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored cases: a release expectation left standing — the
+# substitution asserted still badged after the unforce — and a
+# record settling the release without its journaled transition
+# must each surface the named diagnostic rather than pass
+# silently.
+LEG = {
+    "order": 90,
+    "title": "the force-release leg",
+    "passes": "force-release",
+    "tampers": [
+        {
+            "name": "expect-standing",
+            "passed": "a expect-standing passed the release leg",
+            "missed": "the expect-standing case did not report its named diagnostic",
+            "evidence": ["expected the substitution still standing"],
+        },
+        {
+            "name": "unjournaled-release",
+            "passed": "a unjournaled-release passed the release leg",
+            "missed": "the unjournaled-release case did not report its named diagnostic",
+            "evidence": ["missing or out of order"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)

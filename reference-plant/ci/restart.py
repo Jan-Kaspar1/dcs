@@ -53,8 +53,13 @@ import shutil
 import sys
 import tempfile
 
-import pair
 import simulate
+
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "legs")
+)
+
+import pair
 
 
 def eprint(*args):

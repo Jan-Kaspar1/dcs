@@ -5,8 +5,8 @@ local startup inputs before taking the plant's preemptive write
 claim, so a doomed startup can never strand a persistent claim
 fencing the healthy incumbent (WW-ENG-003, WW-LCM-001).
 
-The pair leg (`ci/pair.py`) proves the declared pair converges and
-switches, and the negotiation leg (`ci/negotiation.py`) proves a
+The pair leg (`ci/legs/pair.py`) proves the declared pair converges and
+switches, and the negotiation leg (`ci/legs/negotiation.py`) proves a
 misconfigured third peer degrades honestly. This leg proves the
 remaining third-controller case — the misdeployment a customer's own
 operations produce: a released controller launched against the same
@@ -65,11 +65,35 @@ import json
 import os
 import sys
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
+
 import failover
 import negotiation
 import pair
 import simulate
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored case: a dead foreign claim stranded over the
+# incumbent — the pre-fix defect's observable shape — must
+# surface the named diagnostic rather than pass.
+LEG = {
+    "order": 30,
+    "title": "the startup-claim ordering leg",
+    "passes": "startup-claim",
+    "tampers": [
+        {
+            "name": "stranded-claim",
+            "passed": "a stranded foreign claim passed the startup-claim leg",
+            "missed": "the stranded-claim case did not report its named diagnostic",
+            "evidence": ["disturbed the incumbent"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)
