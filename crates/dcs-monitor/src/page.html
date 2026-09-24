@@ -3328,10 +3328,21 @@ async function refreshJournal(base) {
   // oldest retained lifetime, so the attribution walk starts over and
   // the served run_boundary markers re-mark it as the fold proceeds.
   if (journalSince === 0) journalRun = 0;
-  // The journal stream's served form of the same gap.
+  // The journal stream's served form of the same gap — checked at the
+  // head against the standing cursor and between each consecutive
+  // served pair. The store pins an evicted run_boundary ahead of the
+  // ring's retained tail, so one answer can read [boundary@low-seq,
+  // ring@high-seq]: an evicted stretch wholly inside the response that
+  // the head comparison alone never names, at any cursor — the whole
+  // re-read's 0 included.
   if (journalSince > 0 && entries.length > 0 &&
       entries[0].seq > journalSince + 1) {
     noteFeedGap("journal", journalSince + 1, entries[0].seq - 1);
+  }
+  for (let i = 1; i < entries.length; i++) {
+    if (entries[i].seq > entries[i - 1].seq + 1) {
+      noteFeedGap("journal", entries[i - 1].seq + 1, entries[i].seq - 1);
+    }
   }
   for (const entry of entries) {
     journalSince = Math.max(journalSince, entry.seq);
