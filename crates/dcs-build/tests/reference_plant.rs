@@ -293,27 +293,35 @@ fn git(dir: &Path, args: &[&str]) {
 /// Ensures the checkout's object store contains `rev`. CI checkouts
 /// are shallow (`actions/checkout` fetches at depth 1), so the
 /// recorded release commit may be absent; fetch it from `origin` — the
-/// published origin itself — when the store lacks it.
+/// published origin itself — when the store lacks it. The nested-proof
+/// tasks run as parallel cargo invocations sharing this object store,
+/// so a fetch can lose the repository's shallow/FETCH_HEAD locks to a
+/// sibling mid-fetch: recheck and retry — the winner's fetch leaves
+/// the object for every waiter, and only a rev no remote serves across
+/// the whole window is `pin-unresolvable`.
 fn ensure_commit(rev: &str) {
     static FETCH_LOCK: Mutex<()> = Mutex::new(());
     let _guard = FETCH_LOCK.lock().unwrap();
-    let present = Command::new("git")
-        .args(["cat-file", "-e", &format!("{rev}^{{commit}}")])
-        .current_dir(root())
-        .output()
-        .expect("git cat-file runs");
-    if present.status.success() {
-        return;
-    }
-    for remote in ["origin", PUBLISHED_REMOTE] {
-        let fetch = Command::new("git")
-            .args(["fetch", "--depth", "1", remote, rev])
+    for _ in 0..10 {
+        let present = Command::new("git")
+            .args(["cat-file", "-e", &format!("{rev}^{{commit}}")])
             .current_dir(root())
             .output()
-            .expect("git fetch runs");
-        if fetch.status.success() {
+            .expect("git cat-file runs");
+        if present.status.success() {
             return;
         }
+        for remote in ["origin", PUBLISHED_REMOTE] {
+            let fetch = Command::new("git")
+                .args(["fetch", "--depth", "1", remote, rev])
+                .current_dir(root())
+                .output()
+                .expect("git fetch runs");
+            if fetch.status.success() {
+                return;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
     }
     panic!("{PIN_UNRESOLVABLE}: no remote could serve the pinned rev {rev}");
 }
