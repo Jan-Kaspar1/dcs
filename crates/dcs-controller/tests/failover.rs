@@ -2333,7 +2333,11 @@ fn a_warm_resumed_source_never_rewinds_the_tracking_peers_tick_axis() {
     let restarted = MonitorClient::new(restarted_process.addr);
     relay.retarget(restarted_process.addr);
     let owner = restarted.advance(1).unwrap();
-    assert_eq!(owner.tick.0, N + 1, "the state file resumes at its persisted tick");
+    assert_eq!(
+        owner.tick.0,
+        N + 1,
+        "the state file resumes at its persisted tick"
+    );
 
     // The realign: the standby pulls the resumed stream's checkpoint —
     // same generation, still above the stale alignment, yet ticks
@@ -2397,9 +2401,7 @@ fn a_warm_resumed_source_never_rewinds_the_tracking_peers_tick_axis() {
             saw_stale = point_history
                 .samples
                 .iter()
-                .any(|sample| {
-                    sample.sample.quality == Quality::Uncertain(QualityReason::Stale)
-                });
+                .any(|sample| sample.sample.quality == Quality::Uncertain(QualityReason::Stale));
         }
     }
     assert!(
@@ -2419,17 +2421,15 @@ fn a_warm_resumed_source_never_rewinds_the_tracking_peers_tick_axis() {
         "journal ticks must be non-decreasing in seq order: {attributed:?}"
     );
     assert!(
-        journal.iter().any(|entry| matches!(
-            entry.event,
-            JournalEvent::QualityChanged { .. }
-        )),
+        journal
+            .iter()
+            .any(|entry| matches!(entry.event, JournalEvent::QualityChanged { .. })),
         "the freeze window's quality transitions must journal: {journal:?}"
     );
     assert!(
-        !journal.iter().any(|entry| matches!(
-            entry.event,
-            JournalEvent::SourceRestarted { .. }
-        )),
+        !journal
+            .iter()
+            .any(|entry| matches!(entry.event, JournalEvent::SourceRestarted { .. })),
         "a same-generation warm resume is no source restart: {journal:?}"
     );
 
