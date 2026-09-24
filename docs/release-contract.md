@@ -32,7 +32,7 @@ of this repository.
 |---|---|---|
 | `dcs-build` crate | The typed composition API — the consumer's engineering seam. Its public transitive surface (`dcs-core`, `dcs-model`) resolves with it. | Cargo `git` dependency: `dcs-build = { git = "<repo>", tag = "v<X.Y.Z>" }` or `rev = "<commit>"` |
 | `dcs-core`, `dcs-model` crates | The contract vocabulary (`Value`, `Direction`, ids) and the emitted `PlantModel` document type. A consumer may also declare them directly — e.g. to assert `dcs_model::MODEL_VERSION` — under the same pin. | Same `git` dependency form; identical tag or rev |
-| `dcs-model` CLI | `validate`, `summary`, `signal-index`, `diff`, `lint`, `schema` over a model document; `interface-schema` emits the served-registry schema. | `cargo install --git <repo> --tag v<X.Y.Z> dcs-model`, or a binary built from the tag |
+| `dcs-model` CLI | `validate`, `summary`, `signal-index`, `diff`, `lint`, `schema` over a model document; `interface-schema` emits the served-registry schema; `deploy-schema` emits the deployment-manifest schema. | `cargo install --git <repo> --tag v<X.Y.Z> dcs-model`, or a binary built from the tag |
 | `dcs-controller` binary | The generic controller; `--check` is the consumer's assemble-check (load, validate, resolve devices, construct components — no scan). | `cargo install --git <repo> --tag v<X.Y.Z> dcs-controller`, or the container image below |
 | `dcs-controller` image | The generic controller container (`Dockerfile`); runs any operator-supplied model (decision 46). | Image digest: `dcs-controller@sha256:<digest>` recorded in the release record; or `docker build` at the tag |
 | `dcs-plant-server` image | The shared simulated-plant container (`Dockerfile.plant`) for the consumer's simulation runs. | Image digest recorded in the release record; or `docker build -f Dockerfile.plant` at the tag |
@@ -41,6 +41,7 @@ of this repository.
 | Plant-model JSON Schema | `dcs-model schema`'s emitted draft 2020-12 schema for non-Rust tooling (decision 40). | Recorded in the release record at `docs/releases/<tag>/plant-model.schema.json`, fetchable at the tag; its sha256 is in the record |
 | Served-registry JSON Schema | `dcs-model interface-schema`'s emitted draft 2020-12 schema for the `GET /schema` block-interface registry document (decision 82's served contract) — a non-Rust consumer checks the served surface against it. | Recorded in the release record at `docs/releases/<tag>/block-interfaces.schema.json`, fetchable at the tag; its sha256 is in the record |
 | Dynamics-document JSON Schema | `dcs-plant-server --dynamics-schema`'s emitted draft 2020-12 schema for the `--dynamics`/`--check-dynamics` declaration list (decision 24's document, decision 93's emission) — a non-Rust consumer checks the dynamics document the manifest names against it before the merge's own validation runs. | Recorded in the release record at `docs/releases/<tag>/dynamics.schema.json`, fetchable at the tag; its sha256 is in the record |
+| Deployment-manifest JSON Schema | `dcs-model deploy-schema`'s emitted draft 2020-12 schema for the consumer-owned deployment declaration — the documented shape below (decision 96's emission) — a non-Rust consumer screens its manifest against it before the deploy stage's rig agreement check runs. | Recorded in the release record at `docs/releases/<tag>/deploy-manifest.schema.json`, fetchable at the tag; its sha256 is in the record |
 | Deployment manifest | The consumer-owned deployment declaration — the documented shape below. | A file in the consumer repository pinning the release's artifacts |
 
 All `git` pins resolve through Cargo's git support: a tag names the
@@ -75,7 +76,9 @@ compiles against:
   (`SchemaView`, `BlockInterface`, `INTERFACE_VERSION`) and
   `SchemaView::json_schema`; and from `dcs-model` the `PlantModel`
   document type, `MODEL_VERSION`, `LoadError`, `SignalIndex`,
-  `ModelDiff`, `LintFinding`/`LintRule`, and `PlantModel::json_schema`.
+  `ModelDiff`, `LintFinding`/`LintRule`, `PlantModel::json_schema`,
+  and `deployment_manifest_schema` — the emitted deployment-manifest
+  schema behind `dcs-model deploy-schema`.
 
 `dcs-build`'s `station`, `dosing`, `ijmuiden`, and `ethercat` modules
 are **platform-owned reference compositions**: they remain compilable
@@ -218,9 +221,17 @@ manifest does not declare, a shared member, or wiring that leaves
 the declared pair. A single-pair manifest omits the section: URL
 `?pair=` configuration remains the interface the overview consumes,
 and the section carries no runtime, wire, or persisted-format
-change. The shape is a
-recorded contract, not yet a
-schema-enforced document — `reference-plant/deploy/manifest.json`
+change. The shape is a schema-enforced
+document: `dcs-model deploy-schema` emits its draft 2020-12 JSON
+Schema — recorded in the release record as
+`deploy-manifest.schema.json`, its sha256 pinned like the other
+recorded schemas — covering structure, field types, and the
+membership shape the schema vocabulary can express; the referential
+rules above (members naming declared controllers, disjoint
+memberships, the pair's wiring closing inside it) stay check-side
+with the `deploy` stage's rig agreement, the same split the model
+schema records for its cross-reference limits.
+`reference-plant/deploy/manifest.json`
 instantiates it, `reference-plant/deploy/compose.yaml` instantiates
 the manifest itself as a checked-in rig definition (the consumer-side
 counterpart of this repository's `compose.yaml`), and the template's
@@ -250,6 +261,8 @@ it follows:
      emitted at the tag.
    - `dynamics.schema.json` — `dcs-plant-server --dynamics-schema`
      emitted at the tag.
+   - `deploy-manifest.schema.json` — `dcs-model deploy-schema`
+     emitted at the tag.
 4. Build and publish the `dcs-controller` and `dcs-plant-server`
    images; record their digests in `record.md`.
 
@@ -267,7 +280,9 @@ fields are filled when the release is cut. `v0.1.0`'s recorded commit
 predates the served block-interface registry (#375), so its record
 carries no `block-interfaces.schema.json`, and `v0.2.0`'s predates
 the dynamics-document schema emission (#870), so neither record
-carries `dynamics.schema.json`; release records carry each schema
+carries `dynamics.schema.json`; both likewise predate the
+deployment-manifest schema emission (#909), so neither carries
+`deploy-manifest.schema.json`; release records carry each schema
 artifact from the first tag whose tooling emits it.
 
 ## The consumer-resolution check
