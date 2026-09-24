@@ -3210,7 +3210,12 @@ function commandValue(kind, text) {
 // authentication — echoed on the receipt and into the journal.
 // Content-Type text/plain keeps a cross-origin POST a simple request —
 // no preflight — while the endpoint parses the same JSON body
-// regardless of the declared type.
+// regardless of the declared type. The POST rides the same POLL_MS
+// abort bound as every poll read: /command receipts at admission, so a
+// post that outruns the bound names a hung listener — and the
+// ack-release awaits a submission inside refresh(), where an unbounded
+// hang would hold `polling` forever, freezing the feed marks the loop
+// exists to recompute.
 async function postCommand(base, command) {
   const body = operator === null
     ? command
@@ -3219,6 +3224,7 @@ async function postCommand(base, command) {
     method: "POST",
     headers: { "Content-Type": "text/plain" },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(POLL_MS),
   });
   return response.json();
 }
