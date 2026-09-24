@@ -15,6 +15,7 @@ from .runtime import Runtime
 from . import areas
 from . import findings as findings_lane
 from . import planning
+from . import scheduling
 from . import review as review_lane
 
 
@@ -867,26 +868,9 @@ Repair context: {repair}
             self.log('QA findings lane failed: ' + str(exc)[:500])
 
     def ready_frontier(self, issues):
-        """Count ready work that can dispatch now."""
-        closed = {i['number'] for i in issues if i.get('state') == 'CLOSED'}
-        active_improvement = self.state.get('review:active_improvement')
-        frontier = 0
-        for issue in issues:
-            if issue.get('state') != 'OPEN' or self.state.job(issue['number']):
-                continue
-            if 'agent:ready' not in [l['name'] for l in issue.get('labels', [])]:
-                continue
-            try:
-                meta = planning.metadata(issue.get('body') or '')
-            except (ValueError, KeyError):
-                continue
-            if not set(meta['dependencies']) <= closed:
-                continue
-            improvement = meta.get('improvement')
-            if improvement and active_improvement and active_improvement != improvement:
-                continue
-            frontier += 1
-        return frontier
+        rows = scheduling.inventory(issues, self.state.jobs(),
+                                    self.state.get('review:active_improvement'))
+        return sum(row['reason'] == 'ready' for row in rows)
 
     def planner(self, issues, prs):
         current = self.state.get('planner')
@@ -969,7 +953,11 @@ Repair context: {repair}
         now = time.time()
         last = self.state.get('last_plan', 0)
         frontier = self.ready_frontier(issues)
-        if now - last < 7200 and not (frontier < 6 and now - last >= 900):
+        armed_retries = sum(bool(self.state.get('retry:' + str(job['issue'])))
+                            for job in self.state.jobs(('blocked',)))
+        forced = bool(self.state.get('plan:requested'))
+        if not scheduling.due_for_planning(now, last, frontier, armed_retries,
+                                           forced=forced):
             return
         if not self.admission.reserve('planner', self.models[0], 'coordinator', self.state.capacity()):
             self.log('Planner deferred: inference admission denied')
@@ -980,13 +968,14 @@ Repair context: {repair}
             output.parent.mkdir(parents=True, exist_ok=True)
             allocation = areas.Allocation.from_inventory(issues, self.state.jobs())
             process = self.runtime.spawn('planner-' + str(int(now)), clone, planning.prompt(
-                issues, prs, output, self.planner_review_input(), self.state.get('planner_feedback'), allocation.summary()), model=self.models[0])
+                issues, prs, output, self.planner_review_input(), self.state.get('planner_feedback'), allocation.summary(), self.state.merge_flow()), model=self.models[0])
         except Exception:
             self.admission.release('planner')
             raise
         self.admission.attach('planner', process)
         self.state.set('planner', {'process': process, 'output': str(output)})
         self.state.set('last_plan', now)
+        self.state.set('plan:requested', False)
         self.log('Planner started')
 
     def mirror(self, issues):
@@ -1075,20 +1064,14 @@ Repair context: {repair}
         while candidates:
             issue = min(candidates, key=rank)
             candidates.remove(issue)
-            if issue.get('state') != 'OPEN' or self.state.job(issue['number']):
-                continue
-            if 'agent:ready' not in [l['name'] for l in issue.get('labels', [])]:
-                continue
-            meta = planning.metadata(issue['body'])
-            area = meta.get('area') or areas.issue_area(issue)
-            if not area:
-                continue
-            if not set(meta['dependencies']) <= closed:
-                continue
-            improvement = meta.get('improvement')
             active_improvement = self.state.get('review:active_improvement')
-            if improvement and active_improvement and active_improvement != improvement:
+            reason, meta = scheduling.classify(
+                issue, {job['issue']: job for job in self.state.jobs()},
+                closed, active_improvement)
+            if reason != 'ready':
                 continue
+            area = meta.get('area') or areas.issue_area(issue)
+            improvement = meta.get('improvement')
             # The reviewer slot is re-enforced after every reservation; worker
             # clone leasing alone would fill every worker slot past the ceiling.
             if self.slots_used() >= capacity:
