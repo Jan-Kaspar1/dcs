@@ -485,6 +485,7 @@ dependencies = [
  "dcs-model",
  "dcs-sim",
  "dcs-sim-net",
+ "jsonschema",
  "serde_json",
  "signal-hook",
 ]
@@ -503,6 +504,7 @@ name = "dcs-sim"
 version = "0.2.0"
 dependencies = [
  "dcs-core",
+ "jsonschema",
  "serde",
  "serde_json",
 ]
