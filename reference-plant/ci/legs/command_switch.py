@@ -4,7 +4,7 @@ consumer-side proof that a customer's declared-command invocation
 survives a switchover on the deployed redundant pair (WW-ENG-003,
 WW-LCM-001, WW-FND-003 — decision 84's pair semantics).
 
-The pair leg (`ci/pair.py`) proves the manifest-declared pair runs and
+The pair leg (`ci/legs/pair.py`) proves the manifest-declared pair runs and
 switches bumplessly; the availability leg proves the served verdicts
 agree with the receipted path. This leg proves the consumer-side half
 decision 84 pins workspace-side (#381) and the settlement fix carries
@@ -73,9 +73,42 @@ import os
 import subprocess
 import sys
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
+
 import pair
 import simulate
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored cases: a submission settling zero times and one
+# settling twice must each surface the named diagnostic — never
+# a silently miscounted exactly-once proof.
+LEG = {
+    "order": 180,
+    "title": "the command-switch leg",
+    "passes": "command-switch",
+    "tools": {
+        "ctl": "dcs-ctl",
+    },
+    "tampers": [
+        {
+            "name": "zero-settlement",
+            "passed": "a zero-settlement case passed the command-switch leg",
+            "missed": "the zero-settlement case did not report its named diagnostic",
+            "evidence": ["expected exactly one settlement"],
+        },
+        {
+            "name": "double-settlement",
+            "passed": "a double-settlement case passed the command-switch leg",
+            "missed": "the double-settlement case did not report its named diagnostic",
+            "evidence": ["expected exactly one settlement"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)

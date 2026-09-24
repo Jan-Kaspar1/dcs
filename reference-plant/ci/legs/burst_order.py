@@ -4,7 +4,7 @@ consumer-side proof that the deployed redundant pair's durable ordered
 transition record keeps activation order through a driven multi-alarm
 burst (WW-ENG-003, WW-ALM-003, WW-ALM-004).
 
-The pair leg (`ci/pair.py`) proves the manifest-declared pair runs and
+The pair leg (`ci/legs/pair.py`) proves the manifest-declared pair runs and
 switches; the takeover leg proves the receipted operator seam. This
 leg exercises the incident-review record those deployments exist for:
 a customer's consequential alarm cascade must land in the field
@@ -63,9 +63,39 @@ import os
 import re
 import sys
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
+
 import pair
 import simulate
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored cases: a record missing a driven transition, or
+# one carrying them out of order, must surface the named
+# diagnostic — never a silently unexercised first-out proof.
+LEG = {
+    "order": 110,
+    "title": "the alarm-burst leg",
+    "passes": "burst-order",
+    "tampers": [
+        {
+            "name": "dropped-transition",
+            "passed": "a dropped-transition journal passed the burst leg",
+            "missed": "the dropped-transition case did not report its named diagnostic",
+            "evidence": ["missing or out of order"],
+        },
+        {
+            "name": "reordered-transition",
+            "passed": "a reordered-transition journal passed the burst leg",
+            "missed": "the reordered-transition case did not report its named diagnostic",
+            "evidence": ["missing or out of order"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)

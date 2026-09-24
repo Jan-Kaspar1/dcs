@@ -5,7 +5,7 @@ state carries across a promotion on the deployed redundant pair
 (WW-ENG-003, WW-ALM-002, WW-LCM-001).
 
 ci/check.sh runs this script twice against the same declared
-deployment as ci/pair.py — `dcs-plant-server` serving the emitted
+deployment as ci/legs/pair.py — `dcs-plant-server` serving the emitted
 model and dynamics, plus the two manifest-declared `dcs-controller
 --driven --remote` peers, the standby wired at the field owner's
 monitor. The managed-lifecycle leg proves the managed surface's
@@ -80,6 +80,10 @@ import hashlib
 import json
 import os
 import sys
+
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "legs")
+)
 
 import managed_lifecycle
 import pair

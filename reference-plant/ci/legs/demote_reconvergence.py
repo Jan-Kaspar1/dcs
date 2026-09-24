@@ -5,8 +5,8 @@ on the tracking source its successor's checkpoint pulls announced,
 under the manifest's declared wildcard listen binds (WW-ENG-003,
 WW-LCM-001).
 
-The pair leg (`ci/pair.py`) proves the declared pair switches and
-reconverges; the peer-announce leg (`ci/peer_announce.py`) proves the
+The pair leg (`ci/legs/pair.py`) proves the declared pair switches and
+reconverges; the peer-announce leg (`ci/legs/peer_announce.py`) proves the
 `?peer=` acceptance half. This leg pins the follow-peer half of the
 tracking-source contract the #616/#618/#619/#620 defect fixes settle,
 on the customer-declared deployment that reproduces the #619 defect
@@ -73,8 +73,42 @@ import json
 import os
 import sys
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
+
 import pair
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored case: a crafted ?peer= announce naming the field
+# owner's own monitor address — a claim the pulling
+# connection's own source proves, so it lands exactly as a
+# self-claim — plants a self-addressed demotion hint beside the
+# genuine announce: the self-pin defect shape this leg exists
+# to catch. The demotion's verify pull on it reads the owner's
+# own document — the replayable own-document shape a candidate
+# can never satisfy — so the verified adoption keeps the
+# genuine successor and the journal's tracking_source_adopted
+# names it. The leg doctors its adoption audit to require the
+# self-pin, so a healthy demotion reports the mismatch — a
+# self-pinning regression would satisfy the doctored
+# expectation and pass silently.
+LEG = {
+    "order": 200,
+    "title": "the demote-reconvergence leg",
+    "passes": "demote-reconvergence",
+    "tampers": [
+        {
+            "name": "self-announce",
+            "passed": "a self-addressed announce passed the demote-reconvergence leg",
+            "missed": "the self-announce case did not report its named diagnostic",
+            "evidence": ["tracking_source_adopted"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)

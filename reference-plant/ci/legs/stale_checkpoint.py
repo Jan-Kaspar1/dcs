@@ -5,8 +5,8 @@ is durable truth a tracking peer's re-adoption of a staler checkpoint
 image cannot silently revert (WW-ENG-003, WW-LCM-001 — the
 receipted-command contract's adoption rule).
 
-The force-carryover leg (`ci/force_carryover.py`) proves a standing
-force rides the promotion; the force-release leg (`ci/force_release.py`)
+The force-carryover leg (`ci/legs/force_carryover.py`) proves a standing
+force rides the promotion; the force-release leg (`ci/legs/force_release.py`)
 proves the receipted release half. This leg proves the adoption half
 the release leg's switch leaves unproven: the defect a restarting
 standby demonstrated, adopting a staler peer's image and silently
@@ -82,11 +82,36 @@ import os
 import re
 import sys
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
+
 import force_carryover
 import pair
 import simulate
 import takeover
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored case: a re-adoption expectation left standing —
+# the substitution asserted still badged after the tracker's
+# restart — must surface the named diagnostic rather than pass
+# silently.
+LEG = {
+    "order": 100,
+    "title": "the stale-checkpoint leg",
+    "passes": "stale-checkpoint",
+    "tampers": [
+        {
+            "name": "expect-standing",
+            "passed": "an expect-standing passed the stale-checkpoint leg",
+            "missed": "the expect-standing case did not report its named diagnostic",
+            "evidence": ["expected the substitution still standing"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)

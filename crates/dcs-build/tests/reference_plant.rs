@@ -1047,7 +1047,7 @@ fn a_broken_peer_flag_reports_pair_failed() {
     ));
     copy_tree(&root().join("reference-plant"), &dir);
     let output = Command::new("python3")
-        .arg("ci/pair.py")
+        .arg("ci/legs/pair.py")
         .arg("--plant-server")
         .arg(tools.join("dcs-plant-server"))
         .arg("--controller")
@@ -1100,7 +1100,7 @@ fn a_wrong_negotiation_expectation_reports_the_degraded_state() {
     ));
     copy_tree(&root().join("reference-plant"), &dir);
     let output = Command::new("python3")
-        .arg("ci/negotiation.py")
+        .arg("ci/legs/negotiation.py")
         .arg("--plant-server")
         .arg(tools.join("dcs-plant-server"))
         .arg("--controller")
@@ -1152,7 +1152,7 @@ fn a_doctored_write_expectation_reports_refusal_failed() {
     ));
     copy_tree(&root().join("reference-plant"), &dir);
     let output = Command::new("python3")
-        .arg("ci/refusal.py")
+        .arg("ci/legs/refusal.py")
         .arg("--plant-server")
         .arg(tools.join("dcs-plant-server"))
         .arg("--controller")
@@ -1209,7 +1209,7 @@ fn a_doctored_handover_expectation_reports_handover_failed() {
         ("none-available-silent", "never to report"),
     ] {
         let output = Command::new("python3")
-            .arg("ci/handover.py")
+            .arg("ci/legs/handover.py")
             .arg("--plant-server")
             .arg(tools.join("dcs-plant-server"))
             .arg("--controller")
@@ -1264,7 +1264,7 @@ fn a_doctored_follows_group_expectation_reports_takeover_failed() {
     ));
     copy_tree(&root().join("reference-plant"), &dir);
     let output = Command::new("python3")
-        .arg("ci/takeover.py")
+        .arg("ci/legs/takeover.py")
         .arg("--plant-server")
         .arg(tools.join("dcs-plant-server"))
         .arg("--controller")
@@ -1318,7 +1318,7 @@ fn a_skipped_field_write_reports_divergence_missed() {
     ));
     copy_tree(&root().join("reference-plant"), &dir);
     let output = Command::new("python3")
-        .arg("ci/divergence.py")
+        .arg("ci/legs/divergence.py")
         .arg("--plant-server")
         .arg(tools.join("dcs-plant-server"))
         .arg("--controller")
@@ -1794,14 +1794,18 @@ print("registry, receipt, and event tamper cases report named mismatches")
 }
 
 /// The release contract's named-diagnostic vocabulary must resolve
-/// every `<leg>-unchecked` self-check diagnostic `ci/check.sh` emits —
-/// an operator or tool reading a self-check failure resolves the name
-/// against the declared contract, so an emitted name the vocabulary
-/// does not declare is an unnamed diagnostic by another name. An
-/// emitted `<stem>-unchecked` is covered when the contract declares
-/// the name itself, or when the declared `<leg>-unchecked` convention
-/// covers it — the convention entry present and the leg's own
-/// `<stem>` or `<stem>-failed` diagnostic declared.
+/// every `<leg>-unchecked` self-check diagnostic the check emits —
+/// `ci/check.sh`'s inline `fail` names and the pair stage's legs,
+/// whose driver emits `<stem>-unchecked` for each `ci/legs/*.py`
+/// file's declared doctored cases, the stem the file's name with its
+/// underscores turned to dashes. An operator or tool reading a
+/// self-check failure resolves the name against the declared
+/// contract, so an emitted name the vocabulary does not declare is an
+/// unnamed diagnostic by another name. An emitted `<stem>-unchecked`
+/// is covered when the contract declares the name itself, or when the
+/// declared `<leg>-unchecked` convention covers it — the convention
+/// entry present and the leg's own `<stem>` or `<stem>-failed`
+/// diagnostic declared.
 #[test]
 fn the_contract_declares_every_emitted_unchecked_diagnostic() {
     let check = std::fs::read_to_string(root().join("reference-plant/ci/check.sh")).unwrap();
@@ -1821,6 +1825,21 @@ fn the_contract_declares_every_emitted_unchecked_diagnostic() {
             if name.ends_with("-unchecked") && !emitted.contains(&name) {
                 emitted.push(name);
             }
+        }
+    }
+    // The pair stage's legs emit `<stem>-unchecked` through
+    // `ci/legs.py`'s driver rather than the script's `fail` lines —
+    // every leg file's stem is an emitted name.
+    for entry in std::fs::read_dir(root().join("reference-plant/ci/legs")).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().into_string().unwrap();
+        if !name.ends_with(".py") {
+            continue;
+        }
+        let stem = name[..name.len() - 3].replace('_', "-");
+        let emitted_name = format!("{stem}-unchecked");
+        if !emitted.contains(&emitted_name) {
+            emitted.push(emitted_name);
         }
     }
     assert!(
