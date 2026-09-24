@@ -1253,7 +1253,7 @@ adding `ProcessElement`s to a `ChannelMap` before constructing
 
 `dcs-plant-server --dynamics-schema` prints the document's draft
 2020-12 JSON Schema — the `ProcessElement::json_schema` emission
-(decision 92) — so non-Rust tooling can check a document against the
+(decision 93) — so non-Rust tooling can check a document against the
 recorded artifact: structure, field types, and the numeric bounds the
 schema language can express. The merge-time rules below stay with
 `ChannelMap::validate`; the schema is a first screen, not the
