@@ -176,8 +176,8 @@ These baseline topics need no customer decision and no new capability; the pilot
   - Evidence: deployment-produced identity practice; the journal records the declared `actor` either way (decision 39).
   - Revisit: none beyond SE-1/SE-2.
 - **SE-7 · Security zones and SL-T** (`WW-SEC-001`). Confirm whether the client assigns IEC 62443 target security levels per zone (security-identity.md [2]) and, if so, which SL-T the controller's zone must meet — that answer decides how much of FR 1/FR 2 is the product's versus compensating measures ([3]). Remote-access paths (VPN into the station router, directory logins) are site infrastructure ([22, 23]).
-  - Class: needs-first-client-decision. Owner: customer (owner risk process assigns SL-T); integrator draws the conduits; the documented conduit-boundary list is a platform-owner documentation item (gap 8).
-  - Evidence: deployment-produced zone/conduit design; the platform's three externally reachable transports — monitor HTTP, peer checkpoint link, remote-driver link — are the named partition points.
+  - Class: needs-first-client-decision. Owner: customer (owner risk process assigns SL-T); integrator draws the conduits; the documented conduit-boundary list is the landed platform-owner documentation item — `docs/conduit-boundaries.md` (gap 8 closed as documentation).
+  - Evidence: deployment-produced zone/conduit design; the platform's externally reachable transports — monitor HTTP, peer checkpoint link, remote-driver plant link, sim-bus register protocol, EtherCAT cyclic binding — are the named partition points `docs/conduit-boundaries.md` enumerates.
   - Revisit: an assigned SL-T promotes `WW-SEC-001`.
 
 ## Phase 5 — Engineering scale: whether bulk machinery is needed at the first client's point count
