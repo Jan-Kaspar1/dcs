@@ -564,8 +564,15 @@ class LagStagingTests(unittest.TestCase):
         self.assertEqual(
             order.index(scenarios.scenario_peer_announce) + 1,
             order.index(scenarios.scenario_demote_forged_standby_source))
+        # The stale-island leg's driven third controller shares the
+        # same restored window and still clears before the tune case's
+        # a->b switch.
         self.assertEqual(
             order.index(scenarios.scenario_demote_forged_standby_source)
+            + 1,
+            order.index(scenarios.scenario_stale_island_resolution))
+        self.assertEqual(
+            order.index(scenarios.scenario_stale_island_resolution)
             + 1,
             order.index(scenarios.scenario_parameter_tune_carryover))
         self.assertIs(verify.case_function('lag-staging'),
