@@ -35,7 +35,8 @@
 //! store as the completed scan's immutable read model rather than
 //! rebuilding it per request.
 
-use crate::journal_file::JournalFile;
+use crate::drain::Drain;
+use crate::journal_file::{JournalFile, JournalRecord};
 use crate::store::Store;
 use dcs_core::{
     CarryoverReport, CommandOutcome, CommandReceipt, Divergence, EventRetention, JournalEntry,
@@ -85,8 +86,22 @@ pub struct MonitorConfig {
     /// single-writer: the bind takes an exclusive lock on the path for
     /// the monitor's lifetime, so a second live process configured with
     /// the same path fails its bind naming the conflict rather than
-    /// interleaving a corrupted record.
+    /// interleaving a corrupted record. The append itself drains on a
+    /// dedicated writer off the executor lock — the journal-append
+    /// isolation decision (#942) — bounded by `journal_drain_capacity`.
     pub journal_file: Option<PathBuf>,
+    /// The bound on journaled records queued for the file sink's
+    /// writer — the journal-append isolation decision's declared
+    /// bound (#942, adopting unmanaged finding #546). The recording
+    /// point never waits on the sink: a push finding the queue full —
+    /// the writer stalled or slower than the run's recording rate —
+    /// fails fatally at that push naming the file, rather than
+    /// lengthening a scan or silently dropping an entry. The bound
+    /// must absorb a burst — an adoption draining its superseded
+    /// commands emits a stretch of entries in one call — so it sits
+    /// well above the command queue's, at the served journal's own
+    /// default.
+    pub journal_drain_capacity: usize,
 }
 
 impl Default for MonitorConfig {
@@ -99,6 +114,7 @@ impl Default for MonitorConfig {
             event_history_capacity: 1024,
             publication_capacity: 16,
             journal_file: None,
+            journal_drain_capacity: 1024,
         }
     }
 }
@@ -199,9 +215,11 @@ pub(super) struct Recorder {
     /// and any restored run's first stamps — carry the run's true start
     /// tick, the seam a consumer attributes the lifetimes around.
     last_pushed: Option<Tick>,
-    /// The durable journal sink, when a path is configured — every
-    /// journaled entry is appended there too.
-    sink: Option<JournalFile>,
+    /// The durable journal sink's drain, when a path is configured —
+    /// every journaled entry queues to its writer, which appends off
+    /// the executor lock. Dropping the recorder drains and joins the
+    /// writer, so a graceful shutdown's file is complete.
+    sink: Option<Drain<JournalRecord>>,
 }
 
 impl Recorder {
@@ -223,8 +241,8 @@ impl Recorder {
     pub(super) fn new(config: MonitorConfig, tick: Tick) -> io::Result<Self> {
         let (sink, replay) = match &config.journal_file {
             Some(path) => {
-                let (sink, replay) = JournalFile::open(path, config.journal_capacity, tick)?;
-                (Some(sink), replay)
+                let (file, replay) = JournalFile::open(path, config.journal_capacity, tick)?;
+                (Some(file.into_drain(config.journal_drain_capacity)), replay)
             }
             None => (None, crate::journal_file::Replay::default()),
         };
@@ -240,6 +258,13 @@ impl Recorder {
             config.event_history_capacity,
             replay.runs + 1,
         );
+        // The store carries the sink's drain counters: every
+        // publication stamps the standing backpressure health, and the
+        // monitor's durability-attesting answers wait on the same
+        // shared counters.
+        if let Some(sink) = &sink {
+            store.set_journal_sink(sink.shared());
+        }
         // The replay seeds the ring in `seq` order: boundary markers
         // the file's retained tail already aged out push first, so the
         // store's pinning stream picks them up the same way live
@@ -761,11 +786,44 @@ impl Recorder {
         self.store.journal(since)
     }
 
-    /// Appends one journal entry — to the configured file sink first,
-    /// then the store's served ring and pending publication delta. An
-    /// append the file cannot take is fatal: the run dies naming the
-    /// file rather than running on while its audit trail silently
-    /// stops, and the partial record a crash can leave is what the next
+    /// Test seam: swap in a constructed drain — the stalled and
+    /// failing-sink coverage drives the writer through closures a real
+    /// file cannot produce deterministically.
+    #[cfg(test)]
+    pub(super) fn with_sink(&mut self, sink: Drain<JournalRecord>) {
+        self.store.set_journal_sink(sink.shared());
+        self.sink = Some(sink);
+    }
+
+    /// The sink's live drain report — test-only; the served surface
+    /// reads the same counters through the publication store.
+    #[cfg(test)]
+    pub(super) fn sink_health(&self) -> Option<crate::drain::DrainHealth> {
+        self.sink.as_ref().map(|sink| sink.shared().health())
+    }
+
+    /// Waits the sink's writer out — test-only; the served surface
+    /// waits through the store's `wait_journal_drained`.
+    #[cfg(test)]
+    pub(super) fn flush_sink(&self) {
+        if let Some(sink) = &self.sink {
+            sink.shared()
+                .wait_drained(std::time::Duration::from_secs(30));
+        }
+    }
+
+    /// Appends one journal entry — queued to the configured file
+    /// sink's writer first, then the store's served ring and pending
+    /// publication delta. The handoff never waits on the file: the
+    /// drain's bounded queue either takes the record or refuses it,
+    /// and a refusal is fatal — the run dies naming the file at this
+    /// push rather than running on while its audit trail silently
+    /// stops or lengthening the scan behind a stalled sink (the
+    /// journal-append isolation decision, #942). A sink write that
+    /// fails on the writer turns every later push into the same
+    /// fatal refusal naming the error, so the run fails at the
+    /// recorded point instead of claiming entries the file never
+    /// took; the partial record a crash can leave is what the next
     /// startup's replay rejects by name.
     ///
     /// The append axis never rewinds within the run: the durable
@@ -786,9 +844,19 @@ impl Recorder {
             tick,
             event,
         };
-        if let Some(sink) = &mut self.sink {
-            sink.append(&entry)
-                .unwrap_or_else(|error| panic!("{error}"));
+        if let Some(sink) = &self.sink {
+            // The handoff never waits on the sink: the drain either
+            // takes the record into its bounded queue or refuses it —
+            // the refusal hands the record back and is fatal at this
+            // push, naming the drain and the `seq` the file will never
+            // carry.
+            if let Err(error) = sink.push(JournalRecord::Entry(Box::new(entry.clone()))) {
+                let seq = match &error.record {
+                    JournalRecord::Entry(entry) => entry.seq,
+                    JournalRecord::RunBoundary { .. } => self.next_seq,
+                };
+                panic!("{error} — refused journal seq {seq}");
+            }
         }
         self.next_seq += 1;
         self.store.push_journal(entry);

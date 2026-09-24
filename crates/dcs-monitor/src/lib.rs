@@ -232,7 +232,22 @@
 //! marker line separates process lifetimes within the file, and a
 //! restart's marker also journals once as a `run_boundary` entry so a
 //! `GET /journal` consumer attributes entries to a process lifetime —
-//! so `GET /journal` answers continuously across a restart. Those
+//! so `GET /journal` answers continuously across a restart. The
+//! append itself drains on a dedicated writer off the executor lock —
+//! the journal-append isolation decision (#942, adopting unmanaged
+//! finding #546): the recording point hands each record to a bounded
+//! queue through a non-blocking send, so a slow or stalled sink can
+//! neither lengthen a scan nor pin the lock; the queue's declared
+//! bound (`journal_drain_capacity`) is where a lagging sink turns the
+//! fatal-on-append-failure rule into a refused push, the writer's
+//! FIFO keeps the file's `seq` order, and the drain's standing
+//! health — `healthy`/`lagging`/`failed` with the lost-record
+//! accounting — is the named degraded state stamped into every
+//! published snapshot's `publication.journal_sink` section. A
+//! mutating request's answer, and every `GET /journal`, waits the
+//! writer's queue out first — the request worker's own bounded wait,
+//! never the lock's — so the answer attests the durable record caught
+//! up through the request's effects. Those
 //! served markers are pinned out of the tail's bound: ordinary event
 //! volume can age the boundary past the retained window, but the
 //! served answer keeps it — pinned entries answer ahead of the
@@ -460,6 +475,7 @@
 #![warn(missing_docs)]
 
 pub mod alarm_report;
+mod drain;
 mod journal_file;
 mod pair;
 mod recorder;
@@ -477,8 +493,8 @@ pub use store::{Publication, PublicationGap, PublicationPage};
 
 use dcs_core::{
     CarryoverReport, Command, CommandError, CommandOutcome, CommandReceipt, JournalEntry,
-    PointHistory, PointId, PublicationHealth, ResourceView, RoleReport, SchemaView, StandbySync,
-    SwitchError, TelemetrySnapshot, Tick,
+    JournalSinkHealth, PointHistory, PointId, PublicationHealth, ResourceView, RoleReport,
+    SchemaView, StandbySync, SwitchError, TelemetrySnapshot, Tick,
 };
 use dcs_model::SignalIndex;
 use dcs_runtime::{
@@ -547,6 +563,15 @@ const SCAN_REFUSED_WHEN_PACED: &str = "refused: scans are paced to wall-clock ti
 /// tracking cycle whose pull is still in flight already counts its
 /// heartbeat miss.
 const CHECKPOINT_PULL_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The bound a durability-attesting answer gives the journal sink's
+/// writer — how long a mutating request or a `GET /journal` waits for
+/// the drain to take every queued record before answering anyway.
+/// The wait is the request worker's own, off the executor lock; a
+/// healthy sink drains in microseconds, so reaching the bound means
+/// the writer is stalled — and the queue's own bound has already made
+/// the run's pushes fatal rather than let the file trail silently.
+const JOURNAL_DRAIN_WAIT: Duration = Duration::from_secs(30);
 
 /// How far ahead of this run's own tick a checkpoint pulled to verify
 /// an announced demotion hint may serve: a successor tracking this run
@@ -1414,6 +1439,28 @@ impl<'d> Monitor<'d> {
         self.store.health()
     }
 
+    /// The durable journal sink's live drain report — the named
+    /// backpressure state the journal-append isolation decision
+    /// (#942) stamps into every publication's `journal_sink` section:
+    /// `healthy` while the writer keeps up, `lagging` while records
+    /// wait in its bounded queue, `failed` after a sink write error —
+    /// with `lost` accounting the queued records the file never took.
+    /// `None` when no journal file is configured.
+    pub fn journal_sink_health(&self) -> Option<JournalSinkHealth> {
+        self.store.journal_sink_health()
+    }
+
+    /// Waits — at most `timeout` — for the journal sink's writer to
+    /// have appended or accounted every queued record, and returns
+    /// the standing health either way: `drained + lost == accepted`
+    /// says the durable file caught up. `None` when no journal file
+    /// is configured. The wait rides the caller's thread alone — the
+    /// graceful-shutdown and durability-attestation flush, never the
+    /// executor lock.
+    pub fn flush_journal_sink(&self, timeout: Duration) -> Option<JournalSinkHealth> {
+        self.store.wait_journal_drained(timeout)
+    }
+
     /// The executor's current transferable state, taken under the lock —
     /// the same between-scans [`Checkpoint`] `GET /checkpoint` serves.
     pub fn checkpoint(&self) -> Checkpoint {
@@ -1662,6 +1709,16 @@ impl<'d> Monitor<'d> {
         let url = request.url().to_string();
         let remote = request.remote_addr().copied();
         let (path, query) = url.split_once('?').unwrap_or((url.as_str(), ""));
+        // The journal drain runs off the executor lock, so the durable
+        // file trails the recording point by the writer's beat. An
+        // answer that carries or follows journaled state — every
+        // mutation's, and every journal read's — waits the standing
+        // queue out first, on the request's own worker and never the
+        // lock, so the answer attests the durable record caught up
+        // through the request's effects. A sink stalled past the
+        // bound answers degraded — its pushes are already fatal.
+        let attests_durable =
+            method == Method::Post || (method == Method::Get && path == "/journal");
         let response = match (method, path) {
             (Method::Get, "/") | (Method::Get, "/index.html") => html(PAGE),
             (Method::Get, "/signals") => json(200, &self.signals),
@@ -1882,6 +1939,9 @@ impl<'d> Monitor<'d> {
             },
             _ => json(404, "not found"),
         };
+        if attests_durable {
+            self.store.wait_journal_drained(JOURNAL_DRAIN_WAIT);
+        }
         // A dropped client connection makes respond fail; the request is
         // already handled, so the error is ignored.
         let _ = request.respond(response);

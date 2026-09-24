@@ -680,11 +680,12 @@ impl Case {
 
     fn config(&self, journal_path: &Path) -> MonitorConfig {
         MonitorConfig {
+            journal_file: Some(journal_path.to_path_buf()),
             history_capacity: self.history_capacity,
             journal_capacity: self.journal_capacity,
             event_history_capacity: self.journal_capacity,
             publication_capacity: self.publication_capacity,
-            journal_file: Some(journal_path.to_path_buf()),
+            ..MonitorConfig::default()
         }
     }
 }
@@ -1103,6 +1104,7 @@ fn bounded_eviction_exposes_named_gaps_never_silent_loss() {
             event_history_capacity: 4,
             publication_capacity: 3,
             journal_file: None,
+            ..MonitorConfig::default()
         },
     )
     .unwrap();
