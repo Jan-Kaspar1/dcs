@@ -109,6 +109,14 @@
   .pair-card h3 { margin: 0.2rem 0 0.5rem; }
   .pair-card h3 a { color: inherit; }
   .pair-card .active-peer { font-weight: 600; }
+  #equipment { border: 1px solid #36a; border-radius: 4px;
+    padding: 0.4rem 1rem 0.8rem; margin: 1rem 0; background: #fafbfd; }
+  #equipment-trends { display: flex; flex-wrap: wrap; gap: 1rem; }
+  #equipment .equipment-line { font-size: 0.9rem; margin: 0.25rem 0; }
+  #equipment .equipment-nav { font-size: 0.85rem; }
+  #equipment .equipment-nav a { color: #36a; }
+  #equipment-close { margin-left: 0.5rem; }
+  a.nav-equipment { color: inherit; }
 </style>
 </head>
 <body>
@@ -188,6 +196,35 @@ own surface: the HMI alarm path is never presented as the safeguard.</p>
     </tr>
   </thead>
   <tbody id="protection-points"></tbody>
+</table>
+</section>
+
+<section id="equipment" hidden>
+<h2>Equipment — <span id="equipment-name"></span></h2>
+<p class="equipment-nav"><a href="#alarm-pane">alarms</a>
+<button type="button" id="equipment-close">close</button></p>
+<p id="equipment-pair" class="equipment-line"></p>
+<p id="equipment-io" class="equipment-line"></p>
+<div id="equipment-faceplate"></div>
+<div id="equipment-rationalization"></div>
+<h3>Live points</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Point</th><th>Signal</th><th>Direction</th><th>Type</th>
+      <th>Value</th><th>Quality</th><th>Unit</th><th>Tick</th>
+    </tr>
+  </thead>
+  <tbody id="equipment-points"></tbody>
+</table>
+<h3>Trends</h3>
+<div id="equipment-trends"></div>
+<h3>History</h3>
+<table>
+  <thead>
+    <tr><th>Seq</th><th>Tick</th><th>Event</th></tr>
+  </thead>
+  <tbody id="equipment-journal"></tbody>
 </table>
 </section>
 
@@ -335,6 +372,24 @@ own surface: the HMI alarm path is never presented as the safeguard.</p>
 // or unwritable managed input offers nothing — the never-shelvable
 // surface — and a write attempted anyway meets the receipted path's
 // named rejection.
+//
+// Alarm-to-equipment navigation: every alarm surface element — each
+// standing or managed-list row's component and priority cells and each
+// attributable alarm-journal entry — links into the equipment pane
+// anchored at #equipment, selecting the owning component by its
+// diagnostic name. The pane composes the surfaces the operations
+// workflow reads together on one surface: the instance's faceplate —
+// the same descriptor-driven markup the components section renders,
+// commands and tuning included — its bound points' live values with
+// quality, a trend window per bound point drawn from the same retained
+// history the trends pane shows, the component-attributed slice of the
+// durable journal (the serving layer's attribution rule applied
+// page-side), the rationalization record, and the pair-health and
+// I/O-health lines, so an operator landing from an alarm reads the
+// equipment with its health context beside it. Everything derives from
+// the payloads the page already polls — snapshot, signals, history,
+// journal, the schema/resources join — no endpoint or wire type. A
+// cleared or vanished selection hides the pane.
 //
 // The protection boundary (the independent-protection-layer decision):
 // each ?protection=<group> parameter names a model signal `group`
@@ -547,6 +602,14 @@ const interfaceOpen = new Map();
 // write is accepted — see the alarm pane's notes on the edge-consumed
 // input.
 const ackReleases = new Map();
+// The equipment pane's selection — the owning component the last
+// alarm-surface navigation named, or null while none stands: the pane
+// stays hidden until a row or journal entry selects its owner.
+let equipmentSelection = null;
+// The inputs the last refresh rendered from — a navigation between
+// polls re-renders the equipment pane from them rather than waiting
+// out the cadence.
+const rendered = { snapshot: null, telemetry: null, forced: null };
 // Client-side display bounds; the server's rings bound retention anyway.
 const TREND_LIMIT = 600;
 const JOURNAL_LIMIT = 300;
@@ -1107,19 +1170,25 @@ function pairHref(pair) {
 }
 
 // The card's I/O-health line: the pair view's io-health troubled rule
-// reduced to one line — link degradation, boundary failures (including
-// failed cyclic exchanges), a cyclic driver's working-counter
-// mismatches and missed deadlines, the attributed last fault, scan
-// overruns — read from the source peer's snapshot. A card with no
-// landed snapshot reports the fetch's failure, or waits out its first
-// poll, instead of inventing health.
+// reduced to one line — read from the source peer's snapshot. A card
+// with no landed snapshot reports the fetch's failure, or waits out
+// its first poll, instead of inventing health.
 function ioHealthLine(pair) {
   if (pair.snapshot === null) {
     return pair.snapshotError !== null
       ? { text: "no snapshot — " + pair.snapshotError, bad: true }
       : { text: "awaiting first snapshot", bad: false };
   }
-  const health = pair.snapshot.io_health;
+  return ioHealthSummary(pair.snapshot.io_health);
+}
+
+// One snapshot's io_health section reduced to the one-line verdict the
+// overview card and the equipment pane's health line share: link
+// degradation, boundary failures (including failed cyclic exchanges),
+// a cyclic driver's working-counter mismatches and missed deadlines,
+// the attributed last fault, scan overruns. A snapshot serving no
+// io_health section reports it unreported rather than inventing health.
+function ioHealthSummary(health) {
   if (!health) return { text: "I/O health not reported", bad: false };
   const troubles = [];
   if (health.driver && health.driver.link !== "connected") {
@@ -1276,6 +1345,11 @@ async function refresh() {
     // ForcedPoint serializes as {point, value} — the map keys the badge
     // and the release affordance, the pinned value titles the badge.
     const forced = new Map((snapshot.forces || []).map(f => [f.point, f.value]));
+    // The render inputs an equipment navigation between polls
+    // re-renders from — see the equipmentSelection note.
+    rendered.snapshot = snapshot;
+    rendered.telemetry = telemetry;
+    rendered.forced = forced;
     renderFaceplates(snapshot, telemetry, forced);
     // A value an operator is mid-edit on — and its focus — survives the
     // re-render, keyed by point, the same rule the faceplate
@@ -1308,6 +1382,12 @@ async function refresh() {
     // telemetry, its own surface.
     renderAlarms(snapshot, telemetry, forced);
     renderProtection(telemetry, forced);
+    // The equipment pane draws last of all: its faceplate reads the
+    // descriptor join, its trends the series refreshTrends just grew,
+    // its history slice the entries refreshJournal just merged, and
+    // its health lines this snapshot's sections and the roles this
+    // poll just polled.
+    renderEquipment(snapshot, telemetry, forced);
   } catch (error) {
     // A poll whose reads fail or abort lands nothing fresh: the values
     // on the page stay last-known, so the standing publication takes
@@ -1665,7 +1745,7 @@ function parameterControl(component, param) {
 // survives re-renders, the cell only displays it.
 function setParamStatus(component, name, status) {
   paramStatus.set(paramKey(component, name), status);
-  for (const cell of document.querySelectorAll("#faceplates .param-status")) {
+  for (const cell of document.querySelectorAll("#detail .param-status")) {
     if (cell.dataset.component === component && cell.dataset.param === name) {
       cell.textContent = status.text;
       cell.className = "param-status" + (status.warn ? " warn" : "") +
@@ -1769,33 +1849,72 @@ function faceplateMarkup(descriptor, diag, telemetry, forced, parameters) {
   return parts.join("");
 }
 
-// Re-renders every faceplate from the polled snapshot. Values an
-// operator is mid-edit on — and an input's focus — survive the
-// re-render, keyed by bound point for the write affordances and by
-// component-plus-parameter for the tuning controls.
-function renderFaceplates(snapshot, telemetry, forced) {
+// Snapshots the editable state inside `container`'s subtree before a
+// re-render replaces it: write affordances keyed by bound point, tuning
+// controls by component-plus-parameter, command arguments by
+// component-plus-command-plus-argument, each with the focused control's
+// key, plus every interface disclosure's open state — the operator's
+// choice, recorded so a poll never collapses an opened section. Shared
+// by the faceplates section and the equipment pane's duplicated
+// faceplate.
+function captureEdits(container) {
   const pending = new Map();
   let focused = null;
-  for (const input of document.querySelectorAll("#faceplates input.command-value")) {
+  for (const input of document.querySelectorAll(container + " input.command-value")) {
     pending.set(input.dataset.point, input.value);
     if (input === document.activeElement) focused = input.dataset.point;
   }
-  for (const control of document.querySelectorAll("#faceplates .param-value")) {
+  for (const control of document.querySelectorAll(container + " .param-value")) {
     const key = paramKey(control.dataset.component, control.dataset.param);
     pending.set(key, control.value);
     if (control === document.activeElement) focused = key;
   }
-  for (const input of document.querySelectorAll("#faceplates .command-arg")) {
+  for (const input of document.querySelectorAll(container + " .command-arg")) {
     const key = commandKey(input.dataset.component,
       input.dataset.command + "\n" + input.dataset.arg);
     pending.set(key, input.value);
     if (input === document.activeElement) focused = key;
   }
-  // The interface disclosure's open state is the operator's: snapshot
-  // it before the rebuild so a poll never collapses an opened section.
-  for (const details of document.querySelectorAll("#faceplates details.interface")) {
+  for (const details of document.querySelectorAll(container + " details.interface")) {
     interfaceOpen.set(details.dataset.component, details.open);
   }
+  return { pending, focused };
+}
+
+// Re-applies captureEdits' record after the subtree's rebuild — the
+// values and focus a re-render would otherwise drop. An unedited
+// command-argument input seeds the declared default: an untouched
+// control submits the default, matching a CLI that omitted the flag.
+function restoreEdits(container, captured) {
+  const pending = captured.pending;
+  const focused = captured.focused;
+  for (const input of document.querySelectorAll(container + " input.command-value")) {
+    if (pending.has(input.dataset.point)) input.value = pending.get(input.dataset.point);
+    if (input.dataset.point === focused) input.focus();
+  }
+  for (const control of document.querySelectorAll(container + " .param-value")) {
+    const key = paramKey(control.dataset.component, control.dataset.param);
+    if (pending.has(key)) control.value = pending.get(key);
+    if (key === focused) control.focus();
+  }
+  for (const input of document.querySelectorAll(container + " .command-arg")) {
+    const key = commandKey(input.dataset.component,
+      input.dataset.command + "\n" + input.dataset.arg);
+    if (pending.has(key)) {
+      input.value = pending.get(key);
+    } else if (input.dataset.initial != null) {
+      input.value = input.dataset.initial;
+    }
+    if (key === focused) input.focus();
+  }
+}
+
+// Re-renders every faceplate from the polled snapshot. Values an
+// operator is mid-edit on — and an input's focus — survive the
+// re-render, keyed by bound point for the write affordances and by
+// component-plus-parameter for the tuning controls.
+function renderFaceplates(snapshot, telemetry, forced) {
+  const captured = captureEdits("#faceplates");
   descriptorByName.clear();
   for (const descriptor of snapshot.descriptors) {
     descriptorByName.set(descriptor.name, descriptor);
@@ -1813,28 +1932,7 @@ function renderFaceplates(snapshot, telemetry, forced) {
       faceplateMarkup(descriptor, diagnostics.get(descriptor.name), telemetry,
         forced, parameters))
     .join("");
-  for (const input of document.querySelectorAll("#faceplates input.command-value")) {
-    if (pending.has(input.dataset.point)) input.value = pending.get(input.dataset.point);
-    if (input.dataset.point === focused) input.focus();
-  }
-  for (const control of document.querySelectorAll("#faceplates .param-value")) {
-    const key = paramKey(control.dataset.component, control.dataset.param);
-    if (pending.has(key)) control.value = pending.get(key);
-    if (key === focused) control.focus();
-  }
-  for (const input of document.querySelectorAll("#faceplates .command-arg")) {
-    const key = commandKey(input.dataset.component,
-      input.dataset.command + "\n" + input.dataset.arg);
-    if (pending.has(key)) {
-      input.value = pending.get(key);
-    } else if (input.dataset.initial != null) {
-      // A command-argument input is a typed affordance the page seeds
-      // with the declared default once: an untouched control submits
-      // the default, matching a CLI that omitted the flag.
-      input.value = input.dataset.initial;
-    }
-    if (key === focused) input.focus();
-  }
+  restoreEdits("#faceplates", captured);
 }
 
 // ---- Interface resources ----
@@ -2098,7 +2196,7 @@ function interfaceMarkup(name, generic) {
 // rule the parameter status follows.
 function setCommandStatus(component, name, status) {
   commandStatus.set(commandKey(component, name), status);
-  for (const cell of document.querySelectorAll("#faceplates .command-status")) {
+  for (const cell of document.querySelectorAll("#detail .command-status")) {
     if (cell.dataset.component === component && cell.dataset.command === name) {
       cell.textContent = status.text;
       cell.className = "command-status" + (status.warn ? " warn" : "") +
@@ -2539,6 +2637,46 @@ function commandPoint(command) {
   return null;
 }
 
+// The alarm-to-equipment navigation element every alarm surface
+// carries: an anchor jump to the equipment pane, its data-component
+// naming the owning component the delegated handler selects — the
+// pane's composition is the equipment section's note.
+function equipmentLink(component, content) {
+  return "<a class=\"nav-equipment\" href=\"#equipment\" data-component=\"" +
+    esc(component) + "\">" + content + "</a>";
+}
+
+// The owning component an alarm-surface journal entry attributes to —
+// the navigation target its equipment link names: the descriptor
+// binding the entry's point as a status port, or the component a
+// component-addressed entry names outright. An entry attributing to no
+// component — a run-level record — carries no link.
+function alarmEntryComponent(entry, descriptors) {
+  const owner = point => {
+    for (const descriptor of descriptors) {
+      if (descriptor.ports.some(port =>
+          port.role === "status" && port.point === point)) {
+        return descriptor.name;
+      }
+    }
+    return null;
+  };
+  const event = entry.event;
+  if ("point_changed" in event) return owner(event.point_changed.point);
+  if ("quality_changed" in event) return owner(event.quality_changed.point);
+  if ("field_claim_lost" in event) return owner(event.field_claim_lost.point);
+  if ("command_settled" in event) {
+    const command = event.command_settled.receipt.command;
+    if ("set_parameter" in command) return command.set_parameter.component;
+    if ("invoke" in command) return command.invoke.component;
+    const point = commandPoint(command);
+    return point === null ? null : owner(point);
+  }
+  if ("step_failed" in event) return event.step_failed.component;
+  if ("event_emitted" in event) return event.event_emitted.event.component;
+  return null;
+}
+
 // One asserted status port's row: the markup every list renders, plus
 // the states the row routes and filters by — the component's asserted
 // managed flags, "active" while `alarm` stands, "unacknowledged" while
@@ -2553,12 +2691,13 @@ function alarmRow(descriptor, port, sample, telemetry, forced, parameters, actio
   // The row carries the quality class: a Bad or Uncertain value draws
   // degraded — italic, tinted — instead of as a clean assertion, so a
   // bad sensor reads as uncertainty rather than a hidden alarm state.
+  const priority = priorityMarkup(descriptor.name, parameters);
   return {
     states,
     managed: MANAGED_STATES.filter(state => states.has(state)),
     degraded: !isGood(sample.quality),
     html: "<tr class=\"alarm " + cls + "\">" +
-      "<td>" + esc(descriptor.label) +
+      "<td>" + equipmentLink(descriptor.name, esc(descriptor.label)) +
         rationalizationMarkup(descriptor.name) + "</td>" +
       "<td>" + esc(port.name) + (meta ? " · " + esc(meta.name) : "") +
         truthFlags(descriptor, telemetry) + "</td>" +
@@ -2567,7 +2706,8 @@ function alarmRow(descriptor, port, sample, telemetry, forced, parameters, actio
       "<td class=\"" + cls + "\">" + esc(formatQuality(sample.quality)) +
       "</td>" +
       "<td>" + lastChangedTick(port.point, sample) + "</td>" +
-      "<td>" + priorityMarkup(descriptor.name, parameters) + "</td>" +
+      "<td>" + (priority === ""
+        ? "" : equipmentLink(descriptor.name, priority)) + "</td>" +
       "<td>" + actions + "</td></tr>",
   };
 }
@@ -2640,12 +2780,19 @@ function renderAlarms(snapshot, telemetry, forced) {
   // The alarm journal lists in the durable journal's transition order —
   // seq order — so a burst's initiating cause stands first: equal-tick
   // point_changed transitions and the settled receipt that caused them
-  // keep the order the recorder appended them.
+  // keep the order the recorder appended them. Each attributable entry
+  // carries its owning component's equipment link — the same
+  // navigation the rows offer.
   document.getElementById("alarm-journal").innerHTML = journalEntries
     .filter(entry => alarmJournalEntry(entry, join))
     .sort((a, b) => a.seq - b.seq)
-    .map(entry => "<tr><td>" + entry.seq + "</td><td>" + entry.tick +
-      "</td><td>" + esc(describeEvent(entry.event)) + "</td></tr>")
+    .map(entry => {
+      const owner = alarmEntryComponent(entry, snapshot.descriptors);
+      return "<tr><td>" + entry.seq + "</td><td>" + entry.tick +
+        "</td><td>" + esc(describeEvent(entry.event)) +
+        (owner === null ? "" : " " + equipmentLink(owner, esc(owner))) +
+        "</td></tr>";
+    })
     .join("");
 }
 
@@ -2738,6 +2885,156 @@ async function submitManaged(button) {
   refresh();
 }
 
+// ---- Equipment pane ----
+//
+// The alarm-to-equipment navigation's target: the component the last
+// nav-equipment link selected, composed on the one surface the
+// operations workflow reads — the instance's faceplate in the same
+// descriptor-driven markup the components section renders (commands
+// and tuning operable through the same delegated receipted paths),
+// its bound points' live values with quality, a trend window per bound
+// point drawn from the same retained series the trends pane shows, the
+// component-attributed slice of the durable journal, the instance's
+// rationalization record, and the pair-health and I/O-health lines.
+// Every part derives from the payloads the page already polls; the
+// pane adds no endpoint, wire type, or served-surface change.
+
+// The component's bound points, deduplicated in port order — the
+// pane's live-points table and trend windows both draw from this set.
+function equipmentPoints(descriptor) {
+  const points = [];
+  const seen = new Set();
+  for (const port of descriptor.ports) {
+    if (port.point == null || seen.has(port.point)) continue;
+    seen.add(port.point);
+    points.push({ port: port, point: port.point });
+  }
+  return points;
+}
+
+// One bound point's live-points row — the point listing's columns,
+// the index's signal metadata joined where the point has a declared
+// signal; a point the index does not name (a synthesized link point)
+// falls back to the port's own name, direction, and kind.
+function equipmentPointRow(entry, telemetry, forced) {
+  const meta = metaByPoint.get(entry.point);
+  const sample = (telemetry.get(entry.point) || {}).sample;
+  const cls = sample ? qualityClass(sample.quality) : "nosample";
+  return "<tr><td>" + entry.point + "</td><td>" +
+    esc(meta ? meta.name : entry.port.name) + "</td><td>" +
+    esc(meta ? meta.direction : entry.port.direction) + "</td><td>" +
+    pascal(meta ? meta.value_type : entry.port.kind) + "</td>" +
+    "<td class=\"value " + cls + "\">" +
+      (sample ? esc(formatValue(sample.value)) : "") +
+      forcedBadge(entry.point, forced) + "</td>" +
+    "<td class=\"" + cls + "\">" +
+      (sample ? esc(formatQuality(sample.quality)) : "no sample") + "</td>" +
+    "<td>" + esc(meta && meta.unit ? meta.unit : "") + "</td>" +
+    "<td>" + (sample ? sample.tick : "") + "</td></tr>";
+}
+
+// One bound point's trend window — the standing trend figure's own
+// series drawing (trendBody) under a caption naming the signal. A
+// point the index does not declare draws no window: the page trends
+// only the declared signals.
+function equipmentTrend(entry) {
+  const meta = metaByPoint.get(entry.point);
+  if (!meta) return "";
+  const state = trends.get(entry.point);
+  const samples = state ? state.samples.length : 0;
+  return "<figure class=\"trend\"><figcaption>" + esc(meta.name) +
+    " (point " + entry.point + ")" +
+    (meta.unit ? " [" + esc(meta.unit) + "]" : "") +
+    " — " + samples + " retained samples</figcaption>" +
+    "<svg viewBox=\"0 0 320 90\" width=\"320\" height=\"90\">" +
+    trendBody(entry.point) + "</svg></figure>";
+}
+
+// The component-attributed slice of the retained journal — the serving
+// layer's resource-view attribution rule applied page-side over the
+// entries the journal pane already merged: transitions on the
+// instance's bound points, commands its name or its bound points
+// settle, its step failures, and its emitted events, in the durable
+// record's seq order.
+function equipmentJournalEntries(descriptor) {
+  const bound = new Set(equipmentPoints(descriptor).map(entry => entry.point));
+  const named = command =>
+    ("set_parameter" in command &&
+      command.set_parameter.component === descriptor.name) ||
+    ("invoke" in command && command.invoke.component === descriptor.name);
+  const attributed = entry => {
+    const event = entry.event;
+    if ("point_changed" in event) return bound.has(event.point_changed.point);
+    if ("quality_changed" in event) return bound.has(event.quality_changed.point);
+    if ("field_claim_lost" in event) return bound.has(event.field_claim_lost.point);
+    if ("command_settled" in event) {
+      const command = event.command_settled.receipt.command;
+      if (named(command)) return true;
+      const point = commandPoint(command);
+      return point !== null && bound.has(point);
+    }
+    if ("step_failed" in event) return event.step_failed.component === descriptor.name;
+    if ("event_emitted" in event) {
+      return event.event_emitted.event.component === descriptor.name;
+    }
+    return false;
+  };
+  return journalEntries.filter(attributed).sort((a, b) => a.seq - b.seq);
+}
+
+// Renders the pane for the current selection from the poll's inputs —
+// the render refresh() performs and a between-polls navigation repeats
+// from `rendered`. An empty selection, or one the snapshot no longer
+// describes, hides the pane: there is nothing to navigate to.
+function renderEquipment(snapshot, telemetry, forced) {
+  const pane = document.getElementById("equipment");
+  const descriptor = equipmentSelection === null
+    ? null : descriptorByName.get(equipmentSelection);
+  if (!descriptor) {
+    pane.hidden = true;
+    return;
+  }
+  const captured = captureEdits("#equipment-faceplate");
+  pane.hidden = false;
+  document.getElementById("equipment-name").textContent =
+    descriptor.label + " (" + descriptor.kind + ")";
+  // The pair-health line — the pair section's own verdict, so the
+  // navigation surface carries the same redundancy reading.
+  const pairLine = document.getElementById("equipment-pair");
+  if (peers.length > 1) {
+    const health = pairHealth(peers, peerState);
+    pairLine.textContent = pairSummary(health);
+    pairLine.className = pairFaulted(health) ? "bad" : "good";
+  } else {
+    pairLine.textContent = "standalone controller — no redundant pair";
+    pairLine.className = "";
+  }
+  // The I/O-health line — this snapshot's io_health section reduced to
+  // the one-line verdict the overview cards use.
+  const io = ioHealthSummary(snapshot.io_health);
+  const ioLine = document.getElementById("equipment-io");
+  ioLine.textContent = io.text;
+  ioLine.className = io.bad ? "bad" : "good";
+  const diagnostics = new Map(snapshot.components.map(c => [c.name, c]));
+  const parameters = new Map(
+    (snapshot.parameters || []).map(p => [p.name, p.values]));
+  document.getElementById("equipment-faceplate").innerHTML =
+    faceplateMarkup(descriptor, diagnostics.get(descriptor.name),
+      telemetry, forced, parameters);
+  restoreEdits("#equipment-faceplate", captured);
+  document.getElementById("equipment-rationalization").innerHTML =
+    rationalizationMarkup(descriptor.name);
+  const points = equipmentPoints(descriptor);
+  document.getElementById("equipment-points").innerHTML =
+    points.map(entry => equipmentPointRow(entry, telemetry, forced)).join("");
+  document.getElementById("equipment-trends").innerHTML =
+    points.map(equipmentTrend).join("");
+  document.getElementById("equipment-journal").innerHTML =
+    equipmentJournalEntries(descriptor).map(entry =>
+      "<tr><td>" + entry.seq + "</td><td>" + entry.tick + "</td><td>" +
+      esc(describeEvent(entry.event)) + "</td></tr>").join("");
+}
+
 // One inline-SVG trend panel per point, built once from the signal index.
 function buildTrends() {
   document.getElementById("trends").innerHTML = index.points.map(meta =>
@@ -2814,27 +3111,18 @@ async function refreshTrends(base) {
   for (const meta of index.points) drawTrend(meta);
 }
 
-// Draws one point's retained series as a polyline; samples with non-good
-// quality get a marker dot in the quality's color, so a degraded stretch
-// is visible on the trend itself.
-function drawTrend(meta) {
-  const state = trends.get(meta.point);
-  const svg = document.getElementById("trend-" + meta.point);
-  const caption = document.getElementById("trend-caption-" + meta.point);
-  const latest = state.samples[state.samples.length - 1];
-  caption.textContent = meta.name + " (point " + meta.point + ")" +
-    (meta.unit ? " [" + meta.unit + "]" : "") + (latest
-      ? " — latest " + formatValue(latest.value) + " at tick " + latest.tick +
-        ", " + state.samples.length + " samples, ticks " +
-        state.samples[0].tick + "–" + latest.tick
-      : " — no samples");
+// The inner SVG one point's retained series draws — the polyline plus
+// a marker dot in the quality's color for each non-good sample, so a
+// degraded stretch is visible on the trend itself. Shared by the
+// standing trend figure and the equipment pane's per-point window; a
+// point with no retained series draws empty.
+function trendBody(point) {
+  const state = trends.get(point);
+  if (!state) return "";
   const coords = state.samples
     .map((sample, i) => ({ i, v: numericValue(sample.value), sample }))
     .filter(c => c.v != null);
-  if (coords.length === 0) {
-    svg.innerHTML = "";
-    return;
-  }
+  if (coords.length === 0) return "";
   const min = Math.min(...coords.map(c => c.v));
   const max = Math.max(...coords.map(c => c.v));
   let lo = min, hi = max;
@@ -2857,7 +3145,22 @@ function drawTrend(meta) {
         esc(formatQuality(c.sample.quality)) + "</title></circle>";
     }
   }
-  svg.innerHTML = body;
+  return body;
+}
+
+// Draws one point's retained series into its standing trend figure.
+function drawTrend(meta) {
+  const state = trends.get(meta.point);
+  const svg = document.getElementById("trend-" + meta.point);
+  const caption = document.getElementById("trend-caption-" + meta.point);
+  const latest = state.samples[state.samples.length - 1];
+  caption.textContent = meta.name + " (point " + meta.point + ")" +
+    (meta.unit ? " [" + meta.unit + "]" : "") + (latest
+      ? " — latest " + formatValue(latest.value) + " at tick " + latest.tick +
+        ", " + state.samples.length + " samples, ticks " +
+        state.samples[0].tick + "–" + latest.tick
+      : " — no samples");
+  svg.innerHTML = trendBody(meta.point);
 }
 
 // Fetches the journal increment from the current source and re-renders
@@ -3378,9 +3681,11 @@ async function init() {
   // mark writable is never commanded from the page. A tune button
   // submits its parameter's edit through submitParameter, a force or
   // release button through submitForce/submitUnforce — the same
-  // receipted path.
+  // receipted path. The equipment pane's duplicated faceplate takes
+  // the identical delegated handler — its controls are the same
+  // receipted commands under the same metadata gates.
   const faceplates = document.getElementById("faceplates");
-  faceplates.addEventListener("click", async event => {
+  const faceplateClick = async event => {
     const tune = event.target.closest("button.tune");
     if (tune) {
       await submitParameter(tune);
@@ -3425,11 +3730,25 @@ async function init() {
       document.getElementById("receipt").textContent = "command failed: " + error;
     }
     refresh();
-  });
+  };
+  faceplates.addEventListener("click", faceplateClick);
+  document.getElementById("equipment").addEventListener("click", faceplateClick);
   // The alarm pane's affordances take the same delegated shape — the
-  // rows re-render on every poll — and the state select re-filters the
-  // lists on the next refresh, triggered immediately here.
+  // rows re-render on every poll — plus the nav-equipment links every
+  // row and attributable journal entry carries: a navigation selects
+  // the owning component into the equipment pane and re-renders it
+  // from the last poll's inputs before the anchor's own jump scrolls
+  // it into view. The state select re-filters the lists on the next
+  // refresh, triggered immediately here.
   document.getElementById("alarm-pane").addEventListener("click", async event => {
+    const nav = event.target.closest("a.nav-equipment");
+    if (nav) {
+      equipmentSelection = nav.dataset.component;
+      if (rendered.snapshot !== null) {
+        renderEquipment(rendered.snapshot, rendered.telemetry, rendered.forced);
+      }
+      return;
+    }
     const ack = event.target.closest("button.ack");
     if (ack) {
       await submitAck(ack);
@@ -3437,6 +3756,13 @@ async function init() {
     }
     const managed = event.target.closest("button.managed");
     if (managed) await submitManaged(managed);
+  });
+  // The pane's close affordance drops the selection — a cleared
+  // selection keeps the pane hidden on later polls until the next
+  // navigation.
+  document.getElementById("equipment-close").addEventListener("click", () => {
+    equipmentSelection = null;
+    document.getElementById("equipment").hidden = true;
   });
   document.getElementById("alarm-filter").addEventListener("change", refresh);
   // The point listing's force and release affordances take the same
@@ -3451,8 +3777,9 @@ async function init() {
     const unforce = event.target.closest("button.unforce");
     if (unforce) await submitUnforce(unforce);
   });
-  // Enter inside an affordance input submits like its button.
-  faceplates.addEventListener("keydown", event => {
+  // Enter inside an affordance input submits like its button — the
+  // same rule inside the equipment pane's duplicated faceplate.
+  const faceplateKeydown = event => {
     if (event.key !== "Enter") return;
     const input = event.target.closest("input.command-value");
     if (input) {
@@ -3470,7 +3797,9 @@ async function init() {
     if (!control) return;
     const tune = control.parentElement.querySelector("button.tune");
     if (tune) tune.click();
-  });
+  };
+  faceplates.addEventListener("keydown", faceplateKeydown);
+  document.getElementById("equipment").addEventListener("keydown", faceplateKeydown);
   points.addEventListener("keydown", event => {
     if (event.key !== "Enter") return;
     const input = event.target.closest("input.command-value");
