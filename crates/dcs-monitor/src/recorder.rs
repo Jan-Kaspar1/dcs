@@ -188,6 +188,17 @@ pub(super) struct Recorder {
     /// Per-component `step_errors` counts at the last record, in scan
     /// order — what step-failure entries diff against.
     step_counts: Vec<u64>,
+    /// The tick the journal's append axis last stamped — the run's own
+    /// clock's standing mark. Entry attribution never rewinds within a
+    /// run: a stamp arriving below the mark — a checkpoint-carried
+    /// `Applied` receipt still naming the *line's* apply tick, adopted
+    /// while this run's clock held past a degraded window's stream —
+    /// attributes at the mark instead. The receipt itself keeps the
+    /// line's tick; only the entry's axis position rides the mark. A
+    /// restart's own run begins unmarked: its `run_boundary` entry —
+    /// and any restored run's first stamps — carry the run's true start
+    /// tick, the seam a consumer attributes the lifetimes around.
+    last_pushed: Option<Tick>,
     /// The durable journal sink, when a path is configured — every
     /// journaled entry is appended there too.
     sink: Option<JournalFile>,
@@ -254,6 +265,7 @@ impl Recorder {
                 }),
             local_receipts: HashSet::new(),
             step_counts: Vec::new(),
+            last_pushed: None,
             sink,
         };
         // A file that already records earlier lifetimes makes this run
@@ -546,9 +558,11 @@ impl Recorder {
         // receipt journals on the outcome transition this record
         // observes — whether the command was submitted here or arrived
         // adopted inside a checkpoint, so the run's command audit reads
-        // the same on either peer. An applied receipt reports the tick
-        // it applied at; a boundary rejection is attributed to this
-        // scan.
+        // the same on either peer. An applied receipt's entry rides the
+        // append axis — `push` holds it at the standing mark when the
+        // carried apply tick lags the run's journaled clock — while the
+        // receipt itself keeps the tick it applied at; a boundary
+        // rejection is attributed to this scan.
         // Entries key on the absolute submission index, not the served
         // position: the bounded log's evictions shift positions, while
         // the index is stable for the receipt's lifetime. Observations
@@ -753,7 +767,20 @@ impl Recorder {
     /// file rather than running on while its audit trail silently
     /// stops, and the partial record a crash can leave is what the next
     /// startup's replay rejects by name.
+    ///
+    /// The append axis never rewinds within the run: the durable
+    /// journal is the audit trail's one ordering, and an entry stamped
+    /// below its predecessor's tick would read to a tick-order consumer
+    /// as having happened first. A stamp that lags the axis — a
+    /// carried receipt naming the line's apply tick while this run's
+    /// clock holds ahead of the stream — lands at the standing mark;
+    /// the event payload still carries its own domain's truth.
     pub(super) fn push(&mut self, tick: Tick, event: JournalEvent) {
+        let tick = match self.last_pushed {
+            Some(last) => tick.max(last),
+            None => tick,
+        };
+        self.last_pushed = Some(tick);
         let entry = JournalEntry {
             seq: self.next_seq,
             tick,
