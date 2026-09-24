@@ -14,11 +14,16 @@ matching the supervisor's rolling merge comparison in ``State.merge_flow``):
 - conflict-repair and re-dispatch incidence where the record exposes it:
   WIP-preservation and ``origin/main`` integration lines inside squash-merge
   bodies, plus the job ledger's ``repairs``/``attempt`` counters;
+- repairs and redispatches broken down by bounded cause class, joined from
+  the work ledger's attributed ``repair``/``redispatch`` event rows
+  (``merge-conflict``/``ci-failure``/``publish-error`` repairs and
+  ``worker-failure``/``quota-requeue`` redispatches);
 - the open backlog's ready/blocked label share at report time.
 
 The report is deterministic for a fixed input set and ``--now``. All inputs
-are injectable for tests: ``--git-log``/``--issues``/``--jobs`` files replace
-the live git, GitHub, and SQLite reads. The script never mutates anything.
+are injectable for tests: ``--git-log``/``--issues``/``--jobs``/``--events``
+files replace the live git, GitHub, and SQLite reads. The script never
+mutates anything.
 """
 import argparse
 from collections import Counter
@@ -136,7 +141,19 @@ def window_bounds(now, window_seconds):
     }
 
 
-def window_report(commits, lo, hi, issues_by_number, jobs_by_issue):
+def event_cause(event):
+    """The bounded cause class an attributed ledger row carries, or None."""
+    payload = event.get("payload") or {}
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except ValueError:
+            return None
+    cause = payload.get("cause") if isinstance(payload, dict) else None
+    return cause if isinstance(cause, str) and cause else None
+
+
+def window_report(commits, lo, hi, issues_by_number, jobs_by_issue, events=None):
     """Merge-flow measures for commits whose timestamp falls in [lo, hi)."""
     merges = [c for c in commits if lo <= c["timestamp"] < hi]
     areas = Counter()
@@ -144,6 +161,16 @@ def window_report(commits, lo, hi, issues_by_number, jobs_by_issue):
     resolved = unresolved = 0
     wip_merges = integration_merges = repeated = 0
     ledger_repair = ledger_redispatch = 0
+    repairs_by_cause = Counter()
+    redispatches_by_cause = Counter()
+    for event in events or ():
+        at = event.get("at")
+        if not isinstance(at, (int, float)) or not lo <= at < hi:
+            continue
+        counter = {"repair": repairs_by_cause,
+                   "redispatch": redispatches_by_cause}.get(event.get("kind"))
+        if counter is not None:
+            counter[event_cause(event) or "unclassified"] += 1
     for commit in merges:
         issue_number = merged_issue(commit)
         issue = issues_by_number.get(issue_number) if issue_number else None
@@ -180,6 +207,8 @@ def window_report(commits, lo, hi, issues_by_number, jobs_by_issue):
             "merges_with_repeated_work_commits": repeated,
             "ledger_repairs": ledger_repair,
             "ledger_redispatched": ledger_redispatch,
+            "repairs_by_cause": dict(sorted(repairs_by_cause.items())),
+            "redispatches_by_cause": dict(sorted(redispatches_by_cause.items())),
         },
     }
 
@@ -219,14 +248,15 @@ def backlog_report(issues):
     }
 
 
-def build_report(commits, issues, jobs, now, window_days):
+def build_report(commits, issues, jobs, now, window_days, events=None):
     """Assemble the deterministic report dict from parsed inputs."""
     window_seconds = window_days * 86400
     bounds = window_bounds(now, window_seconds)
     issues_by_number = {i["number"]: i for i in issues or []}
     jobs_by_issue = {j["issue"]: j for j in jobs or []}
     windows = {
-        name: dict(window_report(commits, lo, hi, issues_by_number, jobs_by_issue),
+        name: dict(window_report(commits, lo, hi, issues_by_number, jobs_by_issue,
+                                 events),
                    start=lo, end=hi)
         for name, (lo, hi) in bounds.items()
     }
@@ -246,6 +276,7 @@ def build_report(commits, issues, jobs, now, window_days):
         },
         "ledger": {
             "jobs": len(jobs_by_issue),
+            "events": len(events or []),
             "ledger_merges": {
                 name: sum(1 for j in jobs_by_issue.values()
                           if j.get("status") == "done" and j.get("updated")
@@ -255,6 +286,11 @@ def build_report(commits, issues, jobs, now, window_days):
         },
         "backlog": backlog_report(issues) if issues is not None else None,
     }
+
+
+def _causes_text(causes):
+    """Render a sorted cause-count dict compactly for the text report."""
+    return " ".join("%s=%d" % (k, v) for k, v in causes.items()) or "none"
 
 
 def render_text(report):
@@ -273,14 +309,17 @@ def render_text(report):
             "{name}: merges={merges} identity(resolved={ir} unresolved={iu}) "
             "lead_h(count={lc} p50={p50} p90={p90} max={mx}) "
             "repairs(wip={wip} main_integrations={mi} repeated_work={rw} "
-            "ledger_repairs={lr} redispatched={rd})".format(
+            "ledger_repairs={lr} redispatched={rd}) "
+            "repair_causes[{rc}] redispatch_causes[{dc}]".format(
                 name=name, merges=w["merges"],
                 ir=w["identity"]["resolved"], iu=w["identity"]["unresolved"],
                 lc=lead["count"], p50=lead["p50"], p90=lead["p90"], mx=lead["max"],
                 wip=repair["merges_with_wip_preserve"],
                 mi=repair["merges_with_main_integration"],
                 rw=repair["merges_with_repeated_work_commits"],
-                lr=repair["ledger_repairs"], rd=repair["ledger_redispatched"]))
+                lr=repair["ledger_repairs"], rd=repair["ledger_redispatched"],
+                rc=_causes_text(repair["repairs_by_cause"]),
+                dc=_causes_text(repair["redispatches_by_cause"])))
         lines.append("  areas: " + (", ".join(f"{k}={v}" for k, v in w["areas"].items()) or "none"))
     decline = report["merge_decline_percent"]
     lines.append("merge decline: {}% (previous -> current)".format(decline))
@@ -347,6 +386,17 @@ def read_ledger(path):
         db.close()
 
 
+def read_events(path):
+    """Work-ledger event rows from the supervisor's durable SQLite state."""
+    db = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    db.row_factory = sqlite3.Row
+    try:
+        return [dict(row) for row in db.execute(
+            "SELECT kind, issue, attempt, at, payload FROM work_events")]
+    finally:
+        db.close()
+
+
 def fetch_issues(repo, repo_dir):
     result = subprocess.run(
         ["gh", "issue", "list", "--repo", repo, "--state", "all", "--limit", "2000",
@@ -384,10 +434,12 @@ def main(argv=None):
                         help="skip issue inventory; areas/backlog report unresolved")
     parser.add_argument("--jobs", type=Path,
                         help="job ledger JSON rows (issue, started, updated, status, repairs, attempt)")
+    parser.add_argument("--events", type=Path,
+                        help="work-event ledger JSON rows (kind, issue, attempt, at, payload)")
     parser.add_argument("--state-db", type=Path,
                         help="supervisor state.sqlite3; default: auto-detect install")
     parser.add_argument("--no-ledger", action="store_true",
-                        help="skip the job ledger; lead times report unresolved")
+                        help="skip the job and work-event ledgers; lead times report unresolved")
     parser.add_argument("--json", action="store_true", help="emit JSON instead of text")
     args = parser.parse_args(argv)
 
@@ -415,19 +467,28 @@ def main(argv=None):
             warnings.append("issue inventory unavailable: %s" % exc)
 
     jobs = None
+    events = None
     if args.jobs:
         jobs = json.loads(args.jobs.read_text())
-    elif not args.no_ledger:
+    if args.events:
+        events = json.loads(args.events.read_text())
+    if not args.no_ledger and (jobs is None or events is None):
         state_db = args.state_db or default_state_db()
         if state_db:
-            try:
-                jobs = read_ledger(state_db)
-            except (sqlite3.Error, OSError) as exc:
-                warnings.append("job ledger unavailable: %s" % exc)
+            if jobs is None:
+                try:
+                    jobs = read_ledger(state_db)
+                except (sqlite3.Error, OSError) as exc:
+                    warnings.append("job ledger unavailable: %s" % exc)
+            if events is None:
+                try:
+                    events = read_events(state_db)
+                except (sqlite3.Error, OSError) as exc:
+                    warnings.append("work-event ledger unavailable: %s" % exc)
         else:
-            warnings.append("job ledger unavailable: no state db found")
+            warnings.append("work ledger unavailable: no state db found")
 
-    report = build_report(commits, issues, jobs, now, args.window_days)
+    report = build_report(commits, issues, jobs, now, args.window_days, events)
     report["ref"] = ref
     if warnings:
         report["warnings"] = warnings

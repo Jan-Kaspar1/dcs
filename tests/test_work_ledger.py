@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,14 +19,15 @@ class WorkLedgerTests(unittest.TestCase):
     def test_job_transitions_are_durable_and_retry_is_not_duplicated(self):
         self.state.reserve(7, 'worker-01', 'dcs-core')
         self.state.update_job(7, status='blocked', error='test failure')
-        self.assertTrue(self.state.retry(7))
-        self.assertFalse(self.state.retry(7))
+        self.assertTrue(self.state.retry(7, 'worker-failure'))
+        self.assertFalse(self.state.retry(7, 'worker-failure'))
         self.state.update_job(7, status='pr-open', pr=11)
         self.state.complete(7)
         events = list(reversed(self.state.events(7)))
         self.assertEqual([event['kind'] for event in events], [
-            'reserved', 'status:blocked', 'retry-reserved', 'status:pr-open',
-            'merged-and-closed'])
+            'reserved', 'status:blocked', 'retry-reserved', 'redispatch',
+            'status:pr-open', 'merged-and-closed'])
+        self.assertEqual(json.loads(events[3]['payload'])['cause'], 'worker-failure')
         self.assertEqual(events[-1]['attempt'], 2)
 
     def test_invocation_outcome_is_recorded_once(self):

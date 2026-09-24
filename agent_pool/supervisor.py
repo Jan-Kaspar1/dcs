@@ -8,7 +8,7 @@ import subprocess
 import time
 import uuid
 
-from .state import State
+from .state import State, REDISPATCH_CAUSES
 from .admission import Admission, classify
 from .github import GitHub, GitHubError
 from .runtime import Runtime
@@ -315,7 +315,13 @@ Repair context: {repair}
             self.log('Retry #' + str(number) + ': recovery failed - ' + str(exc)[:500])
             return False
         self.state.update_job(number, worker=worker, clone=str(target))
-        if not self.state.retry(number):
+        # The retry flag carries the redispatch class when a call site armed
+        # it (requeue_quota); an operator-armed retry defaults to the generic
+        # worker-failure class. jobs.error keeps the free-text detail.
+        cause = self.state.get('retry:' + str(number))
+        if cause not in REDISPATCH_CAUSES:
+            cause = 'worker-failure'
+        if not self.state.retry(number, cause):
             self.admission.release(owner)
             self.state.update_job(number, error='Retry rejected: repair budget exhausted')
             return False
@@ -372,7 +378,7 @@ Repair context: {repair}
         self.state.update_job(job['issue'], status='pr-open', pr=number, error=None)
         self.state.set('process:' + str(job['issue']), None)
 
-    def repair(self, job, issue, reason):
+    def repair(self, job, issue, reason, cause):
         if self.state.paused():
             return
         owner = 'job:' + str(job['issue'])
@@ -381,7 +387,7 @@ Repair context: {repair}
                                       self.state.capacity()):
             self.log(f"Repair for #{job['issue']} deferred: inference admission denied")
             return
-        if self.state.repair(job['issue']):
+        if self.state.repair(job['issue'], cause):
             self.launch(self.state.job(job['issue']), issue, reason)
         else:
             self.admission.release(owner)
@@ -402,7 +408,7 @@ Repair context: {repair}
             return
         rec['quota_requeues'] = used + 1
         self.state.set('recovery:' + str(number), rec)
-        self.state.set('retry:' + str(number), True)
+        self.state.set('retry:' + str(number), 'quota-requeue')
         self.log(f"#{number} requeued after {category} failure "
                  f"({used + 1}/{self.admission.max_quota_requeues})")
 
@@ -461,7 +467,7 @@ Repair context: {repair}
                 # Any other publish-path failure (wrong branch, unclean result,
                 # git or state error) belongs to this job alone; repair or block
                 # it so the same pass still reaches the remaining jobs.
-                self.repair(job, issue, str(exc))
+                self.repair(job, issue, str(exc), 'publish-error')
 
     def recover_processes(self):
         """Reconnect durable launch intent or stop unowned live managed invocations."""
@@ -514,7 +520,7 @@ Repair context: {repair}
                     self.runtime.run_git(clone, 'merge', '--no-edit', 'origin/main')
                     self.runtime.run_git(clone, 'push', 'origin', job['branch'])
                 except subprocess.CalledProcessError as exc:
-                    self.repair(job, by_number[job['issue']], 'Resolve the existing merge conflict with origin/main. ' + str(exc.stdout) + str(exc.stderr))
+                    self.repair(job, by_number[job['issue']], 'Resolve the existing merge conflict with origin/main. ' + str(exc.stdout) + str(exc.stderr), 'merge-conflict')
                 return
             if self.github.checks_pass(pr, self.config['required_checks']):
                 if self.github.merge(job['pr'], self.config['required_checks']):
@@ -524,7 +530,7 @@ Repair context: {repair}
             checks = self.github.check_states(pr['head']['sha'])
             failed = {name: checks[name] for name in self.config['required_checks'] if checks.get(name) in ('failure','timed_out','cancelled','action_required','skipped','neutral','stale')}
             if failed:
-                self.repair(job, by_number[job['issue']], 'CI failed. Inspect gh pr checks and gh run view --log-failed as read-only diagnostics. ' + json.dumps(failed))
+                self.repair(job, by_number[job['issue']], 'CI failed. Inspect gh pr checks and gh run view --log-failed as read-only diagnostics. ' + json.dumps(failed), 'ci-failure')
                 return
 
     def review_stage(self, cfg=None):
