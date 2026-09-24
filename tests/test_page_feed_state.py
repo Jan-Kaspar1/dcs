@@ -16,18 +16,25 @@ keeping the replica honest instead of silently drifting. The mirrored
 spans, in page.html 1-based lines:
 
 - `journalEntries`/`journalSeen`/`journalRun` records — L560–576;
-  `feed` record — L589; `POLL_MS`/`pollFetch` abort bound — L738–740
+  `feed` record — L589; the `ackReleases` record — L627;
+  `POLL_MS`/`pollFetch` abort bound — L738–740
 - `pollRoles` fetch/error bookkeeping — L747–759; `selectSource`/
-  `switchSource` — L769–799; the "unreachable" pair render — L964
+  `switchSource` — L769–799; `activePeer`/`noActiveVerdict` —
+  L817–832; the "unreachable" pair render — L964
 - `notePublication`/`noteRestart`/`noteFeedGap`/`renderFeed` —
   L1006–1084
-- `refresh()`'s feed ordering and its failed-poll stale mark —
-  L1333–1356, L1420–1421, L1440–1441
+- `refresh()`'s feed ordering, the ack pulse's held-true arming audit
+  and its retried-until-receipted release loop, and the failed-poll
+  stale mark — L1333–1423, L1455–1456, L1475–1476
+- `submitAck`'s press: the receipted write of true arming the release
+  on an accepted/applied outcome — L2971–2988
 - `refreshTrends`' since cursor, run-marker restart check, gap note,
-  and the refetch-gated watermark / seq fallback — L3161–3210
+  and the refetch-gated watermark / seq fallback — L3196–3245
 - `journalKey`'s run-qualified merge identity and `refreshJournal`'s
   cursor, gap note, attribution re-mark, dedupe, run_boundary restart
-  check, merge, ordering, and bound — L3279–3360
+  check, merge, ordering, and bound — L3314–3389
+- `postCommand`'s bounded POST, `isNotActive`, and `submitCommand`'s
+  active-peer routing with the not_active re-poll — L3675–3727
 """
 import json
 import unittest
@@ -53,8 +60,9 @@ PINS = [
     (560, 'const journalEntries = [];'),
     (567, 'const journalSeen = new Set();'),
     (576, 'let journalRun = 0;'),
-    # The feed record and the shared poll bound.
+    # The feed record, the armed ack releases, and the shared poll bound.
     (589, 'const feed = { publication: null, gap: null, stale: null, restart: null };'),
+    (627, 'const ackReleases = new Map();'),
     (738, 'const POLL_MS = 1000;'),
     (739, 'function pollFetch(url) {'),
     (740, 'return fetch(url, { signal: AbortSignal.timeout(POLL_MS) });'),
@@ -78,6 +86,10 @@ PINS = [
     (797, 'feed.gap = null;'),
     (798, 'feed.stale = null;'),
     (799, 'feed.restart = null;'),
+    # The unique settled-active peer every command targets — and the
+    # not-sent verdict while the pair has none.
+    (817, 'function activePeer() {'),
+    (825, 'function noActiveVerdict() {'),
     # The unreachable peer fault the role poll's error names.
     (883, 'faults.push(was + peer.name + " unreachable");'),
     (884, 'fault_kinds.push("peer_unreachable");'),
@@ -123,53 +135,97 @@ PINS = [
     (1354, 'feed.gap = null;'),
     (1355, 'feed.restart = null;'),
     (1356, 'notePublication(snapshot);'),
-    (1420, 'await Promise.all([refreshTrends(base), refreshJournal(base)]);'),
-    (1421, 'renderFeed();'),
-    (1440, 'if (feed.stale === null && feed.publication !== null) {'),
-    (1441, 'feed.stale = feed.publication;'),
+    # The ack pulse's release half: a snapshot serving a writable `ack`
+    # input held true arms its release at this tick — the serving scan
+    # already observed the level, so an acknowledge write that applied
+    # past its abort-bound receipt (or a reload over a held input)
+    # still gets its pulse completed — and a due release stays armed
+    # until the receipted write answers accepted or applied, an aborted
+    # or refused submission retrying on a later poll rather than
+    # dropping the release and latching the input against later presses.
+    (1380, 'for (const descriptor of snapshot.descriptors || []) {'),
+    (1382, 'p.name === "ack" && p.direction === "in" && p.kind === "bool");'),
+    (1383, 'if (!ack || ack.point == null || ackReleases.has(ack.point)) {'),
+    (1386, 'const meta = metaByPoint.get(ack.point);'),
+    (1387, 'const ackSample = (telemetry.get(ack.point) || {}).sample;'),
+    (1390, 'ackReleases.set(ack.point, snapshot.tick);'),
+    (1403, 'for (const [point, applyTick] of [...ackReleases]) {'),
+    (1405, 'const held = sample && sample.value && sample.value.bool === true;'),
+    (1406, 'if (snapshot.tick < applyTick && !held) continue;'),
+    (1407, 'if (sample && sample.value && sample.value.bool === false) {'),
+    (1408, 'ackReleases.delete(point);'),
+    (1412, 'const answer = await submitCommand({ write_value: {'),
+    (1413, 'point: point, kind: "bool", value: { bool: false } } });'),
+    (1415, '("accepted" in answer.outcome || "applied" in answer.outcome)) {'),
+    (1416, 'ackReleases.delete(point);'),
+    (1419, 'document.getElementById("receipt").textContent ='),
+    (1420, '"command failed: " + error;'),
+    (1455, 'await Promise.all([refreshTrends(base), refreshJournal(base)]);'),
+    (1456, 'renderFeed();'),
+    (1475, 'if (feed.stale === null && feed.publication !== null) {'),
+    (1476, 'feed.stale = feed.publication;'),
+    # submitAck — the press posting write_value true through the
+    # receipted path and arming the release only on an accepted or
+    # applied outcome, so a rejection never schedules a release and a
+    # lost answer leaves the held-true audit to catch the latch.
+    (2971, 'async function submitAck(button) {'),
+    (2974, 'if (!meta || !meta.writable) return;'),
+    (2976, 'const answer = await submitCommand({ write_value: {'),
+    (2980, 'ackReleases.set(point, answer.outcome.accepted.apply_tick);'),
+    (2982, 'ackReleases.set(point, answer.outcome.applied.tick);'),
     # refreshTrends: the common since cursor, the served run marker's
     # restart check, the served gap note, and the refetch-gated tick
     # watermark / seq fallback.
-    (3161, 'async function refreshTrends(base) {'),
-    (3167, 'const histories = await (await pollFetch(base + "/history?since=" + since)).json();'),
-    (3177, 'if (history.run !== undefined) {'),
-    (3178, 'if (state.run !== null && history.run !== state.run) {'),
-    (3179, 'noteRestart("the served history run marker advanced to run " +'),
-    (3182, 'state.run = history.run;'),
-    (3187, 'const first = history.samples.find(entry => entry.seq > state.lastSeq);'),
-    (3188, 'if (state.lastSeq > 0 && first && first.seq > state.lastSeq + 1) {'),
-    (3189, 'noteFeedGap("history", state.lastSeq + 1, first.seq - 1);'),
-    (3200, 'const refetch = state.lastSeq === 0;'),
-    (3201, 'const watermark = state.lastTick;'),
-    (3203, 'if (entry.seq <= state.lastSeq) continue;'),
-    (3204, 'state.lastSeq = entry.seq;'),
-    (3205, 'if (refetch && watermark !== null && entry.sample.tick <= watermark) {'),
-    (3208, 'state.samples.push(entry.sample);'),
-    (3210, 'state.lastTick = entry.sample.tick;'),
+    (3196, 'async function refreshTrends(base) {'),
+    (3202, 'const histories = await (await pollFetch(base + "/history?since=" + since)).json();'),
+    (3212, 'if (history.run !== undefined) {'),
+    (3213, 'if (state.run !== null && history.run !== state.run) {'),
+    (3214, 'noteRestart("the served history run marker advanced to run " +'),
+    (3217, 'state.run = history.run;'),
+    (3222, 'const first = history.samples.find(entry => entry.seq > state.lastSeq);'),
+    (3223, 'if (state.lastSeq > 0 && first && first.seq > state.lastSeq + 1) {'),
+    (3224, 'noteFeedGap("history", state.lastSeq + 1, first.seq - 1);'),
+    (3235, 'const refetch = state.lastSeq === 0;'),
+    (3236, 'const watermark = state.lastTick;'),
+    (3238, 'if (entry.seq <= state.lastSeq) continue;'),
+    (3239, 'state.lastSeq = entry.seq;'),
+    (3240, 'if (refetch && watermark !== null && entry.sample.tick <= watermark) {'),
+    (3243, 'state.samples.push(entry.sample);'),
+    (3245, 'state.lastTick = entry.sample.tick;'),
     # journalKey — the run-qualified merge identity — and
     # refreshJournal's served gap note, cursor advance, the boundary's
     # attribution re-mark ahead of the dedupe, the merge itself, the
     # run_boundary restart observation, and the pane's ordering/bound.
-    (3279, 'function journalKey(entry) {'),
-    (3280, 'return entry.run + " " + entry.tick + " " + JSON.stringify(entry.event);'),
-    (3290, 'const entries = await (await pollFetch(base + "/journal?since=" + journalSince)).json();'),
-    (3295, 'if (journalSince === 0) journalRun = 0;'),
-    (3299, 'noteFeedGap("journal", journalSince + 1, entries[0].seq - 1);'),
-    (3302, 'journalSince = Math.max(journalSince, entry.seq);'),
-    (3308, 'journalRun = entry.event.run_boundary.run;'),
-    (3310, 'entry.run = journalRun;'),
-    (3311, 'const key = journalKey(entry);'),
-    (3312, 'if (journalSeen.has(key)) continue;'),
-    (3313, 'journalSeen.add(key);'),
-    (3314, 'journalEntries.push(entry);'),
-    (3320, 'if ("run_boundary" in entry.event) {'),
-    (3321, 'noteRestart("the journal recorded run " +'),
-    (3351, 'journalEntries.sort((a, b) => a.tick - b.tick || a.seq - b.seq);'),
-    (3353, 'for (const entry of journalEntries.splice(0, journalEntries.length - JOURNAL_LIMIT)) {'),
-    (3354, 'journalSeen.delete(journalKey(entry));'),
+    (3314, 'function journalKey(entry) {'),
+    (3315, 'return entry.run + " " + entry.tick + " " + JSON.stringify(entry.event);'),
+    (3325, 'const entries = await (await pollFetch(base + "/journal?since=" + journalSince)).json();'),
+    (3330, 'if (journalSince === 0) journalRun = 0;'),
+    (3334, 'noteFeedGap("journal", journalSince + 1, entries[0].seq - 1);'),
+    (3337, 'journalSince = Math.max(journalSince, entry.seq);'),
+    (3343, 'journalRun = entry.event.run_boundary.run;'),
+    (3345, 'entry.run = journalRun;'),
+    (3346, 'const key = journalKey(entry);'),
+    (3347, 'if (journalSeen.has(key)) continue;'),
+    (3348, 'journalSeen.add(key);'),
+    (3349, 'journalEntries.push(entry);'),
+    (3355, 'if ("run_boundary" in entry.event) {'),
+    (3356, 'noteRestart("the journal recorded run " +'),
+    (3386, 'journalEntries.sort((a, b) => a.tick - b.tick || a.seq - b.seq);'),
+    (3388, 'for (const entry of journalEntries.splice(0, journalEntries.length - JOURNAL_LIMIT)) {'),
+    (3389, 'journalSeen.delete(journalKey(entry));'),
+    # postCommand — the bounded POST every command rides — isNotActive's
+    # rejected-not_active shape, and submitCommand's active-peer
+    # routing with its single re-poll/retry.
+    (3675, 'async function postCommand(base, command, reason) {'),
+    (3686, 'signal: AbortSignal.timeout(POLL_MS),'),
+    (3691, 'function isNotActive(receipt) {'),
+    (3706, 'async function submitCommand(command, reason) {'),
+    (3718, 'let answer = await postCommand(peers[target].base, command, reason);'),
+    (3719, 'if (isNotActive(answer)) {'),
+    (3725, 'receipt.textContent = JSON.stringify(answer, null, 2);'),
     # The cadence both tickers share.
-    (3795, 'setInterval(refreshOverview, POLL_MS);'),
-    (3996, 'setInterval(refresh, POLL_MS);'),
+    (3830, 'setInterval(refreshOverview, POLL_MS);'),
+    (4031, 'setInterval(refresh, POLL_MS);'),
 ]
 
 
@@ -211,22 +267,35 @@ class StubTransport:
     """Scripted endpoint answers. Each `script(path, [...])` queues the
     responses successive fetches of that path return; queueing HANG
     instead makes the listener never answer, leaving the poll's abort
-    bound to decide the outcome."""
+    bound to decide the outcome. `fetch`'s optional `body` carries the
+    JSON a POST submits — recorded on `posts` — and a scripted callable
+    answers from it, so a script can apply a command and still choose
+    the response. A `handler(path, body)` fallback answers any path
+    whose script is absent or drained — the simulated plant the
+    ack-release tests drive."""
 
     def __init__(self):
         self.routes = {}
         self.requests = []
+        self.posts = []
+        self.handler = None
 
     def script(self, path, responses):
         self.routes[path.lstrip('/')] = list(responses)
 
-    def fetch(self, url):
+    def fetch(self, url, body=None):
         self.requests.append(url)
+        if body is not None:
+            self.posts.append((url, body))
         path = url.split('?')[0].rstrip('/').rsplit('/', 1)[-1]
         script = self.routes.get(path)
-        if not script:
+        if script:
+            answer = script.pop(0)
+        elif self.handler is not None:
+            answer = self.handler(path, body)
+        else:
             raise AssertionError('unscripted or exhausted fetch: ' + url)
-        return script.pop(0)
+        return answer(body) if callable(answer) else answer
 
 
 class PageReplica:
@@ -235,7 +304,7 @@ class PageReplica:
     a hanging fetch resolves at poll start + POLL_MS, the deadline the
     page's AbortSignal.timeout lands every hanging read on."""
 
-    def __init__(self, transport, peers=("",), points=(1,)):
+    def __init__(self, transport, peers=("",), points=(1,), metas=None):
         self.transport = transport
         self.peers = [{'base': base, 'name': base or 'origin'}
                       for base in peers]
@@ -255,6 +324,16 @@ class PageReplica:
         self.journal_entries = []
         self.journal_seen = set()
         self.journal_run = 0
+        # page.html:543,627 — the /signals metadata the command
+        # affordances gate on (each meta a dict like the served
+        # PointSignal: writable, value_type), and the armed
+        # ack-release map — ack point -> the earliest snapshot tick its
+        # release write may go at.
+        self.meta_by_point = dict(metas or {})
+        self.ack_releases = {}
+        # The receipt pane's text — submitCommand's rendered answer or
+        # a caught submission's "command failed: …".
+        self.receipt = ''
         self.polling = False
         self.now = 0
         self.poll_started = 0
@@ -347,6 +426,151 @@ class PageReplica:
             else ('serving' if i == self.source else 'reachable')
             for i in range(len(self.peers))
         ]
+
+    # --- the receipted command path: page.html:817-832, 3675-3727 ---
+
+    def active_peer(self):
+        # page.html:817-820 — the pair's unique settled-active peer's
+        # index, or -1 mid-transition, without one, or under the
+        # dual-active fault.
+        actives = self._actives()
+        return actives[0] if len(actives) == 1 else -1
+
+    def no_active_verdict(self):
+        # page.html:825-832 — the not-sent verdict a control surfaces
+        # when submitCommand found no legitimate target.
+        actives = len(self._actives())
+        if actives > 1:
+            return ('not sent: %s peers report role active — the '
+                    'dual-active fault leaves no unique command target'
+                    % actives)
+        return ('not sent: no peer reports role active — the pair is '
+                'mid-transition')
+
+    def post_command(self, base, command, reason=None):
+        # page.html:3675-3689 — the attributed envelope when a reason
+        # rides (the replica declares no operator identity), the POST
+        # itself, and the same POLL_MS abort bound every poll read
+        # rides: a hanging listener answers nothing and the bound
+        # decides — here, at the submission's own deadline.
+        body = command
+        if reason is not None:
+            body = {'command': command, 'reason': reason}
+        started = self.now
+        answer = self.transport.fetch(base + '/command', body=body)
+        if answer is HANG:
+            self.now = max(self.now, started + POLL_MS)
+            raise PollError('AbortError: signal timed out')
+        return answer.json()
+
+    @staticmethod
+    def is_not_active(receipt):
+        # page.html:3691-3695 — the rejected receipt carrying the
+        # not_active reason.
+        rejected = ((receipt or {}).get('outcome') or {}).get('rejected')
+        return bool(rejected) and 'not_active' in rejected.get('reason', {})
+
+    def submit_command(self, command, reason=None):
+        # page.html:3706-3727 — active-peer routing, the roles re-poll
+        # while none reports, the one not_active re-poll/retry, the
+        # receipt pane's rendered answer, and the answer itself (null
+        # when nothing was sent).
+        target = self.active_peer()
+        if target < 0:
+            self.poll_roles()
+            self.render_pair()
+            target = self.active_peer()
+        if target < 0:
+            self.receipt = self.no_active_verdict()
+            return None
+        answer = self.post_command(self.peers[target]['base'], command,
+                                   reason)
+        if self.is_not_active(answer):
+            self.poll_roles()
+            self.render_pair()
+            target = self.active_peer()
+            if target >= 0:
+                answer = self.post_command(self.peers[target]['base'],
+                                           command, reason)
+        self.receipt = json.dumps(answer, indent=2)
+        return answer
+
+    # --- the ack pulse's press half: page.html:2971-2988 ---
+
+    def submit_ack(self, point):
+        """The acknowledge press: an ordinary receipted write_value of
+        true on the `ack` input's bound point — gated on the metadata's
+        writable mark like every command affordance. An accepted or
+        applied outcome arms the release at its apply/settle tick; a
+        rejection arms nothing, and a lost answer leaves the poll's
+        held-true audit to catch a write that landed anyway."""
+        meta = self.meta_by_point.get(point)
+        if not meta or not meta.get('writable'):
+            return
+        try:
+            answer = self.submit_command({'write_value': {
+                'point': point, 'kind': meta.get('value_type', 'bool'),
+                'value': {'bool': True}}})
+            if answer and answer.get('outcome'):
+                if 'accepted' in answer['outcome']:
+                    self.ack_releases[point] = \
+                        answer['outcome']['accepted']['apply_tick']
+                elif 'applied' in answer['outcome']:
+                    self.ack_releases[point] = \
+                        answer['outcome']['applied']['tick']
+        except PollError as error:
+            self.receipt = 'command failed: %s' % error
+        self.refresh()
+
+    def release_acks(self, snapshot):
+        """The ack pulse's release half, mirrored from
+        page.html:1371-1423 — refresh() runs it over each landed
+        snapshot before the since-polls. A snapshot serving a writable
+        `ack` input held true arms a release at that tick (the serving
+        scan already observed the level, covering a press whose receipt
+        the abort bound swallowed or a reload over a held input); a
+        release is due at its armed apply tick or as soon as the point
+        serves true; and the entry stays armed until the release write
+        answers accepted or applied — an aborted POST, a refused
+        receipt, or a poll without an active peer retries on a later
+        poll rather than dropping the release and latching the input
+        true against every later press."""
+        telemetry = {p['point']: p for p in snapshot.get('points', [])}
+        for descriptor in snapshot.get('descriptors') or []:
+            ack = next((p for p in descriptor.get('ports') or []
+                        if p.get('name') == 'ack'
+                        and p.get('direction') == 'in'
+                        and p.get('kind') == 'bool'), None)
+            if (not ack or ack.get('point') is None
+                    or ack['point'] in self.ack_releases):
+                continue
+            meta = self.meta_by_point.get(ack['point'])
+            ack_sample = (telemetry.get(ack['point']) or {}).get('sample')
+            if (meta and meta.get('writable') and ack_sample
+                    and (ack_sample.get('value') or {}).get('bool')
+                        is True):
+                self.ack_releases[ack['point']] = snapshot['tick']
+        for point, apply_tick in list(self.ack_releases.items()):
+            sample = (telemetry.get(point) or {}).get('sample')
+            held = bool(sample
+                        and (sample.get('value') or {}).get('bool')
+                        is True)
+            if snapshot['tick'] < apply_tick and not held:
+                continue
+            if (sample and (sample.get('value') or {}).get('bool')
+                    is False):
+                del self.ack_releases[point]
+                continue
+            try:
+                answer = self.submit_command({'write_value': {
+                    'point': point, 'kind': 'bool',
+                    'value': {'bool': False}}})
+                if (answer and answer.get('outcome')
+                        and ('accepted' in answer['outcome']
+                             or 'applied' in answer['outcome'])):
+                    del self.ack_releases[point]
+            except PollError as error:
+                self.receipt = 'command failed: %s' % error
 
     # --- the feed record: page.html:1006-1084 ---
 
@@ -540,6 +764,7 @@ class PageReplica:
             self.feed['gap'] = None
             self.feed['restart'] = None
             self.note_publication(snapshot)
+            self.release_acks(snapshot)
             self.refresh_trends()
             self.refresh_journal()
             self.render_feed()
@@ -567,6 +792,127 @@ def entry(seq, value, tick=0):
 def snapshot(tick, published):
     return {'tick': tick, 'publication': {'published': published},
             'points': []}
+
+
+class SimAckPlant:
+    """The smallest controller side the ack pulse exercises: receipted
+    `write_value` commands applied at their apply tick over the plant's
+    points, and a latching alarm whose `unack` flag sets on the alarm
+    condition's rising edge and clears on the `ack` input's — the
+    edge-consumed input the page's pulse exists for. A scan is one
+    `advance()`: due writes land first, then the block reads its
+    inputs, exactly the order an apply tick's rising edge is consumed.
+
+    The transport handler doubles as the fault-injection seam the QA
+    reproduction scripts: `blackhole_next` makes the next POST answer
+    nothing — the hung listener the abort bound lands on, the write
+    never reaching admission — `apply_then_hang` queues the write and
+    then answers nothing — the aborts-but-applies variant — and
+    `reject_next` answers one refused receipt.
+    """
+
+    def __init__(self, pv, ack, alarm, unack, high=90.0):
+        self.tick = 0
+        self.published = 0
+        self.high = high
+        self.pv_point = pv
+        self.ack_point = ack
+        self.alarm_point = alarm
+        self.unack_point = unack
+        self.points = {pv: 50.0, ack: False, alarm: False, unack: False}
+        self.pending = []          # (apply_tick, write_value payload)
+        self.prev_ack = False
+        self.prev_alarm = False
+        self.blackhole_next = False
+        self.apply_then_hang = False
+        self.reject_next = None    # a rejection-reason dict, or None
+
+    def set_pv(self, value):
+        self.points[self.pv_point] = value
+
+    def command(self, body):
+        """The /command endpoint: a write_value admits for the next
+        tick — the accepted receipt carrying its apply tick — with the
+        scripted failures deciding what the listener answers."""
+        write = (body.get('command') or body)['write_value']
+        if self.blackhole_next:
+            # The hung listener: the POST never reached admission, so
+            # the abort bound is the page's only answer.
+            self.blackhole_next = False
+            return HANG
+        if self.reject_next is not None:
+            reason, self.reject_next = self.reject_next, None
+            return Response({'command': {'write_value': write},
+                             'outcome': {'rejected': {'reason': reason}}})
+        self.pending.append((self.tick + 1, write))
+        if self.apply_then_hang:
+            # Aborts-but-applies: admission queued the write, the
+            # answer never arrived.
+            self.apply_then_hang = False
+            return HANG
+        return Response({'command': {'write_value': write},
+                         'outcome': {'accepted': {
+                             'apply_tick': self.tick + 1}}})
+
+    def advance(self):
+        """One scan: every write whose apply tick has arrived lands on
+        the image, then the latching-alarm block reads its inputs —
+        `unack` latching on the alarm's rising edge, clearing on the
+        ack input's."""
+        self.tick += 1
+        due = [p for p in self.pending if p[0] <= self.tick]
+        self.pending = [p for p in self.pending if p[0] > self.tick]
+        for _apply_tick, write in due:
+            self.points[write['point']] = write['value']['bool']
+        alarm = self.points[self.pv_point] > self.high
+        if alarm and not self.prev_alarm:
+            self.points[self.unack_point] = True
+        ack = self.points[self.ack_point]
+        if ack and not self.prev_ack:
+            self.points[self.unack_point] = False
+        self.points[self.alarm_point] = alarm
+        self.prev_alarm, self.prev_ack = alarm, ack
+        self.published += 1
+
+    def _row(self, point):
+        value = self.points[point]
+        return {'point': point, 'sample': {
+            'value': {'bool': value} if isinstance(value, bool)
+                     else {'float': value},
+            'quality': 'good', 'tick': self.tick}}
+
+    def _snapshot(self):
+        return {
+            'tick': self.tick,
+            'publication': {'published': self.published},
+            'points': [self._row(p) for p in self.points],
+            'descriptors': [{'name': 'lal-1', 'ports': [
+                {'name': 'in', 'direction': 'in', 'kind': 'float',
+                 'role': 'measurement', 'point': self.pv_point},
+                {'name': 'ack', 'direction': 'in', 'kind': 'bool',
+                 'role': 'status', 'point': self.ack_point},
+                {'name': 'alarm', 'direction': 'out', 'kind': 'bool',
+                 'role': 'status', 'point': self.alarm_point},
+                {'name': 'unacknowledged', 'direction': 'out',
+                 'kind': 'bool', 'role': 'status',
+                 'point': self.unack_point}]}],
+            'forces': []}
+
+    def serve(self, path, body):
+        """The StubTransport fallback: reads answer from the plant's
+        state, POST /command admits through `command`."""
+        if path == 'role':
+            return Response({'role': 'active', 'tick': self.tick,
+                             'sync': None})
+        if path == 'snapshot':
+            return Response(self._snapshot())
+        if path in ('schema', 'resources'):
+            return Response({})
+        if path in ('history', 'journal'):
+            return Response([])
+        if path == 'command':
+            return self.command(body)
+        raise AssertionError('unhandled path ' + path)
 
 
 class PageLogicPins(unittest.TestCase):
@@ -1122,6 +1468,163 @@ class HangingPollDegradation(unittest.TestCase):
             'signal: AbortSignal.timeout(POLL_MS)', body[start:end],
             'postCommand lost its abort bound — an unanswered /command '
             'POST wedges the poll loop and freezes the feed marks')
+
+
+class AckReleaseRetry(unittest.TestCase):
+    """The ack pulse's release half — the dropped-release defect. The
+    release entry must stay armed until the release write is receipted:
+    a hung listener past POLL_MS, a transport error, or a refused
+    receipt retries on a later poll rather than latching the `ack`
+    input true — held true, every later press receipts `applied` while
+    landing no rising edge, acknowledging nothing. The held-true audit
+    likewise arms a release for an input standing true without one —
+    the acknowledge write that applied past its abort-bound answer."""
+
+    def rig(self):
+        plant = SimAckPlant(pv=10, ack=11, alarm=20, unack=21)
+        transport = StubTransport()
+        transport.handler = plant.serve
+        page = PageReplica(
+            transport, points=(10, 11, 20, 21),
+            metas={11: {'point': 11, 'name': 'lal-1.ack',
+                        'direction': 'in', 'value_type': 'bool',
+                        'writable': True}})
+        return page, transport, plant
+
+    @staticmethod
+    def posted_writes(transport, point, value):
+        """The write_value bodies the page posted for `point` at
+        `value` — the press's true and the release's false."""
+        return [body['write_value'] for _url, body in transport.posts
+                if body.get('write_value', {}).get('point') == point
+                and body['write_value'].get('value') == {'bool': value}]
+
+    def test_dropped_release_retries_and_the_next_press_still_edges(self):
+        # The QA reproduction: the fault trips the alarm unacknowledged;
+        # the press's release POST hangs past the abort bound and never
+        # reached admission; the fault cycles and re-asserts unack; and
+        # the next press must still land an edge.
+        page, transport, plant = self.rig()
+        plant.set_pv(95.0)
+        plant.advance()
+        page.refresh()
+        self.assertTrue(plant.points[21])
+
+        # The press receipts accepted for the next tick and arms the
+        # release at the apply tick; the applying scan consumes the
+        # edge — the latch clears while the input stands true.
+        page.submit_ack(11)
+        self.assertEqual({11: 2}, page.ack_releases)
+        plant.advance()
+        self.assertTrue(plant.points[11])
+        self.assertFalse(plant.points[21])
+
+        # The release POST blackholes past POLL_MS: the entry stays
+        # armed — the release is retried, not dropped — and the failure
+        # surfaces on the receipt pane.
+        plant.blackhole_next = True
+        page.refresh()
+        self.assertIn(11, page.ack_releases,
+                      'the aborted release was dropped — the input '
+                      'stays held against every later press')
+        self.assertTrue(plant.points[11])
+        self.assertTrue(page.receipt.startswith('command failed'))
+        self.assertLessEqual(len(self.posted_writes(transport, 11, False)),
+                             1)
+
+        # The fault cycles and the alarm re-asserts unacknowledged while
+        # the input still stands — the defect's dead-press setup.
+        plant.set_pv(50.0)
+        plant.advance()
+        plant.set_pv(95.0)
+        plant.advance()
+        page.refresh()
+        self.assertTrue(plant.points[21])
+        self.assertTrue(plant.points[11])
+        # The poll retried the release: the accepted answer disarms the
+        # entry, and the write drops the input at its apply tick.
+        self.assertNotIn(11, page.ack_releases)
+        self.assertEqual(2,
+                         len(self.posted_writes(transport, 11, False)))
+        plant.advance()
+        self.assertFalse(plant.points[11])
+
+        # The subsequent press lands its rising edge: unacknowledged is
+        # consumed, exactly what the latched input defeated.
+        page.submit_ack(11)
+        self.assertEqual({11: 6}, page.ack_releases)
+        plant.advance()
+        self.assertFalse(plant.points[21],
+                         'the retried release left the input held — '
+                         'the press receipted but acknowledged nothing')
+
+    def test_refused_release_receipt_keeps_the_release_armed(self):
+        # The silent-drop variant through the answer, not the throw: a
+        # release POST answered with a refused receipt returns normally
+        # from submitCommand — the loop must keep the entry armed and
+        # retry on the next poll rather than ignoring the answer.
+        page, _transport, plant = self.rig()
+        plant.set_pv(95.0)
+        plant.advance()
+        page.refresh()
+        page.submit_ack(11)
+        plant.advance()
+        self.assertTrue(plant.points[11])
+        self.assertEqual({11: 2}, page.ack_releases)
+
+        plant.reject_next = {'point_forced': {'point': 11}}
+        page.refresh()
+        self.assertIn(11, page.ack_releases,
+                      'a rejected release receipt dropped the release')
+        self.assertTrue(plant.points[11])
+
+        page.refresh()
+        self.assertNotIn(11, page.ack_releases)
+        plant.advance()
+        self.assertFalse(plant.points[11])
+
+    def test_lost_press_receipt_releases_via_the_held_input_audit(self):
+        # The aborts-but-applies variant: the acknowledge write lands at
+        # its apply tick but the answer never arrives — no receipt, no
+        # armed release. The poll's audit arms the release when the
+        # snapshot serves the input held true, and the pulse completes.
+        page, transport, plant = self.rig()
+        plant.set_pv(95.0)
+        plant.advance()
+        page.refresh()
+        self.assertTrue(plant.points[21])
+
+        plant.apply_then_hang = True
+        page.submit_ack(11)
+        self.assertEqual({}, page.ack_releases,
+                         'the lost receipt armed a release anyway')
+        self.assertTrue(page.receipt.startswith('command failed'))
+
+        # The queued write applies: the edge consumes the latch and the
+        # input stands true with nothing scheduled to drop it.
+        plant.advance()
+        self.assertTrue(plant.points[11])
+        self.assertFalse(plant.points[21])
+
+        # The held-true observation arms and issues the release in the
+        # same poll; the accepted answer disarms the entry again.
+        page.refresh()
+        self.assertEqual(1,
+                         len(self.posted_writes(transport, 11, False)))
+        self.assertNotIn(11, page.ack_releases)
+        plant.advance()
+        self.assertFalse(plant.points[11])
+
+        # A re-asserted alarm still acknowledges on the next press —
+        # the pulse completed instead of latching the input.
+        plant.set_pv(50.0)
+        plant.advance()
+        plant.set_pv(95.0)
+        plant.advance()
+        self.assertTrue(plant.points[21])
+        page.submit_ack(11)
+        plant.advance()
+        self.assertFalse(plant.points[21])
 
 
 if __name__ == '__main__':

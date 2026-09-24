@@ -621,9 +621,9 @@ function commandKey(component, name) {
 // faceplate, closed beside dedicated presentation.
 const interfaceOpen = new Map();
 // ack point -> the earliest snapshot tick at which its release write may
-// go: the pulse's second half, armed by submitAck once the acknowledge
-// write is accepted — see the alarm pane's notes on the edge-consumed
-// input.
+// go: the pulse's second half — armed by submitAck once the acknowledge
+// write is receipted, or by the poll finding the input held true with no
+// release armed (a receipt lost past the abort bound, or a reload).
 const ackReleases = new Map();
 // The equipment pane's selection — the owning component the last
 // alarm-surface navigation named, or null while none stands: the pane
@@ -1366,25 +1366,60 @@ async function refresh() {
     document.getElementById("status").textContent =
       "tick " + snapshot.tick + peerNote + " — polled " +
       new Date().toLocaleTimeString();
-    // The second half of an ack pulse: a snapshot at or past the
-    // acknowledge write's apply tick means a scan has observed the
-    // `ack` input's rising edge, so the point goes back to false
-    // through the same receipted write path — held true, a later press
-    // would land no edge and acknowledge nothing.
-    for (const [point, applyTick] of [...ackReleases]) {
-      if (snapshot.tick >= applyTick) {
-        ackReleases.delete(point);
-        try {
-          await submitCommand({ write_value: {
-            point: point, kind: "bool", value: { bool: false } } });
-        } catch (error) {
-          document.getElementById("receipt").textContent =
-            "command failed: " + error;
-        }
-      }
-    }
     renderIoHealth(snapshot.io_health, snapshot.command_queue);
     const telemetry = new Map(snapshot.points.map(p => [p.point, p]));
+    // The second half of an ack pulse: the `ack` input is consumed on
+    // its rising edge, so once a scan has observed the level the point
+    // goes back to false through the same receipted write path — held
+    // true, a later press would land no edge and acknowledge nothing.
+    // A snapshot serving a writable `ack` input held true means the
+    // serving scan already observed the level, so the poll arms a
+    // release for any such input standing without one: the acknowledge
+    // write may have applied past the abort bound without its receipt
+    // ever landing, or the page reloaded over a held input.
+    for (const descriptor of snapshot.descriptors || []) {
+      const ack = (descriptor.ports || []).find(p =>
+        p.name === "ack" && p.direction === "in" && p.kind === "bool");
+      if (!ack || ack.point == null || ackReleases.has(ack.point)) {
+        continue;
+      }
+      const meta = metaByPoint.get(ack.point);
+      const ackSample = (telemetry.get(ack.point) || {}).sample;
+      if (meta && meta.writable && ackSample && ackSample.value &&
+          ackSample.value.bool === true) {
+        ackReleases.set(ack.point, snapshot.tick);
+      }
+    }
+    // A release is due once the armed write's apply tick has scanned
+    // past — or as soon as the point serves true, a level some scan
+    // already consumed the edge of (the arm may also predate a restart
+    // and name a tick the new domain never reaches). The entry stays
+    // armed until the release write answers accepted or applied: an
+    // aborted submission, a refused receipt, or a poll finding no
+    // active peer retries on a later poll rather than dropping the
+    // release and latching the input true against every later press.
+    // A point already serving false — released by another path, or by
+    // a write that applied past its own abort — simply disarms.
+    for (const [point, applyTick] of [...ackReleases]) {
+      const sample = (telemetry.get(point) || {}).sample;
+      const held = sample && sample.value && sample.value.bool === true;
+      if (snapshot.tick < applyTick && !held) continue;
+      if (sample && sample.value && sample.value.bool === false) {
+        ackReleases.delete(point);
+        continue;
+      }
+      try {
+        const answer = await submitCommand({ write_value: {
+          point: point, kind: "bool", value: { bool: false } } });
+        if (answer && answer.outcome &&
+            ("accepted" in answer.outcome || "applied" in answer.outcome)) {
+          ackReleases.delete(point);
+        }
+      } catch (error) {
+        document.getElementById("receipt").textContent =
+          "command failed: " + error;
+      }
+    }
     // The snapshot's force set marks the page's forced points;
     // ForcedPoint serializes as {point, value} — the map keys the badge
     // and the release affordance, the pinned value titles the badge.
