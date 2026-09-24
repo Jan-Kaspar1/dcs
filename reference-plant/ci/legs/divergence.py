@@ -5,8 +5,8 @@ promotion of a stale standby honestly: the failover-integrity
 clause's divergence half on the customer pair (WW-ENG-003,
 WW-LCM-001).
 
-The pair leg (`ci/pair.py`) proves the receipted demote/promote
-switch and the refusal leg (`ci/refusal.py`) the pre-transfer and
+The pair leg (`ci/legs/pair.py`) proves the receipted demote/promote
+switch and the refusal leg (`ci/legs/refusal.py`) the pre-transfer and
 role-gate refusals; this leg proves the remaining promotion gate —
 a tracking standby whose staged field `Out` image no longer matches
 the field it would take over, the misconfiguration a customer
@@ -79,11 +79,37 @@ import json
 import os
 import sys
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
+
 import failover
 import pair
 import refusal
 import simulate
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored case: the field-side write skipped while the leg
+# still asserts the diverged report and the refused promote
+# must surface the named diagnostic — never a silently
+# unconvinced pass.
+LEG = {
+    "order": 150,
+    "title": "the staged-vs-field divergence leg",
+    "passes": "divergence-leg",
+    "failed": "divergence-missed",
+    "tampers": [
+        {
+            "name": "skip-field-write",
+            "passed": "a skipped field-side write passed the divergence leg",
+            "missed": "the skip-field-write case did not report its named diagnostic",
+            "evidence": ["expected the diverged report"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)

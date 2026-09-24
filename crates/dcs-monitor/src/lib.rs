@@ -504,15 +504,17 @@ pub struct ScanRequest {
 
 /// The attributed `POST /command` envelope — the wire shape recorded
 /// for the command-path audit-identity decision:
-/// `{"command": <Command>, "actor": "<identity>"}` submitted beside the
-/// still-accepted bare [`Command`]. `actor` is the submitter's
-/// *declared* identity — attestation, not authentication — carried onto
-/// the [`CommandReceipt`] and so into the journaled `CommandSettled`
-/// entry; a deployment fronting the monitor with an authenticating
-/// proxy fills it from verified context. Strict fields: an envelope
-/// carrying neither key's expected shape is a `400`, so a stray
-/// top-level `actor` beside a bare command is refused rather than
-/// silently dropped.
+/// `{"command": <Command>, "actor": "<identity>", "reason": "<why>"}`
+/// submitted beside the still-accepted bare [`Command`]. `actor` is the
+/// submitter's *declared* identity — attestation, not authentication —
+/// and `reason` the declared justification the shelving-reason decision
+/// carries on the same envelope; both ride the [`CommandReceipt`] and
+/// so the journaled `CommandSettled` entry, `reason` independently of
+/// `actor`, and a deployment fronting the monitor with an
+/// authenticating proxy fills `actor` from verified context. Strict
+/// fields: an envelope carrying neither key's expected shape is a
+/// `400`, so a stray top-level `actor` or `reason` beside a bare
+/// command is refused rather than silently dropped.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CommandEnvelope {
@@ -522,6 +524,11 @@ struct CommandEnvelope {
     /// unattributed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     actor: Option<String>,
+    /// The declared reason the submission carries; absent submits
+    /// reasonless — refused at admission only when the target point's
+    /// declaration marks the command reason-carrying.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
 }
 
 /// The monitoring page served at `GET /` — see the crate docs.
@@ -1749,17 +1756,22 @@ impl<'d> Monitor<'d> {
             (Method::Post, "/promote") => self.switchover(true),
             (Method::Post, "/demote") => self.switchover(false),
             (Method::Post, "/command") => match read_command_submission(&mut request) {
-                Ok(CommandEnvelope { command, actor }) => {
+                Ok(CommandEnvelope {
+                    command,
+                    actor,
+                    reason,
+                }) => {
                     let mut shared = self.shared.lock().unwrap();
                     let Shared { peer, recorder } = &mut *shared;
                     // Only the settled-active peer accepts commands: on a
                     // standby or mid-transition instance the write gate
                     // would keep the write from the field, so refuse with
                     // a receipt rather than report a phantom application.
-                    // Either way the declared actor is stamped onto the
-                    // receipt — the settled entry the journal echoes.
+                    // Either way the declared actor and reason are
+                    // stamped onto the receipt — the settled entry the
+                    // journal echoes.
                     let receipt = if peer.accepts_commands() {
-                        let receipt = peer.submit_command_as(command, actor);
+                        let receipt = peer.submit_command_attributed(command, actor, reason);
                         // The journal diff keys on the receipt's
                         // absolute submission index — the bounded log's
                         // evictions shift positions, the index does not.
@@ -1800,6 +1812,7 @@ impl<'d> Monitor<'d> {
                                 },
                             },
                             actor,
+                            reason,
                         };
                         recorder.note_settled(None, receipt.clone(), peer.tick());
                         receipt
@@ -2946,13 +2959,13 @@ fn read_json<T: DeserializeOwned>(request: &mut Request) -> Result<T, Response<C
 }
 
 /// Reads a `POST /command` body into its [`CommandEnvelope`]. The
-/// attributed shape — `{"command":…,"actor":…}` — is selected by either
-/// envelope key; anything else parses as the bare [`Command`]
-/// pre-attribution shape, so existing clients submit unchanged and
-/// journal unattributed (`actor: None`). A body naming `command` or
-/// `actor` without the envelope's shape is a `400` — an attribution the
-/// body meant to carry never silently drops. Parse failures produce the
-/// `400` response directly.
+/// attributed shape — `{"command":…,"actor":…,"reason":…}` — is
+/// selected by any envelope key; anything else parses as the bare
+/// [`Command`] pre-attribution shape, so existing clients submit
+/// unchanged and journal unattributed (`actor: None`, `reason: None`).
+/// A body naming `command`, `actor`, or `reason` without the envelope's
+/// shape is a `400` — an attribution the body meant to carry never
+/// silently drops. Parse failures produce the `400` response directly.
 fn read_command_submission(
     request: &mut Request,
 ) -> Result<CommandEnvelope, Response<Cursor<Vec<u8>>>> {
@@ -2961,9 +2974,11 @@ fn read_command_submission(
         Ok(value) => value,
         Err(error) => return Err(json(400, &error.to_string())),
     };
-    let attributed = value
-        .as_object()
-        .is_some_and(|object| object.contains_key("command") || object.contains_key("actor"));
+    let attributed = value.as_object().is_some_and(|object| {
+        object.contains_key("command")
+            || object.contains_key("actor")
+            || object.contains_key("reason")
+    });
     if attributed {
         serde_json::from_value::<CommandEnvelope>(value)
             .map_err(|error| json(400, &error.to_string()))
@@ -2972,6 +2987,7 @@ fn read_command_submission(
             .map(|command| CommandEnvelope {
                 command,
                 actor: None,
+                reason: None,
             })
             .map_err(|error| json(400, &error.to_string()))
     }
@@ -3335,9 +3351,37 @@ impl MonitorClient {
                 &CommandEnvelope {
                     command: command.clone(),
                     actor: Some(actor.to_string()),
+                    reason: None,
                 },
             ),
             None => self.command(command),
+        }
+    }
+
+    /// `POST /command` with `actor` and `reason` both declared — the
+    /// fully attributed envelope `{"command":…,"actor":…,"reason":…}`
+    /// the shelving-reason decision records; the returned receipt and
+    /// the journaled `CommandSettled` carry both fields. A `reason`
+    /// declared without an `actor` still sends the envelope — the
+    /// reason is independent submission metadata — while `None`/`None`
+    /// submits the same bare-`Command` body [`command`](Self::command)
+    /// sends, journaling unattributed.
+    pub fn command_attributed(
+        &self,
+        command: &Command,
+        actor: Option<&str>,
+        reason: Option<&str>,
+    ) -> io::Result<CommandReceipt> {
+        match (actor, reason) {
+            (None, None) => self.command(command),
+            _ => self.post_json(
+                "/command",
+                &CommandEnvelope {
+                    command: command.clone(),
+                    actor: actor.map(str::to_string),
+                    reason: reason.map(str::to_string),
+                },
+            ),
         }
     }
 

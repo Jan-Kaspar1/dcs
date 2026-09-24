@@ -4,7 +4,7 @@ proof that a standing operator force survives a promotion on the
 deployed redundant pair (WW-ENG-003, WW-LCM-001 — decision 21's
 checkpoint-carried force set).
 
-The pair leg (`ci/pair.py`) proves the declared pair runs and switches
+The pair leg (`ci/legs/pair.py`) proves the declared pair runs and switches
 bumplessly; the takeover leg proves the receipted write seam. This leg
 proves the run-state carry the continuity clause requires for forcing:
 a force set while the pair tracks must ride the checkpoint — the
@@ -66,12 +66,37 @@ unforced value — a genuine carryover must fail it.
 import argparse
 import hashlib
 import json
+import os
 import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
 
 import pair
 import simulate
 import takeover
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored case: a leg asserting the unforced value after
+# promotion must surface the named diagnostic — the force
+# rides the checkpoint, never a silently released pass.
+LEG = {
+    "order": 70,
+    "title": "the force-carryover leg",
+    "passes": "force-carryover",
+    "tampers": [
+        {
+            "name": "expect-unforced",
+            "passed": "a doctored unforced expectation passed the carryover leg",
+            "missed": "the expect-unforced case did not report its named diagnostic",
+            "evidence": ["expected the unforced value"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)

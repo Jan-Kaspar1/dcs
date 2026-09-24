@@ -10,7 +10,7 @@ ownership never falters.
 The restart-recovery leg (`ci/restart.py`) proves the lone-controller
 clause — a released controller resuming from its declared
 `--state-file` in the run's tick domain with the durable journal
-carrying the boundary — and the pair leg (`ci/pair.py`) proves
+carrying the boundary — and the pair leg (`ci/legs/pair.py`) proves
 tracking, the receipted switch, and the persisted record on the
 running pair. This leg exercises the standby half of restart
 recovery on the deployed pair: the non-field-owning peer restarted
@@ -70,10 +70,41 @@ import os
 import re
 import sys
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
+
 import pair
 import refusal
 import simulate
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored cases: a state file gone missing at the restart
+# point, and the restart's assertions held against a peer never
+# restarted, must each surface the named diagnostic — never a
+# silently unrestarted pass.
+LEG = {
+    "order": 160,
+    "title": "the standby-restart leg",
+    "passes": "standby-restart",
+    "tampers": [
+        {
+            "name": "missing-state-file",
+            "passed": "a missing-state-file passed the standby-restart leg",
+            "missed": "the missing-state-file case did not report its named diagnostic",
+            "evidence": ["never reported a resume"],
+        },
+        {
+            "name": "skip-restart",
+            "passed": "a skip-restart passed the standby-restart leg",
+            "missed": "the skip-restart case did not report its named diagnostic",
+            "evidence": ["never reported a resume"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)

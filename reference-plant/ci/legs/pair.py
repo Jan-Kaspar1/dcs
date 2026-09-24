@@ -74,8 +74,32 @@ import tempfile
 import urllib.error
 import urllib.request
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
+
 import simulate
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored case: a standby wired at a peer that never
+# serves must surface the named diagnostic — never a silently
+# unconverged pass.
+LEG = {
+    "order": 10,
+    "title": "the redundant-pair leg",
+    "passes": "pair-leg",
+    "tampers": [
+        {
+            "name": "broken-peer-flag",
+            "passed": "a broken peer flag passed the pair leg",
+            "missed": "the broken-peer-flag case did not report its named diagnostic",
+            "evidence": ["never reported tracking"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)

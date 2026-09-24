@@ -4,7 +4,7 @@ plant — the consumer-side proof that a tracking standby publishes the
 same routed emitted-event records as the active (WW-ENG-003,
 WW-FND-003, WW-LCM-001 — decision 84's emit-identical tracking).
 
-The pair leg (`ci/pair.py`) proves the manifest-declared pair runs and
+The pair leg (`ci/legs/pair.py`) proves the manifest-declared pair runs and
 switches bumplessly; the command-switch leg proves declared commands
 and emitted events continue across promotion. This leg proves the
 read-model parity decision 84 pins workspace-side (#381) on the
@@ -54,12 +54,44 @@ the leg proves its parity assertion fires — each must report
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
 
 import pair
 import simulate
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored cases: a standby whose served record set is
+# missing an emission or carries one re-attributed must surface
+# the named diagnostic — never a silently hollow or diverged
+# parity pass.
+LEG = {
+    "order": 220,
+    "title": "the standby event-parity leg",
+    "passes": "event-parity",
+    "tampers": [
+        {
+            "name": "dropped-event-record",
+            "passed": "the dropped-event-record case passed the parity leg",
+            "missed": "the dropped-event-record case did not report event-parity-failed",
+            "evidence": ["event-parity-failed"],
+        },
+        {
+            "name": "reattributed-event-record",
+            "passed": "the reattributed-event-record case passed the parity leg",
+            "missed": "the reattributed-event-record case did not report event-parity-failed",
+            "evidence": ["event-parity-failed"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)

@@ -83,12 +83,54 @@ import json
 import os
 import sys
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
+
 import alarm_rationalization
 import failover
 import pair
 import simulate
 import takeover
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored cases: a record assembled without one named
+# artifact must fail the completeness audit naming it — never
+# an incomplete record passing silently.
+LEG = {
+    "order": 240,
+    "title": "the commissioning leg",
+    "passes": "commissioning",
+    "tampers": [
+        {
+            "name": "missing-io-checkout",
+            "passed": "a missing-io-checkout record passed the commissioning leg",
+            "missed": "the missing-io-checkout case did not report its named diagnostic",
+            "evidence": ["the record carries no io-checkout artifact"],
+        },
+        {
+            "name": "missing-loop-check",
+            "passed": "a missing-loop-check record passed the commissioning leg",
+            "missed": "the missing-loop-check case did not report its named diagnostic",
+            "evidence": ["the record carries no loop-check artifact"],
+        },
+        {
+            "name": "missing-alarm-signoff",
+            "passed": "a missing-alarm-signoff record passed the commissioning leg",
+            "missed": "the missing-alarm-signoff case did not report its named diagnostic",
+            "evidence": ["the record carries no alarm-signoff artifact"],
+        },
+        {
+            "name": "missing-documentation-turnover",
+            "passed": "a missing-documentation-turnover record passed the commissioning leg",
+            "missed": "the missing-documentation-turnover case did not report its named diagnostic",
+            "evidence": ["the record carries no documentation-turnover artifact"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)

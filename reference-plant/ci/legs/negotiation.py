@@ -15,7 +15,7 @@ to a fingerprint the running pair does not serve, launched without
 `--revised`. The run:
 
 - converges the manifest-declared pair to `tracking` first — the same
-  wiring `ci/pair.py` runs — and captures the field owner's receipt
+  wiring `ci/legs/pair.py` runs — and captures the field owner's receipt
   log, journal position, and model fingerprint as the baseline the
   attempt must leave untouched;
 - launches the foreign peer — `dcs-controller <doctored> --remote …
@@ -64,9 +64,34 @@ import subprocess
 import sys
 import tempfile
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
+
 import pair
 import simulate
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored case: requiring convergence on the
+# foreign-fingerprint peer must surface the named diagnostic —
+# the leg reporting the degraded negotiation state it actually
+# saw, never a silent pass.
+LEG = {
+    "order": 20,
+    "title": "the checkpoint-negotiation leg",
+    "passes": "negotiation-leg",
+    "tampers": [
+        {
+            "name": "expect-tracking",
+            "passed": "an expect-tracking pass succeeded — the leg never noticed the wrong expectation",
+            "missed": "the expect-tracking case did not report the degraded negotiation state it saw",
+            "evidence": ["never reported tracking", "degraded"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)
