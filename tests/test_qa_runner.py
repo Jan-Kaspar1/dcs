@@ -1554,6 +1554,11 @@ class DrivenActionTests(unittest.TestCase):
         self.assertIn('--driven', launch)
         self.assertNotIn('--scan-ms', launch)
         self.assertNotIn('--revised', launch)
+        # The keyed contract: the run's --pair-token signs the driven
+        # peer's ?prove= answers — the line_proof an islanded peer's
+        # orphan-resolution probe demands of its owner candidate.
+        self.assertIn('--pair-token', launch)
+        self.assertIn(self.cfg['pair_token'], launch)
         self.assertIn('127.0.0.1:' + str(self.cfg['driven_port'])
                       + ':8082', launch)
         self.assertIn(runner.CONTAINER_STATE_FILE, launch)
@@ -1564,6 +1569,21 @@ class DrivenActionTests(unittest.TestCase):
         self.assertEqual(info['container'], 'dcs-hw-qa-1-d')
         self.assertEqual([event for event, _ in events],
                          ['driven-start', 'driven-up'])
+
+    def test_tokenless_run_launches_unkeyed(self):
+        # An unkeyed run carries no --pair-token — the driven peer's
+        # ?prove= answers then run unsigned like the pair's own.
+        self.cfg['pair_token'] = None
+        calls = []
+        with patch.object(runner, 'docker',
+                          lambda *a, **k: calls.append(a)
+                          or Result('')):
+            runner.start_driven_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'active', lambda e, d=None: None)
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertNotIn('--pair-token', launch)
+        self.assertIn('--driven', launch)
 
     def test_standby_endpoint_standbys_on_ctrl_b(self):
         calls = []
@@ -1648,6 +1668,10 @@ class DrivenActionTests(unittest.TestCase):
         launch = next(c for c in calls if c[0] == 'run')
         self.assertIn('--standby', launch)
         self.assertIn('--driven', launch)
+        # The keyed run hands the launch the pair token the keyed
+        # orphan-resolution probes require.
+        self.assertIn('--pair-token', launch)
+        self.assertIn(self.cfg['pair_token'], launch)
         self.assertEqual(calls[-1],
                          ('rm', '-f', 'dcs-hw-qa-1-d'))
         # The driven peer's state/journal paths sit inside the run dir.
