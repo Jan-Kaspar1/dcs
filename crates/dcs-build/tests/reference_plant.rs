@@ -293,42 +293,34 @@ fn git(dir: &Path, args: &[&str]) {
 /// the materialized scratch that serves exactly the recorded rev. The
 /// workspace checkout alone cannot play the remote in CI — its shallow
 /// object store lacks the pinned commit and serves no way to name it —
-/// so the stand-in is seeded with that commit: through the checkout's
-/// own object store when it holds the rev, else straight from the
-/// published origin. Each proof task fetches into its own bare repo —
-/// nothing writes into the shared checkout's `.git`, where the
-/// parallel tasks' concurrent fetches collided on ref locks
-/// (`pin-unresolvable`) — and the source pair retries so a transient
-/// refusal cannot pass for an unservable pin. The `upgrade` stage's
-/// repin target — the checkout's `HEAD`, a later commit in the same
-/// minor series — is seeded beside it so the repin resolves.
+/// so the stand-in is seeded with that commit, the same object the
+/// published origin serves for the recorded rev. The seed lands in the
+/// per-test bare repository, never the shared checkout's store: the CI
+/// shards run these proofs as concurrent processes, and two fetches
+/// into one repository collide on its lock files. The `upgrade`
+/// stage's repin target — the checkout's `HEAD`, a later commit in the
+/// same minor series — is seeded beside it so the repin resolves.
 fn serve_pinned_rev(scratch: &Path) -> String {
     let rev = pinned_rev(scratch);
     let remote = scratch.join("dcs-remote.git");
     git(scratch, &["init", "--bare", "dcs-remote.git"]);
-    let mut last_error = String::new();
-    let mut seeded = false;
-    for _ in 0..3 {
-        for source in [root().display().to_string(), PUBLISHED_REMOTE.to_string()] {
-            let fetch = Command::new("git")
-                .args(["fetch", "--depth", "1", &source, &rev])
+    // The local transport serves the object directly when the
+    // checkout's store holds it; the published origin is the fallback
+    // when the shallow store cannot.
+    let served = [root().display().to_string(), PUBLISHED_REMOTE.to_string()]
+        .iter()
+        .any(|source| {
+            Command::new("git")
+                .args(["fetch", "--depth", "1", source, &rev])
                 .current_dir(&remote)
                 .output()
-                .expect("git fetch runs");
-            if fetch.status.success() {
-                seeded = true;
-                break;
-            }
-            last_error = String::from_utf8_lossy(&fetch.stderr).into_owned();
-        }
-        if seeded {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    }
+                .expect("git fetch runs")
+                .status
+                .success()
+        });
     assert!(
-        seeded,
-        "{PIN_UNRESOLVABLE}: no remote could serve the pinned rev {rev}: {last_error}"
+        served,
+        "{PIN_UNRESOLVABLE}: no remote could serve the pinned rev {rev}"
     );
     git(&remote, &["update-ref", "refs/heads/main", &rev]);
     let head = head_rev();
