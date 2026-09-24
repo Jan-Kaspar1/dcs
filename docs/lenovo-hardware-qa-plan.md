@@ -15,7 +15,8 @@ Implementation order: second, after [daily architecture review](daily-architectu
   preserved), one active run via flock + oneshot unit, daily budget
   (4/day) and one auto-retry per inconclusive SHA, 2 h hard timeout,
   restart reconciliation of dead runs and labeled orphan containers.
-- `qa_lane/scenarios.py`: deterministic checks over the simulated rig —
+- `qa_lane/scenarios/` (was `qa_lane/scenarios.py` until #928):
+  deterministic checks over the simulated rig —
   active role + telemetry, standby convergence, writable-point command,
   controller restart recovery (`--state-file`/`--journal-file` on
   runner-owned per-controller paths, with a runner-owned container
@@ -109,6 +110,34 @@ Implementation order: second, after [daily architecture review](daily-architectu
   hands it to the scenario ctx beside `rig_network`; the deploy
   README and the tracking-source-auth/shared-claim scenario docs
   reference it. Enabler for the WW-LCM-001 takeover-integrity legs.
+
+### Landed 2026-09-24 (scenario module split, #928)
+
+- `qa_lane/scenarios.py` became the `qa_lane/scenarios/` package: one
+  module per schedule leg (`NNNN_<slug>.py`) carrying its `scenario_*`
+  function, its leg-private helpers, and its private tunables;
+  `common.py` holds the shared seam — the report `Case`, the HTTP and
+  plant probe helpers, the settle/judge machinery, and the shared
+  tunables — which every leg module binds through
+  `from .common import *`. The package `__init__.py` facade re-exports
+  every name the legs and common define, and its ModuleType
+  `__setattr__` propagates `patch.object(scenarios, ...)` writes into
+  common and every leg module binding the name, so the pool tests'
+  module-attribute seam resolves exactly as it did on the monolith.
+- Ordering rule: the `NNNN_` filename prefix is the run position;
+  numbers are spaced by 100 so a new leg inserts between neighbors
+  without renumbering. `SCENARIOS` is discovered by sorted glob over
+  `[0-9]*_*.py`, so a new leg is exactly one new file and edits no
+  shared file. Which window a leg may occupy is recorded in the
+  ordering comment above `SCENARIOS` in `__init__.py` (later cases
+  degrade to inconclusive when earlier rig state never landed; the
+  dcs-ctl case deliberately closes the schedule).
+- Motivation (scripts/merge_flow.py, #906): dispatch-to-merge lead
+  time between adjacent 7-day windows collapsed — p50 0.64h -> 4.81h,
+  p90 1.92h -> 61.92h — while redispatches went 58 -> 111 and
+  WIP-preservation repairs 19 -> 41, because every open lane leg
+  appended to the same ~19,900-line `scenarios.py` and serialized on
+  identical regions.
 
 ## Outcome
 
