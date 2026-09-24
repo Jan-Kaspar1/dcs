@@ -174,9 +174,18 @@ pub struct Checkpoint {
     /// The scan image's internal `In` samples at capture: held operator
     /// values and link carriers, which field reads never refresh.
     /// Restoring them means a commanded setpoint survives a switchover
-    /// instead of reverting to its declared initial. Absent from
-    /// checkpoints written before internal points existed; defaults to
-    /// empty.
+    /// instead of reverting to its declared initial. The captured stamp
+    /// is the line's claim of when the held value last changed — the
+    /// pair shares one tick domain, so
+    /// [`apply`](crate::Executor::apply) adopts it verbatim, keeping a
+    /// tracked peer's served samples identical to the line's. One stamp
+    /// cannot be the claim it reads as: `Tick::ZERO` means "unchanged
+    /// since before the line's first scan", which only the seed value
+    /// honestly carries — an adopted *change* stamped zero would
+    /// mis-date its origin to run start, so the apply's landing tick
+    /// stamps it instead, the same stamp a `WriteValue` there would
+    /// carry. Absent from checkpoints written before internal points
+    /// existed; defaults to empty.
     #[serde(default)]
     pub internal: BTreeMap<PointId, Sample>,
     /// The operator force set at capture: each forced point and the
