@@ -2690,7 +2690,7 @@ fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Tick {
     // before effect, beside the `io_health` fault the boundary
     // already counted.
     for loss in peer.take_fencing_losses() {
-        recorder.note_field_claim_lost(loss.tick, loss.point);
+        recorder.note_field_claim_lost(loss.tick, loss.point, loss.claimant);
     }
     for change in peer.take_role_changes() {
         recorder.note_role_change(change.tick, change.from, change.to);

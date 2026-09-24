@@ -339,6 +339,30 @@ pub type ReleaseHook = Arc<dyn Fn() + Send + Sync>;
 /// cannot be probed conditionally.
 pub type EnsureHook = Arc<dyn Fn(u64) -> Result<bool, StepError> + Send + Sync>;
 
+/// The fencing-loss counterpart of [`EnsureHook`] — the per-backend
+/// half of [`FanoutDriver::reclaim_field_writer`], run while a
+/// fencing-demoted ex-owner's loss mark stands: re-takes the claim
+/// under `owner` only where the field stands unclaimed or already
+/// names the token — `Ok(true)` — refusing `Ok(false)` where a
+/// different owner stands, so a released preemption ends with the
+/// ex-owner holding the claim again and no probe ever preempts.
+/// Unlike `ensure` the grant is *bound*: the reclaiming attachment
+/// joins the claim's holders, because the peer's gate lifts on success
+/// and its writes must pass the claim it just took back. `Err`
+/// reports the backend could not be asked. `None` on kinds whose
+/// arbitration has no bound conditional grant.
+pub type ReclaimHook = Arc<dyn Fn(u64) -> Result<bool, StepError> + Send + Sync>;
+
+/// The claimant-attribution counterpart of [`ProbeHook`] — the
+/// per-backend half of [`FanoutDriver::fencing_claimant`]: reports the
+/// owner token the field's standing claim named the last time it
+/// fenced one of this backend's mutations, so a superseded field
+/// owner's `field_claim_lost` journal record names the preempting
+/// claimant rather than an anonymous "another". `None` answers mean
+/// the verdict carried no claimant identity — no fenced answer
+/// recorded yet, or a backend whose arbitration names no owner.
+pub type FencedByHook = Arc<dyn Fn() -> Option<u64> + Send + Sync>;
+
 /// The launched-controller counterpart of [`ClaimHook`] — the
 /// per-backend half of [`FanoutDriver::claim_field_writer_unless_held`],
 /// run once at startup activation: claims the field's write-ownership
@@ -406,6 +430,20 @@ pub struct DeviceBackend {
     /// cannot be observed without taking it — for them the served
     /// report carries no claim observation rather than a guessed one.
     pub probe: Option<ProbeHook>,
+    /// The fencing-loss reclaim — the bound conditional re-grant a
+    /// fencing-demoted ex-owner probes each scan while its loss mark
+    /// stands: granted while the field is unclaimed or already names
+    /// the token, refused while a different owner stands, never
+    /// preempting. `None` on kinds whose arbitration has no bound
+    /// conditional grant.
+    pub reclaim: Option<ReclaimHook>,
+    /// The claimant-attribution counterpart of `probe` — reports the
+    /// owner token the field's arbitration named when it last fenced
+    /// this backend's mutation, so the superseded owner's
+    /// `field_claim_lost` journal entry can name the preempting
+    /// claimant. `None` on kinds whose fencing verdicts carry no
+    /// claimant identity.
+    pub fenced_by: Option<FencedByHook>,
     /// The backend's concrete driver, for typed inspection through
     /// [`FanoutDriver::inspect`] — e.g. a scripted device's
     /// recorded-write log. `None` when the backend exposes nothing
@@ -675,6 +713,8 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
     let ensuring = Arc::clone(&remote);
     let starting = Arc::clone(&remote);
     let probing = Arc::clone(&remote);
+    let reclaiming = Arc::clone(&remote);
+    let attributing = Arc::clone(&remote);
     let inspect: Arc<dyn Any + Send + Sync> = remote.clone();
     let device = spec.id.0;
     Ok(DeviceDriver::Backend(DeviceBackend {
@@ -751,6 +791,31 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                 detail: error.to_string(),
             })
         })),
+        // The fencing-loss reclaim: the plant server's *bound*
+        // `ensure_writer` — a fencing-demoted ex-owner takes its claim
+        // back once the field stands unclaimed or already names its
+        // token, the grant joining this attachment to the holders so
+        // the re-lifted gate's writes pass the claim it re-took. A
+        // different owner's claim refuses it whether held or standing
+        // holderless — the reclaim never preempts, so a foreign claim
+        // that outlives its attachment still wedges the pair as an
+        // operator-promotable state rather than silently handing the
+        // field back over a live arbitration.
+        reclaim: Some(Arc::new(move |owner| {
+            match reclaiming.ensure_writer(owner) {
+                Ok(_) => Ok(true),
+                Err(RemoteError::Fenced) => Ok(false),
+                Err(error) => Err(StepError::Backend {
+                    backend: format!("device {device}"),
+                    detail: error.to_string(),
+                }),
+            }
+        })),
+        // The claimant attribution: the owner token the plant server's
+        // last fencing verdict named for this attachment — the
+        // claimant a superseded field owner's `field_claim_lost`
+        // journal entry attributes the preemption to.
+        fenced_by: Some(Arc::new(move || attributing.fenced_by())),
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -856,6 +921,11 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         // to the connection, so "unclaimed" never outlives a holder's
         // link and there is no probe to ask.
         probe: None,
+        // No bound conditional grant either — a claim that dies with
+        // its connection needs no reclaim path — and the device's
+        // fencing verdict names no claimant.
+        reclaim: None,
+        fenced_by: None,
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -959,6 +1029,10 @@ fn sim_cyclic_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError>
         startup_claim: None,
         // As `sim-bus`: no read-only claim observation either.
         probe: None,
+        // As `sim-bus`: no bound conditional grant and no claimant
+        // attribution — the claim dies with its connection.
+        reclaim: None,
+        fenced_by: None,
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -1054,6 +1128,8 @@ fn ethercat_backend(
         ensure: None,
         startup_claim: None,
         probe: None,
+        reclaim: None,
+        fenced_by: None,
         inspect: Some(Arc::clone(device.master()) as Arc<dyn Any + Send + Sync>),
         field_facing: true,
     }))
@@ -1249,6 +1325,8 @@ fn scripted_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         ensure: None,
         startup_claim: None,
         probe: None,
+        reclaim: None,
+        fenced_by: None,
         inspect: Some(inspect),
         field_facing: false,
     }))
@@ -1276,6 +1354,12 @@ struct Backend {
     /// [`DeviceBackend::probe`] carried into the built driver — the
     /// read-only claim-state observation a peer reports.
     probe: Option<ProbeHook>,
+    /// [`DeviceBackend::reclaim`] carried into the built driver — the
+    /// bound conditional re-grant a fencing-demoted ex-owner probes.
+    reclaim: Option<ReclaimHook>,
+    /// [`DeviceBackend::fenced_by`] carried into the built driver —
+    /// the claimant attribution a fencing-loss report reads.
+    fenced_by: Option<FencedByHook>,
     /// The factory-installed typed inspection handle, if any.
     inspect: Option<Arc<dyn Any + Send + Sync>>,
     /// [`DeviceBackend::field_facing`] carried into the built driver —
@@ -1347,6 +1431,8 @@ impl DriverPlan {
                 ensure: None,
                 startup_claim: None,
                 probe: None,
+                reclaim: None,
+                fenced_by: None,
                 inspect: None,
                 field_facing: false,
             });
@@ -1366,6 +1452,8 @@ impl DriverPlan {
                 ensure: planned.backend.ensure,
                 startup_claim: planned.backend.startup_claim,
                 probe: planned.backend.probe,
+                reclaim: planned.backend.reclaim,
+                fenced_by: planned.backend.fenced_by,
                 inspect: planned.backend.inspect,
                 field_facing: planned.backend.field_facing,
             });
@@ -1712,6 +1800,50 @@ impl FanoutDriver {
         })
     }
 
+    /// The fencing-loss counterpart of
+    /// [`ensure_field_writer`](Self::ensure_field_writer) — the *bound*
+    /// conditional re-grant a fencing-demoted ex-owner probes each scan
+    /// while its loss mark stands: takes the claim under `owner` on
+    /// every field-facing backend that answers, granted only where the
+    /// field stands unclaimed or already names the token — the grant
+    /// joining this attachment to the claim's holders, so the peer's
+    /// re-lifted gate writes pass the claim it just took back.
+    /// `Ok(true)` means the claim stands under `owner` on every probed
+    /// backend; `Ok(false)` that a different owner stands on at least
+    /// one — the reclaim never preempts, so a preemptor's claim that
+    /// outlives its attachment leaves the wedge standing as an
+    /// operator-promotable state — or that no backend can answer a
+    /// conditional grant at all; `Err` that a backend could not be
+    /// asked. Field-facing backends without a reclaim hook are skipped
+    /// exactly as `ensure_field_writer` skips unprobeable kinds.
+    pub fn reclaim_field_writer(&self, owner: u64) -> Result<bool, StepError> {
+        let mut asked = false;
+        let mut held = true;
+        for backend in &self.backends {
+            if backend.field_facing
+                && let Some(reclaim) = &backend.reclaim
+            {
+                asked = true;
+                held &= reclaim(owner)?;
+            }
+        }
+        Ok(asked && held)
+    }
+
+    /// The owner token the field's standing claim named the last time
+    /// it fenced a mutation on the backend serving `point` — the
+    /// claimant a superseded field owner's `field_claim_lost` journal
+    /// record attributes the preemption to. `None` where the backend
+    /// records no verdict or its fencing answers carry no claimant
+    /// identity: the journal then records the loss unattributed rather
+    /// than guessing a claimant.
+    pub fn fencing_claimant(&self, point: PointId) -> Option<u64> {
+        self.points
+            .get(&point)
+            .and_then(|&index| self.backends[index].fenced_by.as_ref())
+            .and_then(|fenced_by| fenced_by())
+    }
+
     /// The field-facing devices whose backends cannot arbitrate a single
     /// writer — the ids a promotion cannot take a claim out on. The
     /// failover decision makes automatic promotion honest only when this
@@ -2041,6 +2173,8 @@ mod tests {
             ensure: None,
             startup_claim: None,
             probe: None,
+            reclaim: None,
+            fenced_by: None,
             inspect: None,
             field_facing: false,
         }

@@ -15,9 +15,14 @@ from .common import *
 # `release_writer` drops only the caller's hold — harmless `done` for
 # a holder of nothing. A rogue `claim_writer` preempts — the grant is
 # unconditional — but never silently and never fatally: the superseded
-# owner's journal records `field_claim_lost` and the peer demotes
-# rather than dying, after which the scenario restores the rig by
-# re-promoting it. The post-restart `unclaimed` window is the
+# owner's journal records `field_claim_lost` attributed to the
+# preempting token, and the peer demotes rather than dying. The wedge
+# then escapes by itself: the rogue's `release_writer` frees the
+# field, and the demoted owner's fencing-loss mark drives a bound
+# conditional reclaim every standby scan — refused while the rogue
+# token stands, granted once the field is unclaimed — so the run
+# re-takes the claim under its own token and walks back to `active`
+# with no operator call. The post-restart `unclaimed` window is the
 # link-loss case's leg; the fenced writer's degrade details are the
 # fenced-writer-degrade case's — this case asserts the standing-claim
 # side only.
@@ -68,8 +73,10 @@ def scenario_field_claim(ctx):
                 'shared claim; release_writer drops only the caller\'s '
                 'hold and answers done for a holder of nothing; and a '
                 'rogue claim_writer preempts with field_claim_lost '
-                'journaled — the superseded owner demotes instead of '
-                'dying — before the scenario restores the pair')
+                'journaled under the rogue\'s token — the superseded '
+                'owner demotes instead of dying — and the released '
+                'field is reclaimed by the demoted owner with no '
+                'operator call')
     stream = None
     try:
         if ctx.get('plant') is None:
@@ -342,35 +349,63 @@ def scenario_field_claim(ctx):
             return case.finish('failed', 'the preemption was silent '
                                '— the superseded owner\'s journal '
                                'recorded no field_claim_lost')
+        if any((entry.get('event') or {}).get('field_claim_lost',
+                                             {}).get('claimant')
+               != CLAIM_ROGUE for entry in journal
+               if 'field_claim_lost' in (entry.get('event') or {})):
+            return case.finish('failed', 'the field_claim_lost '
+                               'records do not attribute the '
+                               'takeover to the rogue token — the '
+                               'audit cannot name the claimant: '
+                               + json.dumps(journal)[:300])
         case.observe('the superseded owner demoted to standby with '
-                     'field_claim_lost journaled — degrade, not death')
+                     'field_claim_lost journaled — degrade, not '
+                     'death — the loss attributed to claimant '
+                     + hex(CLAIM_ROGUE))
 
-        # Restore: re-promote the demoted peer — its promotion claim
-        # preempts the rogue token, so the field stays claimed
-        # throughout — then prove the pair settled back onto the same
-        # field owner with probes fenced again.
-        promoted = None
-        deadline = time.monotonic() + CLAIM_DEADLINE
-        while time.monotonic() < deadline and promoted is None:
-            try:
-                status, body = http_json('POST', base + '/promote')
-                if status == 200:
-                    promoted = body
-                else:
-                    time.sleep(POLL_INTERVAL)
-            except urllib.error.HTTPError as exc:
-                if exc.code == 409:
-                    time.sleep(POLL_INTERVAL)
-                else:
-                    raise
+        # Restore: the rogue attachment hands the field back — and
+        # the wedge escapes by itself. The demoted owner's fencing-
+        # loss mark drives the bound conditional reclaim every
+        # standby scan — refused while the rogue token stood, granted
+        # the first scan the field stands unclaimed — so the run
+        # re-takes the claim under its own token and walks back to
+        # active with no operator call. A promote posted in the same
+        # window would only meet the reclaim's own arbitration; the
+        # release is the recovery the contract defines.
+        released = _plant_request(stream, {'op': 'release_writer'})
         ref = save_evidence(ctx['evidence_dir'],
-                            'field-claim-promote.json',
-                            promoted or {'refused': True})
-        case.evidence('file', ref, 'the restore promotion')
-        if promoted is None:
+                            'field-claim-release.json', released)
+        case.evidence('file', ref, 'the rogue claim\'s release — '
+                      'the wedge\'s recovery trigger')
+        if released.get('result') != 'done':
+            return case.finish('failed', 'the rogue claim\'s '
+                               'release_writer refused: '
+                               + json.dumps(released)[:300])
+        watch = {'answered': 0, 'roles': []}
+        deadline = time.monotonic() + CLAIM_DEADLINE
+        restored_role = None
+        while time.monotonic() < deadline:
+            report = _try_role(ctx, base)
+            if report is not None:
+                watch['answered'] += 1
+                watch['roles'].append(report.get('role'))
+                if report.get('role') == 'active':
+                    restored_role = report
+                    break
+            time.sleep(0.1)
+        ref = save_evidence(ctx['evidence_dir'],
+                            'field-claim-reclaim.json',
+                            {'watch': watch, 'role': restored_role})
+        case.evidence('file', ref, 'the demoted owner\'s '
+                      'fencing-loss reclaim')
+        if restored_role is None:
             return case.finish('failed', 'the demoted owner never '
-                               're-promoted — the rig was left '
-                               'without a field writer')
+                               'reclaimed the released field — the '
+                               'role walk stayed '
+                               + json.dumps(watch['roles'][-4:]))
+        case.observe('the demoted owner reclaimed the released field '
+                     'and re-settled active — no promote needed: '
+                     + ' -> '.join(watch['roles'][-4:]))
         restored = wait_for(
             lambda: _settled_active(ctx) == active
             and _try_role(ctx, base),

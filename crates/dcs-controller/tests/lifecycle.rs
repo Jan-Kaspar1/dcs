@@ -866,7 +866,7 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
     assert!(
         resumed.journal(0).unwrap().iter().any(|entry| matches!(
             entry.event,
-            JournalEvent::FieldClaimLost { point } if point == VALVE
+            JournalEvent::FieldClaimLost { point, .. } if point == VALVE
         )),
         "the fenced owner's journal must record the claim loss"
     );
