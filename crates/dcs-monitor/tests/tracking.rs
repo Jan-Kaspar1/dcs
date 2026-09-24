@@ -3163,3 +3163,92 @@ fn a_realign_after_a_degraded_window_never_rewinds_the_journal_axis() {
          {stale:?} then {cleared:?}"
     );
 }
+
+/// QA finding `held-internal-point-tick-zero-misdates-adopted-values`
+/// (#852), driven end to end: a checkpoint adoption overlaid internal
+/// `In` samples verbatim, so an adopted held value served stamped
+/// `Tick::ZERO` — the seed stamp claiming the new value dated from run
+/// start — while a `WriteValue` at the same boundary stamps the
+/// applying scan (the finding's point-300 contrast). The reproduction's
+/// shape, replayed through the pull path: the interposer serves the
+/// standby's own model's document with a planted held value stamped
+/// `Tick::ZERO`, and the driven cycle's adopt-then-scan must serve the
+/// change stamped at the apply's landing tick. A held value the
+/// document leaves untouched keeps the seed stamp — the documented
+/// zero-stamp contract.
+#[test]
+fn a_driven_standby_stamps_an_adopted_held_value_at_the_apply_tick() {
+    let driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[])));
+    // The document the finding describes: the standby's own model's
+    // checkpoint, its held point carrying a planted value still stamped
+    // `Tick::ZERO` — the mis-date the verbatim overlay served.
+    let mut forged = held_executor(driver).checkpoint();
+    forged.tick = Tick(7);
+    forged
+        .internal
+        .insert(PointId(40), Sample::good(Value::Bool(true), Tick::ZERO));
+    let hostile = Hostile::serve(&forged);
+
+    let standby_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[])));
+    let standby = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(held_executor(standby_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(hostile.addr),
+            after_scan: None,
+        }),
+    );
+
+    // Before the adoption the zero stamp is honest: the held value has
+    // stood since before the run's first scan.
+    let seed = standby.client.snapshot().unwrap();
+    assert_eq!(
+        seed.points
+            .iter()
+            .find(|point| point.point == PointId(40))
+            .and_then(|point| point.sample),
+        Some(Sample::good(Value::Bool(false), Tick::ZERO)),
+        "the never-written held value serves the zero stamp: {seed:?}"
+    );
+
+    // One driven cycle: the pull adopts the document at its tick and
+    // the quiesced scan serves the adopted image.
+    standby.client.advance(1).unwrap();
+    let adopted = standby.client.snapshot().unwrap();
+    assert_eq!(
+        adopted
+            .points
+            .iter()
+            .find(|point| point.point == PointId(40))
+            .and_then(|point| point.sample),
+        Some(Sample::good(Value::Bool(true), Tick(7))),
+        "the adoption-changed held value stamps the apply's landing \
+         tick, not the document's `Tick::ZERO`: {adopted:?}"
+    );
+
+    // A later document carrying the same value adopts its own stamp —
+    // the line's claim of when the value last changed, which the
+    // standby's image now agrees with.
+    let mut unchanged = forged.clone();
+    unchanged.tick = Tick(9);
+    unchanged
+        .internal
+        .insert(PointId(40), Sample::good(Value::Bool(true), Tick(4)));
+    hostile.set_body(&unchanged);
+    standby.client.advance(1).unwrap();
+    let converged = standby.client.snapshot().unwrap();
+    assert_eq!(
+        converged
+            .points
+            .iter()
+            .find(|point| point.point == PointId(40))
+            .and_then(|point| point.sample),
+        Some(Sample::good(Value::Bool(true), Tick(4))),
+        "an unchanged held value adopts the captured stamp verbatim: \
+         {converged:?}"
+    );
+}
