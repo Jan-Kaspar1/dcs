@@ -308,12 +308,13 @@ fn the_driven_controller_steps_the_field_through_the_boundary_exchange() {
     assert_eq!(sample(&snapshot, LEVEL).value, Value::Float(7.0));
 
     // The exchange counters reached the served snapshot's I/O-health
-    // surface: device 1's backend attempted every scan's exchange —
-    // five completions, four misses — and device 2's ran only the scans
-    // device 1's completed, the fan-out stopping at the first failure.
+    // surface: each bus's backend attempted every scan's exchange —
+    // device 1 completing five and missing four, device 2 completing
+    // all nine — one bus's misses never skipping the other's exchange
+    // (#547).
     let exchange = snapshot.io_health.driver.unwrap().exchange.unwrap();
-    assert_eq!(exchange.attempted, 9 + 5);
-    assert_eq!(exchange.succeeded, 5 + 5);
+    assert_eq!(exchange.attempted, 9 + 9);
+    assert_eq!(exchange.succeeded, 5 + 9);
     assert_eq!(exchange.last_exchange_tick, Some(Tick(9)));
     assert_eq!(exchange.working_counter_mismatches, 0);
     assert_eq!(exchange.missed_deadlines, 0);

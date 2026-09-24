@@ -558,10 +558,22 @@ const componentsByName = new Map();
 const trends = new Map();
 // The retained journal window, oldest first.
 const journalEntries = [];
-// Events already displayed — tick plus serialized event — so a journal
-// re-fetch from the new source after a switch adds each transition once.
+// Events already displayed — attributed run plus tick plus serialized
+// event — so a journal re-fetch from the new source after a switch adds
+// each transition once. The run qualifier is what a restarted lifetime
+// needs: a cold run's first-observation sweep re-journals on the old
+// domain's ticks, and an unqualified key would silently dedupe the new
+// lifetime's entries against the prior run's identical rows.
 const journalSeen = new Set();
 let journalSince = 0;
+// The process lifetime the merge attributes incoming entries to — the
+// last served run_boundary's run, or 0 ahead of the stream's first
+// marker (a journal file's first lifetime has no served boundary).
+// Each peer numbers its own file's lifetimes, so a whole re-read — the
+// first poll, or the refetch a restart or source switch forces —
+// restarts the attribution walk; the served boundary markers re-mark
+// it as the fold proceeds.
+let journalRun = 0;
 // The feed's delivery state — see the feed-state note above. The
 // current source's last rendered publication identity
 // ({published, tick}) plus the named degradations the latest poll
@@ -777,6 +789,7 @@ function switchSource(next) {
     state.run = null;
   }
   journalSince = 0;
+  journalRun = 0;
   // The new peer numbers its own publications: the feed's freshness
   // and gap bookkeeping starts over — a mark observed against the old
   // source's numbering says nothing about this stream.
@@ -3256,13 +3269,30 @@ function drawTrend(meta) {
   svg.innerHTML = trendBody(meta.point);
 }
 
+// The merge identity a journal entry dedupes and evicts by: the
+// lifetime the fold attributed it to, plus tick, plus the serialized
+// event. Tick alone orders only inside one tick domain — a restart
+// that reopens the domain re-stamps the new lifetime's sweep on the
+// old's ticks, so the run qualifier is what keeps the dedupe honest
+// across the seam. `entry.run` is the page's own attribution stamp,
+// set at merge — the served JournalEntry carries no run field.
+function journalKey(entry) {
+  return entry.run + " " + entry.tick + " " + JSON.stringify(entry.event);
+}
+
 // Fetches the journal increment from the current source and re-renders
 // the pane in tick order — the endpoint returns entries oldest-first.
-// Entries merge by tick plus event identity, so a whole-journal re-fetch
-// after a source switch adds each transition once: both peers journal
-// the same run's events, and each journals its own role changes.
+// Entries merge by attributed run, tick, and event identity, so a
+// whole-journal re-fetch after a source switch adds each transition
+// once: both peers journal the same run's events, and each journals
+// its own role changes.
 async function refreshJournal(base) {
   const entries = await (await pollFetch(base + "/journal?since=" + journalSince)).json();
+  // A whole re-read — the cursor at 0 on the first poll or after a
+  // restart or source switch reset it — answers from the stream's
+  // oldest retained lifetime, so the attribution walk starts over and
+  // the served run_boundary markers re-mark it as the fold proceeds.
+  if (journalSince === 0) journalRun = 0;
   // The journal stream's served form of the same gap.
   if (journalSince > 0 && entries.length > 0 &&
       entries[0].seq > journalSince + 1) {
@@ -3270,51 +3300,58 @@ async function refreshJournal(base) {
   }
   for (const entry of entries) {
     journalSince = Math.max(journalSince, entry.seq);
-    const key = entry.tick + " " + JSON.stringify(entry.event);
-    if (!journalSeen.has(key)) {
-      journalSeen.add(key);
-      journalEntries.push(entry);
-      // A run_boundary the page had not yet rendered is the journal
-      // stream's own restart marker — the same seam the publication
-      // identity or a changed history run names. The dedupe above
-      // keeps a whole-journal re-fetch from re-firing on a boundary it
-      // already merged.
-      if ("run_boundary" in entry.event) {
-        noteRestart("the journal recorded run " +
-          entry.event.run_boundary.run + " beginning");
-      }
-      // A settled set_parameter receipt is the authority's final word on
-      // a tuning submission: the applied tick or the named rejection
-      // surfaces on the parameter's faceplate row as well as in this
-      // pane, replacing any advisory warning the entry drew.
-      const settled = entry.event.command_settled;
-      if (settled && settled.receipt.command.set_parameter) {
-        const tuning = settled.receipt.command.set_parameter;
-        setParamStatus(tuning.component, tuning.name, {
+    // A run_boundary re-marks the lifetime the entries after it belong
+    // to — ahead of the dedupe, so a boundary a whole re-read re-serves
+    // still attributes the entries following it even though the marker
+    // row itself already merged.
+    if ("run_boundary" in entry.event) {
+      journalRun = entry.event.run_boundary.run;
+    }
+    entry.run = journalRun;
+    const key = journalKey(entry);
+    if (journalSeen.has(key)) continue;
+    journalSeen.add(key);
+    journalEntries.push(entry);
+    // A run_boundary the page had not yet rendered is the journal
+    // stream's own restart marker — the same seam the publication
+    // identity or a changed history run names. The dedupe above keeps
+    // a whole-journal re-fetch from re-firing on a boundary it already
+    // merged.
+    if ("run_boundary" in entry.event) {
+      noteRestart("the journal recorded run " +
+        entry.event.run_boundary.run + " beginning");
+    }
+    // A settled set_parameter receipt is the authority's final word on
+    // a tuning submission: the applied tick or the named rejection
+    // surfaces on the parameter's faceplate row as well as in this
+    // pane, replacing any advisory warning the entry drew.
+    const settled = entry.event.command_settled;
+    if (settled && settled.receipt.command.set_parameter) {
+      const tuning = settled.receipt.command.set_parameter;
+      setParamStatus(tuning.component, tuning.name, {
+        text: describeOutcome(settled.receipt.outcome),
+        warn: false,
+        bad: "rejected" in settled.receipt.outcome,
+      });
+    }
+    // The same settled receipt is the authority's final word on an
+    // interface command's invocation: the applied tick or the named
+    // rejection surfaces on its row as well.
+    if (settled) {
+      const key = settledCommandKey(settled.receipt.command);
+      if (key) {
+        setCommandStatus(key.component, key.name, {
           text: describeOutcome(settled.receipt.outcome),
           warn: false,
           bad: "rejected" in settled.receipt.outcome,
         });
-      }
-      // The same settled receipt is the authority's final word on an
-      // interface command's invocation: the applied tick or the named
-      // rejection surfaces on its row as well.
-      if (settled) {
-        const key = settledCommandKey(settled.receipt.command);
-        if (key) {
-          setCommandStatus(key.component, key.name, {
-            text: describeOutcome(settled.receipt.outcome),
-            warn: false,
-            bad: "rejected" in settled.receipt.outcome,
-          });
-        }
       }
     }
   }
   journalEntries.sort((a, b) => a.tick - b.tick || a.seq - b.seq);
   if (journalEntries.length > JOURNAL_LIMIT) {
     for (const entry of journalEntries.splice(0, journalEntries.length - JOURNAL_LIMIT)) {
-      journalSeen.delete(entry.tick + " " + JSON.stringify(entry.event));
+      journalSeen.delete(journalKey(entry));
     }
   }
   document.getElementById("journal").innerHTML = journalEntries.map(entry =>
