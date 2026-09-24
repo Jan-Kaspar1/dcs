@@ -1,6 +1,13 @@
 """The command_availability acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The command-availability case shares the post-failover window: it
+# is self-contained on either role layout — it probes whichever
+# endpoint reports settled active and reads the tracking peer for the
+# parity leg — and its only mutation is a served-available command
+# the earlier command cases already issue.
+RUNS_AFTER = frozenset({'scenario_command_admission', 'scenario_consumer_schedule', 'scenario_failover'})
+
 
 # --------------------------------------------------------------------
 # The served per-command availability verdicts (WW-FND-003's

@@ -1,6 +1,14 @@
 """The incompatible_revision acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The incompatible-revision case sits immediately ahead of it: its
+# carryover-breaking peer never promotes, so the field writer is
+# unchanged, and the compatible case's launch replaces the degraded
+# third container and performs the control's promote leg in the same
+# run.
+RUNS_AFTER = frozenset({'scenario_checkpoint_negotiation', 'scenario_doomed_startup_claim', 'scenario_failover'})
+RUNS_BEFORE = frozenset({'scenario_model_revision'})
+
 
 # The rolling-revision refusal half: WW-LCM-001's deployment-update
 # clause requires the carryover rule to refuse a revision that retypes

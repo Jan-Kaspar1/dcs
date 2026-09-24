@@ -106,8 +106,12 @@ binding the name — patch.object(scenarios, ...) test seams keep
 resolving through the facade unchanged. SCENARIOS is discovered, not
 listed: the NNNN_ filename prefix is the run position (numbers are
 spaced by 100 so a new leg inserts without renumbering), so a new leg
-is exactly one new file and edits no shared file. The ordering
-comment above SCENARIOS records which window each leg needs.
+is exactly one new file and edits no shared file. Each leg declares
+the window it needs in its own module — RUNS_AFTER/RUNS_BEFORE
+constraints over scenario_* names, and RUNS_LAST for the leg that
+closes the schedule — and the derivation check in
+tests/test_qa_scenario_modules.py validates the declarations against
+the discovered order.
 """
 import importlib
 import sys
@@ -168,124 +172,16 @@ _reexport(_LEG_MODULES)
 _SEAM = (_common,) + _LEG_MODULES
 
 
-# The restart case runs ahead of the failover case: the peer it stops
-# is ctrl-a — launched without --standby, so its resumed process comes
-# back active — while ctrl-b is the tracking standby the settle check
-# watches reconverge. The source-restart case runs in the same
-# pre-switch window — it needs ctrl-a field owner so ctrl-b is the
-# tracked adopter, drives its own a->b leg for the demoted-peer
-# regression, and ends back on the launch roles with ctrl-a owning
-# the field again. The field-claim case shares that window: the
-# settled pair's pinned owner token is the standing claim its third
-# attachment probes, shares, and rogue-preempts, and its demote and
-# re-promote of the same peer lands the pair back on the launch
-# roles before the cases that follow. The fenced-writer-degrade case
-# shares that restored window: the tracking standby takes the
-# misordered promote, the superseded peer demotes in place, and the
-# documented demote/promote order lands the pair back on the launch
-# roles before the cases that follow. The dead-peer-latency case
-# sits in the same
-# restored window: it isolates ctrl-a — the source ctrl-b and its
-# driven third peer pull from — restores it before the armed failover
-# bound, and removes the driven peer, so the launch roles still hold
-# for the cases that follow. The monitor-starvation case runs in the
-# same armed window: it needs ctrl-b — the only peer launched
-# --auto-promote — as the tracking standby whose checkpoint pulls
-# measure the starved ctrl-a monitor, and it leaves the launch roles
-# untouched, so it must run before the tune case's a->b switch. The
-# duty-rotation case shares that
-# restored window: it cycles demand through the writable maintenance
-# points, runs its own mid-cycle a->b switch for the carried rotation
-# position, and fails back to the launch roles before the force case.
-# The force-carryover case runs on the
-# same pre-switch window — ctrl-a active, ctrl-b tracking — driving
-# its own a->b leg for the forced-point evidence and failing back to
-# the launch roles before the tune case runs its switch. The
-# backup-health case sits in the same restored window: only with the
-# pair settled and tracking does a backup-only field fault have a
-# standby whose takeover the annunciation must precede — the leg
-# injects, annunciates, acks, clears, and restores without moving the
-# selection or the roles. The source-failover case shares that
-# window: the complementary primary-faulted leg faults the field
-# source the selection currently rides, watches the failover-select
-# engage the backup and the wired alarm's two-flag lifecycle, acks,
-# clears, and restores — field, latch, and launch roles as found.
-# The
-# lag-staging case sits in the same restored window: the settled
-# pair's pinned owner token is the shared claim its inflow drive
-# needs, and the leg writes, stages, annunciates, acks, drains, and
-# restores — inflow back to baseline, the ack input re-armed, no pump
-# operator state touched, no role moved. The standby-loss case sits
-# in the same restored window: it needs a tracking standby to refuse
-# and to lose, drives its own a->b switch for the promotion-gate leg,
-# and demote/promotes back to the launch roles, so it runs before the
-# tune case's a->b switch. The demote-settle-uniqueness case shares
-# that window: it races receipted submissions against the documented
-# demote on whichever peer owns the field, cycles the switch twice per
-# pass, and lands the pair back on the launch roles before the tune
-# case's a->b switch. The demote-carry-settle case shares that
-# window: it races receipted submissions on whichever peer owns the
-# field around a rogue claim's preemption — the involuntary demote
-# the #829 boundary contract covers — lets the tracking peer carry
-# the suspended admissions, promotes it, and lands the pair back on
-# the launch roles before the tune case's a->b switch. The
-# peer-announce case shares that window: it
-# guards the demotion's announced tracking source with a foreign
-# checkpoint announce, drives its own demote-then-promote switch for
-# the reconvergence and fencing legs, and restores the launch roles
-# before the tune case's a->b switch. The
-# parameter-tune case also runs ahead of the
-# failover leg: only ctrl-b tracks (its --standby source is ctrl-a),
-# so a tuned value can cross a checkpoint only from ctrl-a to ctrl-b,
-# and the promotion it performs is the run's one a->b switch — the
-# failover leg behind it demotes whichever peer reports settled active
-# and promotes the converged one back. The checkpoint-negotiation case
-# sits between them and the model-revision case: it needs the pair
-# still on the mounted fingerprint so the recipe-derived document is
-# foreign, and it removes its foreign peer before the revision launch
-# takes the third-controller seat. The doomed-startup-claim case
-# shares that foreign seat beside it — launched onto a corrupt journal
-# file against the settled pair and torn down before either revision
-# case claims the seat. The model-revision case runs
-# behind the failover: whichever peer holds the field then is the one
-# its third --revised controller stands by on and supersedes, so every
-# case after it already exercises the revised model document. The
-# incompatible-revision case sits immediately ahead of it: its
-# carryover-breaking peer never promotes, so the field writer is
-# unchanged, and the compatible case's launch replaces the degraded
-# third container and performs the control's promote leg in the same
-# run. The command-availability case shares the
-# post-failover window: it is self-contained on either role layout —
-# it probes whichever endpoint reports settled active and reads the
-# tracking peer for the parity leg — and its only mutation is a
-# served-available command the earlier command cases already issue.
-# The plant-link-loss case
-# follows later in the schedule: its plant container cycling cannot
-# contaminate an earlier case, and whichever endpoint owns the field
-# by then keeps it through the outage and recovery the scenario
-# drives. The field-fault case is self-contained on either role
-# layout — including the post-recovery rig — and leaves the rig as it
-# found it. The event-retention case rides beside the
-# served-interface case — the same registry surface, the same
-# either-layout self-containment, and nothing but receipted drives on
-# the field-owning peer. The alarm-rationalization case rides
-# beside them — the same registry surface plus the field owner's
-# durable journal, the same either-layout self-containment, and one
-# receipted retune it restores before returning. The
-# unclaimed-rearm case is the same shape:
-# its preempt-and-release induction opens the ownerless window behind
-# whichever peer owns the field, watches the recorded owner's inline
-# re-arm and the fencing it restores, and leaves the claim state and
-# launch roles as found. The unavailable-fallback case is
-# self-contained on either role layout as well: it drives per-point
-# faults on the shared field through the shipped plant tool and
-# clears them all in teardown. The power-fail-trip case is the same
-# shape: it writes the field contact through the plant protocol under
-# whichever peer owns the field, restores the contact and re-arms every
-# alarm latch it drove, and perturbs no role — a simulated process
-# trip is not peer loss. The dcs-ctl case closes the schedule:
-# it observes the post-failover role layout and perturbs nothing
-# earlier cases established.
+# Ordering is declared, not listed: each leg module states the
+# window it needs as RUNS_AFTER/RUNS_BEFORE constraints over
+# scenario_* names — and RUNS_LAST for the dcs-ctl case, which
+# closes the schedule — with the prose for its window beside the
+# declaration. The derivation check in
+# tests/test_qa_scenario_modules.py validates every declared
+# constraint against this discovered order, so a new leg's
+# ordering intent lives in its own file and edits no shared file.
+# Later cases degrade to inconclusive when rig state an earlier
+# case was to establish never landed.
 SCENARIOS = tuple(_scenario_functions(_LEG_MODULES))
 
 

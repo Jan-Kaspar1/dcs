@@ -1,6 +1,11 @@
 """The power_fail_trip acceptance leg — one module per leg of the scenario schedule; see qa_lane/scenarios/__init__.py for the ordering rule and the shared seam."""
 from .common import *
 
+# Ordering: The power-fail-trip case is the same shape: it writes the field
+# contact through the plant protocol under whichever peer owns the
+# field, restores the contact and re-arms every alarm latch it drove,
+# and perturbs no role — a simulated process trip is not peer loss.
+
 
 # --------------------------------------------------------------------
 # The station power-fail interlock trip and its declared recovery
