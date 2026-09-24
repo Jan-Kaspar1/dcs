@@ -844,12 +844,12 @@ class EndpointPlacementTests(unittest.TestCase):
         self.assertFalse(any(c[0] == 'run' for c in calls))
 
     def test_tracking_source_auth_leg_references_the_note(self):
-        # The tracking-source-auth docstring's forged-checkpoint
-        # server is placed per the recorded rule — 'bridge', never a
-        # host socket the rig cannot reach.
+        # The demote-forged-standby-source docstring's
+        # forged-checkpoint endpoint is placed per the recorded rule
+        # — 'bridge', never a host socket the rig cannot reach.
         doc = scenarios.__doc__
-        auth = doc[doc.index('tracking-source-auth'):]
-        auth = auth[:auth.index('verified source owes')]
+        auth = doc[doc.index('demote-forged-standby-source'):]
+        auth = auth[:auth.index('command-record audit')]
         self.assertIn('endpoint_placement', auth)
         self.assertIn('bridge', auth)
 
@@ -884,7 +884,8 @@ class DcsCtlBuildTests(unittest.TestCase):
     def _fake_docker(self, calls, binaries=('dcs-controller',
                                             'dcs-plant-server',
                                             'dcs-plant-ctl',
-                                            'dcs-ctl')):
+                                            'dcs-ctl',
+                                            'dcs-forge')):
         def fake_docker(*args, timeout=120, check=True):
             calls.append(args)
             if args[0] == 'run' and 'cargo' in str(args):
@@ -952,7 +953,8 @@ class PlantCtlShipTests(unittest.TestCase):
     def _fake_docker(self, calls, binaries=('dcs-controller',
                                             'dcs-plant-server',
                                             'dcs-plant-ctl',
-                                            'dcs-ctl')):
+                                            'dcs-ctl',
+                                            'dcs-forge')):
         def fake_docker(*args, timeout=120, check=True):
             calls.append((args, check))
             if args[0] == 'run' and 'cargo' in str(args):
@@ -1653,6 +1655,248 @@ class DrivenActionTests(unittest.TestCase):
                         .is_relative_to(self.run_dir))
         self.assertTrue(Path(ctx['state_files']['driven'])
                         .is_relative_to(self.run_dir))
+
+
+class ForgeEndpointTests(unittest.TestCase):
+    """The scenario-callable forged-checkpoint endpoint: the runner
+    launches the run's labeled rig-bridge container on the shipped
+    dcs-forge binary out of the controller image — announcing itself
+    to the named owner's monitor and serving a staged checkpoint
+    document the leg rewrites between demote calls — and removes the
+    container again for the case's teardown, both halves recorded on
+    the run's action timeline. The keyed posture comes from the run
+    config's --pair-token, the launch refuses a non-bridge placement,
+    and _scenario_ctx hands the actions to the case."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        self.run_dir.mkdir(parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+        self.document = {'format_version': 1,
+                         'generation': 7, 'tick': 42,
+                         'source_owns_field': False}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _record(self):
+        return {'run_id': 'qa-1', 'attempted_sha': SHA_A}
+
+    def test_forge_launches_keyed_on_the_rig_bridge(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            info = runner.start_forge_endpoint(
+                self.cfg, self._record(), self.run_dir, self.document,
+                'active',
+                lambda event, detail=None: events.append(
+                    (event, detail)))
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertIn('dcs-hw-qa-1-forge', launch)
+        self.assertIn(runner.MANAGED_LABEL + '=1', launch)
+        self.assertIn(runner.RUN_LABEL + '=qa-1', launch)
+        # Bridge placement: the run's rig network, no host port.
+        self.assertIn('dcs-hwtest-qa-1', launch)
+        self.assertNotIn('-p', launch)
+        # The shipped binary runs under --entrypoint on the controller
+        # image, serving the staged document and ledgering its hits.
+        self.assertIn('--entrypoint', launch)
+        self.assertIn('dcs-forge', launch)
+        self.assertIn('dcs-hwtest/controller:' + SHA_A, launch)
+        self.assertIn('--listen', launch)
+        self.assertIn('0.0.0.0:' + str(runner.FORGE_PORT), launch)
+        self.assertIn('--document', launch)
+        self.assertIn('/forge/checkpoint.json', launch)
+        self.assertIn('--hits', launch)
+        self.assertIn('/forge/hits.jsonl', launch)
+        # The endpoint announces to the named owner's monitor so its
+        # bridge address is the recorded tracking hint.
+        self.assertIn('--announce', launch)
+        self.assertIn('dcs-hw-qa-1-a:8080', launch)
+        # Keyed: the run's --pair-token signs the ?prove= answers.
+        self.assertIn('--pair-token', launch)
+        self.assertIn(self.cfg['pair_token'], launch)
+        self.assertTrue(info['keyed'])
+        self.assertEqual(info['container'], 'dcs-hw-qa-1-forge')
+        self.assertEqual(info['port'], runner.FORGE_PORT)
+        # The staged document and hits ledger sit inside the run dir.
+        self.assertEqual(json.loads(Path(info['document'])
+                                    .read_text()), self.document)
+        self.assertTrue(Path(info['document'])
+                        .is_relative_to(self.run_dir))
+        self.assertTrue(Path(info['hits'])
+                        .is_relative_to(self.run_dir))
+        self.assertEqual([event for event, _ in events],
+                         ['forge-start', 'forge-up'])
+
+    def test_unkeyed_launch_carries_no_pair_token(self):
+        calls = []
+        with patch.object(runner, 'docker',
+                          lambda *a, **k: calls.append(a)
+                          or Result('')):
+            info = runner.start_forge_endpoint(
+                self.cfg, self._record(), self.run_dir, self.document,
+                'standby', lambda e, d=None: None, keyed=False)
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertNotIn('--pair-token', launch)
+        self.assertIn('dcs-hw-qa-1-b:8081', launch)
+        self.assertFalse(info['keyed'])
+
+    def test_tokenless_run_launches_unkeyed_regardless(self):
+        self.cfg['pair_token'] = None
+        calls = []
+        with patch.object(runner, 'docker',
+                          lambda *a, **k: calls.append(a)
+                          or Result('')):
+            info = runner.start_forge_endpoint(
+                self.cfg, self._record(), self.run_dir, self.document,
+                'active', lambda e, d=None: None)
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertNotIn('--pair-token', launch)
+        self.assertFalse(info['keyed'])
+
+    def test_non_bridge_placement_refuses_the_launch(self):
+        self.cfg['endpoint_placement'] = {
+            **self.cfg['endpoint_placement'], 'forge': 'loopback'}
+        with self.assertRaises(RuntimeError):
+            runner.start_forge_endpoint(
+                self.cfg, self._record(), self.run_dir, self.document,
+                'active', lambda e, d=None: None)
+
+    def test_unknown_endpoint_rejected(self):
+        with self.assertRaises(RuntimeError):
+            runner.start_forge_endpoint(
+                self.cfg, self._record(), self.run_dir, self.document,
+                'forge', lambda e, d=None: None)
+
+    def test_failed_launch_raises_after_recording_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'run' and check:
+                raise RuntimeError('docker run failed: name in use')
+            return Result('')
+
+        with patch.object(runner, 'docker', raising):
+            with self.assertRaises(RuntimeError):
+                runner.start_forge_endpoint(
+                    self.cfg, self._record(), self.run_dir,
+                    self.document, 'active',
+                    lambda event, detail=None: events.append(event))
+        self.assertEqual(events, ['forge-start'])
+
+    def test_stop_removes_the_forge_container(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            runner.stop_forge_endpoint(
+                'qa-1', lambda event, detail=None: events.append(
+                    (event, detail)))
+        self.assertEqual(calls,
+                         [('rm', '-f', 'dcs-hw-qa-1-forge')])
+        self.assertEqual([event for event, _ in events],
+                         ['forge-stop', 'forge-stopped'])
+
+    def test_failed_teardown_raises_after_recording_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'rm' and check:
+                raise RuntimeError('docker rm failed: no such')
+            return Result('')
+
+        with patch.object(runner, 'docker', raising):
+            with self.assertRaises(RuntimeError):
+                runner.stop_forge_endpoint(
+                    'qa-1',
+                    lambda event, detail=None: events.append(event))
+        self.assertEqual(events, ['forge-stop'])
+
+    def test_scenario_ctx_carries_forge_actions_and_token(self):
+        calls = []
+        record = self._record()
+        with patch.object(runner, 'docker',
+                          lambda *a, **k: calls.append(a)
+                          or Result('')):
+            ctx = runner._scenario_ctx(
+                self.cfg, record, self.src, self.run_dir,
+                self.run_dir / 'evidence', 0,
+                lambda e, d=None: None)
+            info = ctx['start_forge'](self.document, 'active')
+            ctx['stop_forge']()
+        self.assertEqual(ctx['pair_token'], self.cfg['pair_token'])
+        self.assertEqual(info['container'], 'dcs-hw-qa-1-forge')
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertIn('--entrypoint', launch)
+        self.assertIn('dcs-forge', launch)
+        self.assertIn('--pair-token', launch)
+        self.assertEqual(calls[-1],
+                         ('rm', '-f', 'dcs-hw-qa-1-forge'))
+
+    def test_controller_image_ships_the_forge_binary(self):
+        calls, events = [], []
+        target = Path(self.cfg['state_dir']) / 'build-cache' \
+            / 'target' / 'release'
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            if args[0] == 'run' and 'cargo' in str(args):
+                target.mkdir(parents=True, exist_ok=True)
+                for binary in ('dcs-controller', 'dcs-plant-server',
+                               'dcs-plant-ctl', 'dcs-ctl', 'dcs-forge'):
+                    (target / binary).write_text('bin')
+            if args[:2] == ('image', 'inspect'):
+                return Result('sha256:' + 'a' * 64)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            runner._build_images(
+                self.src, self.cfg, self.run_dir,
+                lambda event, detail=None: events.append(event),
+                'qa-1')
+        build = next(args for args in calls
+                     if args[0] == 'run' and 'cargo' in str(args))
+        self.assertIn('--bin dcs-forge', build[-1])
+        dockerfile = (self.run_dir / 'image-controller'
+                      / 'Dockerfile').read_text()
+        self.assertIn('COPY dcs-forge /usr/local/bin/dcs-forge',
+                      dockerfile)
+        self.assertIn('ENTRYPOINT ["dcs-controller"]', dockerfile)
+        self.assertTrue(
+            (self.run_dir / 'image-controller' / 'dcs-forge')
+            .is_file())
+        plant = (self.run_dir / 'image-plant'
+                 / 'Dockerfile').read_text()
+        self.assertNotIn('dcs-forge', plant)
+
+    def test_build_fails_loudly_without_the_forge_binary(self):
+        target = Path(self.cfg['state_dir']) / 'build-cache' \
+            / 'target' / 'release'
+
+        def fake_docker(*args, timeout=120, check=True):
+            if args[0] == 'run' and 'cargo' in str(args):
+                target.mkdir(parents=True, exist_ok=True)
+                for binary in ('dcs-controller', 'dcs-plant-server',
+                               'dcs-plant-ctl', 'dcs-ctl'):
+                    (target / binary).write_text('bin')
+            if args[:2] == ('image', 'inspect'):
+                return Result('sha256:' + 'a' * 64)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            with self.assertRaises(RuntimeError):
+                runner._build_images(self.src, self.cfg, self.run_dir,
+                                     lambda e, d=None: None, 'qa-1')
 
 
 if __name__ == '__main__':

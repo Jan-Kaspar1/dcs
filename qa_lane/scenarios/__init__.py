@@ -40,16 +40,25 @@ controller stop/start actions ctx['stop_controller']/
 ctx['start_controller'] carry — the rig launches controllers with
 --restart no, so a stopped container holds a real down-window — and
 reads both peers' --journal-file paths for the refusal and
-non-interference audits. The tracking-source-auth scenario drives the
-same controller lifecycle seam to open the announced-only demotion
-window — the tracking peer stopped, the field owner warm-restarted so
-no announce is recorded — probes the `GET /checkpoint?peer=` contract
-with crafted announce hints and a forged-checkpoint server placed per
-the run config's recorded `endpoint_placement` ('bridge': a labeled
-container on the run's rig network, since the host egress policy
-drops every packet a rig peer aims at a host socket — a forge bound
-on the scenario host is unreachable from the rig), and audits the
-served journals for the adoption entries every verified source owes.
+non-interference audits. The demote-forged-standby-source scenario
+drives the same controller lifecycle seam to open the announced-only
+demotion window — the tracking peer stopped, the field owner
+warm-restarted so no genuine announce is recorded — and stands the
+forged-checkpoint endpoint through ctx['start_forge']/
+ctx['stop_forge']: the runner launches the shipped `dcs-forge` binary
+in a labeled rig-bridge container per the run config's recorded
+`endpoint_placement` ('bridge', since the host egress policy drops
+every packet a rig peer aims at a host socket — a forge bound on the
+scenario host is unreachable from the rig), announcing itself to the
+field owner's monitor so its bridge address is the tracking hint
+POST /demote then verifies, serving the staged checkpoint document —
+the receipt-window-forked and internal-`In`-planted forgeries, then
+the honest standby shape — that the scenario rewrites between demote
+calls, and ledgering every pull it answers. The leg reads the served
+--journal-file and the forge's hits ledger for the no-adoption and
+refusal audits, and the keyed/unkeyed launch posture exercises both
+the proof gate and the command-record audit the verified document
+owes.
 
 The field-fault, backup-health, and unavailable-fallback cases
 inject and clear per-point faults on the shared simulated field
