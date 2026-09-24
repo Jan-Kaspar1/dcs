@@ -249,7 +249,89 @@ def _tail_has(path, needle, size=4096):
         return False
 
 
-def runner(spec_path):
+# Bounded interval over which the stall watchdog samples descendant CPU ticks
+# once the log has gone quiet past stall_seconds. It runs at most once per
+# stall window, not per poll tick, so it stays negligible next to the 1200s
+# default while still separating a quiet build from a dead agent.
+STALL_PROBE_SECONDS = 2.0
+
+
+def process_tree(pid):
+    """Snapshot {pid: (comm, utime+stime ticks)} for a child's live tree.
+
+    Covers every process in the child's process group plus all /proc
+    descendants, so a daemonized grandchild that escaped the ppid chain but
+    still answers killpg is recorded too. Linux-only: without /proc it returns
+    an empty mapping and the watchdog degrades to the pre-probe behavior —
+    a log-quiet child is declared stalled, since no CPU evidence can exist.
+    """
+    proc = Path('/proc')
+    if not proc.is_dir():
+        return {}
+    try:
+        entries = list(proc.iterdir())
+    except OSError:
+        return {}
+    stats, children = {}, {}
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            record = (entry / 'stat').read_text()
+        except OSError:
+            continue
+        lparen, rparen = record.find('('), record.rfind(')')
+        if not 0 <= lparen < rparen:
+            continue
+        fields = record[rparen + 2:].split()
+        try:
+            member = int(entry.name)
+            stats[member] = (record[lparen + 1:rparen],
+                             int(fields[11]) + int(fields[12]),
+                             int(fields[2]))
+            children.setdefault(int(fields[1]), []).append(member)
+        except (IndexError, ValueError):
+            continue
+    tree = {member: stat[:2] for member, stat in stats.items() if stat[2] == pid}
+    pending = [pid]
+    while pending:
+        member = pending.pop()
+        if member in stats and member not in tree:
+            tree[member] = stats[member][:2]
+        pending.extend(children.get(member, ()))
+    return tree
+
+
+def process_activity(pid, interval=STALL_PROBE_SECONDS):
+    """Probe the tree rooted at pid: (busy, {pid: comm}) from the second sample.
+
+    `busy` is True when any member's utime+stime advanced across the interval
+    or a new member appeared — the tree is working, not hung. An empty tree
+    (dead leader or no /proc) reports not busy with nothing to record.
+    """
+    before = process_tree(pid)
+    if not before:
+        return False, {}
+    time.sleep(interval)
+    after = process_tree(pid)
+    busy = any(member not in before or ticks > before[member][1]
+               for member, (_, ticks) in after.items())
+    return busy, {member: comm for member, (comm, _) in after.items()}
+
+
+def _format_tree(tree):
+    return ' '.join('%d(%s)' % (member, comm)
+                    for member, comm in sorted(tree.items())) or 'none'
+
+
+def _log_size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 'unknown'
+
+
+def runner(spec_path, activity=None):
     spec = json.loads(Path(spec_path).read_text())
     # The runner writes its own owner record as well, closing the window in
     # which the supervisor dies between Popen and saving the returned metadata.
@@ -288,6 +370,8 @@ def runner(spec_path):
                 if stdin_handle is not None:
                     stdin_handle.close()
             atomic_json(spec['metadata'], {'pid': child.pid, 'identity': process_identity(child.pid)})
+            if activity is None:
+                activity = process_activity
             stall_seconds = spec.get('stall_seconds')
             error_stall = spec.get('error_stall_seconds') or stall_seconds
             last_mtime, last_activity, stalled = None, time.monotonic(), None
@@ -306,10 +390,32 @@ def runner(spec_path):
                     # A provider 'stream error' as the most recent log event means
                     # the agent froze on a dead stream; fail it fast instead of
                     # waiting out the generic stall or hard timeout windows.
-                    if idle >= stall_seconds or (idle >= error_stall and
-                                                 _tail_has(spec['log'], 'stream error')):
+                    if idle >= error_stall and _tail_has(spec['log'], 'stream error'):
                         reason = 'failed'
                         stalled = 'No agent output for %ds; treating as hang' % int(idle)
+                    elif idle >= stall_seconds:
+                        # Log silence is not proof of a hang: a quiet build or
+                        # test phase keeps the child's descendants consuming
+                        # CPU. Sample the tree over a bounded interval — only a
+                        # quiet AND idle tree is stalled; CPU progress extends
+                        # the window instead of killing.
+                        busy, tree = activity(child.pid)
+                        if child.poll() is not None:
+                            continue  # Finished while the probe slept.
+                        try:
+                            mtime = os.path.getmtime(spec['log'])
+                        except OSError:
+                            mtime = last_mtime
+                        if mtime != last_mtime:
+                            last_mtime, last_activity = mtime, time.monotonic()
+                        elif busy:
+                            last_activity = time.monotonic()
+                        else:
+                            reason = 'failed'
+                            stalled = ('No agent output for %ds; treating as hang; '
+                                       'idle process tree: %s; log tail at byte %s'
+                                       % (int(idle), _format_tree(tree),
+                                          _log_size(spec['log'])))
                 if reason is None:
                     time.sleep(0.1)
                     continue
