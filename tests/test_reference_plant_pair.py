@@ -18,7 +18,7 @@ from pathlib import Path
 
 _CI_DIR = Path(__file__).resolve().parents[1] / "reference-plant" / "ci"
 sys.path.insert(0, str(_CI_DIR))
-_PATH = _CI_DIR / "event_parity.py"
+_PATH = _CI_DIR / "legs" / "event_parity.py"
 _spec = importlib.util.spec_from_file_location("event_parity", _PATH)
 event_parity = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(event_parity)

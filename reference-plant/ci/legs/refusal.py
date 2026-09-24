@@ -3,7 +3,7 @@
 consumer-side proof that the deployed redundant pair refuses honestly
 at its role boundaries (WW-ENG-003, WW-LCM-001).
 
-The pair leg (`ci/pair.py`) proves the manifest-declared pair runs and
+The pair leg (`ci/legs/pair.py`) proves the manifest-declared pair runs and
 switches; this leg proves the refusal half of the same contract on the
 same declared deployment: the rig reads the standby wiring and
 persistence fields out of `deploy/manifest.json` and spawns the
@@ -57,9 +57,33 @@ import json
 import os
 import sys
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
+
 import pair
 import simulate
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored case: a leg asserting the standby-directed write
+# settles applied must surface the named diagnostic — never a
+# silently unrefused pass.
+LEG = {
+    "order": 40,
+    "title": "the role-gated refusal leg",
+    "passes": "refusal-leg",
+    "tampers": [
+        {
+            "name": "expect-applied",
+            "passed": "a doctored write expectation passed the refusal leg",
+            "missed": "the expect-applied case did not report its named diagnostic",
+            "evidence": ["expected an applied receipt"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)

@@ -7,7 +7,7 @@ This is a **recorded artifact set and procedure**, not a new
 mechanism: the record is materialized from the deterministic evidence
 an existing driven run already produces — no new wire types, no new
 persisted formats, no new served surface. The reference plant's
-`ci/commissioning.py` leg produces it inside clean CI as part of the
+`ci/legs/commissioning.py` leg produces it inside clean CI as part of the
 `pair` stage, and the completeness audit is what makes the record a
 contract: a run that cannot produce every named artifact fails by
 name rather than handing over a partial record.

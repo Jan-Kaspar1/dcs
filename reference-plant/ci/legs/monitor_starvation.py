@@ -58,15 +58,47 @@ pass.
 import argparse
 import hashlib
 import json
+import os
 import socket
 import sys
 import time
 import urllib.request
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
+
 import failover
 import pair
 import simulate
 
+
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored cases.
+# The doctored cases: a leg whose liveness reads starve — the
+# declared bound doctored to zero — and one whose armed standby
+# reports a role change mid-hold must each surface the named
+# diagnostic — never a silently unexercised contract.
+LEG = {
+    "order": 230,
+    "title": "the monitor-starvation leg",
+    "passes": "monitor-starvation",
+    "tampers": [
+        {
+            "name": "starved-reads",
+            "passed": "a starved-reads case passed the starvation leg",
+            "missed": "the starved-reads case did not report its named diagnostic",
+            "evidence": ["never answered inside the declared"],
+        },
+        {
+            "name": "peer-transition",
+            "passed": "a peer-transition case passed the starvation leg",
+            "missed": "the peer-transition case did not report its named diagnostic",
+            "evidence": ["moved to role"],
+        },
+    ],
+}
 
 def eprint(*args):
     print(*args, file=sys.stderr)
