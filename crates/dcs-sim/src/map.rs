@@ -502,7 +502,9 @@ impl ChannelMap {
     ///   value kind;
     /// - element ends are `Float` points — except a `bool_flow`'s gate
     ///   input and a `threshold`'s contact output, which must be `Bool`
-    ///   points — `time_constant`, `delay`, and `damping_ratio` are
+    ///   points, the requirement attaching to each leg's role so an
+    ///   element reading and driving the same point faces both legs'
+    ///   checks — `time_constant`, `delay`, and `damping_ratio` are
     ///   finite and positive, `amplitude` is finite and non-negative,
     ///   `on_rate`, `off_rate`, `gain`, and `bias` are finite, a
     ///   `threshold`'s `on`/`off` bounds are finite and distinct —
@@ -566,32 +568,42 @@ impl ChannelMap {
         }
 
         for element in &self.elements {
-            // Every end must name a bound point of the kind the end
+            // Every end must name a bound point of the kind its role
             // requires: Float throughout, except a bool_flow's gate
             // input and a threshold's contact output, which must be
-            // Bool points.
-            for point in element.inputs().iter().copied().chain([element.output()]) {
+            // Bool points. The requirement attaches to the leg, not to
+            // the point's identity, so an element whose input and
+            // output name the same point still faces both legs' checks.
+            for point in element.inputs().iter().copied() {
                 let bound = binding(&points, point)?;
-                let gate = matches!(element, ProcessElement::BoolFlow(flow) if flow.input == point);
-                let contact = matches!(element, ProcessElement::Threshold(threshold) if threshold.output == point);
-                if gate && bound.kind() != ValueKind::Bool {
-                    return Err(ConfigError::ElementGateKind {
-                        point,
-                        kind: bound.kind(),
-                    });
-                }
-                if contact && bound.kind() != ValueKind::Bool {
-                    return Err(ConfigError::ElementContactKind {
-                        point,
-                        kind: bound.kind(),
-                    });
-                }
-                if !gate && !contact && bound.kind() != ValueKind::Float {
+                if matches!(element, ProcessElement::BoolFlow(_)) {
+                    if bound.kind() != ValueKind::Bool {
+                        return Err(ConfigError::ElementGateKind {
+                            point,
+                            kind: bound.kind(),
+                        });
+                    }
+                } else if bound.kind() != ValueKind::Float {
                     return Err(ConfigError::ElementPointKind {
                         point,
                         kind: bound.kind(),
                     });
                 }
+            }
+            let point = element.output();
+            let bound = binding(&points, point)?;
+            if matches!(element, ProcessElement::Threshold(_)) {
+                if bound.kind() != ValueKind::Bool {
+                    return Err(ConfigError::ElementContactKind {
+                        point,
+                        kind: bound.kind(),
+                    });
+                }
+            } else if bound.kind() != ValueKind::Float {
+                return Err(ConfigError::ElementPointKind {
+                    point,
+                    kind: bound.kind(),
+                });
             }
             if let ProcessElement::BoolFlow(flow) = element {
                 for (rate, value) in [("on_rate", flow.on_rate), ("off_rate", flow.off_rate)] {

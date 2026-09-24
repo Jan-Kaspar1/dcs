@@ -2489,6 +2489,53 @@ mod tests {
     }
 
     #[test]
+    fn bool_flow_self_point_is_rejected_by_each_leg_kind_check() {
+        // QA finding dynamics-self-point-validation-panics-plant-server:
+        // the gate leg must be Bool and the driven leg Float, so no one
+        // point can fill both. The equality-keyed check let a Bool
+        // self-point merge — the Float `initial` seeded the Bool point
+        // at construction, and the first Good step panicked inside the
+        // driver mutex, poisoning it for every later request.
+        let element = || {
+            ProcessElement::BoolFlow(BoolFlow {
+                input: PointId(1),
+                output: PointId(1),
+                on_rate: -10.0,
+                off_rate: 0.0,
+                initial: 0.0,
+            })
+        };
+
+        // A Bool self-point satisfies the gate leg but fails the
+        // output leg's Float requirement.
+        let map = ChannelMap::new()
+            .with_point(binding(1, Direction::Out, Value::Bool(false)))
+            .with_element(element());
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementPointKind {
+                point: PointId(1),
+                kind: ValueKind::Bool,
+            }
+        );
+        // The driver refuses the map outright — nothing serves to step.
+        assert!(SimDriver::new(map).is_err());
+
+        // A Float self-point fails the gate leg's Bool requirement.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::Out))
+            .with_element(element());
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementGateKind {
+                point: PointId(1),
+                kind: ValueKind::Float,
+            }
+        );
+        assert!(SimDriver::new(map).is_err());
+    }
+
+    #[test]
     fn bool_flow_serde_roundtrips() {
         let map = bool_flow_map(-10.0, 0.5);
         let json = serde_json::to_string(&map).unwrap();
@@ -3362,6 +3409,52 @@ mod tests {
                 kind: ValueKind::Float,
             }
         );
+    }
+
+    #[test]
+    fn threshold_self_point_is_rejected_by_each_leg_kind_check() {
+        // QA finding dynamics-self-point-validation-panics-plant-server:
+        // the input leg must be Float and the contact leg Bool, so no
+        // one point can fill both. The equality-keyed check let a Bool
+        // self-point merge — the first Good step then panicked inside
+        // the driver mutex, poisoning it for every later request.
+        let element = || {
+            ProcessElement::Threshold(Threshold {
+                input: PointId(1),
+                output: PointId(1),
+                on: 8.0,
+                off: 7.5,
+                initial: false,
+            })
+        };
+
+        // A Bool self-point satisfies the contact leg but fails the
+        // input leg's Float requirement.
+        let map = ChannelMap::new()
+            .with_point(binding(1, Direction::In, Value::Bool(false)))
+            .with_element(element());
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementPointKind {
+                point: PointId(1),
+                kind: ValueKind::Bool,
+            }
+        );
+        // The driver refuses the map outright — nothing serves to step.
+        assert!(SimDriver::new(map).is_err());
+
+        // A Float self-point fails the contact leg's Bool requirement.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_element(element());
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementContactKind {
+                point: PointId(1),
+                kind: ValueKind::Float,
+            }
+        );
+        assert!(SimDriver::new(map).is_err());
     }
 
     #[test]
