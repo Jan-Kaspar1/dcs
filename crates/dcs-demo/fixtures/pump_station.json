@@ -3680,7 +3680,7 @@
         }
       },
       "rationalization": {
-        "consequence": "Demand stands with no pump available to meet it",
+        "consequence": "No pump is available; the station cannot pump",
         "required_action": "Restore a pump to service or clear its faults",
         "reference": "none-available-alarm"
       },

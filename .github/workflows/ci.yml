@@ -50,7 +50,12 @@ jobs:
     env:
       CARGO_BUILD_JOBS: 4
     steps:
+      # Full history: the reference-plant proofs seed their stand-in
+      # remote with the recorded pin rev from the checkout's own object
+      # store — a depth-1 checkout cannot serve it.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Show Rust toolchain
         id: rust-version
         run: |
