@@ -411,6 +411,7 @@ mod tests {
             },
             outcome: CommandOutcome::Applied { tick: Tick(tick) },
             actor: None,
+            reason: None,
         }
     }
 

@@ -184,6 +184,7 @@ fn an_attributed_command_settles_into_an_attributed_receipt_and_journal_entry() 
                     apply_tick: Tick(2)
                 },
                 actor: Some("operator-7".to_string()),
+                reason: None,
             }
         );
 
@@ -196,6 +197,7 @@ fn an_attributed_command_settles_into_an_attributed_receipt_and_journal_entry() 
                 command,
                 outcome: CommandOutcome::Applied { tick: Tick(2) },
                 actor: Some("operator-7".to_string()),
+                reason: None,
             }]
         );
         // The receipt log carries the same attribution.
@@ -286,10 +288,113 @@ fn a_stray_actor_beside_a_bare_command_is_refused() {
 }
 
 #[test]
+fn a_reasoned_command_settles_into_a_reasoned_receipt_and_journal_entry() {
+    with_monitor(|_driver, client| {
+        client.advance(1).unwrap();
+        let command = write_value(10, Value::Float(5.0));
+        // The fully attributed envelope: actor and reason both declared,
+        // both stamped onto the receipt and both journaled.
+        let receipt = client
+            .command_attributed(
+                &command,
+                Some("operator-7"),
+                Some("nuisance trips during pump work"),
+            )
+            .unwrap();
+        assert_eq!(
+            receipt,
+            CommandReceipt {
+                command: command.clone(),
+                outcome: CommandOutcome::Accepted {
+                    apply_tick: Tick(2)
+                },
+                actor: Some("operator-7".to_string()),
+                reason: Some("nuisance trips during pump work".to_string()),
+            }
+        );
+        client.advance(1).unwrap();
+        assert_eq!(
+            settled_receipts(client),
+            vec![CommandReceipt {
+                command: command.clone(),
+                outcome: CommandOutcome::Applied { tick: Tick(2) },
+                actor: Some("operator-7".to_string()),
+                reason: Some("nuisance trips during pump work".to_string()),
+            }]
+        );
+
+        // The reason is independent submission metadata: declared
+        // without an actor it still rides the envelope and journals.
+        let receipt = client
+            .command_attributed(&command, None, Some("declared alone"))
+            .unwrap();
+        assert_eq!(receipt.actor, None);
+        assert_eq!(receipt.reason.as_deref(), Some("declared alone"));
+        client.advance(1).unwrap();
+        let settled = settled_receipts(client);
+        assert_eq!(settled.len(), 2);
+        assert_eq!(settled[1].reason.as_deref(), Some("declared alone"));
+        assert_eq!(settled[1].actor, None);
+    });
+}
+
+#[test]
+fn the_raw_reason_envelope_parses_and_a_stray_reason_is_refused() {
+    with_monitor(|_driver, client| {
+        // The reason-only envelope — `reason` alone selects the
+        // envelope shape; the reasonless half journals unattributed.
+        let (status, body) = client
+            .request(
+                "POST",
+                "/command",
+                Some(
+                    r#"{"command":{"write_value":{"point":10,"kind":"float","value":{"float":7.5}}},"reason":"shelved for the washdown"}"#,
+                ),
+            )
+            .unwrap();
+        assert_eq!(status, 200, "{body}");
+        let receipt: CommandReceipt = serde_json::from_str(&body).unwrap();
+        assert_eq!(receipt.actor, None);
+        assert_eq!(receipt.reason.as_deref(), Some("shelved for the washdown"));
+
+        // An envelope key the contract does not declare refuses —
+        // strict fields, never a silently dropped attribution.
+        let (status, _body) = client
+            .request(
+                "POST",
+                "/command",
+                Some(
+                    r#"{"command":{"write_value":{"point":10,"kind":"float","value":{"float":7.5}}},"operator":"console-a"}"#,
+                ),
+            )
+            .unwrap();
+        assert_eq!(status, 400);
+
+        // A stray top-level "reason" beside a bare command is the same
+        // refusal the stray "actor" takes.
+        let (status, _body) = client
+            .request(
+                "POST",
+                "/command",
+                Some(
+                    r#"{"write_value":{"point":10,"kind":"float","value":{"float":7.5}},"reason":"x"}"#,
+                ),
+            )
+            .unwrap();
+        assert_eq!(status, 400);
+        // Only the accepted submission reached the executor's receipt
+        // log — both refused envelopes were refused at the boundary.
+        assert_eq!(client.receipts().unwrap(), vec![receipt]);
+    });
+}
+
+#[test]
 fn a_not_active_rejection_stamps_the_actor_identically() {
     with_standby_monitor(|_driver, client| {
         let command = write_value(10, Value::Float(5.0));
-        let receipt = client.command_as(&command, Some("operator-7")).unwrap();
+        let receipt = client
+            .command_attributed(&command, Some("operator-7"), Some("retry on the peer"))
+            .unwrap();
         assert_eq!(
             receipt,
             CommandReceipt {
@@ -301,6 +406,7 @@ fn a_not_active_rejection_stamps_the_actor_identically() {
                     },
                 },
                 actor: Some("operator-7".to_string()),
+                reason: Some("retry on the peer".to_string()),
             }
         );
         // The refusal never entered the executor's receipt log, but the
@@ -318,7 +424,7 @@ fn the_served_page_supplies_the_configured_operator_identity() {
         // The ?operator= URL parameter is the configured identity…
         assert!(page.contains("urlParams.get(\"operator\")"), "{page}");
         // …stamped on every submission through the attributed envelope…
-        assert!(page.contains("actor: operator"), "{page}");
+        assert!(page.contains("body.actor = operator"), "{page}");
         // …and stated beside the command form.
         assert!(page.contains("command-actor"), "{page}");
     });

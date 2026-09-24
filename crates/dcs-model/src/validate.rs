@@ -157,6 +157,15 @@ pub enum ValidationError {
         /// The offending point.
         point: PointId,
     },
+    /// A point declares `requires_reason` but is not a writable `In`
+    /// point. The flag qualifies the command surface — a point the
+    /// command path never reaches takes no reason to declare, so the
+    /// mark on an `Out` point or an unmarked `In` point is a dead
+    /// declaration.
+    RequiresReasonNotWritable {
+        /// The offending point.
+        point: PointId,
+    },
     /// A point's value type disagrees with its bound channel's value type.
     ChannelTypeMismatch {
         /// The offending point.
@@ -296,6 +305,11 @@ impl fmt::Display for ValidationError {
             Self::JournaledFloat { point } => write!(
                 f,
                 "io point {} declares journaled but has value type float",
+                point.0
+            ),
+            Self::RequiresReasonNotWritable { point } => write!(
+                f,
+                "io point {} declares requires_reason but is not a writable in point",
                 point.0
             ),
             Self::ChannelTypeMismatch {
@@ -472,6 +486,10 @@ impl PlantModel {
     ///   is the low-volume record of discrete transitions, so a `Float`
     ///   point carrying the flag is reported — either direction, field
     ///   or internal;
+    /// - `requires_reason` marks only writable `In` points: the flag
+    ///   qualifies the command surface, so a point that takes no
+    ///   commands — an `Out` point or an unmarked `In` point —
+    ///   carrying it is reported;
     /// - each connection's `from` end produces a value (an `In` point or an
     ///   `Out` port) and its `to` end consumes one (an `Out` point or an `In`
     ///   port), with matching value types on both ends — internal points
@@ -534,6 +552,14 @@ impl PlantModel {
             // is a declaration error.
             if point.journaled && point.value_type == ValueKind::Float {
                 errors.push(ValidationError::JournaledFloat { point: point.id });
+            }
+            // `requires_reason` interacts with the command-surface
+            // rule: it qualifies a writable `In` point's command
+            // admission, so on a point that takes no commands — an
+            // `Out` point, or an `In` point the model never marked
+            // `writable` — the flag is a dead declaration.
+            if point.requires_reason && (point.direction == Direction::Out || !point.writable) {
+                errors.push(ValidationError::RequiresReasonNotWritable { point: point.id });
             }
             let Some(reference) = &point.channel else {
                 // An internal point's initial value is its whole declared
@@ -1052,6 +1078,42 @@ mod tests {
             model
                 .validate()
                 .contains(&ValidationError::JournaledFloat { point: PointId(10) })
+        );
+    }
+
+    #[test]
+    fn requires_reason_marks_only_writable_in_points() {
+        // A writable `In` point — bound or internal — is a legal mark:
+        // the flag qualifies the admission check the point's command
+        // surface already answers.
+        let mut model = minimal();
+        model.io_points[0].writable = true;
+        model.io_points[0].requires_reason = true;
+        assert!(model.validate().is_empty());
+        let mut model = minimal();
+        make_internal(&mut model, 0, Some(Value::Float(25.0)));
+        model.io_points[0].writable = true;
+        model.io_points[0].requires_reason = true;
+        assert!(model.validate().is_empty());
+
+        // On an `Out` point the command path never reaches the mark —
+        // the flag is a dead declaration.
+        let mut model = minimal();
+        model.io_points[1].requires_reason = true;
+        assert!(
+            model
+                .validate()
+                .contains(&ValidationError::RequiresReasonNotWritable { point: PointId(11) })
+        );
+
+        // So is an `In` point the model never marked writable — the
+        // gate it names admits nothing.
+        let mut model = minimal();
+        model.io_points[0].requires_reason = true;
+        assert!(
+            model
+                .validate()
+                .contains(&ValidationError::RequiresReasonNotWritable { point: PointId(10) })
         );
     }
 }

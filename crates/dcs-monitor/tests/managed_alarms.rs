@@ -14,7 +14,10 @@
 //! protection-layer signal group is served data, all driven over TCP
 //! through the in-process `MonitorClient` against a rig of the two
 //! managed sibling kinds — one unbound-`shelve` and one
-//! unwritable-`shelve` instance covering the never-shelvable surface.
+//! unwritable-`shelve` instance covering the never-shelvable surface —
+//! with the first alarm's `shelve` point carrying the model's
+//! `requires_reason` mark, the per-alarm mandatory-reason declaration
+//! the shelving-reason decision records.
 
 use dcs_blocks::{
     AlarmLimits, ManagedAlarmConfig, ManagedAlarmIo, ManagedBoolLatchingAlarm, ManagedLatchingAlarm,
@@ -127,6 +130,7 @@ fn journaled_out() -> PointSpec {
         kind: ValueKind::Bool,
         internal: None,
         writable: false,
+        requires_reason: false,
         stale_after_ticks: None,
         journaled: true,
     }
@@ -140,6 +144,7 @@ fn journaled_in() -> PointSpec {
         kind: ValueKind::Bool,
         internal: None,
         writable: false,
+        requires_reason: false,
         stale_after_ticks: None,
         journaled: true,
     }
@@ -211,7 +216,21 @@ fn with_monitor<T>(body: impl FnOnce(&StubDriver, &MonitorClient) -> T) -> T {
         // field point: the bound-but-unwritable half of the
         // never-shelvable surface.
         .with_writable_internal(ACK1, Direction::In, ValueKind::Bool, Value::Bool(false))
-        .with_writable_internal(SHELVE1, Direction::In, ValueKind::Bool, Value::Bool(false))
+        // The first alarm's shelve request point carries the model's
+        // `requires_reason` mark — the per-alarm mandatory-reason
+        // declaration the shelving-reason decision records.
+        .with_spec(
+            SHELVE1,
+            PointSpec {
+                direction: Direction::In,
+                kind: ValueKind::Bool,
+                internal: Some(Value::Bool(false)),
+                writable: true,
+                requires_reason: true,
+                stale_after_ticks: None,
+                journaled: false,
+            },
+        )
         .with_writable_internal(OOS1_IN, Direction::In, ValueKind::Bool, Value::Bool(false))
         .with_point(PV2, Direction::In, ValueKind::Bool)
         .with_writable_internal(ACK2, Direction::In, ValueKind::Bool, Value::Bool(false))
@@ -475,13 +494,7 @@ fn the_join_yields_the_managed_lists_priority_and_rationalization() {
         driver.write(PV2, Value::Bool(true)).unwrap();
         driver.write(SUPPRESS2, Value::Bool(true)).unwrap();
         for point in [SHELVE1, OOS1_IN, OOS2_IN] {
-            let receipt = client
-                .command(&Command::WriteValue {
-                    point,
-                    kind: ValueKind::Bool,
-                    value: Value::Bool(true),
-                })
-                .unwrap();
+            let receipt = managed_write(client, point, true);
             assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
         }
         let snapshot = client.advance(1).unwrap();
@@ -598,15 +611,11 @@ fn the_alarm_journal_keeps_durable_transition_order() {
         // initiating cause; the resulting `shelved` transition is its
         // consequence. In the durable journal's seq order the cause
         // stands first — tick order alone cannot show it: both land at
-        // the applying scan's tick.
-        let receipt = client
-            .command(&Command::WriteValue {
-                point: SHELVE1,
-                kind: ValueKind::Bool,
-                value: Value::Bool(true),
-            })
-            .unwrap();
+        // the applying scan's tick. SHELVE1 is the fixture's
+        // `requires_reason` point, so the request declares one.
+        let receipt = managed_write(client, SHELVE1, true);
         assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+        assert_eq!(receipt.reason.as_deref(), Some("pump maintenance window"));
         driver.write(PV1, Value::Float(95.0)).unwrap();
         client.advance(1).unwrap();
 
@@ -674,6 +683,106 @@ fn the_alarm_journal_keeps_durable_transition_order() {
             consequence.seq
         );
         assert_eq!(cause.tick, consequence.tick);
+        // And the receipt the alarm journal pairs the transition with
+        // carries the declared actor and reason — the durable record
+        // the shelving-reason decision prescribes.
+        let JournalEvent::CommandSettled { receipt } = &cause.event else {
+            unreachable!();
+        };
+        assert_eq!(receipt.actor.as_deref(), Some("op-1"));
+        assert_eq!(receipt.reason.as_deref(), Some("pump maintenance window"));
+    });
+}
+
+#[test]
+fn the_marked_shelve_point_refuses_reasonless_and_journals_the_reason() {
+    with_monitor(|driver, client| {
+        // The served index carries the mark: the page's early-explain
+        // gate reads `requires_reason` off the same PointSignal the
+        // admission check enforces.
+        let index = client.signals().unwrap();
+        assert!(index.get(SHELVE1).unwrap().requires_reason);
+        assert!(!index.get(OOS1_IN).unwrap().requires_reason);
+
+        driver.write(PV1, Value::Float(95.0)).unwrap();
+        client.advance(1).unwrap();
+
+        // A reasonless shelve request on the marked point refuses at
+        // admission with the named rejection — and the refused attempt
+        // journals like every refused command. A blank declaration is
+        // no reason.
+        for reason in [None, Some("   ")] {
+            let receipt = client
+                .command_attributed(
+                    &Command::WriteValue {
+                        point: SHELVE1,
+                        kind: ValueKind::Bool,
+                        value: Value::Bool(true),
+                    },
+                    Some("op-1"),
+                    reason,
+                )
+                .unwrap();
+            assert_eq!(
+                receipt.outcome,
+                CommandOutcome::Rejected {
+                    reason: CommandError::ReasonRequired { point: SHELVE1 }
+                }
+            );
+        }
+        let snapshot = client.advance(1).unwrap();
+        assert_eq!(
+            telemetry(&snapshot, SHELVED1).sample.unwrap().value,
+            Value::Bool(false),
+            "the refused requests never shelved the alarm"
+        );
+
+        // The declared reason admits the shelve and journals beside the
+        // lifecycle record — the receipted `CommandSettled` carries it
+        // and the `shelved` `point_changed` it drove follows at the same
+        // tick.
+        let receipt = managed_write(client, SHELVE1, true);
+        assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+        let snapshot = client.advance(1).unwrap();
+        assert_eq!(
+            telemetry(&snapshot, SHELVED1).sample.unwrap().value,
+            Value::Bool(true)
+        );
+
+        let journal = client.journal(0).unwrap();
+        assert!(
+            journal.iter().any(|entry| matches!(
+                &entry.event,
+                JournalEvent::CommandSettled { receipt }
+                    if receipt.outcome
+                        == CommandOutcome::Rejected {
+                            reason: CommandError::ReasonRequired { point: SHELVE1 }
+                        }
+            )),
+            "the refused reasonless requests are journaled"
+        );
+        assert!(
+            journal.iter().any(|entry| matches!(
+                &entry.event,
+                JournalEvent::CommandSettled { receipt }
+                    if matches!(
+                        &receipt.command,
+                        Command::WriteValue { point, .. } if *point == SHELVE1
+                    )
+                        && matches!(receipt.outcome, CommandOutcome::Applied { .. })
+                        && receipt.actor.as_deref() == Some("op-1")
+                        && receipt.reason.as_deref() == Some("pump maintenance window")
+            )),
+            "the reasoned shelve's applied receipt is journaled with the reason"
+        );
+        // The served receipt log is the page's other managed-state
+        // surface — the same attribution reaches it.
+        let receipts = client.receipts().unwrap();
+        let applied = receipts
+            .iter()
+            .find(|receipt| matches!(receipt.outcome, CommandOutcome::Applied { .. }))
+            .unwrap();
+        assert_eq!(applied.reason.as_deref(), Some("pump maintenance window"));
     });
 }
 
@@ -842,16 +951,20 @@ fn page_serves_the_managed_pane_markup() {
 
 /// The affordance's post: an attributed `write_value` of `level` on the
 /// managed request point — the receipted path the pane's managed
-/// buttons issue, under the actor the page's `?operator=` declares.
+/// buttons issue, under the actor the page's `?operator=` declares and
+/// carrying the declared reason the managed cell's reason field holds —
+/// mandatory on the `requires_reason`-marked SHELVE1, voluntary on the
+/// rest.
 fn managed_write(client: &MonitorClient, point: PointId, level: bool) -> dcs_core::CommandReceipt {
     client
-        .command_as(
+        .command_attributed(
             &Command::WriteValue {
                 point,
                 kind: ValueKind::Bool,
                 value: Value::Bool(level),
             },
             Some("op-1"),
+            Some("pump maintenance window"),
         )
         .unwrap()
 }
@@ -918,6 +1031,21 @@ fn page_serves_the_managed_affordance_markup_and_the_held_level_rule() {
         ] {
             assert!(page.contains(needle), "page lacks {needle}");
         }
+        // The declared-reason affordance: one input beside the managed
+        // buttons, its text riding the attributed envelope, and the
+        // `requires_reason` mark gating a blank submission up front.
+        for needle in [
+            "input.managed-reason",
+            "meta.requires_reason",
+            "declare a reason",
+            "managedTransitionAttribution",
+        ] {
+            assert!(page.contains(needle), "page lacks {needle}");
+        }
+        let start = page.find("async function submitManaged(").unwrap();
+        let end = start + page[start..].find("\n}\n").unwrap();
+        let managed_body = &page[start..end];
+        assert!(managed_body.contains("reason"), "{managed_body}");
         // The held-level rule: the submission issues the single
         // receipted write_value of the affordance's target level — no
         // `ackReleases` arming, no pulse-back write; the request stands
@@ -1074,7 +1202,8 @@ fn the_managed_actions_settle_through_the_receipted_attributed_path() {
         );
 
         // Every action lands in the journal as an attributed settled
-        // receipt — the lifecycle audit the surface promises.
+        // receipt carrying the declared reason — the lifecycle audit
+        // the shelving-reason decision prescribes.
         let journal = client.journal(0).unwrap();
         for point in [SHELVE1, OOS1_IN] {
             assert!(
@@ -1087,6 +1216,7 @@ fn the_managed_actions_settle_through_the_receipted_attributed_path() {
                         )
                             && matches!(receipt.outcome, CommandOutcome::Applied { .. })
                             && receipt.actor.as_deref() == Some("op-1")
+                            && receipt.reason.as_deref() == Some("pump maintenance window")
                 )),
                 "no applied attributed receipt journaled for {point:?}"
             );

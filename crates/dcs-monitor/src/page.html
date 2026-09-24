@@ -62,6 +62,7 @@
   tr.protection.uncertain td { background: #dde8f4; font-style: italic; }
   button.ack { color: #b00; font-weight: bold; }
   button.managed { color: #a60; font-weight: bold; margin-left: 0.3rem; }
+  input.managed-reason { width: 9rem; margin-right: 0.3rem; font-size: 0.85rem; }
   #faceplates { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
   .faceplate { border: 1px solid #bbb; border-radius: 4px; padding: 0.5rem 0.9rem;
     min-width: 16rem; background: #fdfdfd; }
@@ -445,6 +446,16 @@ own surface: the HMI alarm path is never presented as the safeguard.</p>
 // authenticating proxy is the recorded seam for filling it from
 // verified context. With no ?operator the page submits the bare
 // Command body and the command journals unattributed.
+//
+// Command reason (the shelving-reason decision, #900's record under
+// decision 72): the managed-state cell's reason field declares the
+// justification the shelve/unshelve and out-of-service/return writes
+// carry — joining actor on the same attributed envelope, stamped onto
+// the receipt, and echoed into the journaled command_settled entry —
+// and the alarm journal pairs each shelved/out_of_service transition
+// with the settled request receipt at its applied tick so actor and
+// reason stand beside it. A point the model marks requires_reason
+// refuses a blank declaration with the reason_required rejection.
 //
 // Plant overview (the plant-wide-supervision decision): repeated
 // ?pair=<name>=<host:port>,<host:port>,… URL parameters switch the page
@@ -2511,6 +2522,14 @@ function managedAffordance(descriptor, telemetry) {
       port.point + "\" data-level=\"" + !held + "\" title=\"" +
       esc(label + " " + descriptor.label) + "\">" + esc(label) + "</button>");
   }
+  if (parts.length === 0) return "";
+  // One declared-reason field serves the cell's managed commands: the
+  // shelve and oos requests carry it in both directions — the
+  // shelving-reason decision's record obligation — and a point whose
+  // declaration marks it mandatory refuses a blank one at admission.
+  parts.unshift("<input type=\"text\" class=\"managed-reason\" " +
+    "placeholder=\"reason\" title=\"declared reason — journaled beside " +
+    "the settled managed-state command\">");
   return parts.join("");
 }
 
@@ -2646,6 +2665,45 @@ function alarmJournalEntry(entry, join) {
     return join.components.has(event.step_failed.component);
   }
   return false;
+}
+
+// The settled shelve/oos request receipt a managed-state
+// point_changed pairs with — the shelving-reason decision's pairing:
+// the receipt whose applied tick stamped the transition carries the
+// declared actor and reason, so both stand beside the transition in
+// the alarm journal. Newest receipt applied at the entry's tick wins;
+// a transition carrying none — expiry's automatic `shelved` drop
+// journals through no command — renders nothing.
+function managedTransitionAttribution(entry, descriptors) {
+  const change = entry.event.point_changed;
+  if (!change) return "";
+  for (const descriptor of descriptors) {
+    const status = (descriptor.ports || []).find(port =>
+      port.role === "status" && port.direction === "out" &&
+      port.point === change.point &&
+      (port.name === "shelved" || port.name === "out_of_service"));
+    if (!status) continue;
+    const requestName = status.name === "shelved" ? "shelve" : "oos";
+    const request = (descriptor.ports || []).find(port =>
+      port.name === requestName && port.direction === "in");
+    if (!request || request.point == null) return "";
+    let receipt = null;
+    for (const candidate of journalEntries) {
+      const settled = candidate.event.command_settled;
+      if (!settled) continue;
+      const command = settled.receipt.command;
+      if (!("write_value" in command) ||
+          command.write_value.point !== request.point) continue;
+      const applied = settled.receipt.outcome.applied;
+      if (applied && applied.tick === entry.tick) {
+        receipt = settled.receipt;
+      }
+    }
+    if (!receipt) return "";
+    return (receipt.actor ? " — declared by " + esc(receipt.actor) : "") +
+      (receipt.reason ? " — reason \"" + esc(receipt.reason) + "\"" : "");
+  }
+  return "";
 }
 
 // The point a point-targeted command names, or null for a
@@ -2810,6 +2868,7 @@ function renderAlarms(snapshot, telemetry, forced) {
       const owner = alarmEntryComponent(entry, snapshot.descriptors);
       return "<tr><td>" + entry.seq + "</td><td>" + entry.tick +
         "</td><td>" + esc(describeEvent(entry.event)) +
+        managedTransitionAttribution(entry, snapshot.descriptors) +
         (owner === null ? "" : " " + equipmentLink(owner, esc(owner))) +
         "</td></tr>";
     })
@@ -2882,23 +2941,37 @@ async function submitAck(button) {
 }
 
 // A managed-state submission: an ordinary receipted write_value of the
-// affordance's target level on the bound request point. Unlike the ack
-// pulse the managed inputs are held level-observed — no release write
-// follows: a shelve request stands until the unshelve, max_shelve_ticks
-// bounding the flag rather than the request; an oos request stands
-// until the return, there being no automatic return. The named
-// rejection of a refused write lands in the receipt pane and the
-// journal like every other command's.
+// affordance's target level on the bound request point, carrying the
+// declared reason the cell's managed-reason field holds — the
+// shelving-reason decision's record obligation attaches to the managed
+// writes in both directions, so raise and release alike declare it.
+// Unlike the ack pulse the managed inputs are held level-observed — no
+// release write follows: a shelve request stands until the unshelve,
+// max_shelve_ticks bounding the flag rather than the request; an oos
+// request stands until the return, there being no automatic return. A
+// point the model marks requires_reason demands a non-blank reason up
+// front — the admission rejection the receipted path would answer —
+// and every other named rejection of a refused write lands in the
+// receipt pane and the journal like every other command's.
 async function submitManaged(button) {
   const point = Number(button.dataset.point);
   const meta = metaByPoint.get(point);
   if (!meta || !meta.writable) return;
+  const input = button.parentElement.querySelector("input.managed-reason");
+  const text = input ? input.value.trim() : "";
+  const reason = text === "" ? null : text;
+  if (meta.requires_reason && reason === null) {
+    document.getElementById("receipt").textContent =
+      "declare a reason — " + meta.name + " requires one";
+    return;
+  }
   try {
     await submitCommand({ write_value: {
       point: point,
       kind: meta.value_type,
       value: { bool: button.dataset.level === "true" },
-    } });
+    } }, reason);
+    if (input) input.value = "";
   } catch (error) {
     document.getElementById("receipt").textContent = "command failed: " + error;
   }
@@ -3292,12 +3365,13 @@ function describeEvent(event) {
   }
   if ("command_settled" in event) {
     const receipt = event.command_settled.receipt;
-    // The declared actor rides the receipt: the journal row names the
-    // attribution the audit entry carries, or reads plain when the
-    // command submitted unattributed.
+    // The declared actor and reason ride the receipt: the journal row
+    // names the attribution the audit entry carries, or reads plain
+    // when the command submitted unattributed.
     return describeCommand(receipt.command) + " — " +
       describeOutcome(receipt.outcome) +
-      (receipt.actor ? " — declared by " + receipt.actor : "");
+      (receipt.actor ? " — declared by " + receipt.actor : "") +
+      (receipt.reason ? " — reason \"" + receipt.reason + "\"" : "");
   }
   if ("step_failed" in event) {
     const failure = event.step_failed;
@@ -3418,7 +3492,8 @@ function describeOutcome(outcome) {
 // {"driver_rejected": {point, error}} | {"point_forced": {point}} |
 // {"not_active": {point, role}} |
 // {"queue_full": {point, capacity}} — the bounded ingress's admission
-// refusal — | the parameter-command reasons
+// refusal — | {"reason_required": {point}} — the mandatory-reason
+// declaration's — | the parameter-command reasons
 // {"unknown_component"|"unknown_parameter"|"unsupported_parameter"|
 // "parameter_type_mismatch"|"out_of_range"|"invalid_parameter": {...}},
 // each carrying the offending component — | the invoke surface's
@@ -3453,6 +3528,10 @@ function describeReason(reason) {
   if ("queue_full" in reason) {
     return "command queue full (" + reason.queue_full.capacity +
       " pending) — resubmit once a scan drains it";
+  }
+  if ("reason_required" in reason) {
+    return pointName(reason.reason_required.point) +
+      " requires a declared reason — resubmit with one";
   }
   if ("unknown_component" in reason) {
     return "unknown component " + reason.unknown_component.component;
@@ -3507,22 +3586,27 @@ function commandValue(kind, text) {
 }
 
 // POSTs the command to a peer: the attributed envelope
-// {"command":…,"actor":…} when ?operator= configured an identity, the
-// bare Command body otherwise — both shapes the endpoint accepts. The
-// actor is the operator's declared identity — attestation, not
-// authentication — echoed on the receipt and into the journal.
-// Content-Type text/plain keeps a cross-origin POST a simple request —
-// no preflight — while the endpoint parses the same JSON body
+// {"command":…,"actor":…,"reason":…} when ?operator= configured an
+// identity or a declared reason rides the submission, the bare Command
+// body otherwise — all shapes the endpoint accepts. The actor is the
+// operator's declared identity — attestation, not authentication — and
+// the reason the declared justification the shelving-reason decision
+// carries on the same envelope; both echo on the receipt and into the
+// journal. Content-Type text/plain keeps a cross-origin POST a simple
+// request — no preflight — while the endpoint parses the same JSON body
 // regardless of the declared type. The POST rides the same POLL_MS
 // abort bound as every poll read: /command receipts at admission, so a
 // post that outruns the bound names a hung listener — and the
 // ack-release awaits a submission inside refresh(), where an unbounded
 // hang would hold `polling` forever, freezing the feed marks the loop
 // exists to recompute.
-async function postCommand(base, command) {
-  const body = operator === null
-    ? command
-    : { command: command, actor: operator };
+async function postCommand(base, command, reason) {
+  let body = command;
+  if (operator !== null || reason) {
+    body = { command: command };
+    if (operator !== null) body.actor = operator;
+    if (reason) body.reason = reason;
+  }
   const response = await fetch(base + "/command", {
     method: "POST",
     headers: { "Content-Type": "text/plain" },
@@ -3541,11 +3625,13 @@ function isNotActive(receipt) {
 // Submits an operator command to the peer reporting settled "active" —
 // never to a standby. A not_active rejection means the pair moved
 // mid-flight: roles are re-polled and the command retried once against
-// the peer now reporting active, per the pair-view rule. Answers the
-// peer's response — normally the command's receipt — so the caller can
-// surface it beside the control that submitted; null when nothing was
-// sent.
-async function submitCommand(command) {
+// the peer now reporting active, per the pair-view rule. `reason`, when
+// supplied, rides the attributed envelope beside the operator identity —
+// the declared justification the shelving-reason decision carries.
+// Answers the peer's response — normally the command's receipt — so the
+// caller can surface it beside the control that submitted; null when
+// nothing was sent.
+async function submitCommand(command, reason) {
   const receipt = document.getElementById("receipt");
   let target = activePeer();
   if (target < 0) {
@@ -3557,12 +3643,12 @@ async function submitCommand(command) {
     receipt.textContent = noActiveVerdict();
     return null;
   }
-  let answer = await postCommand(peers[target].base, command);
+  let answer = await postCommand(peers[target].base, command, reason);
   if (isNotActive(answer)) {
     await pollRoles();
     renderPair();
     target = activePeer();
-    if (target >= 0) answer = await postCommand(peers[target].base, command);
+    if (target >= 0) answer = await postCommand(peers[target].base, command, reason);
   }
   receipt.textContent = JSON.stringify(answer, null, 2);
   return answer;
