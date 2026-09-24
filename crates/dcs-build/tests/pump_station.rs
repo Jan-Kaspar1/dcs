@@ -1688,8 +1688,8 @@ fn alarms_emit_the_managed_kinds_and_wiring() {
     }
     // Decision 88's designed suppression: the none-available alarm
     // declares `suppress` bound to the delivered `any-manual` copy — a
-    // pump held in manual withdraws from the group's roster, so
-    // demand-with-no-available-pump is designed state, not a fault.
+    // pump held in manual withdraws from the group's roster, so an
+    // empty roster is designed state, not a fault.
     let none_available = &layout.none_available_alarm;
     assert!(none_available.shelve.is_none());
     assert!(none_available.oos.is_none());
@@ -1722,6 +1722,83 @@ fn alarms_emit_the_managed_kinds_and_wiring() {
             assert_eq!(bound_point(model, alarm.component, "oos"), None);
             assert_eq!(bound_point(model, alarm.component, "suppress"), None);
         }
+    }
+}
+
+/// Issue #825's reproduction leg: demand at zero with every pump
+/// unavailable — the carrier and its alarm still annunciate the empty
+/// roster, and the declared consequence must describe that condition
+/// rather than claim a standing demand the snapshot disproves.
+#[test]
+fn none_available_annunciation_never_claims_standing_demand() {
+    let model = fixture_model();
+    let layout = ids();
+    let driver = build_driver(&model);
+    let mut executor = assemble(&model, &dcs_controller::registry(), &driver).unwrap();
+
+    // The inflow is never forced: the well sits at the dynamics' 0.8
+    // seed below the chain's `start`, so demand reads zero throughout.
+    executor.scan();
+    assert_eq!(int(executor.sample(layout.demand).unwrap()), 0);
+
+    // The reproduction's OOS variant: both pumps written out of
+    // service collapses availability while no demand stands.
+    for pump in &layout.pumps {
+        write(
+            &mut executor,
+            pump.out_of_service,
+            ValueKind::Bool,
+            Value::Bool(true),
+        );
+    }
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| point_bool(
+            e,
+            layout.none_available
+        )),
+        "none_available never asserted with every pump out of service"
+    );
+    // The alarm's condition reads the carrier a scan later.
+    assert!(
+        drive_until(&mut executor, &driver, 4, |e| point_bool(
+            e,
+            layout.none_available_alarm.alarm
+        )),
+        "the alarm must still annunciate the empty roster"
+    );
+    assert_eq!(
+        int(executor.sample(layout.demand).unwrap()),
+        0,
+        "the reproduction requires demand at zero"
+    );
+    assert!(
+        point_bool(&executor, layout.none_available_alarm.unacknowledged),
+        "the unsuppressed annunciation must latch"
+    );
+
+    // The defect was the narrative, not the carrier: the declared
+    // consequence names the empty roster and makes no demand claim —
+    // in the platform fixture and in the consumer plant's emitted
+    // document alike.
+    let consumer =
+        PlantModel::load(&std::fs::read_to_string(REFERENCE_MODEL_JSON).unwrap()).unwrap();
+    for (document, name) in [(&model, "fixture"), (&consumer, "consumer")] {
+        let record = document
+            .components
+            .iter()
+            .find_map(|instance| {
+                instance
+                    .rationalization
+                    .as_ref()
+                    .filter(|record| record.reference == "none-available-alarm")
+            })
+            .unwrap_or_else(|| panic!("the {name} document declares no none-available alarm"));
+        assert!(
+            !record.consequence.to_lowercase().contains("demand"),
+            "the {name} document's none-available consequence claims a \
+             standing demand: {:?}",
+            record.consequence
+        );
     }
 }
 
