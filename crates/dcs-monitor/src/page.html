@@ -619,7 +619,7 @@ function pointName(point) {
 // and the pair has no failover coverage to call healthy.
 const CONVERGENCE_GRACE_MS = 5000;
 
-const PAIR_FAULT_KINDS_VERSION = 2;
+const PAIR_FAULT_KINDS_VERSION = 3;
 const PAIR_FAULT_KINDS = [
   "peer_unreachable",
   "standby_unsynchronized_past_grace",
@@ -628,6 +628,7 @@ const PAIR_FAULT_KINDS = [
   "standby_degraded",
   "standby_diverged",
   "standby_orphaned",
+  "field_unclaimed",
 ];
 
 // The convergence-grace clock pairHealth reads: a report of
@@ -775,8 +776,12 @@ function describeSync(sync) {
 // overview card: the reported-active peers' names plus the named
 // redundancy faults — an unreachable peer, a degraded or diverged
 // standby convergence, a peer still reporting "unsynchronized" past
-// CONVERGENCE_GRACE_MS, no peer reporting active, or more than one
-// reporting it. Two actives is the dual-active split-brain the
+// CONVERGENCE_GRACE_MS, a reporting peer whose field_claim observation
+// stands "unclaimed" (no field owner stands; POST /promote on a
+// converged peer is the documented remedy — the field's own
+// arbitration verdict, distinct from the tracked line's sync
+// verdicts), no peer reporting active, or more than one reporting it.
+// Two actives is the dual-active split-brain the
 // one-logical-controller contract makes impossible — an alarmable
 // state the summary names rather than presenting the pair as healthy.
 // These are pair health, never plant faults.
@@ -816,6 +821,14 @@ function pairHealth(pairPeers, states) {
           "(aligned at tick " + state.report.sync.orphaned.aligned + ")");
         fault_kinds.push("standby_orphaned");
       }
+    }
+    // The field's own arbitration verdict: distinct from the tracked
+    // line's sync verdicts — a peer may converge on a field no owner
+    // claims. An absent field_claim is no observation, never a fault.
+    if (state.report.field_claim === "unclaimed") {
+      faults.push(peer.name + " reports the field unclaimed: no owner holds " +
+        "the write claim — promote is the documented remedy");
+      fault_kinds.push("field_unclaimed");
     }
   });
   if (actives.length === 0) {
@@ -862,12 +875,19 @@ function renderPair() {
     const state = peerState[i];
     const report = state.report;
     const unreachable = state.error !== null;
+    // The field's arbitration verdict badges the row: "unclaimed" is
+    // no sync verdict — the tracked line may read "tracking" while no
+    // field owner stands — so it marks the peer distinctly here and in
+    // pairHealth's named fault above. Absent field_claim renders as
+    // before.
+    const unclaimed = report !== null && report.field_claim === "unclaimed";
     return "<tr" + (i === source ? " class=\"source\"" : "") + "><td>" +
       esc(peer.name) + "</td><td>" + (report ? esc(report.role) : "—") +
       "</td><td>" + (report && report.sync ? esc(describeSync(report.sync)) : "—") +
       "</td><td>" + (report ? report.tick : "—") + "</td><td class=\"" +
-      (unreachable ? "bad" : "good") + "\">" +
+      (unreachable || unclaimed ? "bad" : "good") + "\">" +
       (unreachable ? "unreachable" : (i === source ? "serving" : "reachable")) +
+      (unclaimed ? " — field unclaimed" : "") +
       "</td></tr>";
   }).join("");
   const summary = document.getElementById("pair-summary");
