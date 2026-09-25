@@ -358,7 +358,7 @@ fn run_failover(tag: &str) -> (Vec<(Value, Value)>, u64) {
         .unwrap()
         .iter()
         .filter_map(|entry| match entry.event {
-            JournalEvent::RoleChanged { from, to } => Some((from, to)),
+            JournalEvent::RoleChanged { from, to, .. } => Some((from, to)),
             _ => None,
         })
         .collect();
@@ -877,7 +877,7 @@ fn a_misordered_promotion_degrades_the_superseded_active() {
     let role_changes: Vec<(Role, Role)> = journal
         .iter()
         .filter_map(|entry| match entry.event {
-            JournalEvent::RoleChanged { from, to } => Some((from, to)),
+            JournalEvent::RoleChanged { from, to, .. } => Some((from, to)),
             _ => None,
         })
         .collect();

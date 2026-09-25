@@ -75,8 +75,12 @@ list in the same change.
   proxy fills `actor` from authenticated context and enforces whatever
   read/write grading the site requires (security-identity.md gaps 1 and
   5 hold the in-product alternatives as client-decision questions).
-  `promote`/`demote` carry no actor field — gap 2 records that highest-
-  consequence attribution hole.
+  `promote`/`demote` take the same convention since #467: an optional
+  `{"actor":…}` body, journaled onto the `RoleChanged` entries beside
+  the peer's `origin` marker — bare POSTs journal unattributed and
+  peer-initiated switches (failover, fencing, reclaim) are
+  distinguishable from any request. The role-gating question gap 2
+  posed on top of attribution stays open.
 
 ### 2. Peer checkpoint link — pair-member tracking
 

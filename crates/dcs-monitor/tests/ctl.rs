@@ -10,7 +10,7 @@ use dcs_blocks::{Pid, PidConfig, Sequencer, SequencerStep};
 use dcs_core::{
     Command, CommandError, CommandOutcome, CommandReceipt, Direction, ForcedPoint, IoDriver,
     IoError, JournalEvent, PointId, Quality, QualityReason, Role, RoleReport, Sample, SignalId,
-    StandbySync, Tick, Value, ValueKind,
+    StandbySync, SwitchOrigin, Tick, Value, ValueKind,
 };
 use dcs_model::{PointSignal, SignalIndex};
 use dcs_monitor::{Monitor, MonitorClient, PairFaultKind};
@@ -1424,6 +1424,115 @@ fn promote_and_demote_print_role_reports_and_named_refusals() {
     standby.stop();
 }
 
+/// The journaled `RoleChanged` events of a peer's served journal: the
+/// transition beside the switch's attribution — `origin` marking a
+/// requested switch, `actor` the declared identity it carried.
+fn role_changes(client: &MonitorClient) -> Vec<(Role, Role, Option<SwitchOrigin>, Option<String>)> {
+    client
+        .journal(0)
+        .unwrap()
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            JournalEvent::RoleChanged {
+                from,
+                to,
+                origin,
+                actor,
+            } => Some((*from, *to, *origin, actor.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Converges `standby` against `active`'s current checkpoint — the
+/// promote contract's prerequisite.
+fn converge(active: &PeerRig, standby: &PeerRig) {
+    active.client.advance(3).unwrap();
+    standby
+        .monitor
+        .apply_checkpoint(&active.client.checkpoint().unwrap())
+        .unwrap();
+}
+
+#[test]
+fn promote_and_demote_carry_the_declared_actor() {
+    let active = PeerRig::start(Role::Active);
+    // The standby names its tracking source — the configured peer its
+    // demotions follow back to the active.
+    let standby = PeerRig::start_tracking(Role::Standby, Some(active.addr));
+    converge(&active, &standby);
+
+    // `promote --actor` declares the identity the switch request
+    // carries: both journaled RoleChanged entries — the request's
+    // transition and the settle's — stamp it beside `origin: request`.
+    let report: RoleReport =
+        serde_json::from_value(ctl_ok(standby.addr, &["promote", "--actor", "console-7"])).unwrap();
+    assert_eq!(report.role, Role::Promoting);
+    ctl_ok(standby.addr, &["scan", "1"]);
+    assert_eq!(
+        role_changes(&standby.client),
+        vec![
+            (
+                Role::Standby,
+                Role::Promoting,
+                Some(SwitchOrigin::Request),
+                Some("console-7".to_string()),
+            ),
+            (
+                Role::Promoting,
+                Role::Active,
+                Some(SwitchOrigin::Request),
+                Some("console-7".to_string()),
+            ),
+        ]
+    );
+
+    // `DCS_ACTOR` is the configured default a flagless `demote`
+    // declares; the flag overrides it — the same convention the
+    // command subcommands honor.
+    let output = ctl_env(standby.addr, &["demote"], &[("DCS_ACTOR", "ops-cli")]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let report: RoleReport = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(report.role, Role::Demoting);
+    ctl_ok(standby.addr, &["scan", "1"]);
+    converge(&active, &standby);
+    let output = ctl_env(
+        standby.addr,
+        &["promote", "--actor", "console-7"],
+        &[("DCS_ACTOR", "ops-cli")],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    ctl_ok(standby.addr, &["scan", "1"]);
+    // An invocation declaring neither — the env removed, no flag —
+    // submits the bare request and journals unattributed.
+    ctl_ok(standby.addr, &["demote"]);
+    ctl_ok(standby.addr, &["scan", "1"]);
+
+    let actors: Vec<Option<String>> = role_changes(&standby.client)
+        .iter()
+        .map(|(_, _, origin, actor)| {
+            assert_eq!(*origin, Some(SwitchOrigin::Request));
+            actor.clone()
+        })
+        .collect();
+    assert_eq!(
+        actors,
+        vec![
+            Some("console-7".to_string()),
+            Some("console-7".to_string()),
+            Some("ops-cli".to_string()),
+            Some("ops-cli".to_string()),
+            Some("console-7".to_string()),
+            Some("console-7".to_string()),
+            None,
+            None,
+        ]
+    );
+
+    active.stop();
+    standby.stop();
+}
+
 #[test]
 fn scan_runs_on_an_unpaced_monitor_and_is_refused_on_a_paced_one() {
     with_monitor(|_driver, addr, _client| {
@@ -1546,12 +1655,15 @@ fn malformed_arguments_fail_with_usage_never_a_panic() {
         vec![dead, "invoke", "seq", "advance", "count=1", "count=2"],
         vec![dead, "invoke", "comp", "cmd", "x=1", "--actor"],
         vec![dead, "invoke", "comp", "cmd", "--bogus"],
-        // promote/demote take no actor: the switch-request contract has
-        // no field for one, so the flag is malformed usage there.
+        // promote/demote's malformed shapes: a stray positional, the
+        // actor flag's missing name or a repeat, an unknown flag.
         vec![dead, "promote", "extra"],
-        vec![dead, "promote", "--actor", "op"],
+        vec![dead, "promote", "--actor"],
+        vec![dead, "promote", "--actor", "a", "--actor", "b"],
+        vec![dead, "promote", "--bogus"],
         vec![dead, "demote", "extra"],
-        vec![dead, "demote", "--actor", "op"],
+        vec![dead, "demote", "--actor"],
+        vec![dead, "demote", "--bogus", "x"],
         vec![dead, "snapshot", "--actor", "op"],
         vec![dead, "scan"],
         vec![dead, "scan", "abc"],

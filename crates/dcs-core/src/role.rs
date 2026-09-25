@@ -245,6 +245,39 @@ pub struct RoleReport {
     pub field_claim: Option<FieldClaim>,
 }
 
+/// What initiated a role switch — the journaled distinction between a
+/// switch the monitoring surface was asked for and the peer's own
+/// automatic transitions.
+///
+/// The paths queue the same role transitions (`standby` → `promoting`
+/// → `active`, `active` → `demoting` → `standby`); without an origin a
+/// failover's or a fenced demotion's journaled entries would read
+/// identically to an unattributed operator request. The marker travels
+/// beside `actor`, not inside it: `origin` says what initiated the
+/// switch — a fact the peer assigns and a requester cannot declare —
+/// while `actor` says *who* asked, on a request that chose to declare
+/// one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchOrigin {
+    /// A switch requested through the monitoring surface —
+    /// `POST /promote` or `POST /demote` — whether or not the request
+    /// declared an actor.
+    Request,
+    /// The peer's own automatic failover promotion — the heartbeat-miss
+    /// budget met while the convergence proof stood — never an
+    /// operator request, and never carrying an actor.
+    Failover,
+    /// The peer's own protective demotion — the field fenced this run's
+    /// write, meaning the claim it held was preempted — never an
+    /// operator request, and never carrying an actor.
+    Fenced,
+    /// The peer's own reclaim promotion — the conditional re-claim
+    /// probe granted a previously preempted claim back — never an
+    /// operator request, and never carrying an actor.
+    Reclaim,
+}
+
 /// Why a switchover request was refused — the named errors of the
 /// promotion contract, carried on the wire so a monitoring consumer can
 /// tell "try again after convergence" from "wrong peer".

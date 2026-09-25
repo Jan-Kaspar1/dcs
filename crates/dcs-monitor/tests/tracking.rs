@@ -9,7 +9,7 @@ use dcs_core::{
     Command, CommandAvailability, CommandDecl, CommandOutcome, ComponentDescriptor, Direction,
     Divergence, EmittedEvent, EventDecl, EventField, EventFieldKind, EventRetention, EventValue,
     IoDriver, IoError, JournalEvent, PointId, Quality, QualityReason, Role, Sample, StandbySync,
-    StateMap, SwitchError, Tick, Value, ValueKind,
+    StateMap, SwitchError, SwitchOrigin, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorClient};
@@ -603,7 +603,9 @@ fn driven_track_cycle_journals_the_self_promotion_role_changes() {
 
     // The budget-th miss self-promotes at that boundary: the role
     // changes the cycle queued drain into the journal — the request's
-    // promotion, then the scan settling it.
+    // promotion, then the scan settling it — each stamped
+    // `origin: failover` with no actor: the peer's own takeover never
+    // reads as an unattributed operator request.
     standby.standby.client.advance(1).unwrap();
     let report = standby.standby.client.role().unwrap();
     assert_eq!(report.role, Role::Active);
@@ -613,10 +615,14 @@ fn driven_track_cycle_journals_the_self_promotion_role_changes() {
             JournalEvent::RoleChanged {
                 from: Role::Standby,
                 to: Role::Promoting,
+                origin: Some(SwitchOrigin::Failover),
+                actor: None,
             },
             JournalEvent::RoleChanged {
                 from: Role::Promoting,
                 to: Role::Active,
+                origin: Some(SwitchOrigin::Failover),
+                actor: None,
             },
         ]
     );
