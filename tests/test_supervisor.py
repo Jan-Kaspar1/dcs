@@ -308,6 +308,32 @@ class SupervisorTests(unittest.TestCase):
         s.planner([], [])
         self.assertIn('Invalid disposition fields', self.runtime.spawn.call_args[0][2])
 
+    def test_planner_publishes_root_when_ready_labels_are_dependency_blocked(self):
+        s = self.supervisor
+        issues = [issue(1)] + [issue(n, dependencies=(1,)) for n in range(2, 22)]
+        issues[0]['labels'] = [{'name': 'agent:blocked'}]
+        candidate = dict(key='new-root', title='Independent repair', scope='Repair dispatch',
+                         acceptance='Dispatch resumes', tests='supervisor test',
+                         dependencies=[], priority=1, milestone='recovery',
+                         group='agent_pool', area='delivery-platform')
+        s.state.set('pending_proposal', {'issues': [candidate], 'dispositions': []})
+        s.github.create_issue = Mock(return_value=99)
+        s.planner(issues, [])
+        s.github.create_issue.assert_called_once()
+        self.assertIsNone(s.state.get('pending_proposal'))
+
+    def test_planner_caps_dispatchable_frontier(self):
+        s = self.supervisor
+        issues = [issue(n) for n in range(1, 21)]
+        candidate = dict(key='new-root', title='Independent repair', scope='Repair dispatch',
+                         acceptance='Dispatch resumes', tests='supervisor test',
+                         dependencies=[], priority=1, milestone='recovery',
+                         group='agent_pool', area='delivery-platform')
+        s.state.set('pending_proposal', {'issues': [candidate], 'dispositions': []})
+        s.github.create_issue = Mock(return_value=99)
+        s.planner(issues, [])
+        s.github.create_issue.assert_not_called()
+
     def test_unowned_running_invocation_pauses(self):
         self.runtime.recover.return_value=[{'invocation':'orphan','key':'unknown'}]
         self.runtime.poll.return_value=None

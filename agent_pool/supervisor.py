@@ -927,7 +927,10 @@ Repair context: {repair}
                 self.log('Discarded malformed pending proposal: ' + str(exc))
                 return
             self.state.set('planner_feedback', None)
-            ready_count = sum('agent:ready' in [l['name'] for l in i.get('labels', [])] and i.get('state') == 'OPEN' for i in issues)
+            # The frontier cap must count dispatchable work, not labels on
+            # tickets whose prerequisites are still open.
+            ready_count = self.ready_frontier(issues)
+            closed = {i['number'] for i in issues if i.get('state') == 'CLOSED'}
             known = {}
             for issue in issues:
                 try:
@@ -952,7 +955,8 @@ Repair context: {repair}
                 numbers.add(number)
                 if item.get('improvement'):
                     self.state.map_improvement(item['improvement'], number)
-                ready_count += 1
+                if set(resolved) <= closed:
+                    ready_count += 1
             self.apply_dispositions(pending.get('dispositions', []), pending['issues'], issues, created)
             self.state.set('pending_proposal', None)
             return
