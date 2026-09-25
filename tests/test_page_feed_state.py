@@ -237,24 +237,24 @@ PINS = [
     # rides, isNotActive's rejected-not_active shape, and
     # submitCommand's active-peer routing with the single re-poll/retry
     # the abort verdict precedes.
-    (3735, 'function isAbortError(error) {'),
-    (3737, '(error.name === "AbortError" || error.name === "TimeoutError");'),
-    (3766, 'function sameSubmission(receipt, pending) {'),
-    (3779, 'function abandonedSubmission(command, reason, error) {'),
-    (3782, 'outcome: { indeterminate: { detail: String(error) } },'),
-    (3790, 'pendingCommands.push({'),
-    (3818, 'async function postCommand(base, command, reason) {'),
-    (3829, 'signal: AbortSignal.timeout(POLL_MS),'),
-    (3834, 'function isNotActive(receipt) {'),
-    (3860, 'async function submitCommand(command, reason) {'),
-    (3874, 'answer = await postCommand(peers[target].base, command, reason);'),
-    (3876, 'if (isAbortError(error)) {'),
-    (3877, 'return abandonedSubmission(command, reason, error);'),
-    (3881, 'if (isNotActive(answer)) {'),
-    (3899, 'receipt.textContent = JSON.stringify(answer, null, 2);'),
+    (3740, 'function isAbortError(error) {'),
+    (3742, '(error.name === "AbortError" || error.name === "TimeoutError");'),
+    (3771, 'function sameSubmission(receipt, pending) {'),
+    (3784, 'function abandonedSubmission(command, reason, error) {'),
+    (3787, 'outcome: { indeterminate: { detail: String(error) } },'),
+    (3795, 'pendingCommands.push({'),
+    (3823, 'async function postCommand(base, command, reason) {'),
+    (3834, 'signal: AbortSignal.timeout(POLL_MS),'),
+    (3839, 'function isNotActive(receipt) {'),
+    (3865, 'async function submitCommand(command, reason) {'),
+    (3879, 'answer = await postCommand(peers[target].base, command, reason);'),
+    (3881, 'if (isAbortError(error)) {'),
+    (3882, 'return abandonedSubmission(command, reason, error);'),
+    (3886, 'if (isNotActive(answer)) {'),
+    (3904, 'receipt.textContent = JSON.stringify(answer, null, 2);'),
     # The cadence both tickers share.
-    (4004, 'setInterval(refreshOverview, POLL_MS);'),
-    (4205, 'setInterval(refresh, POLL_MS);'),
+    (4009, 'setInterval(refreshOverview, POLL_MS);'),
+    (4210, 'setInterval(refresh, POLL_MS);'),
 ]
 
 
@@ -479,7 +479,7 @@ class PageReplica:
             for i in range(len(self.peers))
         ]
 
-    # --- the receipted command path: page.html:836-851, 3717-3890 ---
+    # --- the receipted command path: page.html:836-851, 3722-3895 ---
 
     def active_peer(self):
         # page.html:836-839 — the pair's unique settled-active peer's
@@ -501,14 +501,14 @@ class PageReplica:
 
     @staticmethod
     def is_abort_error(error):
-        # page.html:3724-3727 — the abort bound's two error names
+        # page.html:3729-3732 — the abort bound's two error names
         # (the replica's PollError carries the name in its text):
         # either means the wait ended, not provably the server's work.
         return str(error).startswith(('AbortError', 'TimeoutError'))
 
     @staticmethod
     def same_command(a, b):
-        # page.html:3742-3747 — two wire Commands name the same
+        # page.html:3747-3752 — two wire Commands name the same
         # operation when the same known variant carries structurally
         # equal fields; Python's dict equality already numbers
         # 1.0 == 1, the sameJson numeric-equivalence rule.
@@ -520,7 +520,7 @@ class PageReplica:
 
     @staticmethod
     def same_submission(receipt, pending):
-        # page.html:3755-3759 — the settled receipt answers an
+        # page.html:3760-3764 — the settled receipt answers an
         # abandoned submission when the command matches and the
         # declared actor and reason the receipt echoes agree, so
         # another console's identical command cannot claim the pending
@@ -531,7 +531,7 @@ class PageReplica:
                 and (receipt.get('reason') or None) == pending['reason'])
 
     def abandoned_submission(self, command, reason, error):
-        # page.html:3768-3788 — the receipt-shaped indeterminate answer
+        # page.html:3773-3793 — the receipt-shaped indeterminate answer
         # an abort-abandoned submission reports, the pending record the
         # journaled settle resolves, and the receipt pane's "outcome
         # unknown" notice — never "command failed". (The page's notice
@@ -556,7 +556,7 @@ class PageReplica:
         return answer
 
     def post_command(self, base, command, reason=None):
-        # page.html:3807-3821 — the attributed envelope when a reason
+        # page.html:3812-3826 — the attributed envelope when a reason
         # rides (the replica declares no operator identity), the POST
         # itself, and the same POLL_MS abort bound every poll read
         # rides: a hanging listener answers nothing and the bound
@@ -573,13 +573,13 @@ class PageReplica:
 
     @staticmethod
     def is_not_active(receipt):
-        # page.html:3823-3827 — the rejected receipt carrying the
+        # page.html:3828-3832 — the rejected receipt carrying the
         # not_active reason.
         rejected = ((receipt or {}).get('outcome') or {}).get('rejected')
         return bool(rejected) and 'not_active' in rejected.get('reason', {})
 
     def submit_command(self, command, reason=None):
-        # page.html:3849-3890 — active-peer routing, the roles re-poll
+        # page.html:3854-3895 — active-peer routing, the roles re-poll
         # while none reports, the one not_active re-poll/retry, the
         # receipt pane's rendered answer, and the answer itself (null
         # when nothing was sent). The abort bound firing answers the
