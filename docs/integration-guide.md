@@ -376,7 +376,8 @@ arguments, an action whose availability the kind itself decides, or a
 typed event the block emits rather than a point transition the monitor
 observes. The checked-in example is `dcs_blocks::Sequencer`
 (`crates/dcs-blocks/src/sequencer.rs`): it declares the `advance`/`reset`
-commands and the `step_completed` event beside its `run`/`reset` level
+commands and the `step_completed`/`sequence_completed`/`progress`
+events — one declared per retention class — beside its `run`/`reset` level
 inputs — deliberately not writable-point aliases, because `reset` the
 command is a one-shot where the `reset` input is a held condition.
 
@@ -453,25 +454,44 @@ unconditional `available`.
 event-kind identity), `payload` (`EventField`s of `name`,
 `EventFieldKind` — a `Value` of a kind, a `Quality`, a `Receipt`, or
 free `Text` — plus an `optional` flag for fields that may carry no
-value), and `retention` (`EventRetention::Journal` for the durable
-transition record; `History`/`Latest` are declared in the vocabulary but
-route to no consumer-visible store yet — treat them as reserved). The
-component emits by pushing `EmittedEvent`s (`event` naming the
+value), and `retention` — the `EventRetention` naming the store the
+serving layer routes the emission to. All three classes are live:
+`Journal` is the durable transition record — the audit-grade class for
+run-level boundaries and other low-volume, keep-forever events;
+`History` is the read model's bounded event-history ring, evicting
+oldest-first under the same numbering-gap convention as the other
+rings — the class for per-cycle operational records a diagnostic reads
+back; `Latest` is the latest-emission view, the newest record per
+(component, event) superseding the last — the class for standing
+publications only ever read at their newest value. Pick the class by
+the record's shape — durable audit boundary `Journal`, bounded
+operational record `History`, superseding latest-value publication
+`Latest`; the `sequencer` kind declares one event per class and is the
+worked example.
+
+The component emits by pushing `EmittedEvent`s (`event` naming the
 declaration, `fields` keyed by the declared field names) into a buffer
 `Component::drain_events` empties; the executor drains after every
 `step`, success or failure, stamps each event's `component` with the
-registered instance name, and journal-retained emissions land as
-`JournalEvent::EventEmitted` at the producing scan's tick. An emission
-the descriptor never declares still journals — the audit record never
-drops an event — but the drift test treats declaration as the contract.
+registered instance name, and the emission lands in its declared
+class's store at the producing scan's tick — `Journal`-retained
+emissions as `JournalEvent::EventEmitted`, `History`/`Latest`
+emissions in the routed `EventRecord` streams `GET /resources` serves
+beside the journal tail, each entry marked with its retention. An
+emission the descriptor never declares still journals — the audit
+record never drops an event — but the drift test treats declaration
+as the contract.
 
 **Checkpoint obligation for emitting kinds:** an emitted event's
 sequence is derived state. A kind that emits sequence-bearing events
 must checkpoint everything feeding the sequence — decision 84's
 emit-identical rule makes a tracking standby re-derive the same
 emissions, so a kind emitting from non-checkpointed state would break a
-promoted run's indistinguishable journal. `Sequencer` checkpoints the
-step position its `step_completed` emissions report.
+promoted run's indistinguishable record. `Sequencer` checkpoints the
+step position its `step_completed`, `sequence_completed`, and
+`progress` emissions report — the tracking peer reproduces the same
+routed records, emitting nothing independently of the run's own
+checkpoints.
 
 ### The spec mirror and the generic consumer
 
@@ -488,9 +508,11 @@ A generic consumer needs no kind-specific code:
   component — declared commands and events appear under `Declared`
   provenance beside the adapted entries;
 - `GET /resources` joins the live half — per-command `available` or
-  the named refusal the submission path would answer, and the retained
-  journal tail's entries attributed to the instance, `event_emitted`
-  records included;
+  the named refusal the submission path would answer, and the
+  attributed event streams: the retained journal tail's entries beside
+  the routed `History`/`Latest` emission records, each entry's
+  `retention` mark telling the diagnostic streams from the durable
+  record;
 - the monitoring page renders the command table with typed argument
   controls and the recent-events list from those two documents alone;
 - `dcs-ctl invoke <component> <command> [<name>=<value>]...` submits a

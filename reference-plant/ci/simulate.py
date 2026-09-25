@@ -575,9 +575,12 @@ def settlement_misses(invoked, journal):
 
 
 def emitted_event_misses(wanted, journal):
-    """Each `(component, spec)` in `wanted` must have a journaled
-    `event_emitted` record carrying its declared payload fields — the
-    kind-emitted event reaching the consumer-visible record."""
+    """Each `(component, spec)` in `wanted` declaring `journal`
+    retention — the durable class — must have a journaled
+    `event_emitted` record carrying its declared payload fields.
+    `history`/`latest` emissions route to the bounded consumer stores
+    instead; `resource_event_misses` covers their consumer-visible
+    record."""
     emitted = [
         entry["event"]["event_emitted"]["event"]
         for entry in journal
@@ -591,6 +594,16 @@ def emitted_event_misses(wanted, journal):
             if event.get("component") == component
             and event.get("event") == spec["name"]
         ]
+        retention = spec.get("retention", "journal")
+        if retention != "journal":
+            # A routed emission never lands in the durable record —
+            # journal volume carries the journal-retained class only.
+            if matches:
+                failures.append(
+                    f"the {retention}-retained {spec['name']} event from "
+                    f"{component} landed in the journal"
+                )
+            continue
         if not matches:
             failures.append(
                 f"no emitted {spec['name']} event from {component} "
@@ -610,7 +623,9 @@ def emitted_event_misses(wanted, journal):
 def resource_event_misses(wanted, resources):
     """Each `(component, spec)` in `wanted` must appear in the
     component's `GET /resources` `events` — the per-instance view of
-    the same consumer-visible record."""
+    the same consumer-visible record — marked with its declared
+    `retention` so the consumer tells the routed stores from the
+    durable record."""
     components = {
         entry.get("name"): entry for entry in resources.get("components", [])
     }
@@ -620,15 +635,24 @@ def resource_event_misses(wanted, resources):
         if entry is None:
             failures.append(f"{component} serves no resource view")
             continue
-        if not any(
-            "event_emitted" in event.get("event", {})
+        matches = [
+            event
+            for event in entry.get("events", [])
+            if "event_emitted" in event.get("event", {})
             and event["event"]["event_emitted"]["event"].get("event")
             == spec["name"]
-            for event in entry.get("events", [])
-        ):
+        ]
+        if not matches:
             failures.append(
                 f"no emitted {spec['name']} event is attributed to "
                 f"{component} in the resource view"
+            )
+            continue
+        retention = spec.get("retention", "journal")
+        if not any(event.get("retention") == retention for event in matches):
+            failures.append(
+                f"the emitted {spec['name']} event attributed to "
+                f"{component} serves no {retention}-retained record"
             )
     return failures
 
@@ -636,8 +660,9 @@ def resource_event_misses(wanted, resources):
 def emission_scans(model, component):
     """The running scans a declared-event component needs to emit — the
     exercise program's `sequencer` emits `step_completed` once `run`
-    has held across a step's declared ticks, so the declared step
-    table's total length covers emission."""
+    has held across a step's declared ticks, `progress` every scan,
+    and `sequence_completed` at the table's end, so the declared step
+    table's total length covers every declaration."""
     declared = next(
         (
             entry
@@ -731,8 +756,9 @@ def run_surface(monitor, model, schema_out=None):
     # The kind-emitted event surface: each component declaring a
     # kind-emitted event is driven far enough to emit it. Driving is
     # composition knowledge — the exercise program's `sequencer` emits
-    # `step_completed` once its writable `run` input has held across
-    # the declared step table's ticks.
+    # `step_completed`/`sequence_completed`/`progress` once its
+    # writable `run` input has held across the declared step table's
+    # ticks.
     wanted = []
     scans_needed = 2
     if schema is not None:
@@ -803,9 +829,10 @@ def run_surface(monitor, model, schema_out=None):
 
     # The consumer-visible record: `GET /journal` answers the run's
     # transitions — which must include each submitted declared
-    # command's settled receipt and each declared event's emitted
-    # record — and `GET /resources` attributes the emitted events to
-    # their producing instances.
+    # command's settled receipt and each `journal`-retained declared
+    # event's emitted record — and `GET /resources` attributes every
+    # declared event's emitted record to its producing instance,
+    # `history`/`latest` emissions riding their routed stores.
     journal = None
     try:
         journal = http(f"{monitor}/journal")

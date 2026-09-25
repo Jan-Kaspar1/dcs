@@ -1600,14 +1600,8 @@ mod tests {
         let events = block.drain_events();
         let names: Vec<&str> = events.iter().map(|event| event.event.as_str()).collect();
         assert_eq!(names, ["step_completed", "sequence_completed", "progress"]);
-        assert_eq!(
-            events[0].fields["step"],
-            EventValue::Value(Value::Int(3))
-        );
-        assert_eq!(
-            events[1].fields["steps"],
-            EventValue::Value(Value::Int(3))
-        );
+        assert_eq!(events[0].fields["step"], EventValue::Value(Value::Int(3)));
+        assert_eq!(events[1].fields["steps"], EventValue::Value(Value::Int(3)));
         assert_eq!(
             events[2].fields["done"],
             EventValue::Value(Value::Bool(true))
@@ -1635,10 +1629,7 @@ mod tests {
         let events = block.drain_events();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event, "sequence_completed");
-        assert_eq!(
-            events[0].fields["steps"],
-            EventValue::Value(Value::Int(3))
-        );
+        assert_eq!(events[0].fields["steps"], EventValue::Value(Value::Int(3)));
 
         // A non-completing advance emits no boundary — the next scan's
         // `progress` reports the new position alone.

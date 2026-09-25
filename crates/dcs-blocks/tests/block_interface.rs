@@ -11,7 +11,8 @@
 
 use dcs_blocks::{
     AlarmLimits, GroupOutputs, LatchingAlarm, Motor, PumpGroup, PumpGroupConfig, PumpIo,
-    RotationPolicy, Sequencer, SequencerStep, SetpointTable, ThresholdChain, ThresholdOutputs, Valve,
+    RotationPolicy, Sequencer, SequencerStep, SetpointTable, ThresholdChain, ThresholdOutputs,
+    Valve,
 };
 use dcs_core::{
     AdaptedCommand, AdaptedEvent, BlockInterface, CommandAvailability, ConfigCapability, Direction,

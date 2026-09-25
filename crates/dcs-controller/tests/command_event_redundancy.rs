@@ -6,8 +6,10 @@
 //! uninterrupted reference controller on its own plant — with the
 //! controller-side model extended by a `sequencer` component wired to
 //! internal points: the proving kind's declared commands (`advance`,
-//! `reset`) and emitted events (`step_completed`) ride the same command
-//! path and journal as everything else, without touching field I/O.
+//! `reset`) and emitted events ride the same command path — the
+//! `Journal`-retained `sequence_completed` boundary journaling beside
+//! everything else while the `History`/`Latest` records route to the
+//! bounded consumer stores — without touching field I/O.
 //!
 //! The pinned semantics under test:
 //!
@@ -240,8 +242,9 @@ fn declared_commands_and_emitted_events_survive_promotion() {
     assert_eq!(standby.receipts().unwrap(), active.receipts().unwrap());
     assert_eq!(standby.receipts().unwrap().len(), 1);
     // The pinned standby-emission semantics: the tracking peer's
-    // journal already carries the same `step_completed` stream at the
-    // same ticks — identical to the field owner's and the reference's.
+    // journal already carries the field owner's identical emitted-event
+    // stream — the `Journal`-retained records the run produced at the
+    // same ticks — and the reference's.
     assert_eq!(emitted(&standby), emitted(&active));
     assert_eq!(emitted(&standby), emitted(&reference));
 
@@ -342,8 +345,9 @@ fn declared_commands_and_emitted_events_survive_promotion() {
     );
 
     // The pinned record: the promoted peer's emitted-event stream is
-    // the uninterrupted reference run's — every `step_completed` at the
-    // same tick with the same payload — its receipt log is identical,
+    // the uninterrupted reference run's — every `Journal`-retained
+    // emission at the same tick with the same payload — its receipt log
+    // is identical,
     // and the `reset` carried across the boundary settled exactly once
     // at tick N+1: one receipt, one journaled outcome.
     assert_eq!(emitted(&standby), emitted(&reference));
