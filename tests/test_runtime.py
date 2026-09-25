@@ -241,8 +241,14 @@ class RuntimeTests(unittest.TestCase):
             while sleeper.pid not in process_tree(sleeper.pid):
                 self.assertLess(time.monotonic(), deadline)
                 time.sleep(.02)
+            # A just-exec'd interpreter still burns startup ticks, which
+            # the probe rightly reports as busy — poll for the settled
+            # idle verdict inside the deadline rather than asserting on
+            # the first window.
             busy, snapshot = process_activity(sleeper.pid, interval=.1)
-            self.assertFalse(busy)
+            while busy:
+                self.assertLess(time.monotonic(), deadline)
+                busy, snapshot = process_activity(sleeper.pid, interval=.1)
             self.assertIn(sleeper.pid, snapshot)
         finally:
             sleeper.terminate()
