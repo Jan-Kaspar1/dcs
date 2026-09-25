@@ -750,8 +750,9 @@ pub const DEFAULT_RECEIPT_LOG_CAPACITY: usize = 1024;
 /// A [`Command::Invoke`] rides the same boundary and the same bounded
 /// queue: submission validates it against the component's declared
 /// [`CommandDecl`](dcs_core::CommandDecl)s — the component must exist,
-/// the command must be declared, and every supplied argument must carry
-/// its declared kind — and the applying scan dispatches it to the
+/// the command must be declared, and every supplied argument must name
+/// a declared request entry and carry its declared kind — and the
+/// applying scan dispatches it to the
 /// component's [`invoke_command`](Component::invoke_command) hook, where
 /// the declared availability predicate or a kind invariant settles the
 /// receipt `Rejected` with the declared refusal reason. The sibling
@@ -2484,9 +2485,13 @@ impl<'d> Executor<'d> {
     ///
     /// An `Invoke` resolves its component the same way, then validates
     /// against the component's declared commands: an undeclared command
-    /// is [`CommandError::UnknownCommand`] and a supplied argument whose
+    /// is [`CommandError::UnknownCommand`], a supplied argument name
+    /// the `request` schema does not declare is
+    /// [`CommandError::UnknownArgument`], and a supplied argument whose
     /// kind differs from its declaration is
-    /// [`CommandError::ArgumentTypeMismatch`]. A well-formed invocation
+    /// [`CommandError::ArgumentTypeMismatch`]. A declared argument left
+    /// absent stays legal — the kind owns its default — the schema
+    /// bounding names and kinds, not presence. A well-formed invocation
     /// resolves to [`Resolved::Invoke`], which the applying scan
     /// dispatches to the component's
     /// [`invoke_command`](Component::invoke_command) hook — the declared
@@ -2625,10 +2630,21 @@ impl<'d> Executor<'d> {
                     });
                 };
                 for (argument, value) in arguments {
-                    if let Some(declared) =
-                        spec.request.iter().find(|entry| entry.name == *argument)
-                        && declared.kind != value.kind()
-                    {
+                    // The declared request schema bounds the names a
+                    // submission may carry: an undeclared argument
+                    // refuses at admission rather than ride a receipted
+                    // `applied` for a payload outside the schema. A
+                    // declared argument left absent stays legal — the
+                    // kind owns its absent-argument default.
+                    let Some(declared) = spec.request.iter().find(|entry| entry.name == *argument)
+                    else {
+                        return Err(CommandError::UnknownArgument {
+                            component: component.clone(),
+                            command: name.clone(),
+                            argument: argument.clone(),
+                        });
+                    };
+                    if declared.kind != value.kind() {
                         return Err(CommandError::ArgumentTypeMismatch {
                             component: component.clone(),
                             command: name.clone(),
@@ -9752,9 +9768,48 @@ mod tests {
             }
         );
 
-        // All four refused at admission — nothing reached the queue.
-        assert_eq!(executor.receipts().len(), 4);
+        // An argument name the `request` schema does not declare
+        // refuses at admission too — the schema bounds the names a
+        // submission may carry, so no receipted `applied` can stand
+        // for a payload outside it.
+        let receipt = executor.submit_command(invoke("ctr", "bump", &[("up_to", Value::Int(3))]));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::UnknownArgument {
+                    component: "ctr".to_string(),
+                    command: "bump".to_string(),
+                    argument: "up_to".to_string(),
+                }
+            }
+        );
+
+        // All five refused at admission — nothing reached the queue.
+        assert_eq!(executor.receipts().len(), 5);
         assert_eq!(executor.snapshot().command_queue.depth, 0);
+    }
+
+    #[test]
+    fn invoke_without_a_declared_argument_uses_the_kinds_default() {
+        // The schema bounds names and kinds, not presence: `bump`
+        // omitting its declared `by` still resolves and dispatches,
+        // the kind's absent-argument default — one — applying.
+        let driver = StubDriver::new(&[float(10), float(20), int(40)], &[]);
+        let mut executor = commanded_rig(&driver);
+
+        let receipt = executor.submit_command(invoke("ctr", "bump", &[]));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Accepted {
+                apply_tick: Tick(1)
+            }
+        );
+        executor.scan();
+        assert_eq!(driver_value(&driver, 40), Value::Int(1));
+        assert_eq!(
+            executor.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { tick: Tick(1) }
+        );
     }
 
     #[test]

@@ -3666,8 +3666,8 @@ function describeOutcome(outcome) {
 // {"unknown_component"|"unknown_parameter"|"unsupported_parameter"|
 // "parameter_type_mismatch"|"out_of_range"|"invalid_parameter": {...}},
 // each carrying the offending component — | the invoke surface's
-// {"unknown_command"|"argument_type_mismatch"|"command_refused":
-// {component, command, ...}}.
+// {"unknown_command"|"unknown_argument"|"argument_type_mismatch"|
+// "command_refused": {component, command, ...}}.
 function describeReason(reason) {
   if ("unknown_point" in reason) {
     return "unknown point " + reason.unknown_point.point;
@@ -3733,6 +3733,11 @@ function describeReason(reason) {
   if ("unknown_command" in reason) {
     const rejection = reason.unknown_command;
     return rejection.component + " declares no command " + rejection.command;
+  }
+  if ("unknown_argument" in reason) {
+    const rejection = reason.unknown_argument;
+    return "command " + rejection.component + "." + rejection.command +
+      " declares no argument " + rejection.argument;
   }
   if ("argument_type_mismatch" in reason) {
     const rejection = reason.argument_type_mismatch;

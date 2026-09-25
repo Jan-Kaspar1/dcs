@@ -442,6 +442,7 @@ fn the_page_carries_the_generic_five_category_renderers() {
             "\"event_emitted\" in event",
             "\"invoke\" in command",
             "\"unknown_command\" in reason",
+            "\"unknown_argument\" in reason",
             "\"argument_type_mismatch\" in reason",
             "\"command_refused\" in reason",
         ] {
