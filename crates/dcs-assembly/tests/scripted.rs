@@ -117,7 +117,7 @@ fn mixed_sim_and_scripted_kinds_assemble_and_scan_through_the_registry() {
     driver.write(SETPOINT, Value::Float(50.0)).unwrap();
     driver.write(PUMP_ENABLE, Value::Bool(true)).unwrap();
     for _ in 0..15 {
-        executor.scan().unwrap();
+        executor.scan();
         driver.step(0.1).unwrap();
     }
     assert!(
@@ -218,7 +218,7 @@ fn scripted_playback_is_deterministic_across_identical_runs() {
         driver.write(SETPOINT, Value::Float(50.0)).unwrap();
         driver.write(PUMP_ENABLE, Value::Bool(true)).unwrap();
         for _ in 0..20 {
-            executor.scan().unwrap();
+            executor.scan();
             driver.step(0.1).unwrap();
         }
         let snapshot = serde_json::to_string(&executor.snapshot()).unwrap();
@@ -240,7 +240,7 @@ fn scripted_quality_fault_surfaces_as_non_good_snapshot_samples() {
     // Scan 11 reads the point while the driver sits at tick 10 — the
     // script's `bad`/`device_fault` entry.
     for _ in 0..11 {
-        executor.scan().unwrap();
+        executor.scan();
         driver.step(0.1).unwrap();
     }
     let sample = executor
@@ -268,7 +268,7 @@ fn writes_to_the_scripted_out_channel_are_recorded_and_inspectable() {
     // Five scans: the digital-output block writes the pump command each
     // scan, and one direct write goes through the fan-out surface.
     for _ in 0..5 {
-        executor.scan().unwrap();
+        executor.scan();
         driver.step(0.1).unwrap();
     }
     driver.write(PUMP_CMD, Value::Bool(false)).unwrap();

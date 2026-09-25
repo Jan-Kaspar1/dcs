@@ -250,9 +250,10 @@ fn recorded_release_schema_matches_the_emitted_output() {
     //
     // `Some(digest)` asserts the file's sha256 equals the digest its
     // record publishes, keeping the checked-in artifact and the record
-    // from drifting apart. `v0.1.0` carries `None`: its recorded
-    // sha256 pins the tagged emission, which the tracked file has
-    // legitimately moved past since the cut.
+    // from drifting apart. `v0.1.0` and `v0.2.0` carry `None`: their
+    // recorded sha256 pins the tagged emission, which the tracked file
+    // has legitimately moved past since the cut — `v0.2.0`'s with the
+    // `requires_reason` io_point field (#908).
     let output = run_schema_subcommand();
     assert!(
         output.status.success(),
@@ -260,11 +261,11 @@ fn recorded_release_schema_matches_the_emitted_output() {
         String::from_utf8_lossy(&output.stderr)
     );
     for (path, recorded_sha256) in [
-        ("docs/releases/v0.1.0/plant-model.schema.json", None),
         (
-            "docs/releases/v0.2.0/plant-model.schema.json",
-            Some("68f77f99081a8e7bdc5e63b180c643b0b2e33b9459a8275ccd0da84362f26fe4"),
+            "docs/releases/v0.1.0/plant-model.schema.json",
+            None::<&'static str>,
         ),
+        ("docs/releases/v0.2.0/plant-model.schema.json", None),
     ] {
         let recorded = std::fs::read(workspace_root().join(path)).unwrap_or_else(|error| {
             panic!("the release record's schema file {path} must exist: {error}")
@@ -347,6 +348,19 @@ fn schema_rejects_documents_with_structural_violations() {
         serde_json::json!({"version": 1, "devices": [], "io_points": [
             {"id": 1, "direction": "in", "value_type": "float",
              "initial": {"float": 0.0}, "journaled": true}
+        ], "signals": [], "components": [], "connections": []}),
+        // The requires-reason mark on an out point — the command
+        // surface never reaches it, so the flag is a dead declaration.
+        serde_json::json!({"version": 1, "devices": [], "io_points": [
+            {"id": 1, "direction": "out", "value_type": "bool",
+             "initial": {"bool": false}, "writable": false,
+             "requires_reason": true}
+        ], "signals": [], "components": [], "connections": []}),
+        // And on an in point the model never marked writable — the
+        // gate it qualifies admits nothing.
+        serde_json::json!({"version": 1, "devices": [], "io_points": [
+            {"id": 1, "direction": "in", "value_type": "bool",
+             "initial": {"bool": false}, "requires_reason": true}
         ], "signals": [], "components": [], "connections": []}),
         // A negative freshness budget.
         serde_json::json!({"version": 1, "devices": [

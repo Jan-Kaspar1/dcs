@@ -457,7 +457,7 @@ fn role_changes(client: &MonitorClient) -> Vec<(Role, Role)> {
         .unwrap()
         .iter()
         .filter_map(|entry| match entry.event {
-            JournalEvent::RoleChanged { from, to } => Some((from, to)),
+            JournalEvent::RoleChanged { from, to, .. } => Some((from, to)),
             _ => None,
         })
         .collect()
@@ -866,7 +866,7 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
     assert!(
         resumed.journal(0).unwrap().iter().any(|entry| matches!(
             entry.event,
-            JournalEvent::FieldClaimLost { point } if point == VALVE
+            JournalEvent::FieldClaimLost { point, .. } if point == VALVE
         )),
         "the fenced owner's journal must record the claim loss"
     );

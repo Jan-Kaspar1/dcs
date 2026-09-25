@@ -129,7 +129,10 @@ struct DelayLine {
 
 impl ElementState {
     /// Advances the element's state one step of `dt` given a `Good`
-    /// `Float` input `u`, returning the new output.
+    /// `Float` input `u`, returning the new output — or `None` when the
+    /// step's arithmetic would leave the element non-finite, in which
+    /// case nothing is committed: `y`, `v`, the delay line, and the
+    /// generator all keep their last finite values.
     ///
     /// Serves the `Float` single-input variants only — a `bool_flow`'s
     /// `Bool` gate, a `flow_sum`'s input list, and a `threshold`'s
@@ -146,10 +149,20 @@ impl ElementState {
     /// `gain · u` — a rate, not an increment, so `dt` does not scale
     /// it. All are pure functions of their arguments and stored state,
     /// keeping stepping deterministic.
-    fn advance(&mut self, u: f64, dt: f64) -> f64 {
+    ///
+    /// The `None` verdict is what keeps a stored sample representable:
+    /// finite inputs and a finite `dt` can still overflow — an
+    /// integrator wound past the `f64` range by a large `u·dt`, a
+    /// scaled flow or lag difference saturating — and a committed
+    /// non-finite accumulator would both serve values no JSON contract
+    /// can spell and stay non-finite under every later input. Holding
+    /// the last finite state instead leaves the element recoverable:
+    /// the first step whose arithmetic lands finite resumes it.
+    fn advance(&mut self, u: f64, dt: f64) -> Option<f64> {
         match &self.element {
             ProcessElement::FirstOrderLag(element) => {
-                self.y + (1.0 - (-dt / element.time_constant).exp()) * (u - self.y)
+                let y = self.y + (1.0 - (-dt / element.time_constant).exp()) * (u - self.y);
+                y.is_finite().then_some(y)
             }
             ProcessElement::SecondOrderLag(element) => {
                 // The held input shifts the equilibrium: the deviation
@@ -161,31 +174,59 @@ impl ElementState {
                     element.damping_ratio,
                     dt,
                 );
-                self.v = v;
-                u + e
+                let y = u + e;
+                if y.is_finite() && v.is_finite() {
+                    self.v = v;
+                    Some(y)
+                } else {
+                    None
+                }
             }
-            ProcessElement::Integrator(_) => self.y + u * dt,
+            ProcessElement::Integrator(_) => {
+                let y = self.y + u * dt;
+                y.is_finite().then_some(y)
+            }
             ProcessElement::DeadTime(element) => {
                 // Constructed in `SimDriver::new` for every dead-time element.
                 let line = self.delay_line.as_mut().unwrap();
-                line.t += dt;
-                line.history.push_back((line.t, u));
+                // A `dt` that overflows the line's clock is refused
+                // before anything moves: a non-finite `t` would drain
+                // the whole history and never recover.
+                let t = line.t + dt;
+                if !t.is_finite() {
+                    return None;
+                }
+                line.t = t;
+                line.history.push_back((t, u));
                 // The newest sample at or before `t - delay`. The
                 // tolerance absorbs float error accumulated in the
                 // stored times so a sample recorded exactly on the
                 // boundary is delivered on the expected step.
-                let target = line.t - element.delay;
-                let tolerance = 1e-9 * line.t.abs().max(1.0);
+                let target = t - element.delay;
+                let tolerance = 1e-9 * t.abs().max(1.0);
                 while line.history.len() > 1 && line.history[1].0 <= target + tolerance {
                     line.history.pop_front();
                 }
-                line.history[0].1
+                Some(line.history[0].1)
             }
             ProcessElement::Noise(element) => {
-                let x = splitmix64_next(&mut self.rng);
-                u + element.amplitude * (2.0 * x - 1.0)
+                // Draw into a scratch state so a refused step leaves the
+                // generator where it stood — the same freeze a non-Good
+                // input applies.
+                let mut rng = self.rng;
+                let x = splitmix64_next(&mut rng);
+                let y = u + element.amplitude * (2.0 * x - 1.0);
+                if y.is_finite() {
+                    self.rng = rng;
+                    Some(y)
+                } else {
+                    None
+                }
             }
-            ProcessElement::ScaledFlow(element) => element.gain * u,
+            ProcessElement::ScaledFlow(element) => {
+                let y = element.gain * u;
+                y.is_finite().then_some(y)
+            }
             ProcessElement::BoolFlow(_)
             | ProcessElement::FlowSum(_)
             | ProcessElement::Threshold(_) => {
@@ -451,6 +492,18 @@ impl SimDriver {
     ///    sample — a `flow_sum` propagating the worst of its inputs'
     ///    qualities — mirroring the contract's quality propagation.
     ///
+    /// A `Good`-input step whose arithmetic would drive the element
+    /// non-finite — an integrator's `y + u·dt` overflowing, a `flow_sum`
+    /// or scaled flow saturating, a lag's difference or a dead-time
+    /// clock passing the `f64` range — commits nothing for that
+    /// element: its state holds the last finite values and the output
+    /// reports them `Bad`/`out_of_range`. The rule keeps every stored
+    /// sample representable — a non-finite `Float` has no JSON spelling
+    /// and would poison any served copy of the field permanently — and
+    /// keeps the element recoverable: the first later step whose
+    /// arithmetic lands finite resumes it, so a finite input write
+    /// repairs an overflowed element without restarting the field.
+    ///
     /// `dt` must be finite and non-negative.
     ///
     /// # Panics
@@ -500,9 +553,21 @@ impl SimDriver {
                         total += value;
                     }
                     let output = state.points.get_mut(&sum.output).unwrap();
-                    if quality.is_good() {
+                    if quality.is_good() && total.is_finite() {
                         element.y = total;
                         output.sample = Sample::good(Value::Float(element.y), tick);
+                    } else if quality.is_good() {
+                        // All-Good inputs summed past the finite range:
+                        // hold the last finite total and mark the
+                        // output bad — a non-finite sample would be
+                        // unrepresentable on the wire, and the element
+                        // recovers on the first step whose inputs sum
+                        // finite.
+                        output.sample = Sample::new(
+                            Value::Float(element.y),
+                            Quality::Bad(QualityReason::OutOfRange),
+                            tick,
+                        );
                     } else {
                         output.sample = Sample::new(Value::Float(element.y), quality, tick);
                     }
@@ -536,8 +601,26 @@ impl SimDriver {
                         let Value::Float(u) = input.value else {
                             unreachable!("validated element inputs are Float points")
                         };
-                        element.y = element.advance(u, dt);
-                        output.sample = Sample::good(Value::Float(element.y), tick);
+                        match element.advance(u, dt) {
+                            Some(y) => {
+                                element.y = y;
+                                output.sample = Sample::good(Value::Float(y), tick);
+                            }
+                            // The step's arithmetic overflowed: the
+                            // element holds its last finite state and
+                            // the output reports it bad — the field
+                            // degrades instead of storing a value the
+                            // wire cannot carry, and recovers on the
+                            // first step whose inputs produce a finite
+                            // result.
+                            None => {
+                                output.sample = Sample::new(
+                                    Value::Float(element.y),
+                                    Quality::Bad(QualityReason::OutOfRange),
+                                    tick,
+                                );
+                            }
+                        }
                     } else {
                         output.sample = Sample::new(Value::Float(element.y), input.quality, tick);
                     }
@@ -628,6 +711,18 @@ impl IoDriver for SimDriver {
                 expected: point_state.kind,
                 found: value,
             });
+        }
+        // A `Float` point refuses a non-finite value: NaN and the
+        // infinities have no JSON spelling — serde emits `null` — so
+        // storing one would serve samples no contract consumer can
+        // decode, corrupting the field for every attachment until the
+        // process restarts. Finite `Float`s of any magnitude land;
+        // element arithmetic that overflows anyway degrades the driven
+        // point's quality rather than storing the result.
+        if let Value::Float(v) = value
+            && !v.is_finite()
+        {
+            return Err(IoError::InvalidValue { point });
         }
         point_state.sample = Sample::good(value, state.tick);
         Ok(())
@@ -930,6 +1025,49 @@ mod tests {
         }
         // y = 0 + 2.0 · 5.0 = 10.0, exactly representable.
         assert_eq!(sim.read(PointId(2)).unwrap().value, Value::Float(10.0));
+    }
+
+    #[test]
+    fn an_overflowing_step_marks_the_output_bad_and_the_element_recovers() {
+        // Finite, contract-legal inputs can still overflow the element's
+        // own arithmetic — a 1e308 input stepping 1e308 lands past the
+        // f64 range. The step commits nothing: the output reports the
+        // last finite state `Bad`/`out_of_range` — a sample every wire
+        // contract still decodes — rather than storing a non-finite
+        // value that serializes `{"float":null}` and stays corrupt under
+        // every later step until the field restarts.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_point(float_point(2, Direction::In))
+            .with_element(ProcessElement::Integrator(Integrator {
+                input: PointId(1),
+                output: PointId(2),
+                initial: 0.0,
+            }));
+        let sim = SimDriver::new(map).unwrap();
+        sim.write(PointId(1), Value::Float(1e308)).unwrap();
+        sim.step(1e308);
+        let sample = sim.read(PointId(2)).unwrap();
+        assert_eq!(sample.value, Value::Float(0.0));
+        assert_eq!(sample.quality, Quality::Bad(QualityReason::OutOfRange));
+        // The served sample stays decodable under the JSON contract —
+        // the roundtrip is the representability invariant itself.
+        let json = serde_json::to_string(&sample).unwrap();
+        assert_eq!(serde_json::from_str::<Sample>(&json).unwrap(), sample);
+
+        // A second overflowing step holds the same verdict — the
+        // accumulator never left its finite state.
+        sim.step(1e308);
+        assert_eq!(sim.read(PointId(2)).unwrap().value, Value::Float(0.0));
+
+        // The documented recovery: a finite input write followed by a
+        // step whose arithmetic lands finite resumes the element from
+        // the state it held — no field restart.
+        sim.write(PointId(1), Value::Float(2.0)).unwrap();
+        sim.step(1.0);
+        let sample = sim.read(PointId(2)).unwrap();
+        assert_eq!(sample.value, Value::Float(2.0));
+        assert!(sample.quality.is_good());
     }
 
     fn second_order_map(time_constant: f64, damping_ratio: f64) -> ChannelMap {
@@ -1926,6 +2064,30 @@ mod tests {
     }
 
     #[test]
+    fn restore_rejects_a_non_finite_point_value() {
+        // A checkpoint map carrying a non-finite `Float` point value is
+        // refused whole: the restored sample must stay representable
+        // like every value the write boundary accepts — a JSON artifact
+        // could never spell the value, so carrying it in-process is the
+        // only way it can arrive, and it still changes nothing.
+        let sim = SimDriver::new(loopback_map()).unwrap();
+        let mut state = sim.capture_state().unwrap();
+        state.insert("point.10.value", Value::Float(f64::INFINITY));
+        assert_eq!(
+            sim.restore_state(&state).unwrap_err(),
+            StateError::InvalidValue {
+                element: "sim-driver".to_string(),
+                field: "point.10.value".to_string(),
+                value: Value::Float(f64::INFINITY),
+            }
+        );
+        assert_eq!(
+            sim.read(PointId(10)).unwrap(),
+            Sample::good(Value::Float(0.0), Tick::ZERO)
+        );
+    }
+
+    #[test]
     fn inconsistent_maps_are_rejected() {
         // Two bindings on one point id.
         let map = ChannelMap::new()
@@ -1935,6 +2097,20 @@ mod tests {
             map.validate().unwrap_err(),
             ConfigError::DuplicatePoint(PointId(1))
         );
+
+        // A `Float` point's seed sample must be finite — the same
+        // representability rule the write boundary applies.
+        for initial in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let map =
+                ChannelMap::new().with_point(binding(1, Direction::In, Value::Float(initial)));
+            assert!(matches!(
+                map.validate().unwrap_err(),
+                ConfigError::NonFinitePointInitial {
+                    point: PointId(1),
+                    value,
+                } if !value.is_finite()
+            ));
+        }
 
         // A loopback must run Out -> In.
         let map = ChannelMap::new()
@@ -2313,6 +2489,53 @@ mod tests {
     }
 
     #[test]
+    fn bool_flow_self_point_is_rejected_by_each_leg_kind_check() {
+        // QA finding dynamics-self-point-validation-panics-plant-server:
+        // the gate leg must be Bool and the driven leg Float, so no one
+        // point can fill both. The equality-keyed check let a Bool
+        // self-point merge — the Float `initial` seeded the Bool point
+        // at construction, and the first Good step panicked inside the
+        // driver mutex, poisoning it for every later request.
+        let element = || {
+            ProcessElement::BoolFlow(BoolFlow {
+                input: PointId(1),
+                output: PointId(1),
+                on_rate: -10.0,
+                off_rate: 0.0,
+                initial: 0.0,
+            })
+        };
+
+        // A Bool self-point satisfies the gate leg but fails the
+        // output leg's Float requirement.
+        let map = ChannelMap::new()
+            .with_point(binding(1, Direction::Out, Value::Bool(false)))
+            .with_element(element());
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementPointKind {
+                point: PointId(1),
+                kind: ValueKind::Bool,
+            }
+        );
+        // The driver refuses the map outright — nothing serves to step.
+        assert!(SimDriver::new(map).is_err());
+
+        // A Float self-point fails the gate leg's Bool requirement.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::Out))
+            .with_element(element());
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementGateKind {
+                point: PointId(1),
+                kind: ValueKind::Float,
+            }
+        );
+        assert!(SimDriver::new(map).is_err());
+    }
+
+    #[test]
     fn bool_flow_serde_roundtrips() {
         let map = bool_flow_map(-10.0, 0.5);
         let json = serde_json::to_string(&map).unwrap();
@@ -2381,6 +2604,29 @@ mod tests {
         let sim = SimDriver::new(flow_sum_map(&[], 4.0)).unwrap();
         sim.step(1.0);
         assert_eq!(sim.read(PointId(20)).unwrap().value, Value::Float(4.0));
+    }
+
+    #[test]
+    fn a_saturating_flow_sum_marks_the_output_bad_and_recovers() {
+        // Two finite inputs can sum past the f64 range — and +inf −
+        // −inf is the reachable NaN a saturating pair approaches. The
+        // verdict matches the scalar elements': the output holds its
+        // last finite total `Bad`/`out_of_range` until a step whose
+        // inputs sum finite resumes it.
+        let sim = SimDriver::new(flow_sum_map(&[1, 2], 0.0)).unwrap();
+        sim.write(PointId(1), Value::Float(f64::MAX)).unwrap();
+        sim.write(PointId(2), Value::Float(f64::MAX)).unwrap();
+        sim.step(1.0);
+        let sample = sim.read(PointId(20)).unwrap();
+        // The declared initial stands — the overflow committed nothing.
+        assert_eq!(sample.value, Value::Float(-1.0));
+        assert_eq!(sample.quality, Quality::Bad(QualityReason::OutOfRange));
+
+        sim.write(PointId(2), Value::Float(-f64::MAX)).unwrap();
+        sim.step(1.0);
+        let sample = sim.read(PointId(20)).unwrap();
+        assert_eq!(sample.value, Value::Float(0.0));
+        assert!(sample.quality.is_good());
     }
 
     #[test]
@@ -3011,15 +3257,33 @@ mod tests {
     }
 
     #[test]
-    fn nan_threshold_input_holds_the_contact() {
-        // NaN satisfies no comparison — neither `>= on` nor `< off` —
-        // so the contact holds like any in-band input.
+    fn non_finite_writes_are_refused_and_the_stored_sample_stands() {
+        // NaN and the infinities have no JSON spelling — serde emits
+        // `null` — so a `Float` point refuses them at the boundary
+        // rather than storing a sample no wire contract can carry back.
+        // The refusal is `IoError::InvalidValue` and the stored sample
+        // is untouched, so a NaN threshold input — which would satisfy
+        // no comparison and hold the contact — can never be staged.
         let sim = SimDriver::new(threshold_map(8.0, 7.5, true)).unwrap();
-        sim.write(PointId(1), Value::Float(f64::NAN)).unwrap();
+        // Seat the input inside the hysteresis band: the sample the
+        // refused writes must leave standing.
+        sim.write(PointId(1), Value::Float(7.6)).unwrap();
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                sim.write(PointId(1), Value::Float(value)),
+                Err(IoError::InvalidValue { point: PointId(1) })
+            );
+        }
         sim.step(1.0);
+        // The held 7.6 — never replaced — is what the element
+        // evaluated: inside the band the contact holds its initial.
         let sample = contact(&sim);
         assert_eq!(sample.value, Value::Bool(true));
         assert!(sample.quality.is_good());
+        assert_eq!(
+            sim.read(PointId(1)).unwrap(),
+            Sample::good(Value::Float(7.6), Tick::ZERO)
+        );
     }
 
     #[test]
@@ -3145,6 +3409,107 @@ mod tests {
                 kind: ValueKind::Float,
             }
         );
+    }
+
+    #[test]
+    fn threshold_self_point_is_rejected_by_each_leg_kind_check() {
+        // QA finding dynamics-self-point-validation-panics-plant-server:
+        // the input leg must be Float and the contact leg Bool, so no
+        // one point can fill both. The equality-keyed check let a Bool
+        // self-point merge — the first Good step then panicked inside
+        // the driver mutex, poisoning it for every later request.
+        let element = || {
+            ProcessElement::Threshold(Threshold {
+                input: PointId(1),
+                output: PointId(1),
+                on: 8.0,
+                off: 7.5,
+                initial: false,
+            })
+        };
+
+        // A Bool self-point satisfies the contact leg but fails the
+        // input leg's Float requirement.
+        let map = ChannelMap::new()
+            .with_point(binding(1, Direction::In, Value::Bool(false)))
+            .with_element(element());
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementPointKind {
+                point: PointId(1),
+                kind: ValueKind::Bool,
+            }
+        );
+        // The driver refuses the map outright — nothing serves to step.
+        assert!(SimDriver::new(map).is_err());
+
+        // A Float self-point fails the contact leg's Bool requirement.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_element(element());
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementContactKind {
+                point: PointId(1),
+                kind: ValueKind::Float,
+            }
+        );
+        assert!(SimDriver::new(map).is_err());
+    }
+
+    #[test]
+    fn element_driving_an_out_point_is_rejected() {
+        // QA finding dynamics-element-drives-controller-out-point: a
+        // threshold whose contact output named a bool `Out` command
+        // point merged cleanly, then rewrote the operator's command
+        // every step — the wire showed the element's value, never the
+        // commanded one. Elements model field-side physics answering
+        // commands, so the point an element drives must be an `In`
+        // point; the merge now rejects the class.
+        let map = ChannelMap::new()
+            .with_point(float_point(10, Direction::In))
+            .with_point(binding(20, Direction::Out, Value::Bool(false)))
+            .with_element(ProcessElement::Threshold(Threshold {
+                input: PointId(10),
+                output: PointId(20),
+                on: 1.0,
+                off: 0.0,
+                initial: false,
+            }));
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementOutputDirection {
+                point: PointId(20),
+                direction: Direction::Out,
+            }
+        );
+        // The driver refuses the map outright — nothing serves to step.
+        assert!(SimDriver::new(map).is_err());
+
+        // A Float-output element on a Float `Out` point faces the same
+        // rule — the check is direction, not kind.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_point(float_point(2, Direction::Out))
+            .with_element(ProcessElement::Integrator(Integrator {
+                input: PointId(1),
+                output: PointId(2),
+                initial: 0.0,
+            }));
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementOutputDirection {
+                point: PointId(2),
+                direction: Direction::Out,
+            }
+        );
+
+        // Reading an `Out` point stays legal — the actuator-wire seam
+        // a `bool_flow` gate or a `scaled_flow` demand answers. The
+        // maps every other element test builds pin this: their command
+        // inputs are `Out` points.
+        assert!(bool_flow_map(-10.0, 0.5).validate().is_ok());
+        assert!(scaled_flow_map(0.5).validate().is_ok());
     }
 
     #[test]

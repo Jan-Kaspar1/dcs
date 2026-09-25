@@ -8,7 +8,7 @@ use dcs_core::{
     Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
-use dcs_monitor::{Monitor, MonitorClient, PAGE};
+use dcs_monitor::{Monitor, MonitorClient, PAGE, PAIR_FAULT_KINDS_VERSION, PairFaultKind};
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, PointMap, StepError,
 };
@@ -559,6 +559,7 @@ fn setpoint_command_changes_output_at_the_tick_boundary() {
                     apply_tick: Tick(2)
                 },
                 actor: None,
+                reason: None,
             }
         );
         // Between scans nothing has changed yet.
@@ -584,6 +585,7 @@ fn setpoint_command_changes_output_at_the_tick_boundary() {
                 command,
                 outcome: CommandOutcome::Applied { tick: Tick(2) },
                 actor: None,
+                reason: None,
             }
         );
     });
@@ -865,6 +867,45 @@ fn the_pages_hardcoded_spellings_are_the_emitted_contract() {
 }
 
 #[test]
+fn the_pages_pair_fault_kinds_match_the_versioned_contract() {
+    let mut spellings: Vec<_> = PairFaultKind::ALL.iter().map(emitted_spelling).collect();
+    spellings.sort();
+    assert_eq!(
+        spellings,
+        [
+            "dual_active",
+            "field_unclaimed",
+            "no_active_peer",
+            "peer_unreachable",
+            "standby_degraded",
+            "standby_diverged",
+            "standby_orphaned",
+            "standby_unsynchronized_past_grace",
+        ]
+    );
+    assert_eq!(PAIR_FAULT_KINDS_VERSION, 3);
+
+    with_monitor(|_driver, client| {
+        let page = client.page().unwrap();
+        let compact: String = page.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            compact.contains("constPAIR_FAULT_KINDS_VERSION=3;"),
+            "page lacks the version constant"
+        );
+        assert!(
+            compact.contains("fault_kinds_version:PAIR_FAULT_KINDS_VERSION"),
+            "page lacks the versioned fault_kinds field"
+        );
+        for spelling in spellings {
+            assert!(
+                page.contains(&format!("\"{spelling}\"")),
+                "page lacks the emitted pair fault spelling {spelling}"
+            );
+        }
+    });
+}
+
+#[test]
 fn page_json_feed_tracks_snapshots_and_commands() {
     with_monitor(|driver, client| {
         driver.write(PointId(10), Value::Float(3.0)).unwrap();
@@ -1082,6 +1123,7 @@ fn trend_and_journal_feeds_track_the_run() {
                         reason: CommandError::UnknownPoint { point: PointId(99) },
                     },
                     actor: None,
+                    reason: None,
                 },
             }
         );
@@ -1391,11 +1433,13 @@ fn force_and_release_are_journaled_and_badged_in_the_snapshot() {
                     command: force,
                     outcome: CommandOutcome::Applied { tick: Tick(2) },
                     actor: None,
+                    reason: None,
                 },
                 CommandReceipt {
                     command: unforce,
                     outcome: CommandOutcome::Applied { tick: Tick(4) },
                     actor: None,
+                    reason: None,
                 },
             ]
         );
@@ -1432,7 +1476,7 @@ fn paced_monitor_scans_through_the_lock_and_refuses_post_scan() {
 
         // The paced loop's entry point: the scan runs through the shared
         // lock and is recorded like an endpoint-driven one.
-        assert_eq!(monitor.paced_scan(), Ok(Tick(1)));
+        assert_eq!(monitor.paced_scan(), Tick(1));
         assert_eq!(monitor.tick(), Tick(1));
         assert_eq!(client.snapshot().unwrap().tick, Tick(1));
         assert_eq!(
@@ -1460,7 +1504,7 @@ fn paced_monitor_scans_through_the_lock_and_refuses_post_scan() {
                 apply_tick: Tick(2)
             }
         );
-        monitor.paced_scan().unwrap();
+        monitor.paced_scan();
         assert_eq!(
             client.receipts().unwrap()[0].outcome,
             CommandOutcome::Applied { tick: Tick(2) }
@@ -1580,7 +1624,7 @@ fn the_paced_loops_overrun_feed_counts_into_io_health() {
     let monitor = Monitor::bind_paced("127.0.0.1:0", executor, signal_index()).unwrap();
 
     assert_eq!(monitor.snapshot().io_health.scan_overruns, 0);
-    monitor.paced_scan().unwrap();
+    monitor.paced_scan();
     monitor.record_scan_overrun();
     monitor.record_scan_overrun();
     let snapshot = monitor.snapshot();

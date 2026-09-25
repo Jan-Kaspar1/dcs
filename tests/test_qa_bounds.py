@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -35,6 +36,8 @@ def fake_docker_ok(*args, **kw):
     return Result('')
 
 
+@unittest.skipUnless(os.name == 'posix',
+                     'runner.cycle serializes through a POSIX flock')
 class OwnershipGateTests(unittest.TestCase):
     """Failed teardown must block the next cycle with a named error."""
 
@@ -327,6 +330,27 @@ class NetpolicyTests(unittest.TestCase):
         accepts = [r for r in fw['rules']
                    if r[2][-1] == 'ACCEPT' and 'dcsqab' in r[2]]
         self.assertTrue(any('80,443' in r[2] for r in accepts))
+
+    def test_rig_sourced_host_socket_attempt_is_dropped(self):
+        # The rig bridge-to-host reachability rule the
+        # qax-20260922-001, qax-20260922-005, and qax-20260923-001
+        # runs demonstrated: a new connection a rig container opens
+        # toward a host socket — host loopback, the LAN address, or
+        # another stack's published port via the host — meets the
+        # INPUT catch-all drop; only established replies to
+        # host-originated connections pass. Recorded as the lane's
+        # endpoint-placement rule (runner's endpoint_placement).
+        checks = netpolicy.required_checks()
+        self.assertIn(
+            ('iptables', 'INPUT',
+             ['-i', 'dcsqa+', '-m', 'conntrack', '--ctstate',
+              'ESTABLISHED,RELATED', '-j', 'ACCEPT']), checks)
+        self.assertIn(
+            ('iptables', 'INPUT', ['-i', 'dcsqa+', '-j', 'DROP']),
+            checks)
+        self.assertIn(
+            ('ip6tables', 'INPUT', ['-i', 'dcsqa+', '-j', 'DROP']),
+            checks)
 
 
 if __name__ == '__main__':

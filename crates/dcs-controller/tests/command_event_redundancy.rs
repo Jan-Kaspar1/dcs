@@ -27,8 +27,8 @@
 //!   run's for the stated tick count.
 
 use dcs_core::{
-    Command, CommandError, CommandOutcome, EmittedEvent, IoDriver, JournalEvent, PointId, Role,
-    StandbySync, Tick, Value, ValueKind,
+    Command, CommandError, CommandOutcome, EmittedEvent, IoDriver, JournalEvent, PointId, Quality,
+    QualityReason, Role, StandbySync, Tick, Value, ValueKind,
 };
 use dcs_monitor::MonitorClient;
 use dcs_sim_net::RemoteDriver;
@@ -38,7 +38,10 @@ use std::path::{Path, PathBuf};
 
 mod support;
 
-use support::{SimTcp, image_value, sim_tcp_document, spawn_controller, spawn_plant, write_model};
+use support::{
+    SimTcp, image_sample, image_value, kill, settled_receipts, sim_tcp_document, spawn_controller,
+    spawn_controller_logged, spawn_plant, write_model,
+};
 
 /// The shared plant's model — the dcs-plant tank loop.
 const PLANT_MODEL: &str = concat!(
@@ -214,17 +217,39 @@ fn declared_commands_and_emitted_events_survive_promotion() {
     );
 
     // Phase 1: N tracking ticks — each tick the standby pulls the
-    // active's checkpoint, applies it, and scans quiesced, so the peers'
-    // emitted records are the identical-streams proof: at the boundary
-    // after tick 3 the active (and the reference, at its matching
-    // boundary) admits `advance {count: 1}`; the standby's next pull
-    // carries the pending entry and all three apply it at tick 4.
+    // active's checkpoint, applies it, and scans quiesced. At the
+    // boundary after tick 3 the active (and the reference, at its
+    // matching boundary) admits `advance {count: 1}`; the standby's
+    // next pull carries the pending entry but — per #689 — its
+    // quiesced scan must not settle it: the carried receipt stays
+    // `Accepted` on the tracker at tick 4 while the field owners
+    // apply it, so the tracker's sequencer lags by the invoke's
+    // effect for exactly one tick. The tick-5 pull adopts the
+    // applied checkpoint (outcome and advanced component state) and
+    // the run converges — one journaled settle per peer, never a
+    // phantom `Applied` on the gated image.
     for tick in 1..=N {
         let tracked = standby.advance(1).unwrap();
         let owner = active.advance(1).unwrap();
         let alone = reference.advance(1).unwrap();
-        assert_eq!(tracked, owner, "tick {tick}");
-        assert_eq!(owner, alone, "tick {tick}");
+        if tick == 4 {
+            assert_eq!(tracked.tick, owner.tick, "tick {tick}");
+            assert_eq!(owner, alone, "tick {tick}");
+            assert!(
+                matches!(
+                    standby.receipts().unwrap()[0].outcome,
+                    CommandOutcome::Accepted { .. }
+                ),
+                "the quiesced scan carries the adopted invoke (#689)"
+            );
+            assert_eq!(
+                active.receipts().unwrap()[0].outcome,
+                CommandOutcome::Applied { tick: Tick(4) }
+            );
+        } else {
+            assert_eq!(tracked, owner, "tick {tick}");
+            assert_eq!(owner, alone, "tick {tick}");
+        }
         if tick == 3 {
             for client in [&active, &reference] {
                 let receipt = client.command(&invoke("advance", Some(1))).unwrap();
@@ -241,10 +266,13 @@ fn declared_commands_and_emitted_events_survive_promotion() {
     // The adopted receipt log is the pair's one command audit.
     assert_eq!(standby.receipts().unwrap(), active.receipts().unwrap());
     assert_eq!(standby.receipts().unwrap().len(), 1);
-    // The pinned standby-emission semantics: the tracking peer's
-    // journal already carries the field owner's identical emitted-event
-    // stream — the `Journal`-retained records the run produced at the
-    // same ticks — and the reference's.
+    // The pinned standby-emission semantics, as amended by #689: the
+    // tracking peer's journal already carries the field owner's
+    // identical emitted-event stream — the `Journal`-retained records
+    // the run produced at the same ticks — and the reference's. The
+    // tick-4 carried-invoke lag (#689) lives in the routed `History`
+    // records — `step_completed` no longer journals — so the durable
+    // emitted streams are identical unfiltered.
     assert_eq!(emitted(&standby), emitted(&active));
     assert_eq!(emitted(&standby), emitted(&reference));
 
@@ -293,16 +321,30 @@ fn declared_commands_and_emitted_events_survive_promotion() {
 
     // Phase 2: M post-switch ticks. The promoted peer's first scan
     // settles the carried invocation — exactly once — at the same
-    // boundary the demoted peer's own copy and the reference's apply
-    // theirs. Until the post-switch `advance` goes only to the field
-    // owner (submitted after tick N+5, applying at N+6), the demoted
-    // peer's quiesced run stays the uninterrupted reference too.
+    // boundary the reference applies theirs. The demoted peer's own
+    // copy stays carried, not settled (#689): its quiesced scan must
+    // not mint an `Applied` on the fenced image, so at tick N+1 its
+    // sequencer has not taken the reset while the promoted run has —
+    // a one-tick lag the next tracking pull heals by adopting the
+    // applied checkpoint's component state. Until the post-switch
+    // `advance` goes only to the field owner (submitted after tick
+    // N+5, applying at N+6), the demoted peer's quiesced run otherwise
+    // stays the uninterrupted reference.
     for tick in (N + 1)..=(N + M) {
         let quiesced = active.advance(1).unwrap();
         let continued = standby.advance(1).unwrap();
         let alone = reference.advance(1).unwrap();
         assert_eq!(continued, alone, "tick {tick}");
-        if tick <= N + 5 {
+        if tick == N + 1 {
+            assert_eq!(quiesced.tick, continued.tick, "tick {tick}");
+            assert!(
+                matches!(
+                    active.receipts().unwrap()[1].outcome,
+                    CommandOutcome::Accepted { .. }
+                ),
+                "the demoted peer carries the reset (#689)"
+            );
+        } else if tick <= N + 5 {
             assert_eq!(continued, quiesced, "tick {tick}");
         }
         if tick == N + 5 {
@@ -346,10 +388,11 @@ fn declared_commands_and_emitted_events_survive_promotion() {
 
     // The pinned record: the promoted peer's emitted-event stream is
     // the uninterrupted reference run's — every `Journal`-retained
-    // emission at the same tick with the same payload — its receipt log
-    // is identical,
-    // and the `reset` carried across the boundary settled exactly once
-    // at tick N+1: one receipt, one journaled outcome.
+    // emission at the same tick with the same payload (the tick-4
+    // carried-invoke lag rides the routed `History` records, never the
+    // durable stream) — its receipt log is identical, and the `reset`
+    // carried across the boundary settled exactly once at tick N+1:
+    // one receipt, one journaled outcome.
     assert_eq!(emitted(&standby), emitted(&reference));
     assert_eq!(standby.receipts().unwrap(), reference.receipts().unwrap());
     assert_eq!(
@@ -400,7 +443,8 @@ fn declared_commands_and_emitted_events_survive_promotion() {
 /// pending copy later settled `applied` on its fenced image. Now the
 /// stale checkpoint's newer receipts still carry, the promoted peer
 /// settles the write `applied` on the live image, and the superseded
-/// peer's copy settles `superseded` — never `applied` on a dead image.
+/// peer's own boundary settlement re-suspends — the carried `applied`
+/// is the one verdict its journal converges on.
 #[test]
 fn a_pending_command_at_the_promote_boundary_survives_the_driven_cadence() {
     let dir = std::env::temp_dir().join(format!("dcs-promote-pending-{}", std::process::id()));
@@ -477,37 +521,43 @@ fn a_pending_command_at_the_promote_boundary_survives_the_driven_cadence() {
         CommandOutcome::Applied { tick: Tick(N + 2) }
     );
 
-    // The superseded peer's own pending copy settles honestly: its
-    // next scan applies it to the abandoned image, the field write
-    // fences on the promoted peer's claim, and the receipt rewrites to
-    // `superseded` — a phantom `applied` never journals.
+    // The QA finding
+    // `demote-boundary-superseded-mint-then-carried-applied`: the
+    // fenced peer's detection scan applied the write onto the
+    // abandoned image, and the demotion used to mint a provisional
+    // `Rejected`/`Superseded` for it — which the adopted checkpoint's
+    // `Applied` then contradicted in the same journal, two terminal
+    // outcomes for one admission. The boundary now re-suspends its
+    // settlements instead: whether the line carried the admission is
+    // the surviving run's verdict to make, so the receipt stays
+    // `Accepted` and no `command_settled` journals on the demoted
+    // peer yet.
     active.advance(1).unwrap();
-    let superseded = active.receipts().unwrap();
+    let suspended = active.receipts().unwrap();
     assert_eq!(
-        superseded[0].outcome,
-        CommandOutcome::Rejected {
-            reason: CommandError::Superseded { point: Some(HELD) }
+        suspended[0].outcome,
+        CommandOutcome::Accepted {
+            apply_tick: Tick(N + 1)
         },
-        "{superseded:?}"
+        "the demote boundary must re-suspend, not settle: {suspended:?}"
     );
     assert_eq!(active.role().unwrap().role, Role::Demoting);
     assert_eq!(
         settlements_of(&active, &write),
-        vec![(
-            N + 1,
-            CommandOutcome::Rejected {
-                reason: CommandError::Superseded { point: Some(HELD) }
-            }
-        )]
+        vec![],
+        "no settlement may journal before the line adjudicates"
     );
     assert_eq!(
         settlements_of(&standby, &write),
         vec![(N + 2, CommandOutcome::Applied { tick: Tick(N + 2) })]
     );
 
-    // The demoted peer reconverges on its announced successor and the
-    // pair's receipt log is again the run's one audit — the new
-    // active's applied settlement included.
+    // The demoted peer reconverges on its announced successor: the
+    // adopted log carries the line's `Applied` verdict at the same
+    // index — the carried admission — so nothing settles `superseded`
+    // and the journal records the one terminal outcome every peer
+    // agrees on. One admission, one `command_settled` per journal, and
+    // never a `Superseded` beside the `Applied`.
     active.advance(1).unwrap();
     let report = active.role().unwrap();
     assert_eq!(report.role, Role::Standby, "{report:?}");
@@ -516,6 +566,408 @@ fn a_pending_command_at_the_promote_boundary_survives_the_driven_cadence() {
         "the demoted peer must reconverge on its successor: {report:?}"
     );
     assert_eq!(active.receipts().unwrap(), standby.receipts().unwrap());
+    assert_eq!(
+        settlements_of(&active, &write),
+        vec![(N + 2, CommandOutcome::Applied { tick: Tick(N + 2) })],
+        "the demoted peer journals the line's one verdict — applied — \
+         never the superseded-then-applied pair the defect produced"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// QA finding `demote-boundary-pending-command-lost-or-phantom-applied`,
+/// the carried outcome: a command admitted on the active and still
+/// `Accepted` when `POST /demote` lands used to race the demoted run's
+/// first quiesced scan — settling `applied` on an image the gate
+/// already fenced, erased by the next adoption. Demotion now suspends
+/// the pending queue, so the receipt stays `Accepted` in the
+/// checkpoint the successor's final-sync pull carries: the command
+/// settles once, `applied`, on the run that actually wrote it — and
+/// the demoted peer's own scan can never mint a phantom application.
+#[test]
+fn a_pending_command_at_the_demote_boundary_rides_the_final_sync_carry() {
+    let dir = std::env::temp_dir().join(format!("dcs-demote-carry-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model = controller_model(&dir, "pair.json", pair_plant.addr);
+
+    let active_process = spawn_controller(&pair_model, &[], DT);
+    let standby_process = spawn_controller(
+        &pair_model,
+        &["--standby".to_string(), active_process.addr.to_string()],
+        DT,
+    );
+    let active = MonitorClient::new(active_process.addr);
+    let standby = MonitorClient::new(standby_process.addr);
+
+    // Converge the pair on the active's checkpoints — both rest at
+    // tick N.
+    for _ in 0..N {
+        standby.advance(1).unwrap();
+        active.advance(1).unwrap();
+    }
+
+    // The admission lands on the active between the standby's last
+    // pull and the demote — `Accepted`, queued for the active's next
+    // scan.
+    let write = Command::WriteValue {
+        point: HELD,
+        kind: ValueKind::Bool,
+        value: Value::Bool(true),
+    };
+    let receipt = active.command(&write).unwrap();
+    assert_eq!(
+        receipt.outcome,
+        CommandOutcome::Accepted {
+            apply_tick: Tick(N + 1)
+        },
+        "{receipt:?}"
+    );
+
+    // The reproduction's ordering: demote before the active's next
+    // scan, then promote the standby. The demotion suspends the
+    // pending write — its receipt stays `Accepted` in the checkpoint
+    // the promote boundary's final pull carries.
+    assert_eq!(active.demote().unwrap().role, Role::Demoting);
+    assert_eq!(standby.promote().unwrap().role, Role::Promoting);
+    let carried = standby.receipts().unwrap();
+    assert_eq!(carried.len(), 1, "{carried:?}");
+    assert!(
+        matches!(carried[0].outcome, CommandOutcome::Accepted { .. }),
+        "{carried:?}"
+    );
+
+    // The promoted peer's first scan settles the carried write —
+    // applied, on the run that owns the field.
+    let continued = standby.advance(1).unwrap();
+    assert_eq!(image_value(&continued, HELD), Value::Bool(true));
+    assert_eq!(standby.role().unwrap().role, Role::Active);
+    assert_eq!(
+        standby.receipts().unwrap()[0].outcome,
+        CommandOutcome::Applied { tick: Tick(N + 1) }
+    );
+
+    // The demoted peer's tracking pull adopts the line's checkpoint:
+    // the carried entry covers its suspended copy — nothing
+    // supersedes, and its own quiesced scan applies nothing the line
+    // did not. Its journal's `applied` settlement is the honest one —
+    // the field really took the write — and the adopted image keeps
+    // the value instead of erasing it a tick later.
+    active.advance(1).unwrap();
+    assert_eq!(active.role().unwrap().role, Role::Standby);
+    assert_eq!(
+        image_value(&active.snapshot().unwrap(), HELD),
+        Value::Bool(true)
+    );
+    assert_eq!(active.receipts().unwrap(), standby.receipts().unwrap());
+    assert_eq!(
+        settlements_of(&standby, &write),
+        vec![(N + 1, CommandOutcome::Applied { tick: Tick(N + 1) })]
+    );
+    assert_eq!(
+        settlements_of(&active, &write),
+        vec![(N + 1, CommandOutcome::Applied { tick: Tick(N + 1) })]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// QA finding `superseded-command-still-settles-applied`: the demote
+/// boundary's stale-checkpoint collision — the reproduction's paced
+/// pair. The demoted peer's first tracking pull lands a checkpoint
+/// the standby captured before it ever observed the admission, and
+/// that absence is the capture's staleness, not the line's verdict:
+/// the adopted receipt window's submission high-water never reached
+/// the suspended entry's index. The adoption must keep the receipt
+/// suspended — still `Accepted` in the checkpoint the successor's
+/// final-sync pull carries — so the command settles exactly once,
+/// `applied`, on the promoted run, with no provisional `superseded`
+/// journaled beside it.
+#[test]
+fn a_stale_checkpoint_at_the_demote_boundary_cannot_supersede_the_raced_command() {
+    let dir = std::env::temp_dir().join(format!("dcs-demote-stale-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model = controller_model(&dir, "pair.json", pair_plant.addr);
+
+    let active_process = spawn_controller(&pair_model, &[], DT);
+    let standby_process = spawn_controller(
+        &pair_model,
+        &["--standby".to_string(), active_process.addr.to_string()],
+        DT,
+    );
+    let active = MonitorClient::new(active_process.addr);
+    let standby = MonitorClient::new(standby_process.addr);
+
+    for _ in 0..N {
+        standby.advance(1).unwrap();
+        active.advance(1).unwrap();
+    }
+
+    let write = Command::WriteValue {
+        point: HELD,
+        kind: ValueKind::Bool,
+        value: Value::Bool(true),
+    };
+    let receipt = active.command(&write).unwrap();
+    assert_eq!(
+        receipt.outcome,
+        CommandOutcome::Accepted {
+            apply_tick: Tick(N + 1)
+        },
+        "{receipt:?}"
+    );
+
+    // The reproduction's ordering: demote, then let the demoted peer's
+    // own tracking cycle run *before* the standby's promote-boundary
+    // pull can carry the command — the pulled checkpoint is the
+    // standby's own, whose receipt window predates the admission.
+    // Stale, not adjudicating: the suspended receipt is restored
+    // behind the adopted window, nothing settles, and the checkpoint
+    // the demoted peer still serves keeps offering the command.
+    assert_eq!(active.demote().unwrap().role, Role::Demoting);
+    active.advance(1).unwrap();
+    assert_eq!(active.role().unwrap().role, Role::Standby);
+    assert!(standby.receipts().unwrap().is_empty());
+    let kept = active.receipts().unwrap();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert!(
+        matches!(kept[0].outcome, CommandOutcome::Accepted { .. }),
+        "{kept:?}"
+    );
+    // No phantom: no settlement journaled on either peer, and the
+    // quiesced image never minted the point change.
+    assert_eq!(settlements_of(&active, &write), vec![]);
+    assert_eq!(settlements_of(&standby, &write), vec![]);
+    assert_eq!(
+        image_value(&active.snapshot().unwrap(), HELD),
+        Value::Bool(false)
+    );
+
+    // The switchover completes on the line's own terms: the standby's
+    // promote-boundary final sync carries the still-offered command
+    // and settles it `applied` on the live run; the demoted peer's
+    // reconvergence adopts the same verdict — the one terminal
+    // outcome, journaled once on each peer, never a `superseded`
+    // beside it.
+    assert_eq!(standby.promote().unwrap().role, Role::Promoting);
+    standby.advance(1).unwrap();
+    assert_eq!(standby.role().unwrap().role, Role::Active);
+    active.advance(1).unwrap();
+    assert_eq!(active.role().unwrap().role, Role::Standby);
+    assert_eq!(active.receipts().unwrap(), standby.receipts().unwrap());
+    assert_eq!(
+        image_value(&active.snapshot().unwrap(), HELD),
+        Value::Bool(true)
+    );
+    let settled = active.receipts().unwrap();
+    assert_eq!(settled.len(), 1, "{settled:?}");
+    assert!(
+        matches!(settled[0].outcome, CommandOutcome::Applied { .. }),
+        "{settled:?}"
+    );
+    assert_eq!(
+        settlements_of(&active, &write),
+        settlements_of(&standby, &write),
+    );
+    assert_eq!(settlements_of(&active, &write).len(), 1);
+    assert!(matches!(
+        settlements_of(&active, &write)[0].1,
+        CommandOutcome::Applied { .. }
+    ));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// QA finding `stale-checkpoint-resurrects-receipted-unforce` (#639):
+/// the driven-pair reproduction. A forces a point, then demotes with
+/// its checkpoint fetch severed — no `--peer`, the announced-fallback
+/// analog — so its served image freezes on the force. B promotes,
+/// unforces the point (applied, journaled), and restarts onto its own
+/// persisted state; its first tracking pull then adopts A's staler
+/// checkpoint, whose force set predates the release. The applied
+/// `unforce` receipt in B's own log is durable truth: the force must
+/// not re-stand, no `Substituted` quality may return, and any
+/// force-set change the adoption did author must journal a receipt
+/// naming the adopting source.
+#[test]
+fn a_receipted_unforce_survives_the_restarted_standbys_stale_pull() {
+    let dir = std::env::temp_dir().join(format!("dcs-stale-unforce-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model = controller_model(&dir, "pair.json", pair_plant.addr);
+
+    // The tank loop's writable field `In` — the reproduction's forced
+    // point.
+    const FORCED: PointId = PointId(11);
+    let force = Command::ForcePoint {
+        point: FORCED,
+        kind: ValueKind::Float,
+        value: Value::Float(5.0),
+    };
+    let unforce = Command::UnforcePoint { point: FORCED };
+    let substituted = || Quality::Uncertain(QualityReason::Substituted);
+
+    let a_state = dir.join("a.state");
+    let a_journal = dir.join("a.journal");
+    let b_state = dir.join("b.state");
+    let b_journal = dir.join("b.journal");
+    let persistent = |state: &Path, journal: &Path| {
+        vec![
+            "--state-file".to_string(),
+            state.to_str().unwrap().to_string(),
+            "--journal-file".to_string(),
+            journal.to_str().unwrap().to_string(),
+        ]
+    };
+
+    // A is launched active without `--peer`: demoted, it tracks
+    // nothing — the severed fetch — so the checkpoint it keeps
+    // serving is the pre-release image.
+    let a_process = spawn_controller(&pair_model, &persistent(&a_state, &a_journal), DT);
+    let mut b_args = vec!["--standby".to_string(), a_process.addr.to_string()];
+    b_args.extend(persistent(&b_state, &b_journal));
+    let mut b_process = spawn_controller(&pair_model, &b_args, DT);
+    let a = MonitorClient::new(a_process.addr);
+    let b = MonitorClient::new(b_process.addr);
+
+    // Converge the pair, then force the point on A and let B adopt it.
+    for _ in 0..N {
+        b.advance(1).unwrap();
+        a.advance(1).unwrap();
+    }
+    let receipt = a.command(&force).unwrap();
+    assert!(
+        matches!(receipt.outcome, CommandOutcome::Accepted { .. }),
+        "{receipt:?}"
+    );
+    a.advance(1).unwrap();
+    let adopted = b.advance(1).unwrap();
+    assert!(
+        adopted.forces.iter().any(|forced| forced.point == FORCED),
+        "the standby must adopt the standing force: {:?}",
+        adopted.forces
+    );
+    assert_eq!(image_sample(&adopted, FORCED).quality, substituted());
+
+    // The severed switchover: A demotes and its served checkpoint
+    // freezes — it never observes the release. B promotes and owns
+    // the field from its next scan.
+    assert_eq!(a.demote().unwrap().role, Role::Demoting);
+    assert_eq!(b.promote().unwrap().role, Role::Promoting);
+    b.advance(1).unwrap();
+    assert_eq!(b.role().unwrap().role, Role::Active);
+
+    // The release applies on B and journals there — the durable truth
+    // the restart must not lose.
+    let receipt = b.command(&unforce).unwrap();
+    assert!(
+        matches!(receipt.outcome, CommandOutcome::Accepted { .. }),
+        "{receipt:?}"
+    );
+    let released = b.advance(1).unwrap();
+    assert!(
+        released.forces.is_empty(),
+        "the release must lift the force: {:?}",
+        released.forces
+    );
+    assert!(image_sample(&released, FORCED).quality.is_good());
+    let settled = settlements_of(&b, &unforce);
+    assert_eq!(settled.len(), 1, "{settled:?}");
+    assert!(
+        matches!(settled[0].1, CommandOutcome::Applied { .. }),
+        "the unforce must journal applied: {settled:?}"
+    );
+
+    // The restart: B resumes its persisted run — receipt log and
+    // released force set — then tracks A's stale image on its next
+    // driven scan.
+    kill(&mut b_process);
+    let (b_process, preamble) = spawn_controller_logged(&pair_model, &b_args, DT);
+    assert!(
+        preamble
+            .iter()
+            .any(|line| line.starts_with("resumed from state file")),
+        "the restart must resume B's persisted run: {preamble:?}"
+    );
+    let b = MonitorClient::new(b_process.addr);
+
+    // The defect's window: the tracking pull lands the stale image
+    // and the scans that follow it are where the `Substituted`
+    // quality silently returned. With the receipted release
+    // re-asserted over the adopted force set, neither happens.
+    for _ in 0..3 {
+        let snap = b.advance(1).unwrap();
+        assert!(
+            snap.forces.is_empty(),
+            "the receipted release is durable truth — the stale \
+             checkpoint must not resurrect the force: {:?}",
+            snap.forces
+        );
+        assert_ne!(
+            image_sample(&snap, FORCED).quality,
+            substituted(),
+            "substituted quality must not return for {FORCED:?}"
+        );
+    }
+    // The reconvergence verdict: A demoted sourceless stamps its
+    // served checkpoint ownerless, so the converged verdict on the
+    // restarted pull is `Orphaned` with the alignment the pulls land
+    // — the ownerless-stream semantics, not the `Tracking` verdict
+    // the finding predates. Either proves the re-adoption converges
+    // on A's image while the assertions above prove the release
+    // survives it.
+    let sync = b.role().unwrap().sync;
+    assert!(
+        matches!(
+            sync,
+            Some(StandbySync::Tracking { .. }) | Some(StandbySync::Orphaned { .. })
+        ),
+        "the restarted standby must be tracking A"
+    );
+
+    // The audit fallback the finding names: a force change the merged
+    // receipt log cannot explain journals an `Applied` receipt whose
+    // actor names the adopting checkpoint. The fixed path leaves none
+    // — every post-restart force settlement on B must either not
+    // exist or carry that attribution.
+    let journal = b.journal(0).unwrap();
+    let last_boundary = journal
+        .iter()
+        .rposition(|entry| matches!(entry.event, JournalEvent::RunBoundary { .. }))
+        .expect("the restart journals a run boundary");
+    for entry in &journal[last_boundary..] {
+        if let JournalEvent::CommandSettled { receipt } = &entry.event
+            && matches!(
+                &receipt.command,
+                Command::ForcePoint { point, .. } | Command::UnforcePoint { point }
+                    if *point == FORCED
+            )
+        {
+            assert!(
+                receipt
+                    .actor
+                    .as_deref()
+                    .is_some_and(|actor| actor.starts_with("checkpoint")),
+                "a post-restart force change must journal naming the \
+                 adopting source: {receipt:?}"
+            );
+        }
+    }
+    // And the release itself survives the restart in the durable
+    // record — replayed, not re-settled.
+    assert_eq!(
+        settled_receipts(&journal)
+            .iter()
+            .filter(|receipt| receipt.command == unforce)
+            .count(),
+        1,
+        "the unforce must appear exactly once in B's durable journal: {journal:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

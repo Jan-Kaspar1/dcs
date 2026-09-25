@@ -24,8 +24,8 @@
 //! named error and the old active keeps the field.
 
 use dcs_core::{
-    CarryoverReport, Command, DroppedElement, IoDriver, JournalEvent, PointId, Role, StandbySync,
-    SwitchError, Value, ValueKind,
+    CarryoverReport, Command, DroppedElement, IoDriver, JournalEvent, PointId, RevertedParameter,
+    Role, StandbySync, SwitchError, Value, ValueKind,
 };
 use dcs_model::PlantModel;
 use dcs_monitor::MonitorClient;
@@ -207,8 +207,12 @@ fn run_roll(tag: &str) -> serde_json::Value {
     let field = RemoteDriver::connect(plant.addr).unwrap();
 
     // The run's operator inputs land by command — point 11 is the
-    // controllers' internal held setpoint — then N ticks of pair
-    // operation carry the crossings every pull.
+    // controllers' internal held setpoint — plus one receipted
+    // parameter tune on `analog-input:1`, the component whose identity
+    // survives the revision: its checkpointed `raw_min` differs from the
+    // declared default, so the crossing must itemize it as reverted
+    // tuning. Then N ticks of pair operation carry the crossings every
+    // pull.
     for (point, value) in [
         (SETPOINT, Value::Float(OPERATING_POINT)),
         (DROPPED_KNOB, Value::Float(7.0)),
@@ -229,6 +233,20 @@ fn run_roll(tag: &str) -> serde_json::Value {
             "{receipt:?}"
         );
     }
+    let receipt = active
+        .command(&Command::SetParameter {
+            component: "analog-input:1".to_string(),
+            name: "raw_min".to_string(),
+            value: Value::Float(4.5),
+        })
+        .unwrap();
+    assert!(
+        matches!(
+            receipt.outcome,
+            dcs_core::CommandOutcome::Applied { .. } | dcs_core::CommandOutcome::Accepted { .. }
+        ),
+        "{receipt:?}"
+    );
     for _ in 0..N {
         standby.advance(1).unwrap();
         active.advance(1).unwrap();
@@ -276,6 +294,21 @@ fn run_roll(tag: &str) -> serde_json::Value {
     assert_eq!(
         report.reinitialized,
         vec!["analog-input:1".to_string(), "pid:3".to_string()]
+    );
+    // The receipted tune does not carry — component state reinitializes
+    // by rule — so the report itemizes exactly the one declared
+    // parameter whose checkpointed value differed from the revision's
+    // declared default: `raw_min` tuned 4.0 → 4.5 on the old run. The
+    // re-idd `pid:2`'s checkpointed state is dropped by name, not
+    // itemized — its successor `pid:3` has no checkpointed entry.
+    assert_eq!(
+        report.reverted_tuning,
+        vec![RevertedParameter {
+            component: "analog-input:1".to_string(),
+            parameter: "raw_min".to_string(),
+            checkpointed: Value::Float(4.5),
+            declared: Value::Float(4.0),
+        }]
     );
     assert_eq!(report.initialized, vec![NEW_KNOB]);
     // The carried value stands in the revised run's image and the new
@@ -355,7 +388,7 @@ fn run_roll(tag: &str) -> serde_json::Value {
             .unwrap()
             .iter()
             .filter_map(|entry| match entry.event {
-                JournalEvent::RoleChanged { from, to } => Some((from, to)),
+                JournalEvent::RoleChanged { from, to, .. } => Some((from, to)),
                 _ => None,
             })
             .collect()

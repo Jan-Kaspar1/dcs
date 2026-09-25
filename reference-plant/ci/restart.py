@@ -50,21 +50,23 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 
 import simulate
+
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "legs")
+)
+
+import pair
 
 
 def eprint(*args):
     print(*args, file=sys.stderr)
 
 
-class Abort(Exception):
-    """A restart-contract check failed mid-run. Carrying a message, the
-    message is itself the failure; raised bare it only unwinds
-    `run_legs` after the hook already recorded its failures."""
+Abort = pair.Abort
 
 
 class MonitorRef:
@@ -76,77 +78,6 @@ class MonitorRef:
 
     def __str__(self):
         return self.url
-
-
-def stop(process):
-    """Terminate a spawned child, escalating to kill if it lingers."""
-    if process is None or process.poll() is not None:
-        return
-    process.terminate()
-    try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=10)
-
-
-def spawn_controller(controller, model, dt, plant_addr, state_file, journal_file):
-    """Spawn `dcs-controller --remote … --driven` carrying the
-    persistence flags. Returns `(process, monitor_url, preamble)`:
-    `monitor_url` is None when the process exits before reporting a
-    listener — the preamble then carries the startup refusal's stderr
-    lines. A resumed process reports `resumed from state file …` ahead
-    of its listener, so the preamble is also where the resume is read."""
-    process = subprocess.Popen(
-        [
-            controller,
-            model,
-            "--remote",
-            plant_addr,
-            "--driven",
-            "--listen",
-            "127.0.0.1:0",
-            "--dt",
-            str(dt),
-            "--state-file",
-            state_file,
-            "--journal-file",
-            journal_file,
-        ],
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    preamble = []
-    for line in process.stderr:
-        line = line.strip()
-        if "listening on" in line:
-            return process, "http://" + line.rsplit(None, 1)[-1], preamble
-        preamble.append(line)
-    process.wait(timeout=10)
-    return process, None, preamble
-
-
-def journal_records(path):
-    """The `--journal-file`'s lines in file order: `("boundary",
-    {"run", "tick"})` markers and `("entry", entry)` records."""
-    records = []
-    with open(path) as handle:
-        for number, line in enumerate(handle, 1):
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError as error:
-                raise Abort(
-                    f"journal file {path} line {number} does not parse: {error}"
-                )
-            if "run_boundary" in record:
-                records.append(("boundary", record["run_boundary"]))
-            elif "entry" in record:
-                records.append(("entry", record["entry"]))
-            else:
-                raise Abort(
-                    f"journal file {path} line {number} is not a journal record"
-                )
-    return records
 
 
 def check_journal(records, persisted, failures):
@@ -164,16 +95,6 @@ def check_journal(records, persisted, failures):
     seqs = [record["seq"] for kind, record in records if kind == "entry"]
     if seqs != list(range(1, len(seqs) + 1)):
         failures.append(f"the journal file's entry seqs are not 1..n in order: {seqs}")
-
-
-def select_snapshot(snapshot):
-    """The run-state sections a resumed run must reproduce — the field
-    image plus the checkpoint-carried force set and parameters. The
-    monitor-stamped `publication` section is monitor-local and
-    excluded."""
-    return {
-        key: snapshot.get(key) for key in ("tick", "points", "forces", "parameters")
-    }
 
 
 def manifest_persistence(path):
@@ -217,30 +138,20 @@ def interrupted_pass(args, scenario, persistence, tamper):
     monitor = MonitorRef()
     plant = controller = client = None
     try:
-        plant = subprocess.Popen(
-            [
-                args.plant_server,
-                args.model,
-                "--dynamics",
-                args.dynamics,
-                "--listen",
-                "127.0.0.1:0",
-            ],
-            stderr=subprocess.PIPE,
-            text=True,
+        plant, plant_addr = pair.spawn_plant(
+            args.plant_server, args.model, args.dynamics
         )
-        plant_addr = simulate.listen_address(plant, "dcs-plant-server")
         client = simulate.PlantClient(plant_addr)
 
         def launch():
             nonlocal controller
-            controller, monitor.url, preamble = spawn_controller(
+            controller, monitor.url, preamble = pair.spawn_peer(
                 args.controller,
                 args.model,
                 scenario["dt"],
                 plant_addr,
-                state_file,
-                journal_file,
+                None,
+                {"state_file": state_file, "journal_file": journal_file},
             )
             return preamble
 
@@ -260,7 +171,7 @@ def interrupted_pass(args, scenario, persistence, tamper):
                 return
             stopped = simulate.http(f"{monitor}/snapshot")
             served = simulate.http(f"{monitor}/journal")
-            stop(controller)
+            pair.stop(controller)
 
             if not os.path.exists(state_file):
                 failures.append(
@@ -283,7 +194,7 @@ def interrupted_pass(args, scenario, persistence, tamper):
                     f"the run stood at {stopped['tick']}"
                 )
                 raise Abort
-            records = journal_records(journal_file)
+            records = pair.journal_records(journal_file)
             boundaries = [
                 record for kind, record in records if kind == "boundary"
             ]
@@ -379,7 +290,7 @@ def interrupted_pass(args, scenario, persistence, tamper):
                 )
                 raise Abort
             evidence["replayed_entries"] = len(replayed)
-            check_journal(journal_records(journal_file), persisted, failures)
+            check_journal(pair.journal_records(journal_file), persisted, failures)
             if failures:
                 raise Abort
 
@@ -388,12 +299,12 @@ def interrupted_pass(args, scenario, persistence, tamper):
         )
         failures += leg_failures
         if not failures:
-            records = journal_records(journal_file)
+            records = pair.journal_records(journal_file)
             check_journal(records, evidence["persisted_tick"], failures)
             evidence["journal_entries"] = sum(
                 1 for kind, _record in records if kind == "entry"
             )
-            evidence["final"] = select_snapshot(
+            evidence["final"] = pair.select_snapshot(
                 simulate.http(f"{monitor}/snapshot")
             )
     except Abort as abort:
@@ -401,10 +312,10 @@ def interrupted_pass(args, scenario, persistence, tamper):
     except Exception as error:
         failures.append(f"the run raised {error!r}")
     finally:
-        stop(controller)
+        pair.stop(controller)
         if client is not None:
             client.close()
-        stop(plant)
+        pair.stop(plant)
         shutil.rmtree(scratch, ignore_errors=True)
     return digest_entries, evidence, failures
 
@@ -423,7 +334,7 @@ def reference_pass(args, scenario):
         entries, failures = simulate.run_legs(monitor, client, scenario["legs"])
         snapshot = simulate.http(f"{monitor}/snapshot")
         client.close()
-    return entries, failures, select_snapshot(snapshot)
+    return entries, failures, pair.select_snapshot(snapshot)
 
 
 def main():

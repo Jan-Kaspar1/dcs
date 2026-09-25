@@ -127,9 +127,9 @@ fn sim_input_holding_an_old_tick_turns_stale() {
 
         // Scans 1 and 2 lag by one and two ticks — inside the budget of
         // 2 — and the image stamps the scan tick, never the driver's.
-        executor.scan().unwrap();
+        executor.scan();
         driver.step(0.1).unwrap();
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             image_sample(&executor, MEASUREMENT),
             Sample::good(Value::Float(7.0), Tick(2))
@@ -138,7 +138,7 @@ fn sim_input_holding_an_old_tick_turns_stale() {
         // Scan 3's lag of 3 exceeds the budget: the held value lands as
         // Uncertain(Stale) at the scan tick.
         driver.step(0.1).unwrap();
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             image_sample(&executor, MEASUREMENT),
             Sample::new(
@@ -158,7 +158,7 @@ fn sim_input_holding_an_old_tick_turns_stale() {
         // The first sample the device refreshes inside the budget
         // returns the driver's own Good quality.
         driver.write(MEASUREMENT, Value::Float(9.0)).unwrap();
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             image_sample(&executor, MEASUREMENT),
             Sample::good(Value::Float(9.0), Tick(4))
@@ -182,7 +182,7 @@ fn bus_register_holding_an_old_tick_turns_stale() {
             .unwrap();
         driver.step(0.1).unwrap();
         for _ in 0..3 {
-            executor.scan().unwrap();
+            executor.scan();
             driver.step(0.1).unwrap();
         }
         // Three lags inside the budget of 3 stay Good.
@@ -193,7 +193,7 @@ fn bus_register_holding_an_old_tick_turns_stale() {
 
         // The fourth scan's lag exceeds the budget — the register-held
         // value lands as Uncertain(Stale), stamped at the scan tick.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             image_sample(&executor, LEVEL_RAW),
             Sample::new(
@@ -208,7 +208,7 @@ fn bus_register_holding_an_old_tick_turns_stale() {
             .bank()
             .write(LEVEL_REGISTER, Value::Float(7.5))
             .unwrap();
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             image_sample(&executor, LEVEL_RAW),
             Sample::good(Value::Float(7.5), Tick(5))
@@ -225,7 +225,7 @@ fn identical_stale_runs_produce_identical_snapshots() {
             let mut executor = assemble(&model, &ComponentRegistry::new(), &driver).unwrap();
             driver.write(MEASUREMENT, Value::Float(7.0)).unwrap();
             for _ in 0..5 {
-                executor.scan().unwrap();
+                executor.scan();
                 driver.step(0.1).unwrap();
             }
             serde_json::to_string(&executor.snapshot()).unwrap()

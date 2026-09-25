@@ -102,7 +102,47 @@ pub enum PlantRequest {
     /// from a second process reusing it — but the sharing is flagged,
     /// because two field-owning processes pinned to one token defeat
     /// the arbitration this claim exists to provide.
+    ///
+    /// `controller` records whether the claiming attachment belongs to
+    /// a controller peer rather than a field tool: only controller
+    /// claims are the live incumbents a peer's conditional
+    /// [`ClaimWriterUnlessHeld`](Self::ClaimWriterUnlessHeld) refuses
+    /// to preempt — the stale-island rule — while a tool's claim is
+    /// always preemptable by it, so a rogue or merely lingering tool
+    /// hold can never wedge a peer's documented promote recovery.
+    /// Payloads from builds predating the flag carry none and read as
+    /// `true` — an unmarked claim is treated as a controller's, the
+    /// conservative verdict: a mislabeled tool claim only ever refuses
+    /// a takeover a deliberate unconditional claim still runs, where a
+    /// mislabeled controller claim would reopen the stale-island
+    /// preemption the conditional grant exists to refuse.
     ClaimWriter {
+        /// The ownership token the claim asserts.
+        owner: u64,
+        /// Whether the claiming attachment belongs to a controller.
+        #[serde(default = "default_controller_claim")]
+        controller: bool,
+    },
+    /// The launched-controller half of the write-ownership claim: takes
+    /// the claim for `owner` only while no *live* attachment holds a
+    /// different owner's claim — the grant a controller's startup
+    /// activation asserts, and the conditional claim an orphaned peer's
+    /// promotion runs so an islanded run can never seize the field from
+    /// a live incumbent. A claim left standing by a dead owner — its
+    /// holder set empty — is still preempted, so the restart-as-active
+    /// recovery of a crashed owner keeps working, and so is a field
+    /// tool's claim — a tool is not an incumbent a peer must defer to.
+    /// A live *controller's* different-owner unyielded claim is refused
+    /// [`PlantError::Fenced`]: a controller restarted onto stale state,
+    /// or an orphaned peer tracking a diverged island, cannot prove its
+    /// image is current with the incumbent's, so it cannot seize the
+    /// field and silently roll back commands it receipted and applied.
+    /// A granted request binds `owner` to this connection exactly as
+    /// `claim_writer` does — including the
+    /// [`PlantResponse::ClaimedShared`] flag when the token is already
+    /// held by another live attachment — and the claim it lands is
+    /// always recorded as a controller's.
+    ClaimWriterUnlessHeld {
         /// The ownership token the claim asserts.
         owner: u64,
     },
@@ -118,22 +158,81 @@ pub enum PlantRequest {
     /// `owner` to this connection exactly as `claim_writer` does —
     /// including the [`PlantResponse::ClaimedShared`] flag when the
     /// token is already held by another live attachment.
+    ///
+    /// `rebind: false` is the orphan cycle's probe shape: the claim is
+    /// raised or confirmed *for* the token without this attachment
+    /// joining its holders, so a demoted ex-owner can keep its released
+    /// claim fencing the field — and a conditional
+    /// [`ClaimWriterUnlessHeld`](Self::ClaimWriterUnlessHeld) can still
+    /// tell the claim is ownerless — without ever becoming a live
+    /// holder a different owner's conditional claim would read as a
+    /// live incumbent. Requests from builds predating the flag carry
+    /// none and bind as they always did.
+    ///
+    /// `controller` carries the same marker [`ClaimWriter`]'s does: a
+    /// claim this grant raises for a controller's token is recorded as
+    /// a controller claim, so a peer's conditional takeover still
+    /// refuses to preempt it while the owner stays attached. Payloads
+    /// predating the flag read `true`, as `claim_writer`'s does.
     EnsureWriter {
         /// The ownership token the claim asserts.
         owner: u64,
+        /// Whether a grant binds this connection to the claim.
+        #[serde(default = "default_rebind")]
+        rebind: bool,
+        /// Whether the claiming attachment belongs to a controller.
+        #[serde(default = "default_controller_claim")]
+        controller: bool,
     },
-    /// Drop this connection's hold on the write claim. When the
-    /// release empties the claim's holder set the claim itself is
-    /// released and the field returns to `unclaimed`; while other
-    /// holders stand, or the connection holds nothing, nothing changes
-    /// and the answer is `Done`. The claim is persistent by design — a
-    /// holder's disconnect drops only its own hold so a crashed
-    /// owner's claim keeps fencing its stale token — which makes an
-    /// explicit release the tool's counterpart: an attachment that
-    /// claimed conditionally for a mutation (`dcs-plant-ctl`) must
-    /// release afterward rather than leaving a dead token standing
-    /// against the field owner's re-arm.
-    ReleaseWriter,
+    /// Drop this connection's hold on the write claim. `keep_claim:
+    /// false` — the deliberate hand-back a mutation tool performs —
+    /// releases the claim itself when the release empties the holder
+    /// set: the field returns to `unclaimed`, still closed to mutation.
+    /// `keep_claim: true` — the demotion half of the contract — leaves
+    /// the claim standing with this connection's hold removed and marks
+    /// it yielded: the token keeps fencing the field for the ex-owner's
+    /// conditional re-arm, and a conditional
+    /// [`ClaimWriterUnlessHeld`](Self::ClaimWriterUnlessHeld) still
+    /// preempts it despite other attachments — a mutation tool's —
+    /// holding the yielded token live, while a *live incumbent's*
+    /// unyielded claim keeps refusing it. A release from an attachment
+    /// holding nothing changes nothing either way: an empty holder set
+    /// is the dead-owner state the claim exists to fence, not a
+    /// hand-back. Requests from builds predating the flag carry none
+    /// and release fully, as they always did.
+    ReleaseWriter {
+        /// Leave the claim standing, marked yielded, instead of
+        /// releasing it when the holder set empties.
+        #[serde(default)]
+        keep_claim: bool,
+    },
+    /// The read-only half of the writer claim — the claim-state
+    /// observation a tracking peer reports through its role surface.
+    /// The answer is the verdict a mutation from this connection would
+    /// meet, without any mutation: [`PlantResponse::Done`] while this
+    /// connection holds the claim, [`PlantError::Fenced`] while another
+    /// owner does, [`PlantError::Unclaimed`] while no claim stands.
+    /// The probe asserts, joins, and releases nothing — an observation
+    /// cannot seize the field it reports, so reporting `unclaimed`
+    /// leaves the claim exactly as closed as it found it.
+    ProbeWriter,
+}
+
+/// The serde default for [`PlantRequest::EnsureWriter`]'s `rebind`:
+/// requests from builds predating the flag bind the granted token to
+/// the connection exactly as `ensure_writer` always did.
+fn default_rebind() -> bool {
+    true
+}
+
+/// The serde default for the `controller` flag on
+/// [`PlantRequest::ClaimWriter`] and [`PlantRequest::EnsureWriter`]:
+/// requests from builds predating the flag read as controller claims —
+/// the conservative verdict, since a claim mislabeled as a tool's could
+/// be preempted by a peer's conditional grant while its live owner is
+/// exactly the incumbent that grant exists to protect.
+fn default_controller_claim() -> bool {
+    true
 }
 
 /// The server's answer to one [`PlantRequest`].
@@ -194,11 +293,19 @@ pub enum PlantError {
     /// A point-level failure: the [`IoError`] the server's
     /// [`SimDriver`](dcs_sim::SimDriver) returned, carried verbatim so the
     /// client surfaces the identical `UnknownPoint`, `TypeMismatch`,
-    /// `Disconnected`, or `Timeout` a local driver would have produced —
-    /// including faults injected through the protocol.
+    /// `InvalidValue`, `Disconnected`, or `Timeout` a local driver would
+    /// have produced — including faults injected through the protocol.
     Io {
         /// The driver's error.
         error: IoError,
+        /// When `error` is the fencing verdict — the write-ownership
+        /// claim refused this attachment's mutation — the standing
+        /// claim's owner token: who the field serves instead. `None`
+        /// on every other point error and absent on the wire from
+        /// servers predating the field, where the fence's claimant is
+        /// recorded only as "another".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<u64>,
     },
     /// The request itself could not be served: a line that does not parse
     /// as a [`PlantRequest`], or a [`PlantRequest::Step`] whose `dt` is
@@ -216,6 +323,13 @@ pub enum PlantError {
     Fenced {
         /// Why the request was refused.
         detail: String,
+        /// The standing claim's owner token — who the field's
+        /// arbitration serves instead of this attachment. Carried so a
+        /// fenced-out field owner's durable audit can name the
+        /// preempting claimant, not just "another". Absent on the wire
+        /// from servers predating the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<u64>,
     },
     /// The request mutates the shared field but no write-ownership
     /// claim stands at all — the server is fresh or restarted, or the
@@ -244,14 +358,21 @@ pub enum PlantError {
 /// [`io::ErrorKind::InvalidData`] means the line exceeded `max` — a
 /// protocol violation the caller answers by dropping the connection. Other
 /// errors are ordinary I/O failures, `WouldBlock`/`TimedOut` included when
-/// the stream carries a read timeout.
+/// the stream carries a read timeout. An interrupted wait
+/// ([`io::ErrorKind::Interrupted`]) is retried, not reported: a caught
+/// signal is not link trouble — the process can field `SIGCHLD` from
+/// spawned helpers while a request is in flight, and that must not drop
+/// the connection.
 pub(crate) fn read_message(
     reader: &mut BufReader<TcpStream>,
     max: usize,
 ) -> io::Result<Option<Vec<u8>>> {
     let mut line = Vec::with_capacity(128);
     loop {
-        let chunk = reader.fill_buf()?;
+        let chunk = match reader.fill_buf() {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            other => other?,
+        };
         if chunk.is_empty() {
             return Ok(None);
         }
@@ -314,9 +435,24 @@ mod tests {
             },
             PlantRequest::ClearFault { point: PointId(4) },
             PlantRequest::ListPoints,
-            PlantRequest::ClaimWriter { owner: 42 },
-            PlantRequest::EnsureWriter { owner: 43 },
-            PlantRequest::ReleaseWriter,
+            PlantRequest::ClaimWriter {
+                owner: 42,
+                controller: false,
+            },
+            PlantRequest::ClaimWriterUnlessHeld { owner: 44 },
+            PlantRequest::EnsureWriter {
+                owner: 43,
+                rebind: true,
+                controller: true,
+            },
+            PlantRequest::EnsureWriter {
+                owner: 45,
+                rebind: false,
+                controller: true,
+            },
+            PlantRequest::ReleaseWriter { keep_claim: false },
+            PlantRequest::ReleaseWriter { keep_claim: true },
+            PlantRequest::ProbeWriter,
         ];
         for request in requests {
             let json = serde_json::to_string(&request).unwrap();
@@ -346,16 +482,56 @@ mod tests {
             r#"{"op":"list_points"}"#
         );
         assert_eq!(
-            serde_json::to_string(&PlantRequest::ClaimWriter { owner: 42 }).unwrap(),
-            r#"{"op":"claim_writer","owner":42}"#
+            serde_json::to_string(&PlantRequest::ClaimWriter {
+                owner: 42,
+                controller: false
+            })
+            .unwrap(),
+            r#"{"op":"claim_writer","owner":42,"controller":false}"#
         );
         assert_eq!(
-            serde_json::to_string(&PlantRequest::EnsureWriter { owner: 43 }).unwrap(),
-            r#"{"op":"ensure_writer","owner":43}"#
+            serde_json::to_string(&PlantRequest::ClaimWriterUnlessHeld { owner: 44 }).unwrap(),
+            r#"{"op":"claim_writer_unless_held","owner":44}"#
         );
         assert_eq!(
-            serde_json::to_string(&PlantRequest::ReleaseWriter).unwrap(),
-            r#"{"op":"release_writer"}"#
+            serde_json::to_string(&PlantRequest::EnsureWriter {
+                owner: 43,
+                rebind: true,
+                controller: true
+            })
+            .unwrap(),
+            r#"{"op":"ensure_writer","owner":43,"rebind":true,"controller":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PlantRequest::ReleaseWriter { keep_claim: false }).unwrap(),
+            r#"{"op":"release_writer","keep_claim":false}"#
+        );
+        // The pre-flag wire shapes still decode: an absent `rebind`
+        // binds, an absent `keep_claim` releases fully, and an absent
+        // `controller` reads as a controller claim — the contract every
+        // earlier build's requests carried.
+        assert_eq!(
+            serde_json::from_str::<PlantRequest>(r#"{"op":"ensure_writer","owner":43}"#).unwrap(),
+            PlantRequest::EnsureWriter {
+                owner: 43,
+                rebind: true,
+                controller: true
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<PlantRequest>(r#"{"op":"claim_writer","owner":42}"#).unwrap(),
+            PlantRequest::ClaimWriter {
+                owner: 42,
+                controller: true
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<PlantRequest>(r#"{"op":"release_writer"}"#).unwrap(),
+            PlantRequest::ReleaseWriter { keep_claim: false }
+        );
+        assert_eq!(
+            serde_json::to_string(&PlantRequest::ProbeWriter).unwrap(),
+            r#"{"op":"probe_writer"}"#
         );
     }
 
@@ -383,6 +559,7 @@ mod tests {
             PlantResponse::Error {
                 error: PlantError::Io {
                     error: IoError::UnknownPoint(PointId(4)),
+                    owner: None,
                 },
             },
             PlantResponse::Error {
@@ -392,11 +569,19 @@ mod tests {
                         expected: ValueKind::Float,
                         found: Value::Bool(true),
                     },
+                    owner: None,
                 },
             },
             PlantResponse::Error {
                 error: PlantError::Io {
                     error: IoError::Timeout(PointId(6)),
+                    owner: None,
+                },
+            },
+            PlantResponse::Error {
+                error: PlantError::Io {
+                    error: IoError::InvalidValue { point: PointId(8) },
+                    owner: None,
                 },
             },
             PlantResponse::Error {
@@ -407,6 +592,7 @@ mod tests {
             PlantResponse::Error {
                 error: PlantError::Fenced {
                     detail: "another attachment owns field writes".to_string(),
+                    owner: Some(424242),
                 },
             },
             PlantResponse::Error {
@@ -452,6 +638,7 @@ mod tests {
             serde_json::to_string(&PlantResponse::Error {
                 error: PlantError::Io {
                     error: IoError::UnknownPoint(PointId(4)),
+                    owner: None,
                 },
             })
             .unwrap(),
@@ -465,6 +652,55 @@ mod tests {
             })
             .unwrap(),
             r#"{"result":"error","error":{"kind":"unclaimed","detail":"no attachment holds field writes"}}"#
+        );
+        // The fencing verdicts name the standing claim's owner — the
+        // claimant the fenced-out owner's audit trail records — while
+        // a `None` keeps the pre-field payload shape byte-identical.
+        assert_eq!(
+            serde_json::to_string(&PlantResponse::Error {
+                error: PlantError::Fenced {
+                    detail: "another attachment owns field writes".to_string(),
+                    owner: Some(424242),
+                },
+            })
+            .unwrap(),
+            r#"{"result":"error","error":{"kind":"fenced","detail":"another attachment owns field writes","owner":424242}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PlantResponse::Error {
+                error: PlantError::Io {
+                    error: IoError::Fenced(PointId(101)),
+                    owner: Some(424242),
+                },
+            })
+            .unwrap(),
+            r#"{"result":"error","error":{"kind":"io","error":{"fenced":101},"owner":424242}}"#
+        );
+        // A fenced answer from a build predating the field carries no
+        // owner and decodes to the unattributed verdict.
+        assert_eq!(
+            serde_json::from_str::<PlantResponse>(
+                r#"{"result":"error","error":{"kind":"fenced","detail":"another attachment owns field writes"}}"#
+            )
+            .unwrap(),
+            PlantResponse::Error {
+                error: PlantError::Fenced {
+                    detail: "another attachment owns field writes".to_string(),
+                    owner: None,
+                },
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<PlantResponse>(
+                r#"{"result":"error","error":{"kind":"io","error":{"fenced":101}}}"#
+            )
+            .unwrap(),
+            PlantResponse::Error {
+                error: PlantError::Io {
+                    error: IoError::Fenced(PointId(101)),
+                    owner: None,
+                },
+            }
         );
     }
 
@@ -511,6 +747,7 @@ mod tests {
                         expected: ValueKind::Float,
                         found: Value::Bool(true),
                     },
+                    owner: None,
                 },
             }
         );

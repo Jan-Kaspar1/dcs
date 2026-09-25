@@ -1,11 +1,12 @@
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from qa_lane import revision, runner, state as qa_state
+from qa_lane import revision, runner, scenarios, state as qa_state
 
 
 SHA_A = 'a' * 40
@@ -97,6 +98,8 @@ class ReconcileTests(unittest.TestCase):
         self.assertTrue(any(a[0] == 'rm' and 'dead0' in a for a in calls))
 
 
+@unittest.skipUnless(os.name == 'posix',
+                     'runner.cycle serializes through a POSIX flock')
 class CycleTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -193,6 +196,115 @@ class RestartActionTests(unittest.TestCase):
                     'qa-1', 'active',
                     lambda event, detail=None: events.append(event))
         self.assertEqual(events, ['controller-restart'])
+
+
+class ColdRestartActionTests(unittest.TestCase):
+    """The scenario-callable cold restart: stop, drop the named
+    controller's host-side state.json inside the bounded run dir —
+    the journal file stays, its run-boundary marker part of the
+    evidence — then start, both docker halves on the timeline."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.run_dir = Path(self.tmp.name) / 'runs' / 'qa-1'
+        self.a_dir = self.run_dir / 'controllers' / 'a'
+        self.b_dir = self.run_dir / 'controllers' / 'b'
+        for directory in (self.a_dir, self.b_dir):
+            directory.mkdir(parents=True)
+            (directory / 'state.json').write_text('{"tick": 400}')
+            (directory / 'journal.jsonl').write_text(
+                '{"run_boundary": {"run": 1, "tick": 0}}\n')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _cold_restart(self, name='active', docker=None, events=None):
+        calls = []
+        if docker is None:
+            def docker(*args, timeout=120, check=True):
+                calls.append(args)
+                return Result('')
+        seen = events if events is not None else []
+        with patch.object(runner, 'docker', docker):
+            runner.cold_restart_controller(
+                'qa-1', self.run_dir, name,
+                lambda event, detail=None: seen.append((event, detail)))
+        return calls, seen
+
+    def test_stop_remove_start_recorded_on_timeline(self):
+        calls, events = self._cold_restart()
+        self.assertEqual(
+            calls, [('stop', '--time', '2', 'dcs-hw-qa-1-a'),
+                    ('start', 'dcs-hw-qa-1-a')])
+        self.assertEqual([event for event, _ in events],
+                         ['controller-cold-restart',
+                          'controller-cold-restarted'])
+        self.assertIn('dcs-hw-qa-1-a', events[0][1])
+        self.assertFalse((self.a_dir / 'state.json').exists())
+        self.assertTrue((self.a_dir / 'journal.jsonl').exists())
+
+    def test_standby_endpoint_drops_b_state_only(self):
+        calls, _ = self._cold_restart(name='standby')
+        self.assertEqual(calls[0][-1], 'dcs-hw-qa-1-b')
+        self.assertEqual(calls[1], ('start', 'dcs-hw-qa-1-b'))
+        self.assertFalse((self.b_dir / 'state.json').exists())
+        self.assertTrue((self.b_dir / 'journal.jsonl').exists())
+        self.assertTrue((self.a_dir / 'state.json').exists())
+
+    def test_state_removal_stays_inside_the_run_dir(self):
+        # The removed path resolves under the bounded run dir — the
+        # peer's sibling state and journal survive, and nothing outside
+        # the run dir is touched.
+        before_b = (self.b_dir / 'state.json').read_text()
+        self._cold_restart()
+        self.assertFalse((self.a_dir / 'state.json').exists())
+        self.assertEqual((self.b_dir / 'state.json').read_text(),
+                         before_b)
+        touched = sorted(p for p in self.run_dir.rglob('*'))
+        self.assertNotIn(self.a_dir / 'state.json', touched)
+
+    def test_missing_state_file_still_restarts(self):
+        (self.a_dir / 'state.json').unlink()
+        calls, events = self._cold_restart()
+        self.assertEqual(calls[0][0], 'stop')
+        self.assertEqual(calls[1], ('start', 'dcs-hw-qa-1-a'))
+        self.assertIn('already absent', events[1][1])
+
+    def test_failed_stop_raises_after_recording_the_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'stop' and check:
+                raise RuntimeError('docker stop failed: no such')
+            return Result('')
+
+        with self.assertRaises(RuntimeError):
+            self._cold_restart(docker=raising, events=events)
+        self.assertEqual([event for event, _ in events],
+                         ['controller-cold-restart'])
+        self.assertTrue((self.a_dir / 'state.json').exists())
+
+    def test_scenario_ctx_carries_the_cold_restart_action(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        record = {'run_id': 'qa-1', 'attempted_sha': SHA_A}
+        with patch.object(runner, 'docker', fake_docker):
+            ctx = runner._scenario_ctx(
+                dict(runner.DEFAULT_CONFIG), record, Path('src'),
+                self.run_dir, 'evidence', 0,
+                lambda event, detail=None: events.append(event))
+            ctx['cold_restart_controller']('standby')
+        self.assertEqual(calls, [('stop', '--time', '2',
+                                  'dcs-hw-qa-1-b'),
+                                 ('start', 'dcs-hw-qa-1-b')])
+        self.assertFalse((self.b_dir / 'state.json').exists())
+        self.assertTrue((self.b_dir / 'journal.jsonl').exists())
+        self.assertIn('controller-cold-restart', events)
+        self.assertIn('controller-cold-restarted', events)
 
 
 class LifecycleActionTests(unittest.TestCase):
@@ -444,6 +556,314 @@ class RigStateFileTests(unittest.TestCase):
         self.assertFalse(self.run_dir.exists())
 
 
+class OwnerTokenPinTests(unittest.TestCase):
+    """The per-controller --owner-token pins the run config records:
+    every controller the runner launches — the pair and the
+    scenario-action third peers — carries its endpoint's pinned
+    token, so a scenario plant-protocol attachment can share the
+    standing owner's claim through ensure_writer (the designed
+    harness path) instead of preempting it; ctx['plant_owner'] hands
+    the cases the same recorded map."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        self.run_dir.mkdir(parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+        self.model = self.src / self.cfg['model_fixture']
+        self.model.parent.mkdir(parents=True, exist_ok=True)
+        self.model.write_text(json.dumps(
+            {'version': 1,
+             'devices': [{'id': 1, 'kind': 'sim-di',
+                          'channels': [{'name': 'ch0',
+                                        'direction': 'in',
+                                        'value_type': 'bool'}]}],
+             'io_points': [
+                 {'id': 10, 'direction': 'in', 'value_type': 'bool',
+                  'channel': {'device': 1, 'channel': 'ch0'}},
+                 {'id': 300, 'direction': 'in', 'value_type': 'bool',
+                  'writable': True, 'initial': {'bool': False}}],
+             'signals': [{'id': 10300, 'name': 'oos', 'source': 300}],
+             'components': [], 'connections': []}))
+        dynamics = self.src / self.cfg['dynamics_fixture']
+        dynamics.parent.mkdir(parents=True, exist_ok=True)
+        dynamics.write_text('{}')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _record(self):
+        return {'run_id': 'qa-1', 'attempted_sha': SHA_A}
+
+    @staticmethod
+    def _docker(calls):
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+        return fake_docker
+
+    @staticmethod
+    def _launch(calls, container):
+        return next(c for c in calls
+                    if c[0] == 'run' and container in c)
+
+    @staticmethod
+    def _owner_token(launch):
+        return launch[launch.index('--owner-token') + 1]
+
+    def test_pair_launches_carry_the_config_pins(self):
+        calls = []
+
+        class FakeConn:
+            def close(self):
+                pass
+
+        with patch.object(runner, 'docker', self._docker(calls)), \
+                patch.object(runner.socket, 'create_connection',
+                             return_value=FakeConn()):
+            runner._start_rig(self.cfg, self._record(), self.src,
+                              self.run_dir, lambda e, d=None: None)
+        tokens = self.cfg['plant_owner_tokens']
+        for key, container in (('active', 'dcs-hw-qa-1-a'),
+                               ('standby', 'dcs-hw-qa-1-b')):
+            launch = self._launch(calls, container)
+            self.assertEqual(self._owner_token(launch),
+                             str(tokens[key]), key)
+        self.assertNotEqual(tokens['active'], tokens['standby'])
+
+    def test_pins_come_from_the_run_config_not_a_constant(self):
+        # A config-file override is what the launch carries — the pin
+        # is recorded in the run config, not buried in the code.
+        self.cfg['plant_owner_tokens'] = {
+            **self.cfg['plant_owner_tokens'], 'active': 424299}
+        calls = []
+
+        class FakeConn:
+            def close(self):
+                pass
+
+        with patch.object(runner, 'docker', self._docker(calls)), \
+                patch.object(runner.socket, 'create_connection',
+                             return_value=FakeConn()):
+            runner._start_rig(self.cfg, self._record(), self.src,
+                              self.run_dir, lambda e, d=None: None)
+        launch = self._launch(calls, 'dcs-hw-qa-1-a')
+        self.assertEqual(self._owner_token(launch), '424299')
+
+    def test_every_third_controller_launch_carries_its_pin(self):
+        calls, events = [], []
+        with patch.object(runner, 'docker', self._docker(calls)):
+            runner.start_revised_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'standby', lambda e, d=None: events.append((e, d)))
+            runner.start_foreign_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'standby', lambda e, d=None: events.append((e, d)))
+            runner.start_driven_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'standby', lambda e, d=None: events.append((e, d)))
+        tokens = self.cfg['plant_owner_tokens']
+        for key, container in (('revised', 'dcs-hw-qa-1-c'),
+                               ('foreign', 'dcs-hw-qa-1-foreign'),
+                               ('driven', 'dcs-hw-qa-1-d')):
+            launch = self._launch(calls, container)
+            self.assertEqual(self._owner_token(launch),
+                             str(tokens[key]), key)
+        self.assertEqual(
+            len({tokens[key] for key in
+                 ('revised', 'foreign', 'driven')}), 3)
+        # Each launch record names the pin it carried.
+        for event, detail in events:
+            if event in ('model-revision-start', 'negotiation-start',
+                         'driven-start'):
+                self.assertIn('--owner-token', detail, event)
+
+    def test_scenario_ctx_hands_cases_the_recorded_map(self):
+        ctx = runner._scenario_ctx(
+            self.cfg, self._record(), self.src, self.run_dir,
+            self.run_dir / 'evidence', 0, lambda e, d=None: None)
+        self.assertEqual(ctx['plant_owner'],
+                         self.cfg['plant_owner_tokens'])
+        self.assertEqual(set(ctx['plant_owner']),
+                         set(runner.OWNER_TOKEN_ENDPOINTS))
+
+    def test_a_duplicated_pin_fails_the_launch_loudly(self):
+        # Two endpoints on one token would silently defeat the sim's
+        # single-writer fencing — the config check refuses before any
+        # container launches.
+        self.cfg['plant_owner_tokens'] = {
+            **self.cfg['plant_owner_tokens'],
+            'standby': self.cfg['plant_owner_tokens']['active']}
+        calls = []
+        with patch.object(runner, 'docker', self._docker(calls)):
+            with self.assertRaises(RuntimeError) as caught:
+                runner._start_rig(self.cfg, self._record(), self.src,
+                                  self.run_dir, lambda e, d=None: None)
+            self.assertIn('distinct', str(caught.exception))
+            with self.assertRaises(RuntimeError):
+                runner.start_revised_controller(
+                    self.cfg, self._record(), self.run_dir, self.model,
+                    'standby', lambda e, d=None: None)
+        self.assertFalse(any(c[0] == 'run' for c in calls))
+
+    def test_a_missing_pin_fails_the_launch_loudly(self):
+        tokens = dict(self.cfg['plant_owner_tokens'])
+        del tokens['revised']
+        self.cfg['plant_owner_tokens'] = tokens
+        with patch.object(runner, 'docker', self._docker([])):
+            with self.assertRaises(RuntimeError) as caught:
+                runner.start_revised_controller(
+                    self.cfg, self._record(), self.run_dir, self.model,
+                    'standby', lambda e, d=None: None)
+        self.assertIn('revised', str(caught.exception))
+
+    def test_a_non_integer_pin_fails_the_launch_loudly(self):
+        self.cfg['plant_owner_tokens'] = {
+            **self.cfg['plant_owner_tokens'], 'driven': 'qa-d'}
+        with patch.object(runner, 'docker', self._docker([])):
+            with self.assertRaises(RuntimeError):
+                runner.start_driven_controller(
+                    self.cfg, self._record(), self.run_dir, self.model,
+                    'standby', lambda e, d=None: None)
+
+
+class EndpointPlacementTests(unittest.TestCase):
+    """The rig bridge-to-host reachability rule the qax-20260922-001,
+    qax-20260922-005, and qax-20260923-001 exploration runs
+    demonstrated, recorded in the run config: the host egress policy
+    drops every rig-network packet aimed at a host socket, so an
+    endpoint a rig peer must dial (forge/interposer/plant-probe) runs
+    bridge-placed in a labeled rig-bridge container while host-side
+    attachments reach rig services through the published loopback
+    ports only. _scenario_ctx hands the cases the recorded map and
+    the run's bridge name."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        self.run_dir.mkdir(parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _record(self):
+        return {'run_id': 'qa-1', 'attempted_sha': SHA_A}
+
+    def _ctx(self):
+        return runner._scenario_ctx(
+            self.cfg, self._record(), self.src, self.run_dir,
+            self.run_dir / 'evidence', 0, lambda e, d=None: None)
+
+    def test_default_config_records_every_lane_endpoint(self):
+        placements = self.cfg['endpoint_placement']
+        self.assertEqual(set(placements),
+                         set(runner.PLACEMENT_ENDPOINTS))
+        # The endpoints rig peers must dial are recorded 'bridge': a
+        # host socket is unreachable from the rig network.
+        for key in ('forge', 'interposer'):
+            self.assertEqual(placements[key], 'bridge', key)
+        for key in ('active', 'standby', 'revised', 'foreign',
+                    'driven', 'plant'):
+            self.assertEqual(placements[key], 'loopback', key)
+
+    def test_scenario_ctx_hands_cases_the_recorded_map(self):
+        ctx = self._ctx()
+        self.assertEqual(ctx['endpoint_placement'],
+                         self.cfg['endpoint_placement'])
+        self.assertEqual(set(ctx['endpoint_placement']),
+                         set(runner.PLACEMENT_ENDPOINTS))
+        self.assertEqual(ctx['rig_network'], 'dcs-hwtest-qa-1')
+
+    def test_selection_comes_from_the_run_config_not_a_constant(self):
+        # A config-file override is what the ctx carries — the
+        # placement is recorded in the run config, not buried in code.
+        self.cfg['endpoint_placement'] = {
+            **self.cfg['endpoint_placement'], 'forge': 'loopback'}
+        self.assertEqual(self._ctx()['endpoint_placement']['forge'],
+                         'loopback')
+
+    def test_a_missing_placement_fails_loudly(self):
+        placements = dict(self.cfg['endpoint_placement'])
+        del placements['forge']
+        self.cfg['endpoint_placement'] = placements
+        with self.assertRaises(RuntimeError) as caught:
+            self._ctx()
+        self.assertIn('forge', str(caught.exception))
+
+    def test_an_unknown_placement_fails_loudly(self):
+        self.cfg['endpoint_placement'] = {
+            **self.cfg['endpoint_placement'], 'interposer': 'host'}
+        with self.assertRaises(RuntimeError):
+            self._ctx()
+
+    def test_start_rig_fails_closed_on_a_bad_record(self):
+        # A malformed map stops the launch before any container moves.
+        self.cfg['endpoint_placement'] = {'active': 'loopback'}
+        for fixture in (self.cfg['model_fixture'],
+                        self.cfg['dynamics_fixture']):
+            path = self.src / fixture
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{}')
+        calls = []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            with self.assertRaises(RuntimeError):
+                runner._start_rig(self.cfg, self._record(), self.src,
+                                  self.run_dir, lambda e, d=None: None)
+        self.assertFalse(any(c[0] == 'run' for c in calls))
+
+    def test_start_rig_refuses_a_loopback_endpoint_marked_bridge(self):
+        # The pair's monitor ports and the plant probe port publish on
+        # host loopback — a config recording them 'bridge' describes a
+        # rig this launch does not build, so the launch refuses.
+        self.cfg['endpoint_placement'] = {
+            **self.cfg['endpoint_placement'], 'plant': 'bridge'}
+        for fixture in (self.cfg['model_fixture'],
+                        self.cfg['dynamics_fixture']):
+            path = self.src / fixture
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{}')
+        calls = []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            with self.assertRaises(RuntimeError) as caught:
+                runner._start_rig(self.cfg, self._record(), self.src,
+                                  self.run_dir, lambda e, d=None: None)
+        self.assertIn('plant', str(caught.exception))
+        self.assertFalse(any(c[0] == 'run' for c in calls))
+
+    def test_tracking_source_auth_leg_references_the_note(self):
+        # The demote-forged-standby-source docstring's
+        # forged-checkpoint endpoint is placed per the recorded rule
+        # — 'bridge', never a host socket the rig cannot reach.
+        doc = scenarios.__doc__
+        auth = doc[doc.index('demote-forged-standby-source'):]
+        auth = auth[:auth.index('command-record audit')]
+        self.assertIn('endpoint_placement', auth)
+        self.assertIn('bridge', auth)
+
+    def test_shared_claim_legs_reference_the_note(self):
+        # The shared-claim paragraph records the plant-probe
+        # attachments' published-loopback placement and the
+        # bridge-placed alternative for rig-side attachments.
+        doc = scenarios.__doc__
+        self.assertGreaterEqual(doc.count('endpoint_placement'), 2)
+        shared = doc[doc.index('shared-claim'):]
+        self.assertIn('endpoint_placement', shared)
+        self.assertIn('published loopback port', shared)
+
+
 class DcsCtlBuildTests(unittest.TestCase):
     """The dcs-ctl host-binary seam: the bounded image build compiles
     the operator CLI beside the image binaries, _scenario_ctx hands its
@@ -463,7 +883,9 @@ class DcsCtlBuildTests(unittest.TestCase):
 
     def _fake_docker(self, calls, binaries=('dcs-controller',
                                             'dcs-plant-server',
-                                            'dcs-ctl')):
+                                            'dcs-plant-ctl',
+                                            'dcs-ctl',
+                                            'dcs-forge')):
         def fake_docker(*args, timeout=120, check=True):
             calls.append(args)
             if args[0] == 'run' and 'cargo' in str(args):
@@ -493,7 +915,8 @@ class DcsCtlBuildTests(unittest.TestCase):
         with patch.object(runner, 'docker',
                           self._fake_docker(
                               [], binaries=('dcs-controller',
-                                            'dcs-plant-server'))):
+                                            'dcs-plant-server',
+                                            'dcs-plant-ctl'))):
             with self.assertRaises(RuntimeError):
                 runner._build_images(self.src, self.cfg, self.run_dir,
                                      lambda e, d=None: None, 'qa-1')
@@ -506,6 +929,105 @@ class DcsCtlBuildTests(unittest.TestCase):
         self.assertEqual(ctx['dcs_ctl'],
                          str(Path(self.cfg['state_dir']) / 'build-cache'
                              / 'target' / 'release' / 'dcs-ctl'))
+
+
+class PlantCtlShipTests(unittest.TestCase):
+    """The dcs-plant-ctl image seam: the bounded image build compiles
+    the plant-side tool beside the image binaries, the generated plant
+    image ships it beside dcs-plant-server with the entrypoint
+    unchanged, _scenario_ctx hands the cases a `docker exec`
+    invocation against the container's loopback listener, and a build
+    that produces no tool binary fails loudly rather than leaving the
+    cases to run against a phantom tool."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        self.run_dir.mkdir(parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _fake_docker(self, calls, binaries=('dcs-controller',
+                                            'dcs-plant-server',
+                                            'dcs-plant-ctl',
+                                            'dcs-ctl',
+                                            'dcs-forge')):
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append((args, check))
+            if args[0] == 'run' and 'cargo' in str(args):
+                target = Path(self.cfg['state_dir']) / 'build-cache' \
+                    / 'target' / 'release'
+                target.mkdir(parents=True, exist_ok=True)
+                for binary in binaries:
+                    (target / binary).write_text('bin')
+            if args[:2] == ('image', 'inspect'):
+                return Result('sha256:' + 'a' * 64)
+            return Result('')
+        return fake_docker
+
+    def _ctx(self):
+        return runner._scenario_ctx(
+            self.cfg, {'run_id': 'qa-1'}, self.src,
+            self.run_dir, self.run_dir / 'evidence', 0,
+            lambda e, d=None: None)
+
+    def test_build_compiles_the_tool_beside_the_server(self):
+        calls, events = [], []
+        with patch.object(runner, 'docker', self._fake_docker(calls)):
+            runner._build_images(
+                self.src, self.cfg, self.run_dir,
+                lambda event, detail=None: events.append(event), 'qa-1')
+        build = next(args for args, _ in calls
+                     if args[0] == 'run' and 'cargo' in str(args))
+        self.assertIn('-p dcs-controller -p dcs-plant -p dcs-sim-net',
+                      build[-1])
+        dockerfile = (self.run_dir / 'image-plant'
+                      / 'Dockerfile').read_text()
+        self.assertIn('COPY dcs-plant-server '
+                      '/usr/local/bin/dcs-plant-server', dockerfile)
+        self.assertIn('COPY dcs-plant-ctl '
+                      '/usr/local/bin/dcs-plant-ctl', dockerfile)
+        self.assertIn('ENTRYPOINT ["dcs-plant-server"]', dockerfile)
+        self.assertTrue(
+            (self.run_dir / 'image-plant' / 'dcs-plant-ctl').is_file())
+        controller = (self.run_dir / 'image-controller'
+                      / 'Dockerfile').read_text()
+        self.assertNotIn('dcs-plant-ctl', controller)
+
+    def test_build_fails_loudly_without_the_tool(self):
+        with patch.object(runner, 'docker',
+                          self._fake_docker(
+                              [], binaries=('dcs-controller',
+                                            'dcs-plant-server',
+                                            'dcs-ctl'))):
+            with self.assertRaises(RuntimeError):
+                runner._build_images(self.src, self.cfg, self.run_dir,
+                                     lambda e, d=None: None, 'qa-1')
+
+    def test_scenario_ctx_execs_the_tool_inside_the_container(self):
+        calls = []
+        with patch.object(runner, 'docker', self._fake_docker(calls)):
+            answer = self._ctx()['plant_ctl']('list')
+        self.assertEqual(calls, [
+            (('exec', 'dcs-hw-qa-1-plant', 'dcs-plant-ctl',
+              '127.0.0.1:' + str(self.cfg['plant_port']), 'list'),
+             False)])
+        self.assertEqual(answer.returncode, 0)
+
+    def test_scenario_ctx_returns_refusals_without_raising(self):
+        calls = []
+
+        def refusing(*args, timeout=120, check=True):
+            calls.append((args, check))
+            return Result('', returncode=1)
+
+        with patch.object(runner, 'docker', refusing):
+            answer = self._ctx()['plant_ctl']('write', '10', '1.5')
+        self.assertEqual(answer.returncode, 1)
+        self.assertEqual(calls[0][1], False)
 
 
 class ModelRevisionActionTests(unittest.TestCase):
@@ -981,6 +1503,424 @@ class NegotiationActionTests(unittest.TestCase):
                         .is_relative_to(self.run_dir))
         self.assertTrue(Path(ctx['state_files']['foreign'])
                         .is_relative_to(self.run_dir))
+
+
+class DrivenActionTests(unittest.TestCase):
+    """The scenario-callable driven-peer actions: the runner launches
+    the run's labeled third controller on the same mounted model with
+    --standby AND --driven — the externally paced standby whose pulls
+    happen only inside POST /scan — and removes the container again
+    for the case's teardown, both halves recorded on the run's action
+    timeline."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        self.run_dir.mkdir(parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+        self.model = self.src / self.cfg['model_fixture']
+        self.model.parent.mkdir(parents=True, exist_ok=True)
+        self.model.write_text(json.dumps({'version': 1}))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _record(self):
+        return {'run_id': 'qa-1', 'attempted_sha': SHA_A}
+
+    def test_driven_peer_launches_standby_driven(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            info = runner.start_driven_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'active',
+                lambda event, detail=None: events.append(
+                    (event, detail)))
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertIn('dcs-hw-qa-1-d', launch)
+        self.assertIn(runner.MANAGED_LABEL + '=1', launch)
+        self.assertIn(runner.RUN_LABEL + '=qa-1', launch)
+        self.assertIn('dcs-hwtest-qa-1', launch)
+        self.assertIn('--standby', launch)
+        self.assertIn('dcs-hw-qa-1-a:8080', launch)
+        # The externally paced seam: --driven, never --scan-ms —
+        # every pull happens inside a POST /scan request.
+        self.assertIn('--driven', launch)
+        self.assertNotIn('--scan-ms', launch)
+        self.assertNotIn('--revised', launch)
+        # The keyed contract: the run's --pair-token signs the driven
+        # peer's ?prove= answers — the line_proof an islanded peer's
+        # orphan-resolution probe demands of its owner candidate.
+        self.assertIn('--pair-token', launch)
+        self.assertIn(self.cfg['pair_token'], launch)
+        self.assertIn('127.0.0.1:' + str(self.cfg['driven_port'])
+                      + ':8082', launch)
+        self.assertIn(runner.CONTAINER_STATE_FILE, launch)
+        self.assertIn(runner.CONTAINER_JOURNAL_FILE, launch)
+        self.assertIn(str(self.model) + ':/model/plant.json:ro', launch)
+        self.assertIn(str(self.run_dir / 'controllers' / 'd')
+                      + ':' + runner.CONTAINER_RUN_DIR, launch)
+        self.assertEqual(info['container'], 'dcs-hw-qa-1-d')
+        self.assertEqual([event for event, _ in events],
+                         ['driven-start', 'driven-up'])
+
+    def test_tokenless_run_launches_unkeyed(self):
+        # An unkeyed run carries no --pair-token — the driven peer's
+        # ?prove= answers then run unsigned like the pair's own.
+        self.cfg['pair_token'] = None
+        calls = []
+        with patch.object(runner, 'docker',
+                          lambda *a, **k: calls.append(a)
+                          or Result('')):
+            runner.start_driven_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'active', lambda e, d=None: None)
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertNotIn('--pair-token', launch)
+        self.assertIn('--driven', launch)
+
+    def test_standby_endpoint_standbys_on_ctrl_b(self):
+        calls = []
+        with patch.object(runner, 'docker',
+                          lambda *a, **k: calls.append(a)
+                          or Result('')):
+            runner.start_driven_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'standby', lambda e, d=None: None)
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertIn('dcs-hw-qa-1-b:8081', launch)
+
+    def test_unknown_endpoint_rejected(self):
+        with self.assertRaises(RuntimeError):
+            runner.start_driven_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'driven', lambda e, d=None: None)
+
+    def test_failed_launch_raises_after_recording_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'run' and check:
+                raise RuntimeError('docker run failed: name in use')
+            return Result('')
+
+        with patch.object(runner, 'docker', raising):
+            with self.assertRaises(RuntimeError):
+                runner.start_driven_controller(
+                    self.cfg, self._record(), self.run_dir, self.model,
+                    'active',
+                    lambda event, detail=None: events.append(event))
+        self.assertEqual(events, ['driven-start'])
+
+    def test_stop_removes_the_driven_container(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            runner.stop_driven_controller(
+                'qa-1', lambda event, detail=None: events.append(
+                    (event, detail)))
+        self.assertEqual(calls,
+                         [('rm', '-f', 'dcs-hw-qa-1-d')])
+        self.assertEqual([event for event, _ in events],
+                         ['driven-stop', 'driven-stopped'])
+
+    def test_failed_teardown_raises_after_recording_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'rm' and check:
+                raise RuntimeError('docker rm failed: no such')
+            return Result('')
+
+        with patch.object(runner, 'docker', raising):
+            with self.assertRaises(RuntimeError):
+                runner.stop_driven_controller(
+                    'qa-1',
+                    lambda event, detail=None: events.append(event))
+        self.assertEqual(events, ['driven-stop'])
+
+    def test_scenario_ctx_carries_driven_actions_and_endpoint(self):
+        calls = []
+        record = self._record()
+        with patch.object(runner, 'docker',
+                          lambda *a, **k: calls.append(a)
+                          or Result('')):
+            ctx = runner._scenario_ctx(
+                self.cfg, record, self.src, self.run_dir,
+                self.run_dir / 'evidence', 0,
+                lambda e, d=None: None)
+            info = ctx['start_driven']('active')
+            ctx['stop_driven']()
+        self.assertEqual(ctx['driven'],
+                         'http://127.0.0.1:' + str(
+                             self.cfg['driven_port']))
+        self.assertEqual(info['container'], 'dcs-hw-qa-1-d')
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertIn('--standby', launch)
+        self.assertIn('--driven', launch)
+        # The keyed run hands the launch the pair token the keyed
+        # orphan-resolution probes require.
+        self.assertIn('--pair-token', launch)
+        self.assertIn(self.cfg['pair_token'], launch)
+        self.assertEqual(calls[-1],
+                         ('rm', '-f', 'dcs-hw-qa-1-d'))
+        # The driven peer's state/journal paths sit inside the run dir.
+        self.assertTrue(Path(ctx['journal_files']['driven'])
+                        .is_relative_to(self.run_dir))
+        self.assertTrue(Path(ctx['state_files']['driven'])
+                        .is_relative_to(self.run_dir))
+
+
+class ForgeEndpointTests(unittest.TestCase):
+    """The scenario-callable forged-checkpoint endpoint: the runner
+    launches the run's labeled rig-bridge container on the shipped
+    dcs-forge binary out of the controller image — announcing itself
+    to the named owner's monitor and serving a staged checkpoint
+    document the leg rewrites between demote calls — and removes the
+    container again for the case's teardown, both halves recorded on
+    the run's action timeline. The keyed posture comes from the run
+    config's --pair-token, the launch refuses a non-bridge placement,
+    and _scenario_ctx hands the actions to the case."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        self.run_dir.mkdir(parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+        self.document = {'format_version': 1,
+                         'generation': 7, 'tick': 42,
+                         'source_owns_field': False}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _record(self):
+        return {'run_id': 'qa-1', 'attempted_sha': SHA_A}
+
+    def test_forge_launches_keyed_on_the_rig_bridge(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            info = runner.start_forge_endpoint(
+                self.cfg, self._record(), self.run_dir, self.document,
+                'active',
+                lambda event, detail=None: events.append(
+                    (event, detail)))
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertIn('dcs-hw-qa-1-forge', launch)
+        self.assertIn(runner.MANAGED_LABEL + '=1', launch)
+        self.assertIn(runner.RUN_LABEL + '=qa-1', launch)
+        # Bridge placement: the run's rig network, no host port.
+        self.assertIn('dcs-hwtest-qa-1', launch)
+        self.assertNotIn('-p', launch)
+        # The shipped binary runs under --entrypoint on the controller
+        # image, serving the staged document and ledgering its hits.
+        self.assertIn('--entrypoint', launch)
+        self.assertIn('dcs-forge', launch)
+        self.assertIn('dcs-hwtest/controller:' + SHA_A, launch)
+        self.assertIn('--listen', launch)
+        self.assertIn('0.0.0.0:' + str(runner.FORGE_PORT), launch)
+        self.assertIn('--document', launch)
+        self.assertIn('/forge/checkpoint.json', launch)
+        self.assertIn('--hits', launch)
+        self.assertIn('/forge/hits.jsonl', launch)
+        # The endpoint announces to the named owner's monitor so its
+        # bridge address is the recorded tracking hint.
+        self.assertIn('--announce', launch)
+        self.assertIn('dcs-hw-qa-1-a:8080', launch)
+        # Keyed: the run's --pair-token signs the ?prove= answers.
+        self.assertIn('--pair-token', launch)
+        self.assertIn(self.cfg['pair_token'], launch)
+        self.assertTrue(info['keyed'])
+        self.assertEqual(info['container'], 'dcs-hw-qa-1-forge')
+        self.assertEqual(info['port'], runner.FORGE_PORT)
+        # The staged document and hits ledger sit inside the run dir.
+        self.assertEqual(json.loads(Path(info['document'])
+                                    .read_text()), self.document)
+        self.assertTrue(Path(info['document'])
+                        .is_relative_to(self.run_dir))
+        self.assertTrue(Path(info['hits'])
+                        .is_relative_to(self.run_dir))
+        self.assertEqual([event for event, _ in events],
+                         ['forge-start', 'forge-up'])
+
+    def test_unkeyed_launch_carries_no_pair_token(self):
+        calls = []
+        with patch.object(runner, 'docker',
+                          lambda *a, **k: calls.append(a)
+                          or Result('')):
+            info = runner.start_forge_endpoint(
+                self.cfg, self._record(), self.run_dir, self.document,
+                'standby', lambda e, d=None: None, keyed=False)
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertNotIn('--pair-token', launch)
+        self.assertIn('dcs-hw-qa-1-b:8081', launch)
+        self.assertFalse(info['keyed'])
+
+    def test_tokenless_run_launches_unkeyed_regardless(self):
+        self.cfg['pair_token'] = None
+        calls = []
+        with patch.object(runner, 'docker',
+                          lambda *a, **k: calls.append(a)
+                          or Result('')):
+            info = runner.start_forge_endpoint(
+                self.cfg, self._record(), self.run_dir, self.document,
+                'active', lambda e, d=None: None)
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertNotIn('--pair-token', launch)
+        self.assertFalse(info['keyed'])
+
+    def test_non_bridge_placement_refuses_the_launch(self):
+        self.cfg['endpoint_placement'] = {
+            **self.cfg['endpoint_placement'], 'forge': 'loopback'}
+        with self.assertRaises(RuntimeError):
+            runner.start_forge_endpoint(
+                self.cfg, self._record(), self.run_dir, self.document,
+                'active', lambda e, d=None: None)
+
+    def test_unknown_endpoint_rejected(self):
+        with self.assertRaises(RuntimeError):
+            runner.start_forge_endpoint(
+                self.cfg, self._record(), self.run_dir, self.document,
+                'forge', lambda e, d=None: None)
+
+    def test_failed_launch_raises_after_recording_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'run' and check:
+                raise RuntimeError('docker run failed: name in use')
+            return Result('')
+
+        with patch.object(runner, 'docker', raising):
+            with self.assertRaises(RuntimeError):
+                runner.start_forge_endpoint(
+                    self.cfg, self._record(), self.run_dir,
+                    self.document, 'active',
+                    lambda event, detail=None: events.append(event))
+        self.assertEqual(events, ['forge-start'])
+
+    def test_stop_removes_the_forge_container(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            runner.stop_forge_endpoint(
+                'qa-1', lambda event, detail=None: events.append(
+                    (event, detail)))
+        self.assertEqual(calls,
+                         [('rm', '-f', 'dcs-hw-qa-1-forge')])
+        self.assertEqual([event for event, _ in events],
+                         ['forge-stop', 'forge-stopped'])
+
+    def test_failed_teardown_raises_after_recording_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'rm' and check:
+                raise RuntimeError('docker rm failed: no such')
+            return Result('')
+
+        with patch.object(runner, 'docker', raising):
+            with self.assertRaises(RuntimeError):
+                runner.stop_forge_endpoint(
+                    'qa-1',
+                    lambda event, detail=None: events.append(event))
+        self.assertEqual(events, ['forge-stop'])
+
+    def test_scenario_ctx_carries_forge_actions_and_token(self):
+        calls = []
+        record = self._record()
+        with patch.object(runner, 'docker',
+                          lambda *a, **k: calls.append(a)
+                          or Result('')):
+            ctx = runner._scenario_ctx(
+                self.cfg, record, self.src, self.run_dir,
+                self.run_dir / 'evidence', 0,
+                lambda e, d=None: None)
+            info = ctx['start_forge'](self.document, 'active')
+            ctx['stop_forge']()
+        self.assertEqual(ctx['pair_token'], self.cfg['pair_token'])
+        self.assertEqual(info['container'], 'dcs-hw-qa-1-forge')
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertIn('--entrypoint', launch)
+        self.assertIn('dcs-forge', launch)
+        self.assertIn('--pair-token', launch)
+        self.assertEqual(calls[-1],
+                         ('rm', '-f', 'dcs-hw-qa-1-forge'))
+
+    def test_controller_image_ships_the_forge_binary(self):
+        calls, events = [], []
+        target = Path(self.cfg['state_dir']) / 'build-cache' \
+            / 'target' / 'release'
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            if args[0] == 'run' and 'cargo' in str(args):
+                target.mkdir(parents=True, exist_ok=True)
+                for binary in ('dcs-controller', 'dcs-plant-server',
+                               'dcs-plant-ctl', 'dcs-ctl', 'dcs-forge'):
+                    (target / binary).write_text('bin')
+            if args[:2] == ('image', 'inspect'):
+                return Result('sha256:' + 'a' * 64)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            runner._build_images(
+                self.src, self.cfg, self.run_dir,
+                lambda event, detail=None: events.append(event),
+                'qa-1')
+        build = next(args for args in calls
+                     if args[0] == 'run' and 'cargo' in str(args))
+        self.assertIn('--bin dcs-forge', build[-1])
+        dockerfile = (self.run_dir / 'image-controller'
+                      / 'Dockerfile').read_text()
+        self.assertIn('COPY dcs-forge /usr/local/bin/dcs-forge',
+                      dockerfile)
+        self.assertIn('ENTRYPOINT ["dcs-controller"]', dockerfile)
+        self.assertTrue(
+            (self.run_dir / 'image-controller' / 'dcs-forge')
+            .is_file())
+        plant = (self.run_dir / 'image-plant'
+                 / 'Dockerfile').read_text()
+        self.assertNotIn('dcs-forge', plant)
+
+    def test_build_fails_loudly_without_the_forge_binary(self):
+        target = Path(self.cfg['state_dir']) / 'build-cache' \
+            / 'target' / 'release'
+
+        def fake_docker(*args, timeout=120, check=True):
+            if args[0] == 'run' and 'cargo' in str(args):
+                target.mkdir(parents=True, exist_ok=True)
+                for binary in ('dcs-controller', 'dcs-plant-server',
+                               'dcs-plant-ctl', 'dcs-ctl'):
+                    (target / binary).write_text('bin')
+            if args[:2] == ('image', 'inspect'):
+                return Result('sha256:' + 'a' * 64)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            with self.assertRaises(RuntimeError):
+                runner._build_images(self.src, self.cfg, self.run_dir,
+                                     lambda e, d=None: None, 'qa-1')
 
 
 if __name__ == '__main__':

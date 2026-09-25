@@ -17,7 +17,11 @@
 #                stale-artifact)
 #   tooling      the released tooling accepts the emitted model —
 #                `dcs-model validate`, `dcs-model lint`,
-#                `dcs-controller --check` — and exercises the contract's
+#                `dcs-controller --check` — and the dynamics document
+#                standalone, `dcs-plant-server --check-dynamics` merging
+#                and validating every element against the model's
+#                channel map with no server launched — and exercises the
+#                contract's
 #                remaining dcs-model surfaces: `dcs-model schema` and
 #                `dcs-model interface-schema` emissions byte-identical
 #                to the release record's schema artifacts (fetched from
@@ -28,17 +32,52 @@
 #                `dcs-model signal-index` outputs recorded to the run's
 #                evidence (tooling-rejected, pin-unresolvable,
 #                schema-drift, diff-mismatch)
+#   alarm-validation
+#                the rejection half of decision 70's alarm record at
+#                the customer boundary — every managed alarm instance
+#                carrying its rationalization prose and
+#                priority/class/response_ticks codes, doctored copies
+#                refused by the released `dcs-controller --check`
+#                naming the missing element, and the driven run's
+#                served components/parameters sections reporting the
+#                same record (alarm-validation-failed,
+#                alarm-validation-nondeterministic)
 #   fingerprint  the emitted model's fingerprint equals the manifest's
-#                recorded `model.fingerprint`
-#                (manifest-fingerprint-mismatch)
+#                recorded `model.fingerprint`, the deployed pair's
+#                served model digest — each peer's /checkpoint-stamped
+#                fingerprint on the manifest-declared deployment —
+#                equals it too, so the record authorizes the served
+#                model bytes rather than only the checked-in file; a
+#                doctored served document — every point id renumbered
+#                over identical components — reports the named
+#                mismatch carrying the expected vs served fingerprint
+#                and the first diverging section; and the dynamics
+#                document the manifest-declared deployment serves —
+#                the `dynamics.path` the rig mounts and
+#                `dcs-plant-server --dynamics` merges — fingerprints
+#                the recorded optional `dynamics.fingerprint` and the
+#                checked-in artifact identically on the launched
+#                pair, a doctored served document with renumbered
+#                point references over identical element content
+#                reporting the named mismatch; two passes produce
+#                identical digests (manifest-fingerprint-mismatch,
+#                fingerprint-failed, fingerprint-nondeterministic,
+#                fingerprint-unchecked, dynamics-fingerprint-failed,
+#                dynamics-fingerprint-nondeterministic,
+#                dynamics-fingerprint-unchecked)
 #   deploy       the checked-in rig definition deploy/compose.yaml
 #                instantiates every field of deploy/manifest.json —
 #                release, images, mounted model and dynamics paths,
 #                the fingerprint propagated into the controller
 #                invocations, listen addresses, the pair's standby
-#                wiring, and the optional per-controller persistence
+#                wiring, the standby's optional failover_budget
+#                declaration carried as its --auto-promote flag, and
+#                the optional per-controller persistence
 #                paths (state_file/journal_file) backed by writable
-#                mounts and flags — parsed and validated through
+#                mounts and flags, and the optional topology
+#                section's declared pairs — each naming two
+#                declared members whose standby wiring closes
+#                inside the pair — parsed and validated through
 #                `docker compose config` or the fallback parser, with
 #                the fields' divergence cases exercised against
 #                doctored copies
@@ -63,7 +102,9 @@
 #                monitoring page, the snapshot's descriptors, the
 #                block-interface registry covering every declared
 #                component, the kind-declared commands answering
-#                structured receipts through POST /command, and the
+#                structured receipts through POST /command and
+#                reporting their published availability verdicts
+#                through GET /resources in both directions, and the
 #                kind-emitted events reaching the journal and the
 #                per-instance resource view — matches the emitted
 #                model's declaration, in the same deterministic
@@ -71,6 +112,26 @@
 #                served GET /schema document's structural conformance
 #                to the fetched block-interfaces schema artifact
 #                (surface-mismatch, schema-mismatch)
+#   pair         the consumer-declared redundant pair — the deployment
+#                the manifest actually declares, not just its
+#                definition, run on the released tooling. The stage's
+#                legs are the ci/legs/*.py files — one file per leg,
+#                each carrying its explanatory prose in its own
+#                docstring and its stage registration in a module-level
+#                LEG literal (its declared order, its titles, any extra
+#                tool flags, and its doctored cases). ci/legs.py
+#                discovers the legs in declared order, runs each twice
+#                requiring identical digests, then runs each declared
+#                tamper requiring its named evidence; the legs share
+#                the launch/settle/restore harness consolidated under
+#                #647 — ci/legs/pair.py's launch_pair/PairRig — and
+#                each restores the pair's launch roles for the next.
+#                Every leg reports its own <stem>-failed /
+#                <stem>-nondeterministic / <stem>-unchecked
+#                diagnostics, the stem its file name with underscores
+#                turned to dashes; adding a leg is one new file under
+#                ci/legs/ — this script, the boundary lint, and the
+#                README need no edit.
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -107,8 +168,9 @@
 #   DCS_REV      the pinned revision (default: the release-line rev
 #                this repository's manifest records — the v0.2.0
 #                commit whose tooling serves the interface registry,
-#                declared commands, and emitted events the surface
-#                stage proves).
+#                declared commands and their live availability
+#                verdicts, and emitted events the surface stage
+#                proves).
 #   DCS_UPGRADE_REV
 #                the later compatible revision the upgrade stage repins
 #                to (default: $DCS_REV — a same-revision repin, still
@@ -117,10 +179,26 @@
 #   DCS_UPGRADE  set to 0 to skip the upgrade stage — the stage's own
 #                repinned re-run uses this internally.
 #   DCS_TOOLS    a directory holding prebuilt `dcs-model`,
-#                `dcs-controller`, `dcs-plant-server`, and `dcs-ctl`
-#                binaries. When unset, the check installs them from
-#                $DCS_REMOTE at $DCS_REV — the contract's `cargo
-#                install --git` mechanism — into a scratch root.
+#                `dcs-controller`, `dcs-plant-server`, `dcs-plant-ctl`,
+#                `dcs-ctl`, and `dcs-alarm-report` binaries. When
+#                unset, the check installs them from $DCS_REMOTE at
+#                $DCS_REV — the contract's `cargo install --git`
+#                mechanism — into a scratch root.
+#   DCS_RECORD_DIR
+#                a directory holding the release record tree
+#                (`docs/releases/<tag>/…`) the schema-drift leg
+#                compares the tooling's emissions against. When unset
+#                — the contract's own shape — the record is fetched
+#                from $DCS_REMOTE at $DCS_REV. The workspace-side
+#                proof substitutes the checkout's own docs/releases:
+#                its tooling stand-ins emit the checkout's schemas,
+#                which legitimately drift from the pinned release's
+#                recorded artifacts between cuts (the contract's
+#                additive serde-optional fields land without a version
+#                bump), so the record the checkout carries is the
+#                comparator. The pinned-rev fetch still runs either
+#                way, proving the record stays reachable through the
+#                consumer mechanism.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -129,6 +207,7 @@ DCS_REMOTE="${DCS_REMOTE:-https://github.com/Jan-Kaspar1/dcs.git}"
 DCS_REV="${DCS_REV:-c2b5694d9fd6f6168b85c1dfc2e1542b369b3a3f}"
 DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-$DCS_REV}"
 DCS_TOOLS="${DCS_TOOLS:-}"
+DCS_RECORD_DIR="${DCS_RECORD_DIR:-}"
 TOOLS=""
 TOOLS_REV=""
 UPGRADE_DIR=""
@@ -162,10 +241,24 @@ ensure_tools() {
     local dir
     dir="$(mktemp -d)"
     if ! cargo install --quiet --git "$DCS_REMOTE" --rev "$1" \
-            dcs-model dcs-controller dcs-plant dcs-monitor --root "$dir"; then
+            dcs-model dcs-controller dcs-plant dcs-monitor dcs-sim-net \
+            --root "$dir"; then
         rm -rf "$dir"
         return 1
     fi
+    # The delivered binary set — the `dcs-monitor` package ships both
+    # operator tools, `dcs-ctl` and `dcs-alarm-report`, and
+    # `dcs-sim-net` ships the plant-side `dcs-plant-ctl`; a revision
+    # whose tooling predates one fails the install rather than the
+    # stage that invokes it.
+    local bin
+    for bin in dcs-model dcs-controller dcs-plant-server dcs-ctl \
+            dcs-alarm-report dcs-plant-ctl; do
+        if [ ! -x "$dir/bin/$bin" ]; then
+            rm -rf "$dir"
+            return 1
+        fi
+    done
     INSTALL_ROOTS="$INSTALL_ROOTS $dir"
     TOOLS="$dir/bin"
     TOOLS_REV="$1"
@@ -250,7 +343,9 @@ LINT="$("$TOOLS/dcs-model" lint model/plant.json)" \
     || fail "tooling-rejected: dcs-model lint reports findings: $LINT"
 "$TOOLS/dcs-controller" model/plant.json --check \
     || fail "tooling-rejected: dcs-controller --check refused the checked-in model"
-echo "  validate, lint, and --check accept the checked-in model"
+"$TOOLS/dcs-plant-server" model/plant.json --check-dynamics model/dynamics.json \
+    || fail "tooling-rejected: dcs-plant-server --check-dynamics refused the checked-in dynamics document"
+echo "  validate, lint, --check, and --check-dynamics accept the checked-in documents"
 
 # The release record's schema artifacts: `docs/releases/<tag>/` lives
 # in the same repository the crate and tooling pins resolve from, so
@@ -269,6 +364,16 @@ for artifact in block-interfaces.schema.json plant-model.schema.json; do
         > "$RECORD/$artifact" \
         || fail "pin-unresolvable: the pinned rev serves no docs/releases/$DCS_RELEASE/$artifact"
 done
+if [ -n "$DCS_RECORD_DIR" ]; then
+    # The workspace-side proof's tooling stand-ins emit the checkout's
+    # schemas, so the checkout's own record tree is the comparator;
+    # the fetch above still proves the record stays fetchable at the
+    # pinned rev through the consumer mechanism.
+    for artifact in block-interfaces.schema.json plant-model.schema.json; do
+        cp "$DCS_RECORD_DIR/$DCS_RELEASE/$artifact" "$RECORD/$artifact" \
+            || fail "record-missing: $DCS_RECORD_DIR serves no $DCS_RELEASE/$artifact"
+    done
+fi
 
 # `dcs-model <subcommand>` emitted at the pinned rev must equal the
 # recorded artifact byte-for-byte — the consumer's non-drift leg for
@@ -389,12 +494,138 @@ printf '%s\n' "$SUMMARY_OUT" | sed 's/^/    /'
 echo "  dcs-model signal-index (sha256 $(printf '%s\n' "$INDEX_OUT" | sha256sum | cut -d' ' -f1)):"
 printf '%s\n' "$INDEX_OUT" | sed 's/^/    /'
 
+echo "== alarm-validation =="
+# The rejection half of decision 70's alarm record — a leg beside the
+# acceptance checks above: ci/alarm_validation.py audits the emitted
+# document's managed-alarm record (each instance's rationalization
+# prose and priority/class/response_ticks codes), doctors copies of it
+# — one managed alarm's required_action removed, the same field
+# emptied, another kind's priority removed — and requires the released
+# `dcs-controller --check` to refuse each naming the missing element,
+# never a silent load, then checks the driven run's served
+# components/parameters sections report the same record. Contract
+# violations report `alarm-validation: …` lines on stderr.
+run_alarm_validation() {
+    python3 ci/alarm_validation.py \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json
+}
+ALARM_1="$(run_alarm_validation)" \
+    || fail "alarm-validation-failed: the alarm-validation leg refused"
+ALARM_2="$(run_alarm_validation)" \
+    || fail "alarm-validation-failed: the alarm-validation leg refused"
+[ "$ALARM_1" = "$ALARM_2" ] \
+    || fail "alarm-validation-nondeterministic: two alarm-validation passes produced different digests"
+echo "  $ALARM_1"
+
+# The leg's refusal assertions must themselves be proven — a run that
+# writes the pristine document where each doctored copy belongs must
+# report every acceptance, never pass a silent load.
+if out="$(python3 ci/alarm_validation.py \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --tamper skip-doctoring 2>&1)"; then
+    fail "alarm-validation-unchecked: a run with the doctoring skipped passed"
+fi
+[[ "$out" == *"alarm-validation:"* ]] \
+    || fail "alarm-validation-unchecked: the skipped-doctoring run did not report alarm-validation: $out"
+echo "  a skipped-doctoring run refused: alarm-validation"
+
 echo "== fingerprint =="
 EMITTED_FP="$("$BIN" --fingerprint)"
 MANIFEST_FP="$(python3 -c 'import json; print(json.load(open("deploy/manifest.json"))["model"]["fingerprint"])')"
 [ "$EMITTED_FP" = "$MANIFEST_FP" ] \
     || fail "manifest-fingerprint-mismatch: emitted model fingerprints $EMITTED_FP but deploy/manifest.json records $MANIFEST_FP"
 echo "  fingerprint $EMITTED_FP matches the manifest"
+
+# The served-bytes half of the model authorization: the recorded
+# fingerprint must name what the deployed pair actually serves, not
+# just the checked-in artifact — ci/fingerprint.py launches the
+# manifest-declared pair on the released tooling and pulls each peer's
+# stamped model digest through GET /checkpoint, reporting the named
+# manifest-fingerprint-mismatch with the expected vs served fingerprint
+# and the first diverging document section on any divergence. Two
+# passes must produce identical digests.
+run_fingerprint() {
+    python3 ci/fingerprint.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_fingerprint)" \
+    || fail "fingerprint-failed: the manifest-fingerprint leg did not hold — its evidence lines are above"
+SECOND="$(run_fingerprint)" \
+    || fail "fingerprint-failed: the manifest-fingerprint leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "fingerprint-nondeterministic: two fingerprint-leg passes produced different digests"
+echo "  $FIRST"
+
+# The doctored case: the pair serving a model whose point ids were
+# renumbered — identical component content — must surface the named
+# diagnostic; a silent pass would leave the authorization unproven.
+if out="$(run_fingerprint --tamper renumber-points 2>&1)"; then
+    fail "fingerprint-unchecked: a served model with renumbered point ids passed the fingerprint leg"
+fi
+[[ "$out" == *"manifest-fingerprint-mismatch"* && "$out" == *"io_points"* ]] \
+    || fail "fingerprint-unchecked: the renumber-points case did not report its named diagnostic: $out"
+echo "  renumber-points: reported, manifest-fingerprint-mismatch"
+
+# The dynamics half of the authorization, under the same canonical
+# fingerprint contract: the optional `dynamics.fingerprint` must name
+# the dynamics document the deployment serves — the manifest's
+# declared `dynamics.path`, the read-only mount the rig instantiates
+# and `dcs-plant-server --dynamics` merges — and the checked-in
+# artifact must fingerprint it identically. A manifest omitting the
+# optional field declares no pin; the served-vs-checked-in comparison
+# still stands.
+DYN_FP="$(python3 ci/dynamics_fingerprint.py --fingerprint model/dynamics.json)"
+MANIFEST_DYN_FP="$(python3 -c 'import json; print(json.load(open("deploy/manifest.json")).get("dynamics", {}).get("fingerprint") or "")')"
+if [ -n "$MANIFEST_DYN_FP" ]; then
+    [ "$DYN_FP" = "$MANIFEST_DYN_FP" ] \
+        || fail "manifest-fingerprint-mismatch: the checked-in dynamics fingerprints $DYN_FP but deploy/manifest.json records $MANIFEST_DYN_FP"
+    echo "  dynamics fingerprint $DYN_FP matches the manifest"
+else
+    echo "  the manifest records no dynamics.fingerprint — the pin is undeclared"
+fi
+
+# The served-bytes half: ci/dynamics_fingerprint.py launches the
+# manifest-declared pair on the released tooling serving the
+# deployment's declared dynamics.path, fingerprints the document it
+# actually runs, and holds it equal to the recorded fingerprint and
+# the checked-in artifact — reporting manifest-fingerprint-mismatch
+# with the expected vs served fingerprint and the first diverging
+# element on any divergence. Two passes must produce identical
+# digests.
+run_dynamics_fingerprint() {
+    python3 ci/dynamics_fingerprint.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_dynamics_fingerprint)" \
+    || fail "dynamics-fingerprint-failed: the dynamics-fingerprint leg did not hold — its evidence lines are above"
+SECOND="$(run_dynamics_fingerprint)" \
+    || fail "dynamics-fingerprint-failed: the dynamics-fingerprint leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "dynamics-fingerprint-nondeterministic: two dynamics-fingerprint passes produced different digests"
+echo "  $FIRST"
+
+# The doctored case: the pair serving a dynamics document whose point
+# references were renumbered — identical element content — must
+# surface the named diagnostic; a silent pass would leave the
+# authorization unproven.
+if out="$(run_dynamics_fingerprint --tamper renumber-points 2>&1)"; then
+    fail "dynamics-fingerprint-unchecked: a served dynamics document with renumbered points passed the fingerprint leg"
+fi
+[[ "$out" == *"manifest-fingerprint-mismatch"* && "$out" == *"element 0"* ]] \
+    || fail "dynamics-fingerprint-unchecked: the renumber-points case did not report its named diagnostic: $out"
+echo "  renumber-points: reported, manifest-fingerprint-mismatch"
 
 echo "== deploy =="
 # The rig-definition consistency check reports its own named
@@ -406,7 +637,13 @@ python3 ci/deploy_rig.py
 # report rig-mismatch — a declared path missing its mount or flag, a
 # flag or writable mount the manifest does not declare, a persistence
 # mount left read-only — while the fields omitted outright (with their
-# mounts and flags) stay a valid deployment.
+# mounts and flags) stay a valid deployment. The same harness proves
+# the optional topology section: a declared named pair validates —
+# over the single pair and over a beyond-one-pair rig — while a
+# member the rig does not declare, a member two pairs share, or a
+# declared pair whose standby wiring does not close inside it each
+# report rig-mismatch. The checked-in manifest carries no section —
+# the single-pair default every passing case starts from.
 RIG_DIR="$(mktemp -d)"
 mkdir -p "$RIG_DIR/deploy" "$RIG_DIR/ci" "$RIG_DIR/model"
 cp deploy/manifest.json deploy/compose.yaml "$RIG_DIR/deploy/"
@@ -457,6 +694,24 @@ elif case == "undeclared-writable-mount":
         "volumes:\n  ctrl-a-data:\n  ctrl-a-scratch:",
         1,
     )
+elif case == "failover-flag-missing":
+    # ctrl-b keeps its declared failover_budget while the rig
+    # definition drops the --auto-promote flag.
+    compose = compose.replace(
+        "      - --auto-promote\n      - \"3\"\n", "", 1)
+elif case == "failover-flag-undeclared":
+    # The rig definition keeps --auto-promote while the manifest
+    # drops the declaration — an undeclared flag.
+    document = json.loads(manifest)
+    del document["controllers"][1]["failover_budget"]
+    manifest = json.dumps(document, indent=2)
+elif case == "failover-wrong-peer":
+    # The declared budget moves to the duty entry — automatic
+    # failover arms a tracking standby only.
+    document = json.loads(manifest)
+    document["controllers"][0]["failover_budget"] = \
+        document["controllers"][1].pop("failover_budget")
+    manifest = json.dumps(document, indent=2)
 elif case == "persistence-omitted":
     # Both fields omitted together with their flags and mounts — the
     # optional deployment a consumer without durable storage declares.
@@ -472,6 +727,93 @@ elif case == "persistence-omitted":
         "      - --journal-file\n      - /var/tmp/journal.jsonl\n",
     ):
         compose = compose.replace(line, "")
+elif case == "topology-declared":
+    # The optional section naming the deployment's one pair —
+    # additive vocabulary a single-pair manifest may carry.
+    document = json.loads(manifest)
+    document["topology"] = {
+        "pairs": [{"name": "station", "members": ["ctrl-a", "ctrl-b"]}]
+    }
+    manifest = json.dumps(document, indent=2)
+elif case == "topology-multi-pair":
+    # Two named pairs over a four-controller rig — the
+    # beyond-one-pair declaration the section exists for. The rig
+    # grows the matching second pair's services and volumes, cloned
+    # from the first pair's blocks on fresh names and ports.
+    document = json.loads(manifest)
+    document["controllers"] += [
+        {
+            "name": "ctrl-c",
+            "listen": "0.0.0.0:8082",
+            "state_file": "/var/tmp/state.json",
+            "journal_file": "/var/tmp/journal.jsonl",
+        },
+        {
+            "name": "ctrl-d",
+            "listen": "0.0.0.0:8083",
+            "standby": "ctrl-c:8082",
+            "state_file": "/var/tmp/state.json",
+            "journal_file": "/var/tmp/journal.jsonl",
+        },
+    ]
+    document["topology"] = {
+        "pairs": [
+            {"name": "station-a", "members": ["ctrl-a", "ctrl-b"]},
+            {"name": "station-b", "members": ["ctrl-c", "ctrl-d"]},
+        ]
+    }
+    manifest = json.dumps(document, indent=2)
+    block_a = compose[
+        compose.index("  ctrl-a:"):compose.index("  ctrl-b:")
+    ]
+    block_b = compose[compose.index("  ctrl-b:"):compose.index("\nnetworks:")]
+    block_c = block_a.replace("ctrl-a", "ctrl-c").replace("8080", "8082")
+    block_d = (
+        block_b.replace("ctrl-b", "ctrl-d")
+        .replace("ctrl-a:8080", "ctrl-c:8082")
+        .replace("ctrl-a:", "ctrl-c:")
+        .replace("8081", "8083")
+        .replace('      - --auto-promote\n      - "3"\n', "")
+    )
+    compose = compose.replace(
+        "\nnetworks:",
+        "\n" + block_c + "\n" + block_d + "\nnetworks:",
+        1,
+    )
+    compose = compose.replace(
+        "  ctrl-a-data:\n  ctrl-b-data:\n",
+        "  ctrl-a-data:\n  ctrl-b-data:\n  ctrl-c-data:\n  ctrl-d-data:\n",
+        1,
+    )
+elif case == "topology-undeclared-member":
+    # A named pair member the rig does not declare.
+    document = json.loads(manifest)
+    document["topology"] = {
+        "pairs": [{"name": "station", "members": ["ctrl-a", "ctrl-z"]}]
+    }
+    manifest = json.dumps(document, indent=2)
+elif case == "topology-shared-member":
+    # Two named pairs claiming the same member.
+    document = json.loads(manifest)
+    document["topology"] = {
+        "pairs": [
+            {"name": "station-a", "members": ["ctrl-a", "ctrl-b"]},
+            {"name": "station-b", "members": ["ctrl-a", "ctrl-b"]},
+        ]
+    }
+    manifest = json.dumps(document, indent=2)
+elif case == "topology-unwired-pair":
+    # The declared pair's wiring does not close inside it: dropping
+    # the standby field and flag leaves two duty controllers the
+    # section still calls a pair.
+    document = json.loads(manifest)
+    document["topology"] = {
+        "pairs": [{"name": "station", "members": ["ctrl-a", "ctrl-b"]}]
+    }
+    del document["controllers"][1]["standby"]
+    manifest = json.dumps(document, indent=2)
+    compose = compose.replace(
+        "      - --standby\n      - ctrl-a:8080\n", "", 1)
 else:
     sys.exit("unknown rig case " + case)
 open(compose_path, "w").write(compose)
@@ -479,13 +821,19 @@ open(manifest_path, "w").write(manifest)
 PY
     local out
     if out="$(cd "$RIG_DIR" && python3 ci/deploy_rig.py 2>&1)"; then
-        [ "$1" = "persistence-omitted" ] \
-            || fail "rig-mismatch-unchecked: the $1 divergence passed the rig check"
-        echo "  $1: declared fields optional — the pair still agrees"
-        return
+        case "$1" in
+            persistence-omitted|topology-declared|topology-multi-pair)
+                echo "  $1: optional declaration — the manifest and the rig agree"
+                return
+                ;;
+        esac
+        fail "rig-mismatch-unchecked: the $1 divergence passed the rig check"
     fi
-    [ "$1" = "persistence-omitted" ] \
-        && fail "rig-mismatch-unchecked: omitting the persistence fields reported: $out"
+    case "$1" in
+        persistence-omitted|topology-declared|topology-multi-pair)
+            fail "rig-mismatch-unchecked: the $1 case reported: $out"
+            ;;
+    esac
     [[ "$out" == *"rig-mismatch"* ]] \
         || fail "rig-mismatch-unchecked: the $1 divergence did not report rig-mismatch: $out"
     echo "  $1 refused: rig-mismatch"
@@ -493,7 +841,11 @@ PY
 
 for divergence in persistence-mount-divergence persistence-flag-divergence \
         persistence-mount-read-only undeclared-persistence-flag \
-        undeclared-writable-mount persistence-omitted; do
+        undeclared-writable-mount failover-flag-missing \
+        failover-flag-undeclared failover-wrong-peer \
+        persistence-omitted topology-declared topology-multi-pair \
+        topology-undeclared-member topology-shared-member \
+        topology-unwired-pair; do
     rig_case "$divergence"
 done
 
@@ -567,7 +919,7 @@ python3 ci/simulate.py \
     --model model/plant.json \
     --dynamics model/dynamics.json \
     --scenario ci/scenario.json \
-    || fail "surface-mismatch: the served operator surface — signal index, page, descriptors, interface registry, declared commands, emitted events — does not match the emitted model's declared surface"
+    || fail "surface-mismatch: the served operator surface — signal index, page, descriptors, interface registry, declared commands, their availability verdicts, emitted events — does not match the emitted model's declared surface"
 
 # The served GET /schema document against the fetched record artifact's
 # declared structure — the consumer-side required-keys/field-shape
@@ -610,13 +962,43 @@ for case in missing-required mistyped-required mistyped-nested; do
     served_case "$case"
 done
 
+echo "== pair =="
+# The redundant-pair half of WW-LCM-001's switchover evidence — the
+# deployment the manifest declares, run: the deploy stage proves the
+# wiring statically; the stage's legs run it. Each leg is one file
+# under ci/legs/ — self-registering through its module-level LEG
+# literal, its explanatory comment carried in its own docstring —
+# discovered and driven by ci/legs.py in the recorded order: each leg
+# runs twice requiring identical digests, then each declared doctored
+# case runs requiring its named evidence. The legs share the
+# launch/settle/restore harness consolidated under #647 —
+# ci/legs/pair.py's launch_pair/PairRig — and each restores the pair's
+# launch roles for the next. Adding a leg is one new file under
+# ci/legs/ — nothing in this script changes. The driver reports each
+# leg's named diagnostics itself.
+python3 ci/legs.py \
+    --plant-server "$TOOLS/dcs-plant-server" \
+    --controller "$TOOLS/dcs-controller" \
+    --model model/plant.json \
+    --dynamics model/dynamics.json \
+    --scenario ci/scenario.json \
+    --manifest deploy/manifest.json \
+    --tools "$TOOLS" || exit 1
+
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
-for file in ci/consumers.py ci/ctl.py ci/deploy_rig.py ci/restart.py \
-        ci/schema_conformance.py ci/simulate.py README.md; do
+# The ci/legs/*.py glob is the directory rule covering the pair
+# stage's leg convention — a new leg registers by file and needs no
+# edit here.
+for file in ci/alarm_rationalization.py ci/alarm_validation.py \
+        ci/claim_fencing.py ci/consumers.py ci/ctl.py ci/deploy_rig.py \
+        ci/dynamics_fingerprint.py ci/fingerprint.py ci/legs.py \
+        ci/managed_carryover.py ci/oos.py ci/power_trip.py \
+        ci/restart.py ci/schema_conformance.py ci/simulate.py \
+        ci/staging.py ci/legs/*.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
     fi

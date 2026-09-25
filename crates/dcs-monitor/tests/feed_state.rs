@@ -9,13 +9,16 @@
 //! simply not scanning, then asserting the named state renders and
 //! clears.
 
-use dcs_core::{Direction, IoDriver, IoError, PointId, Sample, Tick, Value, ValueKind};
+use dcs_core::{
+    Command, Direction, IoDriver, IoError, JournalEvent, PointId, Sample, Tick, Value, ValueKind,
+};
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{Monitor, MonitorClient, MonitorConfig};
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, PointMap, StepError,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::thread;
 
@@ -131,14 +134,22 @@ enum FeedState {
     /// The snapshot re-served the publication identity the last poll
     /// already rendered — a stall. The page's "stale publication".
     Stale { published: Option<u64>, tick: Tick },
+    /// The serving process restarted — the publication identity
+    /// regressed, a new journal `run_boundary` landed, or a history
+    /// envelope's `run` marker changed — so the page's stream cursors
+    /// reset rather than stitch the new lifetime's numbering onto the
+    /// old stream's. The page's "source restarted".
+    Restart,
 }
 
 /// The page's feed-state rule, mirrored poll-for-poll: one snapshot
 /// read against the last rendered publication identity — the
 /// `publication` section's `published` seq beside the snapshot tick —
 /// then the since-cursor history and journal increments, whose first
-/// returned seq stepping over the cursor's successor is the served
-/// numbering gap. Cursors live per point like the page's per-trend
+/// returned seq stepping over the cursor's successor — or two
+/// consecutive served seqs stepping over an evicted stretch, the shape
+/// a pinned `run_boundary` ahead of the ring's tail serves — is the
+/// served numbering gap. Cursors live per point like the page's per-trend
 /// `lastSeq`, and the common history `since` follows the page's rule:
 /// the smallest seen seq once every point has seen one, else a whole
 /// refetch.
@@ -150,8 +161,16 @@ struct PageFeed {
     /// Per-point history cursors — the page's per-trend `lastSeq`,
     /// seeded for every index point like `buildTrends`.
     history_since: BTreeMap<PointId, u64>,
+    /// Per-point served lifetime markers — the page's per-trend `run`:
+    /// a changed `run` under a standing cursor is the history stream's
+    /// own restart observation.
+    history_run: BTreeMap<PointId, u64>,
     /// The journal cursor — the page's `journalSince`.
     journal_since: u64,
+    /// Entries already observed — the page's `journalSeen`, tick plus
+    /// serialized event — so a whole-journal re-fetch after a restart
+    /// reset does not re-fire a boundary already merged.
+    journal_seen: HashSet<String>,
 }
 
 impl PageFeed {
@@ -165,8 +184,22 @@ impl PageFeed {
                 .iter()
                 .map(|meta| (meta.point, 0))
                 .collect(),
+            history_run: BTreeMap::new(),
             journal_since: 0,
+            journal_seen: HashSet::new(),
         }
+    }
+
+    /// The page's `noteRestart`: a same-source restart observed through
+    /// any served stream resets every stream cursor so the next reads
+    /// re-fetch whole — the new lifetime's numbering must never merge
+    /// onto the old stream's.
+    fn restart(&mut self) {
+        for seq in self.history_since.values_mut() {
+            *seq = 0;
+        }
+        self.history_run.clear();
+        self.journal_since = 0;
     }
 
     /// One page refresh's feed reads — `/snapshot` then the `/history`
@@ -174,14 +207,17 @@ impl PageFeed {
     /// renders. A poll observing both degradations answers the gap:
     /// the streams provably advanced past the cursor while the
     /// publication identity repeated cannot happen — a gap needs new
-    /// entries, which a repeated publication never carries.
+    /// entries, which a repeated publication never carries. A restart
+    /// observation outranks either: cursors reset and the poll reports
+    /// the seam, whatever the streams then answered.
     fn poll(&mut self, client: &MonitorClient) -> FeedState {
         let snapshot = client.snapshot().unwrap();
         let publication = (
             snapshot.publication.map(|health| health.published),
             snapshot.tick,
         );
-        let mut state = match self.publication {
+        let last_publication = self.publication;
+        let mut state = match last_publication {
             Some(last) if last == publication => FeedState::Stale {
                 published: publication.0,
                 tick: publication.1,
@@ -189,6 +225,16 @@ impl PageFeed {
             _ => FeedState::Fresh,
         };
         self.publication = Some(publication);
+        let mut restarted = false;
+        // A regressed identity — a lower `published` seq or an older
+        // tick — can only mean the source's store restarted.
+        if let Some((last_seq, last_tick)) = last_publication
+            && ((last_seq.is_some() && publication.0.is_some() && publication.0 < last_seq)
+                || publication.1 < last_tick)
+        {
+            restarted = true;
+            self.restart();
+        }
 
         let since =
             if !self.history_since.is_empty() && self.history_since.values().all(|seq| *seq > 0) {
@@ -197,6 +243,21 @@ impl PageFeed {
                 0
             };
         for history in client.history(&[], since).unwrap() {
+            // The envelope's served lifetime marker: a `run` that
+            // changed under a standing cursor means the seq axis
+            // restarted with a new process lifetime. An envelope
+            // predating the marker serves `run` 0 and seeds nothing.
+            if history.run != 0 {
+                if self
+                    .history_run
+                    .get(&history.point)
+                    .is_some_and(|run| *run != history.run)
+                {
+                    restarted = true;
+                    self.restart();
+                }
+                self.history_run.insert(history.point, history.run);
+            }
             let last = self.history_since.get(&history.point).copied().unwrap_or(0);
             if last > 0
                 && let Some(first) = history.samples.iter().find(|entry| entry.seq > last)
@@ -224,10 +285,37 @@ impl PageFeed {
                 through: first.seq - 1,
             };
         }
+        // The same discontinuity can sit wholly inside one answer: a
+        // pinned run_boundary precedes the ring's retained tail, so
+        // consecutive served seqs can step over an evicted stretch at
+        // any cursor — the whole re-read's 0 included. Ascending seqs
+        // give each later pair the wider `through`, matching the
+        // page's widest-gap note.
+        for pair in entries.windows(2) {
+            if pair[1].seq > pair[0].seq + 1 {
+                state = FeedState::Gap {
+                    from: pair[0].seq + 1,
+                    through: pair[1].seq - 1,
+                };
+            }
+        }
         for entry in &entries {
             self.journal_since = self.journal_since.max(entry.seq);
+            let key = format!(
+                "{} {}",
+                entry.tick.0,
+                serde_json::to_string(&entry.event).unwrap()
+            );
+            // A run_boundary the page had not yet merged is the journal
+            // stream's own restart marker.
+            if self.journal_seen.insert(key)
+                && matches!(entry.event, JournalEvent::RunBoundary { .. })
+            {
+                restarted = true;
+                self.restart();
+            }
         }
-        state
+        if restarted { FeedState::Restart } else { state }
     }
 }
 
@@ -250,22 +338,35 @@ fn page_carries_the_feed_state_indicator() {
     // The line beside the view the marks render on, and the named
     // states themselves — distinct names from the pair section's
     // unreachable-peer fault and from the quality vocabulary.
-    for needle in ["id=\"feed-state\"", "publication gap", "stale publication"] {
+    for needle in [
+        "id=\"feed-state\"",
+        "publication gap",
+        "stale publication",
+        "source restarted",
+    ] {
         assert!(page.contains(needle), "page lacks {needle}");
     }
     // The detection machinery: the publication identity the freshness
-    // check compares, the since-cursor gap reads, and the renderer.
+    // check compares, the since-cursor gap reads, the restart
+    // observations — a regressed publication identity, a served
+    // run_boundary, a changed history run marker — funnelling into the
+    // cursor reset, and the renderer.
     for needle in [
         "function notePublication(snapshot)",
+        "function noteRestart(detail)",
         "function noteFeedGap(stream, from, through)",
         "function renderFeed()",
         "feed.publication",
         "feed.gap",
         "feed.stale",
+        "feed.restart",
         "snapshot.publication",
         "health.published",
         "noteFeedGap(\"history\"",
         "noteFeedGap(\"journal\"",
+        "noteRestart(\"the source's publication identity regressed\")",
+        "\"run_boundary\" in entry.event",
+        "history.run !== undefined",
     ] {
         assert!(page.contains(needle), "page lacks {needle}");
     }
@@ -276,6 +377,7 @@ fn page_carries_the_feed_state_indicator() {
         "feed.publication = null",
         "feed.gap = null",
         "feed.stale = null",
+        "feed.restart = null",
         "line.hidden = notices.length === 0",
     ] {
         assert!(page.contains(needle), "page lacks {needle}");
@@ -384,4 +486,166 @@ fn non_good_process_data_is_not_a_feed_state() {
             telemetry.sample
         );
     });
+}
+
+/// A scratch directory per test and process — tests run in parallel.
+fn scratch(test: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("dcs-monitor-feed-{test}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Binds the rig's monitor on `journal` — a fn rather than a closure
+/// because the returned `Monitor` borrows the driver.
+fn bind_on_journal<'d>(driver: &'d StubDriver, journal: &std::path::Path) -> Monitor<'d> {
+    bind_on_journal_bounded(driver, journal, MonitorConfig::default().journal_capacity)
+}
+
+/// `bind_on_journal` with a chosen journal tail bound — small enough
+/// that a handful of journaled entries evicts a `run_boundary` into
+/// the pinned stream.
+fn bind_on_journal_bounded<'d>(
+    driver: &'d StubDriver,
+    journal: &std::path::Path,
+    journal_capacity: usize,
+) -> Monitor<'d> {
+    Monitor::bind_with(
+        "127.0.0.1:0",
+        Executor::new(driver, rig().1, vec![Box::new(Scale)]).unwrap(),
+        signal_index(),
+        MonitorConfig {
+            journal_file: Some(journal.to_path_buf()),
+            journal_capacity,
+            ..MonitorConfig::default()
+        },
+    )
+    .unwrap()
+}
+
+/// #884's regression, consumer side: a monitor restart behind the same
+/// configured source left every served stream's seq axis renumbered
+/// from 1, so a cursor consumer read phantom idle then stitched the new
+/// lifetime's samples contiguously onto the old series. The page now
+/// notes the restart — the publication identity regressing, the served
+/// `run_boundary`, the changed history `run` marker — resets its
+/// cursors, and marks the feed "source restarted" for that poll,
+/// clearing on the next in-sequence one. Two binds on one journal file
+/// stand in for the restart, the PageFeed's cursors persisting across
+/// them like the page's do across a same-source process swap.
+#[test]
+fn a_same_source_restart_marks_the_feed_and_re_reads_the_streams() {
+    let dir = scratch("restart-feed");
+    let journal = dir.join("monitor.jsonl");
+
+    // First lifetime: scans and polls seat the page's cursors at the
+    // run's tail.
+    let (driver, _) = rig();
+    let first = bind_on_journal(&driver, &journal);
+    let mut feed = serving(&first, || {
+        let client = MonitorClient::new(first.local_addr());
+        let mut feed = PageFeed::new(&client);
+        client.advance(3).unwrap();
+        assert_eq!(feed.poll(&client), FeedState::Fresh);
+        feed
+    });
+    drop(first);
+
+    // The restart behind the same source: the second lifetime's store
+    // renumbers every seq axis from 1 while its journal replays the
+    // file's record and serves run 2's boundary. The first poll on the
+    // new process observes the regression — publication seq back at 1 —
+    // and names the restart instead of merging its numbering.
+    let driver = StubDriver::new(&[
+        (PointId(10), Value::Float(0.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ]);
+    let second = bind_on_journal(&driver, &journal);
+    serving(&second, || {
+        let client = MonitorClient::new(second.local_addr());
+        assert_eq!(
+            feed.poll(&client),
+            FeedState::Restart,
+            "the restart must name itself, never read as idle or \
+             in-sequence continuation"
+        );
+        // The restart's cursor reset re-read the streams whole: the
+        // served run boundary was merged once — it must not re-fire on
+        // every later poll.
+        client.advance(1).unwrap();
+        assert_eq!(feed.poll(&client), FeedState::Fresh);
+    });
+    drop(second);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// qa-journal-pinned-boundary-internal-gap-unseen, consumer side: a
+/// `run_boundary` the bounded journal tail evicted survives pinned
+/// ahead of the ring, so one `GET /journal` answer reads
+/// `[boundary@low-seq, ring@high-seq]` — an evicted stretch wholly
+/// inside the response. A whole re-read (cursor 0) has no head check
+/// term for it at all, so only the consecutive-pair comparison names
+/// the jump — the defect's silent case.
+#[test]
+fn a_pinned_boundary_internal_gap_marks_the_feed() {
+    let dir = scratch("pinned-boundary-internal-gap");
+    let journal = dir.join("monitor.jsonl");
+
+    // The first lifetime on the file — its census seeds the record —
+    // so the second journals its run_boundary as an ordinary entry.
+    let (driver, _) = rig();
+    let first = bind_on_journal_bounded(&driver, &journal, 4);
+    first.paced_scan();
+    drop(first);
+
+    let (driver, _) = rig();
+    let second = bind_on_journal_bounded(&driver, &journal, 4);
+    serving(&second, || {
+        let client = MonitorClient::new(second.local_addr());
+        let mut feed = PageFeed::new(&client);
+        // The boundary merges while it still stands inside the ring:
+        // the poll names the restart, and the marker's merge key now
+        // dedupes it — so a later re-serve cannot mask the gap verdict
+        // behind a second restart observation.
+        assert_eq!(feed.poll(&client), FeedState::Restart);
+
+        // The reproduction's flood: journaled command settles past the
+        // tail's bound evict the boundary into the pinned stream.
+        for value in 0..12_u64 {
+            client
+                .command(&Command::WriteValue {
+                    point: PointId(10),
+                    kind: ValueKind::Float,
+                    value: Value::Float(value as f64),
+                })
+                .unwrap();
+            client.advance(1).unwrap();
+        }
+        // The served answer's own discontinuity — the pinned marker
+        // ahead of the retained tail — is the stretch the mark names.
+        let served = client.journal(0).unwrap();
+        assert!(
+            matches!(served[0].event, JournalEvent::RunBoundary { .. }),
+            "the pinned run_boundary must head the answer: {served:?}"
+        );
+        let pair = served
+            .windows(2)
+            .rfind(|pair| pair[1].seq > pair[0].seq + 1)
+            .expect("the flood must leave a pinned-marker discontinuity");
+        let (from, through) = (pair[0].seq + 1, pair[1].seq - 1);
+
+        // A whole re-read — the cursor a restart observation reset to
+        // 0 — steps over the internal jump: the named gap, not a
+        // restart — the boundary's key already merged.
+        feed.restart();
+        assert_eq!(
+            feed.poll(&client),
+            FeedState::Gap { from, through },
+            "the internal discontinuity must read as the named gap"
+        );
+    });
+    drop(second);
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

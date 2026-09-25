@@ -664,7 +664,7 @@ mod tests {
         let mut executor = Executor::new(&sim, point_map, vec![Box::new(pid)]).unwrap();
         sim.write(SP, Value::Float(5.0)).unwrap();
         sim.write(PV, Value::Float(1.0)).unwrap();
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(sim.read(OUT).unwrap().value, Value::Float(4.0));
 
         let receipt = executor.submit_command(dcs_core::Command::SetParameter {
@@ -678,7 +678,7 @@ mod tests {
         ));
         // Not yet applied: the boundary is the next scan.
         assert_eq!(sim.read(OUT).unwrap().value, Value::Float(4.0));
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(sim.read(OUT).unwrap().value, Value::Float(8.0));
     }
 
@@ -808,7 +808,7 @@ mod tests {
         // Setpoint 10, pv starting at 0; run 40 seconds of simulated time.
         sim.write(SP, Value::Float(10.0)).unwrap();
         for _ in 0..400 {
-            executor.scan().unwrap();
+            executor.scan();
             sim.step(0.1);
         }
 

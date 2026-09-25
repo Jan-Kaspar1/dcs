@@ -294,15 +294,25 @@ fn an_injected_fault_is_visible_in_a_controllers_snapshot_and_journal() {
 #[test]
 fn an_unreachable_server_exits_nonzero_naming_the_address() {
     // Bind once to learn a free port, then drop the listener so the
-    // address refuses connections.
-    let addr = TcpListener::bind(("127.0.0.1", 0))
-        .unwrap()
-        .local_addr()
-        .unwrap();
-    let output = ctl(addr, &["list"]);
-    assert!(!output.status.success());
-    let stderr = stderr(&output);
-    assert!(stderr.contains(&addr.to_string()), "{stderr}");
+    // address refuses connections. A concurrently bound fixture can
+    // legitimately take the freed port — the probe then answers —
+    // so retry until a probed port stays refused.
+    for _ in 0..20 {
+        let addr = TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let output = ctl(addr, &["list"]);
+        if output.status.success() {
+            continue;
+        }
+        let stderr = stderr(&output);
+        assert!(stderr.contains(&addr.to_string()), "{stderr}");
+        return;
+    }
+    panic!(
+        "twenty dead ports each answered — a concurrent listener keeps taking the freed port or the tool accepts a refused address"
+    );
 }
 
 #[test]

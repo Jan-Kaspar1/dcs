@@ -10,10 +10,10 @@ use dcs_blocks::{Pid, PidConfig, Sequencer, SequencerStep};
 use dcs_core::{
     Command, CommandError, CommandOutcome, CommandReceipt, Direction, ForcedPoint, IoDriver,
     IoError, JournalEvent, PointId, Quality, QualityReason, Role, RoleReport, Sample, SignalId,
-    StandbySync, Tick, Value, ValueKind,
+    StandbySync, SwitchOrigin, Tick, Value, ValueKind,
 };
 use dcs_model::{PointSignal, SignalIndex};
-use dcs_monitor::{Monitor, MonitorClient};
+use dcs_monitor::{Monitor, MonitorClient, PairFaultKind};
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap, StepError,
 };
@@ -128,6 +128,7 @@ fn entry(point: PointId, direction: Direction, kind: ValueKind, writable: bool) 
         description: None,
         group: None,
         writable,
+        requires_reason: false,
     }
 }
 
@@ -403,6 +404,7 @@ fn read_subcommands_roundtrip_the_served_payloads() {
                 role: Role::Active,
                 tick: Tick(2),
                 sync: None,
+                field_claim: None,
             }
         );
 
@@ -702,6 +704,35 @@ fn resources_print_the_served_live_resource_view() {
             Some("I/O point PointId(50) is not declared writable")
         );
 
+        // The `KindDeclared` probe's published verdict joins the same
+        // read: `advance` landing the table's last step completes the
+        // run, and the served state turns unavailable carrying the
+        // kind's standing refusal — the text a refused submission's
+        // receipt settles — while `reset` stays available.
+        let receipt: CommandReceipt =
+            serde_json::from_value(ctl_ok(addr, &["invoke", "seq", "advance"])).unwrap();
+        assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+        ctl_ok(addr, &["scan", "1"]);
+        let seq: dcs_core::ComponentResources =
+            serde_json::from_value(ctl_ok(addr, &["resources", "seq"])).unwrap();
+        let advance = seq
+            .commands
+            .iter()
+            .find(|command| command.name == "advance")
+            .unwrap();
+        assert!(!advance.available, "{advance:?}");
+        assert_eq!(
+            advance.refusal.as_deref(),
+            Some("the sequence has run to its end; reset restarts it")
+        );
+        assert!(
+            seq.commands
+                .iter()
+                .find(|command| command.name == "reset")
+                .unwrap()
+                .available
+        );
+
         // A name the served registry does not carry fails the
         // invocation naming it — the same lookup `events <component>`
         // performs, never a rejection.
@@ -734,6 +765,7 @@ fn write_parses_per_the_declared_kind_and_reports_receipts() {
                     apply_tick: Tick(2)
                 },
                 actor: None,
+                reason: None,
             }
         );
         let receipt: CommandReceipt =
@@ -1075,6 +1107,7 @@ fn invoke_submits_declared_commands_and_prints_the_receipt() {
                     apply_tick: Tick(2)
                 },
                 actor: None,
+                reason: None,
             }
         );
 
@@ -1296,6 +1329,69 @@ fn an_unattributed_submission_journals_unattributed() {
 }
 
 #[test]
+fn pair_health_prints_healthy_json_for_all_resolved_peers() {
+    let active = PeerRig::start(Role::Active);
+    let standby = PeerRig::start(Role::Standby);
+    let other_standby = PeerRig::start(Role::Standby);
+    active.client.advance(1).unwrap();
+    let checkpoint = active.client.checkpoint().unwrap();
+    standby.monitor.apply_checkpoint(&checkpoint).unwrap();
+    other_standby.monitor.apply_checkpoint(&checkpoint).unwrap();
+
+    for (first, second) in [(active.addr, standby.addr), (standby.addr, active.addr)] {
+        let output = ctl(
+            first,
+            &[
+                "pair-health",
+                &second.to_string(),
+                &other_standby.addr.to_string(),
+            ],
+        );
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert!(stderr(&output).is_empty());
+        let health: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(health["active"], active.addr.to_string());
+        assert_eq!(health["faults"], serde_json::json!([]));
+        assert!(health.get("fault_kinds").is_none());
+        let decoded: dcs_monitor::PairHealth = serde_json::from_value(health.clone()).unwrap();
+        assert!(decoded.fault_kinds.is_empty());
+        assert!(health["fault_kinds_version"].is_u64());
+    }
+}
+
+#[test]
+fn pair_health_faults_exit_nonzero_with_serialized_named_kinds() {
+    for (role, kind) in [
+        (Role::Active, PairFaultKind::DualActive),
+        (Role::Standby, PairFaultKind::NoActivePeer),
+    ] {
+        let first = PeerRig::start(role);
+        let second = PeerRig::start(role);
+        let output = ctl(first.addr, &["pair-health", &second.addr.to_string()]);
+        assert!(!output.status.success(), "{output:?}");
+        let health: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let kinds = vec![kind];
+        assert_eq!(health["active"], serde_json::Value::Null);
+        assert_eq!(health["fault_kinds"], serde_json::to_value(&kinds).unwrap());
+        assert_eq!(health["faults"].as_array().unwrap().len(), kinds.len());
+        assert!(health["fault_kinds_version"].is_u64());
+        assert_eq!(
+            stderr(&output),
+            format!(
+                "dcs-ctl: {}: pair-health faults: {}\n",
+                first.addr,
+                serde_json::to_string_pretty(&kinds).unwrap()
+            )
+        );
+        for peer in [&first, &second] {
+            let report: RoleReport = serde_json::from_value(ctl_ok(peer.addr, &["role"])).unwrap();
+            assert_eq!(report, peer.client.role().unwrap());
+            assert_eq!(report.role, role);
+        }
+    }
+}
+
+#[test]
 fn promote_and_demote_print_role_reports_and_named_refusals() {
     let active = PeerRig::start(Role::Active);
     // The standby names its tracking source — the configured peer its
@@ -1366,6 +1462,115 @@ fn promote_and_demote_print_role_reports_and_named_refusals() {
     standby.stop();
 }
 
+/// The journaled `RoleChanged` events of a peer's served journal: the
+/// transition beside the switch's attribution — `origin` marking a
+/// requested switch, `actor` the declared identity it carried.
+fn role_changes(client: &MonitorClient) -> Vec<(Role, Role, Option<SwitchOrigin>, Option<String>)> {
+    client
+        .journal(0)
+        .unwrap()
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            JournalEvent::RoleChanged {
+                from,
+                to,
+                origin,
+                actor,
+            } => Some((*from, *to, *origin, actor.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Converges `standby` against `active`'s current checkpoint — the
+/// promote contract's prerequisite.
+fn converge(active: &PeerRig, standby: &PeerRig) {
+    active.client.advance(3).unwrap();
+    standby
+        .monitor
+        .apply_checkpoint(&active.client.checkpoint().unwrap())
+        .unwrap();
+}
+
+#[test]
+fn promote_and_demote_carry_the_declared_actor() {
+    let active = PeerRig::start(Role::Active);
+    // The standby names its tracking source — the configured peer its
+    // demotions follow back to the active.
+    let standby = PeerRig::start_tracking(Role::Standby, Some(active.addr));
+    converge(&active, &standby);
+
+    // `promote --actor` declares the identity the switch request
+    // carries: both journaled RoleChanged entries — the request's
+    // transition and the settle's — stamp it beside `origin: request`.
+    let report: RoleReport =
+        serde_json::from_value(ctl_ok(standby.addr, &["promote", "--actor", "console-7"])).unwrap();
+    assert_eq!(report.role, Role::Promoting);
+    ctl_ok(standby.addr, &["scan", "1"]);
+    assert_eq!(
+        role_changes(&standby.client),
+        vec![
+            (
+                Role::Standby,
+                Role::Promoting,
+                Some(SwitchOrigin::Request),
+                Some("console-7".to_string()),
+            ),
+            (
+                Role::Promoting,
+                Role::Active,
+                Some(SwitchOrigin::Request),
+                Some("console-7".to_string()),
+            ),
+        ]
+    );
+
+    // `DCS_ACTOR` is the configured default a flagless `demote`
+    // declares; the flag overrides it — the same convention the
+    // command subcommands honor.
+    let output = ctl_env(standby.addr, &["demote"], &[("DCS_ACTOR", "ops-cli")]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let report: RoleReport = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(report.role, Role::Demoting);
+    ctl_ok(standby.addr, &["scan", "1"]);
+    converge(&active, &standby);
+    let output = ctl_env(
+        standby.addr,
+        &["promote", "--actor", "console-7"],
+        &[("DCS_ACTOR", "ops-cli")],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    ctl_ok(standby.addr, &["scan", "1"]);
+    // An invocation declaring neither — the env removed, no flag —
+    // submits the bare request and journals unattributed.
+    ctl_ok(standby.addr, &["demote"]);
+    ctl_ok(standby.addr, &["scan", "1"]);
+
+    let actors: Vec<Option<String>> = role_changes(&standby.client)
+        .iter()
+        .map(|(_, _, origin, actor)| {
+            assert_eq!(*origin, Some(SwitchOrigin::Request));
+            actor.clone()
+        })
+        .collect();
+    assert_eq!(
+        actors,
+        vec![
+            Some("console-7".to_string()),
+            Some("console-7".to_string()),
+            Some("ops-cli".to_string()),
+            Some("ops-cli".to_string()),
+            Some("console-7".to_string()),
+            Some("console-7".to_string()),
+            None,
+            None,
+        ]
+    );
+
+    active.stop();
+    standby.stop();
+}
+
 #[test]
 fn scan_runs_on_an_unpaced_monitor_and_is_refused_on_a_paced_one() {
     with_monitor(|_driver, addr, _client| {
@@ -1393,22 +1598,36 @@ fn scan_runs_on_an_unpaced_monitor_and_is_refused_on_a_paced_one() {
 #[test]
 fn an_unreachable_monitor_exits_nonzero_naming_the_address() {
     // Bind once to learn a free port, then drop the listener so the
-    // address refuses connections.
-    let addr = TcpListener::bind(("127.0.0.1", 0))
-        .unwrap()
-        .local_addr()
-        .unwrap();
-    for args in [
-        ["snapshot"].as_slice(),
-        ["write", "11", "5"].as_slice(),
-        ["invoke", "seq", "advance"].as_slice(),
-        ["promote"].as_slice(),
-    ] {
-        let output = ctl(addr, args);
-        assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
-        let stderr = stderr(&output);
-        assert!(stderr.contains(&addr.to_string()), "{args:?}: {stderr}");
+    // address refuses connections. A concurrently bound fixture can
+    // legitimately take the freed port — a probe then answers — so
+    // retry until a probed port stays refused.
+    for _ in 0..20 {
+        let addr = TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let mut rebound = false;
+        for args in [
+            ["snapshot"].as_slice(),
+            ["write", "11", "5"].as_slice(),
+            ["invoke", "seq", "advance"].as_slice(),
+            ["promote"].as_slice(),
+        ] {
+            let output = ctl(addr, args);
+            if output.status.success() {
+                rebound = true;
+                break;
+            }
+            let stderr = stderr(&output);
+            assert!(stderr.contains(&addr.to_string()), "{args:?}: {stderr}");
+        }
+        if !rebound {
+            return;
+        }
     }
+    panic!(
+        "twenty dead ports each answered — a concurrent listener keeps taking the freed port or the tool accepts a refused address"
+    );
 }
 
 #[test]
@@ -1421,6 +1640,12 @@ fn malformed_arguments_fail_with_usage_never_a_panic() {
         vec![dead],
         vec![dead, "bogus"],
         vec![dead, "snapshot", "extra"],
+        vec![dead, "role", "extra"],
+        vec![dead, "pair-health"],
+        vec![dead, "pair-health", "--actor", "op"],
+        vec![dead, "pair-health", dead, "--bogus"],
+        vec![dead, "pair-health", "not-an-address"],
+        vec![dead, "pair-health", dead, "not-an-address"],
         vec![dead, "journal", "--since"],
         vec![dead, "journal", "--since", "abc"],
         vec![dead, "journal", "--bogus", "1"],
@@ -1468,12 +1693,15 @@ fn malformed_arguments_fail_with_usage_never_a_panic() {
         vec![dead, "invoke", "seq", "advance", "count=1", "count=2"],
         vec![dead, "invoke", "comp", "cmd", "x=1", "--actor"],
         vec![dead, "invoke", "comp", "cmd", "--bogus"],
-        // promote/demote take no actor: the switch-request contract has
-        // no field for one, so the flag is malformed usage there.
+        // promote/demote's malformed shapes: a stray positional, the
+        // actor flag's missing name or a repeat, an unknown flag.
         vec![dead, "promote", "extra"],
-        vec![dead, "promote", "--actor", "op"],
+        vec![dead, "promote", "--actor"],
+        vec![dead, "promote", "--actor", "a", "--actor", "b"],
+        vec![dead, "promote", "--bogus"],
         vec![dead, "demote", "extra"],
-        vec![dead, "demote", "--actor", "op"],
+        vec![dead, "demote", "--actor"],
+        vec![dead, "demote", "--bogus", "x"],
         vec![dead, "snapshot", "--actor", "op"],
         vec![dead, "scan"],
         vec![dead, "scan", "abc"],

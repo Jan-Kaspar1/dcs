@@ -174,7 +174,7 @@ fn scripted_run(driver: &(dyn IoDriver + Sync), mut step: impl FnMut()) -> Vec<S
         driver
             .write(PointId(1), Value::Float(scan as f64 * 0.25))
             .unwrap();
-        executor.scan().unwrap();
+        executor.scan();
         step();
         trace.push(executor.sample(PointId(1)).unwrap());
         trace.push(executor.sample(PointId(2)).unwrap());

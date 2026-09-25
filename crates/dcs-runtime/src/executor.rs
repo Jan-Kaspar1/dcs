@@ -17,8 +17,8 @@ use dcs_core::{
     CommandQueueDiagnostics, CommandReceipt, CommandVerdict, ComponentCommands,
     ComponentDiagnostics, ComponentParameters, CyclicIoDriver, Direction, DroppedElement,
     EmittedEvent, ForcedPoint, IoDriver, IoError, IoFault, IoHealth, ModelFingerprint, PointId,
-    PointTelemetry, Quality, QualityReason, Sample, StateMap, TelemetrySnapshot, Tick, Value,
-    ValueKind,
+    PointTelemetry, Quality, QualityReason, RevertedParameter, Sample, StateMap, TelemetrySnapshot,
+    Tick, Value, ValueKind,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -45,13 +45,22 @@ pub struct PointSpec {
     /// [`CommandError::NotWritable`](dcs_core::CommandError::NotWritable)
     /// regardless.
     pub writable: bool,
+    /// Whether the point's `io_point` declaration marks its commands
+    /// reason-carrying — the `requires_reason` flag carried through
+    /// assembly. A submission against a marked point declaring no
+    /// `reason` beside `actor` on the attributed envelope rejects
+    /// [`CommandError::ReasonRequired`](dcs_core::CommandError::ReasonRequired)
+    /// at admission; an unmarked point takes commands with or without
+    /// one. The model only admits the flag on a writable `In` point, so
+    /// the map serves it without repeating the shape check.
+    pub requires_reason: bool,
     /// The point's declared freshness budget — the `stale_after_ticks` a
     /// model `io_point` declaration carries through assembly.
     /// `Some(budget)` on a field `In` point asks the input phase to land
     /// the image sample as
     /// [`Quality::Uncertain`]`(`[`QualityReason::Stale`]`)` when the
-    /// driver-returned sample's tick lags the scan tick by more than
-    /// `budget` ticks; `None` disables the check, and the budget is
+    /// driver-returned sample has not changed in more than `budget`
+    /// scan ticks; `None` disables the check, and the budget is
     /// inert on internal points (never driver-read) and `Out` points
     /// (never read).
     pub stale_after_ticks: Option<u64>,
@@ -98,6 +107,7 @@ impl PointMap {
                 kind,
                 internal: None,
                 writable: false,
+                requires_reason: false,
                 stale_after_ticks: None,
                 journaled: false,
             },
@@ -133,6 +143,7 @@ impl PointMap {
                 kind,
                 internal: None,
                 writable: true,
+                requires_reason: false,
                 stale_after_ticks: None,
                 journaled: false,
             },
@@ -157,6 +168,7 @@ impl PointMap {
                 kind,
                 internal: Some(initial),
                 writable: false,
+                requires_reason: false,
                 stale_after_ticks: None,
                 journaled: false,
             },
@@ -184,6 +196,7 @@ impl PointMap {
                 kind,
                 internal: Some(initial),
                 writable: true,
+                requires_reason: false,
                 stale_after_ticks: None,
                 journaled: false,
             },
@@ -370,42 +383,24 @@ impl fmt::Display for WiringError {
 
 impl std::error::Error for WiringError {}
 
-/// Why a scan failed.
-///
-/// No scan phase currently produces one: component `step` errors are
-/// counted per component in [`Executor::component_statuses`], and
-/// driver-boundary failures — reads, writes, the cyclic exchange —
-/// degrade into [`IoHealth`](dcs_core::IoHealth) counters and held
-/// samples rather than aborting the scan. The variant set is retained
-/// for the [`Executor::scan`]/[`Peer`](crate::Peer)/monitor `Result`
-/// contract the callers write against.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ScanError {
-    /// A driver-boundary failure ended the scan — kept for contract
-    /// compatibility; the executor's field faults now degrade instead.
-    Io(IoError),
-}
-
-impl fmt::Display for ScanError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(error) => write!(f, "output write failed: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for ScanError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(error) => Some(error),
-        }
-    }
-}
-
-impl From<IoError> for ScanError {
-    fn from(error: IoError) -> Self {
-        Self::Io(error)
-    }
+/// One budgeted field `In` point's freshness evidence: the driver
+/// sample last read and the scan tick at which that observation last
+/// changed — the run-domain record the `stale_after_ticks` budget
+/// measures, so a driver stamping in its own tick domain still yields
+/// a lag inside the run's.
+#[derive(Debug, Clone, Copy)]
+struct Freshness {
+    /// The sample the last successful read returned — the change
+    /// marker: a fresh acquisition re-stamps it, so an unchanged
+    /// report is held data aging under the budget.
+    observed: Sample,
+    /// The scan tick `observed` last changed at — or, on the first
+    /// observation, the earlier of that tick and the driver's own
+    /// stamp: a stamp already behind the scan tick is aged evidence
+    /// the run trusts only as far as the stamp claims, while a stamp
+    /// in a domain running ahead of the run seeds at the observation
+    /// itself — the freshest thing the run has seen.
+    since: Tick,
 }
 
 /// Runtime diagnostics for one registered component.
@@ -428,6 +423,15 @@ struct Entry {
     /// Declared requirements indexed by point; the step's scoped I/O view
     /// checks every access against this set.
     declared: HashMap<PointId, IoRequirement>,
+    /// The component's parameter report captured at construction — the
+    /// revision's declared defaults as the fresh instance stands before
+    /// any scan, command, or adopted receipt could tune them. The
+    /// reverted-tuning itemization diffs a crossing checkpoint's
+    /// declared parameters against this baseline, not the live report:
+    /// an `Accepted` receipt the checkpoint adopted and re-settled here,
+    /// or a tune aimed at this run directly, must not hide what the old
+    /// run's tuning reverted *from*.
+    parameter_defaults: StateMap,
     last_tick: Option<Tick>,
     step_errors: u64,
     last_error: Option<String>,
@@ -507,10 +511,24 @@ fn failure_quality(error: IoError) -> Quality {
         IoError::Disconnected(_) | IoError::Timeout(_) | IoError::Fenced(_) => {
             Quality::Bad(QualityReason::CommunicationFault)
         }
-        IoError::UnknownPoint(_) | IoError::TypeMismatch { .. } => {
+        IoError::UnknownPoint(_) | IoError::TypeMismatch { .. } | IoError::InvalidValue { .. } => {
             Quality::Bad(QualityReason::ConfigurationFault)
         }
     }
+}
+
+/// Whether a checkpointed parameter value and the revision's declared
+/// default stand equal for the reverted-tuning itemization — exact
+/// match per kind, `NaN` agreeing only with `NaN` like the divergence
+/// rule's comparison: a checkpointed `NaN` against a declared `NaN` is
+/// no reversion.
+fn parameter_value_stands(checkpointed: Value, declared: Value) -> bool {
+    checkpointed == declared
+        || matches!(
+            (checkpointed, declared),
+            (Value::Float(checkpointed), Value::Float(declared))
+                if checkpointed.is_nan() && declared.is_nan()
+        )
 }
 
 /// A command resolved past static validation: what
@@ -535,6 +553,60 @@ enum Resolved {
         command: String,
         arguments: BTreeMap<String, Value>,
     },
+}
+
+/// The rollback record for one effect a command boundary staged: the
+/// pre-boundary state [`Executor::suspend_boundary_commands`] returns
+/// when the boundary's run turns out superseded. Every state a command
+/// mutates is run state the checkpoints keep carrying — the receipt
+/// outcome the boundary wrote, the image's internal `In` samples, the
+/// force set, a component's captured state — and a settlement on the
+/// abandoned boundary is provisional: the surviving line may already
+/// carry the admission, so the boundary replays its effects *and* its
+/// verdicts back out — the receipts re-suspend `Accepted` for the
+/// tracked line's adoption to adjudicate once, and the mutations
+/// unwrite so the demoted peer's quiesced checkpoints carry the
+/// pre-boundary state the still-pending receipts claim.
+#[derive(Debug)]
+enum BoundaryUndo {
+    /// A queued command's receipt as the boundary found it — always
+    /// `Accepted`, since only queued entries reach the boundary. The
+    /// settlement the boundary then wrote is provisional like every
+    /// other staged effect: a successor's checkpoint carry can hold
+    /// the same still-live admission, and a terminal verdict written
+    /// here would journal beside the line's own later, contradictory
+    /// one — so the replay returns the outcome the receipt held. The
+    /// index is the absolute submission index, not the log position:
+    /// the boundary's own `trim_receipts` may slide positions before
+    /// the replay runs.
+    Receipt { index: u64, prior: CommandOutcome },
+    /// An internal `In` point's image sample as the boundary found it —
+    /// staged by a `WriteValue` or by the force pair's image re-stamps.
+    Image {
+        point: PointId,
+        prior: Option<Sample>,
+    },
+    /// A point's `forces` entry as the boundary found it — `None` where
+    /// no force stood — staged by `ForcePoint`/`UnforcePoint`.
+    Force {
+        point: PointId,
+        prior: Option<Value>,
+    },
+    /// A field `In` point's last-observed sample as the boundary's
+    /// image held it, for a `WriteValue` the driver accepted: the
+    /// compensating write-back a superseded boundary attempts —
+    /// best-effort, since a field the claim arbitration fenced may
+    /// refuse it, leaving the plant's own record to speak.
+    FieldWrite {
+        point: PointId,
+        prior: Option<Sample>,
+    },
+    /// The component at this scan-order index, captured before the
+    /// boundary's first `SetParameter`/`Invoke` touched it — the
+    /// checkpoint vocabulary's own state, restored through the same
+    /// [`restore_state`](Component::restore_state) contract a tracking
+    /// apply relies on.
+    Component { index: usize, state: StateMap },
 }
 
 /// The default bound on the pending-command queue — how many accepted
@@ -600,8 +672,10 @@ pub const DEFAULT_RECEIPT_LOG_CAPACITY: usize = 1024;
 ///    marked [`Quality::Bad`] rather than aborting the scan, and a
 ///    `stale_after_ticks` budget on the point merges
 ///    [`Quality::Uncertain`]`(`[`QualityReason::Stale`]`)` onto a sample
-///    whose driver-stamped tick lags the scan tick past the budget —
-///    over a cyclic driver that stamp is the producing exchange's
+///    whose driver report has not changed within the budget — the lag
+///    measured in scan ticks, so a driver stamping in a foreign tick
+///    domain still ages held data and releases fresh data correctly;
+///    over a cyclic driver the stamp is the producing exchange's
 ///    acquisition tick, so the budget measures exchange freshness —
 ///    and every internal link routes its `Out` point's image
 ///    sample onto its `In` point, so a port-to-port carrier delivers the
@@ -731,7 +805,12 @@ pub const DEFAULT_RECEIPT_LOG_CAPACITY: usize = 1024;
 /// false `Good` data — and an internal-link route onto the point is
 /// likewise overridden. A `WriteValue` to a forced field point still
 /// reaches the driver — the force overrides the image, not the field —
-/// so the release observes whatever the field then carries. Release is
+/// so the release observes whatever the field then carries; the same
+/// write to a forced *internal* point refuses at validation with
+/// [`CommandError::PointForced`] — the image the force owns is the
+/// point's only store, so the input phase would re-stamp the forced
+/// value over the staged write within the same scan and an `Applied`
+/// settlement would journal an effect that never lands. Release is
 /// the same boundary in reverse: the applying scan's input phase reads
 /// the driver again for a field point, while a held internal point's
 /// image — left with the force's last `Substituted` stamp — is
@@ -808,6 +887,13 @@ pub struct Executor<'d> {
     /// field stays `None` here — [`snapshot`](Executor::snapshot) fills
     /// it from the driver's `diagnostics` hook at reporting time.
     io_health: IoHealth,
+    /// Per-point freshness evidence for field `In` points carrying a
+    /// `stale_after_ticks` budget — the driver sample last observed and
+    /// the scan tick that observation last changed, kept in the run's
+    /// own tick domain so a driver stamping in a foreign domain (a
+    /// remote plant's, say) cannot strand the verdict. Run-local
+    /// observation state: checkpoints neither carry nor reset it.
+    freshness: HashMap<PointId, Freshness>,
     /// The first point whose output write the shared field fenced —
     /// answered [`IoError::Fenced`] — during the most recent scan:
     /// `None` before the first scan and on scans with no fenced write.
@@ -816,10 +902,30 @@ pub struct Executor<'d> {
     /// did not see the abandoned scan's fencing. [`Peer`](crate::Peer)
     /// reads it to journal the claim loss a degraded scan still carries.
     fenced_write: Option<PointId>,
+    /// The rollback records for the commands the most recent command
+    /// boundary applied — one [`BoundaryUndo`] per staged effect, in
+    /// application order. A scan product like `emitted`: cleared when
+    /// the next scan starts and by a checkpoint apply. Only
+    /// [`suspend_boundary_commands`](Self::suspend_boundary_commands)
+    /// consumes it — the fencing path replays it in reverse so the
+    /// abandoned run's state, and every checkpoint it keeps serving,
+    /// carry the pre-boundary state while the receipts it settled
+    /// re-suspend for the surviving line to adjudicate.
+    boundary_undo: Vec<BoundaryUndo>,
     /// The fingerprint of the model this run was assembled from, when
     /// the assembling layer supplied one: stamped into every checkpoint
     /// and the value a restored checkpoint's fingerprint must equal.
     model_fingerprint: Option<ModelFingerprint>,
+    /// The tick-domain generation this run's checkpoint stream belongs
+    /// to — the identity the assembling shell mints through
+    /// [`with_generation`](Self::with_generation) and every checkpoint
+    /// stamps. `apply`, `restore`, and `reinitialize` adopt the
+    /// checkpoint's: the run joins the line the captured state came
+    /// from, so the whole tracked line shares one generation across
+    /// switchovers while a cold-started or replaced source begins a new
+    /// one. `None` while the run was never given one — the unminted
+    /// test/legacy shape — or when the last adoption carried none.
+    generation: Option<u64>,
     tick: Tick,
 }
 
@@ -880,9 +986,11 @@ impl<'d> Executor<'d> {
                 }
                 declared.insert(point, requirement);
             }
+            let parameter_defaults = component.report_parameters();
             entries.push(Entry {
                 component,
                 declared,
+                parameter_defaults,
                 last_tick: None,
                 step_errors: 0,
                 last_error: None,
@@ -921,7 +1029,11 @@ impl<'d> Executor<'d> {
         // Internal points are seeded into the image at their declared
         // initial values — a held operator value or a carrier's start —
         // so every internal point has a defined sample before the first
-        // scan.
+        // scan. The seed stamp is `Tick::ZERO`, honestly: the declared
+        // value has stood since before the run's first boundary, and a
+        // sample the run never changed keeps that stamp until a command
+        // or an adoption moves it — the zero-stamp contract held `In`
+        // points serve.
         let image = RefCell::new(HashMap::new());
         for (point, spec) in map.iter() {
             if let Some(initial) = spec.internal {
@@ -945,8 +1057,11 @@ impl<'d> Executor<'d> {
             command_verdicts: Vec::new(),
             forces: BTreeMap::new(),
             io_health: IoHealth::default(),
+            freshness: HashMap::new(),
             fenced_write: None,
+            boundary_undo: Vec::new(),
             model_fingerprint: None,
+            generation: None,
             tick: Tick::ZERO,
         })
     }
@@ -963,6 +1078,33 @@ impl<'d> Executor<'d> {
     pub fn with_model_fingerprint(mut self, fingerprint: ModelFingerprint) -> Self {
         self.model_fingerprint = Some(fingerprint);
         self
+    }
+
+    /// Records this run's checkpoint-stream generation — the tick-domain
+    /// identity every [`checkpoint`](Executor::checkpoint) stamps.
+    ///
+    /// The running process's shell mints it
+    /// ([`mint_generation`](crate::mint_generation)) at startup: each
+    /// process boot begins a new tick domain, so the generation is
+    /// supplied per run, never derived. The mint stays out of
+    /// `Executor::new` itself so a run assembled without one — tests,
+    /// lone runs — still produces fully deterministic checkpoints. A
+    /// later [`apply`](Executor::apply), [`restore`](Executor::restore),
+    /// or [`reinitialize`](Executor::reinitialize) adopts the
+    /// checkpoint's generation instead: the run joins the line the
+    /// captured state came from, so the whole tracked line shares one
+    /// generation across a switchover while a cold-started or replaced
+    /// source begins a new one.
+    pub fn with_generation(mut self, generation: u64) -> Self {
+        self.generation = Some(generation);
+        self
+    }
+
+    /// The generation this run's checkpoint stream belongs to — the
+    /// value [`with_generation`](Self::with_generation) recorded or the
+    /// last adoption carried; `None` while unidentified.
+    pub(crate) fn generation(&self) -> Option<u64> {
+        self.generation
     }
 
     /// Declares the pending-command queue's capacity bound — how many
@@ -1245,11 +1387,14 @@ impl<'d> Executor<'d> {
     /// Queues `command` for application at the start of the next scan and
     /// returns its receipt.
     ///
-    /// Submission validates the command statically — a `WriteValue`,
+    /// Submission validates the command — a `WriteValue`,
     /// `ForcePoint`, or `UnforcePoint` against the point map (the point
     /// must be served, must be a writable `In` point, and for the
     /// value-carrying pair the declared kind must match both the
-    /// map's kind and the supplied value's variant), a `SetParameter`
+    /// map's kind and the supplied value's variant; a `WriteValue`
+    /// additionally refuses an internal point a force currently pins,
+    /// [`CommandError::PointForced`], since the force owns the point's
+    /// only store until release), a `SetParameter`
     /// against the addressed component's
     /// descriptor (the component must be registered, the parameter
     /// declared, the value's kind matching, and a declared
@@ -1259,8 +1404,10 @@ impl<'d> Executor<'d> {
     /// tick the command is scheduled to apply at; at the head of the next
     /// [`scan`](Executor::scan), before the input-read phase, that same
     /// log entry's outcome is updated to [`CommandOutcome::Applied`], or
-    /// `Rejected` when the driver refuses the write or the component
-    /// refuses the tuned value — exactly one receipt per command, kept
+    /// `Rejected` when the driver refuses the write, the component
+    /// refuses the tuned value, or a force queued ahead of a write in
+    /// the same boundary pinned its internal point first — exactly one
+    /// receipt per command, kept
     /// in the [`receipts`](Executor::receipts) log in submission order.
     /// The log is bounded — settled receipts evict oldest-first past
     /// [`receipt_log_capacity`](Executor::receipt_log_capacity), a
@@ -1276,25 +1423,44 @@ impl<'d> Executor<'d> {
     /// statically invalid command takes its named validation rejection
     /// even when the queue is full.
     ///
-    /// The receipt is unattributed; [`submit_command_as`](Self::submit_command_as)
+    /// The receipt is unattributed; [`submit_command_attributed`](Self::submit_command_attributed)
     /// is the attributed variant the audit path submits through.
     pub fn submit_command(&mut self, command: Command) -> CommandReceipt {
-        self.submit_command_as(command, None)
+        self.submit_command_attributed(command, None, None)
+    }
+
+    /// As [`submit_command_attributed`](Self::submit_command_attributed)
+    /// without a declared reason — the actor-only attribution shape the
+    /// original command-path audit-identity decision recorded, kept for
+    /// callers that predate the shelving-reason carriage.
+    pub fn submit_command_as(&mut self, command: Command, actor: Option<String>) -> CommandReceipt {
+        self.submit_command_attributed(command, actor, None)
     }
 
     /// As [`submit_command`](Self::submit_command), stamping the receipt
-    /// with the submitter's declared actor identity — the
-    /// audit-attribution field of the command-path audit-identity
-    /// decision. The actor is submission metadata: it rides the receipt
-    /// untouched by validation, so an attributed command validates,
-    /// queues, and settles exactly as an unattributed one, and the
-    /// journaled `CommandSettled` echoing this receipt carries the
-    /// attribution. `None` submits unattributed — identical to
+    /// with the submitter's declared actor identity and the declared
+    /// `reason` the shelving-reason decision carries through the
+    /// attributed command path — the per-request justification an
+    /// operator declares beside the command for the points whose model
+    /// declaration marks it mandatory, or voluntary metadata on any
+    /// other writable point. Both are submission metadata: they ride
+    /// the receipt untouched by validation, so an attributed command
+    /// validates, queues, and settles exactly as an unattributed one —
+    /// except that a command against a `requires_reason` point
+    /// declaring no `reason` rejects `ReasonRequired` at admission, the
+    /// one place the metadata feeds back into validation — and the
+    /// journaled `CommandSettled` echoing this receipt carries both
+    /// fields. `None`/`None` submits unattributed — identical to
     /// [`submit_command`](Self::submit_command).
-    pub fn submit_command_as(&mut self, command: Command, actor: Option<String>) -> CommandReceipt {
+    pub fn submit_command_attributed(
+        &mut self,
+        command: Command,
+        actor: Option<String>,
+        reason: Option<String>,
+    ) -> CommandReceipt {
         self.command_admission.attempts += 1;
-        let outcome = match self.check_command(&command) {
-            Err(reason) => CommandOutcome::Rejected { reason },
+        let outcome = match self.check_command(&command, reason.as_deref()) {
+            Err(error) => CommandOutcome::Rejected { reason: error },
             // Validation precedes admission: a statically invalid
             // command takes its named rejection even when the queue is
             // full, and a full queue refuses a valid command without
@@ -1317,6 +1483,7 @@ impl<'d> Executor<'d> {
             command,
             outcome,
             actor,
+            reason,
         };
         self.receipts.push(receipt.clone());
         if accepted {
@@ -1376,6 +1543,29 @@ impl<'d> Executor<'d> {
         &self.receipts
     }
 
+    /// The standing force set — each forced point's substituted value.
+    /// The peer layer diffs it across a checkpoint adoption so a force
+    /// change no receipt accounts for can journal its true cause.
+    pub(crate) fn forces(&self) -> &BTreeMap<PointId, Value> {
+        &self.forces
+    }
+
+    /// The image's held internal `In` samples — the operator-commanded
+    /// and link-carried values a checkpoint's `internal` section
+    /// overlays on adoption, the same span
+    /// [`Checkpoint::internal`](crate::Checkpoint) carries. The peer
+    /// layer diffs them across the adoption so a held value the
+    /// adoption reverted against a settled write receipt can journal
+    /// its true cause.
+    pub(crate) fn held_internals(&self) -> BTreeMap<PointId, Sample> {
+        let image = self.image.borrow();
+        self.map
+            .iter()
+            .filter(|(_, spec)| spec.direction == Direction::In && spec.internal.is_some())
+            .filter_map(|(point, _)| image.get(&point).map(|&sample| (point, sample)))
+            .collect()
+    }
+
     /// The events the last completed scan's components emitted, in the
     /// order they were drained — component scan order, then each
     /// component's own emission order — each stamped with the producing
@@ -1406,31 +1596,59 @@ impl<'d> Executor<'d> {
 
     /// Runs `scans` scans and returns the tick the last one ran at.
     ///
-    /// `run(0)` is a no-op returning the current tick. A [`ScanError`]
-    /// aborts the run partway; the tick reports how far it got.
-    pub fn run(&mut self, scans: u64) -> Result<Tick, ScanError> {
+    /// `run(0)` is a no-op returning the current tick.
+    pub fn run(&mut self, scans: u64) -> Tick {
         for _ in 0..scans {
-            self.scan()?;
+            self.scan();
         }
-        Ok(self.tick)
+        self.tick
     }
 
     /// Executes one scan — apply commands, read inputs, step components,
     /// write outputs — and returns the tick it ran at. See the type docs
-    /// for the phase order.
-    pub fn scan(&mut self) -> Result<Tick, ScanError> {
+    /// for the phase order. Field-side faults never abort the scan:
+    /// they degrade into `io_health` counters and held `Bad` samples,
+    /// so the returned tick always reports a completed scan.
+    pub fn scan(&mut self) -> Tick {
         self.tick = Tick(self.tick.0 + 1);
         let tick = self.tick;
 
         self.emitted.clear();
         self.fenced_write = None;
+        self.boundary_undo.clear();
         self.apply_commands(tick);
         self.exchange_image(tick);
         self.read_inputs(tick);
         self.step_components(tick);
         self.probe_command_verdicts();
         self.write_outputs();
-        Ok(tick)
+        tick
+    }
+
+    /// Executes one quiesced scan — the same read → step → write cycle
+    /// as [`scan`](Self::scan) but without the scan-head command
+    /// application.
+    ///
+    /// A peer that does not own the field
+    /// ([`Peer::scan`](crate::Peer::scan)) runs this: an adopted
+    /// still-`Accepted` receipt is carried for a possible promotion, not
+    /// settled here — a quiesced scan must not mint an `Applied` the line
+    /// never ordered. The pending queue and the receipt log pass through
+    /// untouched, so the carried entries settle once at the promoted
+    /// run's first field-owning scan.
+    pub fn scan_quiesced(&mut self) -> Tick {
+        self.tick = Tick(self.tick.0 + 1);
+        let tick = self.tick;
+
+        self.emitted.clear();
+        self.fenced_write = None;
+        self.boundary_undo.clear();
+        self.exchange_image(tick);
+        self.read_inputs(tick);
+        self.step_components(tick);
+        self.probe_command_verdicts();
+        self.write_outputs();
+        tick
     }
 
     /// Captures the run's transferable state as a [`Checkpoint`].
@@ -1453,6 +1671,7 @@ impl<'d> Executor<'d> {
         Checkpoint {
             format_version: CHECKPOINT_FORMAT_VERSION,
             model_fingerprint: self.model_fingerprint,
+            generation: self.generation,
             tick: self.tick,
             components: self
                 .components
@@ -1480,6 +1699,13 @@ impl<'d> Executor<'d> {
             forces: self.forces.clone(),
             receipts: self.receipts.clone(),
             command_admission: self.command_admission,
+            // The executor has no role view — the serving `Peer` stamps
+            // `source_owns_field` over its own capture and the serving
+            // `Monitor` stamps `line_owner`; `line_proof` exists only
+            // on `?prove=` responses, never on a capture.
+            source_owns_field: None,
+            line_owner: None,
+            line_proof: None,
         }
     }
 
@@ -1537,6 +1763,11 @@ impl<'d> Executor<'d> {
         }
 
         executor.tick = checkpoint.tick;
+        // The restored run joins the checkpointed line's generation —
+        // a `--state-file` resume continues the same tick domain, so the
+        // checkpoints it serves carry the line's identity, not a fresh
+        // one.
+        executor.generation = checkpoint.generation;
         executor.image.borrow_mut().extend(
             checkpoint
                 .outputs
@@ -1563,9 +1794,19 @@ impl<'d> Executor<'d> {
     /// driver and each component restore their captured state, the tick
     /// resumes from `checkpoint.tick`, the output image becomes
     /// exactly the checkpoint's while its internal `In` samples overlay
-    /// the image's held values, and the receipt log becomes the
+    /// the image's held values — carrying their captured stamps
+    /// verbatim except a `Tick::ZERO` stamp on a value the adoption
+    /// changes, which re-stamps at the apply's landing tick — and the
+    /// receipt log becomes the
     /// checkpoint's — the pair's one command audit, entries still
-    /// `Accepted` re-queued for this run's next boundary. The next
+    /// `Accepted` re-queued for this run's next boundary — extended by
+    /// this run's own still-unreached tail when the adopted window's
+    /// submission high-water never saw it (see
+    /// [`adopt_receipts`](Self::adopt_receipts)). The force set takes
+    /// the checkpoint's image as its base, then the same unreached
+    /// tail's settled force verdicts re-assert over it — an applied
+    /// release this run receipted is durable truth a staler peer's
+    /// image cannot silently revert. The next
     /// [`scan`](Executor::scan) then
     /// continues the run the checkpoint captured.
     ///
@@ -1615,6 +1856,11 @@ impl<'d> Executor<'d> {
         }
 
         self.tick = checkpoint.tick;
+        // The run joins the checkpointed line's generation: from this
+        // adoption on, the checkpoints this executor serves name the
+        // line's tick-domain identity, so a peer tracking it can tell
+        // the line's continuation from a new generation's stream.
+        self.generation = checkpoint.generation;
         let mut image = self.image.borrow_mut();
         // The output image becomes exactly the checkpoint's: drop stale
         // `Out` samples so a value from the standby's own earlier scans
@@ -1633,12 +1879,40 @@ impl<'d> Executor<'d> {
             checkpoint
                 .outputs
                 .iter()
-                .chain(checkpoint.internal.iter())
                 .map(|(&point, &sample)| (point, sample)),
         );
+        // The carried stamp is the line's claim of when the held value
+        // last changed, and the pair serves one tick domain: a tracked
+        // peer's snapshot stays identical to the line's, so real stamps
+        // adopt verbatim. The exception is a stamp that cannot be the
+        // claim it reads as: `Tick::ZERO` means "unchanged since before
+        // the line's first scan", which only the seed value can
+        // honestly carry — a changed value stamped zero mis-dates its
+        // origin to run start, so the adoption's own boundary stamps
+        // it instead, the same stamp a `WriteValue` applying there
+        // would carry.
+        for (&point, &sample) in &checkpoint.internal {
+            let adopted = if sample.tick == Tick::ZERO
+                && image
+                    .get(&point)
+                    .is_none_or(|held| held.value != sample.value)
+            {
+                Sample {
+                    tick: checkpoint.tick,
+                    ..sample
+                }
+            } else {
+                sample
+            };
+            image.insert(point, adopted);
+        }
         drop(image);
-        // The checkpoint's force set is authoritative: the standby
-        // forces exactly what the active forced — no more, no less.
+        // The checkpoint's force set is the base image — the standby
+        // forces exactly what the active forced — except where this
+        // run's own receipted verdicts reach past the checkpoint's
+        // high-water: `adopt_receipts` re-asserts those settled force
+        // commands over the adopted set before the apply completes, so
+        // a staler image cannot silently revert durable truth.
         self.forces.clone_from(&checkpoint.forces);
         // The last scan's drained emissions and probed command verdicts
         // belong to the abandoned line: the adopted run's records start
@@ -1647,6 +1921,7 @@ impl<'d> Executor<'d> {
         self.emitted.clear();
         self.command_verdicts.clear();
         self.fenced_write = None;
+        self.boundary_undo.clear();
         self.adopt_receipts(checkpoint);
         Ok(())
     }
@@ -1663,7 +1938,56 @@ impl<'d> Executor<'d> {
     /// never drops it. The admission counters converge with the audit
     /// they measure, so the pair's `command_queue` telemetry section
     /// answers identically.
+    ///
+    /// One stretch of this run's own log survives the convergence:
+    /// the contiguous suffix the adopted window's high-water mark —
+    /// `attempts`, the submission index one past the last the source
+    /// recorded — does not reach. A receipt at or beyond that mark is
+    /// a submission the checkpoint's source had not observed at
+    /// capture, so its absence from the adopted log is the checkpoint's
+    /// staleness, not the line's verdict; dropping it would settle a
+    /// provisional absence as if it were one. The suffix — a demoted
+    /// run's suspended commands and the settled receipts below them —
+    /// is restored verbatim behind the adopted window and `attempts`
+    /// rises to cover it, so the checkpoint this run keeps serving
+    /// still offers the entries to a successor's
+    /// [`carry_pending_commands`](Self::carry_pending_commands) pull.
+    /// Restored `Accepted` entries stay suspended — they do not
+    /// re-queue, a quiesced scan must not mint an `Applied` the line
+    /// never ordered — and resolve when a covering adoption
+    /// adjudicates their indices: carried then, settling with the
+    /// line, or passed by and abandoned. A suffix whose base index
+    /// sits past the adopted high-water — evictions the source never
+    /// saw opening a gap the log cannot span — cannot be restored and
+    /// drops with the rest of the abandoned window.
     fn adopt_receipts(&mut self, checkpoint: &Checkpoint) {
+        // The adopted window's end in the submission sequence — the
+        // high-water a prior receipt's index measures against. Indices
+        // at or beyond it extend the adopted log contiguously only
+        // while the run's window reaches back to meet it: a prior base
+        // above the mark leaves a gap no restoration can span.
+        let adopted_end = checkpoint.receipt_base() + checkpoint.receipts.len() as u64;
+        // The receipts this run holds past the adopted high-water —
+        // submissions the checkpoint's source never observed at
+        // capture. `uncovered` is the spanable suffix restored into
+        // the log below; `unreached` is the wider set the force-set
+        // replay reads — the whole abandoned window when a gap leaves
+        // it unspanable — because an applied verdict is durable truth
+        // whether or not its receipt survives the merge: a staler
+        // image cannot silently re-stand a force the journal already
+        // released, nor drop one it recorded standing.
+        let unreached: Vec<CommandReceipt> = if adopted_end >= self.receipt_base() {
+            let skip = (adopted_end - self.receipt_base()).min(self.receipts.len() as u64) as usize;
+            self.receipts[skip..].to_vec()
+        } else {
+            self.receipts.clone()
+        };
+        self.reassert_receipted_forces(&unreached);
+        let uncovered: Vec<CommandReceipt> = if adopted_end >= self.receipt_base() {
+            unreached
+        } else {
+            Vec::new()
+        };
         self.receipts.clone_from(&checkpoint.receipts);
         // The adopted log is re-trimmed to this run's own bound: a
         // checkpoint captured under a looser capacity cannot grow this
@@ -1689,6 +2013,74 @@ impl<'d> Executor<'d> {
             .command_admission
             .high_water
             .max(self.pending_commands.len());
+        if !uncovered.is_empty() {
+            // The restored suffix lands after the queue rebuild on
+            // purpose: its `Accepted` entries are suspended state the
+            // tracked line has not adjudicated, not carried commands
+            // owed a boundary, so they must not re-queue. `attempts`
+            // rises to the window's true high-water — the submissions
+            // this log still holds — keeping `receipt_base` honest and
+            // the served checkpoint carrying them for a successor's
+            // carry.
+            self.command_admission.attempts = adopted_end + uncovered.len() as u64;
+            self.receipts.extend(uncovered);
+            self.trim_receipts();
+        }
+    }
+
+    /// Re-asserts the settled force verdicts `receipts` carries, in
+    /// order — the receipted-command contract's force-set half: an
+    /// `Applied` `ForcePoint`/`UnforcePoint` is durable truth, so an
+    /// adopted image whose capture predates the receipt cannot
+    /// silently revert it. Callers pass exactly the receipts the
+    /// checkpoint's coverage missed: [`adopt_receipts`](Self::adopt_receipts)
+    /// passes this run's unreached tail, and
+    /// [`carry_pending_commands`](Self::carry_pending_commands) the
+    /// appended carry — settled entries only; `Accepted` and
+    /// `Rejected` verdicts move no force. A receipted release on an
+    /// internal point also re-stamps its held image sample `Good` —
+    /// the same resumption the applying scan boundary performs — so a
+    /// carried `Substituted` stamp cannot outlive the lifted force. A
+    /// receipted force the current map no longer serves as a writable
+    /// `In` point — a model-boundary crossing's dropped surface — does
+    /// not re-stand: the verdict stays in the log, but the effect has
+    /// no surface to take.
+    fn reassert_receipted_forces(&mut self, receipts: &[CommandReceipt]) {
+        for receipt in receipts {
+            if !matches!(receipt.outcome, CommandOutcome::Applied { .. }) {
+                continue;
+            }
+            match &receipt.command {
+                Command::ForcePoint { point, value, .. } => {
+                    let servable = self.map.get(*point).is_some_and(|spec| {
+                        spec.direction == Direction::In
+                            && spec.writable
+                            && spec.kind == value.kind()
+                    });
+                    if servable {
+                        self.forces.insert(*point, *value);
+                    }
+                }
+                Command::UnforcePoint { point }
+                    if self.forces.remove(point).is_some()
+                        && self
+                            .map
+                            .get(*point)
+                            .is_some_and(|spec| spec.internal.is_some()) =>
+                {
+                    // The lifted force's last `Substituted` stamp would
+                    // otherwise stand on the held internal sample — the
+                    // same re-stamp the applying scan boundary performs.
+                    let held = self.image.borrow().get(point).copied();
+                    if let Some(sample) = held {
+                        self.image
+                            .borrow_mut()
+                            .insert(*point, Sample::good(sample.value, self.tick));
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Adopts the admissions a checkpoint's receipt log carries past
@@ -1726,8 +2118,13 @@ impl<'d> Executor<'d> {
         let tail = self_end.max(checkpoint_base);
         let skipped = (tail - checkpoint_base) as usize;
         let base_len = self.receipts.len();
-        self.receipts
-            .extend(checkpoint.receipts[skipped..].iter().cloned());
+        let appended: Vec<CommandReceipt> = checkpoint.receipts[skipped..].to_vec();
+        self.receipts.extend(appended.iter().cloned());
+        // The appended tail's settled force verdicts are line truth
+        // this run never observed — the same durable-truth replay
+        // `adopt_receipts` runs on its unreached suffix, here for the
+        // carry half of the boundary.
+        self.reassert_receipted_forces(&appended);
         self.command_admission = checkpoint.command_admission;
         // Bound the union before the adopted `Accepted` entries queue:
         // the trim may reach into the tail's own settled prefix, so the
@@ -1759,7 +2156,11 @@ impl<'d> Executor<'d> {
     /// log carries verbatim — the run's audit survives the boundary,
     /// entries still `Accepted` re-queued to settle under the revision —
     /// component and driver state reinitialize, and the tick resumes at
-    /// the checkpoint's. The rule classifies the whole checkpoint before any
+    /// the checkpoint's. The report itemizes the tuning the reinitialize
+    /// rule reverted: per reinitialized component, every
+    /// descriptor-declared parameter whose checkpointed value differs
+    /// from the revision's declared default. The rule classifies the
+    /// whole checkpoint before any
     /// state moves, so a revision that breaks it — a kind-retyped
     /// carried point, an unservable force, an unreadable format — fails
     /// with a named [`CarryoverError`] and changes nothing the run
@@ -1859,6 +2260,49 @@ impl<'d> Executor<'d> {
             dropped.push(DroppedElement::DriverState);
         }
 
+        // The reverted-tuning itemization: every reinitialized
+        // component's descriptor-declared parameters whose checkpointed
+        // field differs from the revision's declared default — the
+        // value the component's fresh construction reported, captured
+        // at wiring — are named so the report says which tuning was
+        // lost, not just which components restarted. The baseline is
+        // the captured defaults, not the live `report_parameters`: an
+        // `Accepted` receipt the crossing adopted can re-settle the
+        // same tune on this run, and a re-report that diffed the live
+        // value would then name nothing. Component state never crosses,
+        // so a checkpointed field the descriptor does not declare is
+        // the component's own dropped vocabulary, and a checkpointed
+        // field whose kind the revision retyped itemizes like any
+        // differing value — nothing is reinterpreted, so the
+        // named-refusal convention does not apply.
+        let mut reverted_tuning = Vec::new();
+        for entry in &self.components {
+            let component = &entry.component;
+            let declared_parameters = component.describe().parameters;
+            if declared_parameters.is_empty() {
+                continue;
+            }
+            let Some(checkpointed) = checkpoint.components.get(component.name()) else {
+                continue;
+            };
+            for parameter in declared_parameters {
+                let (Some(checkpointed_value), Some(declared_value)) = (
+                    checkpointed.get(&parameter.name),
+                    entry.parameter_defaults.get(&parameter.name),
+                ) else {
+                    continue;
+                };
+                if !parameter_value_stands(checkpointed_value, declared_value) {
+                    reverted_tuning.push(RevertedParameter {
+                        component: component.name().to_string(),
+                        parameter: parameter.name,
+                        checkpointed: checkpointed_value,
+                        declared: declared_value,
+                    });
+                }
+            }
+        }
+
         // Apply: carried samples land verbatim — quality and tick as the
         // checkpoint captured them — over the image's seeded initials;
         // the force set becomes exactly the checkpoint's; the run's
@@ -1871,6 +2315,10 @@ impl<'d> Executor<'d> {
         }
         self.forces.clone_from(&checkpoint.forces);
         self.tick = checkpoint.tick;
+        // The crossing keeps the tracked line's generation: the revised
+        // run continues the checkpoint stream's tick domain, so the
+        // checkpoints it serves still name the line they came from.
+        self.generation = checkpoint.generation;
         self.emitted.clear();
         self.command_verdicts.clear();
         self.fenced_write = None;
@@ -1902,6 +2350,7 @@ impl<'d> Executor<'d> {
                 .iter()
                 .map(|entry| entry.component.name().to_string())
                 .collect(),
+            reverted_tuning,
             initialized,
         })
     }
@@ -1995,21 +2444,30 @@ impl<'d> Executor<'d> {
         Ok(())
     }
 
-    /// Validates `command` statically and resolves what it will apply.
-    /// The checks are static — the map fixes which points exist, which of
-    /// them are writable `In` points, and their declared kinds, and a
-    /// component's descriptor fixes which parameters exist, their kinds,
-    /// and their declared ranges — so the same check at submission and at
-    /// application can only differ when the driver or the component
-    /// itself refuses.
+    /// Validates `command` and resolves what it will apply. The checks
+    /// are static — the map fixes which points exist, which of them are
+    /// writable `In` points, and their declared kinds, and a component's
+    /// descriptor fixes which parameters exist, their kinds, and their
+    /// declared ranges — plus one run-state check: whether a force
+    /// currently pins an internal point a `WriteValue` targets, which a
+    /// force queued ahead of it in the same boundary can newly answer,
+    /// so a submission's `Accepted` can still settle `Rejected` at
+    /// application when the boundary's own ordering forces the point
+    /// first.
     ///
     /// A `WriteValue` must name a served point ([`CommandError::UnknownPoint`])
     /// the map marks writable and whose direction is `In`
     /// ([`CommandError::NotWritable`] otherwise — every `Out` point
     /// refuses writes), then the declared kind must match the map's and
     /// the supplied value's variant ([`CommandError::TypeMismatch`]).
-    /// `ForcePoint`/`UnforcePoint` share that surface: a force pins a
-    /// point only the operator could write, so the same
+    /// One state check follows the static ones: a `WriteValue` to an
+    /// *internal* point a force currently pins refuses with
+    /// [`CommandError::PointForced`] — the image is the point's only
+    /// store and the force owns it until release, so nothing the write
+    /// staged could ever land — while a forced *field* point's write
+    /// still resolves, the driver holding it for the release to
+    /// observe. `ForcePoint`/`UnforcePoint` share the writable surface:
+    /// a force pins a point only the operator could write, so the same
     /// `UnknownPoint`/`NotWritable`/`TypeMismatch` rejections bound it —
     /// and a force never touches the driver, so no boundary refusal
     /// exists for the pair.
@@ -2035,11 +2493,23 @@ impl<'d> Executor<'d> {
     /// availability predicate and the kind's own invariants decide
     /// there, and a refusal settles the receipt
     /// [`CommandError::CommandRefused`] carrying the kind's reason.
-    fn check_command(&self, command: &Command) -> Result<Resolved, CommandError> {
+    ///
+    /// `reason` is the attributed envelope's declared reason — the
+    /// submission metadata
+    /// [`submit_command_attributed`](Self::submit_command_attributed)
+    /// threads through: a point command against a `requires_reason`
+    /// point declaring none refuses [`CommandError::ReasonRequired`],
+    /// while a reason on an unmarked point, or on a component command,
+    /// rides the receipt without entering validation.
+    fn check_command(
+        &self,
+        command: &Command,
+        reason: Option<&str>,
+    ) -> Result<Resolved, CommandError> {
         match command {
             Command::WriteValue { point, kind, value }
             | Command::ForcePoint { point, kind, value } => {
-                let spec = self.check_command_point(*point)?;
+                let spec = self.check_command_point(*point, reason)?;
                 if *kind != spec.kind {
                     return Err(CommandError::TypeMismatch {
                         point: *point,
@@ -2054,6 +2524,20 @@ impl<'d> Executor<'d> {
                         found: *value,
                     });
                 }
+                // A write to a forced *internal* point cannot land: the
+                // image is the point's only store and the force owns it
+                // — the input phase re-stamps the forced value over the
+                // staged write within the same scan — so the receipted
+                // path refuses rather than settle `Applied` for an
+                // effect nothing can observe. A forced *field* point's
+                // write still resolves: the driver keeps it for the
+                // release to read back.
+                if matches!(command, Command::WriteValue { .. })
+                    && spec.internal.is_some()
+                    && self.forces.contains_key(point)
+                {
+                    return Err(CommandError::PointForced { point: *point });
+                }
                 Ok(match command {
                     Command::ForcePoint { .. } => Resolved::Force {
                         point: *point,
@@ -2066,7 +2550,7 @@ impl<'d> Executor<'d> {
                 })
             }
             Command::UnforcePoint { point } => {
-                self.check_command_point(*point)?;
+                self.check_command_point(*point, reason)?;
                 Ok(Resolved::Unforce { point: *point })
             }
             Command::SetParameter {
@@ -2167,14 +2651,25 @@ impl<'d> Executor<'d> {
     /// served ([`CommandError::UnknownPoint`]) and must be a writable
     /// `In` point — the command surface is the map's writable `In`
     /// points, so an unmarked point, and every `Out` point, refuses
-    /// before its payload is examined with [`CommandError::NotWritable`].
-    fn check_command_point(&self, point: PointId) -> Result<PointSpec, CommandError> {
+    /// before its payload is examined with [`CommandError::NotWritable`]
+    /// — and when the point's declaration marks commands
+    /// reason-carrying, the submission must declare a non-empty
+    /// `reason` beside `actor`, refusing [`CommandError::ReasonRequired`]
+    /// for an absent or blank one.
+    fn check_command_point(
+        &self,
+        point: PointId,
+        reason: Option<&str>,
+    ) -> Result<PointSpec, CommandError> {
         let spec = self
             .map
             .get(point)
             .ok_or(CommandError::UnknownPoint { point })?;
         if spec.direction != Direction::In || !spec.writable {
             return Err(CommandError::NotWritable { point });
+        }
+        if spec.requires_reason && reason.is_none_or(|r| r.trim().is_empty()) {
+            return Err(CommandError::ReasonRequired { point });
         }
         Ok(spec)
     }
@@ -2187,7 +2682,12 @@ impl<'d> Executor<'d> {
     ///
     /// A command to an internal point writes the image directly — the
     /// driver does not serve it — so a held `In` value changes here and
-    /// holds until the next command.
+    /// holds until the next command. A write to an internal point a
+    /// force pins never reaches here: validation refuses it
+    /// [`CommandError::PointForced`], at submission or at this boundary
+    /// when a force queued ahead of it just landed, because the force's
+    /// input-phase substitution would erase the staged value before any
+    /// publication could observe it.
     ///
     /// A `SetParameter` lands on the component's
     /// [`apply_parameter`](Component::apply_parameter) hook at this same
@@ -2213,24 +2713,69 @@ impl<'d> Executor<'d> {
     fn apply_commands(&mut self, tick: Tick) {
         while let Some(index) = self.pending_commands.pop_front() {
             let command = self.receipts[index].command.clone();
-            self.receipts[index].outcome = match self.check_command(&command) {
-                Err(reason) => CommandOutcome::Rejected { reason },
+            // The settlement the boundary is about to write is
+            // provisional until the scan proves the run still owns the
+            // field — stage the receipt's `Accepted` outcome so a
+            // superseded boundary's replay suspends it back for the
+            // surviving line to adjudicate. The absolute submission
+            // index survives the boundary's own receipt-log trim,
+            // which can slide positions before the replay runs.
+            self.boundary_undo.push(BoundaryUndo::Receipt {
+                index: self.receipt_base() + index as u64,
+                prior: self.receipts[index].outcome.clone(),
+            });
+            // The schedule the admitting line set: a queued entry is
+            // still `Accepted`, and a carried one replays on the
+            // promoted run scans after its `apply_tick`. An internal
+            // point's image sample keeps that stamp — the held value's
+            // line time — so consumers aging a standing request measure
+            // the operator-visible window rather than the handover lag.
+            let scheduled = match self.receipts[index].outcome {
+                CommandOutcome::Accepted { apply_tick } => apply_tick.min(tick),
+                _ => tick,
+            };
+            // Re-validate with the receipt's declared reason: a carried
+            // pending command re-checks against the promoted run's map,
+            // and the reason rides the receipt so the boundary sees the
+            // same submission metadata admission did.
+            let reason = self.receipts[index].reason.clone();
+            self.receipts[index].outcome = match self.check_command(&command, reason.as_deref()) {
+                Err(error) => CommandOutcome::Rejected { reason: error },
                 Ok(Resolved::Write { point, value }) => {
                     let internal = self
                         .map
                         .get(point)
                         .is_some_and(|spec| spec.internal.is_some());
                     if internal {
+                        self.boundary_undo.push(BoundaryUndo::Image {
+                            point,
+                            prior: self.image.borrow().get(&point).copied(),
+                        });
                         self.image
                             .borrow_mut()
-                            .insert(point, Sample::good(value, tick));
+                            .insert(point, Sample::good(value, scheduled));
                         CommandOutcome::Applied { tick }
                     } else {
+                        // The image still holds the last-observed field
+                        // sample at the boundary head — this scan's
+                        // input phase has not run yet — which is the
+                        // prior a supersede's write-back restores. A
+                        // forced point's image holds the substituted
+                        // value instead — the field's own value went
+                        // unobserved — so no write-back can honestly
+                        // claim a prior.
+                        let prior = if self.forces.contains_key(&point) {
+                            None
+                        } else {
+                            self.image.borrow().get(&point).copied()
+                        };
                         match self.driver.write(point, value) {
                             Err(error) => CommandOutcome::Rejected {
                                 reason: CommandError::DriverRejected { point, error },
                             },
                             Ok(()) => {
+                                self.boundary_undo
+                                    .push(BoundaryUndo::FieldWrite { point, prior });
                                 self.image
                                     .borrow_mut()
                                     .insert(point, Sample::good(value, tick));
@@ -2243,19 +2788,45 @@ impl<'d> Executor<'d> {
                     component,
                     name,
                     value,
-                }) => match self.components[component]
-                    .component
-                    .apply_parameter(&name, value)
-                {
-                    Ok(()) => CommandOutcome::Applied { tick },
-                    Err(reason) => CommandOutcome::Rejected { reason },
-                },
+                }) => {
+                    self.note_component_undo(component);
+                    match self.components[component]
+                        .component
+                        .apply_parameter(&name, value)
+                    {
+                        Ok(()) => CommandOutcome::Applied { tick },
+                        Err(reason) => CommandOutcome::Rejected { reason },
+                    }
+                }
                 Ok(Resolved::Force { point, value }) => {
+                    self.boundary_undo.push(BoundaryUndo::Force {
+                        point,
+                        prior: self.forces.get(&point).copied(),
+                    });
+                    // The force's image effect lands at this scan's
+                    // input phase — the rollback owes the pre-scan
+                    // sample to a held internal point, whose image no
+                    // later channel rewrites.
+                    if self
+                        .map
+                        .get(point)
+                        .is_some_and(|spec| spec.internal.is_some())
+                    {
+                        self.boundary_undo.push(BoundaryUndo::Image {
+                            point,
+                            prior: self.image.borrow().get(&point).copied(),
+                        });
+                    }
                     self.forces.insert(point, value);
                     CommandOutcome::Applied { tick }
                 }
                 Ok(Resolved::Unforce { point }) => {
-                    if self.forces.remove(&point).is_some()
+                    let removed = self.forces.remove(&point);
+                    self.boundary_undo.push(BoundaryUndo::Force {
+                        point,
+                        prior: removed,
+                    });
+                    if removed.is_some()
                         && self
                             .map
                             .get(point)
@@ -2269,6 +2840,8 @@ impl<'d> Executor<'d> {
                         // nothing here; this scan's input phase reads
                         // the driver again.
                         let held = self.image.borrow().get(&point).copied();
+                        self.boundary_undo
+                            .push(BoundaryUndo::Image { point, prior: held });
                         if let Some(sample) = held {
                             self.image
                                 .borrow_mut()
@@ -2281,19 +2854,22 @@ impl<'d> Executor<'d> {
                     component,
                     command,
                     arguments,
-                }) => match self.components[component]
-                    .component
-                    .invoke_command(&command, &arguments)
-                {
-                    Ok(()) => CommandOutcome::Applied { tick },
-                    Err(reason) => CommandOutcome::Rejected {
-                        reason: CommandError::CommandRefused {
-                            component: self.components[component].component.name().to_string(),
-                            command,
-                            reason,
+                }) => {
+                    self.note_component_undo(component);
+                    match self.components[component]
+                        .component
+                        .invoke_command(&command, &arguments)
+                    {
+                        Ok(()) => CommandOutcome::Applied { tick },
+                        Err(reason) => CommandOutcome::Rejected {
+                            reason: CommandError::CommandRefused {
+                                component: self.components[component].component.name().to_string(),
+                                command,
+                                reason,
+                            },
                         },
-                    },
-                },
+                    }
+                }
             };
         }
         // Settlements landed: the entries the boundary just resolved
@@ -2303,37 +2879,148 @@ impl<'d> Executor<'d> {
         self.trim_receipts();
     }
 
-    /// Reconciles the commands a superseded run must not report applied.
+    /// Captures the component at `index` for the boundary's rollback
+    /// record — once per boundary per component, before the first
+    /// command touches it — so [`suspend_boundary_commands`](Self::suspend_boundary_commands)
+    /// can return every mutation the abandoned boundary staged.
+    fn note_component_undo(&mut self, index: usize) {
+        if self.boundary_undo.iter().any(
+            |undo| matches!(undo, BoundaryUndo::Component { index: captured, .. } if *captured == index),
+        ) {
+            return;
+        }
+        let state = self.components[index].component.capture_state();
+        self.boundary_undo
+            .push(BoundaryUndo::Component { index, state });
+    }
+
+    /// Suspends every command the fenced boundary just settled — the
+    /// superseded run's command-audit reconciliation.
     ///
     /// [`Peer`](crate::Peer) runs this on the scan that discovered the
     /// lost field claim: the boundary settled the run's queued commands
     /// onto an image the field will never see — the claim already
-    /// belonged to another attachment — so `Applied` would overstate
-    /// what an auditing operator reads as "took effect". Every receipt
-    /// still `Accepted` in the pending queue, and every receipt the
-    /// boundary at `tick` settled `Applied`, is rewritten `Rejected`
-    /// carrying [`CommandError::Superseded`]. Settlements of earlier
-    /// boundaries — applied while the run still owned the field — stand,
-    /// as do the boundary's own refusals (a field-point write the fence
-    /// already answered `DriverRejected`).
-    pub fn supersede_commands(&mut self, tick: Tick) {
-        while let Some(index) = self.pending_commands.pop_front() {
-            self.receipts[index].outcome = CommandOutcome::Rejected {
-                reason: CommandError::Superseded {
-                    point: self.receipts[index].command.point(),
+    /// belonged to another attachment. What the surviving line did with
+    /// the admissions is not this run's to decide: the promoted peer's
+    /// promotion-boundary pull may already have carried the
+    /// still-`Accepted` receipt, in which case it applies on the live
+    /// line — and a terminal `Rejected`/`Superseded` verdict written
+    /// here would journal beside the line's own later `applied` entry
+    /// for the identical admission (the QA finding
+    /// `demote-boundary-superseded-mint-then-carried-applied`). So every
+    /// receipt the boundary settled returns to the `Accepted` outcome
+    /// it held — the same suspended shape
+    /// [`suspend_pending_commands`](Self::suspend_pending_commands)
+    /// leaves a voluntary demotion's queue in — and the tracked line's
+    /// checkpoint applies adjudicate each once: covered by the adopted
+    /// log, settling with the line's own verdict, or passed by its
+    /// submission high-water into the one `Rejected`/`Superseded` the
+    /// journal emits — never both, never a provisional verdict the
+    /// next adoption contradicts.
+    ///
+    /// The settlement replay is only half the reconciliation: the
+    /// state those commands mutated is run state — internal `In`
+    /// image samples, the force set, component state — and this
+    /// demoted run keeps serving it in quiesced checkpoints a
+    /// tracking successor adopts. A still-`Accepted` receipt claims
+    /// the line has not settled the change, so the boundary's staged
+    /// effects replay back out in reverse application order — the
+    /// rollback records [`apply_commands`](Self::apply_commands)
+    /// captured — and the checkpoints this run serves from here carry
+    /// the pre-boundary state beside the live admission a successor's
+    /// carry can still pick up. A field-side write the driver
+    /// accepted gets a best-effort compensating write-back: the
+    /// field's own claim arbitration may refuse it — the claim is
+    /// already lost — which is the plant keeping its own record of
+    /// what landed.
+    pub fn suspend_boundary_commands(&mut self) {
+        // The queue already drained inside `apply_commands`; any
+        // defensive remainder suspends rather than settles — its
+        // `Accepted` receipts stay in the log for the line's adoption
+        // to adjudicate.
+        self.pending_commands.clear();
+        // Unstage what the superseded boundary staged — reverse
+        // application order, so a chain of writes to one point unwinds
+        // to the sample the boundary found and every settlement
+        // returns the receipt to the outcome it held. The records
+        // belong to this tick's boundary alone: `scan` clears the
+        // list each cycle and `apply_commands` is the only producer.
+        for undo in std::mem::take(&mut self.boundary_undo).into_iter().rev() {
+            match undo {
+                BoundaryUndo::Receipt { index, prior } => {
+                    // The boundary's own trim may have moved the
+                    // window — the absolute index maps back to the
+                    // receipt's current position, and an entry the
+                    // trim evicted needs no replay: its provisional
+                    // settlement left the log with it.
+                    if let Some(position) = index.checked_sub(self.receipt_base())
+                        && let Some(receipt) = self.receipts.get_mut(position as usize)
+                    {
+                        receipt.outcome = prior;
+                    }
+                }
+                BoundaryUndo::Image { point, prior } => {
+                    let mut image = self.image.borrow_mut();
+                    match prior {
+                        Some(sample) => {
+                            image.insert(point, sample);
+                        }
+                        None => {
+                            image.remove(&point);
+                        }
+                    }
+                }
+                BoundaryUndo::Force { point, prior } => match prior {
+                    Some(value) => {
+                        self.forces.insert(point, value);
+                    }
+                    None => {
+                        self.forces.remove(&point);
+                    }
                 },
-            };
-        }
-        for receipt in &mut self.receipts {
-            if receipt.outcome == (CommandOutcome::Applied { tick }) {
-                receipt.outcome = CommandOutcome::Rejected {
-                    reason: CommandError::Superseded {
-                        point: receipt.command.point(),
-                    },
-                };
+                BoundaryUndo::FieldWrite { point, prior } => {
+                    if let Some(sample) = prior {
+                        let _ = self.driver.write(point, sample.value);
+                    }
+                }
+                BoundaryUndo::Component { index, state } => {
+                    // A state map the component captured from itself
+                    // restores cleanly — the same contract `apply`'s
+                    // rollback relies on.
+                    let _ = self.components[index].component.restore_state(&state);
+                }
             }
         }
         self.trim_receipts();
+    }
+
+    /// Suspends the run's queued commands without settling them — the
+    /// demotion counterpart of
+    /// [`suspend_boundary_commands`](Self::suspend_boundary_commands),
+    /// which does the same for the receipts the fenced boundary had
+    /// already settled.
+    /// [`Peer::demote`](crate::Peer::demote) runs it as the gate closes:
+    /// the receipts stay `Accepted` in the log, so the checkpoints this
+    /// run keeps serving still carry them for a successor's
+    /// promotion-boundary pull ([`Peer::final_sync`](crate::Peer::final_sync),
+    /// [`carry_pending_commands`](Self::carry_pending_commands)) — but
+    /// the demoted run's own scans no longer apply them, because a
+    /// quiesced scan's `Applied` would journal an application the gate
+    /// kept off the field, erased by the next adoption. Each suspended
+    /// entry resolves on the tracked line's checkpoint applies: covered
+    /// by the adopted log it re-queues and settles with the run; passed
+    /// by the adopted window's high-water without being carried, the
+    /// peer settles it `Rejected` carrying
+    /// [`CommandError::Superseded`]. An adoption whose high-water has
+    /// not reached the entry's index settles nothing — the source had
+    /// not observed the submission at capture, so
+    /// [`adopt_receipts`](Self::adopt_receipts) restores it suspended
+    /// for a covering checkpoint to adjudicate — a pending command
+    /// neither vanishes unaudited, reports `applied` on an abandoned
+    /// image, nor settles `superseded` on a verdict the line never
+    /// made.
+    pub fn suspend_pending_commands(&mut self) {
+        self.pending_commands.clear();
     }
 
     /// The cyclic exchange at the read boundary: when the driver
@@ -2378,15 +3065,20 @@ impl<'d> Executor<'d> {
     /// keep their image value untouched.
     ///
     /// A field `In` point carrying a `stale_after_ticks` budget gets the
-    /// freshness check before the re-stamp: when the tick the driver's
-    /// sample carries lags the scan tick by more than the budget, the
+    /// freshness check before the re-stamp: when the sample the driver
+    /// returns has not changed in more than `budget` scan ticks, the
     /// landed sample's quality merges
     /// [`Quality::Uncertain`]`(`[`QualityReason::Stale`]`)` — the
     /// worst-of merge, so a driver-reported `Bad` or worse-named
-    /// `Uncertain` is never improved to `Stale`, and the first sample
-    /// inside the budget again returns the driver's own quality. The
-    /// driver tick is freshness evidence only; the image stamp stays the
-    /// scan tick either way.
+    /// `Uncertain` is never improved to `Stale`, and the first changed
+    /// sample inside the budget again returns the driver's own quality.
+    /// The lag is measured in the run's own tick domain — the scans
+    /// since the driver report last changed — not against the stamp the
+    /// sample carries: a remote driver stamps in the plant's tick
+    /// domain, whose offset from the scan tick a stopped-then-resumed
+    /// field leaves permanently lagging, so a cross-domain comparison
+    /// would latch stale on fresh data. The image stamp stays the scan
+    /// tick either way.
     ///
     /// A forced `In` point skips both channels: the driver is not read
     /// — so a field fault on a forced point counts no failed read —
@@ -2412,14 +3104,34 @@ impl<'d> Executor<'d> {
             let sample = match self.driver.read(point) {
                 Ok(sample) => {
                     self.io_health.consecutive_failures = 0;
-                    // Freshness is judged on the driver-stamped tick —
-                    // evidence only, never the image's timestamp — before
-                    // the scan tick is stamped on.
+                    // Freshness is judged in the run's own tick domain —
+                    // the driver-returned sample is change evidence,
+                    // never the image's timestamp: a remote driver
+                    // stamps in the plant's tick domain, whose offset
+                    // from the scan tick a stopped-then-resumed field
+                    // leaves permanently lagging, so comparing the two
+                    // domains directly would latch stale on fresh data.
                     let quality = match spec.stale_after_ticks {
-                        Some(budget) if tick.0.saturating_sub(sample.tick.0) > budget => sample
-                            .quality
-                            .merge(Quality::Uncertain(QualityReason::Stale)),
-                        _ => sample.quality,
+                        Some(budget) => {
+                            let freshness = self.freshness.entry(point).or_insert(Freshness {
+                                observed: sample,
+                                since: sample.tick.min(tick),
+                            });
+                            if freshness.observed != sample {
+                                *freshness = Freshness {
+                                    observed: sample,
+                                    since: tick,
+                                };
+                            }
+                            if tick.0.saturating_sub(freshness.since.0) > budget {
+                                sample
+                                    .quality
+                                    .merge(Quality::Uncertain(QualityReason::Stale))
+                            } else {
+                                sample.quality
+                            }
+                        }
+                        None => sample.quality,
                     };
                     Sample {
                         quality,
@@ -2788,13 +3500,13 @@ mod tests {
             .unwrap();
 
             driver.write(PointId(10), Value::Float(5.0)).unwrap();
-            executor.scan().unwrap();
+            executor.scan();
             // After one scan the chain has only reached point 20.
             assert_eq!(driver_value(&driver, 20), Value::Float(10.0));
             assert_eq!(driver_value(&driver, 40), Value::Float(0.0));
 
             driver.advance();
-            executor.scan().unwrap();
+            executor.scan();
             // The second scan carries the value through component b.
             assert_eq!(driver_value(&driver, 40), Value::Float(30.0));
             (driver_value(&driver, 20), driver_value(&driver, 40))
@@ -2830,9 +3542,9 @@ mod tests {
             .unwrap()
         };
 
-        ordered(1.0, 2.0).scan().unwrap();
+        ordered(1.0, 2.0).scan();
         assert_eq!(driver_value(&driver, 50), Value::Float(2.0));
-        ordered(2.0, 1.0).scan().unwrap();
+        ordered(2.0, 1.0).scan();
         assert_eq!(driver_value(&driver, 50), Value::Float(1.0));
     }
 
@@ -2977,8 +3689,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(executor.tick(), Tick::ZERO);
-        assert_eq!(executor.run(0).unwrap(), Tick::ZERO);
-        executor.run(3).unwrap();
+        assert_eq!(executor.run(0), Tick::ZERO);
+        executor.run(3);
         assert_eq!(executor.tick(), Tick(3));
 
         // The step tick and the stamped input sample agree per scan.
@@ -3008,14 +3720,14 @@ mod tests {
         )
         .unwrap();
 
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.sample(PointId(10)).unwrap().value,
             Value::Float(7.0)
         );
 
         driver.faults.lock().unwrap().insert(PointId(10));
-        executor.scan().unwrap();
+        executor.scan();
         let sample = executor.sample(PointId(10)).unwrap();
         // The last known value is held and marked bad; the scan continues.
         assert_eq!(sample.value, Value::Float(7.0));
@@ -3047,7 +3759,7 @@ mod tests {
             .collect();
         let mut executor = Executor::new(&driver, map, vec![Box::new(Fragile)]).unwrap();
 
-        executor.run(2).unwrap();
+        executor.run(2);
         let status = &executor.component_statuses()[0];
         assert_eq!(status.name, "fragile");
         assert_eq!(status.step_errors, 2);
@@ -3088,7 +3800,7 @@ mod tests {
         let mut executor = Executor::new(&driver, map, vec![Box::new(Passthrough)]).unwrap();
 
         driver.faults.lock().unwrap().insert(PointId(10));
-        executor.scan().unwrap();
+        executor.scan();
         let output = executor.sample(PointId(20)).unwrap();
         assert_eq!(
             output.quality,
@@ -3135,7 +3847,7 @@ mod tests {
         .into_iter()
         .collect();
         let mut executor = Executor::new(&driver, map, vec![Box::new(Grabby)]).unwrap();
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(executor.component_statuses()[0].step_errors, 0);
     }
 
@@ -3162,7 +3874,7 @@ mod tests {
         .unwrap();
 
         driver.write(PointId(10), Value::Float(5.0)).unwrap();
-        executor.scan().unwrap();
+        executor.scan();
         let snapshot = executor.snapshot();
 
         assert_eq!(snapshot.tick, Tick(1));
@@ -3213,9 +3925,9 @@ mod tests {
         )
         .unwrap();
 
-        executor.scan().unwrap();
+        executor.scan();
         driver.faults.lock().unwrap().insert(PointId(10));
-        executor.scan().unwrap();
+        executor.scan();
 
         let sample = executor.snapshot().points[0].sample.unwrap();
         // The held value is marked bad in the executor's tick domain.
@@ -3244,14 +3956,14 @@ mod tests {
         )
         .unwrap();
 
-        executor.scan().unwrap();
+        executor.scan();
         // A clean scan reports an all-zero health section — and the stub
         // has no transport, so the driver half is `None`.
         assert_eq!(executor.snapshot().io_health, IoHealth::default());
 
         driver.faults.lock().unwrap().insert(PointId(10));
-        executor.scan().unwrap();
-        executor.scan().unwrap();
+        executor.scan();
+        executor.scan();
 
         // The documented read behavior continues — the scan succeeds and
         // the held value degrades to Bad — and each failed read is
@@ -3275,7 +3987,7 @@ mod tests {
         // A successful boundary operation ends the consecutive streak;
         // the counters and last-error attribution persist.
         driver.faults.lock().unwrap().remove(&PointId(10));
-        executor.scan().unwrap();
+        executor.scan();
         let health = &executor.snapshot().io_health;
         assert_eq!(health.failed_reads, 2);
         assert_eq!(health.consecutive_failures, 0);
@@ -3292,6 +4004,7 @@ mod tests {
                 kind: ValueKind::Float,
                 internal: None,
                 writable: false,
+                requires_reason: false,
                 stale_after_ticks: Some(budget),
                 journaled: false,
             },
@@ -3320,14 +4033,14 @@ mod tests {
         // The driver stamped the sample at its tick 0; lags of 1 and 2
         // sit within the budget — the landed quality stays Good and the
         // image stamp is the scan tick, not the driver's.
-        executor.scan().unwrap();
-        executor.scan().unwrap();
+        executor.scan();
+        executor.scan();
         let sample = executor.snapshot().points[0].sample.unwrap();
         assert_eq!(sample, Sample::good(Value::Float(0.0), Tick(2)));
 
         // A lag exactly at the budget is still fresh.
         stamp(&driver, 10, Sample::good(Value::Float(3.0), Tick(1)));
-        executor.scan().unwrap();
+        executor.scan();
         let sample = executor.snapshot().points[0].sample.unwrap();
         assert_eq!(sample, Sample::good(Value::Float(3.0), Tick(3)));
     }
@@ -3348,7 +4061,7 @@ mod tests {
 
         // The driver stopped refreshing after stamping tick 0; the third
         // scan's lag of 3 exceeds the budget of 2.
-        executor.run(3).unwrap();
+        executor.run(3);
         let sample = executor.snapshot().points[0].sample.unwrap();
         // The value is preserved and the image stamp is the scan tick —
         // the driver tick is freshness evidence, never the timestamp.
@@ -3370,7 +4083,7 @@ mod tests {
         )
         .unwrap();
 
-        executor.run(3).unwrap();
+        executor.run(3);
         assert_eq!(
             executor.snapshot().points[0].sample.unwrap().quality,
             Quality::Uncertain(QualityReason::Stale)
@@ -3379,7 +4092,7 @@ mod tests {
         // The device refreshed at its tick 3; the next scan's lag of 1
         // returns the driver's own quality on the first fresh read.
         stamp(&driver, 10, Sample::good(Value::Float(9.0), Tick(3)));
-        executor.scan().unwrap();
+        executor.scan();
         let sample = executor.snapshot().points[0].sample.unwrap();
         assert_eq!(sample, Sample::good(Value::Float(9.0), Tick(4)));
     }
@@ -3408,7 +4121,7 @@ mod tests {
 
         // A lagging Bad sample keeps the driver-reported quality — the
         // worst-of merge never improves it to Uncertain(Stale).
-        executor.run(3).unwrap();
+        executor.run(3);
         let sample = executor.snapshot().points[0].sample.unwrap();
         assert_eq!(sample.quality, Quality::Bad(QualityReason::DeviceFault));
         assert_eq!(sample.tick, Tick(3));
@@ -3423,7 +4136,7 @@ mod tests {
                 Tick(3),
             ),
         );
-        executor.run(2).unwrap();
+        executor.run(2);
         let sample = executor.snapshot().points[0].sample.unwrap();
         assert_eq!(
             sample.quality,
@@ -3448,9 +4161,9 @@ mod tests {
         // A failed read is not a stale sample: the held value degrades
         // to Bad(CommunicationFault) exactly as on a point without a
         // budget, and the failure counts into I/O health.
-        executor.scan().unwrap();
+        executor.scan();
         driver.faults.lock().unwrap().insert(PointId(10));
-        executor.scan().unwrap();
+        executor.scan();
         let sample = executor.snapshot().points[0].sample.unwrap();
         assert_eq!(sample.value, Value::Float(7.0));
         assert_eq!(
@@ -3478,9 +4191,162 @@ mod tests {
 
         // The driver sample's tick lags by any amount — with no declared
         // budget the landed quality stays Good.
-        executor.run(10).unwrap();
+        executor.run(10);
         let sample = executor.snapshot().points[0].sample.unwrap();
         assert_eq!(sample, Sample::good(Value::Float(0.0), Tick(10)));
+    }
+
+    #[test]
+    fn resumed_stamp_advances_clear_stale_despite_a_domain_lag() {
+        // The QA finding's shape: the driver stamps in a tick domain
+        // that a stopped-then-resumed field leaves permanently lagging
+        // the run's — each unstepped window adds its length to the gap.
+        // Freshness must follow the report's *change*, not the stamp's
+        // offset: a lag measured across the two domains would read
+        // `scan_tick - stamp` past the budget forever and latch stale
+        // on data arriving every scan.
+        let driver = StubDriver::new(&[float(10)], &[]);
+        let mut executor = Executor::new(
+            &driver,
+            stale_map(PointId(10), 2),
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        // The field owner steps: the stamp advances every scan and the
+        // two domains stay aligned — every read lands fresh.
+        for tick in 1..=4 {
+            stamp(
+                &driver,
+                10,
+                Sample::good(Value::Float(tick as f64), Tick(tick)),
+            );
+            executor.scan();
+            assert_eq!(
+                executor.snapshot().points[0].sample.unwrap().quality,
+                Quality::Good
+            );
+        }
+
+        // The unstepped window — the pause/demote the run ticks through:
+        // the driver report stops changing at its tick 4 and the point
+        // ages to stale past its budget.
+        executor.run(2);
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap().quality,
+            Quality::Good
+        );
+        executor.scan();
+        let sample = executor.snapshot().points[0].sample.unwrap();
+        assert_eq!(sample.quality, Quality::Uncertain(QualityReason::Stale));
+        assert_eq!(sample.tick, Tick(7));
+
+        // The field resumes stepping — the driver domain resumes at its
+        // own tick 5, now four behind the run's: a cross-domain lag
+        // reads 4 > 2 and would stay stale forever, but the changed
+        // report is fresh evidence and the driver's own quality lands.
+        stamp(&driver, 10, Sample::good(Value::Float(9.0), Tick(5)));
+        executor.scan();
+        let sample = executor.snapshot().points[0].sample.unwrap();
+        assert_eq!(sample, Sample::good(Value::Float(9.0), Tick(8)));
+
+        // And stays fresh while the resumed domain keeps advancing
+        // behind the run's — the permanent gap is not the lag the
+        // budget measures.
+        stamp(&driver, 10, Sample::good(Value::Float(9.0), Tick(6)));
+        executor.run(2);
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap().quality,
+            Quality::Good
+        );
+    }
+
+    #[test]
+    fn a_run_started_behind_the_driver_domain_still_marks_stale() {
+        // The finding's symmetric edge: a run whose tick sits behind
+        // the driver's stamp domain — a resume at a persisted tick the
+        // field has already advanced past — used to saturate the lag at
+        // zero and never mark stale. Judged in the run's domain, a
+        // stalled driver report ages exactly like a lagging one.
+        let driver = StubDriver::new(&[float(10)], &[]);
+        let mut executor = Executor::new(
+            &driver,
+            stale_map(PointId(10), 2),
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        // The driver domain runs ahead — stamps near its tick 100 while
+        // the run is at 1 — and keeps advancing: fresh every scan.
+        for offset in 0..3 {
+            stamp(
+                &driver,
+                10,
+                Sample::good(Value::Float(7.0), Tick(100 + offset)),
+            );
+            executor.scan();
+            assert_eq!(
+                executor.snapshot().points[0].sample.unwrap().quality,
+                Quality::Good
+            );
+        }
+
+        // The driver stalls at its tick 102: the run's own lag accrues
+        // and the point presents stale past the budget — the verdict a
+        // stamp-domain comparison could never reach from behind.
+        executor.run(3);
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap().quality,
+            Quality::Uncertain(QualityReason::Stale)
+        );
+
+        // A report that resumes advancing clears it again — still ahead
+        // of the run's domain, still the driver's own quality.
+        stamp(&driver, 10, Sample::good(Value::Float(8.0), Tick(140)));
+        executor.scan();
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap(),
+            Sample::good(Value::Float(8.0), Tick(7))
+        );
+    }
+
+    #[test]
+    fn a_changed_value_at_a_held_stamp_counts_as_fresh_evidence() {
+        // Freshness follows the driver *report*, not the stamp alone: a
+        // field write while the driver's tick is frozen changes the
+        // report without moving its stamp — new evidence the run counts.
+        let driver = StubDriver::new(&[float(10)], &[]);
+        let mut executor = Executor::new(
+            &driver,
+            stale_map(PointId(10), 2),
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        // The held tick-0 report ages to stale.
+        executor.run(3);
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap().quality,
+            Quality::Uncertain(QualityReason::Stale)
+        );
+
+        // A changed report at the same stamp is fresh anyway — the
+        // driver's domain told the run nothing new could arrive.
+        stamp(&driver, 10, Sample::good(Value::Float(9.0), Tick(0)));
+        executor.scan();
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap(),
+            Sample::good(Value::Float(9.0), Tick(4))
+        );
     }
 
     #[test]
@@ -3493,6 +4359,7 @@ mod tests {
                 kind: ValueKind::Float,
                 internal: None,
                 writable: true,
+                requires_reason: false,
                 stale_after_ticks: Some(2),
                 journaled: false,
             },
@@ -3508,7 +4375,7 @@ mod tests {
         .unwrap();
 
         executor.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
-        executor.run(5).unwrap();
+        executor.run(5);
         // The forced path never reads the driver, so the lagging field
         // sample cannot reach the image — Substituted stands.
         let sample = executor.snapshot().points[0].sample.unwrap();
@@ -3539,12 +4406,12 @@ mod tests {
         )
         .unwrap();
 
-        executor.scan().unwrap();
+        executor.scan();
         driver.faults.lock().unwrap().insert(PointId(20));
 
         // The write boundary's degrade rule — the same one reads carry:
         // the failure is counted and attributed while the scan completes.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(executor.tick(), Tick(2));
         let health = &executor.snapshot().io_health;
         assert_eq!(health.failed_writes, 1);
@@ -3562,7 +4429,7 @@ mod tests {
 
         // The streak ends on the next successful write; the totals stay.
         driver.faults.lock().unwrap().remove(&PointId(20));
-        executor.scan().unwrap();
+        executor.scan();
         let health = &executor.snapshot().io_health;
         assert_eq!(health.failed_writes, 1);
         assert_eq!(health.consecutive_failures, 0);
@@ -3604,7 +4471,7 @@ mod tests {
             .into_iter()
             .collect();
         let mut executor = Executor::new(&driver, map, Vec::new()).unwrap();
-        executor.scan().unwrap();
+        executor.scan();
 
         // The driver's transport surface reports beside the counters —
         // link health, distinct from per-point quality.
@@ -3657,10 +4524,10 @@ mod tests {
                 })],
             )
             .unwrap();
-            executor.scan().unwrap();
+            executor.scan();
             driver.faults.lock().unwrap().insert(PointId(10));
-            executor.scan().unwrap();
-            executor.scan().unwrap();
+            executor.scan();
+            executor.scan();
             executor.snapshot().io_health
         };
         let health_a = run();
@@ -3693,7 +4560,7 @@ mod tests {
             .collect();
         let mut executor = Executor::new(&driver, map, vec![Box::new(Fragile)]).unwrap();
 
-        executor.run(2).unwrap();
+        executor.run(2);
         let component = &executor.snapshot().components[0];
         assert_eq!(component.name, "fragile");
         assert_eq!(component.step_errors, 2);
@@ -3722,7 +4589,7 @@ mod tests {
         )
         .unwrap();
         driver.write(PointId(10), Value::Float(3.0)).unwrap();
-        executor.scan().unwrap();
+        executor.scan();
 
         let json = serde_json::to_string(&executor.snapshot()).unwrap();
         let snapshot: TelemetrySnapshot = serde_json::from_str(&json).unwrap();
@@ -3774,9 +4641,10 @@ mod tests {
                     apply_tick: Tick(1)
                 },
                 actor: Some("operator-7".to_string()),
+                reason: None,
             }
         );
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.receipts().last().unwrap().actor.as_deref(),
             Some("operator-7")
@@ -3797,6 +4665,151 @@ mod tests {
         assert_eq!(rejected.actor.as_deref(), Some("operator-7"));
     }
 
+    /// The setpoint rig with point 10 marked `requires_reason` — the
+    /// per-point mandatory-reason declaration a managed request point
+    /// carries through the model.
+    fn reasoned_rig(driver: &StubDriver) -> Executor<'_> {
+        let map = PointMap::new()
+            .with_spec(
+                PointId(10),
+                PointSpec {
+                    direction: Direction::In,
+                    kind: ValueKind::Float,
+                    internal: None,
+                    writable: true,
+                    requires_reason: true,
+                    stale_after_ticks: None,
+                    journaled: false,
+                },
+            )
+            .with_point(PointId(20), Direction::Out, ValueKind::Float)
+            .with_point(PointId(30), Direction::Out, ValueKind::Float);
+        Executor::new(
+            driver,
+            map,
+            vec![Box::new(Scale {
+                name: "a",
+                input: PointId(10),
+                output: PointId(20),
+                gain: 2.0,
+            })],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_reason_required_point_refuses_the_reasonless_and_blank_submissions() {
+        let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut executor = reasoned_rig(&driver);
+        let command = write_value(10, ValueKind::Float, Value::Float(5.0));
+
+        // Absent and whitespace-only reasons refuse alike at admission —
+        // a blank declaration is no reason — and the refused receipt
+        // carries whatever the submission declared.
+        for reason in [None, Some("   ".to_string())] {
+            let receipt = executor.submit_command_attributed(
+                command.clone(),
+                Some("operator-7".to_string()),
+                reason.clone(),
+            );
+            assert_eq!(
+                receipt.outcome,
+                CommandOutcome::Rejected {
+                    reason: CommandError::ReasonRequired { point: PointId(10) }
+                }
+            );
+            assert_eq!(receipt.reason, reason);
+        }
+
+        // The declared reason admits and rides the settled receipt into
+        // the audit — the durable record the journaled CommandSettled
+        // echoes.
+        let receipt = executor.submit_command_attributed(
+            command.clone(),
+            Some("operator-7".to_string()),
+            Some("nuisance trips during pump work".to_string()),
+        );
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Accepted {
+                apply_tick: Tick(1)
+            }
+        );
+        executor.scan();
+        assert_eq!(
+            executor.receipts().last().unwrap(),
+            &CommandReceipt {
+                command,
+                outcome: CommandOutcome::Applied { tick: Tick(1) },
+                actor: Some("operator-7".to_string()),
+                reason: Some("nuisance trips during pump work".to_string()),
+            }
+        );
+        assert_eq!(driver_value(&driver, 20), Value::Float(10.0));
+
+        // A reason is voluntary metadata on an unmarked point — the
+        // ordinary command surface takes one or none.
+        let receipt = executor.submit_command_attributed(
+            write_value(30, ValueKind::Float, Value::Float(9.0)),
+            None,
+            Some("unmarked points take one anyway".to_string()),
+        );
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::NotWritable { point: PointId(30) }
+            }
+        );
+        assert_eq!(
+            receipt.reason.as_deref(),
+            Some("unmarked points take one anyway")
+        );
+    }
+
+    #[test]
+    fn a_checkpointed_pending_command_revalidates_with_its_carried_reason() {
+        // The mid-flight case: a reasoned write checkpointed
+        // still-`Accepted` re-queues on the standby and faces the
+        // promoted run's admission check again — against the marked
+        // point the carried reason is what admits it.
+        let active_driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut active = reasoned_rig(&active_driver);
+        active.submit_command_attributed(
+            write_value(10, ValueKind::Float, Value::Float(5.0)),
+            Some("operator-7".to_string()),
+            Some("declared before the swap".to_string()),
+        );
+        let checkpoint = active.checkpoint();
+
+        let standby_driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut standby = reasoned_rig(&standby_driver);
+        standby.apply(&checkpoint).unwrap();
+        standby.scan();
+        let settled = standby.receipts().last().unwrap();
+        assert_eq!(settled.outcome, CommandOutcome::Applied { tick: Tick(1) });
+        assert_eq!(settled.reason.as_deref(), Some("declared before the swap"));
+        assert_eq!(driver_value(&standby_driver, 20), Value::Float(10.0));
+
+        // And a receipt log captured without the field — the pre-
+        // change serialized shape — restores and replays unchanged.
+        let mut legacy = serde_json::to_value(&checkpoint).unwrap();
+        for receipt in legacy["receipts"].as_array_mut().unwrap() {
+            receipt.as_object_mut().unwrap().remove("reason");
+        }
+        let legacy: Checkpoint = serde_json::from_value(legacy).unwrap();
+        let restored_driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut restored = reasoned_rig(&restored_driver);
+        restored.apply(&legacy).unwrap();
+        assert_eq!(
+            restored
+                .receipts()
+                .iter()
+                .map(|receipt| receipt.reason.as_deref())
+                .collect::<Vec<_>>(),
+            vec![None]
+        );
+    }
+
     #[test]
     fn setpoint_command_applies_at_next_scan_and_holds() {
         let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
@@ -3812,12 +4825,13 @@ mod tests {
                     apply_tick: Tick(1)
                 },
                 actor: None,
+                reason: None,
             }
         );
         // Queued, not yet applied: the driver still holds the old value.
         assert_eq!(driver_value(&driver, 10), Value::Float(0.0));
 
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(driver_value(&driver, 20), Value::Float(10.0));
         assert_eq!(
             executor.receipts().last().unwrap().outcome,
@@ -3826,7 +4840,7 @@ mod tests {
 
         // The write landed on the field, so the setpoint holds for later
         // scans rather than reverting.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(driver_value(&driver, 20), Value::Float(10.0));
         assert_eq!(
             executor.snapshot().points[0].sample.unwrap().value,
@@ -3876,7 +4890,7 @@ mod tests {
 
         // Rejected commands were never queued: the next scan adds no
         // application receipts.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(executor.receipts().len(), 3);
         assert!(driver_value(&driver, 10) == Value::Float(0.0));
     }
@@ -3935,7 +4949,7 @@ mod tests {
 
         // Nothing was queued: a scan adds no application receipts and
         // leaves driver and image untouched.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(executor.receipts().len(), 5);
         assert_eq!(driver_value(&driver, 11), Value::Float(0.0));
         let held = executor
@@ -3964,7 +4978,7 @@ mod tests {
             }
         );
 
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.receipts().last().unwrap().outcome,
             CommandOutcome::Rejected {
@@ -3996,7 +5010,7 @@ mod tests {
                 }
             );
         }
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(executor.receipts().len(), 2);
         assert_eq!(driver_value(&driver, 30), Value::Float(0.0));
     }
@@ -4009,9 +5023,9 @@ mod tests {
             executor.submit_command(write_value(10, ValueKind::Float, Value::Float(5.0)));
             executor.submit_command(write_value(99, ValueKind::Float, Value::Float(0.0)));
             executor.submit_command(write_value(30, ValueKind::Float, Value::Float(7.0)));
-            executor.run(2).unwrap();
+            executor.run(2);
             executor.submit_command(write_value(10, ValueKind::Float, Value::Float(8.0)));
-            executor.scan().unwrap();
+            executor.scan();
             (
                 executor.receipts().to_vec(),
                 serde_json::to_string(&executor.snapshot()).unwrap(),
@@ -4071,7 +5085,7 @@ mod tests {
         let mut executor = setpoint_rig(&driver);
 
         // Baseline: the live field value reads through with Good quality.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.sample(PointId(10)),
             Some(Sample::good(Value::Float(0.0), Tick(1)))
@@ -4087,7 +5101,7 @@ mod tests {
 
         // The applying scan substitutes the forced value at Substituted
         // quality and the component's step observes it the same scan.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.receipts().last().unwrap().outcome,
             CommandOutcome::Applied { tick: Tick(2) }
@@ -4106,7 +5120,7 @@ mod tests {
         // current tick at Substituted quality.
         driver.write(PointId(10), Value::Float(3.0)).unwrap();
         for n in 3..=5u64 {
-            executor.scan().unwrap();
+            executor.scan();
             assert_eq!(
                 executor.sample(PointId(10)),
                 Some(forced(Value::Float(5.0), n)),
@@ -4126,11 +5140,11 @@ mod tests {
         let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
         let mut executor = setpoint_rig(&driver);
         executor.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
-        executor.scan().unwrap();
+        executor.scan();
         // The field moves while the force stands; the image still holds
         // the forced value.
         driver.write(PointId(10), Value::Float(2.0)).unwrap();
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.sample(PointId(10)),
             Some(forced(Value::Float(5.0), 2))
@@ -4147,7 +5161,7 @@ mod tests {
         // The release applies at the head of the scan, so that scan's
         // input phase already reads the field again — the documented
         // boundary — and the component sees the live value the same scan.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.receipts().last().unwrap().outcome,
             CommandOutcome::Applied { tick: Tick(3) }
@@ -4245,7 +5259,7 @@ mod tests {
         }
 
         // Every rejection was at submission: a scan queues nothing.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(executor.receipts().len(), 10);
         assert_eq!(driver_value(&driver, 10), Value::Float(0.0));
     }
@@ -4264,7 +5278,7 @@ mod tests {
                 apply_tick: Tick(1)
             }
         );
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.receipts().last().unwrap().outcome,
             CommandOutcome::Applied { tick: Tick(1) }
@@ -4281,11 +5295,11 @@ mod tests {
         let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
         let mut executor = setpoint_rig(&driver);
         executor.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
-        executor.scan().unwrap();
+        executor.scan();
 
         // A second force replaces the first at its boundary.
         executor.submit_command(force_point(10, ValueKind::Float, Value::Float(9.0)));
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.sample(PointId(10)),
             Some(forced(Value::Float(9.0), 2))
@@ -4295,7 +5309,7 @@ mod tests {
         // force overrides the image, not the field — so the release
         // observes the field's current value.
         executor.submit_command(write_value(10, ValueKind::Float, Value::Float(4.0)));
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(driver_value(&driver, 10), Value::Float(4.0));
         assert_eq!(
             executor.sample(PointId(10)),
@@ -4303,7 +5317,7 @@ mod tests {
         );
 
         executor.submit_command(unforce_point(10));
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.sample(PointId(10)),
             Some(Sample::good(Value::Float(4.0), Tick(4)))
@@ -4322,15 +5336,15 @@ mod tests {
             kind: ValueKind::Float,
             value: Value::Float(8.0),
         });
-        executor.scan().unwrap();
-        executor.scan().unwrap();
+        executor.scan();
+        executor.scan();
         assert_eq!(
             executor.sample(PointId(10)),
             Some(forced(Value::Float(8.0), 2))
         );
 
         executor.submit_command(Command::UnforcePoint { point: PointId(10) });
-        executor.scan().unwrap();
+        executor.scan();
         // Release resumes the held-value rule: the image keeps the last
         // sample's value — the forced value as last stamped while
         // forced — re-stamped `Good` at the release boundary rather than
@@ -4352,14 +5366,14 @@ mod tests {
         let driver = StubDriver::new(&[], &[]);
         let mut executor = internal_rig(&driver);
         executor.submit_command(force_point(10, ValueKind::Float, Value::Float(8.0)));
-        executor.run(2).unwrap();
+        executor.run(2);
         assert_eq!(
             executor.sample(PointId(10)),
             Some(forced(Value::Float(8.0), 2))
         );
 
         executor.submit_command(unforce_point(10));
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.receipts().last().unwrap().outcome,
             CommandOutcome::Applied { tick: Tick(3) }
@@ -4375,7 +5389,7 @@ mod tests {
 
         // The restamp is the held value now: later scans leave it
         // untouched rather than re-substituting.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.sample(PointId(10)),
             Some(Sample::good(Value::Float(8.0), Tick(3)))
@@ -4385,12 +5399,151 @@ mod tests {
         // lands on the identical image.
         let written_driver = StubDriver::new(&[], &[]);
         let mut written = internal_rig(&written_driver);
-        written.run(2).unwrap();
+        written.run(2);
         written.submit_command(write_value(10, ValueKind::Float, Value::Float(8.0)));
-        written.scan().unwrap();
+        written.scan();
         for (sample, point) in released.into_iter().zip([PointId(10), PointId(20)]) {
             assert_eq!(written.sample(point), sample, "point {point:?}");
         }
+    }
+
+    /// QA finding
+    /// `write-to-forced-held-point-settles-applied-without-effect`: an
+    /// internal `In` point's image IS its store, so a write staged
+    /// while a force stands is overwritten by the force's input-phase
+    /// substitution in the same scan — an `Applied` receipt would
+    /// journal an effect that never lands. The receipted path refuses
+    /// the write by name instead, and the image, the receipt, and the
+    /// post-release value all agree.
+    #[test]
+    fn write_to_a_forced_internal_point_is_refused_by_name() {
+        let driver = StubDriver::new(&[], &[]);
+        let mut executor = internal_rig(&driver);
+
+        executor.scan();
+        // The held point keeps its wired initial: internal `In` samples
+        // re-stamp only when a command writes them.
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(2.5), Tick::ZERO))
+        );
+
+        executor.submit_command(force_point(10, ValueKind::Float, Value::Float(8.0)));
+        executor.scan();
+        assert_eq!(
+            executor.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { tick: Tick(2) }
+        );
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(forced(Value::Float(8.0), 2))
+        );
+
+        // The write refuses at submission with the named reason — never
+        // accepted, never queued, never applied.
+        let receipt = executor.submit_command(write_value(10, ValueKind::Float, Value::Float(4.0)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::PointForced { point: PointId(10) }
+            }
+        );
+
+        // The next scan substitutes the forced value as usual: the
+        // written 4.0 enters no publication, and the settled receipt
+        // says exactly that — `Rejected`, not a phantom `Applied`.
+        executor.scan();
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(forced(Value::Float(8.0), 3))
+        );
+        assert_eq!(
+            executor.receipts().last().unwrap().outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::PointForced { point: PointId(10) }
+            }
+        );
+
+        // Release stands the forced value `Good` — the only value the
+        // applied commands ever staged.
+        executor.submit_command(unforce_point(10));
+        executor.scan();
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(8.0), Tick(4)))
+        );
+        executor.scan();
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(8.0), Tick(4)))
+        );
+    }
+
+    #[test]
+    fn write_queued_behind_a_force_in_the_same_boundary_is_refused() {
+        // The boundary re-validates each queued command in submission
+        // order, so a write accepted while the point was unforced still
+        // settles `Rejected` when a force queued ahead of it lands
+        // first — the queue's own ordering can newly answer the
+        // run-state check.
+        let driver = StubDriver::new(&[], &[]);
+        let mut executor = internal_rig(&driver);
+
+        executor.submit_command(force_point(10, ValueKind::Float, Value::Float(8.0)));
+        let receipt = executor.submit_command(write_value(10, ValueKind::Float, Value::Float(4.0)));
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Accepted {
+                apply_tick: Tick(1)
+            }
+        );
+
+        executor.scan();
+        let outcomes: Vec<&CommandOutcome> = executor
+            .receipts()
+            .iter()
+            .map(|receipt| &receipt.outcome)
+            .collect();
+        assert_eq!(
+            outcomes,
+            vec![
+                &CommandOutcome::Applied { tick: Tick(1) },
+                &CommandOutcome::Rejected {
+                    reason: CommandError::PointForced { point: PointId(10) }
+                },
+            ]
+        );
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(forced(Value::Float(8.0), 1))
+        );
+
+        // Submission validates against the standing force set, not the
+        // pending queue: a write submitted while the force still stands
+        // refuses even with its release already queued behind it.
+        executor.submit_command(unforce_point(10));
+        let refused = executor.submit_command(write_value(10, ValueKind::Float, Value::Float(4.0)));
+        assert_eq!(
+            refused.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::PointForced { point: PointId(10) }
+            }
+        );
+
+        // Once the release lands the same write applies legitimately —
+        // the point is no longer forced when the write resolves, so its
+        // value lands in the image and holds.
+        executor.scan();
+        executor.submit_command(write_value(10, ValueKind::Float, Value::Float(4.0)));
+        executor.scan();
+        assert_eq!(
+            executor.receipts().last().unwrap().outcome,
+            CommandOutcome::Applied { tick: Tick(3) }
+        );
+        assert_eq!(
+            executor.sample(PointId(10)),
+            Some(Sample::good(Value::Float(4.0), Tick(3)))
+        );
     }
 
     #[test]
@@ -4424,18 +5577,18 @@ mod tests {
             })],
         )
         .unwrap();
-        executor.scan().unwrap();
+        executor.scan();
 
         executor.submit_command(force_point(30, ValueKind::Float, Value::Float(7.0)));
-        executor.scan().unwrap();
-        executor.scan().unwrap();
+        executor.scan();
+        executor.scan();
         assert_eq!(
             executor.sample(PointId(30)),
             Some(forced(Value::Float(7.0), 3))
         );
 
         executor.submit_command(unforce_point(30));
-        executor.scan().unwrap();
+        executor.scan();
         // The route resumes at the release boundary.
         assert_eq!(
             executor.sample(PointId(30)),
@@ -4450,10 +5603,10 @@ mod tests {
         let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
         let mut executor = setpoint_rig(&driver);
         executor.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
-        executor.scan().unwrap();
+        executor.scan();
 
         driver.faults.lock().unwrap().insert(PointId(10));
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.sample(PointId(10)),
             Some(forced(Value::Float(5.0), 2))
@@ -4462,7 +5615,7 @@ mod tests {
 
         // Release resumes reads — and the fault now reports.
         executor.submit_command(unforce_point(10));
-        executor.scan().unwrap();
+        executor.scan();
         let health = &executor.snapshot().io_health;
         assert_eq!(health.failed_reads, 1);
         assert_eq!(
@@ -4489,7 +5642,7 @@ mod tests {
             value: Value::Bool(true),
         });
         executor.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.snapshot().forces,
             vec![
@@ -4505,7 +5658,7 @@ mod tests {
         );
 
         executor.submit_command(unforce_point(10));
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.snapshot().forces,
             vec![dcs_core::ForcedPoint {
@@ -4542,7 +5695,7 @@ mod tests {
         )
         .unwrap();
         executor.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
-        executor.run(2).unwrap();
+        executor.run(2);
 
         let checkpoint = executor.checkpoint();
         assert_eq!(
@@ -4566,7 +5719,7 @@ mod tests {
             None,
         )
         .unwrap();
-        restored.scan().unwrap();
+        restored.scan();
         assert_eq!(
             restored.sample(PointId(10)),
             Some(forced(Value::Float(5.0), 3))
@@ -4594,7 +5747,7 @@ mod tests {
         )
         .unwrap();
         active.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
-        active.scan().unwrap();
+        active.scan();
 
         let standby_driver = StubDriver::new(&[float(10), float(20)], &[]);
         standby_driver
@@ -4607,7 +5760,7 @@ mod tests {
         )
         .unwrap();
         standby.apply(&active.checkpoint()).unwrap();
-        standby.scan().unwrap();
+        standby.scan();
         assert_eq!(
             standby.sample(PointId(10)),
             Some(forced(Value::Float(5.0), 2))
@@ -4616,14 +5769,153 @@ mod tests {
         // A later checkpoint whose force set is empty releases the
         // standby's force: the checkpoint's set is authoritative.
         active.submit_command(unforce_point(10));
-        active.scan().unwrap();
+        active.scan();
         standby.apply(&active.checkpoint()).unwrap();
-        standby.scan().unwrap();
+        standby.scan();
         assert_eq!(
             standby.sample(PointId(10)),
             Some(Sample::good(Value::Float(1.0), Tick(3)))
         );
         assert!(standby.snapshot().forces.is_empty());
+    }
+
+    /// QA finding `stale-checkpoint-resurrects-receipted-unforce`
+    /// (#639): the journaled release is durable truth — adopting a
+    /// checkpoint captured before it must not re-stand the force.
+    #[test]
+    fn a_stale_checkpoint_cannot_resurrect_a_receipted_unforce() {
+        let active_driver = StubDriver::new(&[float(10), float(20)], &[]);
+        let mut active = Executor::new(
+            &active_driver,
+            forcing_checkpoint_map(),
+            forcing_checkpoint_components(),
+        )
+        .unwrap();
+        active.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
+        active.scan();
+        // The stale image: captured while the force stood, its receipt
+        // window ending before the release's index.
+        let stale = active.checkpoint();
+
+        let standby_driver = StubDriver::new(&[float(10), float(20)], &[]);
+        let mut standby = Executor::new(
+            &standby_driver,
+            forcing_checkpoint_map(),
+            forcing_checkpoint_components(),
+        )
+        .unwrap();
+        standby.apply(&stale).unwrap();
+        // The release applies on this run and journals — the receipt
+        // the checkpoint's high-water never reached.
+        standby.submit_command(unforce_point(10));
+        standby.scan();
+        assert!(standby.forces().is_empty());
+
+        // The re-adoption — a restart's tracking pull on the staler
+        // peer — keeps the release: the unreached receipt re-asserts
+        // over the adopted force set.
+        standby.apply(&stale).unwrap();
+        assert!(standby.forces().is_empty());
+        standby.scan();
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(Sample::good(Value::Float(0.0), Tick(2)))
+        );
+
+        // The receipted half of the same rule: an applied force this
+        // run's log holds past the checkpoint's high-water re-stands
+        // over a staler image that dropped it.
+        standby.submit_command(force_point(10, ValueKind::Float, Value::Float(7.0)));
+        standby.scan();
+        standby.apply(&stale).unwrap();
+        assert_eq!(standby.forces()[&PointId(10)], Value::Float(7.0));
+        standby.scan();
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(forced(Value::Float(7.0), 2))
+        );
+    }
+
+    /// The internal-point half of the same finding: a receipted
+    /// release replayed over a stale image also lifts the held
+    /// sample's `Substituted` stamp, matching the scan boundary's own
+    /// unforce application.
+    #[test]
+    fn a_replayed_unforce_restamps_the_held_internal_sample() {
+        let map = || {
+            PointMap::new().with_writable_internal(
+                PointId(10),
+                Direction::In,
+                ValueKind::Float,
+                Value::Float(0.0),
+            )
+        };
+        let active_driver = StubDriver::new(&[], &[]);
+        let mut active = Executor::new(&active_driver, map(), Vec::new()).unwrap();
+        active.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
+        active.scan();
+        let stale = active.checkpoint();
+
+        let standby_driver = StubDriver::new(&[], &[]);
+        let mut standby = Executor::new(&standby_driver, map(), Vec::new()).unwrap();
+        standby.apply(&stale).unwrap();
+        standby.submit_command(unforce_point(10));
+        standby.scan();
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(Sample::good(Value::Float(5.0), Tick(2)))
+        );
+
+        // The stale adoption replays the release: the force stays
+        // lifted and the held image sample is `Good` again, not the
+        // `Substituted` stamp the checkpoint's internal section carried.
+        standby.apply(&stale).unwrap();
+        assert!(standby.forces().is_empty());
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(Sample::good(Value::Float(5.0), Tick(1)))
+        );
+    }
+
+    /// The boundary-carry half: a checkpoint whose receipt log runs
+    /// ahead of this run's — the promote boundary's `final_sync` pull
+    /// — appends settled force verdicts the adopted image predates,
+    /// and they re-assert over the standing force set the same way.
+    #[test]
+    fn carry_pending_commands_replays_the_appended_force_verdicts() {
+        let active_driver = StubDriver::new(&[float(10), float(20)], &[]);
+        let mut active = Executor::new(
+            &active_driver,
+            forcing_checkpoint_map(),
+            forcing_checkpoint_components(),
+        )
+        .unwrap();
+        active.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
+        active.scan();
+
+        let standby_driver = StubDriver::new(&[float(10), float(20)], &[]);
+        let mut standby = Executor::new(
+            &standby_driver,
+            forcing_checkpoint_map(),
+            forcing_checkpoint_components(),
+        )
+        .unwrap();
+        standby.apply(&active.checkpoint()).unwrap();
+        assert_eq!(standby.forces()[&PointId(10)], Value::Float(5.0));
+
+        // The release lands on the tracked line after this run's last
+        // alignment: the carry appends the receipt and the force lifts
+        // with it, rather than standing on the older image.
+        active.submit_command(unforce_point(10));
+        active.scan();
+        standby.carry_pending_commands(&active.checkpoint());
+        assert!(standby.forces().is_empty());
+        assert_eq!(standby.receipts(), active.receipts());
+        standby.scan();
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(Sample::good(Value::Float(0.0), Tick(2)))
+        );
     }
 
     #[test]
@@ -4637,7 +5929,7 @@ mod tests {
             write_value(10, ValueKind::Float, Value::Float(5.0)),
             Some("operator-7".to_string()),
         );
-        executor.scan().unwrap();
+        executor.scan();
 
         let checkpoint = executor.checkpoint();
         assert_eq!(checkpoint.receipts, executor.receipts());
@@ -4666,7 +5958,7 @@ mod tests {
             write_value(10, ValueKind::Float, Value::Float(5.0)),
             Some("operator-7".to_string()),
         );
-        active.scan().unwrap();
+        active.scan();
         // The second command is checkpointed still-`Accepted`: submitted
         // after the settling scan, captured before its own boundary.
         active.submit_command(write_value(10, ValueKind::Float, Value::Float(7.0)));
@@ -4679,7 +5971,7 @@ mod tests {
 
         // The re-queued command lands at the standby's next boundary
         // exactly as the active's would have landed it.
-        standby.scan().unwrap();
+        standby.scan();
         assert_eq!(
             standby.receipts().last().unwrap().outcome,
             CommandOutcome::Applied { tick: Tick(2) }
@@ -4740,7 +6032,7 @@ mod tests {
 
         // The scan drains the queue: the queued commands still apply in
         // submission order and settle their receipts.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.receipts()[0].outcome,
             CommandOutcome::Applied { tick: Tick(1) }
@@ -4775,7 +6067,7 @@ mod tests {
 
         for _ in 0..6 {
             executor.submit_command(write_value(10, ValueKind::Float, Value::Float(5.0)));
-            executor.scan().unwrap();
+            executor.scan();
         }
 
         // Six submissions, four retained — the newest four, settled at
@@ -4799,12 +6091,12 @@ mod tests {
         // within one width here.)
         for _ in 0..100 {
             executor.submit_command(write_value(10, ValueKind::Float, Value::Float(5.0)));
-            executor.scan().unwrap();
+            executor.scan();
         }
         let first = serde_json::to_string(&executor.checkpoint()).unwrap().len();
         for _ in 0..4 {
             executor.submit_command(write_value(10, ValueKind::Float, Value::Float(5.0)));
-            executor.scan().unwrap();
+            executor.scan();
         }
         assert_eq!(executor.receipts().len(), 4);
         assert_eq!(executor.receipt_base(), 106);
@@ -4838,7 +6130,7 @@ mod tests {
         assert_eq!(executor.receipts().len(), 6);
         assert_eq!(executor.receipt_base(), 0);
 
-        executor.scan().unwrap();
+        executor.scan();
         for receipt in executor.receipts() {
             assert_eq!(receipt.outcome, CommandOutcome::Applied { tick: Tick(1) });
         }
@@ -4852,7 +6144,7 @@ mod tests {
 
         // The pending entry still indexes the log correctly through the
         // drain: it settles at its boundary, applied like the rest.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.receipts().last().unwrap().outcome,
             CommandOutcome::Applied { tick: Tick(2) }
@@ -4870,7 +6162,7 @@ mod tests {
         let mut active = setpoint_rig(&active_driver).with_receipt_log_capacity(4);
         for value in [1.0, 2.0] {
             active.submit_command(write_value(10, ValueKind::Float, Value::Float(value)));
-            active.scan().unwrap();
+            active.scan();
         }
         let early = active.checkpoint();
 
@@ -4883,7 +6175,7 @@ mod tests {
         // receipts, the last checkpointed still `Accepted`.
         for value in [3.0, 4.0, 5.0] {
             active.submit_command(write_value(10, ValueKind::Float, Value::Float(value)));
-            active.scan().unwrap();
+            active.scan();
         }
         active.submit_command(write_value(10, ValueKind::Float, Value::Float(6.0)));
         let checkpoint = active.checkpoint();
@@ -4900,7 +6192,7 @@ mod tests {
         // The adopted `Accepted` entry queued past the admission bound
         // and settles at the standby's own next boundary.
         assert_eq!(standby.snapshot().command_queue.depth, 1);
-        standby.scan().unwrap();
+        standby.scan();
         assert_eq!(
             standby.receipts().last().unwrap().outcome,
             CommandOutcome::Applied { tick: Tick(3) }
@@ -5010,7 +6302,7 @@ mod tests {
 
         // The carried entries still settle at their boundary, in
         // submission order.
-        standby.scan().unwrap();
+        standby.scan();
         assert_eq!(
             standby.receipts()[0].outcome,
             CommandOutcome::Applied { tick: Tick(1) }
@@ -5039,7 +6331,7 @@ mod tests {
                 reason: CommandError::QueueFull { .. }
             }
         ));
-        tracking.scan().unwrap();
+        tracking.scan();
         assert_eq!(driver_value(&tracking_driver, 10), Value::Float(4.0));
     }
 
@@ -5078,7 +6370,7 @@ mod tests {
 
         // The drain clears the depth; the counters and the high-water
         // persist across it.
-        executor.scan().unwrap();
+        executor.scan();
         executor.submit_command(write_value(10, ValueKind::Float, Value::Float(6.0)));
         assert_eq!(
             executor.snapshot().command_queue,
@@ -5105,7 +6397,7 @@ mod tests {
         )
         .unwrap();
         executor.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
-        executor.scan().unwrap();
+        executor.scan();
         let checkpoint = executor.checkpoint();
 
         let unforceable_map = PointMap::new()
@@ -5147,11 +6439,11 @@ mod tests {
             let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
             let mut executor = setpoint_rig(&driver);
             executor.submit_command(force_point(10, ValueKind::Float, Value::Float(5.0)));
-            executor.run(3).unwrap();
+            executor.run(3);
             driver.write(PointId(10), Value::Float(3.0)).unwrap();
-            executor.run(2).unwrap();
+            executor.run(2);
             executor.submit_command(unforce_point(10));
-            executor.scan().unwrap();
+            executor.scan();
             (
                 executor.receipts().to_vec(),
                 serde_json::to_string(&executor.snapshot()).unwrap(),
@@ -5324,7 +6616,7 @@ mod tests {
         let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
         driver.write(PointId(10), Value::Float(1.0)).unwrap();
         let mut executor = tuning_rig(&driver);
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(driver_value(&driver, 20), Value::Float(2.0));
 
         let command = set_parameter("loop", "gain", Value::Float(3.0));
@@ -5337,10 +6629,11 @@ mod tests {
                     apply_tick: Tick(2)
                 },
                 actor: None,
+                reason: None,
             }
         );
         // Queued, not yet applied: the component still runs the old gain.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.receipts().last().unwrap().outcome,
             CommandOutcome::Applied { tick: Tick(2) }
@@ -5413,7 +6706,7 @@ mod tests {
                 assert!(reason.component().is_some(), "receipt={receipt:?}");
             }
         }
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(executor.receipts().len(), 4);
     }
 
@@ -5439,7 +6732,7 @@ mod tests {
                 }
             }
         );
-        executor.scan().unwrap();
+        executor.scan();
         // Untouched: the run still drives the constructor's gain.
         assert_eq!(driver_value(&driver, 20), Value::Float(2.0));
     }
@@ -5459,7 +6752,7 @@ mod tests {
                 apply_tick: Tick(1)
             }
         );
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.receipts().last().unwrap().outcome,
             CommandOutcome::Rejected {
@@ -5471,7 +6764,7 @@ mod tests {
             }
         );
         // A refused parameter changes nothing.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(driver_value(&driver, 20), Value::Float(2.0));
     }
 
@@ -5488,7 +6781,7 @@ mod tests {
         executor.submit_command(set_parameter("loop", "limit", Value::Float(8.0)));
         executor.submit_command(write_value(10, ValueKind::Float, Value::Float(2.0)));
         executor.submit_command(set_parameter("loop", "gain", Value::Float(4.0)));
-        executor.scan().unwrap();
+        executor.scan();
 
         assert_eq!(
             executor
@@ -5511,9 +6804,9 @@ mod tests {
         let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
         driver.write(PointId(10), Value::Float(1.0)).unwrap();
         let mut executor = tuning_rig(&driver);
-        executor.scan().unwrap();
+        executor.scan();
         executor.submit_command(set_parameter("loop", "gain", Value::Float(4.0)));
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(driver_value(&driver, 20), Value::Float(4.0));
 
         let checkpoint = executor.checkpoint();
@@ -5555,7 +6848,7 @@ mod tests {
             None,
         )
         .unwrap();
-        restored.scan().unwrap();
+        restored.scan();
         assert_eq!(driver_value(&standby, 20), Value::Float(4.0));
 
         // A checkpoint/restore mid-tune reports identically from the
@@ -5572,7 +6865,7 @@ mod tests {
         let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
         driver.write(PointId(10), Value::Float(1.0)).unwrap();
         let mut executor = tuning_rig(&driver);
-        executor.scan().unwrap();
+        executor.scan();
 
         // The section aligns 1:1 with the diagnostics and descriptors in
         // scan order and carries each declared parameter's standing
@@ -5601,7 +6894,7 @@ mod tests {
 
         // A receipted tune reports its new value in the next snapshot.
         executor.submit_command(set_parameter("loop", "gain", Value::Float(4.0)));
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.snapshot().parameters[0].values["gain"],
             Value::Float(4.0)
@@ -5613,7 +6906,7 @@ mod tests {
         let driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
         driver.write(PointId(10), Value::Float(1.0)).unwrap();
         let mut executor = tuning_rig(&driver);
-        executor.scan().unwrap();
+        executor.scan();
 
         // `Scale` declares no parameters and never overrides the hook:
         // its entry is present with an empty value set, and the rest of
@@ -5685,7 +6978,7 @@ mod tests {
             })],
         )
         .unwrap();
-        executor.scan().unwrap();
+        executor.scan();
 
         let reported = &executor.snapshot().parameters[0];
         assert_eq!(reported.name, "over");
@@ -5704,7 +6997,7 @@ mod tests {
             driver.write(PointId(10), Value::Float(1.0)).unwrap();
             let mut executor = tuning_rig(&driver);
             executor.submit_command(set_parameter("loop", "gain", Value::Float(4.0)));
-            executor.run(3).unwrap();
+            executor.run(3);
             executor.snapshot().parameters
         };
         assert_eq!(run(), run());
@@ -5788,7 +7081,7 @@ mod tests {
         let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
         driver.write(PointId(10), Value::Float(5.0)).unwrap();
         let mut executor = checkpoint_rig(&driver);
-        executor.run(3).unwrap();
+        executor.run(3);
 
         let checkpoint = executor.checkpoint();
         assert_eq!(checkpoint.tick, Tick(3));
@@ -5847,11 +7140,11 @@ mod tests {
                 None => checkpoint_rig(&driver),
             };
             if checkpoint.is_none() {
-                executor.run(3).unwrap();
+                executor.run(3);
             }
             let mut samples = Vec::new();
             for _ in 0..2 {
-                executor.scan().unwrap();
+                executor.scan();
                 samples.push((
                     executor.sample(PointId(10)).unwrap(),
                     executor.sample(PointId(20)).unwrap(),
@@ -5865,7 +7158,7 @@ mod tests {
         let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
         driver.write(PointId(10), Value::Float(5.0)).unwrap();
         let mut original = checkpoint_rig(&driver);
-        original.run(3).unwrap();
+        original.run(3);
         let checkpoint = original.checkpoint();
 
         // The standby driver observes the process itself — the same
@@ -5877,7 +7170,7 @@ mod tests {
     fn restore_rejects_a_mismatched_component_set() {
         let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
         let mut executor = checkpoint_rig(&driver);
-        executor.scan().unwrap();
+        executor.scan();
         let checkpoint = executor.checkpoint();
 
         // The checkpoint names a component the fresh executor lacks.
@@ -5912,7 +7205,7 @@ mod tests {
     fn restore_rejects_incompatible_component_state() {
         let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
         let mut executor = checkpoint_rig(&driver);
-        executor.scan().unwrap();
+        executor.scan();
         let mut checkpoint = executor.checkpoint();
         checkpoint
             .components
@@ -5989,7 +7282,7 @@ mod tests {
             })],
         )
         .unwrap();
-        executor.scan().unwrap();
+        executor.scan();
         let checkpoint = executor.checkpoint();
         assert!(checkpoint.driver.is_some());
 
@@ -6232,8 +7525,8 @@ mod tests {
         let driver_b = StubDriver::new(&[float(10), float(20), float(30), float(40)], &[]);
         let mut run_a = chain_rig(&driver_a);
         let mut run_b = chain_rig(&driver_b);
-        run_a.scan().unwrap();
-        run_b.scan().unwrap();
+        run_a.scan();
+        run_b.scan();
 
         let snapshot_a = run_a.snapshot();
         let snapshot_b = run_b.snapshot();
@@ -6309,7 +7602,7 @@ mod tests {
             executor.sample(PointId(10)),
             Some(Sample::good(Value::Float(2.5), Tick::ZERO))
         );
-        executor.scan().unwrap();
+        executor.scan();
         // The component read the held initial and its write landed on the
         // image-carried `Out` point — recorded for monitoring.
         assert_eq!(
@@ -6329,7 +7622,7 @@ mod tests {
                 apply_tick: Tick(2)
             }
         );
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.receipts()[0].outcome,
             CommandOutcome::Applied { tick: Tick(2) }
@@ -6345,7 +7638,7 @@ mod tests {
         );
 
         // The held value survives later scans until the next command.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.sample(PointId(10)).unwrap().value,
             Value::Float(7.0)
@@ -6406,7 +7699,7 @@ mod tests {
         )
         .unwrap();
 
-        executor.scan().unwrap();
+        executor.scan();
         // Scan 1's input phase routed the `Out` point's seeded initial;
         // the producer's write lands on the `In` point at scan 2.
         assert_eq!(
@@ -6415,7 +7708,7 @@ mod tests {
         );
         assert_eq!(driver_value(&driver, 40), Value::Float(0.0));
 
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.sample(PointId(30)),
             Some(Sample::good(Value::Float(9.0), Tick(2)))
@@ -6504,7 +7797,7 @@ mod tests {
             kind: ValueKind::Float,
             value: Value::Float(7.0),
         });
-        executor.scan().unwrap();
+        executor.scan();
 
         let checkpoint = executor.checkpoint();
         assert_eq!(
@@ -6553,7 +7846,7 @@ mod tests {
             kind: ValueKind::Float,
             value: Value::Float(7.0),
         });
-        active.scan().unwrap();
+        active.scan();
         let checkpoint = active.checkpoint();
 
         standby.apply(&checkpoint).unwrap();
@@ -6592,6 +7885,80 @@ mod tests {
         );
     }
 
+    /// QA finding `held-internal-point-tick-zero-misdates-adopted-values`
+    /// (#852): an adoption overlaid internal `In` samples verbatim, so a
+    /// document whose held value differs from the image's served the
+    /// adopted value stamped `Tick::ZERO` — the seed stamp claiming it
+    /// stood since run start — where a `WriteValue` at the same boundary
+    /// stamps the applying scan. `Tick::ZERO` can honestly mark only the
+    /// seed value, so a changed value carrying it re-stamps at the
+    /// apply's landing tick; every other captured stamp is the line's
+    /// claim of when the value last changed and adopts verbatim — the
+    /// pair shares one tick domain, so a tracked peer's served samples
+    /// stay identical to the line's.
+    #[test]
+    fn an_apply_restamps_a_zero_stamped_held_value_it_changes() {
+        let driver = StubDriver::new(&[], &[]);
+        let mut standby = internal_rig(&driver);
+        for _ in 0..3 {
+            standby.scan();
+        }
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(Sample::good(Value::Float(2.5), Tick::ZERO)),
+            "the never-written held value keeps the zero stamp"
+        );
+
+        // The reproduction's document: a held value the image never
+        // held, still stamped `Tick::ZERO` — what a checkpoint written
+        // before the point's first write carries. The zero stamp cannot
+        // name the change, so the apply's landing tick stamps it — the
+        // `WriteValue` stamp the same change would carry at this
+        // boundary.
+        let mut checkpoint = standby.checkpoint();
+        checkpoint.tick = Tick(7);
+        checkpoint
+            .internal
+            .insert(PointId(10), Sample::good(Value::Float(7.0), Tick::ZERO));
+        standby.apply(&checkpoint).unwrap();
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(Sample::good(Value::Float(7.0), Tick(7))),
+            "a zero-stamped change stamps the apply's landing tick"
+        );
+
+        // A document carrying a changed value under a real stamp keeps
+        // it: the stamp is the line's own record of when the value last
+        // changed, and verbatim adoption is what keeps the tracked
+        // peer's served samples identical to the line's.
+        let mut written = standby.checkpoint();
+        written.tick = Tick(9);
+        written
+            .internal
+            .insert(PointId(10), Sample::good(Value::Float(9.5), Tick(6)));
+        standby.apply(&written).unwrap();
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(Sample::good(Value::Float(9.5), Tick(6))),
+            "a change carrying a real stamp adopts the line's claim verbatim"
+        );
+
+        // And a value the document carries unchanged adopts the captured
+        // stamp too — including the honest `Tick::ZERO` a never-written
+        // point still wears.
+        let mut unchanged = standby.checkpoint();
+        unchanged.tick = Tick(11);
+        unchanged
+            .internal
+            .insert(PointId(10), Sample::good(Value::Float(9.5), Tick(4)));
+        standby.apply(&unchanged).unwrap();
+        assert_eq!(
+            standby.sample(PointId(10)),
+            Some(Sample::good(Value::Float(9.5), Tick(4))),
+            "an unchanged held value adopts the captured stamp verbatim"
+        );
+    }
+
     /// The revised-model executor of the reinitialize tests: writable
     /// internal `In` point 10 (the carried operator value's landing), an
     /// internal `Out` point 20 the one component writes onto, and a
@@ -6625,6 +7992,7 @@ mod tests {
         Checkpoint {
             format_version: CHECKPOINT_FORMAT_VERSION,
             model_fingerprint: Some(ModelFingerprint::of(b"model-a")),
+            generation: None,
             tick: Tick(50),
             components: [
                 ("a".to_string(), StateMap::new()),
@@ -6648,6 +8016,9 @@ mod tests {
             forces: [(PointId(10), Value::Float(3.0))].into_iter().collect(),
             receipts: Vec::new(),
             command_admission: CommandAdmissionCounts::default(),
+            source_owns_field: None,
+            line_owner: None,
+            line_proof: None,
         }
     }
 
@@ -6657,7 +8028,7 @@ mod tests {
         let mut executor = revision_rig(&driver);
         // The revision scanned before the crossing: its own image values
         // are evidence the apply leg overwrites exactly the carried set.
-        executor.scan().unwrap();
+        executor.scan();
 
         let report = executor.reinitialize(&foreign_checkpoint()).unwrap();
         assert_eq!(report.from, Some(ModelFingerprint::of(b"model-a")));
@@ -6710,7 +8081,7 @@ mod tests {
         );
         assert_eq!(executor.tick(), Tick(50));
 
-        executor.scan().unwrap();
+        executor.scan();
         // The carried force stands: the scan substitutes it onto the
         // point's image at Substituted quality, and the reinitialized
         // component computed on the forced value.
@@ -6774,6 +8145,144 @@ mod tests {
         assert!(executor.snapshot().forces.is_empty());
     }
 
+    /// The reinitialize rig with a tunable component: `Tunable` ("loop")
+    /// declares `gain`/`limit` at the construction defaults 2.0/10.0 —
+    /// the revision's declared defaults the itemization diffs against.
+    fn revision_tuning_rig(driver: &StubDriver) -> Executor<'_> {
+        Executor::new(
+            driver,
+            internal_map(),
+            vec![Box::new(Tunable {
+                name: "loop",
+                input: PointId(10),
+                output: PointId(20),
+                gain: 2.0,
+                limit: 10.0,
+            })],
+        )
+        .unwrap()
+        .with_model_fingerprint(ModelFingerprint::of(b"model-b"))
+    }
+
+    /// A checkpoint captured under `model-a` carrying `loop`'s
+    /// component state — the fields `Tunable::capture_state` writes.
+    fn tuned_checkpoint(state: StateMap) -> Checkpoint {
+        Checkpoint {
+            format_version: CHECKPOINT_FORMAT_VERSION,
+            model_fingerprint: Some(ModelFingerprint::of(b"model-a")),
+            generation: None,
+            tick: Tick(50),
+            components: [("loop".to_string(), state)].into_iter().collect(),
+            driver: None,
+            outputs: BTreeMap::new(),
+            internal: BTreeMap::new(),
+            forces: BTreeMap::new(),
+            receipts: Vec::new(),
+            command_admission: CommandAdmissionCounts::default(),
+            source_owns_field: None,
+            line_owner: None,
+            line_proof: None,
+        }
+    }
+
+    #[test]
+    fn reinitialize_itemizes_reverted_tuning() {
+        let driver = StubDriver::new(&[], &[]);
+        let mut executor = revision_tuning_rig(&driver);
+
+        // The receipted tune the old run settled: `gain` driven to 3.0
+        // while `limit` stayed at its declared 10.0 — the checkpoint's
+        // component section carries both, exactly as `capture_state`
+        // wrote them.
+        let mut state = StateMap::new();
+        state.insert("gain", Value::Float(3.0));
+        state.insert("limit", Value::Float(10.0));
+        let checkpoint = tuned_checkpoint(state);
+
+        let report = executor.reinitialize(&checkpoint).unwrap();
+        assert_eq!(report.reinitialized, vec!["loop".to_string()]);
+        // Only the differing tune is named: `limit` matched the
+        // revision's declared default and lists nothing.
+        assert_eq!(
+            report.reverted_tuning,
+            vec![RevertedParameter {
+                component: "loop".to_string(),
+                parameter: "gain".to_string(),
+                checkpointed: Value::Float(3.0),
+                declared: Value::Float(2.0),
+            }]
+        );
+
+        // The tune does not carry: the reinitialized component stands
+        // at its declared default — the itemization is the witnessed
+        // record of what reverted.
+        let parameters = &executor.snapshot().parameters[0];
+        assert_eq!(parameters.name, "loop");
+        assert_eq!(parameters.values["gain"], Value::Float(2.0));
+
+        // Two runs of the same crossing report identically.
+        let mut second = revision_tuning_rig(&driver);
+        assert_eq!(second.reinitialize(&checkpoint).unwrap(), report);
+    }
+
+    #[test]
+    fn reinitialize_itemizes_against_declared_defaults_not_live_tuning() {
+        let driver = StubDriver::new(&[], &[]);
+        let mut executor = revision_tuning_rig(&driver);
+
+        // This run's own `loop` got the same 3.0 tune — the shape an
+        // adopted `Accepted` receipt re-settling under the revision
+        // produces. The itemization diffs the checkpoint against the
+        // revision's declared defaults, not the live report, so the
+        // re-settled tune cannot hide what the old run's value
+        // reverted from.
+        executor.submit_command(set_parameter("loop", "gain", Value::Float(3.0)));
+        executor.scan();
+        let parameters = &executor.snapshot().parameters[0];
+        assert_eq!(parameters.values["gain"], Value::Float(3.0));
+
+        let mut state = StateMap::new();
+        state.insert("gain", Value::Float(3.0));
+        state.insert("limit", Value::Float(10.0));
+        let report = executor.reinitialize(&tuned_checkpoint(state)).unwrap();
+        assert_eq!(
+            report.reverted_tuning,
+            vec![RevertedParameter {
+                component: "loop".to_string(),
+                parameter: "gain".to_string(),
+                checkpointed: Value::Float(3.0),
+                declared: Value::Float(2.0),
+            }]
+        );
+    }
+
+    #[test]
+    fn reinitialize_itemizes_a_retyped_parameter_and_skips_undeclared_state() {
+        let driver = StubDriver::new(&[], &[]);
+        let mut executor = revision_tuning_rig(&driver);
+
+        // `gain` checkpointed as Int where the revision declares Float:
+        // nothing component-side crosses, so the field itemizes as
+        // reverted like any differing value — the named-refusal
+        // convention binds the carried sections, not state that never
+        // moves. `integrator` is captured run state the descriptor does
+        // not declare: the component's own dropped vocabulary, not a
+        // reverted parameter.
+        let mut state = StateMap::new();
+        state.insert("gain", Value::Int(3));
+        state.insert("integrator", Value::Float(1.5));
+        let report = executor.reinitialize(&tuned_checkpoint(state)).unwrap();
+        assert_eq!(
+            report.reverted_tuning,
+            vec![RevertedParameter {
+                component: "loop".to_string(),
+                parameter: "gain".to_string(),
+                checkpointed: Value::Int(3),
+                declared: Value::Float(2.0),
+            }]
+        );
+    }
+
     #[test]
     fn reinitialize_ignores_the_fingerprint_gate_but_not_the_version() {
         let driver = StubDriver::new(&[], &[]);
@@ -6803,7 +8312,7 @@ mod tests {
         let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
         let mut executor =
             checkpoint_rig(&driver).with_model_fingerprint(ModelFingerprint::of(b"model-a"));
-        executor.scan().unwrap();
+        executor.scan();
         let checkpoint = executor.checkpoint();
 
         // This build stamps the version it writes and the fingerprint
@@ -6838,7 +8347,7 @@ mod tests {
         // it restores onto an executor assembled without one.
         let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
         let mut executor = checkpoint_rig(&driver);
-        executor.run(3).unwrap();
+        executor.run(3);
         let checkpoint = executor.checkpoint();
         assert_eq!(checkpoint.model_fingerprint, None);
 
@@ -6894,7 +8403,7 @@ mod tests {
     fn restore_rejects_an_unsupported_format_version() {
         let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
         let mut executor = checkpoint_rig(&driver);
-        executor.scan().unwrap();
+        executor.scan();
         let mut checkpoint = executor.checkpoint();
         checkpoint.format_version = CHECKPOINT_FORMAT_VERSION + 1;
 
@@ -6929,7 +8438,7 @@ mod tests {
         // this checkpoint's components would have failed it anyway.
         let standby_driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
         let mut standby = checkpoint_rig(&standby_driver);
-        standby.run(2).unwrap();
+        standby.run(2);
         assert_eq!(standby.apply(&checkpoint), Err(error));
         assert_eq!(standby.tick(), Tick(2));
         assert_eq!(
@@ -6946,7 +8455,7 @@ mod tests {
         let driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
         driver.write(PointId(10), Value::Float(5.0)).unwrap();
         let mut executor = checkpoint_rig(&driver).with_model_fingerprint(fingerprint);
-        executor.run(3).unwrap();
+        executor.run(3);
         let checkpoint = executor.checkpoint();
 
         let components = || {
@@ -7015,7 +8524,7 @@ mod tests {
         // of the foreign run applied.
         let standby_driver = StubDriver::new(&[float(10), float(20), int(30)], &[]);
         let mut standby = checkpoint_rig(&standby_driver).with_model_fingerprint(other);
-        standby.run(2).unwrap();
+        standby.run(2);
         assert_eq!(
             standby.apply(&checkpoint),
             Err(RestoreError::FingerprintMismatch {
@@ -7404,8 +8913,8 @@ mod tests {
         // boundary — its driver write stages into the output image
         // before the exchange runs.
         executor.submit_command(write_value(11, ValueKind::Float, Value::Float(3.0)));
-        executor.scan().unwrap();
-        executor.scan().unwrap();
+        executor.scan();
+        executor.scan();
 
         // Exactly one exchange per scan, stamped with the scan's tick —
         // after the boundary's command write stages, before the
@@ -7445,7 +8954,7 @@ mod tests {
         )
         .unwrap();
 
-        executor.run(3).unwrap();
+        executor.run(3);
 
         // Three scans read the input and wrote the output every cycle —
         // yet the only transport calls are the three exchanges: under
@@ -7485,7 +8994,7 @@ mod tests {
         .unwrap();
 
         // The first exchange latches the field image at its tick.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.snapshot().points[0].sample.unwrap(),
             Sample::good(Value::Float(7.0), Tick(1))
@@ -7499,7 +9008,7 @@ mod tests {
         // boundary and surfaced as a disconnected link — but the held
         // image still serves; the acquisition stamp lags by one, inside
         // the budget.
-        executor.scan().unwrap();
+        executor.scan();
         let health = &executor.snapshot().io_health;
         assert_eq!(health.failed_exchanges, 1);
         assert_eq!(health.failed_reads, 0);
@@ -7523,7 +9032,7 @@ mod tests {
 
         // The second miss ages the held sample past its budget — the
         // latched acquisition stamp still reads tick 1.
-        executor.scan().unwrap();
+        executor.scan();
         let sample = executor.snapshot().points[0].sample.unwrap();
         assert_eq!(sample.value, Value::Float(7.0));
         assert_eq!(sample.quality, Quality::Uncertain(QualityReason::Stale));
@@ -7531,7 +9040,7 @@ mod tests {
         // The third miss reaches the declared threshold: reads escalate
         // to `Disconnected` — an ordinary boundary failure degrading the
         // held value to `Bad`.
-        executor.scan().unwrap();
+        executor.scan();
         let sample = executor.snapshot().points[0].sample.unwrap();
         assert_eq!(sample.value, Value::Float(7.0));
         assert_eq!(
@@ -7559,12 +9068,12 @@ mod tests {
         // The fourth miss keeps the escalation; the sixth scan's
         // completed exchange relatches — misses reset, the link
         // recovers, and the field's asserted value lands fresh.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.snapshot().points[0].sample.unwrap().quality,
             Quality::Bad(QualityReason::CommunicationFault)
         );
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.snapshot().points[0].sample.unwrap(),
             Sample::good(Value::Float(9.0), Tick(6))
@@ -7598,7 +9107,7 @@ mod tests {
 
         // Scan 1's write phase staged the value — the field carries the
         // initial sample until the next exchange publishes it.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             driver.field_sample(20),
             Some(Sample::good(Value::Float(0.0), Tick::ZERO))
@@ -7606,7 +9115,7 @@ mod tests {
 
         // Scan 2's exchange fails: nothing publishes, and the staged
         // image is retained — no component write follows to restage it.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             driver.field_sample(20),
             Some(Sample::good(Value::Float(0.0), Tick::ZERO))
@@ -7614,7 +9123,7 @@ mod tests {
 
         // Scan 3's completed exchange publishes the retained staged
         // image — the value lands stamped with the exchange's tick.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             driver.field_sample(20),
             Some(Sample::good(Value::Float(9.0), Tick(3)))
@@ -7644,7 +9153,7 @@ mod tests {
         // Scan 1: the exchange ran before the write phase staged
         // anything, so the field still carries its initial value while
         // the executor's image already reports the staged output.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             driver.field_sample(20),
             Some(Sample::good(Value::Float(0.0), Tick::ZERO))
@@ -7656,7 +9165,7 @@ mod tests {
 
         // Scan 2's exchange publishes the staged image — one scan after
         // the write.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             driver.field_sample(20),
             Some(Sample::good(Value::Float(9.0), Tick(2)))
@@ -7680,13 +9189,13 @@ mod tests {
             .with_point(PointId(11), Direction::In, ValueKind::Float);
         let mut executor = Executor::new(&driver, map, Vec::new()).unwrap();
 
-        executor.scan().unwrap();
+        executor.scan();
 
         // The short exchange completed — the boundary counts no
         // exchange failure — but station 1's point escalates to
         // `Disconnected` while station 2's serves the freshly latched
         // image.
-        executor.scan().unwrap();
+        executor.scan();
         let snapshot = executor.snapshot();
         assert_eq!(snapshot.io_health.failed_exchanges, 0);
         assert_eq!(snapshot.io_health.failed_reads, 1);
@@ -7720,7 +9229,7 @@ mod tests {
 
         // A clean exchange clears the shortfall: both stations serve
         // fresh data again.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.snapshot().points[0].sample.unwrap(),
             Sample::good(Value::Float(7.0), Tick(3))
@@ -7741,7 +9250,7 @@ mod tests {
         );
         let mut executor = Executor::new(&driver, stale_map(PointId(10), 2), Vec::new()).unwrap();
 
-        executor.run(4).unwrap();
+        executor.run(4);
 
         // Three of four exchanges completed — the failed one counted
         // once at the boundary — and the late frame reported its missed
@@ -7788,7 +9297,7 @@ mod tests {
         )
         .unwrap();
 
-        executor.run(2).unwrap();
+        executor.run(2);
 
         // Both scans exchanged — the gate passed the cyclic surface
         // through — while the quiesced writes never reached the staged
@@ -7807,8 +9316,8 @@ mod tests {
         // Opening the gate lets the next write stage — and the next
         // exchange publish.
         gate.open();
-        executor.scan().unwrap();
-        executor.scan().unwrap();
+        executor.scan();
+        executor.scan();
         assert_eq!(
             driver.field_sample(20),
             Some(Sample::good(Value::Float(9.0), Tick(4)))
@@ -7824,7 +9333,7 @@ mod tests {
             .into_iter()
             .collect();
         let mut executor = Executor::new(&driver, map, Vec::new()).unwrap();
-        executor.run(3).unwrap();
+        executor.run(3);
         assert_eq!(executor.snapshot().io_health.failed_exchanges, 0);
         assert_eq!(executor.snapshot().io_health.driver, None);
     }
@@ -8174,12 +9683,13 @@ mod tests {
                     apply_tick: Tick(1)
                 },
                 actor: None,
+                reason: None,
             }
         );
         // Queued, not yet applied: the count still reports its start.
         assert_eq!(driver_value(&driver, 40), Value::Int(0));
 
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(driver_value(&driver, 40), Value::Int(3));
         assert_eq!(
             executor.receipts().last().unwrap().outcome,
@@ -8255,7 +9765,7 @@ mod tests {
         // `load` then `bump`: the count lands at 5 + 3.
         executor.submit_command(invoke("ctr", "load", &[("to", Value::Int(5))]));
         executor.submit_command(invoke("ctr", "bump", &[("by", Value::Int(3))]));
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(driver_value(&driver, 40), Value::Int(8));
         assert_eq!(
             executor.receipts()[0].outcome,
@@ -8270,7 +9780,7 @@ mod tests {
         // command kind, decides: `bump` then `load` lands at 5.
         executor.submit_command(invoke("ctr", "bump", &[("by", Value::Int(3))]));
         executor.submit_command(invoke("ctr", "load", &[("to", Value::Int(5))]));
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(driver_value(&driver, 40), Value::Int(5));
     }
 
@@ -8282,7 +9792,7 @@ mod tests {
         // A kind invariant the schema cannot express: `by` below 1.
         let receipt = executor.submit_command(invoke("ctr", "bump", &[("by", Value::Int(0))]));
         assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.receipts().last().unwrap().outcome,
             CommandOutcome::Rejected {
@@ -8300,7 +9810,7 @@ mod tests {
         // refused while `load` — `Always`-available — still serves.
         executor.submit_command(invoke("ctr", "load", &[("to", Value::Int(100))]));
         executor.submit_command(invoke("ctr", "bump", &[("by", Value::Int(1))]));
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.receipts()[1].outcome,
             CommandOutcome::Applied { tick: Tick(2) }
@@ -8336,7 +9846,7 @@ mod tests {
 
         let receipt = executor.submit_command(invoke("declares", "ping", &[]));
         assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.receipts().last().unwrap().outcome,
             CommandOutcome::Rejected {
@@ -8389,7 +9899,7 @@ mod tests {
 
         // The scan drains the queue: the admitted invoke applies and
         // settles; admission re-opens.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(driver_value(&driver, 40), Value::Int(2));
         assert_eq!(
             executor.receipts()[0].outcome,
@@ -8405,7 +9915,7 @@ mod tests {
         let driver = StubDriver::new(&[float(10), float(20), int(40)], &[]);
         let mut executor = commanded_rig(&driver);
         executor.submit_command(invoke("ctr", "bump", &[("by", Value::Int(7))]));
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(driver_value(&driver, 40), Value::Int(7));
         let checkpoint = executor.checkpoint();
         assert_eq!(
@@ -8438,7 +9948,7 @@ mod tests {
         )
         .unwrap();
 
-        standby.scan().unwrap();
+        standby.scan();
         assert_eq!(driver_value(&standby_driver, 40), Value::Int(7));
     }
 
@@ -8451,7 +9961,7 @@ mod tests {
         let active_driver = StubDriver::new(&[float(10), float(20), int(40)], &[]);
         let mut active = commanded_rig(&active_driver);
         active.submit_command(invoke("ctr", "bump", &[("by", Value::Int(7))]));
-        active.scan().unwrap();
+        active.scan();
         // Still pending when the checkpoint is taken.
         active.submit_command(invoke("ctr", "bump", &[("by", Value::Int(3))]));
         let checkpoint = active.checkpoint();
@@ -8462,8 +9972,8 @@ mod tests {
 
         // The standby's boundary replays the carried invoke; the active
         // applies it at its own — the pair's outputs agree.
-        active.scan().unwrap();
-        standby.scan().unwrap();
+        active.scan();
+        standby.scan();
         assert_eq!(driver_value(&active_driver, 40), Value::Int(10));
         assert_eq!(driver_value(&standby_driver, 40), Value::Int(10));
         assert_eq!(standby.receipts().len(), active.receipts().len());
@@ -8508,7 +10018,7 @@ mod tests {
         .unwrap();
 
         assert!(executor.emitted_events().is_empty());
-        executor.scan().unwrap();
+        executor.scan();
         let emitted: Vec<(&str, &str)> = executor
             .emitted_events()
             .iter()
@@ -8532,7 +10042,7 @@ mod tests {
 
         // The next scan's record replaces the last — the buffer always
         // holds exactly one scan's emissions.
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(executor.emitted_events().len(), 6);
         assert_eq!(
             executor.emitted_events()[0].fields["n"],
@@ -8560,7 +10070,7 @@ mod tests {
         )
         .unwrap();
 
-        executor.scan().unwrap();
+        executor.scan();
         let emitted: Vec<&str> = executor
             .emitted_events()
             .iter()
@@ -8595,7 +10105,7 @@ mod tests {
         )
         .unwrap();
 
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(executor.emitted_events().len(), 3);
         let checkpoint = executor.checkpoint();
         executor.apply(&checkpoint).unwrap();
@@ -8611,7 +10121,7 @@ mod tests {
         // exercised in one scan.
         let driver = StubDriver::new(&[], &[]);
         let mut executor = emitter_rig(&driver);
-        executor.scan().unwrap();
+        executor.scan();
 
         let descriptor = &executor.snapshot().descriptors[0];
         let retention_of = |event: &EmittedEvent| {
@@ -8668,15 +10178,15 @@ mod tests {
         // A standby joining mid-run: the checkpointed component state
         // aligns the emission sequence, so its first tracked scan
         // already emits what the active's does.
-        active.run(3).unwrap();
+        active.run(3);
         standby.apply(&active.checkpoint()).unwrap();
 
         // The driven pair's cycle: adopt the active's post-scan state,
         // then scan — the peers' emitted records are equal scan by
         // scan, whether or not the pull lands between them.
         for _ in 0..4 {
-            standby.scan().unwrap();
-            active.scan().unwrap();
+            standby.scan();
+            active.scan();
             assert_eq!(standby.emitted_events(), active.emitted_events());
             standby.apply(&active.checkpoint()).unwrap();
         }
@@ -8695,13 +10205,13 @@ mod tests {
 
         for _ in 0..3 {
             standby.apply(&reference.checkpoint()).unwrap();
-            standby.scan().unwrap();
-            reference.scan().unwrap();
+            standby.scan();
+            reference.scan();
         }
         // Promotion: the peer stops applying and runs on.
         for _ in 0..4 {
-            standby.scan().unwrap();
-            reference.scan().unwrap();
+            standby.scan();
+            reference.scan();
             assert_eq!(standby.emitted_events(), reference.emitted_events());
         }
     }
@@ -8721,7 +10231,7 @@ mod tests {
         let standby_driver = StubDriver::new(&[float(10), float(20), int(40)], &[]);
         let mut standby = commanded_rig(&standby_driver);
         standby.apply(&pending).unwrap();
-        standby.scan().unwrap();
+        standby.scan();
 
         assert_eq!(standby.receipts().len(), 1);
         assert_eq!(
@@ -8732,9 +10242,9 @@ mod tests {
 
         // The settled outcome rides the next checkpoint forward — the
         // re-application lands nothing: still one receipt, still 7.
-        active.scan().unwrap();
+        active.scan();
         standby.apply(&active.checkpoint()).unwrap();
-        standby.scan().unwrap();
+        standby.scan();
         assert_eq!(standby.receipts().len(), 1);
         assert_eq!(driver_value(&standby_driver, 40), Value::Int(7));
     }
@@ -8766,7 +10276,7 @@ mod tests {
         // A scan product: before the first scan the section is empty.
         assert!(executor.snapshot().command_verdicts.is_empty());
 
-        executor.scan().unwrap();
+        executor.scan();
         let snapshot = executor.snapshot();
         // One entry per registered component, in scan order; `a`
         // declares no command surface, so its verdict list is empty.
@@ -8791,7 +10301,7 @@ mod tests {
         // Drive the count to the limit: the same scan's probe reports
         // `bump`'s standing refusal — the text dispatch would settle.
         executor.submit_command(invoke("ctr", "load", &[("to", Value::Int(100))]));
-        executor.scan().unwrap();
+        executor.scan();
         let snapshot = executor.snapshot();
         assert_eq!(
             verdict(&snapshot, "ctr", "bump"),
@@ -8805,7 +10315,7 @@ mod tests {
         // `load` back under the limit re-opens `bump` on the next
         // scan's probe.
         executor.submit_command(invoke("ctr", "load", &[("to", Value::Int(0))]));
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             verdict(&executor.snapshot(), "ctr", "bump"),
             Some(&CommandVerdict {
@@ -8859,7 +10369,7 @@ mod tests {
         let mut executor =
             Executor::new(&driver, map, vec![Box::new(Unprobed { name: "unprobed" })]).unwrap();
 
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.snapshot().command_verdicts,
             [ComponentCommands {
@@ -8878,7 +10388,7 @@ mod tests {
         // invoke hook's refusal — and the disagreement fails nothing.
         let receipt = executor.submit_command(invoke("unprobed", "ping", &[]));
         assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.receipts().last().unwrap().outcome,
             CommandOutcome::Rejected {
@@ -8914,15 +10424,15 @@ mod tests {
         // The active's count reaches the limit before the standby
         // joins: the adopted state carries `bump`'s standing refusal.
         active.submit_command(invoke("ctr", "load", &[("to", Value::Int(100))]));
-        active.scan().unwrap();
+        active.scan();
         standby.apply(&active.checkpoint()).unwrap();
         // The abandoned line's verdicts do not linger past the apply:
         // the adopted line has completed no scan yet.
         assert!(standby.snapshot().command_verdicts.is_empty());
 
         for _ in 0..4 {
-            standby.scan().unwrap();
-            active.scan().unwrap();
+            standby.scan();
+            active.scan();
             assert_eq!(
                 standby.snapshot().command_verdicts,
                 active.snapshot().command_verdicts
@@ -8931,7 +10441,7 @@ mod tests {
         }
         // Both report `bump`'s standing refusal — the adopted state
         // carries the limit.
-        standby.scan().unwrap();
+        standby.scan();
         assert_eq!(
             verdict(&standby.snapshot(), "ctr", "bump").and_then(|v| v.refusal.as_deref()),
             Some("the counter is at its limit")
@@ -8942,8 +10452,8 @@ mod tests {
         // `load` below the limit re-opens `bump` on both peers.
         active.submit_command(invoke("ctr", "load", &[("to", Value::Int(0))]));
         standby.apply(&active.checkpoint()).unwrap();
-        active.scan().unwrap();
-        standby.scan().unwrap();
+        active.scan();
+        standby.scan();
         assert_eq!(
             standby.snapshot().command_verdicts,
             active.snapshot().command_verdicts

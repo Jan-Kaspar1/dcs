@@ -37,6 +37,11 @@ const DT: f64 = 0.1;
 const N: u64 = 8;
 /// The fixture's writable setpoint input — the command target.
 const SETPOINT: PointId = PointId(10);
+/// The pair's shared tracking secret both monitors key with — the
+/// `--pair-token` deployment a real redundant pair declares: the
+/// active's demote below verifies the standby's announced hint
+/// against the keyed `line_proof` and tracks it under proof.
+const PAIR_KEY: u64 = 0x517c_c1b7_2722_0a95;
 
 /// `shutdown` on drop, so a panicking test still lets the scoped serve
 /// threads exit instead of hanging the scope's join — the same pattern
@@ -122,6 +127,7 @@ fn receipts_and_journal_cover_the_run_on_every_peer_the_audit_reached() {
     let active_step = &active_driver;
     let active_monitor = Monitor::bind_peer(("127.0.0.1", 0), active, model.signal_index())
         .unwrap()
+        .with_pair_key(PAIR_KEY)
         .driven(Driven {
             track: None,
             after_scan: Some(Box::new(move |peer: &Peer<'_>| {
@@ -154,6 +160,7 @@ fn receipts_and_journal_cover_the_run_on_every_peer_the_audit_reached() {
     let standby_step = &standby_driver;
     let standby_monitor = Monitor::bind_peer(("127.0.0.1", 0), standby, model.signal_index())
         .unwrap()
+        .with_pair_key(PAIR_KEY)
         .driven(Driven {
             track: Some(active_monitor.local_addr()),
             after_scan: Some(Box::new(move |peer: &Peer<'_>| {
@@ -198,9 +205,30 @@ fn receipts_and_journal_cover_the_run_on_every_peer_the_audit_reached() {
         // The standby's next scan pulls the checkpoint carrying the
         // still-`Accepted` receipt — the re-queue keeps the command
         // alive across the pair — then the active's own boundary
-        // settles it at the same tick.
+        // settles it at the same tick. Per #689 the tracker's quiesced
+        // scan carries the adopted receipt rather than settling it, so
+        // one further pull adopts the applied checkpoint and the two
+        // logs converge on the single settlement.
         standby_client.advance(1).unwrap();
         active_client.advance(1).unwrap();
+        standby_client.advance(1).unwrap();
+        // #689's one-cycle lag, healed: the tracker's quiesced scan
+        // carried the adopted receipt without settling it, so the
+        // staged outputs it computed lagged the field by the command's
+        // effect and the adopting pull named divergence. The next
+        // cycle reads the commanded field and stages matching outputs,
+        // so the following pull's same-tick comparison resyncs to
+        // tracking — bounded here, deterministically one more cycle.
+        for _ in 0..5 {
+            if matches!(
+                standby_client.role().unwrap().sync,
+                Some(dcs_core::StandbySync::Tracking { .. })
+            ) {
+                break;
+            }
+            active_client.advance(1).unwrap();
+            standby_client.advance(1).unwrap();
+        }
 
         // The finding: the peer that never saw the submission serves an
         // empty receipt log. Now the checkpoint carries the audit — the

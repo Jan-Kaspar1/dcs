@@ -103,9 +103,9 @@
 
 use dcs_core::{
     AdaptedCommand, AdaptedEvent, Command, CommandAvailability, CommandError, CommandOutcome,
-    EmittedEvent, EventEmission, EventRetention, EventValue, JournalEntry, JournalEvent, PointId,
-    Quality, QualityReason, Role, RoleReport, Sample, StandbySync, SwitchError, TelemetrySnapshot,
-    Tick, Value, ValueKind,
+    EmittedEvent, EventEmission, EventRetention, EventValue, FieldClaim, JournalEntry,
+    JournalEvent, PointId, Quality, QualityReason, Role, RoleReport, Sample, StandbySync,
+    SwitchError, TelemetrySnapshot, Tick, Value, ValueKind,
 };
 use dcs_demo::showcase::{
     self, BATCH_STEP1_TICKS, FAULT_SCANS, INITIAL_SETPOINT, MOVED_SCANS, MOVED_SETPOINT,
@@ -120,7 +120,9 @@ use std::process::Command as Process;
 
 mod support;
 
-use support::{SimTcp, controller_model, spawn_controller, spawn_plant, workspace_binary};
+use support::{
+    SimTcp, controller_model, settle_sink_health, spawn_controller, spawn_plant, workspace_binary,
+};
 
 /// The showcase plant model the plant servers load — the #69 fixture.
 const PLANT_MODEL: &str = concat!(
@@ -269,7 +271,7 @@ fn journaled_roles(journal: &[JournalEntry]) -> Vec<(Role, Role)> {
     journal
         .iter()
         .filter_map(|entry| match &entry.event {
-            JournalEvent::RoleChanged { from, to } => Some((*from, *to)),
+            JournalEvent::RoleChanged { from, to, .. } => Some((*from, *to)),
             _ => None,
         })
         .collect()
@@ -549,7 +551,11 @@ fn run_full_stack(tag: &str) -> Outcome {
     // The pair view reads the field owner's image.
     let view = pair.snapshot().unwrap();
     assert_eq!(view, settled);
-    stages.push(view.clone());
+    // The journal sink's live counters ride the writer thread's beat —
+    // the cross-run compare pins the run-stable fields.
+    let mut staged = view.clone();
+    settle_sink_health(&mut staged);
+    stages.push(staged);
     assert!(
         (float(&view, points::LEVEL_PERCENT) - INITIAL_SETPOINT).abs() < 0.5,
         "the loop settled at the declared setpoint"
@@ -630,7 +636,11 @@ fn run_full_stack(tag: &str) -> Outcome {
     );
     let view = pair.snapshot().unwrap();
     assert_eq!(view, moved);
-    stages.push(view.clone());
+    // The journal sink's live counters ride the writer thread's beat —
+    // the cross-run compare pins the run-stable fields.
+    let mut staged = view.clone();
+    settle_sink_health(&mut staged);
+    stages.push(staged);
     assert_eq!(view.tick, Tick(SETTLE_SCANS + MOVED_SCANS));
     assert_eq!(float(&view, points::LEVEL_SETPOINT), MOVED_SETPOINT);
     assert!(
@@ -889,9 +899,10 @@ fn run_full_stack(tag: &str) -> Outcome {
         &mut trace,
         BATCH_CLOSE_SCANS,
     );
-    let view = pair.snapshot().unwrap();
+    let mut view = pair.snapshot().unwrap();
     assert_eq!(view, closed);
     assert_clean(&view);
+    settle_sink_health(&mut view);
     stages.push(view);
     for path in [&active_journal, &standby_journal] {
         let data = read_journal_file(path).unwrap();
@@ -948,7 +959,11 @@ fn run_full_stack(tag: &str) -> Outcome {
     );
     let view = pair.snapshot().unwrap();
     assert_eq!(view, faulted);
-    stages.push(view.clone());
+    // The journal sink's live counters ride the writer thread's beat —
+    // the cross-run compare pins the run-stable fields.
+    let mut staged = view.clone();
+    settle_sink_health(&mut staged);
+    stages.push(staged);
     // The documented fault behavior, through the monitor snapshot: the
     // feedback reads Bad, the interlock trips and drives the valve safe,
     // the level drains through the low alarm — horn asserted, motor
@@ -1023,6 +1038,9 @@ fn run_full_stack(tag: &str) -> Outcome {
             role: Role::Active,
             tick: continued.tick,
             sync: None,
+            // The per-scan claim probe's observation: the promoted
+            // peer's own claim stands at the field.
+            field_claim: Some(FieldClaim::Held),
         }
     );
     let report = active.role().unwrap();
@@ -1037,7 +1055,11 @@ fn run_full_stack(tag: &str) -> Outcome {
     assert_eq!(pair.source(), Some(standby_process.addr));
     let view = pair.snapshot().unwrap();
     assert_eq!(view, continued);
-    stages.push(view.clone());
+    // The journal sink's live counters ride the writer thread's beat —
+    // the cross-run compare pins the run-stable fields.
+    let mut staged = view.clone();
+    settle_sink_health(&mut staged);
+    stages.push(staged);
     assert!(bool_point(&view, points::INTERLOCK_TRIPPED));
     assert_eq!(float(&view, points::VALVE_RAW), 4.0);
     // The journals carry both peers' sides of the switch.
@@ -1069,7 +1091,11 @@ fn run_full_stack(tag: &str) -> Outcome {
     );
     let view = pair.snapshot().unwrap();
     assert_eq!(view, recovered);
-    stages.push(view.clone());
+    // The journal sink's live counters ride the writer thread's beat —
+    // the cross-run compare pins the run-stable fields.
+    let mut staged = view.clone();
+    settle_sink_health(&mut staged);
+    stages.push(staged);
     assert_eq!(image_sample(&view, points::PUMP_RUN).quality, Quality::Good);
     assert!(!bool_point(&view, points::INTERLOCK_TRIPPED));
     assert!(!bool_point(&view, points::LEVEL_ALARM));
@@ -1130,8 +1156,9 @@ fn run_full_stack(tag: &str) -> Outcome {
     assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
     let image = standby.advance(1).unwrap();
     trace.push(observe(&field, image.tick));
-    let view = pair.snapshot().unwrap();
+    let mut view = pair.snapshot().unwrap();
     assert_eq!(view, image);
+    settle_sink_health(&mut view);
     stages.push(view);
 
     // Final role reporting: the pair view's poll sees the settled pair.

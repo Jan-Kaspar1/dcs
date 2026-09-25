@@ -62,6 +62,7 @@
   tr.protection.uncertain td { background: #dde8f4; font-style: italic; }
   button.ack { color: #b00; font-weight: bold; }
   button.managed { color: #a60; font-weight: bold; margin-left: 0.3rem; }
+  input.managed-reason { width: 9rem; margin-right: 0.3rem; font-size: 0.85rem; }
   #faceplates { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
   .faceplate { border: 1px solid #bbb; border-radius: 4px; padding: 0.5rem 0.9rem;
     min-width: 16rem; background: #fdfdfd; }
@@ -109,6 +110,14 @@
   .pair-card h3 { margin: 0.2rem 0 0.5rem; }
   .pair-card h3 a { color: inherit; }
   .pair-card .active-peer { font-weight: 600; }
+  #equipment { border: 1px solid #36a; border-radius: 4px;
+    padding: 0.4rem 1rem 0.8rem; margin: 1rem 0; background: #fafbfd; }
+  #equipment-trends { display: flex; flex-wrap: wrap; gap: 1rem; }
+  #equipment .equipment-line { font-size: 0.9rem; margin: 0.25rem 0; }
+  #equipment .equipment-nav { font-size: 0.85rem; }
+  #equipment .equipment-nav a { color: #36a; }
+  #equipment-close { margin-left: 0.5rem; }
+  a.nav-equipment { color: inherit; }
 </style>
 </head>
 <body>
@@ -128,7 +137,7 @@
 <p id="pair-summary"></p>
 <table>
   <thead>
-    <tr><th>Peer</th><th>Role</th><th>Standby sync</th><th>Tick</th><th>Status</th></tr>
+    <tr><th>Peer</th><th>Role</th><th>Standby sync</th><th>Tick</th><th>Status</th><th>Switch</th></tr>
   </thead>
   <tbody id="pair-peers"></tbody>
 </table>
@@ -188,6 +197,35 @@ own surface: the HMI alarm path is never presented as the safeguard.</p>
     </tr>
   </thead>
   <tbody id="protection-points"></tbody>
+</table>
+</section>
+
+<section id="equipment" hidden>
+<h2>Equipment — <span id="equipment-name"></span></h2>
+<p class="equipment-nav"><a href="#alarm-pane">alarms</a>
+<button type="button" id="equipment-close">close</button></p>
+<p id="equipment-pair" class="equipment-line"></p>
+<p id="equipment-io" class="equipment-line"></p>
+<div id="equipment-faceplate"></div>
+<div id="equipment-rationalization"></div>
+<h3>Live points</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Point</th><th>Signal</th><th>Direction</th><th>Type</th>
+      <th>Value</th><th>Quality</th><th>Unit</th><th>Tick</th>
+    </tr>
+  </thead>
+  <tbody id="equipment-points"></tbody>
+</table>
+<h3>Trends</h3>
+<div id="equipment-trends"></div>
+<h3>History</h3>
+<table>
+  <thead>
+    <tr><th>Seq</th><th>Tick</th><th>Event</th></tr>
+  </thead>
+  <tbody id="equipment-journal"></tbody>
 </table>
 </section>
 
@@ -320,9 +358,10 @@ own surface: the HMI alarm path is never presented as the safeguard.</p>
 // initiating cause of a burst stands first. A component declaring an
 // `ack` input wired to a model-writable point gets an ack affordance
 // issuing an ordinary receipted write_value — no alarm-specific
-// protocol — and because the kind's ack is level-observed the pane
-// pulses it: once the write's apply tick has scanned past, a second
-// receipted write drops the point back to false. The managed kinds'
+// protocol — and because the kind's ack is consumed on its rising
+// edge the pane pulses it: once the write's apply tick has scanned
+// past, a second receipted write drops the point back to false so the
+// next press forms a fresh edge. The managed kinds'
 // `shelve` and `oos` inputs join the same way — the descriptor's
 // bound-point annotation plus the bound point's writable mark — but
 // they are held level-observed, not pulsed: the affordance writes the
@@ -334,6 +373,24 @@ own surface: the HMI alarm path is never presented as the safeguard.</p>
 // or unwritable managed input offers nothing — the never-shelvable
 // surface — and a write attempted anyway meets the receipted path's
 // named rejection.
+//
+// Alarm-to-equipment navigation: every alarm surface element — each
+// standing or managed-list row's component and priority cells and each
+// attributable alarm-journal entry — links into the equipment pane
+// anchored at #equipment, selecting the owning component by its
+// diagnostic name. The pane composes the surfaces the operations
+// workflow reads together on one surface: the instance's faceplate —
+// the same descriptor-driven markup the components section renders,
+// commands and tuning included — its bound points' live values with
+// quality, a trend window per bound point drawn from the same retained
+// history the trends pane shows, the component-attributed slice of the
+// durable journal (the serving layer's attribution rule applied
+// page-side), the rationalization record, and the pair-health and
+// I/O-health lines, so an operator landing from an alarm reads the
+// equipment with its health context beside it. Everything derives from
+// the payloads the page already polls — snapshot, signals, history,
+// journal, the schema/resources join — no endpoint or wire type. A
+// cleared or vanished selection hides the pane.
 //
 // The protection boundary (the independent-protection-layer decision):
 // each ?protection=<group> parameter names a model signal `group`
@@ -383,12 +440,36 @@ own surface: the HMI alarm path is never presented as the safeguard.</p>
 // ?operator=<name> configures the actor identity every command
 // submission declares — postCommand wraps the command in the
 // attributed envelope {command, actor} so the returned receipt and the
-// journaled command_settled entry carry the attribution. The identity
-// is declared, not authenticated: the journal proves what the console
-// claimed, and a deployment fronting the monitor with an
-// authenticating proxy is the recorded seam for filling it from
-// verified context. With no ?operator the page submits the bare
-// Command body and the command journals unattributed.
+// journaled command_settled entry carry the attribution. The pair
+// section's switch controls stamp it the same way — postSwitch sends
+// the attributed {actor} body the switch's journaled role_changed
+// entries carry. The identity is declared, not authenticated: the
+// journal proves what the console claimed, and a deployment fronting
+// the monitor with an authenticating proxy is the recorded seam for
+// filling it from verified context. With no ?operator the page submits
+// the bare shapes — the bare Command body, the bare switch request —
+// and the action journals unattributed.
+//
+// Command reason (the shelving-reason decision, #900's record under
+// decision 72): the managed-state cell's reason field declares the
+// justification the shelve/unshelve and out-of-service/return writes
+// carry — joining actor on the same attributed envelope, stamped onto
+// the receipt, and echoed into the journaled command_settled entry —
+// and the alarm journal pairs each shelved/out_of_service transition
+// with the settled request receipt at its applied tick so actor and
+// reason stand beside it. A point the model marks requires_reason
+// refuses a blank declaration with the reason_required rejection.
+//
+// Abandoned submissions (the indeterminate-outcome rule): the command
+// POST's AbortSignal.timeout cancels the page's wait, never the
+// server's work — the request may already sit buffered in the listen
+// backlog — so an aborted submission's outcome is genuinely unknown.
+// The page answers the indeterminate "outcome unknown" verdict rather
+// than asserting failure, never retries a submission whose fate is
+// unresolved — a landed invoke would apply twice — and holds the
+// declared {command, actor, reason} in pendingCommands so the journaled
+// command_settled entry, the receipted contract's truth about the
+// command, resolves the standing notice when the settle lands.
 //
 // Plant overview (the plant-wide-supervision decision): repeated
 // ?pair=<name>=<host:port>,<host:port>,… URL parameters switch the page
@@ -419,8 +500,9 @@ for (const raw of urlParams.getAll("peer")) {
 }
 
 // The declared operator identity ?operator=<name> configures — stamped
-// on every command submission as the attributed envelope's actor (see
-// postCommand). Declared, not authenticated; null submits unattributed.
+// on every command submission as the attributed envelope's actor and
+// on every switch request's attributed body (see postCommand,
+// postSwitch). Declared, not authenticated; null submits unattributed.
 const operator = urlParams.get("operator");
 // Per-peer last-polled state: { report: RoleReport | null, error,
 // unsyncedSince } — error non-null is the named unreachable redundancy
@@ -479,26 +561,47 @@ const metaByPoint = new Map();
 // rationalization block. The index's components section is
 // serde-defaulted — an index served without it simply joins nothing.
 const componentsByName = new Map();
-// point id -> { samples: [Sample], lastSeq, lastTick } — the series a
-// trend draws. lastSeq is the since-cursor in the *current* source's
-// stream; lastTick is the merge watermark that keeps the series
-// continuous across a source switch.
+// point id -> { samples: [Sample], lastSeq, lastTick, run } — the
+// series a trend draws. lastSeq is the since-cursor in the *current*
+// source's stream; lastTick is the merge watermark that keeps the
+// series continuous across a source switch's whole-stream re-read — an
+// incremental poll's seq cursor proves each entry new on its own, so a
+// point whose served stamps stop advancing the tick domain still
+// extends on each served change. run is the served envelope's process
+// lifetime marker — a change under a standing cursor means the seq
+// axis restarted with the source process.
 const trends = new Map();
 // The retained journal window, oldest first.
 const journalEntries = [];
-// Events already displayed — tick plus serialized event — so a journal
-// re-fetch from the new source after a switch adds each transition once.
+// Events already displayed — attributed run plus tick plus serialized
+// event — so a journal re-fetch from the new source after a switch adds
+// each transition once. The run qualifier is what a restarted lifetime
+// needs: a cold run's first-observation sweep re-journals on the old
+// domain's ticks, and an unqualified key would silently dedupe the new
+// lifetime's entries against the prior run's identical rows.
 const journalSeen = new Set();
 let journalSince = 0;
+// The process lifetime the merge attributes incoming entries to — the
+// last served run_boundary's run, or 0 ahead of the stream's first
+// marker (a journal file's first lifetime has no served boundary).
+// Each peer numbers its own file's lifetimes, so a whole re-read — the
+// first poll, or the refetch a restart or source switch forces —
+// restarts the attribution walk; the served boundary markers re-mark
+// it as the fold proceeds.
+let journalRun = 0;
 // The feed's delivery state — see the feed-state note above. The
 // current source's last rendered publication identity
 // ({published, tick}) plus the named degradations the latest poll
 // observed: gap = {stream, from, through}, the served seq stretch a
 // since-poll stepped over; stale = the re-served publication's
-// identity when a poll found nothing new. null marks are a fresh,
+// identity when a poll found nothing new; restart = a string naming
+// the observation that proved the source process restarted — its
+// publication identity regressing, a served run_boundary, or a changed
+// history run marker — so the page's stream cursors reset rather than
+// silently merging two lifetimes. null marks are a fresh,
 // in-sequence feed; a source switch resets the identity — each peer
 // numbers its own publications.
-const feed = { publication: null, gap: null, stale: null };
+const feed = { publication: null, gap: null, stale: null, restart: null };
 // component name -> its served descriptor, rebuilt on every poll: the
 // parameter edit path reads declared kinds and ranges from it — the
 // descriptor is the page's authority for what a tunable accepts.
@@ -533,10 +636,26 @@ function commandKey(component, name) {
 // faceplate, closed beside dedicated presentation.
 const interfaceOpen = new Map();
 // ack point -> the earliest snapshot tick at which its release write may
-// go: the pulse's second half, armed by submitAck once the acknowledge
-// write is accepted — see the alarm pane's notes on the level-observed
-// input.
+// go: the pulse's second half — armed by submitAck once the acknowledge
+// write is receipted, or by the poll finding the input held true with no
+// release armed (a receipt lost past the abort bound, or a reload).
 const ackReleases = new Map();
+// The submissions the abort bound abandoned before a receipt answered,
+// each {command, actor, reason, notice}: the outcome is indeterminate
+// until a journaled command_settled — the receipted contract's truth —
+// matches the declared fields, and `notice` is the receipt-pane text
+// the landing settle replaces while it still stands there. Bounded
+// like every page-side collection; the oldest unresolved entry drops.
+const pendingCommands = [];
+const PENDING_LIMIT = 16;
+// The equipment pane's selection — the owning component the last
+// alarm-surface navigation named, or null while none stands: the pane
+// stays hidden until a row or journal entry selects its owner.
+let equipmentSelection = null;
+// The inputs the last refresh rendered from — a navigation between
+// polls re-renders the equipment pane from them rather than waiting
+// out the cadence.
+const rendered = { snapshot: null, telemetry: null, forced: null };
 // Client-side display bounds; the server's rings bound retention anyway.
 const TREND_LIMIT = 600;
 const JOURNAL_LIMIT = 300;
@@ -609,6 +728,18 @@ function pointName(point) {
 // and the pair has no failover coverage to call healthy.
 const CONVERGENCE_GRACE_MS = 5000;
 
+const PAIR_FAULT_KINDS_VERSION = 3;
+const PAIR_FAULT_KINDS = [
+  "peer_unreachable",
+  "standby_unsynchronized_past_grace",
+  "no_active_peer",
+  "dual_active",
+  "standby_degraded",
+  "standby_diverged",
+  "standby_orphaned",
+  "field_unclaimed",
+];
+
 // The convergence-grace clock pairHealth reads: a report of
 // "unsynchronized" starts or continues the peer's run; any converged
 // sync state — and the unreachable fault, which pairHealth already
@@ -622,6 +753,16 @@ function noteSyncAge(state) {
   }
 }
 
+// The shared poll cadence — roles, the snapshot, and the history and
+// journal since-reads all ride it — and the bound each poll's fetches
+// answer within: a hanging read aborts into the poll's named
+// degradation — an unreachable peer, a stale publication — inside one
+// period instead of freezing the view on last-known data.
+const POLL_MS = 1000;
+function pollFetch(url) {
+  return fetch(url, { signal: AbortSignal.timeout(POLL_MS) });
+}
+
 // Polls GET /role on every configured peer — the role cadence the pair
 // view adds to the normal data polling — then re-selects the data
 // source. A failed poll is recorded as pair health, not thrown: one
@@ -629,7 +770,7 @@ function noteSyncAge(state) {
 async function pollRoles() {
   await Promise.all(peers.map(async (peer, i) => {
     try {
-      const response = await fetch(peer.base + "/role");
+      const response = await pollFetch(peer.base + "/role");
       if (!response.ok) throw new Error("HTTP " + response.status);
       peerState[i].report = await response.json();
       peerState[i].error = null;
@@ -666,14 +807,19 @@ function selectSource() {
 // same run without duplicating samples.
 function switchSource(next) {
   source = next;
-  for (const state of trends.values()) state.lastSeq = 0;
+  for (const state of trends.values()) {
+    state.lastSeq = 0;
+    state.run = null;
+  }
   journalSince = 0;
+  journalRun = 0;
   // The new peer numbers its own publications: the feed's freshness
   // and gap bookkeeping starts over — a mark observed against the old
   // source's numbering says nothing about this stream.
   feed.publication = null;
   feed.gap = null;
   feed.stale = null;
+  feed.restart = null;
 }
 
 // The indices of the peers reporting settled "active" — the legitimate
@@ -700,31 +846,38 @@ function activePeer() {
 // legitimate target: no settled-active peer mid-transition, or the
 // dual-active fault leaving no unique one.
 function noActiveVerdict() {
-  const actives = activePeers().length;
-  return actives > 1
+  const health = pairHealth(peers, peerState);
+  const actives = health.actives.length;
+  return health.fault_kinds.includes("dual_active")
     ? "not sent: " + actives + " peers report role active — the " +
       "dual-active fault leaves no unique command target"
     : "not sent: no peer reports role active — the pair is mid-transition";
 }
 
 // StandbySync serializes as "unsynchronized" | {"tracking": {aligned}} |
-// {"degraded": {detail}} | {"diverged": {mismatches}} |
-// {"reinitialized": {report}}.
+// {"degraded": {detail}} | {"orphaned": {aligned}} |
+// {"diverged": {mismatches}} | {"reinitialized": {report}}.
 function describeSync(sync) {
   if (typeof sync === "string") return sync;
   if ("tracking" in sync) {
     return "tracking (aligned at tick " + sync.tracking.aligned + ")";
   }
   if ("degraded" in sync) return "degraded: " + sync.degraded.detail;
+  if ("orphaned" in sync) {
+    return "orphaned: the tracked line has no field owner " +
+      "(aligned at tick " + sync.orphaned.aligned + ")";
+  }
   if ("diverged" in sync) {
     return "diverged: staged outputs mismatch the field at " +
       sync.diverged.mismatches.map(m => m.point).join(", ");
   }
   if ("reinitialized" in sync) {
     const report = sync.reinitialized.report;
+    const reverted = (report.reverted_tuning || []).length;
     return "reinitialized under revised model at tick " + report.resumed_at +
       " (" + report.carried.length + " carried, " +
-      report.dropped.length + " dropped)";
+      report.dropped.length + " dropped" +
+      (reverted > 0 ? ", " + reverted + " reverted" : "") + ")";
   }
   return JSON.stringify(sync);
 }
@@ -733,19 +886,25 @@ function describeSync(sync) {
 // overview card: the reported-active peers' names plus the named
 // redundancy faults — an unreachable peer, a degraded or diverged
 // standby convergence, a peer still reporting "unsynchronized" past
-// CONVERGENCE_GRACE_MS, no peer reporting active, or more than one
-// reporting it. Two actives is the dual-active split-brain the
+// CONVERGENCE_GRACE_MS, a reporting peer whose field_claim observation
+// stands "unclaimed" (no field owner stands; POST /promote on a
+// converged peer is the documented remedy — the field's own
+// arbitration verdict, distinct from the tracked line's sync
+// verdicts), no peer reporting active, or more than one reporting it.
+// Two actives is the dual-active split-brain the
 // one-logical-controller contract makes impossible — an alarmable
 // state the summary names rather than presenting the pair as healthy.
 // These are pair health, never plant faults.
 function pairHealth(pairPeers, states) {
   const faults = [];
+  const fault_kinds = [];
   const actives = [];
   pairPeers.forEach((peer, i) => {
     const state = states[i];
     if (state.error !== null) {
       const was = state.report ? state.report.role + " " : "";
       faults.push(was + peer.name + " unreachable");
+      fault_kinds.push("peer_unreachable");
       return;
     }
     if (state.report === null) return;
@@ -755,28 +914,60 @@ function pairHealth(pairPeers, states) {
         Date.now() - state.unsyncedSince >= CONVERGENCE_GRACE_MS) {
       faults.push(peer.name + " has not converged: unsynchronized " +
         "past the convergence grace");
+      fault_kinds.push("standby_unsynchronized_past_grace");
     }
     if (state.report.sync && typeof state.report.sync === "object") {
       if ("degraded" in state.report.sync) {
         faults.push(peer.name + " sync degraded: " + state.report.sync.degraded.detail);
+        fault_kinds.push("standby_degraded");
       }
       if ("diverged" in state.report.sync) {
         faults.push(peer.name + " standby diverged: staged outputs mismatch the field at " +
           state.report.sync.diverged.mismatches.map(m => m.point).join(", "));
+        fault_kinds.push("standby_diverged");
+      }
+      if ("orphaned" in state.report.sync) {
+        faults.push(peer.name + " reports the tracked line has no field owner " +
+          "(aligned at tick " + state.report.sync.orphaned.aligned + ")");
+        fault_kinds.push("standby_orphaned");
       }
     }
+    // The field's own arbitration verdict: distinct from the tracked
+    // line's sync verdicts — a peer may converge on a field no owner
+    // claims. An absent field_claim is no observation, never a fault.
+    if (state.report.field_claim === "unclaimed") {
+      faults.push(peer.name + " reports the field unclaimed: no owner holds " +
+        "the write claim — promote is the documented remedy");
+      fault_kinds.push("field_unclaimed");
+    }
   });
-  if (actives.length === 0) faults.push("no peer reports role active");
+  if (actives.length === 0) {
+    faults.push("no peer reports role active");
+    fault_kinds.push("no_active_peer");
+  }
   if (actives.length > 1) {
     faults.push("dual-active: " + actives.join(", ") +
       " report role active — split-brain leaves no unique controller");
+    fault_kinds.push("dual_active");
   }
-  return { activeName: actives.length === 1 ? actives[0] : null, actives, faults };
+  return {
+    activeName: actives.length === 1 ? actives[0] : null,
+    actives,
+    faults,
+    fault_kinds_version: PAIR_FAULT_KINDS_VERSION,
+    fault_kinds,
+  };
 }
 
 // The pair's redundancy summary line, from pairHealth's verdict.
+function pairFaulted(health) {
+  const kinds = health.fault_kinds || [];
+  if (health.fault_kinds_version !== PAIR_FAULT_KINDS_VERSION) return true;
+  return PAIR_FAULT_KINDS.some(kind => kinds.includes(kind)) || kinds.length > 0;
+}
+
 function pairSummary(health) {
-  return health.faults.length === 0
+  return !pairFaulted(health)
     ? "redundant pair healthy — active on " + health.activeName
     : "redundancy fault: " + health.faults.join("; ");
 }
@@ -794,18 +985,38 @@ function renderPair() {
     const state = peerState[i];
     const report = state.report;
     const unreachable = state.error !== null;
+    // The field's arbitration verdict badges the row: "unclaimed" is
+    // no sync verdict — the tracked line may read "tracking" while no
+    // field owner stands — so it marks the peer distinctly here and in
+    // pairHealth's named fault above. Absent field_claim renders as
+    // before.
+    const unclaimed = report !== null && report.field_claim === "unclaimed";
+    // The switch affordance the peer's reported role offers: promote a
+    // settled standby, demote the field owner — the documented order
+    // the operator runs by hand. Mid-transition and unreachable peers
+    // take no request; the endpoint's named SwitchError stays the
+    // authority on every submission.
+    const control = unreachable || report === null ? "—"
+      : report.role === "standby"
+        ? "<button type=\"button\" class=\"switch\" data-peer=\"" + i +
+          "\" data-verb=\"promote\">promote</button>"
+      : report.role === "active"
+        ? "<button type=\"button\" class=\"switch\" data-peer=\"" + i +
+          "\" data-verb=\"demote\">demote</button>"
+      : "—";
     return "<tr" + (i === source ? " class=\"source\"" : "") + "><td>" +
       esc(peer.name) + "</td><td>" + (report ? esc(report.role) : "—") +
       "</td><td>" + (report && report.sync ? esc(describeSync(report.sync)) : "—") +
       "</td><td>" + (report ? report.tick : "—") + "</td><td class=\"" +
-      (unreachable ? "bad" : "good") + "\">" +
+      (unreachable || unclaimed ? "bad" : "good") + "\">" +
       (unreachable ? "unreachable" : (i === source ? "serving" : "reachable")) +
-      "</td></tr>";
+      (unclaimed ? " — field unclaimed" : "") +
+      "</td><td>" + control + "</td></tr>";
   }).join("");
   const summary = document.getElementById("pair-summary");
   const health = pairHealth(peers, peerState);
   summary.textContent = pairSummary(health);
-  summary.className = health.faults.length === 0 ? "good" : "bad";
+  summary.className = !pairFaulted(health) ? "good" : "bad";
 }
 
 // ---- Feed state ----
@@ -823,6 +1034,11 @@ function renderPair() {
 // same read model it last served, so the values about to re-render are
 // last-known rather than current. A new identity clears the mark. A
 // peer serving snapshots without the section compares on tick alone.
+// A regressed identity — a lower `published` seq than the one already
+// rendered, or an older tick — can only mean the source's store
+// restarted: its streams' seq axes reset with it, so the page's
+// cursors reset too rather than reading the new lifetime's numbering
+// as a continuation of the old.
 function notePublication(snapshot) {
   const health = snapshot.publication || null;
   const current = {
@@ -835,6 +1051,34 @@ function notePublication(snapshot) {
     ? current
     : null;
   feed.publication = current;
+  if (last !== null && ((current.published !== null &&
+      last.published !== null && current.published < last.published) ||
+      current.tick < last.tick)) {
+    noteRestart("the source's publication identity regressed");
+  }
+}
+
+// A same-source restart, observed through any of the served streams:
+// the publication identity regressing, a new journal run_boundary, or
+// a history envelope's changed run marker. Every stream cursor resets
+// so the next reads re-fetch whole and merge by tick — idempotent
+// across the several observations one restart produces. A restart that
+// restarted the tick domain itself (the served tick now stands at or
+// below a drawn sample's) can't merge — the drawn series belongs to
+// the old lifetime's axis, so it clears rather than stitching across.
+function noteRestart(detail) {
+  const freshDomain = [...trends.values()].some(state =>
+    state.lastTick !== null && feed.publication.tick <= state.lastTick);
+  for (const state of trends.values()) {
+    state.lastSeq = 0;
+    state.run = null;
+    if (freshDomain) {
+      state.samples = [];
+      state.lastTick = null;
+    }
+  }
+  journalSince = 0;
+  feed.restart = detail;
 }
 
 // Notes a served seq stretch the page's since-cursor stepped over:
@@ -855,6 +1099,10 @@ function noteFeedGap(stream, from, through) {
 function renderFeed() {
   const line = document.getElementById("feed-state");
   const notices = [];
+  if (feed.restart !== null) {
+    notices.push("source restarted — " + feed.restart +
+      "; new process lifetime, streams re-read and merged by tick");
+  }
   if (feed.gap !== null) {
     notices.push("publication gap: " + feed.gap.stream + " seqs " +
       feed.gap.from + "–" + feed.gap.through +
@@ -869,7 +1117,9 @@ function renderFeed() {
   }
   line.hidden = notices.length === 0;
   line.className =
-    feed.gap !== null ? "gap" : feed.stale !== null ? "stale" : "";
+    feed.gap !== null || feed.restart !== null
+      ? "gap"
+      : feed.stale !== null ? "stale" : "";
   line.textContent = notices.join("; ");
 }
 
@@ -950,7 +1200,7 @@ function selectPairSource(pair) {
 async function pollPairCard(pair) {
   await Promise.all(pair.peers.map(async (peer, i) => {
     try {
-      const response = await fetch(peer.base + "/role");
+      const response = await pollFetch(peer.base + "/role");
       if (!response.ok) throw new Error("HTTP " + response.status);
       pair.state[i].report = await response.json();
       pair.state[i].error = null;
@@ -965,7 +1215,7 @@ async function pollPairCard(pair) {
   const state = pair.state[pair.source];
   if (state.error !== null || state.report === null) return;
   try {
-    const response = await fetch(pair.peers[pair.source].base + "/snapshot");
+    const response = await pollFetch(pair.peers[pair.source].base + "/snapshot");
     if (!response.ok) throw new Error("HTTP " + response.status);
     pair.snapshot = await response.json();
   } catch (error) {
@@ -1000,19 +1250,25 @@ function pairHref(pair) {
 }
 
 // The card's I/O-health line: the pair view's io-health troubled rule
-// reduced to one line — link degradation, boundary failures (including
-// failed cyclic exchanges), a cyclic driver's working-counter
-// mismatches and missed deadlines, the attributed last fault, scan
-// overruns — read from the source peer's snapshot. A card with no
-// landed snapshot reports the fetch's failure, or waits out its first
-// poll, instead of inventing health.
+// reduced to one line — read from the source peer's snapshot. A card
+// with no landed snapshot reports the fetch's failure, or waits out
+// its first poll, instead of inventing health.
 function ioHealthLine(pair) {
   if (pair.snapshot === null) {
     return pair.snapshotError !== null
       ? { text: "no snapshot — " + pair.snapshotError, bad: true }
       : { text: "awaiting first snapshot", bad: false };
   }
-  const health = pair.snapshot.io_health;
+  return ioHealthSummary(pair.snapshot.io_health);
+}
+
+// One snapshot's io_health section reduced to the one-line verdict the
+// overview card and the equipment pane's health line share: link
+// degradation, boundary failures (including failed cyclic exchanges),
+// a cyclic driver's working-counter mismatches and missed deadlines,
+// the attributed last fault, scan overruns. A snapshot serving no
+// io_health section reports it unreported rather than inventing health.
+function ioHealthSummary(health) {
   if (!health) return { text: "I/O health not reported", bad: false };
   const troubles = [];
   if (health.driver && health.driver.link !== "connected") {
@@ -1057,7 +1313,7 @@ function ioHealthLine(pair) {
 function pairCardMarkup(pair) {
   const health = pairHealth(pair.peers, pair.state);
   const io = ioHealthLine(pair);
-  const faulted = health.faults.length > 0 || io.bad;
+  const faulted = pairFaulted(health) || io.bad;
   const rows = pair.peers.map((peer, i) => {
     const state = pair.state[i];
     const report = state.report;
@@ -1076,8 +1332,8 @@ function pairCardMarkup(pair) {
       "</span></p>" +
     "<table><thead><tr><th>Peer</th><th>Role</th><th>Standby sync</th>" +
       "<th>Tick</th><th>Status</th></tr></thead><tbody>" + rows + "</tbody></table>" +
-    "<p class=\"" + (health.faults.length === 0 ? "good" : "bad") + "\">" +
-      esc(health.faults.length === 0
+    "<p class=\"" + (!pairFaulted(health) ? "good" : "bad") + "\">" +
+      esc(!pairFaulted(health)
         ? "redundant pair healthy — active on " + health.activeName
         : "redundancy fault: " + health.faults.join("; ")) + "</p>" +
     "<p class=\"" + (io.bad ? "bad" : "good") + "\">" + esc(io.text) + "</p>" +
@@ -1123,16 +1379,17 @@ async function refresh() {
     // /resources answers 404 — the interface surface then renders
     // nothing, the absent-section convention.
     const [snapshot, schema, resources] = await Promise.all([
-      fetch(base + "/snapshot").then(r => r.json()),
-      fetch(base + "/schema").then(r => (r.ok ? r.json() : null)).catch(() => null),
-      fetch(base + "/resources").then(r => (r.ok ? r.json() : null)).catch(() => null),
+      pollFetch(base + "/snapshot").then(r => r.json()),
+      pollFetch(base + "/schema").then(r => (r.ok ? r.json() : null)).catch(() => null),
+      pollFetch(base + "/resources").then(r => (r.ok ? r.json() : null)).catch(() => null),
     ]);
     // Freshness bookkeeping before the view re-renders: the served
     // publication's seq/tick identity decides whether this poll found
-    // anything new, and the since-polls below note any evicted stretch
-    // they step over.
-    notePublication(snapshot);
+    // anything new — a regressed one marks the source's restart — and
+    // the since-polls below note any evicted stretch they step over.
     feed.gap = null;
+    feed.restart = null;
+    notePublication(snapshot);
     interfaceByName.clear();
     for (const entry of (schema && schema.interfaces) || []) {
       interfaceByName.set(entry.name, entry.interface);
@@ -1145,29 +1402,69 @@ async function refresh() {
     document.getElementById("status").textContent =
       "tick " + snapshot.tick + peerNote + " — polled " +
       new Date().toLocaleTimeString();
-    // The second half of an ack pulse: a snapshot at or past the
-    // acknowledge write's apply tick means a scan has observed the
-    // level-observed `ack` input held true, so the point goes back to
-    // false through the same receipted write path — held true it would
-    // suppress every later trip's latch.
-    for (const [point, applyTick] of [...ackReleases]) {
-      if (snapshot.tick >= applyTick) {
-        ackReleases.delete(point);
-        try {
-          await submitCommand({ write_value: {
-            point: point, kind: "bool", value: { bool: false } } });
-        } catch (error) {
-          document.getElementById("receipt").textContent =
-            "command failed: " + error;
-        }
-      }
-    }
     renderIoHealth(snapshot.io_health, snapshot.command_queue);
     const telemetry = new Map(snapshot.points.map(p => [p.point, p]));
+    // The second half of an ack pulse: the `ack` input is consumed on
+    // its rising edge, so once a scan has observed the level the point
+    // goes back to false through the same receipted write path — held
+    // true, a later press would land no edge and acknowledge nothing.
+    // A snapshot serving a writable `ack` input held true means the
+    // serving scan already observed the level, so the poll arms a
+    // release for any such input standing without one: the acknowledge
+    // write may have applied past the abort bound without its receipt
+    // ever landing, or the page reloaded over a held input.
+    for (const descriptor of snapshot.descriptors || []) {
+      const ack = (descriptor.ports || []).find(p =>
+        p.name === "ack" && p.direction === "in" && p.kind === "bool");
+      if (!ack || ack.point == null || ackReleases.has(ack.point)) {
+        continue;
+      }
+      const meta = metaByPoint.get(ack.point);
+      const ackSample = (telemetry.get(ack.point) || {}).sample;
+      if (meta && meta.writable && ackSample && ackSample.value &&
+          ackSample.value.bool === true) {
+        ackReleases.set(ack.point, snapshot.tick);
+      }
+    }
+    // A release is due once the armed write's apply tick has scanned
+    // past — or as soon as the point serves true, a level some scan
+    // already consumed the edge of (the arm may also predate a restart
+    // and name a tick the new domain never reaches). The entry stays
+    // armed until the release write answers accepted or applied: an
+    // aborted submission, a refused receipt, or a poll finding no
+    // active peer retries on a later poll rather than dropping the
+    // release and latching the input true against every later press.
+    // A point already serving false — released by another path, or by
+    // a write that applied past its own abort — simply disarms.
+    for (const [point, applyTick] of [...ackReleases]) {
+      const sample = (telemetry.get(point) || {}).sample;
+      const held = sample && sample.value && sample.value.bool === true;
+      if (snapshot.tick < applyTick && !held) continue;
+      if (sample && sample.value && sample.value.bool === false) {
+        ackReleases.delete(point);
+        continue;
+      }
+      try {
+        const answer = await submitCommand({ write_value: {
+          point: point, kind: "bool", value: { bool: false } } });
+        if (answer && answer.outcome &&
+            ("accepted" in answer.outcome || "applied" in answer.outcome)) {
+          ackReleases.delete(point);
+        }
+      } catch (error) {
+        document.getElementById("receipt").textContent =
+          "command failed: " + error;
+      }
+    }
     // The snapshot's force set marks the page's forced points;
     // ForcedPoint serializes as {point, value} — the map keys the badge
     // and the release affordance, the pinned value titles the badge.
     const forced = new Map((snapshot.forces || []).map(f => [f.point, f.value]));
+    // The render inputs an equipment navigation between polls
+    // re-renders from — see the equipmentSelection note.
+    rendered.snapshot = snapshot;
+    rendered.telemetry = telemetry;
+    rendered.forced = forced;
     renderFaceplates(snapshot, telemetry, forced);
     // A value an operator is mid-edit on — and its focus — survives the
     // re-render, keyed by point, the same rule the faceplate
@@ -1200,7 +1497,21 @@ async function refresh() {
     // telemetry, its own surface.
     renderAlarms(snapshot, telemetry, forced);
     renderProtection(telemetry, forced);
+    // The equipment pane draws last of all: its faceplate reads the
+    // descriptor join, its trends the series refreshTrends just grew,
+    // its history slice the entries refreshJournal just merged, and
+    // its health lines this snapshot's sections and the roles this
+    // poll just polled.
+    renderEquipment(snapshot, telemetry, forced);
   } catch (error) {
+    // A poll whose reads fail or abort lands nothing fresh: the values
+    // on the page stay last-known, so the standing publication takes
+    // the feed's stale mark rather than the line hiding on the last
+    // fresh poll's bookkeeping.
+    if (feed.stale === null && feed.publication !== null) {
+      feed.stale = feed.publication;
+      renderFeed();
+    }
     document.getElementById("status").textContent = "poll failed: " + error;
   } finally {
     polling = false;
@@ -1549,7 +1860,7 @@ function parameterControl(component, param) {
 // survives re-renders, the cell only displays it.
 function setParamStatus(component, name, status) {
   paramStatus.set(paramKey(component, name), status);
-  for (const cell of document.querySelectorAll("#faceplates .param-status")) {
+  for (const cell of document.querySelectorAll("#detail .param-status")) {
     if (cell.dataset.component === component && cell.dataset.param === name) {
       cell.textContent = status.text;
       cell.className = "param-status" + (status.warn ? " warn" : "") +
@@ -1653,33 +1964,72 @@ function faceplateMarkup(descriptor, diag, telemetry, forced, parameters) {
   return parts.join("");
 }
 
-// Re-renders every faceplate from the polled snapshot. Values an
-// operator is mid-edit on — and an input's focus — survive the
-// re-render, keyed by bound point for the write affordances and by
-// component-plus-parameter for the tuning controls.
-function renderFaceplates(snapshot, telemetry, forced) {
+// Snapshots the editable state inside `container`'s subtree before a
+// re-render replaces it: write affordances keyed by bound point, tuning
+// controls by component-plus-parameter, command arguments by
+// component-plus-command-plus-argument, each with the focused control's
+// key, plus every interface disclosure's open state — the operator's
+// choice, recorded so a poll never collapses an opened section. Shared
+// by the faceplates section and the equipment pane's duplicated
+// faceplate.
+function captureEdits(container) {
   const pending = new Map();
   let focused = null;
-  for (const input of document.querySelectorAll("#faceplates input.command-value")) {
+  for (const input of document.querySelectorAll(container + " input.command-value")) {
     pending.set(input.dataset.point, input.value);
     if (input === document.activeElement) focused = input.dataset.point;
   }
-  for (const control of document.querySelectorAll("#faceplates .param-value")) {
+  for (const control of document.querySelectorAll(container + " .param-value")) {
     const key = paramKey(control.dataset.component, control.dataset.param);
     pending.set(key, control.value);
     if (control === document.activeElement) focused = key;
   }
-  for (const input of document.querySelectorAll("#faceplates .command-arg")) {
+  for (const input of document.querySelectorAll(container + " .command-arg")) {
     const key = commandKey(input.dataset.component,
       input.dataset.command + "\n" + input.dataset.arg);
     pending.set(key, input.value);
     if (input === document.activeElement) focused = key;
   }
-  // The interface disclosure's open state is the operator's: snapshot
-  // it before the rebuild so a poll never collapses an opened section.
-  for (const details of document.querySelectorAll("#faceplates details.interface")) {
+  for (const details of document.querySelectorAll(container + " details.interface")) {
     interfaceOpen.set(details.dataset.component, details.open);
   }
+  return { pending, focused };
+}
+
+// Re-applies captureEdits' record after the subtree's rebuild — the
+// values and focus a re-render would otherwise drop. An unedited
+// command-argument input seeds the declared default: an untouched
+// control submits the default, matching a CLI that omitted the flag.
+function restoreEdits(container, captured) {
+  const pending = captured.pending;
+  const focused = captured.focused;
+  for (const input of document.querySelectorAll(container + " input.command-value")) {
+    if (pending.has(input.dataset.point)) input.value = pending.get(input.dataset.point);
+    if (input.dataset.point === focused) input.focus();
+  }
+  for (const control of document.querySelectorAll(container + " .param-value")) {
+    const key = paramKey(control.dataset.component, control.dataset.param);
+    if (pending.has(key)) control.value = pending.get(key);
+    if (key === focused) control.focus();
+  }
+  for (const input of document.querySelectorAll(container + " .command-arg")) {
+    const key = commandKey(input.dataset.component,
+      input.dataset.command + "\n" + input.dataset.arg);
+    if (pending.has(key)) {
+      input.value = pending.get(key);
+    } else if (input.dataset.initial != null) {
+      input.value = input.dataset.initial;
+    }
+    if (key === focused) input.focus();
+  }
+}
+
+// Re-renders every faceplate from the polled snapshot. Values an
+// operator is mid-edit on — and an input's focus — survive the
+// re-render, keyed by bound point for the write affordances and by
+// component-plus-parameter for the tuning controls.
+function renderFaceplates(snapshot, telemetry, forced) {
+  const captured = captureEdits("#faceplates");
   descriptorByName.clear();
   for (const descriptor of snapshot.descriptors) {
     descriptorByName.set(descriptor.name, descriptor);
@@ -1697,28 +2047,7 @@ function renderFaceplates(snapshot, telemetry, forced) {
       faceplateMarkup(descriptor, diagnostics.get(descriptor.name), telemetry,
         forced, parameters))
     .join("");
-  for (const input of document.querySelectorAll("#faceplates input.command-value")) {
-    if (pending.has(input.dataset.point)) input.value = pending.get(input.dataset.point);
-    if (input.dataset.point === focused) input.focus();
-  }
-  for (const control of document.querySelectorAll("#faceplates .param-value")) {
-    const key = paramKey(control.dataset.component, control.dataset.param);
-    if (pending.has(key)) control.value = pending.get(key);
-    if (key === focused) control.focus();
-  }
-  for (const input of document.querySelectorAll("#faceplates .command-arg")) {
-    const key = commandKey(input.dataset.component,
-      input.dataset.command + "\n" + input.dataset.arg);
-    if (pending.has(key)) {
-      input.value = pending.get(key);
-    } else if (input.dataset.initial != null) {
-      // A command-argument input is a typed affordance the page seeds
-      // with the declared default once: an untouched control submits
-      // the default, matching a CLI that omitted the flag.
-      input.value = input.dataset.initial;
-    }
-    if (key === focused) input.focus();
-  }
+  restoreEdits("#faceplates", captured);
 }
 
 // ---- Interface resources ----
@@ -1982,7 +2311,7 @@ function interfaceMarkup(name, generic) {
 // rule the parameter status follows.
 function setCommandStatus(component, name, status) {
   commandStatus.set(commandKey(component, name), status);
-  for (const cell of document.querySelectorAll("#faceplates .command-status")) {
+  for (const cell of document.querySelectorAll("#detail .command-status")) {
     if (cell.dataset.component === component && cell.dataset.command === name) {
       cell.textContent = status.text;
       cell.className = "command-status" + (status.warn ? " warn" : "") +
@@ -2113,7 +2442,7 @@ async function submitInterfaceCommand(button) {
       : String(answer);
   setCommandStatus(component, name, {
     text: verdict,
-    warn: false,
+    warn: isIndeterminate(answer),
     bad: !answer || !answer.outcome || "rejected" in answer.outcome,
   });
 }
@@ -2277,6 +2606,14 @@ function managedAffordance(descriptor, telemetry) {
       port.point + "\" data-level=\"" + !held + "\" title=\"" +
       esc(label + " " + descriptor.label) + "\">" + esc(label) + "</button>");
   }
+  if (parts.length === 0) return "";
+  // One declared-reason field serves the cell's managed commands: the
+  // shelve and oos requests carry it in both directions — the
+  // shelving-reason decision's record obligation — and a point whose
+  // declaration marks it mandatory refuses a blank one at admission.
+  parts.unshift("<input type=\"text\" class=\"managed-reason\" " +
+    "placeholder=\"reason\" title=\"declared reason — journaled beside " +
+    "the settled managed-state command\">");
   return parts.join("");
 }
 
@@ -2414,12 +2751,91 @@ function alarmJournalEntry(entry, join) {
   return false;
 }
 
+// The settled shelve/oos request receipt a managed-state
+// point_changed pairs with — the shelving-reason decision's pairing:
+// the receipt whose applied tick stamped the transition carries the
+// declared actor and reason, so both stand beside the transition in
+// the alarm journal. Newest receipt applied at the entry's tick wins;
+// a transition carrying none — expiry's automatic `shelved` drop
+// journals through no command — renders nothing.
+function managedTransitionAttribution(entry, descriptors) {
+  const change = entry.event.point_changed;
+  if (!change) return "";
+  for (const descriptor of descriptors) {
+    const status = (descriptor.ports || []).find(port =>
+      port.role === "status" && port.direction === "out" &&
+      port.point === change.point &&
+      (port.name === "shelved" || port.name === "out_of_service"));
+    if (!status) continue;
+    const requestName = status.name === "shelved" ? "shelve" : "oos";
+    const request = (descriptor.ports || []).find(port =>
+      port.name === requestName && port.direction === "in");
+    if (!request || request.point == null) return "";
+    let receipt = null;
+    for (const candidate of journalEntries) {
+      const settled = candidate.event.command_settled;
+      if (!settled) continue;
+      const command = settled.receipt.command;
+      if (!("write_value" in command) ||
+          command.write_value.point !== request.point) continue;
+      const applied = settled.receipt.outcome.applied;
+      if (applied && applied.tick === entry.tick) {
+        receipt = settled.receipt;
+      }
+    }
+    if (!receipt) return "";
+    return (receipt.actor ? " — declared by " + esc(receipt.actor) : "") +
+      (receipt.reason ? " — reason \"" + esc(receipt.reason) + "\"" : "");
+  }
+  return "";
+}
+
 // The point a point-targeted command names, or null for a
 // component-targeted one.
 function commandPoint(command) {
   if ("write_value" in command) return command.write_value.point;
   if ("force_point" in command) return command.force_point.point;
   if ("unforce_point" in command) return command.unforce_point.point;
+  return null;
+}
+
+// The alarm-to-equipment navigation element every alarm surface
+// carries: an anchor jump to the equipment pane, its data-component
+// naming the owning component the delegated handler selects — the
+// pane's composition is the equipment section's note.
+function equipmentLink(component, content) {
+  return "<a class=\"nav-equipment\" href=\"#equipment\" data-component=\"" +
+    esc(component) + "\">" + content + "</a>";
+}
+
+// The owning component an alarm-surface journal entry attributes to —
+// the navigation target its equipment link names: the descriptor
+// binding the entry's point as a status port, or the component a
+// component-addressed entry names outright. An entry attributing to no
+// component — a run-level record — carries no link.
+function alarmEntryComponent(entry, descriptors) {
+  const owner = point => {
+    for (const descriptor of descriptors) {
+      if (descriptor.ports.some(port =>
+          port.role === "status" && port.point === point)) {
+        return descriptor.name;
+      }
+    }
+    return null;
+  };
+  const event = entry.event;
+  if ("point_changed" in event) return owner(event.point_changed.point);
+  if ("quality_changed" in event) return owner(event.quality_changed.point);
+  if ("field_claim_lost" in event) return owner(event.field_claim_lost.point);
+  if ("command_settled" in event) {
+    const command = event.command_settled.receipt.command;
+    if ("set_parameter" in command) return command.set_parameter.component;
+    if ("invoke" in command) return command.invoke.component;
+    const point = commandPoint(command);
+    return point === null ? null : owner(point);
+  }
+  if ("step_failed" in event) return event.step_failed.component;
+  if ("event_emitted" in event) return event.event_emitted.event.component;
   return null;
 }
 
@@ -2437,12 +2853,13 @@ function alarmRow(descriptor, port, sample, telemetry, forced, parameters, actio
   // The row carries the quality class: a Bad or Uncertain value draws
   // degraded — italic, tinted — instead of as a clean assertion, so a
   // bad sensor reads as uncertainty rather than a hidden alarm state.
+  const priority = priorityMarkup(descriptor.name, parameters);
   return {
     states,
     managed: MANAGED_STATES.filter(state => states.has(state)),
     degraded: !isGood(sample.quality),
     html: "<tr class=\"alarm " + cls + "\">" +
-      "<td>" + esc(descriptor.label) +
+      "<td>" + equipmentLink(descriptor.name, esc(descriptor.label)) +
         rationalizationMarkup(descriptor.name) + "</td>" +
       "<td>" + esc(port.name) + (meta ? " · " + esc(meta.name) : "") +
         truthFlags(descriptor, telemetry) + "</td>" +
@@ -2451,7 +2868,8 @@ function alarmRow(descriptor, port, sample, telemetry, forced, parameters, actio
       "<td class=\"" + cls + "\">" + esc(formatQuality(sample.quality)) +
       "</td>" +
       "<td>" + lastChangedTick(port.point, sample) + "</td>" +
-      "<td>" + priorityMarkup(descriptor.name, parameters) + "</td>" +
+      "<td>" + (priority === ""
+        ? "" : equipmentLink(descriptor.name, priority)) + "</td>" +
       "<td>" + actions + "</td></tr>",
   };
 }
@@ -2524,12 +2942,20 @@ function renderAlarms(snapshot, telemetry, forced) {
   // The alarm journal lists in the durable journal's transition order —
   // seq order — so a burst's initiating cause stands first: equal-tick
   // point_changed transitions and the settled receipt that caused them
-  // keep the order the recorder appended them.
+  // keep the order the recorder appended them. Each attributable entry
+  // carries its owning component's equipment link — the same
+  // navigation the rows offer.
   document.getElementById("alarm-journal").innerHTML = journalEntries
     .filter(entry => alarmJournalEntry(entry, join))
     .sort((a, b) => a.seq - b.seq)
-    .map(entry => "<tr><td>" + entry.seq + "</td><td>" + entry.tick +
-      "</td><td>" + esc(describeEvent(entry.event)) + "</td></tr>")
+    .map(entry => {
+      const owner = alarmEntryComponent(entry, snapshot.descriptors);
+      return "<tr><td>" + entry.seq + "</td><td>" + entry.tick +
+        "</td><td>" + esc(describeEvent(entry.event)) +
+        managedTransitionAttribution(entry, snapshot.descriptors) +
+        (owner === null ? "" : " " + equipmentLink(owner, esc(owner))) +
+        "</td></tr>";
+    })
     .join("");
 }
 
@@ -2575,9 +3001,9 @@ function renderProtection(telemetry, forced) {
 
 // The acknowledge submission: an ordinary receipted write_value of true
 // to the component's `ack` point — no alarm-specific protocol. The
-// kind's ack is level-observed, so the write's apply tick arms
-// `ackReleases`: refresh drops the point back to false once a scan has
-// observed it, and a rejection never arms the release.
+// kind's ack is consumed on its rising edge, so the write's apply tick
+// arms `ackReleases`: refresh drops the point back to false once a scan
+// has observed it, and a rejection never arms the release.
 async function submitAck(button) {
   const point = Number(button.dataset.point);
   const meta = metaByPoint.get(point);
@@ -2599,27 +3025,191 @@ async function submitAck(button) {
 }
 
 // A managed-state submission: an ordinary receipted write_value of the
-// affordance's target level on the bound request point. Unlike the ack
-// pulse the managed inputs are held level-observed — no release write
-// follows: a shelve request stands until the unshelve, max_shelve_ticks
-// bounding the flag rather than the request; an oos request stands
-// until the return, there being no automatic return. The named
-// rejection of a refused write lands in the receipt pane and the
-// journal like every other command's.
+// affordance's target level on the bound request point, carrying the
+// declared reason the cell's managed-reason field holds — the
+// shelving-reason decision's record obligation attaches to the managed
+// writes in both directions, so raise and release alike declare it.
+// Unlike the ack pulse the managed inputs are held level-observed — no
+// release write follows: a shelve request stands until the unshelve,
+// max_shelve_ticks bounding the flag rather than the request; an oos
+// request stands until the return, there being no automatic return. A
+// point the model marks requires_reason demands a non-blank reason up
+// front — the admission rejection the receipted path would answer —
+// and every other named rejection of a refused write lands in the
+// receipt pane and the journal like every other command's.
 async function submitManaged(button) {
   const point = Number(button.dataset.point);
   const meta = metaByPoint.get(point);
   if (!meta || !meta.writable) return;
+  const input = button.parentElement.querySelector("input.managed-reason");
+  const text = input ? input.value.trim() : "";
+  const reason = text === "" ? null : text;
+  if (meta.requires_reason && reason === null) {
+    document.getElementById("receipt").textContent =
+      "declare a reason — " + meta.name + " requires one";
+    return;
+  }
   try {
     await submitCommand({ write_value: {
       point: point,
       kind: meta.value_type,
       value: { bool: button.dataset.level === "true" },
-    } });
+    } }, reason);
+    if (input) input.value = "";
   } catch (error) {
     document.getElementById("receipt").textContent = "command failed: " + error;
   }
   refresh();
+}
+
+// ---- Equipment pane ----
+//
+// The alarm-to-equipment navigation's target: the component the last
+// nav-equipment link selected, composed on the one surface the
+// operations workflow reads — the instance's faceplate in the same
+// descriptor-driven markup the components section renders (commands
+// and tuning operable through the same delegated receipted paths),
+// its bound points' live values with quality, a trend window per bound
+// point drawn from the same retained series the trends pane shows, the
+// component-attributed slice of the durable journal, the instance's
+// rationalization record, and the pair-health and I/O-health lines.
+// Every part derives from the payloads the page already polls; the
+// pane adds no endpoint, wire type, or served-surface change.
+
+// The component's bound points, deduplicated in port order — the
+// pane's live-points table and trend windows both draw from this set.
+function equipmentPoints(descriptor) {
+  const points = [];
+  const seen = new Set();
+  for (const port of descriptor.ports) {
+    if (port.point == null || seen.has(port.point)) continue;
+    seen.add(port.point);
+    points.push({ port: port, point: port.point });
+  }
+  return points;
+}
+
+// One bound point's live-points row — the point listing's columns,
+// the index's signal metadata joined where the point has a declared
+// signal; a point the index does not name (a synthesized link point)
+// falls back to the port's own name, direction, and kind.
+function equipmentPointRow(entry, telemetry, forced) {
+  const meta = metaByPoint.get(entry.point);
+  const sample = (telemetry.get(entry.point) || {}).sample;
+  const cls = sample ? qualityClass(sample.quality) : "nosample";
+  return "<tr><td>" + entry.point + "</td><td>" +
+    esc(meta ? meta.name : entry.port.name) + "</td><td>" +
+    esc(meta ? meta.direction : entry.port.direction) + "</td><td>" +
+    pascal(meta ? meta.value_type : entry.port.kind) + "</td>" +
+    "<td class=\"value " + cls + "\">" +
+      (sample ? esc(formatValue(sample.value)) : "") +
+      forcedBadge(entry.point, forced) + "</td>" +
+    "<td class=\"" + cls + "\">" +
+      (sample ? esc(formatQuality(sample.quality)) : "no sample") + "</td>" +
+    "<td>" + esc(meta && meta.unit ? meta.unit : "") + "</td>" +
+    "<td>" + (sample ? sample.tick : "") + "</td></tr>";
+}
+
+// One bound point's trend window — the standing trend figure's own
+// series drawing (trendBody) under a caption naming the signal. A
+// point the index does not declare draws no window: the page trends
+// only the declared signals.
+function equipmentTrend(entry) {
+  const meta = metaByPoint.get(entry.point);
+  if (!meta) return "";
+  const state = trends.get(entry.point);
+  const samples = state ? state.samples.length : 0;
+  return "<figure class=\"trend\"><figcaption>" + esc(meta.name) +
+    " (point " + entry.point + ")" +
+    (meta.unit ? " [" + esc(meta.unit) + "]" : "") +
+    " — " + samples + " retained samples</figcaption>" +
+    "<svg viewBox=\"0 0 320 90\" width=\"320\" height=\"90\">" +
+    trendBody(entry.point) + "</svg></figure>";
+}
+
+// The component-attributed slice of the retained journal — the serving
+// layer's resource-view attribution rule applied page-side over the
+// entries the journal pane already merged: transitions on the
+// instance's bound points, commands its name or its bound points
+// settle, its step failures, and its emitted events, in the durable
+// record's seq order.
+function equipmentJournalEntries(descriptor) {
+  const bound = new Set(equipmentPoints(descriptor).map(entry => entry.point));
+  const named = command =>
+    ("set_parameter" in command &&
+      command.set_parameter.component === descriptor.name) ||
+    ("invoke" in command && command.invoke.component === descriptor.name);
+  const attributed = entry => {
+    const event = entry.event;
+    if ("point_changed" in event) return bound.has(event.point_changed.point);
+    if ("quality_changed" in event) return bound.has(event.quality_changed.point);
+    if ("field_claim_lost" in event) return bound.has(event.field_claim_lost.point);
+    if ("command_settled" in event) {
+      const command = event.command_settled.receipt.command;
+      if (named(command)) return true;
+      const point = commandPoint(command);
+      return point !== null && bound.has(point);
+    }
+    if ("step_failed" in event) return event.step_failed.component === descriptor.name;
+    if ("event_emitted" in event) {
+      return event.event_emitted.event.component === descriptor.name;
+    }
+    return false;
+  };
+  return journalEntries.filter(attributed).sort((a, b) => a.seq - b.seq);
+}
+
+// Renders the pane for the current selection from the poll's inputs —
+// the render refresh() performs and a between-polls navigation repeats
+// from `rendered`. An empty selection, or one the snapshot no longer
+// describes, hides the pane: there is nothing to navigate to.
+function renderEquipment(snapshot, telemetry, forced) {
+  const pane = document.getElementById("equipment");
+  const descriptor = equipmentSelection === null
+    ? null : descriptorByName.get(equipmentSelection);
+  if (!descriptor) {
+    pane.hidden = true;
+    return;
+  }
+  const captured = captureEdits("#equipment-faceplate");
+  pane.hidden = false;
+  document.getElementById("equipment-name").textContent =
+    descriptor.label + " (" + descriptor.kind + ")";
+  // The pair-health line — the pair section's own verdict, so the
+  // navigation surface carries the same redundancy reading.
+  const pairLine = document.getElementById("equipment-pair");
+  if (peers.length > 1) {
+    const health = pairHealth(peers, peerState);
+    pairLine.textContent = pairSummary(health);
+    pairLine.className = pairFaulted(health) ? "bad" : "good";
+  } else {
+    pairLine.textContent = "standalone controller — no redundant pair";
+    pairLine.className = "";
+  }
+  // The I/O-health line — this snapshot's io_health section reduced to
+  // the one-line verdict the overview cards use.
+  const io = ioHealthSummary(snapshot.io_health);
+  const ioLine = document.getElementById("equipment-io");
+  ioLine.textContent = io.text;
+  ioLine.className = io.bad ? "bad" : "good";
+  const diagnostics = new Map(snapshot.components.map(c => [c.name, c]));
+  const parameters = new Map(
+    (snapshot.parameters || []).map(p => [p.name, p.values]));
+  document.getElementById("equipment-faceplate").innerHTML =
+    faceplateMarkup(descriptor, diagnostics.get(descriptor.name),
+      telemetry, forced, parameters);
+  restoreEdits("#equipment-faceplate", captured);
+  document.getElementById("equipment-rationalization").innerHTML =
+    rationalizationMarkup(descriptor.name);
+  const points = equipmentPoints(descriptor);
+  document.getElementById("equipment-points").innerHTML =
+    points.map(entry => equipmentPointRow(entry, telemetry, forced)).join("");
+  document.getElementById("equipment-trends").innerHTML =
+    points.map(equipmentTrend).join("");
+  document.getElementById("equipment-journal").innerHTML =
+    equipmentJournalEntries(descriptor).map(entry =>
+      "<tr><td>" + entry.seq + "</td><td>" + entry.tick + "</td><td>" +
+      esc(describeEvent(entry.event)) + "</td></tr>").join("");
 }
 
 // One inline-SVG trend panel per point, built once from the signal index.
@@ -2630,7 +3220,7 @@ function buildTrends() {
     "<svg id=\"trend-" + meta.point + "\" viewBox=\"0 0 320 90\" width=\"320\" height=\"90\"></svg>" +
     "</figure>").join("");
   for (const meta of index.points) {
-    trends.set(meta.point, { samples: [], lastSeq: 0, lastTick: null });
+    trends.set(meta.point, { samples: [], lastSeq: 0, lastTick: null, run: null });
   }
 }
 
@@ -2645,10 +3235,23 @@ async function refreshTrends(base) {
   if (states.length > 0 && states.every(state => state.lastSeq > 0)) {
     since = Math.min(...states.map(state => state.lastSeq));
   }
-  const histories = await (await fetch(base + "/history?since=" + since)).json();
+  const histories = await (await pollFetch(base + "/history?since=" + since)).json();
   for (const history of histories) {
     const state = trends.get(history.point);
     if (!state) continue;
+    // The envelope's served lifetime marker: a `run` that changed under
+    // a standing cursor means the seq axis restarted with a new process
+    // lifetime — the same seam the publication identity names — so the
+    // stream cursors reset rather than read the restarted axis as a
+    // continuation. A peer predating the marker serves no `run` and
+    // seeds nothing.
+    if (history.run !== undefined) {
+      if (state.run !== null && history.run !== state.run) {
+        noteRestart("the served history run marker advanced to run " +
+          history.run);
+      }
+      state.run = history.run;
+    }
     // A since-read answering past the cursor's successor is the served
     // form of the named publication gap: the stretch between evicted
     // from the bounded ring while the page wasn't polling.
@@ -2656,14 +3259,27 @@ async function refreshTrends(base) {
     if (state.lastSeq > 0 && first && first.seq > state.lastSeq + 1) {
       noteFeedGap("history", state.lastSeq + 1, first.seq - 1);
     }
+    // The tick watermark dedupes only a whole-stream re-read — the
+    // cursor standing at 0 means this batch re-serves the ring (the
+    // first poll, or the refetch a source switch forces), where a new
+    // source's restarted seqs cannot order entries against the drawn
+    // series. An entry the seq cursor itself proves new takes the seq
+    // fallback instead: a point whose served stamps stop advancing the
+    // tick domain — every sample stamped tick 0 — still extends its
+    // series on each served change instead of freezing on the first
+    // drawn sample.
+    const refetch = state.lastSeq === 0;
+    const watermark = state.lastTick;
     for (const entry of history.samples) {
       if (entry.seq <= state.lastSeq) continue;
       state.lastSeq = entry.seq;
-      if (state.lastTick !== null && entry.sample.tick <= state.lastTick) {
+      if (refetch && watermark !== null && entry.sample.tick <= watermark) {
         continue;
       }
       state.samples.push(entry.sample);
-      state.lastTick = entry.sample.tick;
+      if (state.lastTick === null || entry.sample.tick > state.lastTick) {
+        state.lastTick = entry.sample.tick;
+      }
     }
     if (state.samples.length > TREND_LIMIT) {
       state.samples.splice(0, state.samples.length - TREND_LIMIT);
@@ -2672,27 +3288,18 @@ async function refreshTrends(base) {
   for (const meta of index.points) drawTrend(meta);
 }
 
-// Draws one point's retained series as a polyline; samples with non-good
-// quality get a marker dot in the quality's color, so a degraded stretch
-// is visible on the trend itself.
-function drawTrend(meta) {
-  const state = trends.get(meta.point);
-  const svg = document.getElementById("trend-" + meta.point);
-  const caption = document.getElementById("trend-caption-" + meta.point);
-  const latest = state.samples[state.samples.length - 1];
-  caption.textContent = meta.name + " (point " + meta.point + ")" +
-    (meta.unit ? " [" + meta.unit + "]" : "") + (latest
-      ? " — latest " + formatValue(latest.value) + " at tick " + latest.tick +
-        ", " + state.samples.length + " samples, ticks " +
-        state.samples[0].tick + "–" + latest.tick
-      : " — no samples");
+// The inner SVG one point's retained series draws — the polyline plus
+// a marker dot in the quality's color for each non-good sample, so a
+// degraded stretch is visible on the trend itself. Shared by the
+// standing trend figure and the equipment pane's per-point window; a
+// point with no retained series draws empty.
+function trendBody(point) {
+  const state = trends.get(point);
+  if (!state) return "";
   const coords = state.samples
     .map((sample, i) => ({ i, v: numericValue(sample.value), sample }))
     .filter(c => c.v != null);
-  if (coords.length === 0) {
-    svg.innerHTML = "";
-    return;
-  }
+  if (coords.length === 0) return "";
   const min = Math.min(...coords.map(c => c.v));
   const max = Math.max(...coords.map(c => c.v));
   let lo = min, hi = max;
@@ -2715,51 +3322,127 @@ function drawTrend(meta) {
         esc(formatQuality(c.sample.quality)) + "</title></circle>";
     }
   }
-  svg.innerHTML = body;
+  return body;
+}
+
+// Draws one point's retained series into its standing trend figure.
+function drawTrend(meta) {
+  const state = trends.get(meta.point);
+  const svg = document.getElementById("trend-" + meta.point);
+  const caption = document.getElementById("trend-caption-" + meta.point);
+  const latest = state.samples[state.samples.length - 1];
+  caption.textContent = meta.name + " (point " + meta.point + ")" +
+    (meta.unit ? " [" + meta.unit + "]" : "") + (latest
+      ? " — latest " + formatValue(latest.value) + " at tick " + latest.tick +
+        ", " + state.samples.length + " samples, ticks " +
+        state.samples[0].tick + "–" + latest.tick
+      : " — no samples");
+  svg.innerHTML = trendBody(meta.point);
+}
+
+// The merge identity a journal entry dedupes and evicts by: the
+// lifetime the fold attributed it to, plus tick, plus the serialized
+// event. Tick alone orders only inside one tick domain — a restart
+// that reopens the domain re-stamps the new lifetime's sweep on the
+// old's ticks, so the run qualifier is what keeps the dedupe honest
+// across the seam. `entry.run` is the page's own attribution stamp,
+// set at merge — the served JournalEntry carries no run field.
+function journalKey(entry) {
+  return entry.run + " " + entry.tick + " " + JSON.stringify(entry.event);
 }
 
 // Fetches the journal increment from the current source and re-renders
 // the pane in tick order — the endpoint returns entries oldest-first.
-// Entries merge by tick plus event identity, so a whole-journal re-fetch
-// after a source switch adds each transition once: both peers journal
-// the same run's events, and each journals its own role changes.
+// Entries merge by attributed run, tick, and event identity, so a
+// whole-journal re-fetch after a source switch adds each transition
+// once: both peers journal the same run's events, and each journals
+// its own role changes.
 async function refreshJournal(base) {
-  const entries = await (await fetch(base + "/journal?since=" + journalSince)).json();
-  // The journal stream's served form of the same gap.
+  const entries = await (await pollFetch(base + "/journal?since=" + journalSince)).json();
+  // A whole re-read — the cursor at 0 on the first poll or after a
+  // restart or source switch reset it — answers from the stream's
+  // oldest retained lifetime, so the attribution walk starts over and
+  // the served run_boundary markers re-mark it as the fold proceeds.
+  if (journalSince === 0) journalRun = 0;
+  // The journal stream's served form of the same gap — checked at the
+  // head against the standing cursor and between each consecutive
+  // served pair. The store pins an evicted run_boundary ahead of the
+  // ring's retained tail, so one answer can read [boundary@low-seq,
+  // ring@high-seq]: an evicted stretch wholly inside the response that
+  // the head comparison alone never names, at any cursor — the whole
+  // re-read's 0 included.
   if (journalSince > 0 && entries.length > 0 &&
       entries[0].seq > journalSince + 1) {
     noteFeedGap("journal", journalSince + 1, entries[0].seq - 1);
   }
+  for (let i = 1; i < entries.length; i++) {
+    if (entries[i].seq > entries[i - 1].seq + 1) {
+      noteFeedGap("journal", entries[i - 1].seq + 1, entries[i].seq - 1);
+    }
+  }
   for (const entry of entries) {
     journalSince = Math.max(journalSince, entry.seq);
-    const key = entry.tick + " " + JSON.stringify(entry.event);
-    if (!journalSeen.has(key)) {
-      journalSeen.add(key);
-      journalEntries.push(entry);
-      // A settled set_parameter receipt is the authority's final word on
-      // a tuning submission: the applied tick or the named rejection
-      // surfaces on the parameter's faceplate row as well as in this
-      // pane, replacing any advisory warning the entry drew.
-      const settled = entry.event.command_settled;
-      if (settled && settled.receipt.command.set_parameter) {
-        const tuning = settled.receipt.command.set_parameter;
-        setParamStatus(tuning.component, tuning.name, {
+    // A run_boundary re-marks the lifetime the entries after it belong
+    // to — ahead of the dedupe, so a boundary a whole re-read re-serves
+    // still attributes the entries following it even though the marker
+    // row itself already merged.
+    if ("run_boundary" in entry.event) {
+      journalRun = entry.event.run_boundary.run;
+    }
+    entry.run = journalRun;
+    const key = journalKey(entry);
+    if (journalSeen.has(key)) continue;
+    journalSeen.add(key);
+    journalEntries.push(entry);
+    // A run_boundary the page had not yet rendered is the journal
+    // stream's own restart marker — the same seam the publication
+    // identity or a changed history run names. The dedupe above keeps
+    // a whole-journal re-fetch from re-firing on a boundary it already
+    // merged.
+    if ("run_boundary" in entry.event) {
+      noteRestart("the journal recorded run " +
+        entry.event.run_boundary.run + " beginning");
+    }
+    // A settled set_parameter receipt is the authority's final word on
+    // a tuning submission: the applied tick or the named rejection
+    // surfaces on the parameter's faceplate row as well as in this
+    // pane, replacing any advisory warning the entry drew.
+    const settled = entry.event.command_settled;
+    if (settled && settled.receipt.command.set_parameter) {
+      const tuning = settled.receipt.command.set_parameter;
+      setParamStatus(tuning.component, tuning.name, {
+        text: describeOutcome(settled.receipt.outcome),
+        warn: false,
+        bad: "rejected" in settled.receipt.outcome,
+      });
+    }
+    // The same settled receipt is the authority's final word on an
+    // interface command's invocation: the applied tick or the named
+    // rejection surfaces on its row as well.
+    if (settled) {
+      const key = settledCommandKey(settled.receipt.command);
+      if (key) {
+        setCommandStatus(key.component, key.name, {
           text: describeOutcome(settled.receipt.outcome),
           warn: false,
           bad: "rejected" in settled.receipt.outcome,
         });
       }
-      // The same settled receipt is the authority's final word on an
-      // interface command's invocation: the applied tick or the named
-      // rejection surfaces on its row as well.
-      if (settled) {
-        const key = settledCommandKey(settled.receipt.command);
-        if (key) {
-          setCommandStatus(key.component, key.name, {
-            text: describeOutcome(settled.receipt.outcome),
-            warn: false,
-            bad: "rejected" in settled.receipt.outcome,
-          });
+      // The receipted contract's truth answering an abandoned
+      // submission: a settle matching a pendingCommands entry resolves
+      // the indeterminate verdict the abort left — the receipt pane's
+      // notice is replaced only while that submission's notice still
+      // stands there.
+      const abandoned = pendingCommands.findIndex(pending =>
+        sameSubmission(settled.receipt, pending));
+      if (abandoned >= 0) {
+        const pending = pendingCommands.splice(abandoned, 1)[0];
+        const pane = document.getElementById("receipt");
+        if (pane.textContent === pending.notice) {
+          pane.textContent = "the abandoned submission settled — " +
+            describeCommand(settled.receipt.command) + " — " +
+            describeOutcome(settled.receipt.outcome) + "\n\n" +
+            JSON.stringify(settled.receipt, null, 2);
         }
       }
     }
@@ -2767,7 +3450,7 @@ async function refreshJournal(base) {
   journalEntries.sort((a, b) => a.tick - b.tick || a.seq - b.seq);
   if (journalEntries.length > JOURNAL_LIMIT) {
     for (const entry of journalEntries.splice(0, journalEntries.length - JOURNAL_LIMIT)) {
-      journalSeen.delete(entry.tick + " " + JSON.stringify(entry.event));
+      journalSeen.delete(journalKey(entry));
     }
   }
   document.getElementById("journal").innerHTML = journalEntries.map(entry =>
@@ -2793,13 +3476,16 @@ function describeEventField(field) {
 // {"quality_changed": ...} | {"command_settled": ...} |
 // {"step_failed": ...} | {"event_emitted": {event: {event, component,
 // fields}}} — the kind-declared event's durable record — |
-// {"role_changed": {from, to}} |
+// {"role_changed": {from, to, origin?, actor?}} |
 // {"divergence_detected": {mismatches}} |
 // {"divergence_resolved": {compared}} — the compared points a clean
 // resync stood on; a diverged verdict clears only on that fully-read
 // same-tick evidence, so an empty list marks an entry an older build
 // journaled — |
 // {"reinitialized": {report}} |
+// {"field_claim_lost": {point, claimant?}} — the fenced write's
+// supersession, claimant naming the preempting owner token where the
+// field's verdict carried one — |
 // {"source_restarted": {was_aligned, resumed_at}} — the tracked
 // stream's generation boundary — | {"run_boundary": {run}} — a new
 // process lifetime's marker on a restarted journal file.
@@ -2818,12 +3504,13 @@ function describeEvent(event) {
   }
   if ("command_settled" in event) {
     const receipt = event.command_settled.receipt;
-    // The declared actor rides the receipt: the journal row names the
-    // attribution the audit entry carries, or reads plain when the
-    // command submitted unattributed.
+    // The declared actor and reason ride the receipt: the journal row
+    // names the attribution the audit entry carries, or reads plain
+    // when the command submitted unattributed.
     return describeCommand(receipt.command) + " — " +
       describeOutcome(receipt.outcome) +
-      (receipt.actor ? " — declared by " + receipt.actor : "");
+      (receipt.actor ? " — declared by " + receipt.actor : "") +
+      (receipt.reason ? " — reason \"" + receipt.reason + "\"" : "");
   }
   if ("step_failed" in event) {
     const failure = event.step_failed;
@@ -2831,7 +3518,19 @@ function describeEvent(event) {
   }
   if ("role_changed" in event) {
     const change = event.role_changed;
-    return "reported role " + change.from + " → " + change.to;
+    // The switch's attribution rides the entry: `origin` marks the
+    // peer's own transitions apart from a requested switch — its
+    // failover promotion, the fenced demotion a preempted claim
+    // forced, the granted reclaim that unwedges it — and `actor`
+    // names the declared submitter a request carried — absent on an
+    // unattributed request and on entries predating the fields.
+    const origin = change.origin === "failover" ? " — automatic failover"
+      : change.origin === "fenced" ? " — field claim preempted"
+      : change.origin === "reclaim" ? " — automatic claim reclaim"
+      : "";
+    return "reported role " + change.from + " → " + change.to +
+      origin +
+      (change.actor ? " — declared by " + change.actor : "");
   }
   if ("divergence_detected" in event) {
     return "standby diverged: staged outputs mismatch the field at " +
@@ -2866,6 +3565,7 @@ function describeEvent(event) {
   }
   if ("reinitialized" in event) {
     const report = event.reinitialized.report;
+    const reverted = report.reverted_tuning || [];
     return "standby reinitialized under revised model at tick " +
       report.resumed_at + ": carried " +
       report.carried.map(c => pointName(c.point)).join(", ") +
@@ -2875,7 +3575,24 @@ function describeEvent(event) {
             : d.output_point ? pointName(d.output_point.point)
             : d.component ? "component " + d.component.name
             : "driver state").join(", ")
+        : "") +
+      (reverted.length > 0
+        ? "; reverted tuning " + reverted.map(r =>
+            r.component + "." + r.parameter + " " +
+            formatValue(r.checkpointed) + " → " +
+            formatValue(r.declared)).join(", ")
         : "");
+  }
+  if ("field_claim_lost" in event) {
+    const lost = event.field_claim_lost;
+    // The claimant is the field's own arbitration verdict — the owner
+    // token the preempting claim was taken under. Entries an older
+    // build journaled carry none and read unattributed.
+    return "field write-ownership lost: " + pointName(lost.point) +
+      " fenced" +
+      (lost.claimant === null || lost.claimant === undefined
+        ? ""
+        : " — preempted by owner token " + lost.claimant);
   }
   if ("event_emitted" in event) {
     const emitted = event.event_emitted.event;
@@ -2919,7 +3636,10 @@ function describeCommand(command) {
 }
 
 // An outcome serializes as {"accepted": {apply_tick}} |
-// {"applied": {tick}} | {"rejected": {reason}}.
+// {"applied": {tick}} | {"rejected": {reason}} — or the page-minted
+// {"indeterminate": {detail}} an abort-abandoned submission answers
+// with: the bound cancelled the wait, not provably the work, so no
+// verdict on the command exists until the journaled settle lands.
 function describeOutcome(outcome) {
   if ("applied" in outcome) return "applied at tick " + outcome.applied.tick;
   if ("accepted" in outcome) {
@@ -2928,15 +3648,21 @@ function describeOutcome(outcome) {
   if ("rejected" in outcome) {
     return "rejected: " + describeReason(outcome.rejected.reason);
   }
+  if ("indeterminate" in outcome) {
+    return "outcome unknown — the submission outlived the abort bound " +
+      "and may still apply; the journaled settled receipt is the verdict";
+  }
   return JSON.stringify(outcome);
 }
 
 // A rejection reason serializes as {"unknown_point": {point}} |
 // {"not_writable": {point}} |
 // {"type_mismatch": {point, expected, found}} |
-// {"driver_rejected": {point, error}} | {"not_active": {point, role}} |
+// {"driver_rejected": {point, error}} | {"point_forced": {point}} |
+// {"not_active": {point, role}} |
 // {"queue_full": {point, capacity}} — the bounded ingress's admission
-// refusal — | the parameter-command reasons
+// refusal — | {"reason_required": {point}} — the mandatory-reason
+// declaration's — | the parameter-command reasons
 // {"unknown_component"|"unknown_parameter"|"unsupported_parameter"|
 // "parameter_type_mismatch"|"out_of_range"|"invalid_parameter": {...}},
 // each carrying the offending component — | the invoke surface's
@@ -2960,6 +3686,10 @@ function describeReason(reason) {
     return "driver rejected " + pointName(rejection.point) + ": " +
       describeIoError(rejection.error);
   }
+  if ("point_forced" in reason) {
+    return pointName(reason.point_forced.point) +
+      " is forced — release the force, then write";
+  }
   if ("not_active" in reason) {
     return "refused: peer reports role " + reason.not_active.role +
       "; commands apply only on the active peer";
@@ -2967,6 +3697,10 @@ function describeReason(reason) {
   if ("queue_full" in reason) {
     return "command queue full (" + reason.queue_full.capacity +
       " pending) — resubmit once a scan drains it";
+  }
+  if ("reason_required" in reason) {
+    return pointName(reason.reason_required.point) +
+      " requires a declared reason — resubmit with one";
   }
   if ("unknown_component" in reason) {
     return "unknown component " + reason.unknown_component.component;
@@ -3020,22 +3754,108 @@ function commandValue(kind, text) {
   return { float: parseFloat(text) };
 }
 
+// Whether a postCommand rejection is the abort bound firing rather
+// than the transport refusing the request: AbortSignal.timeout
+// rejects with TimeoutError where the DOMException naming landed and
+// AbortError elsewhere, and either verdict means the page's wait ended
+// — not provably the server's work, the request possibly already
+// buffered in the listen backlog. A refused connect or a failed send
+// throws anything else and does prove the request never left.
+function isAbortError(error) {
+  return !!error &&
+    (error.name === "AbortError" || error.name === "TimeoutError");
+}
+
+// JSON-tree equality with numeric equivalence: a receipt's echoed
+// command needn't match the submitted literal's key order or number
+// spelling (1.0 vs 1), so matching compares structure, not text.
+function sameJson(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null ||
+      typeof a !== "object" || typeof b !== "object") return false;
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length &&
+    keys.every(key => key in b && sameJson(a[key], b[key]));
+}
+
+// Whether two wire Commands name the same operation — the same
+// variant carrying structurally equal fields.
+function sameCommand(a, b) {
+  for (const variant of
+      ["write_value", "force_point", "unforce_point", "set_parameter", "invoke"]) {
+    if (variant in a) return variant in b && sameJson(a[variant], b[variant]);
+  }
+  return false;
+}
+
+// Whether a journaled settled receipt is the authority's answer to an
+// abandoned submission: the command matches structurally and the
+// declared actor and reason the receipt echoes agree, so another
+// console's identical command cannot claim the pending entry.
+function sameSubmission(receipt, pending) {
+  return sameCommand(receipt.command, pending.command) &&
+    (receipt.actor || null) === pending.actor &&
+    (receipt.reason || null) === pending.reason;
+}
+
+// The answer an abort-abandoned submission reports: a receipt-shaped
+// {command, outcome, actor, reason} carrying the page-minted
+// indeterminate outcome describeOutcome names, so every submitCommand
+// caller renders it through the ordinary receipt path. The submission
+// joins pendingCommands — the journaled settle resolves the standing
+// notice — and the pane states the uncertainty plus the double-apply
+// hazard a blind retry of a landed command would run.
+function abandonedSubmission(command, reason, error) {
+  const answer = {
+    command: command,
+    outcome: { indeterminate: { detail: String(error) } },
+  };
+  if (operator !== null) answer.actor = operator;
+  if (reason) answer.reason = reason;
+  const notice = "command outcome unknown — the request outlived the " +
+    POLL_MS + " ms abort bound and may still apply: " +
+    describeCommand(command) + ". The journaled settled receipt is " +
+    "the verdict — resubmitting now risks applying the command twice.";
+  pendingCommands.push({
+    command: command,
+    actor: operator,
+    reason: reason || null,
+    notice: notice,
+  });
+  if (pendingCommands.length > PENDING_LIMIT) pendingCommands.shift();
+  document.getElementById("receipt").textContent = notice;
+  return answer;
+}
+
 // POSTs the command to a peer: the attributed envelope
-// {"command":…,"actor":…} when ?operator= configured an identity, the
-// bare Command body otherwise — both shapes the endpoint accepts. The
-// actor is the operator's declared identity — attestation, not
-// authentication — echoed on the receipt and into the journal.
-// Content-Type text/plain keeps a cross-origin POST a simple request —
-// no preflight — while the endpoint parses the same JSON body
-// regardless of the declared type.
-async function postCommand(base, command) {
-  const body = operator === null
-    ? command
-    : { command: command, actor: operator };
+// {"command":…,"actor":…,"reason":…} when ?operator= configured an
+// identity or a declared reason rides the submission, the bare Command
+// body otherwise — all shapes the endpoint accepts. The actor is the
+// operator's declared identity — attestation, not authentication — and
+// the reason the declared justification the shelving-reason decision
+// carries on the same envelope; both echo on the receipt and into the
+// journal. Content-Type text/plain keeps a cross-origin POST a simple
+// request — no preflight — while the endpoint parses the same JSON body
+// regardless of the declared type. The POST rides the same POLL_MS
+// abort bound as every poll read: /command receipts at admission, so a
+// post that outruns the bound names a hung listener — and the
+// ack-release awaits a submission inside refresh(), where an unbounded
+// hang would hold `polling` forever, freezing the feed marks the loop
+// exists to recompute. The bound cancels the wait only, so a post that
+// outruns it leaves the command's outcome indeterminate — the
+// indeterminate-outcome rule, not a failure.
+async function postCommand(base, command, reason) {
+  let body = command;
+  if (operator !== null || reason) {
+    body = { command: command };
+    if (operator !== null) body.actor = operator;
+    if (reason) body.reason = reason;
+  }
   const response = await fetch(base + "/command", {
     method: "POST",
     headers: { "Content-Type": "text/plain" },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(POLL_MS),
   });
   return response.json();
 }
@@ -3046,14 +3866,27 @@ function isNotActive(receipt) {
     "not_active" in receipt.outcome.rejected.reason;
 }
 
+// Whether a submitCommand answer is the page-minted indeterminate
+// outcome an abort-abandoned submission reports — status cells show it
+// as a warning, never the failure red, because no verdict says the
+// command did not land.
+function isIndeterminate(answer) {
+  return !!(answer && answer.outcome && "indeterminate" in answer.outcome);
+}
+
 // Submits an operator command to the peer reporting settled "active" —
 // never to a standby. A not_active rejection means the pair moved
 // mid-flight: roles are re-polled and the command retried once against
-// the peer now reporting active, per the pair-view rule. Answers the
-// peer's response — normally the command's receipt — so the caller can
-// surface it beside the control that submitted; null when nothing was
-// sent.
-async function submitCommand(command) {
+// the peer now reporting active, per the pair-view rule. `reason`, when
+// supplied, rides the attributed envelope beside the operator identity —
+// the declared justification the shelving-reason decision carries.
+// Answers the peer's response — normally the command's receipt — so the
+// caller can surface it beside the control that submitted; null when
+// nothing was sent. The abort bound firing answers the indeterminate
+// outcome instead of throwing: the request may already be buffered
+// server-side, so a retry whose fate is unresolved is never sent — a
+// landed command would apply twice.
+async function submitCommand(command, reason) {
   const receipt = document.getElementById("receipt");
   let target = activePeer();
   if (target < 0) {
@@ -3065,15 +3898,62 @@ async function submitCommand(command) {
     receipt.textContent = noActiveVerdict();
     return null;
   }
-  let answer = await postCommand(peers[target].base, command);
+  let answer;
+  try {
+    answer = await postCommand(peers[target].base, command, reason);
+  } catch (error) {
+    if (isAbortError(error)) {
+      return abandonedSubmission(command, reason, error);
+    }
+    throw error;
+  }
   if (isNotActive(answer)) {
     await pollRoles();
     renderPair();
     target = activePeer();
-    if (target >= 0) answer = await postCommand(peers[target].base, command);
+    if (target >= 0) {
+      try {
+        answer = await postCommand(peers[target].base, command, reason);
+      } catch (error) {
+        // The first post answered a named refusal — the command never
+        // queued — so only the retry's fate is open when the bound
+        // fires here.
+        if (isAbortError(error)) {
+          return abandonedSubmission(command, reason, error);
+        }
+        throw error;
+      }
+    }
   }
   receipt.textContent = JSON.stringify(answer, null, 2);
   return answer;
+}
+
+// POSTs a role-switch request to the peer it names — "promote" a
+// settled standby, "demote" the field owner: the attributed body
+// {"actor":…} when ?operator= configured an identity — the same
+// declared actor every command submission stamps — a bare POST
+// otherwise, both shapes the endpoint accepts. The answer is the
+// post-change RoleReport; a refusal is the named SwitchError in the
+// 409 body. The receipt pane surfaces either, and the pair view
+// re-polls so the transition reports.
+async function postSwitch(peer, verb) {
+  const request = {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+  };
+  if (operator !== null) request.body = JSON.stringify({ actor: operator });
+  const receipt = document.getElementById("receipt");
+  const response = await fetch(peer.base + "/" + verb, request);
+  if (!response.ok) {
+    const refusal = await response.json().catch(() => null);
+    receipt.textContent = verb + " refused: " +
+      (refusal === null ? "HTTP " + response.status : JSON.stringify(refusal));
+  } else {
+    receipt.textContent = JSON.stringify(await response.json(), null, 2);
+  }
+  await pollRoles();
+  renderPair();
 }
 
 // A parameter edit submits a set_parameter command addressed to the
@@ -3117,7 +3997,7 @@ async function submitParameter(button) {
   setParamStatus(component, name, {
     text: (parsed.warnings.length > 0
       ? "warning: " + parsed.warnings.join("; ") + " — " : "") + verdict,
-    warn: parsed.warnings.length > 0,
+    warn: parsed.warnings.length > 0 || isIndeterminate(answer),
     bad: !answer || !answer.outcome || "rejected" in answer.outcome,
   });
 }
@@ -3177,7 +4057,7 @@ async function init() {
     document.getElementById("overview").hidden = false;
     renderOverview();
     refreshOverview();
-    setInterval(refreshOverview, 1000);
+    setInterval(refreshOverview, POLL_MS);
     return;
   }
   index = await (await fetch("/signals")).json();
@@ -3199,9 +4079,25 @@ async function init() {
   // every submission declares — so the console states the attribution
   // its commands will carry (declared, not authenticated).
   document.getElementById("command-actor").textContent = operator === null
-    ? "commands submit unattributed — ?operator=<name> declares an actor"
-    : "commands declare actor \"" + operator +
+    ? "commands and switch requests submit unattributed — ?operator=<name> declares an actor"
+    : "commands and switch requests declare actor \"" + operator +
       "\" — declared identity, not authenticated";
+  // The pair section's switch affordances take the same delegated
+  // shape as the command controls — the rows re-render on every poll —
+  // and the request routes to the peer the control names, not the
+  // command target: a promotion asks the standby to take the field.
+  document.getElementById("pair").addEventListener("click", async event => {
+    const control = event.target.closest("button.switch");
+    if (!control) return;
+    const peer = peers[Number(control.dataset.peer)];
+    if (!peer) return;
+    try {
+      await postSwitch(peer, control.dataset.verb);
+    } catch (error) {
+      document.getElementById("receipt").textContent =
+        control.dataset.verb + " failed: " + error;
+    }
+  });
   buildTrends();
   // Command affordances: delegated listeners — the affordances
   // themselves re-render on every poll. The writable gate is the same
@@ -3209,9 +4105,11 @@ async function init() {
   // mark writable is never commanded from the page. A tune button
   // submits its parameter's edit through submitParameter, a force or
   // release button through submitForce/submitUnforce — the same
-  // receipted path.
+  // receipted path. The equipment pane's duplicated faceplate takes
+  // the identical delegated handler — its controls are the same
+  // receipted commands under the same metadata gates.
   const faceplates = document.getElementById("faceplates");
-  faceplates.addEventListener("click", async event => {
+  const faceplateClick = async event => {
     const tune = event.target.closest("button.tune");
     if (tune) {
       await submitParameter(tune);
@@ -3256,11 +4154,25 @@ async function init() {
       document.getElementById("receipt").textContent = "command failed: " + error;
     }
     refresh();
-  });
+  };
+  faceplates.addEventListener("click", faceplateClick);
+  document.getElementById("equipment").addEventListener("click", faceplateClick);
   // The alarm pane's affordances take the same delegated shape — the
-  // rows re-render on every poll — and the state select re-filters the
-  // lists on the next refresh, triggered immediately here.
+  // rows re-render on every poll — plus the nav-equipment links every
+  // row and attributable journal entry carries: a navigation selects
+  // the owning component into the equipment pane and re-renders it
+  // from the last poll's inputs before the anchor's own jump scrolls
+  // it into view. The state select re-filters the lists on the next
+  // refresh, triggered immediately here.
   document.getElementById("alarm-pane").addEventListener("click", async event => {
+    const nav = event.target.closest("a.nav-equipment");
+    if (nav) {
+      equipmentSelection = nav.dataset.component;
+      if (rendered.snapshot !== null) {
+        renderEquipment(rendered.snapshot, rendered.telemetry, rendered.forced);
+      }
+      return;
+    }
     const ack = event.target.closest("button.ack");
     if (ack) {
       await submitAck(ack);
@@ -3268,6 +4180,13 @@ async function init() {
     }
     const managed = event.target.closest("button.managed");
     if (managed) await submitManaged(managed);
+  });
+  // The pane's close affordance drops the selection — a cleared
+  // selection keeps the pane hidden on later polls until the next
+  // navigation.
+  document.getElementById("equipment-close").addEventListener("click", () => {
+    equipmentSelection = null;
+    document.getElementById("equipment").hidden = true;
   });
   document.getElementById("alarm-filter").addEventListener("change", refresh);
   // The point listing's force and release affordances take the same
@@ -3282,8 +4201,9 @@ async function init() {
     const unforce = event.target.closest("button.unforce");
     if (unforce) await submitUnforce(unforce);
   });
-  // Enter inside an affordance input submits like its button.
-  faceplates.addEventListener("keydown", event => {
+  // Enter inside an affordance input submits like its button — the
+  // same rule inside the equipment pane's duplicated faceplate.
+  const faceplateKeydown = event => {
     if (event.key !== "Enter") return;
     const input = event.target.closest("input.command-value");
     if (input) {
@@ -3301,7 +4221,9 @@ async function init() {
     if (!control) return;
     const tune = control.parentElement.querySelector("button.tune");
     if (tune) tune.click();
-  });
+  };
+  faceplates.addEventListener("keydown", faceplateKeydown);
+  document.getElementById("equipment").addEventListener("keydown", faceplateKeydown);
   points.addEventListener("keydown", event => {
     if (event.key !== "Enter") return;
     const input = event.target.closest("input.command-value");
@@ -3352,7 +4274,7 @@ async function init() {
     refresh();
   });
   refresh();
-  setInterval(refresh, 1000);
+  setInterval(refresh, POLL_MS);
 }
 
 init().catch(error => {

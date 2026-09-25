@@ -1,9 +1,9 @@
 import unittest
-from agent_pool.planning import validate, body, metadata, prompt
+from agent_pool.planning import validate, body, metadata, prompt, planner_inventory
 
 class PlanningTests(unittest.TestCase):
     def item(self):
-        return dict(key='model-contract',title='Define model',scope='Types',acceptance='Compiles',tests='Unit tests',dependencies=[],priority=1,milestone='Foundation',group='model')
+        return dict(key='model-contract',title='Define model',scope='Types',acceptance='Compiles',tests='Unit tests',dependencies=[],priority=1,milestone='Foundation',group='model',area='engineering')
 
     def test_roundtrip(self):
         item=self.item()
@@ -47,6 +47,11 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(metadata(body(item))['improvement'],'deepen-executor')
         item['improvement']='Not A Key!'
         with self.assertRaises(ValueError): validate({'issues':[item]})
+    def test_rejects_unknown_area(self):
+        item = self.item()
+        item['area'] = 'water'
+        with self.assertRaisesRegex(ValueError, 'product area'):
+            validate({'issues': [item]})
 
     def test_dispositions(self):
         ok={'key':'deepen-executor','decision':'defer','reason':'needs decision','revisit':'after #19'}
@@ -58,28 +63,28 @@ class PlanningTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate({'issues':[],'dispositions':[{'key':'x','decision':'maybe','reason':'r'}]})
 
-    def test_prompt_loads_product_context_and_research_gate(self):
+    def test_prompt_uses_current_product_authority(self):
         text = prompt([], [], '/tmp/proposal.json')
         self.assertIn('docs/product-strategy.md', text)
         self.assertIn('docs/requirements/README.md', text)
         self.assertIn('docs/research/', text)
         self.assertIn('Requirements: ID, ID', text)
-        self.assertIn('documentation-only research issue first', text)
-        self.assertIn('WW-ALM-001', text)
-        self.assertIn('IJmuiden mode-change/unsafe-position/rising-level scenario', text)
-        self.assertIn('`WW-ENG-003` as the immediate product-boundary gate', text)
-        self.assertIn('independently published pumping-station repository', text)
-        self.assertIn('directory that remains inside this workspace is only staging', text)
-        self.assertIn('Platform fixtures are conformance evidence', text)
-        self.assertIn('`WW-FND-003` and `WW-FND-004` as the next foundation tranche', text)
-        self.assertIn('additive shared block-interface schema first', text)
-        self.assertIn('named typed commands and events', text)
-        self.assertIn('immutable bounded read publication outside the executor lock', text)
-        self.assertIn('bounded receipted command admission', text)
-        self.assertIn('stalled/disconnected/restarted-UI non-interference tests', text)
-        self.assertIn('never plan fire-and-forget commands', text)
-        self.assertIn('direct reuse of LGPL QiTech implementation code', text)
-        self.assertIn('batch control as deferred', text)
+        self.assertIn('documented market sequence', text)
+        self.assertIn('complete slice', text)
+        self.assertIn('secondary investigation signal', text)
+        self.assertNotIn('WW-ENG-003` as the immediate product-boundary gate', text)
+
+    def test_planner_inventory_keeps_open_context_and_closed_dedup_key(self):
+        item = self.item()
+        open_issue = {'number': 1, 'title': item['title'], 'state': 'OPEN',
+                      'body': body(item), 'labels': [{'name': 'agent:ready'}]}
+        closed_issue = dict(open_issue, number=2, state='CLOSED')
+        rows = planner_inventory([open_issue, closed_issue])
+        self.assertIn('body', rows[0])
+        self.assertEqual(rows[0]['key'], 'model-contract')
+        self.assertEqual(rows[1]['key'], 'model-contract')
+        self.assertNotIn('body', rows[1])
+        self.assertNotIn('labels', rows[1])
 
     def test_prompt_includes_rejection_feedback(self):
         text = prompt([], [], '/tmp/proposal.json', feedback='Missing or oversized text: tests')

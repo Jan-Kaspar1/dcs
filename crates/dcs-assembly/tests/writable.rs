@@ -102,7 +102,7 @@ fn writable_field_input_applies_at_the_scan_boundary() {
         Value::Float(0.0)
     );
 
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(
         executor.receipts()[0].outcome,
         CommandOutcome::Applied { tick: Tick(1) }
@@ -115,7 +115,7 @@ fn writable_field_input_applies_at_the_scan_boundary() {
     assert_eq!(driver.read(FIELD_OUT).unwrap().value, Value::Float(7.0));
 
     // The substitution holds until the field side asserts a new value.
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(
         executor.sample(FIELD_WRITABLE).unwrap().value,
         Value::Float(7.0)
@@ -134,7 +134,7 @@ fn writable_internal_point_updates_the_image_at_the_boundary() {
         executor.sample(INTERNAL_WRITABLE),
         Some(Sample::good(Value::Float(2.0), Tick::ZERO))
     );
-    executor.scan().unwrap();
+    executor.scan();
 
     let receipt = executor.submit_command(write_value(INTERNAL_WRITABLE, Value::Float(9.0)));
     assert_eq!(
@@ -143,7 +143,7 @@ fn writable_internal_point_updates_the_image_at_the_boundary() {
             apply_tick: Tick(2)
         }
     );
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(
         executor.receipts()[0].outcome,
         CommandOutcome::Applied { tick: Tick(2) }
@@ -160,7 +160,7 @@ fn writable_internal_point_updates_the_image_at_the_boundary() {
     );
 
     // The held value survives until the next command.
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(
         executor.sample(INTERNAL_WRITABLE).unwrap().value,
         Value::Float(9.0)
@@ -172,7 +172,7 @@ fn forced_field_input_holds_across_scans_until_released() {
     let model = PlantModel::load(WRITABLE_POINTS).unwrap();
     let driver = sim_driver(&model).unwrap();
     let mut executor = assemble(&model, &registry(), &driver).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
 
     let receipt = executor.submit_command(Command::ForcePoint {
         point: FIELD_WRITABLE,
@@ -191,7 +191,7 @@ fn forced_field_input_holds_across_scans_until_released() {
     // the limiter slews its valve output toward the forced input.
     driver.write(FIELD_WRITABLE, Value::Float(0.5)).unwrap();
     for tick in 2..=3u64 {
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(
             executor.sample(FIELD_WRITABLE),
             Some(Sample::new(
@@ -214,7 +214,7 @@ fn forced_field_input_holds_across_scans_until_released() {
     executor.submit_command(Command::UnforcePoint {
         point: FIELD_WRITABLE,
     });
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(
         executor.sample(FIELD_WRITABLE),
         Some(Sample::good(Value::Float(0.5), Tick(4)))
@@ -260,6 +260,7 @@ fn unmarked_points_reject_with_not_writable_naming_the_point() {
                     reason: CommandError::NotWritable { point }
                 },
                 actor: None,
+                reason: None,
             },
             "{point:?}"
         );
@@ -267,7 +268,7 @@ fn unmarked_points_reject_with_not_writable_naming_the_point() {
 
     // Refused at submission: nothing queues for the scan, so no
     // application receipts appear and the held initial stands.
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(executor.receipts().len(), 2);
     assert_eq!(
         executor.sample(INTERNAL_UNMARKED).unwrap().value,
@@ -298,7 +299,7 @@ fn out_point_commands_are_rejected_per_the_documented_rule() {
             "{point:?}"
         );
     }
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(FIELD_OUT).unwrap().value, Value::Float(0.0));
 }
 

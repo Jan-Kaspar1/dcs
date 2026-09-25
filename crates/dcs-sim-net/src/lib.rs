@@ -32,6 +32,11 @@
 //!   `{"result":"sample","sample":{"value":…,"quality":…,"tick":…}}`.
 //! - `{"op":"write","point":2,"value":{"float":1.5}}` —
 //!   `IoDriver::write` with its kind check; answers `{"result":"done"}`.
+//!   A `Float` write the field cannot represent — NaN or an infinity,
+//!   which has no JSON spelling and so cannot arrive as anything but a
+//!   failed payload decode — is refused: `invalid_request` when the
+//!   value does not decode at all, the point's `IoError::InvalidValue`
+//!   when a peer's own encoding carries it.
 //! - `{"op":"step","dt":0.1}` — `SimDriver::step`; answers
 //!   `{"result":"stepped","tick":7}`. A negative or non-finite `dt` is
 //!   refused as `invalid_request`, never a panic.
@@ -42,18 +47,33 @@
 //! - `{"op":"list_points"}` — `SimDriver::points`; answers
 //!   `{"result":"points","points":[…]}` with every bound point's
 //!   direction, observed sample, and active fault, ordered by point id.
-//! - `{"op":"claim_writer","owner":7}` — takes the plant's
-//!   field-write ownership for the `owner` token; answers
+//! - `{"op":"claim_writer","owner":7,"controller":true}` — takes the
+//!   plant's field-write ownership for the `owner` token; answers
 //!   `{"result":"done"}`, or `{"result":"claimed_shared","owner":7}`
 //!   when another live attachment already holds the token.
-//! - `{"op":"ensure_writer","owner":7}` — the conditional re-grant a
-//!   re-attaching owner asserts; answers `done` while the field is
-//!   unclaimed or already claims `owner` — `claimed_shared` when other
-//!   live attachments hold the token — `fenced` while a different
-//!   owner stands.
-//! - `{"op":"release_writer"}` — drops this connection's hold on the
-//!   write claim, releasing the claim itself when the last holder
-//!   leaves; answers `done`.
+//!   `controller` records whether the claimer is a controller peer —
+//!   only a controller's live unyielded claim refuses the conditional
+//!   takeover below; a tool's claim never does. Payloads predating the
+//!   flag decode as `true`, the conservative verdict.
+//! - `{"op":"ensure_writer","owner":7,"rebind":true,"controller":true}`
+//!   — the conditional re-grant a re-attaching owner asserts; answers
+//!   `done` while the field is unclaimed or already claims `owner` —
+//!   `claimed_shared` when other live attachments hold the token —
+//!   `fenced` while a different owner stands. `rebind:false` raises or
+//!   confirms the claim without joining its holders — the demoted
+//!   ex-owner's orphan-cycle probe. `controller` is `claim_writer`'s
+//!   marker on the claim this grant raises.
+//! - `{"op":"claim_writer_unless_held","owner":7}` — the conditional
+//!   takeover grant a controller's startup activation and an orphaned
+//!   peer's promotion run; answers `done` while no live *controller*
+//!   attachment holds a different owner's unyielded claim, `fenced`
+//!   while one stands — a dead, yielded, or tool-held claim still
+//!   preempts, so a crashed owner's recovery and a rogue claim's
+//!   cleanup keep working where a live incumbent is protected.
+//! - `{"op":"release_writer","keep_claim":false}` — drops this
+//!   connection's hold on the write claim, releasing the claim itself
+//!   when the last holder leaves; answers `done`. `keep_claim:true` —
+//!   the demotion shape — keeps the claim standing, marked yielded.
 //!
 //! ## Field write-ownership fencing
 //!
@@ -78,7 +98,12 @@
 //! therefore drops the claim into a named refusal rather than a field
 //! any attachment can write through, and the returning owner's
 //! `ensure_writer` re-arms deterministically instead of racing an
-//! interposer that could otherwise seize the field first.
+//! interposer that could otherwise seize the field first. A live
+//! attachment whose write or step is refused `Unclaimed` re-arms its
+//! recorded owner once through the conditional `ensure_writer` grant
+//! and retries, so a claim-state reset behind a live connection
+//! reclaims instead of demoting the healthy owner; a genuinely stolen
+//! field refuses that re-arm as fenced.
 //!
 //! The claim tracks the live connections holding it, so a grant joining
 //! a token another live attachment already holds is flagged
@@ -101,7 +126,16 @@
 //! connection's hold, releasing the claim itself when the last holder
 //! leaves — the shape a mutation tool that claimed conditionally
 //! (`dcs-plant-ctl`) needs so its claim cannot outlive its connection
-//! and fence the owner's re-arm.
+//! and fence the owner's re-arm. Its `keep_claim` half is the
+//! demotion's: the ex-owner's hold drops but the claim stands, marked
+//! yielded — the token keeps fencing the field, and a successor's
+//! `claim_writer_unless_held` still preempts it despite other
+//! attachments holding the yielded token, where a live *controller's*
+//! unyielded claim refuses it: the field's own arbitration of "the
+//! owner deliberately stepped down" against "a live incumbent still
+//! stands", with the `controller` marker telling a real peer's claim
+//! from a tool's so the conditional grant never wedges a peer's
+//! recovery on a rogue or lingering tool hold.
 //!
 //! The `dcs-plant-ctl` binary in this crate is the protocol's
 //! development-tooling client: it lists, reads, and writes points and
@@ -112,7 +146,8 @@
 //! Failures answer `{"result":"error","error":…}` with a
 //! [`PlantError`]: `{"kind":"io","error":…}` carries the driver's
 //! [`IoError`](dcs_core::IoError) verbatim (`UnknownPoint`,
-//! `TypeMismatch`, or an injected fault's `Disconnected`/`Timeout`), and
+//! `TypeMismatch`, `InvalidValue`, or an injected fault's
+//! `Disconnected`/`Timeout`), and
 //! `{"kind":"invalid_request","detail":…}` covers an unparseable line or
 //! an invalid `step`. The write-ownership refusals are
 //! `{"kind":"fenced","detail":…}` while another owner stands and
@@ -125,6 +160,19 @@
 //! diverge, so the crate builds `serde_json` with its `float_roundtrip`
 //! feature — the precise float parser; any other implementation of this
 //! protocol needs the same guarantee for `f64` payloads.
+//!
+//! Bit-exactness has a boundary: JSON has no spelling for NaN or an
+//! infinity — serde emits `null`, which a `Value` decode must reject —
+//! so the plant holds every served sample finite. A `write` carrying a
+//! non-finite `Float` fails as above, and a `step` whose element
+//! arithmetic overflows — an integrator wound past the `f64` range, a
+//! `flow_sum` saturating — never commits the result: the element holds
+//! its last finite state and its output reports that value
+//! `Bad`/`out_of_range`, recovering on the first step whose arithmetic
+//! lands finite. Every `sample` and `points` answer therefore decodes
+//! under this protocol's own serde contract — a corrupt step degrades
+//! one point's quality instead of poisoning the field for every
+//! attachment until restart.
 //!
 //! `RemoteDriver` maps the remaining failure surface: a dead or severed
 //! link and any incoherent answer surface as `IoError::Disconnected`, an

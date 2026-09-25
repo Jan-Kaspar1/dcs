@@ -10,7 +10,8 @@
 #![allow(dead_code)]
 
 use dcs_core::{
-    CommandReceipt, JournalEntry, JournalEvent, PointId, Sample, TelemetrySnapshot, Value,
+    CommandReceipt, JournalEntry, JournalEvent, JournalSinkState, PointId, Sample,
+    TelemetrySnapshot, Value,
 };
 use dcs_model::PlantModel;
 use std::io::{BufRead, BufReader};
@@ -60,6 +61,25 @@ pub fn kill(spawned: &mut Spawned) {
     spawned.child.wait().unwrap();
 }
 
+/// Pins a snapshot's journal-sink drain report to its run-stable
+/// fields. `state`, `drained`, `depth`, and `high_water` ride the sink
+/// writer thread's beat — where the writer stood when the publication
+/// stamped — so identical scripted runs legitimately differ there and
+/// the digest comparisons normalize them; `accepted`, `lost`, and
+/// `capacity` are the run's own accounting and stay in the comparison.
+pub fn settle_sink_health(snapshot: &mut TelemetrySnapshot) {
+    if let Some(sink) = snapshot
+        .publication
+        .as_mut()
+        .and_then(|health| health.journal_sink.as_mut())
+    {
+        sink.state = JournalSinkState::Healthy;
+        sink.drained = sink.accepted;
+        sink.depth = 0;
+        sink.high_water = 0;
+    }
+}
+
 /// The announcement `dcs-controller` and `dcs-plant-server` print once
 /// bound: `listening on <addr>`.
 pub fn listening_on(line: &str) -> Option<SocketAddr> {
@@ -98,7 +118,10 @@ fn spawn_inner(
     let addr = loop {
         let mut line = String::new();
         if stderr.read_line(&mut line).unwrap() == 0 {
-            panic!("{} exited before reporting its address", binary.display());
+            panic!(
+                "{} exited before reporting its address; stderr so far: {preamble:?}",
+                binary.display()
+            );
         }
         match parse(line.trim()) {
             Some(addr) => break addr,
@@ -159,6 +182,25 @@ pub fn spawn_piped(
     spawn_logged_piped(binary, args, parse).0
 }
 
+/// The `--pair-token` every helper-spawned controller carries — the
+/// keyed deployment shape a real redundant pair declares: an
+/// announced-source demotion then verifies the hinted endpoint's
+/// `line_proof`, and every checkpoint the adopted source serves keeps
+/// proving under fresh nonces. A test that needs the unkeyed shape —
+/// the replaying interposer's reproduction — spawns its controller
+/// directly.
+pub const PAIR_TOKEN: &str = "dcs-test-pair";
+
+/// Appends the shared `--pair-token` to `args` unless the caller
+/// already declared one — the keyed pair wiring the scripted
+/// controllers run the announced-demotion contract under.
+fn pair_args(args: &mut Vec<String>, extra: &[String]) {
+    if !extra.iter().any(|arg| arg == "--pair-token") {
+        args.push("--pair-token".to_string());
+        args.push(PAIR_TOKEN.to_string());
+    }
+}
+
 /// A `dcs-plant-server` process serving `model` with `dynamics` merged
 /// in, on an ephemeral port.
 pub fn spawn_plant(model: &Path, dynamics: &Path) -> Spawned {
@@ -187,10 +229,52 @@ pub fn spawn_controller(model: &Path, extra: &[String], dt: &str) -> Spawned {
 pub fn spawn_controller_logged(model: &Path, extra: &[String], dt: &str) -> (Spawned, Vec<String>) {
     let mut args = vec![model.to_str().unwrap().to_string()];
     args.extend(extra.iter().cloned());
+    pair_args(&mut args, extra);
     for arg in ["--listen", "127.0.0.1:0", "--driven", "--dt", dt] {
         args.push(arg.to_string());
     }
     spawn_logged(Path::new(CONTROLLER), &args, listening_on)
+}
+
+/// A wall-clock-paced controller process on `model`: `--scan-ms` paces
+/// the scans and `--listen` serves the monitor on `listen` — the QA
+/// rig's deployment shape, where `0.0.0.0:0` binds the wildcard at an
+/// ephemeral port the way the container launch's `0.0.0.0:<port>` does.
+/// [`reachable`] maps the reported wildcard to the address clients dial.
+pub fn spawn_controller_paced(
+    model: &Path,
+    extra: &[String],
+    scan_ms: u64,
+    listen: &str,
+) -> Spawned {
+    let mut args = vec![model.to_str().unwrap().to_string()];
+    args.extend(extra.iter().cloned());
+    pair_args(&mut args, extra);
+    for arg in [
+        "--listen".to_string(),
+        listen.to_string(),
+        "--scan-ms".to_string(),
+        scan_ms.to_string(),
+    ] {
+        args.push(arg);
+    }
+    spawn_logged(Path::new(CONTROLLER), &args, listening_on).0
+}
+
+/// The dialable form of a bound address: a wildcard-bound monitor —
+/// `0.0.0.0`/`::`, every container deployment's `--listen` — is reached
+/// through loopback; connecting to the unspecified address itself is
+/// meaningless.
+pub fn reachable(bound: SocketAddr) -> SocketAddr {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    SocketAddr::new(
+        match bound.ip() {
+            IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ip => ip,
+        },
+        bound.port(),
+    )
 }
 
 /// How [`sim_tcp_document`] re-points a model's devices at a shared

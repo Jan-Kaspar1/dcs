@@ -25,7 +25,6 @@ runtime stage keeps the debian:bookworm-slim + uid 10001 + entrypoint
 contract. CI image pinning does not exist yet; this is the documented
 build choice until it does.
 """
-import fcntl
 import json
 import os
 import platform
@@ -92,6 +91,10 @@ DEFAULT_CONFIG = {
     # revised container does not exist yet, and the case removes it
     # before the model-revision launch.
     'foreign_port': 18083,
+    # The dead-peer-latency case's driven third controller publishes
+    # its monitor here; its sim-net side shares the run's labeled
+    # bridge.
+    'driven_port': 18084,
     'plant_port': 9001,
     'plant_host_port': 19001,
     'rig_cpus': '1.0',
@@ -110,8 +113,59 @@ DEFAULT_CONFIG = {
     # stale well inside the window, while a healthy container restart
     # (~3-5 s of misses) never reaches it.
     'failover_misses': 120,
+    # Deterministic plant-writer owner tokens pinned per controller
+    # endpoint key — every controller the runner launches carries its
+    # key's --owner-token, so a scenario plant-protocol attachment can
+    # `ensure_writer` under the standing owner's token and share the
+    # claim (the designed harness path, answering claimed_shared)
+    # instead of preempting the field writer. Each endpoint keeps its
+    # own token: the sim's writer claim still fences every other
+    # owner, and a standby holds no claim until it promotes. The
+    # launch helper refuses a duplicated or missing pin — two
+    # controllers on one token would silently defeat the fencing.
+    'plant_owner_tokens': {'active': 424243, 'standby': 424244,
+                           'revised': 424245, 'foreign': 424246,
+                           'driven': 424247},
+    # The pair's shared tracking secret: the announced-source contract
+    # is keyed-only, so the rig's redundant pair — the revised peer a
+    # model-revision roll promotes, and the driven peer a stale-island
+    # leg promotes — carries the same --pair-token,
+    # letting a demoted owner's verify pull demand the keyed line_proof
+    # only a peer holding the token stamps. A scenario endpoint that
+    # merely replays or forges the line's public checkpoints — the
+    # bridge-placed forge or interposer — arms nothing in its default
+    # tokenless posture; the forged-standby leg also launches the same
+    # endpoint keyed so its answers are genuinely signed and only the
+    # pulled document's content can convict it — the shape that reaches
+    # the demote verify's command-record audit. The labeled foreign
+    # peer stays unkeyed on purpose.
+    'pair_token': 'dcs-qa-pair',
+    # The rig bridge-to-host reachability rule the qax-20260922-001,
+    # qax-20260922-005, and qax-20260923-001 exploration runs
+    # demonstrated, recorded as the lane's endpoint-placement contract:
+    # the host egress policy drops every packet a rig-bridge container
+    # aims at the host itself (netpolicy's INPUT rules), so a socket
+    # bound on the host — loopback, the LAN address, or another
+    # stack's published port reached through it — is unreachable from
+    # the rig network. Every lane endpoint carries a recorded
+    # placement: 'loopback' marks the services host-side scenario
+    # attachments reach through their 127.0.0.1-published ports (the
+    # monitor endpoints and the published plant-probe port); 'bridge'
+    # marks endpoints a rig peer must dial — the tracking-source/auth
+    # legs' checkpoint interposer and forged-checkpoint server — which
+    # run in labeled containers on the run's rig network and are
+    # dialed by container name, never through a host address.
+    'endpoint_placement': {
+        'active': 'loopback', 'standby': 'loopback',
+        'revised': 'loopback', 'foreign': 'loopback',
+        'driven': 'loopback', 'plant': 'loopback',
+        'interposer': 'bridge', 'forge': 'bridge'},
     'model_fixture': 'crates/dcs-demo/fixtures/pump_station.json',
-    'dynamics_fixture': 'crates/dcs-demo/fixtures/pump_station_dynamics.json',
+    # The lane's own dynamics declaration: the shared fixture leaves
+    # the inflow channel to scripted forcing, while the unattended rig
+    # needs the declared inflow so the station cycles demand on its own
+    # — the duty-rotation case's honest lever.
+    'dynamics_fixture': 'qa_lane/fixtures/pump_station_dynamics.json',
     'capabilities': [
         {'key': 'no-ethercat',
          'detail': 'No EtherCAT driver in this revision; all field I/O '
@@ -644,6 +698,9 @@ def _set_blocked(st, reason, detail, log):
 def cycle(cfg, log=print):
     """One supervisor pass: reconcile, gate, reclaim, then run the
     newest queued revision."""
+    # Lazy: the lane is POSIX-only, but the module must stay importable on
+    # Windows so the repository test suite can collect it there.
+    import fcntl
     state_dir = Path(cfg['state_dir'])
     state_dir.mkdir(parents=True, exist_ok=True)
     lock = (state_dir / 'lock').open('a')
@@ -763,25 +820,40 @@ def _build_images(src, cfg, run_dir, timeline, run_id):
            '-e', 'CARGO_TARGET_DIR=/work/target',
            cfg['builder_image'], 'bash', '-c',
            'cd /src && cargo build --release --locked '
-           '-p dcs-controller -p dcs-plant '
+           '-p dcs-controller -p dcs-plant -p dcs-sim-net '
            '&& cargo build --release --locked '
-           '-p dcs-monitor --bin dcs-ctl',
+           '-p dcs-monitor --bin dcs-ctl --bin dcs-forge',
            timeout=cfg['builder_timeout'])
+    # Extra binaries each image ships beside its entrypoint: the plant
+    # image carries dcs-plant-ctl — the plant-side tool the lane execs
+    # inside the container against the server's loopback listener, so
+    # the covered plant ops run through the shipped binary rather than
+    # a second Python implementation of the wire protocol; the
+    # controller image carries dcs-forge — the announced-source legs'
+    # bridge-placed checkpoint endpoint the runner launches with
+    # --entrypoint dcs-forge.
+    ship = {'plant': ['dcs-plant-ctl'], 'controller': ['dcs-forge']}
     digests = {}
     for crate, binary, tag in (
             ('controller', 'dcs-controller', 'dcs-hwtest/controller'),
             ('plant', 'dcs-plant-server', 'dcs-hwtest/plant')):
-        binary_path = work / 'target' / 'release' / binary
-        if not binary_path.is_file():
-            raise RuntimeError('build produced no ' + binary)
+        binaries = [binary] + ship.get(crate, [])
+        for name in binaries:
+            binary_path = work / 'target' / 'release' / name
+            if not binary_path.is_file():
+                raise RuntimeError('build produced no ' + name)
         context = run_dir / ('image-' + crate)
         context.mkdir(exist_ok=True)
-        shutil.copy2(binary_path, context / binary)
+        copies = ''
+        for name in binaries:
+            shutil.copy2(work / 'target' / 'release' / name,
+                         context / name)
+            copies += 'COPY ' + name + ' /usr/local/bin/' + name + '\n'
         (context / 'Dockerfile').write_text(
             'FROM debian:bookworm-slim\n'
             'RUN useradd --no-create-home --shell /usr/sbin/nologin '
             '--uid 10001 dcs\n'
-            'COPY ' + binary + ' /usr/local/bin/' + binary + '\n'
+            + copies +
             'USER dcs\n'
             'ENTRYPOINT ["' + binary + '"]\n'
             'CMD ["--help"]\n')
@@ -833,6 +905,87 @@ CONTAINER_RUN_DIR = '/var/lib/dcs-run'
 CONTAINER_STATE_FILE = CONTAINER_RUN_DIR + '/state.json'
 CONTAINER_JOURNAL_FILE = CONTAINER_RUN_DIR + '/journal.jsonl'
 
+# The endpoint keys whose controllers the runner launches — the pair
+# `_start_rig` brings up plus the three scenario-action peers.
+OWNER_TOKEN_ENDPOINTS = ('active', 'standby', 'revised', 'foreign',
+                         'driven')
+
+
+def _plant_owner_tokens(cfg):
+    """The run's per-controller --owner-token pins, recorded in the
+    run config under 'plant_owner_tokens' and validated before a
+    launch trusts them.
+
+    The pins are deterministic per endpoint key so a scenario
+    attachment can `ensure_writer` with the standing owner's token —
+    the designed shared-claim path for a test harness driving plant
+    stimuli (the controller's --owner-token contract). Each endpoint
+    keeps its own token: the sim's writer claim still fences every
+    other owner, and a standby holds no claim until it promotes. A
+    config missing a pin or repeating one across endpoints fails the
+    launch loudly — a duplicated token would answer `claimed_shared`
+    instead of preempting, silently defeating the single-writer
+    fencing the claim exists to provide.
+    """
+    tokens = cfg.get('plant_owner_tokens') or {}
+    missing = [key for key in OWNER_TOKEN_ENDPOINTS
+               if key not in tokens]
+    if missing:
+        raise RuntimeError('plant_owner_tokens pins no --owner-token '
+                           'for endpoint(s): ' + ', '.join(missing))
+    bad = {key: tokens[key] for key in OWNER_TOKEN_ENDPOINTS
+           if not isinstance(tokens[key], int)
+           or isinstance(tokens[key], bool)
+           or not 0 <= tokens[key] <= 0xFFFFFFFFFFFFFFFF}
+    if bad:
+        raise RuntimeError('plant_owner_tokens pins must be u64 '
+                           'integers: ' + json.dumps(bad))
+    pins = {key: tokens[key] for key in OWNER_TOKEN_ENDPOINTS}
+    if len(set(pins.values())) != len(pins):
+        raise RuntimeError('plant_owner_tokens must pin a distinct '
+                           '--owner-token per controller endpoint: '
+                           + json.dumps(pins, sort_keys=True))
+    return pins
+
+
+# The endpoint keys the run config records a placement for: the
+# monitor/plant services every scenario ctx carries plus the named
+# attachment endpoints the takeover-integrity legs (#573 and
+# successors) and the tracking-source/auth evidence place.
+PLACEMENT_ENDPOINTS = ('active', 'standby', 'revised', 'foreign',
+                       'driven', 'plant', 'interposer', 'forge')
+PLACEMENTS = ('loopback', 'bridge')
+
+
+def _endpoint_placement(cfg):
+    """The run's recorded endpoint placements, validated before a
+    launch trusts them — the rig bridge-to-host reachability rule
+    made configuration.
+
+    The host egress policy (qa_lane.netpolicy) drops every packet a
+    rig-bridge container aims at the host — the INPUT hook's
+    catch-all — so a rig-dialed endpoint can never be a host socket:
+    'bridge' placements run in labeled containers on the run's rig
+    network and rig peers dial them by container name, while
+    'loopback' placements are the host-side scenario-attachment
+    views through the 127.0.0.1-published ports. A config missing an
+    endpoint's placement or naming an unknown one fails the launch
+    loudly, same as a duplicated owner token.
+    """
+    placements = cfg.get('endpoint_placement') or {}
+    missing = [key for key in PLACEMENT_ENDPOINTS
+               if key not in placements]
+    if missing:
+        raise RuntimeError('endpoint_placement records no placement '
+                           'for endpoint(s): ' + ', '.join(missing))
+    bad = {key: placements[key] for key in PLACEMENT_ENDPOINTS
+           if placements[key] not in PLACEMENTS}
+    if bad:
+        raise RuntimeError('endpoint_placement values must be one of '
+                           + json.dumps(list(PLACEMENTS)) + ': '
+                           + json.dumps(bad, sort_keys=True))
+    return {key: placements[key] for key in PLACEMENT_ENDPOINTS}
+
 
 def _controller_dir(run_dir, name):
     """The run-dir state directory bind-mounted into controller `name`'s
@@ -869,6 +1022,42 @@ def restart_controller(run_id, name, timeline):
     docker('stop', '--time', '2', container, timeout=90)
     docker('start', container, timeout=60)
     timeline('controller-restarted', container + ' running')
+
+
+def cold_restart_controller(run_id, run_dir, name, timeline):
+    """The scenario-callable cold restart: `docker stop` on one of the
+    run's controller containers, remove that controller's host-side
+    --state-file inside the bounded run dir, then `docker start` — the
+    induction the source-restart scenario needs to produce a
+    checkpoint stream whose served tick regresses below the tracking
+    peer's last alignment. Where `restart_controller` preserves the
+    persisted state and resumes the same run, this leaves the
+    restarted process nothing to resume: it binds its --journal-file
+    (which stays — the new run-boundary marker at tick 0 is part of
+    the evidence the resume was cold) and serves its checkpoint
+    stream from the beginning of a fresh run.
+
+    `name` is the scenario ctx's endpoint key: 'active' is ctrl-a's
+    container and state dir, 'standby' ctrl-b's, whichever role each
+    currently reports. Only the named controller's state.json is
+    removed, and only inside this run's bounded directory. Both
+    docker halves are recorded on the run's action timeline; a docker
+    or state-file failure raises so the calling scenario reports the
+    cold restart never completed rather than silently performing a
+    warm restart.
+    """
+    container = _controller_container(run_id, name)
+    peer = container.rsplit('-', 1)[1]
+    state = _controller_dir(run_dir, peer) / 'state.json'
+    timeline('controller-cold-restart', 'docker stop ' + container
+             + '; drop ' + str(state))
+    docker('stop', '--time', '2', container, timeout=90)
+    existed = state.is_file()
+    state.unlink(missing_ok=True)
+    docker('start', container, timeout=60)
+    timeline('controller-cold-restarted', container
+             + ' running cold (state file '
+             + ('dropped' if existed else 'already absent') + ')')
 
 
 def stop_controller(run_id, name, timeline):
@@ -918,6 +1107,23 @@ def start_plant(run_id, timeline):
     timeline('plant-start', 'docker start ' + container)
     docker('start', container, timeout=60)
     timeline('plant-started', container + ' running')
+
+
+def plant_ctl(run_id, port, *args):
+    """The scenario-callable plant-tool invocation: `docker exec` runs
+    the shipped `dcs-plant-ctl` inside the run's plant container
+    against the server's loopback listener — the ticket's honest seam,
+    so the lane's covered plant ops drive the binary the image carries
+    rather than a second Python implementation of the wire protocol.
+    The loopback address binds inside the container's own netns — the
+    exchange never leaves the rig bridge the netpolicy closes.
+    `check=False` returns the CompletedProcess on a refused request too
+    — the tool's nonzero exit is the answer the caller classifies, not
+    a docker failure."""
+    container = 'dcs-hw-' + run_id + '-plant'
+    return docker('exec', container, 'dcs-plant-ctl',
+                  '127.0.0.1:' + str(port), *args,
+                  check=False, timeout=60)
 
 
 def _revised_peer_role(cfg):
@@ -1015,6 +1221,7 @@ def start_revised_controller(cfg, record, run_dir, model, active,
     directory.mkdir(parents=True, exist_ok=True)
     directory.chmod(0o777)
     standby = prefix + '-' + peer_name + ':' + str(peer_port)
+    owner_token = _plant_owner_tokens(cfg)['revised']
     timeline('model-revision-start',
              'derive ' + revised_doc.name + ' (+points '
              + str(info['added_points']) + ', +signals '
@@ -1022,7 +1229,8 @@ def start_revised_controller(cfg, record, run_dir, model, active,
              + (', retyped point ' + str(info['retyped_point'])
                 if incompatible else '')
              + '); launch ' + container
-             + ' --standby ' + standby + ' --revised')
+             + ' --standby ' + standby + ' --revised'
+             + ' --owner-token ' + str(owner_token))
     docker(*_docker_run_args(cfg, run_id, container),
            '--network', 'dcs-hwtest-' + run_id,
            '-p', '127.0.0.1:' + str(cfg['revised_port']) + ':8082',
@@ -1031,11 +1239,18 @@ def start_revised_controller(cfg, record, run_dir, model, active,
            IMAGE_PREFIX + 'controller:' + sha,
            '/model/revised.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
+           '--owner-token', str(owner_token),
            '--standby', standby,
            '--revised',
            '--scan-ms', '100', '--listen', '0.0.0.0:8082',
            '--state-file', CONTAINER_STATE_FILE,
-           '--journal-file', CONTAINER_JOURNAL_FILE)
+           '--journal-file', CONTAINER_JOURNAL_FILE,
+           # The roll demotes the field owner toward this peer's
+           # announced address — under the keyed announced-source
+           # contract only a peer carrying the pair's token can sign
+           # the line_proof the demoted peer's verify pull demands.
+           *(['--pair-token', str(cfg['pair_token'])]
+             if cfg.get('pair_token') else []))
     timeline('model-revision-up', container
              + ' running the revised model')
     return dict(info, container=container)
@@ -1079,9 +1294,11 @@ def start_foreign_controller(cfg, record, run_dir, model, active,
     directory.chmod(0o777)
     container = prefix + '-foreign'
     standby = prefix + '-' + peer_name + ':' + str(peer_port)
+    owner_token = _plant_owner_tokens(cfg)['foreign']
     timeline('negotiation-start',
              'derive ' + foreign_doc.name + '; launch ' + container
-             + ' --standby ' + standby + ' (no --revised)')
+             + ' --standby ' + standby + ' (no --revised)'
+             + ' --owner-token ' + str(owner_token))
     docker(*_docker_run_args(cfg, run_id, container),
            '--network', 'dcs-hwtest-' + run_id,
            '-p', '127.0.0.1:' + str(cfg['foreign_port']) + ':8082',
@@ -1090,6 +1307,7 @@ def start_foreign_controller(cfg, record, run_dir, model, active,
            IMAGE_PREFIX + 'controller:' + sha,
            '/model/foreign.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
+           '--owner-token', str(owner_token),
            '--standby', standby,
            '--scan-ms', '100', '--listen', '0.0.0.0:8082',
            '--state-file', CONTAINER_STATE_FILE,
@@ -1112,30 +1330,248 @@ def stop_foreign_controller(run_id, timeline):
     timeline('negotiation-stopped', container + ' removed')
 
 
+def start_driven_controller(cfg, record, run_dir, model, active,
+                            timeline):
+    """The scenario-callable driven-standby launch — the
+    dead-peer-latency case's second survivor: the run's labeled
+    driven controller on the same mounted model, `--standby <peer>
+    --driven`, so every checkpoint pull it ever performs happens
+    inside a `POST /scan` request — the per-request pull chain a
+    batched scan carries, and the work the serve-pool decision
+    confines to the batch's own worker. Fresh and never driven, it
+    reports `unsynchronized` — the convergence-grace clock the pair
+    health surface reads.
+
+    `active` is the scenario ctx key of the peer the driven standby
+    tracks ('active' is ctrl-a, 'standby' ctrl-b) — the checkpoint
+    source the case's stop induction then makes unreachable. The
+    container carries the run's managed and run labels so teardown
+    reconciles it with the rest of the rig, mounts the run's model
+    read-only at /model/plant.json, publishes its monitor on
+    cfg['driven_port'], gets its own runner-owned state/journal
+    directory, and carries the run's --pair-token so its checkpoint
+    answers sign the keyed line_proof an orphan-resolution probe's
+    ?prove= pull demands. The launch is recorded on the run's action
+    timeline; a docker failure raises so the calling scenario reports
+    the action never completed.
+
+    Returns the launched container's name.
+    """
+    run_id, sha = record['run_id'], record['attempted_sha']
+    prefix = 'dcs-hw-' + run_id
+    peers = {'active': ('a', 8080), 'standby': ('b', 8081)}
+    if active not in peers:
+        raise RuntimeError('start_driven expects the active endpoint '
+                           'key, got ' + repr(active))
+    peer_name, peer_port = peers[active]
+    directory = _controller_dir(run_dir, 'd')
+    directory.mkdir(parents=True, exist_ok=True)
+    directory.chmod(0o777)
+    container = prefix + '-d'
+    standby = prefix + '-' + peer_name + ':' + str(peer_port)
+    owner_token = _plant_owner_tokens(cfg)['driven']
+    timeline('driven-start', 'launch ' + container + ' --standby '
+             + standby + ' --driven --owner-token '
+             + str(owner_token))
+    docker(*_docker_run_args(cfg, run_id, container),
+           '--network', 'dcs-hwtest-' + run_id,
+           '-p', '127.0.0.1:' + str(cfg['driven_port']) + ':8082',
+           '-v', str(model) + ':/model/plant.json:ro',
+           '-v', str(directory) + ':' + CONTAINER_RUN_DIR,
+           IMAGE_PREFIX + 'controller:' + sha,
+           '/model/plant.json',
+           '--remote', prefix + '-plant:' + str(cfg['plant_port']),
+           '--owner-token', str(owner_token),
+           '--standby', standby,
+           '--driven', '--listen', '0.0.0.0:8082',
+           '--state-file', CONTAINER_STATE_FILE,
+           '--journal-file', CONTAINER_JOURNAL_FILE,
+           # The stale-island leg promotes this peer onto the field
+           # and the islanded pair's orphan-resolution probes pull
+           # its checkpoint with ?prove= — under the keyed contract
+           # only a peer carrying the pair's token can sign the
+           # line_proof those verify pulls demand.
+           *(['--pair-token', str(cfg['pair_token'])]
+             if cfg.get('pair_token') else []))
+    timeline('driven-up', container + ' serving a driven standby')
+    return {'container': container}
+
+
+def stop_driven_controller(run_id, timeline):
+    """The dead-peer-latency case's teardown: `docker rm -f` on the
+    driven peer's container — removed outright, not held down, so
+    later cases see the rig's original pair. Recorded on the run's
+    action timeline like the other lifecycle actions; a docker
+    failure raises so the calling scenario reports the teardown
+    never completed."""
+    container = 'dcs-hw-' + run_id + '-d'
+    timeline('driven-stop', 'docker rm -f ' + container)
+    docker('rm', '-f', container, timeout=90)
+    timeline('driven-stopped', container + ' removed')
+
+
+# The forged-checkpoint endpoint's monitor port inside the rig bridge —
+# never published to the host: only the rig's own peers dial it.
+FORGE_PORT = 8090
+
+
+def start_forge_endpoint(cfg, record, run_dir, document, owner,
+                         timeline, keyed=True):
+    """The scenario-callable forged-checkpoint endpoint launch — the
+    demote-forged-standby-source leg's hostile announce target: the
+    run's labeled rig-bridge container running the shipped `dcs-forge`
+    binary out of the controller image, serving `document` as its
+    /checkpoint answer while announcing itself to the named owner's
+    monitor so its bridge address is the recorded tracking hint a
+    POST /demote must verify.
+
+    `document` is the checkpoint-shaped dict the endpoint serves —
+    staged to a bind-mounted file inside the run directory that
+    dcs-forge re-reads on every pull, so the leg's next forged shape
+    lands by rewriting the returned 'document' path between demote
+    calls without a relaunch. `owner` is the ctx endpoint key of the
+    field-owning peer whose monitor the endpoint announces to
+    ('active' is ctrl-a's container, 'standby' ctrl-b's). `keyed`
+    selects whether the endpoint signs `?prove=` answers under the
+    run's --pair-token: the key-holding shape — every pulled document
+    genuinely signed, so only its content can convict it — is what
+    the forged legs need to reach the demote verify's command-record
+    audit rather than the proof gate; unkeyed is the unproven leg's
+    tokenless hostile endpoint. A run config carrying no pair token
+    launches unkeyed regardless — matching the contract's keyed-only
+    posture.
+
+    The container carries the run's managed and run labels so teardown
+    reconciles it with the rig, binds no host port — only the rig's
+    peers dial it — and refuses to launch unless the recorded
+    endpoint_placement marks 'forge' bridge-placed: the host egress
+    policy makes a host socket unreachable from the rig. The launch
+    is recorded on the run's action timeline; a docker failure raises
+    so the calling scenario reports the action never completed.
+
+    Returns {'container', 'dir', 'document', 'hits', 'keyed', 'port'}:
+    the forge's run-dir working directory, the served-document path
+    the leg rewrites, the hits ledger the binary appends every served
+    pull and announce to — the self-verifying record that the verify
+    pull reached the endpoint and whether its answer was signed — the
+    keyed posture actually launched, and the endpoint's announced
+    bridge port a journaled adoption names.
+    """
+    run_id, sha = record['run_id'], record['attempted_sha']
+    prefix = 'dcs-hw-' + run_id
+    peers = {'active': ('a', 8080), 'standby': ('b', 8081)}
+    if owner not in peers:
+        raise RuntimeError('start_forge expects the field-owning '
+                           'endpoint key, got ' + repr(owner))
+    placements = _endpoint_placement(cfg)
+    if placements['forge'] != 'bridge':
+        raise RuntimeError('endpoint_placement records forge as '
+                           + repr(placements['forge'])
+                           + ' but the endpoint must sit on the rig '
+                           'bridge — a host socket is unreachable '
+                           'from the rig')
+    directory = Path(run_dir) / 'forge'
+    directory.mkdir(parents=True, exist_ok=True)
+    directory.chmod(0o777)
+    document_path = directory / 'checkpoint.json'
+    # Host-side atomic staging: the container re-reads this file per
+    # pull, so a rename lands the next shape without a torn read.
+    staged = directory / 'checkpoint.staging.json'
+    staged.write_text(json.dumps(document))
+    staged.replace(document_path)
+    hits = directory / 'hits.jsonl'
+    hits.unlink(missing_ok=True)
+    container = prefix + '-forge'
+    # A leftover forge from an aborted pass leaves the same name; its
+    # staged document and hits ledger are refreshed above regardless.
+    docker('rm', '-f', container, check=False, timeout=60)
+    peer_name, peer_port = peers[owner]
+    announce = prefix + '-' + peer_name + ':' + str(peer_port)
+    keyed = bool(keyed and cfg.get('pair_token'))
+    timeline('forge-start', 'launch ' + container + ' serving '
+             + document_path.name + ', announcing to ' + announce
+             + (' (keyed)' if keyed else ' (unkeyed)'))
+    docker(*_docker_run_args(cfg, run_id, container),
+           '--network', 'dcs-hwtest-' + run_id,
+           '-v', str(directory) + ':/forge',
+           '--entrypoint', 'dcs-forge',
+           IMAGE_PREFIX + 'controller:' + sha,
+           '--listen', '0.0.0.0:' + str(FORGE_PORT),
+           '--document', '/forge/checkpoint.json',
+           '--hits', '/forge/hits.jsonl',
+           '--announce', announce,
+           *(['--pair-token', str(cfg['pair_token'])]
+             if keyed else []))
+    timeline('forge-up', container + ' serving the staged document')
+    return {'container': container, 'dir': str(directory),
+            'document': str(document_path), 'hits': str(hits),
+            'keyed': keyed, 'port': FORGE_PORT}
+
+
+def stop_forge_endpoint(run_id, timeline):
+    """The forged-checkpoint endpoint's teardown: `docker rm -f` on
+    the run's forge container — removed outright so the hint the demote
+    verify dials is a dead endpoint again. Recorded on the run's action
+    timeline like the other lifecycle actions; a docker failure raises
+    so the calling scenario reports the teardown never completed."""
+    container = 'dcs-hw-' + run_id + '-forge'
+    timeline('forge-stop', 'docker rm -f ' + container)
+    docker('rm', '-f', container, timeout=90)
+    timeline('forge-stopped', container + ' removed')
+
+
 def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
                   timeline):
     """The scenario driver's view of the running rig: monitor base URLs
     per endpoint key (the model-revision case's third controller
     answers on 'revised' once launched, the checkpoint-negotiation
-    case's foreign peer on 'foreign'), the published plant-protocol
-    endpoint, the run's evidence dir and deadline, the runner-owned
-    controller-restart, plant stop/start, model-revision, and
-    foreign-peer launch/teardown actions, and the host-side
+    case's foreign peer on 'foreign', the dead-peer-latency case's
+    driven standby on 'driven'), the published plant-protocol
+    endpoint, the run config's pinned plant-writer owner token per
+    endpoint key — the pair's and every third peer's — the run's
+    evidence dir and deadline, the runner-owned
+    controller restart/cold-restart, plant stop/start,
+    model-revision, foreign-peer launch/teardown, driven-peer
+    launch/teardown, and forged-checkpoint-endpoint
+    launch/teardown actions, the run's shared --pair-token the
+    announced-source legs' keyed posture answers, the shipped plant
+    tool's docker-exec invocation, the run config's recorded endpoint
+    placements and the
+    run's rig bridge name — the placement rule a scenario attachment
+    follows when it needs an endpoint a rig peer must dial — and the
+    host-side
     per-controller state/journal files the restart and model-revision
     scenarios read."""
     run_id = record['run_id']
     names = {'active': 'a', 'standby': 'b', 'revised': 'c',
-             'foreign': 'foreign'}
+             'foreign': 'foreign', 'driven': 'd'}
     return {
         'active': 'http://127.0.0.1:' + str(cfg['active_port']),
         'standby': 'http://127.0.0.1:' + str(cfg['standby_port']),
         'revised': 'http://127.0.0.1:' + str(cfg['revised_port']),
         'foreign': 'http://127.0.0.1:' + str(cfg['foreign_port']),
+        'driven': 'http://127.0.0.1:' + str(cfg['driven_port']),
         'plant': '127.0.0.1:' + str(cfg['plant_host_port']),
+        # The run config's pinned --owner-token per endpoint key: a
+        # scenario attachment ensures the writer claim under the
+        # active's token to drive plant stimuli on the designed
+        # shared-claim path.
+        'plant_owner': dict(_plant_owner_tokens(cfg)),
+        # The run config's recorded endpoint placements — the rig
+        # bridge-to-host reachability rule the scenario attachments
+        # follow: host-side attachments dial 'loopback' endpoints on
+        # their published 127.0.0.1 ports; a 'bridge' endpoint a rig
+        # peer must reach runs in a labeled container on
+        # ctx['rig_network'] — a host socket is unreachable from the
+        # rig bridge, so no rig-dialed endpoint may live on the host.
+        'endpoint_placement': dict(_endpoint_placement(cfg)),
+        'rig_network': 'dcs-hwtest-' + run_id,
         'evidence_dir': evidence_dir,
         'deadline': deadline,
         'restart_controller': lambda name: restart_controller(
             run_id, name, timeline),
+        'cold_restart_controller': lambda name: cold_restart_controller(
+            run_id, run_dir, name, timeline),
         'stop_controller': lambda name: stop_controller(
             run_id, name, timeline),
         'start_controller': lambda name: start_controller(
@@ -1143,6 +1579,10 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         'failover_misses': cfg['failover_misses'],
         'stop_plant': lambda: stop_plant(run_id, timeline),
         'start_plant': lambda: start_plant(run_id, timeline),
+        # The shipped dcs-plant-ctl inside the plant container — the
+        # lane's seam for every plant op the tool's subcommands cover.
+        'plant_ctl': lambda *args: plant_ctl(
+            run_id, cfg['plant_port'], *args),
         'start_revised': lambda name, incompatible=False:
             start_revised_controller(
                 cfg, record, run_dir, src / cfg['model_fixture'],
@@ -1152,6 +1592,23 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
             timeline),
         'stop_foreign': lambda: stop_foreign_controller(
             run_id, timeline),
+        'start_driven': lambda name: start_driven_controller(
+            cfg, record, run_dir, src / cfg['model_fixture'], name,
+            timeline),
+        'stop_driven': lambda: stop_driven_controller(
+            run_id, timeline),
+        # The run's shared --pair-token — the keyed posture the
+        # announced-source legs need: absent means the rig verifies
+        # nothing and the legs report inconclusive rather than failed.
+        'pair_token': cfg.get('pair_token'),
+        # The forged-checkpoint endpoint's launch/teardown — the
+        # demote-forged-standby leg's hostile announced source. The
+        # staged document path the launch returns is the leg's rewrite
+        # seam between demote calls.
+        'start_forge': lambda document, owner, keyed=True:
+            start_forge_endpoint(cfg, record, run_dir, document,
+                                 owner, timeline, keyed),
+        'stop_forge': lambda: stop_forge_endpoint(run_id, timeline),
         'state_files': {key: str(_controller_dir(run_dir, peer)
                                  / 'state.json')
                         for key, peer in names.items()},
@@ -1167,6 +1624,17 @@ def _start_rig(cfg, record, src, run_dir, timeline):
     run_id, sha = record['run_id'], record['attempted_sha']
     net = 'dcs-hwtest-' + run_id
     prefix = 'dcs-hw-' + run_id
+    tokens = _plant_owner_tokens(cfg)
+    placements = _endpoint_placement(cfg)
+    # The endpoints this launch publishes on host loopback must be
+    # recorded 'loopback' — a config describing them 'bridge' claims
+    # a rig this launch does not build.
+    for key in ('active', 'standby', 'plant'):
+        if placements[key] != 'loopback':
+            raise RuntimeError('endpoint_placement records ' + key
+                               + ' as ' + repr(placements[key])
+                               + ' but the rig publishes it on host '
+                               'loopback')
     model = src / cfg['model_fixture']
     dynamics = src / cfg['dynamics_fixture']
     for path in (model, dynamics):
@@ -1187,6 +1655,15 @@ def _start_rig(cfg, record, src, run_dir, timeline):
     # `--internal` is still rejected on purpose: it also blocks the
     # published ports the scenario driver needs. Disabled masquerade
     # remains as defense in depth beneath the firewall policy.
+    # The bridge-to-host half of that policy bounds endpoint
+    # placement: its INPUT drop refuses every packet a rig container
+    # aims at a host socket, so an endpoint a rig peer must dial —
+    # the tracking-source/auth legs' forge or interposer, a
+    # plant-probe listener — runs bridge-placed in a labeled
+    # container on this network, dialed by container name (the
+    # recorded endpoint_placement selection, validated above), while
+    # host-side scenario attachments only ever dial the
+    # 127.0.0.1-published ports.
     docker('network', 'create',
            '-o', 'com.docker.network.bridge.name=' + cfg['rig_ifname'],
            '-o', 'com.docker.network.bridge.enable_ip_masquerade=false',
@@ -1213,6 +1690,12 @@ def _start_rig(cfg, record, src, run_dir, timeline):
             time.sleep(1)
     else:
         raise RuntimeError('plant listener never bound')
+    # The announced-source contract is keyed-only: both pair members
+    # carry the run config's shared --pair-token so a demoted owner's
+    # verify pull can demand the keyed line_proof. An empty token runs
+    # the rig unkeyed — where every announced-only demotion refuses.
+    pair_flags = (['--pair-token', str(cfg['pair_token'])]
+                  if cfg.get('pair_token') else [])
     docker(*_docker_run_args(cfg, run_id, prefix + '-a'),
            '--network', net,
            '-p', '127.0.0.1:' + str(cfg['active_port']) + ':8080',
@@ -1222,9 +1705,11 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            'dcs-hwtest/controller:' + sha,
            '/model/plant.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
+           '--owner-token', str(tokens['active']),
            '--scan-ms', '100', '--listen', '0.0.0.0:8080',
            '--state-file', CONTAINER_STATE_FILE,
-           '--journal-file', CONTAINER_JOURNAL_FILE)
+           '--journal-file', CONTAINER_JOURNAL_FILE,
+           *pair_flags)
     docker(*_docker_run_args(cfg, run_id, prefix + '-b'),
            '--network', net,
            '-p', '127.0.0.1:' + str(cfg['standby_port']) + ':8081',
@@ -1234,12 +1719,17 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            'dcs-hwtest/controller:' + sha,
            '/model/plant.json',
            '--remote', prefix + '-plant:' + str(cfg['plant_port']),
+           '--owner-token', str(tokens['standby']),
            '--standby', prefix + '-a:8080',
            '--auto-promote', str(cfg['failover_misses']),
            '--scan-ms', '100', '--listen', '0.0.0.0:8081',
            '--state-file', CONTAINER_STATE_FILE,
-           '--journal-file', CONTAINER_JOURNAL_FILE)
-    timeline('rig-up', 'plant + controller pair on ' + net)
+           '--journal-file', CONTAINER_JOURNAL_FILE,
+           *pair_flags)
+    timeline('rig-up', 'plant + controller pair on ' + net
+             + ' (owner tokens active=' + str(tokens['active'])
+             + ', standby=' + str(tokens['standby'])
+             + (', pair-keyed' if pair_flags else ', unkeyed') + ')')
 
 
 def _wait_monitor(cfg, timeline):

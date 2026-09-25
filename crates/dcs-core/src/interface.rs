@@ -199,8 +199,9 @@ pub struct CommandArgument {
 }
 
 /// When a [`CommandSpec`] may be submitted at all — the static
-/// availability rule; live availability is the served resource state
-/// a later tranche adds.
+/// availability rule; live availability is the `available`/`refusal`
+/// pair the served [`CommandState`](crate::CommandState) reports per
+/// rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandAvailability {
@@ -219,7 +220,11 @@ pub enum CommandAvailability {
     /// reports: the component's kind decides per submission, and a
     /// refusal is answered
     /// [`CommandRefused`](crate::CommandError::CommandRefused) carrying
-    /// the kind's declared refusal reason.
+    /// the kind's declared refusal reason. The kind's standing
+    /// availability probe publishes the per-scan
+    /// [`CommandVerdict`](crate::CommandVerdict) the resource view
+    /// serves as the command's `available` — advisory, never replacing
+    /// the receipted path's answer.
     KindDeclared,
 }
 
@@ -258,9 +263,7 @@ pub enum AdaptedCommand {
 /// [`applied`](crate::CommandOutcome::Applied) or
 /// [`rejected`](crate::CommandOutcome::Rejected) with the named
 /// [`CommandError`](crate::CommandError) reason, journaled through
-/// `command_settled`. This tranche declares the command surface only;
-/// named-command execution beyond the adapted generic variants is a
-/// later slice.
+/// `command_settled`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandSpec {
     /// The command's stable identity within the interface —

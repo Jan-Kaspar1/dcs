@@ -120,7 +120,12 @@ reinitializes every component — the carryover rule moves operator-writable
 internal points, still-declared output image samples, and the force set
 matched by declared point identity, and names each component's captured
 state `DroppedElement::Component` in the carryover report rather than
-restoring it. A revision that wants an instance's state to survive keeps
+restoring it. Runtime tuning reverts with the rest of the component
+state: the report's `reverted_tuning` itemizes, per reinitialized
+component, each descriptor-declared parameter whose checkpointed value
+differed from the revision's declared default — the witnessed record of
+what a receipted `set_parameter` tune did not carry. A revision that
+wants an instance's state to survive keeps
 its declared identity (`<kind>:<id>`) — but only ordinary same-model
 checkpoint convergence restores it; there are no per-kind compatibility
 rules yet.
@@ -347,15 +352,15 @@ let mut executor = assemble(&model, &components, &driver).unwrap();
 
 // The plant side drives the `in` point; each scan publishes the peak.
 driver.write(PointId(1), Value::Float(5.0)).unwrap();
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(driver.read(PointId(3)).unwrap().value, Value::Float(5.0));
 
 driver.write(PointId(1), Value::Float(3.0)).unwrap();
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(driver.read(PointId(3)).unwrap().value, Value::Float(5.0));
 
 driver.write(PointId(2), Value::Bool(true)).unwrap();
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(driver.read(PointId(3)).unwrap().value, Value::Float(3.0));
 
 // The snapshot carries the instance's descriptor and diagnostics.
@@ -445,8 +450,8 @@ published verdict and the refusal must be the same expression. The
 verdict is advisory only: submissions still validate, queue, and settle
 through the receipted path, and a verdict dispatch disagrees with
 settles honestly rather than failing the scan. The default reports
-every declared command invocable, matching the read model's earlier
-unconditional `available`.
+every declared command invocable — the unconditional `available` a
+publication carrying no verdict still serves.
 
 ### Declaring an emitted event
 
@@ -518,10 +523,14 @@ A generic consumer needs no kind-specific code:
 - `dcs-ctl invoke <component> <command> [<name>=<value>]...` submits a
   declared command through the same receipted path without a browser.
 
-A `KindDeclared` command reports `available` in the resource view even
-when the kind's predicate would refuse this submission — the served
-refusal is the settled `command_refused` receipt's, so consumers should
-surface that named reason rather than pre-judging availability.
+A `KindDeclared` command's served `available` joins the published
+verdict: while the kind's predicate refuses, the resource view reports
+`available: false` carrying the kind's named refusal reason. The served
+answer is advisory — it is the last completed scan's standing verdict,
+so a submission still validates, queues, and settles through the
+receipted path, and a refusal the verdict predates (an argument-domain
+check, an `invoke_command` invariant) still lands on the settled
+`command_refused` receipt for consumers to surface.
 
 ## Adding a device kind
 
@@ -603,7 +612,7 @@ A factory returns one of two `DeviceDriver` contributions:
   initial value). The fragment merges with every other `Sim` contribution
   and the synthesized internal points into one `SimDriver` backend, so a
   model can mix many `sim*` devices freely.
-- `DeviceDriver::Backend(DeviceBackend { io, step, claim, release, inspect, field_facing })` — a
+- `DeviceDriver::Backend(DeviceBackend { io, step, claim, release, ensure, startup_claim, probe, reclaim, fenced_by, inspect, field_facing })` — a
   self-contained backend. `io` is the point-facing driver; `step` is an
   optional `StepHook` (`Fn(f64) -> Result<Tick, dcs_assembly::StepError>`)
   advancing the backend's simulated plant one `dt` per `FanoutDriver::step` —
@@ -622,6 +631,63 @@ A factory returns one of two `DeviceDriver` contributions:
   claim token it would otherwise re-assert on a reconnect. `sim-tcp`
   installs `RemoteDriver::release_claim` for exactly that — a demoted
   attachment must not race the new owner back onto a restarted plant.
+  `ensure` is an optional `EnsureHook`
+  (`Fn(u64) -> Result<bool, dcs_assembly::StepError>`) — the conditional
+  counterpart of `claim` the orphan cycle probes: while a demoted
+  ex-owner's tracked line reports no field owner,
+  `FanoutDriver::ensure_field_writer` runs it to re-arm the claim under
+  the owner's token only where the field stands unclaimed or already
+  names that token, never preempting a standing owner. `sim-tcp`
+  installs the plant server's `ensure_writer`; a kind whose claim dies
+  with its connection — `sim-bus`, `sim-cyclic` — leaves it `None`, its
+  arbitration carrying no conditional grant to probe.
+  `startup_claim` is an optional `StartupClaimHook`
+  (`Fn(u64) -> Result<bool, dcs_assembly::StepError>`) — the
+  launched-controller counterpart of `claim` a started active's
+  activation asserts once: `FanoutDriver::claim_field_writer_unless_held`
+  runs it to take the field only where no *live* attachment holds a
+  different owner's claim — `Ok(true)` — refusing `Ok(false)` while a
+  live incumbent stands, so a controller restarted onto a stale
+  checkpoint cannot preempt it and silently roll back commands the
+  incumbent receipted and applied. A claim a dead owner left standing
+  still preempts — the restart-as-active recovery path. `sim-tcp`
+  installs the plant server's `claim_writer_unless_held`; a kind whose
+  arbitration cannot distinguish live holders leaves it `None` and the
+  fan-out falls back to the unconditional `claim` for it, the pre-hook
+  behavior.
+  `probe` is an optional `ProbeHook`
+  (`Fn() -> Result<FieldClaim, dcs_assembly::StepError>`) — the claim's
+  read-only counterpart a peer runs once per scan to report the field's
+  write-ownership as `RoleReport::field_claim`: `held` while an owner
+  stands, `unclaimed` while none does. The probe asserts, joins, and
+  releases nothing, so the observation cannot seize the field it
+  reports. `sim-tcp` installs the plant server's `probe_writer`; a kind
+  whose arbitration cannot be observed without taking it leaves it
+  `None` and the served report carries `None` — no claim question was
+  answered — rather than a guessed `held`.
+  `reclaim` is an optional `ReclaimHook`
+  (`Fn(u64) -> Result<bool, dcs_assembly::StepError>`) — the *bound*
+  conditional re-grant a fencing-demoted ex-owner probes each standby
+  scan while its loss mark stands: `FanoutDriver::reclaim_field_writer`
+  runs it to take the claim back under the run's token only where the
+  field stands unclaimed or already names it — `Ok(true)` — refusing
+  `Ok(false)` while a different owner stands, so a released preemption
+  ends with the ex-owner holding the field again and no probe ever
+  preempts. Unlike `ensure` the grant binds the probing attachment to
+  the claim's holders, because the peer's gate lifts on it and its
+  writes must pass the arbitration it re-took. `sim-tcp` installs the
+  plant server's bound `ensure_writer`; a kind without a bound
+  conditional grant leaves it `None` and the demoted peer keeps the
+  pre-hook wedge — an operator's promote unwedges.
+  `fenced_by` is an optional `FencedByHook` (`Fn() -> Option<u64>`) —
+  the claimant attribution a fencing-loss journal entry reads:
+  `FanoutDriver::fencing_claimant(point)` asks it for the owner token
+  the field's standing claim named the last time it fenced a mutation
+  on `point`'s backend, so `field_claim_lost` attributes the takeover
+  rather than recording an anonymous loss. `sim-tcp` installs
+  `RemoteDriver::fenced_by`; a kind whose fencing verdicts carry no
+  owner identity leaves it `None` and the entry records `claimant:
+  null`.
   `inspect` is an optional
   `Option<Arc<dyn Any + Send + Sync>>` typed handle the factory installs when
   the backend exposes more than the `IoDriver` surface — `sim-scripted`
@@ -805,6 +871,11 @@ fn memory_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         step: None,
         claim: None,
         release: None,
+        ensure: None,
+        startup_claim: None,
+        probe: None,
+        reclaim: None,
+        fenced_by: None,
         inspect: None,
         field_facing: false,
     }))
@@ -868,12 +939,12 @@ let components = ComponentRegistry::new().with(AnalogInput::<f64>::KIND, |spec| 
 let mut executor = assemble(&model, &components, &driver).unwrap();
 
 // `raw` starts at its declared initial 5.0 -> the first scan writes 50.0.
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(driver.read(PointId(2)).unwrap().value, Value::Float(50.0));
 
 // The plant side moves the input; the next scan follows.
 driver.write(PointId(1), Value::Float(10.0)).unwrap();
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(driver.read(PointId(2)).unwrap().value, Value::Float(100.0));
 ```
 
@@ -1275,6 +1346,11 @@ fn demo_bus(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         step: None,
         claim: None,
         release: None,
+        ensure: None,
+        startup_claim: None,
+        probe: None,
+        reclaim: None,
+        fenced_by: None,
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -1321,7 +1397,7 @@ assert_eq!(driver.read(PointId(1)).unwrap().value, Value::Float(0.0));
 
 // One exchange ran at the read boundary and the input phase served the
 // fresh latch — while the per-point `read` never transported.
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(bus.exchange_count(), 1);
 assert_eq!(executor.sample(PointId(1)).unwrap().value, Value::Float(4.0));
 
@@ -1330,7 +1406,7 @@ assert_eq!(executor.sample(PointId(1)).unwrap().value, Value::Float(4.0));
 // it: the one-scan actuation delay.
 driver.write(PointId(2), Value::Float(7.0)).unwrap();
 assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(0.0)));
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(7.0)));
 
 // The link drops: exchanges fail, each counted once at the boundary,
@@ -1338,14 +1414,14 @@ assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(7.0)));
 // `stale_after_ticks` budget.
 bus.set_link_down(true);
 bus.field_set(PointId(1), Value::Float(9.0)); // unseen until an exchange lands
-executor.scan().unwrap(); // miss 1 of 3: held value, still inside the budget
+executor.scan(); // miss 1 of 3: held value, still inside the budget
 assert_eq!(executor.snapshot().io_health.failed_exchanges, 1);
 assert_eq!(executor.snapshot().io_health.failed_reads, 0);
 assert_eq!(executor.sample(PointId(1)).unwrap().value, Value::Float(4.0));
 
 // Miss 2: the held sample's acquisition stamp lags past the declared
 // budget — `Uncertain(Stale)`.
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(
     executor.sample(PointId(1)).unwrap().quality,
     Quality::Uncertain(QualityReason::Stale)
@@ -1354,7 +1430,7 @@ assert_eq!(
 // Miss 3 reaches `exchange_miss_threshold`: reads escalate to
 // `Disconnected` — an ordinary boundary fault degrading the held value
 // to `Bad`.
-executor.scan().unwrap();
+executor.scan();
 let health = &executor.snapshot().io_health;
 assert_eq!(health.failed_exchanges, 3);
 assert_eq!(health.failed_reads, 1);
@@ -1378,7 +1454,7 @@ assert_eq!(
 // The link returns: the next exchange completes — misses reset, the
 // link recovers, and the field's asserted value lands fresh.
 bus.set_link_down(false);
-executor.scan().unwrap();
+executor.scan();
 assert_eq!(
     executor.sample(PointId(1)).unwrap(),
     Sample::good(Value::Float(9.0), Tick(6))
@@ -1391,7 +1467,7 @@ let gate = dcs_runtime::WriteGate::closed(&driver);
 let mut standby = assemble(&model, &ComponentRegistry::new(), &gate).unwrap();
 bus.field_set(PointId(1), Value::Float(2.0));
 gate.write(PointId(2), Value::Float(5.0)).unwrap(); // accepted and dropped
-standby.scan().unwrap();
+standby.scan();
 assert_eq!(standby.sample(PointId(1)).unwrap().value, Value::Float(2.0));
 assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(7.0)));
 
@@ -1399,9 +1475,88 @@ assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(7.0)));
 // publish it.
 gate.open();
 gate.write(PointId(2), Value::Float(5.0)).unwrap();
-standby.scan().unwrap();
+standby.scan();
 assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(5.0)));
 ```
+
+## Composing the dynamics document
+
+The plant model is the control contract; the dynamics document beside it is
+the simulated world's physics. `dcs-plant-server --dynamics FILE` merges a
+JSON list of `ProcessElement` declarations into the served channel map —
+`first_order_lag`, `second_order_lag`, `integrator`, `dead_time`, `noise`,
+`bool_flow`, `flow_sum`, `scaled_flow`, `threshold` — and
+`dcs-sim-bus-device --dynamics` merges the same list over its register bank.
+`dcs-plant-server <model> --check-dynamics FILE` preflights the document
+without starting the server: every element is merged and validated against
+the model's channel map under the same rules `--dynamics` applies, each
+rejection named by its element index and driving point, so plant CI can
+reject a malformed document before deployment. The document is
+deliberately not `PlantModel` schema: process physics are
+simulation internals no controller reads.
+
+`dcs-build`'s `dynamics` module composes that document through the same
+typed seam as the model. The element structs are data mirrors of the
+`dcs-sim` serde vocabulary — the convention the kind specs already apply to
+component descriptors, so the model producer gains no `dcs-sim` dependency —
+and `dcs_build::tests::dynamics` pins each mirror against the vocabulary
+item it serializes as. `DynamicsBuilder` declares one element per method in
+stepping order; ends bind the point handles the model composition returns,
+narrowed by the kind each end requires, so a wrongly-kinded reference fails
+to compile:
+
+```rust
+use dcs_build::{Direction, DynamicsBuilder, PlantBuilder, PointId};
+
+let mut plant = PlantBuilder::new();
+let sim = plant.device("sim").id;
+let inflow_ch = plant.channel::<f64>(sim, "inflow", Direction::In);
+let net_flow_ch = plant.channel::<f64>(sim, "net-flow", Direction::In);
+let draw_ch = plant.channel::<f64>(sim, "pump-draw", Direction::In);
+let cmd_ch = plant.channel::<bool>(sim, "pump-cmd", Direction::Out);
+
+let inflow = plant.field_input::<f64>(PointId(12), inflow_ch, false);
+let net_flow = plant.field_input::<f64>(PointId(13), net_flow_ch, false);
+let draw = plant.field_input::<f64>(PointId(20), draw_ch, false);
+let cmd = plant.field_output::<bool>(PointId(100), cmd_ch);
+let model = plant.build().unwrap();
+
+// Float ends take `InPoint<f64>`/`OutPoint<f64>` handles; the `bool_flow`
+// gate and `threshold` contact take `bool` handles — a `Float` point in a
+// `Bool` end is a compile error, not a merge failure.
+let mut dynamics = DynamicsBuilder::new();
+dynamics
+    .bool_flow(cmd, draw, -10.0, 0.0, 0.0)
+    .flow_sum([inflow, draw], net_flow, 4.0, 4.0);
+
+let document = dynamics.emit(&model).unwrap();
+let json = serde_json::to_string_pretty(&document).unwrap();
+```
+
+`emit` resolves what the types cannot carry against the emitted model and
+reports a named `DynamicsError` — the failures the merge would otherwise
+name at server startup, raised where the document is authored:
+
+- `UnknownPoint` — an element references a point the model does not declare
+  (a stale or foreign handle);
+- `InternalPoint` — the reference names a channel-less internal point, which
+  lives in the scan image and has no simulated-field binding;
+- `PointKind` — the referenced point's declared kind differs from the end's
+  required kind (`Float` throughout, `Bool` on a `bool_flow` gate and a
+  `threshold` contact);
+- `InvalidParameter` / `DegenerateThreshold` — a declared value outside the
+  bounds the merge's channel-map validation enforces (finite and positive
+  `time_constant`/`delay`/`damping_ratio`, non-negative `amplitude`, finite
+  rates, `bias`, `gain`, bounds, and `initial`, and a `threshold`'s
+  distinct `on`/`off`);
+- `ConflictingDriver` — two elements drive the same point.
+
+The emitted list serializes under the document's existing grammar —
+`serde_json::to_string_pretty` produces the canonical bytes — so the
+composition is byte-deterministic and the checked-in artifact stays
+diffable. Runtime fault injection is not part of the document: `inject_fault`
+is a plant-protocol verb exercised by tests and `dcs-plant-ctl`, never a
+`ProcessElement` kind.
 
 ## Automatic versus supplied
 

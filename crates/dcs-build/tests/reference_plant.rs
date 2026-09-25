@@ -12,7 +12,10 @@
 //! byte-pinned to the release record's artifacts fetched through the
 //! stand-in remote at the pinned rev, `diff` legs over a doctored
 //! compatible revision and the identical document, and
-//! `summary`/`signal-index` recorded as run evidence — the manifest
+//! `summary`/`signal-index` recorded as run evidence — the
+//! alarm-validation leg proving the released `dcs-controller --check`
+//! refuses a customer-owned document whose managed-alarm record is
+//! broken, naming the missing element — the manifest
 //! fingerprint check, the
 //! rig-definition consistency check asserting `deploy/compose.yaml`
 //! instantiates `deploy/manifest.json`, the deterministic scripted
@@ -23,15 +26,156 @@
 //! kind-declared command's structured receipt through `POST /command`,
 //! a kind-emitted event's arrival in the consumer-visible record, and
 //! the served registry document's structural conformance to the
-//! fetched record artifact —
-//! the `consumers` stage,
-//! which replays that driven run under each consumer schedule (no UI,
-//! polling, a stalled reader, churn, malformed/flooded traffic, a UI
+//! fetched record artifact — the `pair` stage, which runs the
+//! manifest-declared standby pair on the released tooling: the second
+//! controller converging to `tracking`, scans driven through
+//! `POST /scan` keeping the peers identical, a receipted
+//! `demote`/`promote` switching the roles, and the run continuing
+//! bumplessly with the adopted receipts and the durable journal
+//! files' transition records intact — the stage's negotiation leg
+//! then launching a third released standby on a foreign-fingerprint
+//! model document: the peer reporting the named non-converged
+//! `degraded` state through `GET /role`, `POST /promote` answering
+//! `409 not_converged`, the active undisturbed throughout, and a
+//! control peer on the pair's own model converging and promoting
+//! normally —
+//! plus the pair contract's
+//! refusal half: `POST /promote` before the standby's first transfer
+//! answering the named `not_converged` refusal with no field hand-off,
+//! a receipted write to the tracking standby answering the named
+//! `not_active` rejection with no phantom effect or audit, and the
+//! same promote succeeding once the standby tracks — plus the pair
+//! contract's failure-handover leg: a proven duty-pump field-channel
+//! fault through the plant protocol's declared `inject_fault` handing
+//! `duty` to the standby pump inside the declared bound with the
+//! faulted pump's `fault`/`avail` reporting the exclusion and the
+//! managed fault alarm annunciating with journaled `point_changed`
+//! evidence, the all-out `none_available`/`all_faulted` annunciation
+//! on losing every pump, and the declared recovery with the pair's
+//! controller roles unmoved — plus the pair
+//! contract's takeover leg: with the pair tracking and the pump group
+//! holding a duty demand, receipted `p101-mode`/`p101-hand`/`p101-oos`
+//! writes through the active's `POST /command` producing the declared
+//! manual leg — group-demand exclusion, the hand-driven run under the
+//! thermal/moisture guards, a plant-protocol protection input's proven
+//! fault and managed alarm, the out-of-service inhibit, and the
+//! restore returning the pump to group control with each attributed
+//! transition journaled in order — plus the pair contract's
+//! staged-vs-field divergence leg: the tracking standby's checkpoint
+//! pulls withheld through an observation window while a field-side
+//! write lands through the run's plant-protocol client, the stale
+//! peer's served `diverged` report naming the perturbed output, its
+//! promote refused `not_converged` with no field hand-off, the
+//! active's writes/receipts/journal undisturbed, and a write-free
+//! control window reconverging and promoting normally — plus the pair
+//! contract's emit-identical leg: with the standby tracking, the
+//! sequencer's counted `step_completed` emissions must serve
+//! identical routed event records through both peers'
+//! `GET /resources` views — the `consumers`
+//! stage, which replays that driven run under each consumer schedule
+//! (no UI, polling, a stalled reader, churn, malformed/flooded
+//! traffic, a UI
 //! process restart) requiring identical digests, the `ctl` stage,
 //! which exercises the released `dcs-ctl` operator CLI's receipted
 //! `invoke` path, read subcommands, and named refusal modes against
-//! the same driven run, and the `upgrade`
-//! stage, which repins the materialized tree to the checkout's `HEAD`
+//! the same driven run, the pair contract's report leg, which runs
+//! the released `dcs-alarm-report` over the driven pair's served
+//! journal and manifest-declared durable journal file — the declared
+//! `AlarmReport` metric set asserted, the refusal modes exiting
+//! nonzero — the pair contract's demote-boundary pending-command
+//! leg, which admits a receipted write on the field owner and demotes
+//! inside its pending window: the demoted peer's first quiesced scan
+//! audited for no phantom `command_settled` and no vanished pending
+//! receipt, the admission settling exactly once — carried `applied`
+//! or `Rejected{superseded}` — across both peers' journals, receipt
+//! logs, images, and durable files, and the pair's launch roles
+//! restored — the pair contract's managed-lifecycle leg, which
+//! exercises the emitted model's whole managed-alarm surface on the
+//! deployed pair — the field-driven activation's journaled
+//! `alarm`/`unacknowledged`, the receipted actor-attributed `ack`,
+//! the bounded shelve's `shelved` report and auto-release at the
+//! declared `max_shelve_ticks`, the never-shelvable shelve write's
+//! named `not_writable` refusal, and the pump `oos` drive's declared
+//! `out_of_service`/`suppressed` wiring through the suppressed trip
+//! and the return to service, the durable journal's ordered record
+//! audited and the pair's roles and driven inputs restored — the pair
+//! contract's managed run-state carryover leg, which proves the
+//! managed alarm kinds' checkpointed run state carries across a
+//! takeover on the deployed pair — a per-pump fault alarm held
+//! `out_of_service` through its wired `oos` point and tripped
+//! suppressed, the shelvable alarm shelved mid-run through its
+//! writable journaled `shelve` point, the documented
+//! `demote`/`promote` landing inside the declared `max_shelve_ticks`
+//! bound, the promoted peer asserting `shelved` stands and releases
+//! at the tick the continued countdown expires — never a bound
+//! restarted at the switch — `out_of_service` standing with
+//! evaluation held, both durable journals' ordered records continuous
+//! across the switch, and every driven input and the pair's launch
+//! roles restored — the pair
+//! contract's staging leg, which proves the deployed pair stages and
+//! de-stages on level through the emitted model's declared setpoint
+//! chain: both pumps held out of service through receipted `oos`
+//! writes so the declared inflow raises the level unopposed, the
+//! active's monitor asserting `demand` moves 0→1→2 only at the
+//! declared `start`/`lag_start` crossings with `duty_call`/`lag_call`
+//! reporting, the `high` crossing annunciating the managed high-level
+//! alarm with journaled evidence, the releases staging the group with
+//! the lag answering inside the declared `start_delay_ticks` and each
+//! pump's `cmd`/`run` field outputs proving the start, and the staged
+//! pumps drawing the level down through the declared de-stage order —
+//! the lag's run releasing before the duty's — to the `below-cutoff`
+//! floor, the durable journal audited for the ordered record and the
+//! pair's roles unchanged — the pair contract's per-pump
+//! out-of-service leg, which proves a receipted `oos` write on the
+//! duty pump excludes it on the deployed pair — the in-service cone
+//! and the aggregated availability dropping, `duty` handing to the
+//! sibling inside the declared wiring bound, `staged` reporting the
+//! available count, the held pump's command released through the
+//! sibling's service — each managed per-pump alarm reporting the
+//! `out_of_service`/`suppressed` states its declared lifecycle
+//! bindings select, a mid-OOS run-contact fault asserting `alarm` as
+//! process truth with the `unacknowledged` latch withheld, the false
+//! write returning the pump to availability and re-annunciating the
+//! outlasted trip, the receipted `ack` settling the latch, the next
+//! cycle's rotation handing `duty` back, and the durable journal
+//! carrying every managed transition beside the attributed
+//! settlements — the pair contract's power-fail interlock leg, which
+//! drives the station `power-fail` contact through the plant protocol
+//! on the settled pair under a standing demand — `power-ok` and both
+//! pumps' availability dropping, the motor commands releasing while
+//! the chain's `demand` still stands, `none-available` and the managed
+//! `power-fail` alarm annunciating with journaled evidence, the
+//! receipted `power-fail-ack` clearing the latch mid-condition, and
+//! the released contact re-staging the demand inside the declared
+//! bounds with the pair's roles unchanged — the pair contract's
+//! alarm-rationalization leg, which asserts the emitted model's
+//! managed alarm instances' declared-once record verbatim on both
+//! peers' served surfaces — `GET /signals`' components section
+//! carrying each instance's `rationalization` block, `GET
+//! /snapshot`'s parameters section serving each alarm's declared
+//! `priority`/`class`/`response_ticks` live — before and after the
+//! documented `demote`/`promote` switch, and the pair's launch roles
+//! restored — the pair contract's claim-fencing leg, which attaches a
+//! dedicated third sim-net client to the settled pair's spawned plant
+//! and exercises the standing writer claim's whole lifecycle: fenced
+//! `write`/`step` probes plus the same mutations through the shipped
+//! `dcs-plant-ctl`, the `ensure_writer`/`release_writer` verbs under
+//! foreign and owner tokens, and a rogue `claim_writer` resolving per
+//! the settled contract — its preempt's journaled `field_claim_lost`
+//! and in-place demotion on the superseded owner, then the pair
+//! restored to its launch roles — the pair contract's
+//! commissioning/handover record leg, which materializes the declared
+//! commissioning record from one deterministic driven run: the field
+//! census audited against the declared channel set (the I/O checkout
+//! record), the measurement ladder and the receipted output loop (the
+//! loop-check evidence), every managed alarm's declared record served
+//! verbatim on both peers (the alarm rationalization sign-off), the
+//! documented `demote`/`promote` switch and restore (the handover
+//! procedure), and the document set digested with each peer's
+//! checkpoint fingerprint and durable files (the documentation
+//! turnover) — the completeness audit naming any missing artifact,
+//! two passes producing identical digests — and the `upgrade` stage,
+//! which repins the materialized tree to the checkout's `HEAD`
 //! (seeded into the stand-in beside the recorded rev) and re-runs the
 //! full pipeline under the repin.
 //!
@@ -46,7 +190,16 @@
 //! and the negative cases prove the new stage names the template
 //! introduces: `stale-artifact`, `manifest-fingerprint-mismatch`,
 //! `scenario-failed`, `rig-mismatch`, `schema-drift`,
-//! `schema-mismatch`, `diff-mismatch`, and the `surface-mismatch` paths
+//! `schema-mismatch`, `diff-mismatch`, `pair-failed`,
+//! `negotiation-failed`, `refusal-failed`, `handover-failed`,
+//! `takeover-failed`,
+//! `peer-announce-failed`,
+//! `divergence-missed`/`divergence-nondeterministic`,
+//! `report-failed`/`report-nondeterministic`,
+//! `managed-lifecycle-failed`/`managed-lifecycle-nondeterministic`,
+//! `event-parity-failed`/`event-parity-nondeterministic`,
+//! `commissioning-failed`/`commissioning-nondeterministic`/
+//! `commissioning-unchecked`, and the `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
 
@@ -54,7 +207,6 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::Mutex;
 
 use common::{CARGO, PIN_UNRESOLVABLE, head_rev, root};
 
@@ -77,8 +229,9 @@ fn target_dir() -> PathBuf {
 }
 
 /// Ensures the released tooling's local stand-ins — `dcs-model`,
-/// `dcs-controller`, `dcs-plant-server`, and `dcs-ctl` — are built for
-/// the check's `DCS_TOOLS` substitution.
+/// `dcs-controller`, `dcs-plant-server`, `dcs-ctl`,
+/// `dcs-alarm-report`, and the plant-side `dcs-plant-ctl` — are built
+/// for the check's `DCS_TOOLS` substitution.
 fn build_tools() -> PathBuf {
     let output = Command::new(CARGO)
         .args([
@@ -92,6 +245,8 @@ fn build_tools() -> PathBuf {
             "dcs-plant",
             "-p",
             "dcs-monitor",
+            "-p",
+            "dcs-sim-net",
         ])
         .current_dir(root())
         .output()
@@ -134,57 +289,39 @@ fn git(dir: &Path, args: &[&str]) {
     );
 }
 
-/// Ensures the checkout's object store contains `rev`. CI checkouts
-/// are shallow (`actions/checkout` fetches at depth 1), so the
-/// recorded release commit may be absent; fetch it from `origin` — the
-/// published origin itself — when the store lacks it.
-fn ensure_commit(rev: &str) {
-    static FETCH_LOCK: Mutex<()> = Mutex::new(());
-    let _guard = FETCH_LOCK.lock().unwrap();
-    let present = Command::new("git")
-        .args(["cat-file", "-e", &format!("{rev}^{{commit}}")])
-        .current_dir(root())
-        .output()
-        .expect("git cat-file runs");
-    if present.status.success() {
-        return;
-    }
-    for remote in ["origin", PUBLISHED_REMOTE] {
-        let fetch = Command::new("git")
-            .args(["fetch", "--depth", "1", remote, rev])
-            .current_dir(root())
-            .output()
-            .expect("git fetch runs");
-        if fetch.status.success() {
-            return;
-        }
-    }
-    panic!("{PIN_UNRESOLVABLE}: no remote could serve the pinned rev {rev}");
-}
-
 /// A `file://` stand-in for the published origin: a bare repository in
 /// the materialized scratch that serves exactly the recorded rev. The
 /// workspace checkout alone cannot play the remote in CI — its shallow
 /// object store lacks the pinned commit and serves no way to name it —
 /// so the stand-in is seeded with that commit, the same object the
-/// published origin serves for the recorded rev. The `upgrade` stage's
-/// repin target — the checkout's `HEAD`, a later commit in the same
-/// minor series — is seeded beside it so the repin resolves.
+/// published origin serves for the recorded rev. The seed lands in the
+/// per-test bare repository, never the shared checkout's store: the CI
+/// shards run these proofs as concurrent processes, and two fetches
+/// into one repository collide on its lock files. The `upgrade`
+/// stage's repin target — the checkout's `HEAD`, a later commit in the
+/// same minor series — is seeded beside it so the repin resolves.
 fn serve_pinned_rev(scratch: &Path) -> String {
     let rev = pinned_rev(scratch);
-    ensure_commit(&rev);
     let remote = scratch.join("dcs-remote.git");
     git(scratch, &["init", "--bare", "dcs-remote.git"]);
-    // The local transport serves the object directly; the published
-    // origin is the fallback when the checkout cannot.
-    let fetch = Command::new("git")
-        .args(["fetch", "--depth", "1", &root().display().to_string(), &rev])
-        .current_dir(&remote)
-        .output()
-        .expect("git fetch runs");
-    if !fetch.status.success() {
-        git(&remote, &["fetch", "--depth", "1", PUBLISHED_REMOTE, &rev]);
-    }
+    // The local transport serves the object directly when the
+    // checkout's store holds it; the published origin is the fallback
+    // when the shallow store cannot.
+    let served = [root().display().to_string(), PUBLISHED_REMOTE.to_string()]
+        .iter()
+        .any(|source| {
+            Command::new("git")
+                .args(["fetch", "--depth", "1", source, &rev])
+                .current_dir(&remote)
+                .output()
+                .expect("git fetch runs")
+                .status
+                .success()
+        });
+    assert!(
+        served,
+        "{PIN_UNRESOLVABLE}: no remote could serve the pinned rev {rev}"
+    );
     git(&remote, &["update-ref", "refs/heads/main", &rev]);
     let head = head_rev();
     git(
@@ -257,6 +394,7 @@ impl Materialized {
             .current_dir(&self.dir)
             .env("DCS_REMOTE", &self.remote)
             .env("DCS_TOOLS", tools)
+            .env("DCS_RECORD_DIR", root().join("docs/releases"))
             .env("DCS_UPGRADE_REV", head_rev())
             .env("CARGO_TARGET_DIR", self.dir.join("target"))
             .output()
@@ -329,6 +467,21 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         "conforms to the recorded schema artifact",
         "missing-required refused: schema-mismatch",
         "mistyped-required refused: schema-mismatch",
+        // The alarm-validation leg ran and held: the emitted model's
+        // managed-alarm record audited, the doctored copies refused
+        // by the released `--check`, and the leg's own
+        // skipped-doctoring negative case reported its diagnostic.
+        "managed alarm instances carry the declared record",
+        "doctored documents refused",
+        "a skipped-doctoring run refused: alarm-validation",
+        // The fingerprint stage's dynamics leg ran and held: the
+        // manifest-declared pair served the declared dynamics.path,
+        // its canonical fingerprint matched the recorded
+        // dynamics.fingerprint and the checked-in artifact, and the
+        // leg's own renumbered-points case reported its diagnostic.
+        "dynamics fingerprint",
+        "dynamics-fingerprint-digest",
+        "renumber-points: reported, manifest-fingerprint-mismatch",
     ] {
         assert!(
             stdout.contains(line),
@@ -348,6 +501,379 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
             && stdout.contains("corrupt-state-file: reported, restart-resume-failed"),
         "the restart leg's doctored cases did not report their named diagnostics:\n{stdout}"
     );
+    // The pair stage ran and held: the manifest-declared standby
+    // converged to tracking, the receipted demote/promote switched the
+    // roles, the run continued bumplessly, and each peer's durable
+    // journal file carried the transition records — its digest line
+    // reports the evidence, and the broken-peer-flag case reported its
+    // named diagnostic.
+    assert!(
+        stdout.contains("== pair =="),
+        "the pair stage did not run:\n{stdout}"
+    );
+    let pair_line = stdout
+        .lines()
+        .find(|line| line.contains("pair-digest"))
+        .unwrap_or_else(|| panic!("the pair leg reported no digest:\n{stdout}"));
+    for phrase in ["switched at tick", "persisted journal records"] {
+        assert!(
+            pair_line.contains(phrase),
+            "the pair digest names no '{phrase}' evidence: {pair_line}"
+        );
+    }
+    assert!(
+        stdout.contains("broken-peer-flag: reported, pair-failed"),
+        "the pair leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
+    // The negotiation leg ran and held: the foreign-model standby
+    // reported the named degraded negotiation state naming both
+    // fingerprints, its promote drew the named refusal, the control
+    // peer on the pair's own model settled active, and the
+    // expect-tracking case reported the degraded state it saw.
+    let negotiation_line = stdout
+        .lines()
+        .find(|line| line.contains("negotiation-digest"))
+        .unwrap_or_else(|| panic!("the negotiation leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "degraded",
+        "promote refused not_converged",
+        "settled active",
+    ] {
+        assert!(
+            negotiation_line.contains(phrase),
+            "the negotiation digest names no '{phrase}' evidence: {negotiation_line}"
+        );
+    }
+    assert!(
+        stdout.contains("expect-tracking: reported, negotiation-failed"),
+        "the negotiation leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
+    // The pair contract's refusal half ran and held: the pre-transfer
+    // promote answered not_converged, the standby-directed write
+    // answered not_active, and the same promote succeeded once
+    // tracking — its digest line reports the evidence, and the
+    // doctored applied-expectation case reported its named diagnostic.
+    let refusal_line = stdout
+        .lines()
+        .find(|line| line.contains("refusal-digest"))
+        .unwrap_or_else(|| panic!("the refusal leg reported no digest:\n{stdout}"));
+    for phrase in ["not_converged", "not_active", "promoted at tick"] {
+        assert!(
+            refusal_line.contains(phrase),
+            "the refusal digest names no '{phrase}' evidence: {refusal_line}"
+        );
+    }
+    assert!(
+        stdout.contains("expect-applied: reported, refusal-failed"),
+        "the refusal leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
+    // The pair contract's failure-handover leg ran and held: the
+    // proven duty-pump channel fault handed duty to the standby pump
+    // inside the declared bound, the all-out conditions annunciated on
+    // losing every pump, and the restored inputs produced the declared
+    // recovery — its digest line reports the evidence, and both
+    // doctored cases reported their named diagnostic.
+    let handover_line = stdout
+        .lines()
+        .find(|line| line.contains("handover-digest"))
+        .unwrap_or_else(|| panic!("the handover leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "duty handed to the standby pump at tick",
+        "all-out annunciated",
+        "inputs restored by tick",
+    ] {
+        assert!(
+            handover_line.contains(phrase),
+            "the handover digest names no '{phrase}' evidence: {handover_line}"
+        );
+    }
+    assert!(
+        stdout.contains("keeps-duty: reported, handover-failed")
+            && stdout.contains("none-available-silent: reported, handover-failed"),
+        "the handover leg's doctored cases did not report their named diagnostics:\n{stdout}"
+    );
+    // The pair contract's peer-announce leg ran and held: the foreign
+    // ?peer= announce was refused while the checkpoint read answered,
+    // the demoted peer reconverged tracking on its real successor, and
+    // the landed-announce case reported its named diagnostic.
+    let announce_line = stdout
+        .lines()
+        .find(|line| line.contains("peer-announce-digest"))
+        .unwrap_or_else(|| panic!("the peer-announce leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "checkpoint answered at tick",
+        "tracking its successor",
+        "roles restored",
+    ] {
+        assert!(
+            announce_line.contains(phrase),
+            "the peer-announce digest names no '{phrase}' evidence: {announce_line}"
+        );
+    }
+    assert!(
+        stdout.contains("landed-announce: reported, peer-announce-failed"),
+        "the peer-announce leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
+    // The pair contract's failover leg ran and held: the declared
+    // failover_budget armed the standby's --auto-promote, the severed
+    // field owner left the surviving peer's miss run reported, the
+    // self-promotion landed at the declared budget's boundary, the
+    // plant's writer claim fenced foreign writes while the promoted
+    // peer's writes landed, the run continued, the severed-standby
+    // variant left the owner undisturbed, and the measurement run
+    // walked the declared failover-select/on_bad_demand seam — the
+    // degraded primary annunciating the managed backup-active alarm
+    // while the chain controlled on the backup, the all-bad state
+    // engaging the declared safe demand, the restores returning the
+    // selection and the alarm — its digest line reports the evidence,
+    // and the doctored cases reported the named diagnostic.
+    let failover_line = stdout
+        .lines()
+        .find(|line| line.contains("failover-digest"))
+        .unwrap_or_else(|| panic!("the failover leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "self-promoted at tick",
+        "persisted journal records",
+        "undisturbed at tick",
+        "annunciated at tick",
+        "declared safe demand at tick",
+        "re-selected the primary at tick",
+    ] {
+        assert!(
+            failover_line.contains(phrase),
+            "the failover digest names no '{phrase}' evidence: {failover_line}"
+        );
+    }
+    for line in [
+        "early-promotion: reported, failover-failed",
+        "controls-on-bad: reported, failover-failed",
+        "nonzero-fallback: reported, failover-failed",
+    ] {
+        assert!(
+            stdout.contains(line),
+            "the failover leg's doctored cases lack '{line}':\n{stdout}"
+        );
+    }
+    // The failover declaration's deploy-stage divergences each
+    // reported the named mismatch.
+    for line in [
+        "failover-flag-missing refused: rig-mismatch",
+        "failover-flag-undeclared refused: rig-mismatch",
+        "failover-wrong-peer refused: rig-mismatch",
+    ] {
+        assert!(
+            stdout.contains(line),
+            "the deploy stage's doctored pairs lack '{line}':\n{stdout}"
+        );
+    }
+    // The optional topology section's deploy-stage cases each held:
+    // the declared pairs validate — over the single pair and over a
+    // beyond-one-pair rig — while a member the rig does not declare,
+    // a member two pairs share, or a declared pair whose standby
+    // wiring does not close inside it each report the named mismatch.
+    for line in [
+        "topology-declared: optional declaration — the manifest and the rig agree",
+        "topology-multi-pair: optional declaration — the manifest and the rig agree",
+        "topology-undeclared-member refused: rig-mismatch",
+        "topology-shared-member refused: rig-mismatch",
+        "topology-unwired-pair refused: rig-mismatch",
+    ] {
+        assert!(
+            stdout.contains(line),
+            "the deploy stage's doctored pairs lack '{line}':\n{stdout}"
+        );
+    }
+    // The pair contract's staged-vs-field divergence leg ran and held:
+    // the withheld-pull window left the stale peer's served report
+    // diverged naming the perturbed output, its promote refused
+    // not_converged with no field hand-off, the resolution journaled
+    // once the field matched again, and the write-free control window
+    // reconverged and promoted — its digest line reports the evidence,
+    // and the skipped-field-write case reported its named diagnostic.
+    let divergence_line = stdout
+        .lines()
+        .find(|line| line.contains("divergence-digest"))
+        .unwrap_or_else(|| panic!("the divergence leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "diverged at tick",
+        "naming point",
+        "not_converged",
+        "no field hand-off",
+        "resolved at tick",
+        "control window promoted at tick",
+    ] {
+        assert!(
+            divergence_line.contains(phrase),
+            "the divergence digest names no '{phrase}' evidence: {divergence_line}"
+        );
+    }
+    assert!(
+        stdout.contains("skip-field-write: reported, divergence-missed"),
+        "the divergence leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
+    // The pair contract's report leg ran and held: the released
+    // dcs-alarm-report computed the declared AlarmReport metric set
+    // over the field owner's served journal and its manifest-declared
+    // durable journal file — its digest line reports the evidence —
+    // and each doctored case reported its named diagnostic.
+    let report_line = stdout
+        .lines()
+        .find(|line| line.contains("report-digest"))
+        .unwrap_or_else(|| panic!("the report leg reported no digest:\n{stdout}"));
+    for phrase in ["alarm instances", "activations", "response pairs"] {
+        assert!(
+            report_line.contains(phrase),
+            "the report digest names no '{phrase}' evidence: {report_line}"
+        );
+    }
+    for tamper in ["expect-quiet", "unreachable-monitor", "unreadable-journal"] {
+        assert!(
+            stdout.contains(&format!("{tamper}: reported, report-failed")),
+            "the report leg's {tamper} case did not report its named diagnostic:\n{stdout}"
+        );
+    }
+    // The pair contract's demote-boundary pending-command leg ran and
+    // held: the receipted write admitted on the field owner and
+    // demoted past inside its pending window settled exactly once —
+    // the fenced image's first quiesced scan audited clean before the
+    // promoted peer's first field-owning scan, both peers' journals,
+    // receipt logs, images, and durable files carrying the single
+    // audited settle — its digest line reports the evidence, and each
+    // doctored expectation reported its named diagnostic.
+    let demote_pending_line = stdout
+        .lines()
+        .find(|line| line.contains("demote-pending-digest"))
+        .unwrap_or_else(|| panic!("the demote-pending leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "demoted inside the pending window at tick",
+        "fenced image audited at tick",
+        "persisted settle records",
+        "roles restored at tick",
+    ] {
+        assert!(
+            demote_pending_line.contains(phrase),
+            "the demote-pending digest names no '{phrase}' evidence: {demote_pending_line}"
+        );
+    }
+    for tamper in ["phantom-applied", "unaudited-drop"] {
+        assert!(
+            stdout.contains(&format!("{tamper}: reported, demote-pending-failed")),
+            "the demote-pending leg's {tamper} case did not report its named diagnostic:\n{stdout}"
+        );
+    }
+    // The pair contract's demote-follow reconvergence leg ran and
+    // held: under the manifest's declared 0.0.0.0 listen binds, both
+    // documented switch directions left the demoted peer reconverged
+    // to tracking on the successor's dialable announced source, the
+    // tracking held across the pull train, and the launch roles
+    // restored — its digest line reports the evidence, and the
+    // self-addressed announce case reported its named diagnostic.
+    let reconvergence_line = stdout
+        .lines()
+        .find(|line| line.contains("demote-reconvergence-digest"))
+        .unwrap_or_else(|| panic!("the demote-reconvergence leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "tracking its announced successor",
+        "pulls",
+        "roles restored",
+    ] {
+        assert!(
+            reconvergence_line.contains(phrase),
+            "the demote-reconvergence digest names no '{phrase}' evidence: {reconvergence_line}"
+        );
+    }
+    assert!(
+        stdout.contains("self-announce: reported, demote-reconvergence-failed"),
+        "the demote-reconvergence leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
+    // The pair contract's managed-lifecycle leg ran and held: the
+    // emitted model's managed-alarm surface exercised end to end on
+    // the deployed pair — the field-driven activation, the attributed
+    // ack, the bounded shelve and its auto-release, the named
+    // never-shelvable refusal, and the designed suppression wiring —
+    // its digest line reports the evidence, and each doctored
+    // expectation reported its named diagnostic.
+    let lifecycle_line = stdout
+        .lines()
+        .find(|line| line.contains("managed-lifecycle-digest"))
+        .unwrap_or_else(|| panic!("the managed-lifecycle leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "annunciated at tick",
+        "acknowledged at tick",
+        "shelved at tick",
+        "released at tick",
+        "restored at tick",
+        "journal entries",
+    ] {
+        assert!(
+            lifecycle_line.contains(phrase),
+            "the managed-lifecycle digest names no '{phrase}' evidence: {lifecycle_line}"
+        );
+    }
+    for tamper in ["expect-applied", "expect-standing"] {
+        assert!(
+            stdout.contains(&format!("{tamper}: reported, managed-lifecycle-failed")),
+            "the managed-lifecycle leg's {tamper} case did not report its named diagnostic:\n{stdout}"
+        );
+    }
+    // The pair contract's emit-identical event-parity leg ran and
+    // held: the counted step_completed set served identical routed
+    // event records through both peers' GET /resources views while
+    // the standby reported tracking — its digest line reports the
+    // evidence — and each doctored case reported its named
+    // diagnostic.
+    let parity_line = stdout
+        .lines()
+        .find(|line| line.contains("event-parity-digest"))
+        .unwrap_or_else(|| panic!("the event-parity leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "counted step_completed records identical on both peers",
+        "the standby tracking",
+    ] {
+        assert!(
+            parity_line.contains(phrase),
+            "the event-parity digest names no '{phrase}' evidence: {parity_line}"
+        );
+    }
+    for tamper in ["dropped-event-record", "reattributed-event-record"] {
+        assert!(
+            stdout.contains(&format!("{tamper}: reported, event-parity-failed")),
+            "the event-parity leg's {tamper} case did not report its named diagnostic:\n{stdout}"
+        );
+    }
+    // The pair contract's commissioning/handover record leg ran and
+    // held: the declared commissioning record materialized from one
+    // deterministic driven run — its digest line reports each named
+    // artifact's evidence — and every missing-artifact doctored case
+    // reported its named diagnostic.
+    let commissioning_line = stdout
+        .lines()
+        .find(|line| line.contains("commissioning-digest"))
+        .unwrap_or_else(|| panic!("the commissioning leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "field points checked out",
+        "loop-check marks driven",
+        "managed alarm instances signed off",
+        "switched at tick",
+        "restored at tick",
+        "turnover documents digested",
+    ] {
+        assert!(
+            commissioning_line.contains(phrase),
+            "the commissioning digest names no '{phrase}' evidence: {commissioning_line}"
+        );
+    }
+    for tamper in [
+        "missing-io-checkout",
+        "missing-loop-check",
+        "missing-alarm-signoff",
+        "missing-documentation-turnover",
+    ] {
+        assert!(
+            stdout.contains(&format!("{tamper}: reported, commissioning-failed")),
+            "the commissioning leg's {tamper} case did not report its named diagnostic:\n{stdout}"
+        );
+    }
     assert!(
         stdout.contains("== consumers =="),
         "the consumers stage did not run:\n{stdout}"
@@ -501,6 +1027,329 @@ fn a_divergent_rig_definition_reports_rig_mismatch() {
     );
 }
 
+/// A standby wired at a peer that never serves is the `pair-failed`
+/// diagnostic — exercised against a copied tree at script level with
+/// the locally built tooling, so the remote stand-in is not needed.
+/// The driver's `broken-peer-flag` tamper wires the tracking peer's
+/// `--standby` flag at an address nothing serves; the leg must refuse
+/// the run naming the lost convergence, which the check reports as
+/// `pair-failed` — never a silently unconverged pass.
+#[test]
+fn a_broken_peer_flag_reports_pair_failed() {
+    let tools = build_tools();
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-pair-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    copy_tree(&root().join("reference-plant"), &dir);
+    let output = Command::new("python3")
+        .arg("ci/legs/pair.py")
+        .arg("--plant-server")
+        .arg(tools.join("dcs-plant-server"))
+        .arg("--controller")
+        .arg(tools.join("dcs-controller"))
+        .args([
+            "--model",
+            "model/plant.json",
+            "--dynamics",
+            "model/dynamics.json",
+            "--scenario",
+            "ci/scenario.json",
+            "--manifest",
+            "deploy/manifest.json",
+            "--tamper",
+            "broken-peer-flag",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("python3 runs the redundant-pair leg");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !output.status.success(),
+        "a broken peer flag passed the pair leg"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("never reported tracking"),
+        "expected the lost-convergence evidence, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Requiring convergence on the negotiation leg's foreign-model
+/// standby is the `negotiation-failed` evidence — exercised against a
+/// copied tree at script level with the locally built tooling, so the
+/// remote stand-in is not needed. The driver's `expect-tracking`
+/// tamper flips the observation window's assertion to require
+/// `tracking`; the leg must refuse the pass naming the degraded
+/// negotiation state the peer actually reported — never a silently
+/// accepted run.
+#[test]
+fn a_wrong_negotiation_expectation_reports_the_degraded_state() {
+    let tools = build_tools();
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-negotiation-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    copy_tree(&root().join("reference-plant"), &dir);
+    let output = Command::new("python3")
+        .arg("ci/legs/negotiation.py")
+        .arg("--plant-server")
+        .arg(tools.join("dcs-plant-server"))
+        .arg("--controller")
+        .arg(tools.join("dcs-controller"))
+        .args([
+            "--model",
+            "model/plant.json",
+            "--dynamics",
+            "model/dynamics.json",
+            "--scenario",
+            "ci/scenario.json",
+            "--manifest",
+            "deploy/manifest.json",
+            "--tamper",
+            "expect-tracking",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("python3 runs the checkpoint-negotiation leg");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !output.status.success(),
+        "a wrong convergence expectation passed the negotiation leg"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("never reported tracking") && stderr.contains("degraded"),
+        "expected the degraded negotiation report the peer served, got:\n{stderr}"
+    );
+}
+
+/// A doctored refusal leg asserting the standby-directed write settles
+/// `applied` is the `refusal-failed` diagnostic — exercised against a
+/// copied tree at script level with the locally built tooling, the
+/// same seam the broken-peer-flag test uses. The driver's
+/// `expect-applied` tamper flips the leg's own expectation; the
+/// tracking standby's honest `not_active` rejection must fail it
+/// naming the actual answer — never a silently unrefused pass.
+#[test]
+fn a_doctored_write_expectation_reports_refusal_failed() {
+    let tools = build_tools();
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-refusal-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    copy_tree(&root().join("reference-plant"), &dir);
+    let output = Command::new("python3")
+        .arg("ci/legs/refusal.py")
+        .arg("--plant-server")
+        .arg(tools.join("dcs-plant-server"))
+        .arg("--controller")
+        .arg(tools.join("dcs-controller"))
+        .args([
+            "--model",
+            "model/plant.json",
+            "--dynamics",
+            "model/dynamics.json",
+            "--scenario",
+            "ci/scenario.json",
+            "--manifest",
+            "deploy/manifest.json",
+            "--tamper",
+            "expect-applied",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("python3 runs the role-gated refusal leg");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !output.status.success(),
+        "a doctored write expectation passed the refusal leg"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("expected an applied receipt") && stderr.contains("not_active"),
+        "expected the named not_active evidence, got:\n{stderr}"
+    );
+}
+
+/// A doctored handover leg expecting the failed pump to keep `duty`,
+/// or `none_available` never to report once every pump is out, is the
+/// `handover-failed` diagnostic — exercised against a copied tree at
+/// script level with the locally built tooling, the same seam the
+/// refusal test uses. The driver's `keeps-duty` and
+/// `none-available-silent` tampers flip the leg's own expectations;
+/// the pair's honest handover must fail each naming the actual
+/// evidence — never a silently wrong pass.
+#[test]
+fn a_doctored_handover_expectation_reports_handover_failed() {
+    let tools = build_tools();
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-handover-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    copy_tree(&root().join("reference-plant"), &dir);
+    for (tamper, evidence) in [
+        ("keeps-duty", "keep duty"),
+        ("none-available-silent", "never to report"),
+    ] {
+        let output = Command::new("python3")
+            .arg("ci/legs/handover.py")
+            .arg("--plant-server")
+            .arg(tools.join("dcs-plant-server"))
+            .arg("--controller")
+            .arg(tools.join("dcs-controller"))
+            .args([
+                "--model",
+                "model/plant.json",
+                "--dynamics",
+                "model/dynamics.json",
+                "--scenario",
+                "ci/scenario.json",
+                "--manifest",
+                "deploy/manifest.json",
+                "--tamper",
+                tamper,
+            ])
+            .current_dir(&dir)
+            .output()
+            .expect("python3 runs the failure-handover leg");
+        assert!(
+            !output.status.success(),
+            "a doctored {tamper} expectation passed the handover leg"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(evidence),
+            "expected the named {tamper} evidence, got:\n{stderr}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A doctored takeover leg asserting the pump still follows the
+/// group while `mode` stands manual is the `takeover-failed`
+/// diagnostic — exercised against a copied tree at script level with
+/// the locally built tooling, the same seam the broken-peer-flag and
+/// refusal tests use. The driver's `follows-group` tamper flips the
+/// leg's own expectation; the honest manual selection — the auto leg
+/// reporting manual with the delivered command off the group's
+/// request — must fail it naming the actual readings, never a
+/// silently unexercised pass.
+#[test]
+fn a_doctored_follows_group_expectation_reports_takeover_failed() {
+    let tools = build_tools();
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-takeover-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    copy_tree(&root().join("reference-plant"), &dir);
+    let output = Command::new("python3")
+        .arg("ci/legs/takeover.py")
+        .arg("--plant-server")
+        .arg(tools.join("dcs-plant-server"))
+        .arg("--controller")
+        .arg(tools.join("dcs-controller"))
+        .args([
+            "--model",
+            "model/plant.json",
+            "--dynamics",
+            "model/dynamics.json",
+            "--scenario",
+            "ci/scenario.json",
+            "--manifest",
+            "deploy/manifest.json",
+            "--tamper",
+            "follows-group",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("python3 runs the manual-takeover leg");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !output.status.success(),
+        "a doctored follows-group expectation passed the takeover leg"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("did not follow the group"),
+        "expected the named follows-group evidence, got:\n{stderr}"
+    );
+}
+
+/// A doctored divergence leg skipping the field-side write while the
+/// diverged report is still asserted is the `divergence-missed`
+/// diagnostic — exercised against a copied tree at script level with
+/// the locally built tooling, the same seam the broken-peer-flag,
+/// refusal, and takeover tests use. The driver's `skip-field-write`
+/// tamper withholds the plant-protocol write; the honest
+/// resumed-checkpoint comparison finds the staged image matching the
+/// untouched field, so the leg must fail naming the report it
+/// expected — never a silently unconvinced pass.
+#[test]
+fn a_skipped_field_write_reports_divergence_missed() {
+    let tools = build_tools();
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-reference-plant-divergence-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    copy_tree(&root().join("reference-plant"), &dir);
+    let output = Command::new("python3")
+        .arg("ci/legs/divergence.py")
+        .arg("--plant-server")
+        .arg(tools.join("dcs-plant-server"))
+        .arg("--controller")
+        .arg(tools.join("dcs-controller"))
+        .args([
+            "--model",
+            "model/plant.json",
+            "--dynamics",
+            "model/dynamics.json",
+            "--scenario",
+            "ci/scenario.json",
+            "--manifest",
+            "deploy/manifest.json",
+            "--tamper",
+            "skip-field-write",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("python3 runs the staged-vs-field divergence leg");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !output.status.success(),
+        "a skipped field-side write passed the divergence leg"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("expected the diverged report"),
+        "expected the named diverged-report evidence, got:\n{stderr}"
+    );
+}
+
 /// A served registry document diverging from the recorded artifact's
 /// declared structure is the `schema-mismatch` diagnostic — exercised
 /// at script level against the consumer-side conformance check, the
@@ -602,7 +1451,11 @@ fn a_structurally_divergent_served_document_reports_schema_mismatch() {
 }
 
 /// A dynamics document the scenario's declared outcomes no longer hold
-/// against is the `scenario-failed` diagnostic.
+/// against is the `scenario-failed` diagnostic. The doctored copy
+/// re-records the manifest's `dynamics.fingerprint` over the changed
+/// bytes — a customer who revises the dynamics re-approves the
+/// document — so the fingerprint stage holds and the run reaches the
+/// simulate stage.
 #[test]
 fn a_changed_trajectory_reports_scenario_failed() {
     let tools = build_tools();
@@ -616,11 +1469,66 @@ fn a_changed_trajectory_reports_scenario_failed() {
         source.replacen("\"off_rate\": 0.25", "\"off_rate\": 0.0", 1),
     )
     .unwrap();
+    let fingerprint = Command::new("python3")
+        .arg("ci/dynamics_fingerprint.py")
+        .arg("--fingerprint")
+        .arg("model/dynamics.json")
+        .current_dir(&copy.dir)
+        .output()
+        .expect("python3 fingerprints the doctored dynamics");
+    assert!(
+        fingerprint.status.success(),
+        "the fingerprint helper failed: {}",
+        String::from_utf8_lossy(&fingerprint.stderr)
+    );
+    let fingerprint = String::from_utf8_lossy(&fingerprint.stdout);
+    let fingerprint = fingerprint.trim();
+    let manifest = copy.dir.join("deploy/manifest.json");
+    let source = std::fs::read_to_string(&manifest).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&source).unwrap();
+    let recorded = parsed["dynamics"]["fingerprint"].as_str().unwrap();
+    let field = format!("\"fingerprint\": \"{recorded}\"");
+    assert!(
+        source.contains(&field),
+        "the manifest's dynamics fingerprint field moved"
+    );
+    std::fs::write(
+        &manifest,
+        source.replacen(&field, &format!("\"fingerprint\": \"{fingerprint}\""), 1),
+    )
+    .unwrap();
     let output = copy.check(&tools);
     assert!(!output.status.success(), "a broken scenario passed");
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("scenario-failed"),
         "expected the scenario-failed diagnostic, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A checked-in dynamics document diverging from the manifest's
+/// recorded `dynamics.fingerprint` is the `manifest-fingerprint-mismatch`
+/// diagnostic — the deployment declaration no longer names the approved
+/// dynamics bytes.
+#[test]
+fn a_doctored_dynamics_reports_manifest_fingerprint_mismatch() {
+    let tools = build_tools();
+    let copy = Materialized::new();
+    let dynamics = copy.dir.join("model/dynamics.json");
+    let source = std::fs::read_to_string(&dynamics).unwrap();
+    std::fs::write(
+        &dynamics,
+        source.replacen("\"off_rate\": 0.25", "\"off_rate\": 0.0", 1),
+    )
+    .unwrap();
+    let output = copy.check(&tools);
+    assert!(
+        !output.status.success(),
+        "a doctored dynamics document passed"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("manifest-fingerprint-mismatch"),
+        "expected the manifest-fingerprint-mismatch diagnostic, got:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -698,7 +1606,9 @@ print("tamper cases report named mismatches")
 /// the declared one is caught by the earlier emit and fingerprint
 /// stages. A served registry missing a declared component, drifting a
 /// kind, or dropping a declared resource; a declared command answering
-/// no receipt, a refused one, or never settling `applied`; and a
+/// no receipt, a refused one, never settling `applied`, or serving an
+/// availability verdict adrift of the published one (in either
+/// direction, or refused without the kind's named reason); and a
 /// kind-emitted event absent from the journal or the per-instance
 /// resource view each report the named mismatches `ci/check.sh` turns
 /// into `surface-mismatch`.
@@ -855,6 +1765,50 @@ assert any(
     "step_completed" in f and "sequencer:39" in f for f in failures
 ), failures
 
+# A kind-declared command's served availability verdict: the honest
+# states report no mismatches in either direction, an invocable verdict
+# served unavailable (and the reverse) is named, and a refused verdict
+# served without the kind's named reason is named.
+command = {
+    "name": "advance",
+    "request": [{"name": "count", "kind": "int"}],
+    "adapted": "declared",
+    "availability": "kind_declared",
+}
+def resources_with(state):
+    return {"components": [
+        {"name": "sequencer:39", "commands": [dict({"name": "advance"}, **state)]}
+    ]}
+
+assert simulate.availability_misses(
+    [("sequencer:39", command)],
+    resources_with({"available": True}),
+    {"sequencer:39": True},
+) == []
+assert simulate.availability_misses(
+    [("sequencer:39", command)],
+    resources_with({"available": False, "refusal": "the sequence has run to its end; reset restarts it"}),
+    {"sequencer:39": False},
+) == []
+failures = simulate.availability_misses(
+    [("sequencer:39", command)],
+    resources_with({"available": False, "refusal": "not now"}),
+    {"sequencer:39": True},
+)
+assert any("advance" in f and "expected True" in f for f in failures), failures
+failures = simulate.availability_misses(
+    [("sequencer:39", command)],
+    resources_with({"available": True}),
+    {"sequencer:39": False},
+)
+assert any("advance" in f and "expected False" in f for f in failures), failures
+failures = simulate.availability_misses(
+    [("sequencer:39", command)],
+    resources_with({"available": False}),
+    {"sequencer:39": False},
+)
+assert any("advance" in f and "named refusal" in f for f in failures), failures
+
 print("registry, receipt, and event tamper cases report named mismatches")
 "#,
         )
@@ -867,4 +1821,71 @@ print("registry, receipt, and event tamper cases report named mismatches")
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// The release contract's named-diagnostic vocabulary must resolve
+/// every `<leg>-unchecked` self-check diagnostic the check emits —
+/// `ci/check.sh`'s inline `fail` names and the pair stage's legs,
+/// whose driver emits `<stem>-unchecked` for each `ci/legs/*.py`
+/// file's declared doctored cases, the stem the file's name with its
+/// underscores turned to dashes. An operator or tool reading a
+/// self-check failure resolves the name against the declared
+/// contract, so an emitted name the vocabulary does not declare is an
+/// unnamed diagnostic by another name. An emitted `<stem>-unchecked`
+/// is covered when the contract declares the name itself, or when the
+/// declared `<leg>-unchecked` convention covers it — the convention
+/// entry present and the leg's own `<stem>` or `<stem>-failed`
+/// diagnostic declared.
+#[test]
+fn the_contract_declares_every_emitted_unchecked_diagnostic() {
+    let check = std::fs::read_to_string(root().join("reference-plant/ci/check.sh")).unwrap();
+    let contract = std::fs::read_to_string(root().join("docs/release-contract.md")).unwrap();
+    let declared = |name: &str| contract.contains(&format!("`{name}`"));
+    // The emitted set: every `fail "<name>-unchecked:` the script can
+    // report — the first token of a fail message is its diagnostic.
+    let mut emitted: Vec<String> = Vec::new();
+    for line in check.lines() {
+        let mut rest = line;
+        while let Some(start) = rest.find("fail \"") {
+            rest = &rest[start + "fail \"".len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            if name.ends_with("-unchecked") && !emitted.contains(&name) {
+                emitted.push(name);
+            }
+        }
+    }
+    // The pair stage's legs emit `<stem>-unchecked` through
+    // `ci/legs.py`'s driver rather than the script's `fail` lines —
+    // every leg file's stem is an emitted name.
+    for entry in std::fs::read_dir(root().join("reference-plant/ci/legs")).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().into_string().unwrap();
+        if !name.ends_with(".py") {
+            continue;
+        }
+        let stem = name[..name.len() - 3].replace('_', "-");
+        let emitted_name = format!("{stem}-unchecked");
+        if !emitted.contains(&emitted_name) {
+            emitted.push(emitted_name);
+        }
+    }
+    assert!(
+        !emitted.is_empty(),
+        "ci/check.sh emits no -unchecked self-check diagnostics"
+    );
+    // The convention entry itself must be declared for it to cover a
+    // name the vocabulary does not enumerate verbatim.
+    let convention = declared("<leg>-unchecked");
+    for name in &emitted {
+        let stem = name.strip_suffix("-unchecked").unwrap();
+        assert!(
+            declared(name)
+                || (convention && (declared(stem) || declared(&format!("{stem}-failed")))),
+            "the contract's named-diagnostic vocabulary covers neither \
+             the emitted {name} nor its leg"
+        );
+    }
 }

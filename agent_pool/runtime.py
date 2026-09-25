@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -38,11 +39,15 @@ def is_alive(metadata):
 
 
 class Runtime:
-    def __init__(self, pool_root, state_root, repository, devin='devin', timeout_seconds=7200):
+    def __init__(self, pool_root, state_root, repository, devin='devin', opencode='opencode', timeout_seconds=7200):
         self.pool_root = Path(pool_root).resolve()
         self.state_root = Path(state_root).resolve()
         self.repository = repository
         self.devin = devin
+        self.opencode = opencode
+        self.opencode_db = Path.home() / '.local/share/opencode/opencode.db'
+        self.stall_seconds = 1200
+        self.error_stall_seconds = 180
         self.timeout_seconds = timeout_seconds
         self.pool_root.mkdir(parents=True, exist_ok=True)
         self.state_root.mkdir(parents=True, exist_ok=True)
@@ -77,7 +82,7 @@ class Runtime:
             self.run_git(clone, 'switch', '--detach', 'origin/main')
         return clone
 
-    def spawn(self, key, cwd, prompt, resume_session=None, timeout=None):
+    def spawn(self, key, cwd, prompt, resume_session=None, timeout=None, model='swe-2-high'):
         if not re.fullmatch(r'[A-Za-z0-9_-]+', key):
             raise ValueError('Invalid invocation key')
         cwd = Path(cwd).resolve()
@@ -91,12 +96,31 @@ class Runtime:
         invocation.mkdir()
         prompt_path = invocation / 'prompt.txt'
         prompt_path.write_text(prompt)
-        command = [self.devin, '-p', '--model', 'swe-2-high', '--permission-mode',
-                   'dangerous', '--respect-workspace-trust', 'false', '--prompt-file',
-                   str(prompt_path), '--export', str(invocation / 'conversation.json')]
-        if resume_session:
-            command.extend(['--resume', resume_session])
+        if model.startswith('opencode/'):
+            # --print-logs mirrors provider stream errors into the invocation
+            # log; without it opencode freezes silently after a rate-limited
+            # stream and only the hard timeout notices. The prompt travels
+            # via stdin (the durable prompt.txt opened by the runner), never
+            # argv: large backlog contexts exceed Linux ARG_MAX and the
+            # launch fails with E2BIG before opencode starts.
+            command = [self.opencode, 'run', '--model', model, '--auto',
+                       '--print-logs', '--title', key]
+            if resume_session:
+                command.extend(['--session', resume_session])
+            stdin_path = str(prompt_path)
+            stall = self.stall_seconds
+            error_stall = self.error_stall_seconds
+        else:
+            stall = error_stall = None
+            command = [self.devin, '-p', '--model', model, '--permission-mode',
+                       'dangerous', '--respect-workspace-trust', 'false', '--prompt-file',
+                       str(prompt_path), '--export', str(invocation / 'conversation.json')]
+            if resume_session:
+                command.extend(['--resume', resume_session])
+            stdin_path = None
         spec = {'key': key, 'command': command, 'cwd': str(cwd), 'timeout': timeout or self.timeout_seconds,
+                'stall_seconds': stall, 'error_stall_seconds': error_stall,
+                'stdin': stdin_path,
                 'receipt': str(invocation / 'receipt.json'), 'log': str(invocation / 'output.log'),
                 'metadata': str(invocation / 'process.json')}
         atomic_json(invocation / 'spec.json', spec)
@@ -143,8 +167,10 @@ class Runtime:
         path = Path(metadata.get('metadata', '/nonexistent'))
         return path.is_file() and is_alive(json.loads(path.read_text()))
 
-    def session_id(self, cwd, since=None):
-        """Find the latest session in this checkout, optionally since launch."""
+    def session_id(self, cwd, since=None, model='swe-2-high', key=None):
+        """Find the latest session for this invocation, optionally since launch."""
+        if model.startswith('opencode/'):
+            return self._opencode_session_id(key, cwd)
         result = subprocess.run([self.devin, 'list', '--format', 'json'], cwd=str(cwd),
                                 check=True, capture_output=True, text=True, timeout=30)
         sessions = json.loads(result.stdout)
@@ -157,6 +183,28 @@ class Runtime:
                     and isinstance(session.get('last_activity_at'), (int, float))
                     and (since is None or session['last_activity_at'] >= int(since))]
         return max(matching, key=lambda item: item['last_activity_at'])['id'] if matching else None
+
+    def _opencode_session_id(self, key, cwd=None):
+        """Locate the opencode session spawned for an invocation key.
+
+        Spawns pass --title <key>, and opencode registers pool runs under the
+        global project with the home directory — so the invocation key, not
+        the checkout path, is the reliable identity. Resume is best-effort:
+        any lookup failure just means the next launch starts a new session.
+        """
+        if not key:
+            return None
+        try:
+            db = sqlite3.connect('file:' + str(self.opencode_db) + '?mode=ro',
+                                 uri=True, timeout=5)
+            try:
+                row = db.execute('SELECT id FROM session WHERE title=? '
+                                 'ORDER BY time_created DESC LIMIT 1', (key,)).fetchone()
+            finally:
+                db.close()
+        except sqlite3.Error:
+            return None
+        return row[0] if row else None
 
     def poll(self, metadata):
         child = self._children.get(metadata['pid'])
@@ -191,7 +239,99 @@ class Runtime:
                 'clean': not bool(self.run_git(cwd, 'status', '--porcelain'))}
 
 
-def runner(spec_path):
+def _tail_has(path, needle, size=4096):
+    try:
+        with open(path, 'rb') as stream:
+            stream.seek(0, 2)
+            stream.seek(max(0, stream.tell() - size))
+            return needle in stream.read().decode(errors='replace').lower()
+    except OSError:
+        return False
+
+
+# Bounded interval over which the stall watchdog samples descendant CPU ticks
+# once the log has gone quiet past stall_seconds. It runs at most once per
+# stall window, not per poll tick, so it stays negligible next to the 1200s
+# default while still separating a quiet build from a dead agent.
+STALL_PROBE_SECONDS = 2.0
+
+
+def process_tree(pid):
+    """Snapshot {pid: (comm, utime+stime ticks)} for a child's live tree.
+
+    Covers every process in the child's process group plus all /proc
+    descendants, so a daemonized grandchild that escaped the ppid chain but
+    still answers killpg is recorded too. Linux-only: without /proc it returns
+    an empty mapping and the watchdog degrades to the pre-probe behavior —
+    a log-quiet child is declared stalled, since no CPU evidence can exist.
+    """
+    proc = Path('/proc')
+    if not proc.is_dir():
+        return {}
+    try:
+        entries = list(proc.iterdir())
+    except OSError:
+        return {}
+    stats, children = {}, {}
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            record = (entry / 'stat').read_text()
+        except OSError:
+            continue
+        lparen, rparen = record.find('('), record.rfind(')')
+        if not 0 <= lparen < rparen:
+            continue
+        fields = record[rparen + 2:].split()
+        try:
+            member = int(entry.name)
+            stats[member] = (record[lparen + 1:rparen],
+                             int(fields[11]) + int(fields[12]),
+                             int(fields[2]))
+            children.setdefault(int(fields[1]), []).append(member)
+        except (IndexError, ValueError):
+            continue
+    tree = {member: stat[:2] for member, stat in stats.items() if stat[2] == pid}
+    pending = [pid]
+    while pending:
+        member = pending.pop()
+        if member in stats and member not in tree:
+            tree[member] = stats[member][:2]
+        pending.extend(children.get(member, ()))
+    return tree
+
+
+def process_activity(pid, interval=STALL_PROBE_SECONDS):
+    """Probe the tree rooted at pid: (busy, {pid: comm}) from the second sample.
+
+    `busy` is True when any member's utime+stime advanced across the interval
+    or a new member appeared — the tree is working, not hung. An empty tree
+    (dead leader or no /proc) reports not busy with nothing to record.
+    """
+    before = process_tree(pid)
+    if not before:
+        return False, {}
+    time.sleep(interval)
+    after = process_tree(pid)
+    busy = any(member not in before or ticks > before[member][1]
+               for member, (_, ticks) in after.items())
+    return busy, {member: comm for member, (comm, _) in after.items()}
+
+
+def _format_tree(tree):
+    return ' '.join('%d(%s)' % (member, comm)
+                    for member, comm in sorted(tree.items())) or 'none'
+
+
+def _log_size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 'unknown'
+
+
+def runner(spec_path, activity=None):
     spec = json.loads(Path(spec_path).read_text())
     # The runner writes its own owner record as well, closing the window in
     # which the supervisor dies between Popen and saving the returned metadata.
@@ -215,33 +355,95 @@ def runner(spec_path):
             environment = os.environ.copy()
             environment['CARGO_BUILD_JOBS'] = '4'
             environment['CARGO_TARGET_DIR'] = str(Path(spec['cwd']) / 'target')
-            child = subprocess.Popen(spec['command'], cwd=spec['cwd'], env=environment,
-                                     stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                                     start_new_session=True)
+            stdin_path = spec.get('stdin')
+            stdin_handle = None
+            try:
+                if stdin_path:
+                    stdin_handle = open(stdin_path, 'rb')
+                    stdin_arg = stdin_handle
+                else:
+                    stdin_arg = subprocess.DEVNULL
+                child = subprocess.Popen(spec['command'], cwd=spec['cwd'], env=environment,
+                                         stdin=stdin_arg, stdout=log, stderr=log,
+                                         start_new_session=True)
+            finally:
+                if stdin_handle is not None:
+                    stdin_handle.close()
             atomic_json(spec['metadata'], {'pid': child.pid, 'identity': process_identity(child.pid)})
+            if activity is None:
+                activity = process_activity
+            stall_seconds = spec.get('stall_seconds')
+            error_stall = spec.get('error_stall_seconds') or stall_seconds
+            last_mtime, last_activity, stalled = None, time.monotonic(), None
             while child.poll() is None:
+                reason = None
                 if interrupted or time.monotonic() - started >= spec['timeout']:
-                    status = 'stopped' if interrupted else 'timeout'
-                    os.killpg(child.pid, signal.SIGTERM)
+                    reason = 'stopped' if interrupted else 'timeout'
+                elif stall_seconds:
                     try:
-                        child.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        pass
-                    # Kill any descendants even if the group leader exited after TERM.
-                    try:
-                        os.killpg(child.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    break
-                time.sleep(0.1)
+                        mtime = os.path.getmtime(spec['log'])
+                    except OSError:
+                        mtime = last_mtime
+                    if mtime != last_mtime:
+                        last_mtime, last_activity = mtime, time.monotonic()
+                    idle = time.monotonic() - last_activity
+                    # A provider 'stream error' as the most recent log event means
+                    # the agent froze on a dead stream; fail it fast instead of
+                    # waiting out the generic stall or hard timeout windows.
+                    if idle >= error_stall and _tail_has(spec['log'], 'stream error'):
+                        reason = 'failed'
+                        stalled = 'No agent output for %ds; treating as hang' % int(idle)
+                    elif idle >= stall_seconds:
+                        # Log silence is not proof of a hang: a quiet build or
+                        # test phase keeps the child's descendants consuming
+                        # CPU. Sample the tree over a bounded interval — only a
+                        # quiet AND idle tree is stalled; CPU progress extends
+                        # the window instead of killing.
+                        busy, tree = activity(child.pid)
+                        if child.poll() is not None:
+                            continue  # Finished while the probe slept.
+                        try:
+                            mtime = os.path.getmtime(spec['log'])
+                        except OSError:
+                            mtime = last_mtime
+                        if mtime != last_mtime:
+                            last_mtime, last_activity = mtime, time.monotonic()
+                        elif busy:
+                            last_activity = time.monotonic()
+                        else:
+                            reason = 'failed'
+                            stalled = ('No agent output for %ds; treating as hang; '
+                                       'idle process tree: %s; log tail at byte %s'
+                                       % (int(idle), _format_tree(tree),
+                                          _log_size(spec['log'])))
+                if reason is None:
+                    time.sleep(0.1)
+                    continue
+                status = reason
+                os.killpg(child.pid, signal.SIGTERM)
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+                # Kill any descendants even if the group leader exited after TERM.
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                break
             code = child.wait()
             if status not in ('stopped', 'timeout'):
                 status = 'completed' if code == 0 else 'failed'
+            if stalled:
+                status = 'failed'
     except Exception as error:
         atomic_json(spec['receipt'], {'status': 'failed', 'exit_code': code,
                                      'error': str(error), 'finished_at': time.time()})
         return
-    atomic_json(spec['receipt'], {'status': status, 'exit_code': code, 'finished_at': time.time()})
+    receipt = {'status': status, 'exit_code': code, 'finished_at': time.time()}
+    if stalled:
+        receipt['error'] = stalled
+    atomic_json(spec['receipt'], receipt)
 
 
 if __name__ == '__main__':

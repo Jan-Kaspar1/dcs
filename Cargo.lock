@@ -354,6 +354,7 @@ name = "dcs-assembly"
 version = "0.2.0"
 dependencies = [
  "dcs-blocks",
+ "dcs-build",
  "dcs-core",
  "dcs-ethercat",
  "dcs-model",
@@ -390,6 +391,7 @@ dependencies = [
  "dcs-runtime",
  "dcs-sim",
  "dcs-sim-bus",
+ "serde",
  "serde_json",
 ]
 
@@ -470,6 +472,7 @@ dependencies = [
  "dcs-runtime",
  "serde",
  "serde_json",
+ "sha2",
  "tiny_http",
 ]
 
@@ -482,6 +485,7 @@ dependencies = [
  "dcs-model",
  "dcs-sim",
  "dcs-sim-net",
+ "jsonschema",
  "serde_json",
  "signal-hook",
 ]
@@ -500,6 +504,7 @@ name = "dcs-sim"
 version = "0.2.0"
 dependencies = [
  "dcs-core",
+ "jsonschema",
  "serde",
  "serde_json",
 ]

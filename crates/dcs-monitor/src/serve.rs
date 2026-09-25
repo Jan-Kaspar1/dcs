@@ -20,16 +20,18 @@
 //! point's latest [`Sample`], each configuration resource the
 //! `parameters` section's current value, each command the availability
 //! its [`CommandAvailability`](dcs_core::CommandAvailability) rule
-//! reads live — the `writable` mark through the signal index —
-//! and each instance its attributed events: the retained journal
-//! tail's entries beside the routed `History`/`Latest` emissions it
-//! produced.
+//! reads live — the `writable` mark through the signal index, a
+//! `KindDeclared` command's standing verdict from the publication's
+//! `command_verdicts` section — and each instance its attributed
+//! events: the retained journal tail's entries beside the routed
+//! `History`/`Latest` emissions it produced.
 
 use crate::store::{Publication, RoutedEvents};
 use dcs_core::{
-    CommandAvailability, CommandError, CommandSpec, CommandState, ComponentInterface,
-    ComponentResources, ConfigValue, Direction, EventRecord, EventRetention, JournalEntry,
-    JournalEvent, PointId, ResourceEvent, ResourceSample, ResourceView, Sample, SchemaView, Value,
+    CommandAvailability, CommandError, CommandSpec, CommandState, CommandVerdict,
+    ComponentInterface, ComponentResources, ConfigValue, Direction, EventRecord, EventRetention,
+    JournalEntry, JournalEvent, PointId, ResourceEvent, ResourceSample, ResourceView, Sample,
+    SchemaView, Value,
 };
 use dcs_model::SignalIndex;
 use std::collections::{BTreeMap, BTreeSet};
@@ -66,8 +68,9 @@ pub(crate) fn schema_view(publication: &Publication, signals: &SignalIndex) -> S
 /// `GET /resources`'s view over `publication`: per-instance live
 /// resource state — values from the snapshot's points and parameters
 /// sections, command availability read against the signal index's
-/// `writable` marks, and the store's event streams attributed per
-/// instance. `journal` is the store's served ring — the same stream
+/// `writable` marks and the `command_verdicts` section's published
+/// `KindDeclared` verdicts, and the store's event streams attributed
+/// per instance. `journal` is the store's served ring — the same stream
 /// `GET /journal` answers — so recent events include the control-plane
 /// entries journaled between scans; `routed` is the bounded
 /// event-history ring and the latest-emission view the declared
@@ -89,6 +92,16 @@ pub(crate) fn resource_view(
         .parameters
         .iter()
         .map(|entry| (entry.name.as_str(), &entry.values))
+        .collect();
+    let verdicts: BTreeMap<(&str, &str), &CommandVerdict> = snapshot
+        .command_verdicts
+        .iter()
+        .flat_map(|component| {
+            component
+                .verdicts
+                .iter()
+                .map(move |verdict| ((component.name.as_str(), verdict.name.as_str()), verdict))
+        })
         .collect();
     let components = snapshot
         .descriptors
@@ -130,7 +143,15 @@ pub(crate) fn resource_view(
                 commands: interface
                     .commands
                     .iter()
-                    .map(|command| command_state(command, signals))
+                    .map(|command| {
+                        command_state(
+                            command,
+                            signals,
+                            verdicts
+                                .get(&(descriptor.name.as_str(), command.name.as_str()))
+                                .copied(),
+                        )
+                    })
                     .collect(),
                 events: attributed_events(journal, routed, &descriptor.name, &bound),
             }
@@ -152,17 +173,35 @@ pub(crate) fn resource_view(
 /// so the reported refusal is the named reason the receipted path would
 /// answer: `not_writable` on a served but unmarked point,
 /// `unknown_point` on a bound point the model never declared, an
-/// unbound port refused by name. `Always`- and
-/// `KindDeclared`-available commands are admissible: a submission
-/// validates and dispatches at the scan boundary, where a
-/// kind-declared predicate or an `apply_parameter`/`invoke_command`
-/// invariant may still refuse — that refusal settles through the
-/// journaled `command_settled` receipt the view's `events` carry, so
-/// the read model never has to evaluate the kind's predicate.
-fn command_state(spec: &CommandSpec, signals: &SignalIndex) -> CommandState {
+/// unbound port refused by name. `Always`-available commands are
+/// admissible unconditionally. A `KindDeclared` command joins the
+/// publication's `command_verdicts` verdict — the standing-availability
+/// probe the producer evaluates once per declared command at each
+/// scan's step end — so the view serves the kind's named refusal in
+/// the scan the predicate refuses without the read model ever
+/// evaluating it. A publication carrying no verdict for the command —
+/// one materialized before the first scan, or a snapshot predating the
+/// section — keeps the unconditional `available` the read model
+/// reported before the section existed.
+///
+/// Every answer is advisory: a submission still validates, queues, and
+/// dispatches at the scan boundary, where an `apply_parameter`/
+/// `invoke_command` invariant — or a predicate the verdict predates —
+/// may still refuse, that refusal settling through the journaled
+/// `command_settled` receipt the view's `events` carry. The receipted
+/// path stays the sole authority.
+fn command_state(
+    spec: &CommandSpec,
+    signals: &SignalIndex,
+    verdict: Option<&CommandVerdict>,
+) -> CommandState {
     let refused = |reason: CommandError| (false, Some(reason.to_string()));
     let (available, refusal) = match spec.availability {
-        CommandAvailability::Always | CommandAvailability::KindDeclared => (true, None),
+        CommandAvailability::Always => (true, None),
+        CommandAvailability::KindDeclared => match verdict {
+            Some(verdict) if !verdict.available => (false, verdict.refusal.clone()),
+            _ => (true, None),
+        },
         CommandAvailability::BoundPointWritable => match spec.point {
             None => (
                 false,
@@ -246,12 +285,13 @@ fn attributed_events(
 /// receipts its commands settle (addressed by name or by bound point),
 /// its own step failures, and its kind-emitted events. Run-level
 /// entries — role changes, divergence detections and resolutions,
-/// reinitializations, run boundaries — belong to no instance.
+/// reinitializations, tracking-source adoptions, run boundaries —
+/// belong to no instance.
 fn attributed(entry: &JournalEntry, name: &str, points: &BTreeSet<PointId>) -> bool {
     match &entry.event {
         JournalEvent::QualityChanged { point, .. }
         | JournalEvent::PointChanged { point, .. }
-        | JournalEvent::FieldClaimLost { point } => points.contains(point),
+        | JournalEvent::FieldClaimLost { point, .. } => points.contains(point),
         JournalEvent::CommandSettled { receipt } => {
             receipt.command.component() == Some(name)
                 || receipt
@@ -265,7 +305,9 @@ fn attributed(entry: &JournalEntry, name: &str, points: &BTreeSet<PointId>) -> b
         | JournalEvent::DivergenceDetected { .. }
         | JournalEvent::DivergenceResolved { .. }
         | JournalEvent::Reinitialized { .. }
+        | JournalEvent::FieldOrphaned { .. }
         | JournalEvent::SourceRestarted { .. }
+        | JournalEvent::TrackingSourceAdopted { .. }
         | JournalEvent::RunBoundary { .. } => false,
     }
 }
