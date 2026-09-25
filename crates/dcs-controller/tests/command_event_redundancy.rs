@@ -6,8 +6,10 @@
 //! uninterrupted reference controller on its own plant — with the
 //! controller-side model extended by a `sequencer` component wired to
 //! internal points: the proving kind's declared commands (`advance`,
-//! `reset`) and emitted events (`step_completed`) ride the same command
-//! path and journal as everything else, without touching field I/O.
+//! `reset`) and emitted events ride the same command path — the
+//! `Journal`-retained `sequence_completed` boundary journaling beside
+//! everything else while the `History`/`Latest` records route to the
+//! bounded consumer stores — without touching field I/O.
 //!
 //! The pinned semantics under test:
 //!
@@ -265,25 +267,14 @@ fn declared_commands_and_emitted_events_survive_promotion() {
     assert_eq!(standby.receipts().unwrap(), active.receipts().unwrap());
     assert_eq!(standby.receipts().unwrap().len(), 1);
     // The pinned standby-emission semantics, as amended by #689: the
-    // tracking peer's journal carries the same `step_completed` stream
-    // at the same ticks — identical to the field owner's and the
-    // reference's — except at tick 4, where the carried (not settled)
-    // invoke leaves the tracker one step behind for exactly one scan.
-    // The tick-5 adoption converges state, so every other tick matches.
-    let emitted_except_tick_4 = |client: &MonitorClient| {
-        emitted(client)
-            .into_iter()
-            .filter(|(tick, _)| *tick != 4)
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(
-        emitted_except_tick_4(&standby),
-        emitted_except_tick_4(&active)
-    );
-    assert_eq!(
-        emitted_except_tick_4(&standby),
-        emitted_except_tick_4(&reference)
-    );
+    // tracking peer's journal already carries the field owner's
+    // identical emitted-event stream — the `Journal`-retained records
+    // the run produced at the same ticks — and the reference's. The
+    // tick-4 carried-invoke lag (#689) lives in the routed `History`
+    // records — `step_completed` no longer journals — so the durable
+    // emitted streams are identical unfiltered.
+    assert_eq!(emitted(&standby), emitted(&active));
+    assert_eq!(emitted(&standby), emitted(&reference));
 
     // The unsettled-at-promotion case: `reset` is admitted on the
     // active (and the reference) at tick N and stays `Accepted` through
@@ -396,16 +387,13 @@ fn declared_commands_and_emitted_events_survive_promotion() {
     );
 
     // The pinned record: the promoted peer's emitted-event stream is
-    // the uninterrupted reference run's — every `step_completed` at the
-    // same tick with the same payload, save the tick-4 invoke the
-    // tracker carried rather than settled (#689, as in phase 1) — its
-    // receipt log is identical, and the `reset` carried across the
-    // boundary settled exactly once at tick N+1: one receipt, one
-    // journaled outcome.
-    assert_eq!(
-        emitted_except_tick_4(&standby),
-        emitted_except_tick_4(&reference)
-    );
+    // the uninterrupted reference run's — every `Journal`-retained
+    // emission at the same tick with the same payload (the tick-4
+    // carried-invoke lag rides the routed `History` records, never the
+    // durable stream) — its receipt log is identical, and the `reset`
+    // carried across the boundary settled exactly once at tick N+1:
+    // one receipt, one journaled outcome.
+    assert_eq!(emitted(&standby), emitted(&reference));
     assert_eq!(standby.receipts().unwrap(), reference.receipts().unwrap());
     assert_eq!(
         settlements_of(&standby, &invoke("reset", None)),

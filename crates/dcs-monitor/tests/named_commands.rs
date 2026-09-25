@@ -468,9 +468,12 @@ fn sequencer_invokes_apply_at_the_boundary_and_journal() {
             Value::Int(2)
         );
 
-        // `run` paced to the end: each completing step emitted its
-        // `step_completed` at the producing tick — step 2 on tick 2,
-        // then the run `done`.
+        // `run` paced to the end: step 2 — the table's last — runs its
+        // ticks out on tick 2. The completing scan routes
+        // `step_completed` to the event-history ring and `progress` to
+        // the latest-emission view, while the run-level boundary —
+        // `sequence_completed` — journals at the producing tick: the
+        // only emission the durable record carries.
         driver.write(RUN, Value::Bool(true)).unwrap();
         client.advance(1).unwrap();
         let events = emitted(client, 0);
@@ -480,9 +483,9 @@ fn sequencer_invokes_apply_at_the_boundary_and_journal() {
             events[0].event,
             JournalEvent::EventEmitted {
                 event: EmittedEvent {
-                    event: "step_completed".to_string(),
+                    event: "sequence_completed".to_string(),
                     component: "seq".to_string(),
-                    fields: [("step".to_string(), EventValue::Value(Value::Int(2)))]
+                    fields: [("steps".to_string(), EventValue::Value(Value::Int(2)))]
                         .into_iter()
                         .collect(),
                 }
@@ -680,24 +683,106 @@ fn the_durable_journal_file_carries_emitted_events() {
         },
     );
 
-    // The durable record holds the emitted `step_completed` events at
-    // their producing ticks — what a cold restart replays.
+    // The durable record holds the run-level boundary alone: the
+    // `Journal`-retained `sequence_completed` at the completing tick —
+    // what a cold restart replays — while the `History`/`Latest`
+    // emissions stay in their routed stores, never double-recorded
+    // into the journal.
     let data = read_journal_file(Path::new(&journal_path)).unwrap();
-    let events: Vec<(Tick, i64)> = data
+    let events: Vec<(Tick, &EmittedEvent)> = data
         .entries
         .iter()
         .filter_map(|entry| match &entry.event {
-            JournalEvent::EventEmitted { event } if event.event == "step_completed" => {
-                let step = match event.fields["step"] {
-                    EventValue::Value(Value::Int(step)) => step,
-                    _ => panic!("step field must be Int"),
-                };
-                Some((entry.tick, step))
-            }
+            JournalEvent::EventEmitted { event } => Some((entry.tick, event)),
             _ => None,
         })
         .collect();
-    assert_eq!(events, vec![(Tick(2), 1), (Tick(3), 2)]);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].0, Tick(3));
+    assert_eq!(events[0].1.event, "sequence_completed");
+    assert_eq!(
+        events[0].1.fields["steps"],
+        EventValue::Value(Value::Int(2))
+    );
+}
+
+/// The registered kind's routed classes end to end: `seq`'s run walks
+/// a completing table and the read model routes each emission by its
+/// declared retention — `step_completed` lands in the event-history
+/// ring once per completing step, `progress` stands as one
+/// latest-emission record superseded to the newest scan, and the
+/// `Journal`-retained `sequence_completed` boundary journals at the
+/// producing tick. No `History`/`Latest` emission reaches the durable
+/// journal.
+#[test]
+fn the_registered_kinds_emissions_route_by_declared_retention() {
+    with_sequencer(MonitorConfig::default(), |driver, client| {
+        // Two one-tick steps: `run` held across three scans walks the
+        // table to its end — `step_completed` at ticks 2 and 3,
+        // `sequence_completed` at tick 3, `progress` every scan.
+        client.advance(1).unwrap();
+        driver.write(RUN, Value::Bool(true)).unwrap();
+        client.advance(2).unwrap();
+
+        let events = resource_events(client, "seq");
+        let named = |name: &str| {
+            events
+                .iter()
+                .filter(|entry| emitted_named(entry, name))
+                .collect::<Vec<_>>()
+        };
+        // `step_completed` — one `History`-marked record per completing
+        // step, payload and producing tick intact.
+        let steps = named("step_completed");
+        assert_eq!(steps.len(), 2);
+        assert!(
+            steps
+                .iter()
+                .all(|entry| entry.retention == EventRetention::History)
+        );
+        assert_eq!(
+            steps
+                .iter()
+                .map(|entry| {
+                    let JournalEvent::EventEmitted { event } = &entry.event else {
+                        unreachable!()
+                    };
+                    (entry.tick, event.fields["step"].clone())
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (Tick(2), EventValue::Value(Value::Int(1))),
+                (Tick(3), EventValue::Value(Value::Int(2))),
+            ]
+        );
+        // `progress` — emitted every scan, the latest-emission view
+        // stands as the newest record alone: nothing accumulates.
+        let progress = named("progress");
+        assert_eq!(progress.len(), 1);
+        assert_eq!(progress[0].retention, EventRetention::Latest);
+        assert_eq!(progress[0].tick, Tick(3));
+        let JournalEvent::EventEmitted { event } = &progress[0].event else {
+            unreachable!()
+        };
+        assert_eq!(event.fields["step"], EventValue::Value(Value::Int(2)));
+        assert_eq!(event.fields["elapsed"], EventValue::Value(Value::Int(1)));
+        assert_eq!(event.fields["done"], EventValue::Value(Value::Bool(true)));
+        // `sequence_completed` — the run-level boundary — is the one
+        // `Journal`-marked emission, at the completing tick.
+        let boundary = named("sequence_completed");
+        assert_eq!(boundary.len(), 1);
+        assert_eq!(boundary[0].retention, EventRetention::Journal);
+        assert_eq!(boundary[0].tick, Tick(3));
+
+        // The durable journal carries no `History`/`Latest` record —
+        // `sequence_completed` alone is emitted there.
+        let journal = emitted(client, 0);
+        assert_eq!(journal.len(), 1);
+        assert!(journal.iter().all(|entry| matches!(
+            &entry.event,
+            JournalEvent::EventEmitted { event } if event.event == "sequence_completed"
+        )));
+    });
 }
 
 /// The routed classes' served half: `GET /resources`'s per-instance

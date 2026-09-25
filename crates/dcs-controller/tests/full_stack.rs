@@ -58,15 +58,17 @@
 //! 5. **The batch program's declared surface.** `B-101` — the model's
 //!    `sequencer` — is the checked-in composition's kind carrying the
 //!    declared contract: the served `/schema` lists its `advance` and
-//!    `reset` commands and its `step_completed` event under the
-//!    `Declared` provenance beside the adapted entries. The operator
-//!    starts the table through the writable `run` point — the declared
-//!    commands do not alias the held inputs, so no bespoke point is
-//!    added — the first step's `step_completed` emission journals at
-//!    the producing tick on every controller and in both peers' durable
-//!    journal files, the `advance`/`reset` invocations settle through
-//!    the receipted command path, and the alarm report computes over
-//!    the emitted-event record.
+//!    `reset` commands and its declared events — one per retention
+//!    class — under the `Declared` provenance beside the adapted
+//!    entries. The operator starts the table through the writable `run`
+//!    point — the declared commands do not alias the held inputs, so no
+//!    bespoke point is added — the first step's `step_completed`
+//!    emission routes to the event-history ring at the producing tick
+//!    on every controller — attributed in the served recent-events view
+//!    under its `history` mark, never the durable journal — the
+//!    `advance`/`reset` invocations settle through the receipted
+//!    command path, and the alarm report computes over the journaled
+//!    transition record.
 //! 6. **Injected fault.** `dcs-plant-ctl fault 30 bad:communication_fault`
 //!    on both plants: the conditioned run status goes `Bad`, the
 //!    interlock trips on the bad permissive and drives the valve to its
@@ -222,8 +224,9 @@ fn invoke(command: &str, arguments: &[(&str, Value)]) -> Command {
 }
 
 /// The `step_completed` event the batch program's first step emits on
-/// its completing scan — the kind-declared emission the journal and the
-/// served recent-events view carry.
+/// its completing scan — the kind-declared `History`-retained emission
+/// the routed event-history ring and the served recent-events view
+/// carry, never the durable journal.
 fn step_completed() -> JournalEvent {
     JournalEvent::EventEmitted {
         event: EmittedEvent {
@@ -662,9 +665,12 @@ fn run_full_stack(tag: &str) -> Outcome {
     // `B-101` — the model's `sequencer` — is the checked-in
     // composition's kind carrying the declared contract: the served
     // block-interface schema lists its `advance` and `reset` commands
-    // and its `step_completed` event under the declared provenance
-    // beside the adapted entries — no bespoke writable point stands in
-    // for either.
+    // and its declared events — one per retention class, the served
+    // `retention` mark routing each consumer — under the declared
+    // provenance beside the adapted entries: `step_completed` the
+    // bounded `history` ring, `sequence_completed` the durable
+    // `journal`, `progress` the superseding `latest` view. No bespoke
+    // writable point stands in for either surface.
     let schema = active.schema().unwrap();
     let batch = &schema
         .interfaces
@@ -684,14 +690,20 @@ fn run_full_stack(tag: &str) -> Outcome {
         assert_eq!(spec.adapted, AdaptedCommand::Declared, "{command}");
         assert_eq!(spec.availability, availability, "{command}");
     }
-    let declared = batch
-        .events
-        .iter()
-        .find(|spec| spec.name == "step_completed")
-        .expect("the schema declares step_completed");
-    assert_eq!(declared.adapted, AdaptedEvent::Declared);
-    assert_eq!(declared.emission, EventEmission::KindEmitted);
-    assert_eq!(declared.retention, EventRetention::Journal);
+    for (event, retention) in [
+        ("step_completed", EventRetention::History),
+        ("sequence_completed", EventRetention::Journal),
+        ("progress", EventRetention::Latest),
+    ] {
+        let declared = batch
+            .events
+            .iter()
+            .find(|spec| spec.name == event)
+            .unwrap_or_else(|| panic!("the schema declares {event}"));
+        assert_eq!(declared.adapted, AdaptedEvent::Declared, "{event}");
+        assert_eq!(declared.emission, EventEmission::KindEmitted, "{event}");
+        assert_eq!(declared.retention, retention, "{event}");
+    }
 
     // The operator starts the table: `run` is the held level input the
     // model wires to the declared `batch-run` writable point — the
@@ -728,10 +740,14 @@ fn run_full_stack(tag: &str) -> Outcome {
     trace.push(observe(&field, run_tick));
 
     // The table's first step runs its declared ticks out: the
-    // completing scan emits `step_completed` — the kind-emitted event —
-    // and every controller's journal records it at the producing tick:
-    // the field owner's, the tracking peer's (its own scan emits it
-    // from the checkpointed state), and the reference's.
+    // completing scan emits `step_completed` — the `History`-retained
+    // record — routed to each controller's event-history ring at the
+    // producing tick, never the durable journal: the field owner's,
+    // the tracking peer's (its own scan emits it from the checkpointed
+    // state), and the reference's. The `Journal`-retained
+    // `sequence_completed` boundary never fires — the table never runs
+    // to its end this run — so no `event_emitted` entry lands on any
+    // journal: the durable record's volume is unchanged.
     let event_tick = Tick(run_tick.0 + BATCH_STEP1_TICKS - 1);
     let stepped = phase(
         &standby,
@@ -754,29 +770,26 @@ fn run_full_stack(tag: &str) -> Outcome {
             .iter()
             .filter(|entry| matches!(entry.event, JournalEvent::EventEmitted { .. }))
             .collect();
-        assert_eq!(
-            emitted.len(),
-            1,
-            "{peer} journaled the batch program's one emission"
+        assert!(
+            emitted.is_empty(),
+            "{peer} journaled a non-Journal emission: {emitted:?}"
         );
-        assert_eq!(emitted[0].tick, event_tick, "{peer}");
-        assert_eq!(emitted[0].event, step_completed(), "{peer}");
     }
-    // The served recent-events view attributes the emission to the
-    // instance, and both declared commands report submittable.
+    // The served recent-events view attributes the `History`-routed
+    // emission to the instance — the record's `history` mark — and both
+    // declared commands report submittable.
     let resources = active.resources().unwrap();
     let batch_resources = resources
         .components
         .iter()
         .find(|component| component.name == BATCH_COMPONENT)
         .expect("the resource view covers the batch program");
-    assert!(
-        batch_resources
-            .events
-            .iter()
-            .any(|entry| entry.tick == event_tick && entry.event == step_completed()),
-        "the served events tail carries the emission at the producing tick"
-    );
+    let record = batch_resources
+        .events
+        .iter()
+        .find(|entry| entry.tick == event_tick && entry.event == step_completed())
+        .expect("the served events tail carries the emission at the producing tick");
+    assert_eq!(record.retention, EventRetention::History);
     for command in ["advance", "reset"] {
         let state = batch_resources
             .commands
@@ -873,7 +886,11 @@ fn run_full_stack(tag: &str) -> Outcome {
 
     // The tracking peer scans the stage out behind its gate — every
     // controller agrees again — and the durable journal files the
-    // pair's monitors appended hold the same emitted-event record.
+    // pair's monitors appended carry no `step_completed`: the
+    // `History`-retained emission routes to the bounded event-history
+    // ring instead of the durable record, and the `Journal`-retained
+    // `sequence_completed` boundary never fired — the run's `advance`
+    // landing short of the table's end.
     let closed = phase(
         &standby,
         &active,
@@ -890,16 +907,18 @@ fn run_full_stack(tag: &str) -> Outcome {
     for path in [&active_journal, &standby_journal] {
         let data = read_journal_file(path).unwrap();
         assert!(
-            data.entries
-                .iter()
-                .any(|entry| entry.tick == event_tick && entry.event == step_completed()),
-            "the durable journal {} carries the emission",
+            data.entries.iter().all(|entry| !matches!(
+                &entry.event,
+                JournalEvent::EventEmitted { event }
+                    if event.event == "step_completed" || event.event == "progress"
+            )),
+            "the durable journal {} journaled a non-Journal emission",
             path.display()
         );
     }
 
-    // The alarm report computes over the emitted-event journal — the
-    // served form and the durable file alike — without failure.
+    // The alarm report computes over the durable journal — the served
+    // form and the file alike — without failure.
     for args in [
         vec![active_process.addr.to_string()],
         vec![

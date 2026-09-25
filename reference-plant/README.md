@@ -14,7 +14,8 @@ takeover and out-of-service declarations, the managed alarm set —
 a never-shelvable high-level alarm, a shelvable low-level alarm, and
 the equipment alarms the site policy declares — and a small exercise
 program (`sequencer`) whose kind-declared `advance`/`reset` commands
-and kind-emitted `step_completed` event carry the declared
+and kind-emitted `step_completed`/`sequence_completed`/`progress`
+events — one declared per retention class — carry the declared
 command/event surface the clean check proves.
 
 ## Layout
@@ -331,10 +332,14 @@ served interface carries — the exercise `sequencer`'s `advance` and
 `kind_declared` command's published availability verdict — `advance`
 reporting `available` mid-table, then `available: false` carrying the
 kind's named refusal once the run completes the table; every
-kind-emitted event — the sequencer's `step_completed` — must reach the
-consumer-visible record once the run drives its declaring component to
-emission, appearing in `GET /journal`'s `event_emitted` entries and
-the instance-attributed `events` of `GET /resources`; the snapshot's
+kind-emitted event — the sequencer's `step_completed`,
+`sequence_completed`, and `progress`, one declared per retention
+class — must reach the consumer-visible record once the run drives
+its declaring component to emission, each landing where its served
+`retention` mark routes it: `journal`-retained emissions in `GET
+/journal`'s `event_emitted` entries, `history`/`latest` emissions in
+the bounded routed stores, and all three in the instance-attributed
+`events` of `GET /resources` under their marks; the snapshot's
 `descriptors` must cover every composed component; and `GET /journal`
 must answer the run's recorded transitions. A divergence fails
 `surface-mismatch`.
@@ -418,8 +423,9 @@ bound point's `not declared writable`, the completed table's `advance`
 reporting `available: false` carrying the kind's named refusal — the
 published verdict joined into the command state — with the refused
 submission's `command_refused` receipt in the attributed events), that
-the kind-emitted
-`step_completed` reaches `dcs-ctl events`, and that the refusal modes
+the kind-emitted `step_completed`/`progress` reach `dcs-ctl events`
+under their `history`/`latest` marks while `sequence_completed`
+journals, and that the refusal modes
 exit nonzero naming the failure: an undeclared command answers
 `unknown_command`, a malformed `invoke` argument fails its
 declared-kind parse, and an unreachable monitor names its address. Two

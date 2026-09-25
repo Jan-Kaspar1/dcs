@@ -241,14 +241,25 @@ class RuntimeTests(unittest.TestCase):
             while sleeper.pid not in process_tree(sleeper.pid):
                 self.assertLess(time.monotonic(), deadline)
                 time.sleep(.02)
-            # A just-exec'd interpreter still burns startup ticks, which
-            # the probe rightly reports as busy — poll for the settled
-            # idle verdict inside the deadline rather than asserting on
-            # the first window.
-            busy, snapshot = process_activity(sleeper.pid, interval=.1)
-            while busy:
+            # The child is tree-visible while its interpreter still starts;
+            # wait until it is blocked inside time.sleep ('S' sustained across
+            # two samples) so startup CPU under CI load is not misread as
+            # tree activity.
+            stat = Path('/proc/%d/stat' % sleeper.pid)
+            while True:
                 self.assertLess(time.monotonic(), deadline)
-                busy, snapshot = process_activity(sleeper.pid, interval=.1)
+                try:
+                    state = stat.read_text()
+                except OSError:
+                    self.fail('sleeper exited before reaching sleep state')
+                if state[state.rfind(')') + 2] == 'S':
+                    time.sleep(.02)
+                    state = stat.read_text()
+                    if state[state.rfind(')') + 2] == 'S':
+                        break
+                time.sleep(.02)
+            busy, snapshot = process_activity(sleeper.pid, interval=.1)
+            self.assertFalse(busy)
             self.assertIn(sleeper.pid, snapshot)
         finally:
             sleeper.terminate()

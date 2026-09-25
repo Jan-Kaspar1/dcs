@@ -11,7 +11,8 @@
 
 use dcs_blocks::{
     AlarmLimits, GroupOutputs, LatchingAlarm, Motor, PumpGroup, PumpGroupConfig, PumpIo,
-    RotationPolicy, SetpointTable, ThresholdChain, ThresholdOutputs, Valve,
+    RotationPolicy, Sequencer, SequencerStep, SetpointTable, ThresholdChain, ThresholdOutputs,
+    Valve,
 };
 use dcs_core::{
     AdaptedCommand, AdaptedEvent, BlockInterface, CommandAvailability, ConfigCapability, Direction,
@@ -342,6 +343,53 @@ fn threshold_chain_interface_separates_demand_from_flags() {
     assert_eq!(demand_changed.adapted, AdaptedEvent::PointChanged);
     assert_eq!(demand_changed.retention, EventRetention::Journal);
     assert_eq!(demand_changed.emission, EventEmission::WhenJournaled);
+}
+
+/// `sequencer`: the library's retention-class proving kind — the
+/// derived interface carries each declared event's retention verbatim
+/// under the `Declared`/`KindEmitted` marks, one event per class:
+/// `step_completed` the bounded `History` operational record,
+/// `sequence_completed` the durable `Journal` run boundary, `progress`
+/// the superseding `Latest` publication.
+#[test]
+fn sequencer_interface_carries_each_declared_events_retention() {
+    let component = Sequencer::new(
+        "seq",
+        point(1),
+        point(2),
+        point(3),
+        point(4),
+        point(5),
+        vec![
+            SequencerStep {
+                ticks: 2,
+                value: 10.0,
+            },
+            SequencerStep {
+                ticks: 1,
+                value: 20.0,
+            },
+        ],
+    )
+    .unwrap();
+    let interface = BlockInterface::from_descriptor(&component.describe());
+
+    assert_eq!(interface.kind, "sequencer");
+    for (name, retention) in [
+        ("step_completed", EventRetention::History),
+        ("sequence_completed", EventRetention::Journal),
+        ("progress", EventRetention::Latest),
+    ] {
+        let event = interface
+            .events
+            .iter()
+            .find(|event| event.name == name)
+            .unwrap_or_else(|| panic!("declared event {name:?} missing from interface"));
+        assert_eq!(event.adapted, AdaptedEvent::Declared, "{name}");
+        assert_eq!(event.emission, EventEmission::KindEmitted, "{name}");
+        assert_eq!(event.retention, retention, "{name}");
+        assert_eq!(event.point, None, "{name}");
+    }
 }
 
 /// `valve` and `motor` — the command-with-feedback pattern: the

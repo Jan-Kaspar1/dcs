@@ -300,6 +300,36 @@ typed payload — beside the adapted `point_changed`/`quality_changed`/
 `journaled` mark surfaces as the `when_journaled` emission rule on each
 `Bool`/`Int` port's adapted `point_changed:<port>` event entry.
 
+The `EventDecl`'s `retention` names the store the serving layer routes
+the emission to — all three classes are live, and no emission is
+recorded in two stores:
+
+- `journal` — the durable transition journal: `Journal`-retained (and
+  undeclared) emissions land as `event_emitted` entries at the
+  producing tick, replayed by a cold restart like every journaled
+  event. The audit-grade record — the class for run-level boundaries
+  and other low-volume, keep-forever events.
+- `history` — the read model's bounded event-history ring: one
+  `EventRecord` per emission, evicting oldest-first at its bound under
+  the same numbering-gap convention the point-history and journal
+  rings follow. The class for per-cycle operational records a
+  diagnostic reads back — frequent enough that the durable record
+  should not accumulate them.
+- `latest` — the latest-emission view: the newest `EventRecord` per
+  (component, declared event name), superseded by each newer emission.
+  The class for standing publications where only the newest value
+  matters.
+
+`GET /resources`'s per-instance `events` serves all three classes
+beside the attributed journal tail — each entry's `retention` mark
+naming the store the record came from — and a tracking peer's published
+read model carries the same routed events (decision 84's emit-identical
+parity). The `sequencer` kind declares one event per class and sets the
+convention: `step_completed` (`history`) the per-step operational
+record, `sequence_completed` (`journal`) the durable run-level
+boundary, `progress` (`latest`) the superseding standing-position
+publication.
+
 ## `signals`
 
 A list of plant signals: the monitoring/UI-facing names for the values
@@ -352,8 +382,9 @@ the instance's whole engineering surface is its declared `kind`,
 `ports`, and `parameters`. Operator submissions arrive at runtime as
 `Command::Invoke` on the receipted path, validated against the
 declaration and dispatched to the component's `invoke_command` at the
-scan boundary; emissions drain after each `step` and journal per their
-declared retention (see `journaled` above). `GET /schema` serves each
+scan boundary; emissions drain after each `step` and route to the
+store their declared `retention` names (see `journaled` above).
+`GET /schema` serves each
 instance's derived `BlockInterface` — ports as measurements/state,
 parameters as configuration, the adapted generic and declared native
 commands, and the adapted and declared events — and `GET /resources`
