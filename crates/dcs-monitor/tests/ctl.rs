@@ -476,7 +476,11 @@ fn schema_prints_the_served_interface_registry() {
         // The sequencer kind's declared vocabulary serves under the
         // instance: `advance`/`reset` sit beside the port- and
         // parameter-adapted generic commands, and the kind-emitted
-        // `step_completed` beside the adapted journal transitions.
+        // events — one declared per retention class — beside the
+        // adapted journal transitions, each spec's `retention` mark
+        // routing the consumer: `step_completed` the bounded
+        // `history` record, `sequence_completed` the durable
+        // `journal`, `progress` the superseding `latest` view.
         let seq = schema
             .interfaces
             .iter()
@@ -503,8 +507,25 @@ fn schema_prints_the_served_interface_registry() {
             .iter()
             .map(|event| event.name.as_str())
             .collect();
-        assert!(events.contains(&"step_completed"), "{events:?}");
         assert!(events.contains(&"command_settled"), "{events:?}");
+        for (name, retention) in [
+            ("step_completed", dcs_core::EventRetention::History),
+            ("sequence_completed", dcs_core::EventRetention::Journal),
+            ("progress", dcs_core::EventRetention::Latest),
+        ] {
+            let spec = seq
+                .interface
+                .events
+                .iter()
+                .find(|event| event.name == name)
+                .unwrap_or_else(|| panic!("{name} missing: {events:?}"));
+            assert_eq!(spec.retention, retention, "{name}");
+            assert_eq!(
+                spec.emission,
+                dcs_core::EventEmission::KindEmitted,
+                "{name}"
+            );
+        }
 
         // And the port/parameter halves: `run` is a measurement, `done`
         // a Status-roled state, `step_count` a tunable configuration.
@@ -539,25 +560,47 @@ fn events_print_each_components_recent_emissions() {
         assert!(events.is_empty());
 
         // Holding `run` through a scan completes the one-tick step: the
-        // kind-emitted `step_completed` journals attributed to `seq` —
-        // the emitted event the run produced reflected in `events`,
-        // marked `journal`-retained: the durable record's mark.
+        // kind-emitted `step_completed` lands in the event-history ring
+        // attributed to `seq` — the emitted event the run produced
+        // reflected in `events`, marked `history`-retained — beside the
+        // standing `progress` record the `latest` mark carries.
         driver.write(SEQ_RUN, Value::Bool(true)).unwrap();
         client.advance(1).unwrap();
         let events: Vec<dcs_core::ResourceEvent> =
             serde_json::from_value(ctl_ok(addr, &["events", "seq"])).unwrap();
-        assert!(events.iter().any(|entry| matches!(
-            &entry.event,
-            JournalEvent::EventEmitted { event }
-                if event.event == "step_completed"
-                    && event.component == "seq"
-                    && event.fields["step"] == dcs_core::EventValue::Value(Value::Int(1))
-        )));
-        assert!(
-            events
-                .iter()
-                .all(|entry| entry.retention == dcs_core::EventRetention::Journal)
-        );
+        let completed = events
+            .iter()
+            .find(|entry| {
+                matches!(
+                    &entry.event,
+                    JournalEvent::EventEmitted { event }
+                        if event.event == "step_completed"
+                            && event.component == "seq"
+                            && event.fields["step"] == dcs_core::EventValue::Value(Value::Int(1))
+                )
+            })
+            .expect("the attributed record carries step_completed");
+        assert_eq!(completed.retention, dcs_core::EventRetention::History);
+        let progress = events
+            .iter()
+            .find(|entry| {
+                matches!(
+                    &entry.event,
+                    JournalEvent::EventEmitted { event } if event.event == "progress"
+                )
+            })
+            .expect("the attributed record carries progress");
+        assert_eq!(progress.retention, dcs_core::EventRetention::Latest);
+        // Neither `history` nor `latest` emission is journaled — the
+        // durable record's mark appears on no routed entry beside the
+        // journal-retained adapted transitions the tail also carries.
+        assert!(events.iter().all(|entry| {
+            !matches!(
+                &entry.event,
+                JournalEvent::EventEmitted { event }
+                    if event.event == "step_completed" || event.event == "progress"
+            ) || entry.retention != dcs_core::EventRetention::Journal
+        }));
 
         // The all-components form keys every served instance's list by
         // name — `seq`'s carries the same tail, and `level-pid`'s the

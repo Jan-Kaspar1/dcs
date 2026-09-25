@@ -406,9 +406,10 @@ pub enum AdaptedEvent {
 ///
 /// The entry declares the stable event kind (`name`), the typed
 /// payload schema, the retention class, the emission condition, and
-/// the journaled transition it is adapted from. Typed event emission
-/// beyond the adapted journal vocabulary is a later tranche; these
-/// entries describe what already lands in the journal.
+/// the journaled transition it is adapted from. A kind-declared
+/// emission routes to the store its [`EventRetention`] names — the
+/// durable journal, the bounded event-history ring, or the
+/// latest-emission view.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventSpec {
     /// The event's stable identity within the interface —

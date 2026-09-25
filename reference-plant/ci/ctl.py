@@ -9,16 +9,21 @@ pacing, the read subcommands answer the served block-interface surface,
 and the receipted subcommands carry the mutations.
 
 The proving kind is the emitted model's `sequencer` — the exercise
-program whose kind-declared `advance`/`reset` commands and kind-emitted
-`step_completed` event the leg invokes and observes. The leg asserts,
+program whose kind-declared `advance`/`reset` commands the leg invokes
+and whose kind-emitted events — `step_completed`, `sequence_completed`,
+and `progress`, one declared per retention class — the leg observes
+routed per their served `retention` marks. The leg asserts,
 naming each failure on stderr:
 
 - the read subcommands answer the served contract: `signals` serves
   exactly the signal index the emitted model declares, `schema` the
   sequencer's interface carrying `advance`/`reset` as declared commands
-  and `step_completed` as a kind-emitted event, `snapshot` the
+  and `step_completed`/`sequence_completed`/`progress` as kind-emitted
+  events marked `history`/`journal`/`latest`, `snapshot` the
   descriptors covering every composed component, and `events`/
-  `resources` the per-instance live view;
+  `resources` the per-instance live view where `step_completed` reads
+  back under `history` and `progress` under `latest` — the durable
+  `journal` carrying only `sequence_completed` of the three;
 - a kind-declared `invoke` prints the `accepted` receipt and settles
   `applied` at the scan boundary — the settled receipt visible through
   `receipts` and journaled as `command_settled` carrying the declared
@@ -108,11 +113,19 @@ def rejection_name(receipt):
     return reason if isinstance(reason, str) else None
 
 
-def emitted_step(entry):
-    """The `step` field of an `event_emitted` journal entry's
-    `step_completed` payload — `{"value": {"int": n}}` on the wire —
+def emitted_event(entry):
+    """The `EmittedEvent` an attributed `ResourceEvent` or a journaled
+    `event_emitted` entry carries — routed `history`/`latest` records
+    keep the same `event_emitted` shape under their `retention` mark —
     or None for any other entry."""
-    emitted = entry.get("event", {}).get("event_emitted", {}).get("event", {})
+    return entry.get("event", {}).get("event_emitted", {}).get("event")
+
+
+def emitted_step(entry):
+    """The `step` field of a `step_completed` emission's payload —
+    `{"value": {"int": n}}` on the wire — or None for any other
+    entry."""
+    emitted = emitted_event(entry) or {}
     if emitted.get("event") != "step_completed":
         return None
     return emitted.get("fields", {}).get("step")
@@ -301,11 +314,23 @@ def run(args):
                 events = {
                     spec.get("name"): spec for spec in interface.get("events", [])
                 }
-                emitted = events.get("step_completed")
-                if not isinstance(emitted, dict) or emitted.get("adapted") != "declared":
-                    failures.append(
-                        f"schema: {component}'s `step_completed` event serves {emitted!r}"
-                    )
+                # One declared event per retention class — the marks a
+                # consumer routes the bounded stores by.
+                for name, retention in (
+                    ("step_completed", "history"),
+                    ("sequence_completed", "journal"),
+                    ("progress", "latest"),
+                ):
+                    spec = events.get(name)
+                    if (
+                        not isinstance(spec, dict)
+                        or spec.get("adapted") != "declared"
+                        or spec.get("retention") != retention
+                    ):
+                        failures.append(
+                            f"schema: {component}'s `{name}` event serves "
+                            f"{spec!r}, expected declared/{retention}"
+                        )
 
         snapshot = answered("snapshot")
         if snapshot is not None:
@@ -317,7 +342,10 @@ def run(args):
 
         # `write` holds the sequencer's `run` input — the receipted
         # path's ordinary point write, attributed. Two held scans run
-        # the first step's declared ticks out: `step_completed` emits.
+        # the first step's declared ticks out: `step_completed` routes
+        # to the bounded history ring and the standing `progress`
+        # publication supersedes itself in the latest view — both
+        # served in the attributed record under their retention marks.
         submitted(
             "write run",
             answered("write", run_point, "true", "--actor", ACTOR),
@@ -326,12 +354,41 @@ def run(args):
 
         events = answered("events", component)
         if events is not None:
-            if not any(
-                emitted_step(entry) == {"value": {"int": 1}} for entry in events
-            ):
+            completed = [
+                entry
+                for entry in events
+                if emitted_step(entry) == {"value": {"int": 1}}
+            ]
+            if not completed:
                 failures.append(
                     f"events: no emitted step_completed from {component} "
                     "reached the attributed record"
+                )
+            elif any(entry.get("retention") != "history" for entry in completed):
+                failures.append(
+                    "events: `step_completed` serves a retention other "
+                    f"than history: {completed!r}"
+                )
+            progress = [
+                entry
+                for entry in events
+                if (emitted_event(entry) or {}).get("event") == "progress"
+            ]
+            if len(progress) != 1 or progress[0].get("retention") != "latest":
+                failures.append(
+                    f"events: the standing `progress` publication serves "
+                    f"{progress!r} — one latest-retained record expected"
+                )
+            routed = [
+                entry
+                for entry in events
+                if (emitted_event(entry) or {}).get("event")
+                in ("step_completed", "progress")
+            ]
+            if any(entry.get("retention") == "journal" for entry in routed):
+                failures.append(
+                    "events: a history/latest emission serves the "
+                    f"durable record's mark: {routed!r}"
                 )
         keyed = answered("events")
         if keyed is not None and component not in keyed:
@@ -373,6 +430,24 @@ def run(args):
                 )
             elif journaled[-1].get("actor") != ACTOR:
                 failures.append("journal: the invoke's command_settled carries no actor")
+            # The completed table's run boundary is the durable
+            # emission — `sequence_completed` journals at the applying
+            # tick while the routed `history`/`latest` records never
+            # land here.
+            emitted_names = [
+                (emitted_event(entry) or {}).get("event") for entry in journal
+            ]
+            if "sequence_completed" not in emitted_names:
+                failures.append(
+                    "journal: the completed table's sequence_completed "
+                    "boundary did not journal"
+                )
+            for name in ("step_completed", "progress"):
+                if name in emitted_names:
+                    failures.append(
+                        f"journal: the non-journal-retained {name} "
+                        "emission landed in the durable record"
+                    )
 
         # The standing availability the snapshot publishes for the
         # kind-declared commands: on the completed table `advance`
