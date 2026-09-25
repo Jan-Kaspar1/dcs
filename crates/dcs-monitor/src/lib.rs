@@ -184,12 +184,14 @@
 //!   arriving while the queue is full is refused with a
 //!   [`CommandError::QueueFull`] rejection receipt — admission is
 //!   receipted, never fire-and-forget — and the queue's admission
-//!   metrics ride the snapshot's `command_queue` section. With a
-//!   [`CommandPersist`] installed ([`Monitor::with_command_persist`],
-//!   the controller's `--state-file` wiring), an accepted admission is
-//!   persisted before the `200` answers, so a restart between admission
-//!   and the applying scan re-queues the carried receipt rather than
-//!   losing the command unaudited
+//!   metrics ride the snapshot's `command_queue` section. With
+//!   `state_file` configured on [`MonitorConfig`] (the controller's
+//!   `--state-file` wiring), an accepted admission's checkpoint is
+//!   captured and queued to the sink under the admission's own lock
+//!   hold, then the `200` attests the file caught up through that
+//!   capture before answering — so a restart between admission and the
+//!   applying scan re-queues the carried receipt rather than losing
+//!   the command unaudited
 //! - `POST /scan`, body [`ScanRequest`] → runs that many scans → `200`
 //!   [`TelemetrySnapshot`] taken after the last one; a failing
 //!   [`Driven::after_scan`] hook → `500`; refused with `409` on a paced
@@ -273,6 +275,29 @@
 //! un-replayable record — the second bind fails naming the file and the
 //! live-holder conflict, and a dead holder's lock releases with its
 //! descriptor so a restart re-acquires it.
+//!
+//! With `state_file` set on [`MonitorConfig`], the run's transferable
+//! [`Checkpoint`] persists to that path at its documented boundaries —
+//! every completed scan cycle's end (after the plant step) and every
+//! accepted command's admission — the recovery state a restarted
+//! controller resumes through. The checkpoint file shares the journal
+//! sink's drain shape (the state-file persist isolation fix, #982):
+//! the capture rides the shared executor lock exactly where the write
+//! always did, then hands to a bounded [`Drain`] whose dedicated
+//! writer serializes and atomically replaces the file — so a slow or
+//! stalled disk can neither lengthen a scan nor pin the serving lane
+//! behind it. The queue's declared bound (`state_drain_capacity`) is
+//! where a lagging sink turns fatal at the push, the writer's FIFO on
+//! the lock-serialized captures is what makes a stale overwrite
+//! impossible, and the drain's standing health —
+//! `healthy`/`lagging`/`failed` with the lost-checkpoint accounting —
+//! is the named degraded state stamped into every published snapshot's
+//! `publication.state_sink` section. The answers whose contract
+//! promises durability — an accepted command's `200`, a driven scan
+//! batch's — wait the writer's queue out through the request's own
+//! pushed ordinal first, the request worker's own bounded wait, never
+//! the lock's; every other path — the paced loop's cycle-end persist
+//! included — only queues, never waits.
 //!
 //! The alarm flood and performance report (`dcs-alarm-report`, backed by
 //! [`alarm_report`]) is tooling-side aggregation over that record — the
@@ -485,6 +510,7 @@ mod journal_file;
 mod pair;
 mod recorder;
 mod serve;
+mod state_file;
 mod store;
 
 use crate::store::Store;
@@ -494,12 +520,13 @@ pub use pair::{
     PeerStatus, PeerView,
 };
 pub use recorder::MonitorConfig;
+pub use state_file::{DEFAULT_STATE_DRAIN_CAPACITY, StateSink};
 pub use store::{Publication, PublicationGap, PublicationPage};
 
 use dcs_core::{
     CarryoverReport, Command, CommandError, CommandOutcome, CommandReceipt, JournalEntry,
     JournalSinkHealth, PointHistory, PointId, PublicationHealth, ResourceView, RoleReport,
-    SchemaView, StandbySync, SwitchError, TelemetrySnapshot, Tick,
+    SchemaView, StandbySync, StateSinkHealth, SwitchError, TelemetrySnapshot, Tick,
 };
 use dcs_model::SignalIndex;
 use dcs_runtime::{
@@ -599,6 +626,17 @@ const CHECKPOINT_PULL_TIMEOUT: Duration = Duration::from_secs(1);
 /// the writer is stalled — and the queue's own bound has already made
 /// the run's pushes fatal rather than let the file trail silently.
 const JOURNAL_DRAIN_WAIT: Duration = Duration::from_secs(30);
+
+/// The bound a durability-attesting answer gives the state-file
+/// sink's writer — how long `POST /command`'s accepted admission or a
+/// driven `POST /scan` waits for the drain to have replaced the file
+/// through the request's own pushed checkpoint before the answer can
+/// promise it durable. The wait is the request worker's own, off the
+/// executor lock; a healthy sink drains in microseconds, so reaching
+/// the bound means the writer is stalled — and the queue's own bound
+/// has already made the run's pushes fatal rather than let the file
+/// trail silently.
+const STATE_DRAIN_WAIT: Duration = crate::state_file::STATE_DRAIN_WAIT;
 
 /// How far ahead of this run's own tick a checkpoint pulled to verify
 /// an announced demotion hint may serve: a successor tracking this run
@@ -741,26 +779,11 @@ const MAX_REQUEST_BODY: u64 = 64 * 1024;
 
 /// Runs once after each completed requested scan, receiving the peer —
 /// the plant step the driving request paces the run to (its field
-/// ownership decides the step), and the checkpoint a state-file run
-/// persists at that boundary. A failure fails the request with `500`.
+/// ownership decides the step). A failure fails the request with `500`.
+/// The checkpoint a `state_file`-configured run persists at that same
+/// boundary is the monitor's own — queued to the [`StateSink`] under
+/// the lock just after the hook, never part of it.
 pub type AfterScan<'d> = Box<dyn Fn(&Peer<'d>) -> Result<(), String> + Send + Sync + 'd>;
-
-/// Runs at a command's admission boundary — inside `POST /command`,
-/// after the accepted receipt lands in the executor's log and before
-/// the request answers — receiving the run's just-captured
-/// [`Checkpoint`]. A `--state-file` run installs its persist here so an
-/// accepted command is durable before its `200` receipt is promised:
-/// the checkpoint's receipt log carries the admission and a resume
-/// re-queues it, so a restart between admission and the applying scan
-/// re-applies the command instead of losing it unaudited — the same
-/// takeover guarantee the checkpoint contract gives a promoted standby.
-/// The call runs under the shared lock, serializing with the cycle-end
-/// persist a paced or driven run performs through
-/// [`persist_state`](Monitor::persist_state), so the two writes can
-/// never interleave into a stale overwrite. A failure is fatal — the
-/// run dies naming it rather than answering a receipt it cannot
-/// recover, the same rule the journal-file sink applies.
-pub type CommandPersist = Box<dyn Fn(&Checkpoint) -> Result<(), String> + Send + Sync>;
 
 /// The wiring an unpaced [`Monitor`]'s `POST /scan` runs around each
 /// requested scan — see [`Monitor::driven`].
@@ -808,9 +831,17 @@ pub struct Monitor<'d> {
     /// The per-requested-scan wiring [`driven`](Self::driven) installed —
     /// consulted only on an unpaced monitor, where `POST /scan` runs.
     driven: Driven<'d>,
-    /// The persist a `--state-file` run performs at a command's
-    /// admission boundary — see [`with_command_persist`](Self::with_command_persist).
-    command_persist: Option<CommandPersist>,
+    /// The `--state-file` checkpoint sink — `Some` when
+    /// [`MonitorConfig::state_file`] names a path: every capture
+    /// boundary (a scan cycle's end, an accepted command's admission)
+    /// hands the just-captured checkpoint to its bounded queue under
+    /// the shared lock, while the writer thread serializes and
+    /// atomically replaces the file off it — the state-file persist
+    /// isolation fix (#982). Sits outside `shared` so the
+    /// durability-attesting waits never touch the executor lock; the
+    /// pushes themselves only ever run under it, keeping the queue's
+    /// FIFO order the run's true capture order.
+    state_sink: Option<StateSink>,
     /// The tracking source a standby pulls checkpoints from — the
     /// `--standby` target on a paced standby's monitor, `--peer` on a
     /// launched active's, or `Driven`'s `track` on a driven one.
@@ -1028,12 +1059,23 @@ impl<'d> Monitor<'d> {
         signals: SignalIndex,
         config: MonitorConfig,
     ) -> io::Result<Self> {
+        // The state-file sink's writer spawns at bind beside the
+        // recorder's journal drain — its shared counters stamp every
+        // publication's `state_sink` section from the bind-time read
+        // model on.
+        let state_sink = config
+            .state_file
+            .as_ref()
+            .map(|path| StateSink::new(path, config.state_drain_capacity));
         let mut recorder = recorder::Recorder::new(config, peer.tick())?;
         // A `--state-file`-restored executor already carries the run's
         // state — the receipt log and the restored image are this run's
         // own record continuing, not new events to journal.
         recorder.observe_standing(peer.executor());
         let store = recorder.store();
+        if let Some(sink) = &state_sink {
+            store.set_state_sink(sink.shared());
+        }
         // The bind-time read model is the first publication — any
         // journal tail a configured file replayed rides its event
         // delta — so the read endpoints serve from the store from the
@@ -1046,7 +1088,7 @@ impl<'d> Monitor<'d> {
             server: Server::http(addr).map_err(io::Error::other)?,
             paced: false,
             driven: Driven::default(),
-            command_persist: None,
+            state_sink,
             standby_source: None,
             announced: Mutex::new(VecDeque::new()),
             announced_verify: Mutex::new(None),
@@ -1064,20 +1106,6 @@ impl<'d> Monitor<'d> {
     pub fn driven(mut self, driven: Driven<'d>) -> Self {
         self.standby_source = driven.track;
         self.driven = driven;
-        self
-    }
-
-    /// Installs the persist a `--state-file` run performs at a command's
-    /// admission boundary: `POST /command` invokes it with the
-    /// just-captured checkpoint after an accepted receipt lands in the
-    /// executor's log and before the request answers — the admission is
-    /// durable before its `200` receipt is promised, so a restart before
-    /// the applying scan re-queues the carried `Accepted` receipt
-    /// instead of losing the command with no audit trace. Only an
-    /// `Accepted` admission invokes it — a refused command settles at
-    /// submission and is already journaled. See [`CommandPersist`].
-    pub fn with_command_persist(mut self, persist: CommandPersist) -> Self {
-        self.command_persist = Some(persist);
         self
     }
 
@@ -1488,26 +1516,81 @@ impl<'d> Monitor<'d> {
         self.store.wait_journal_drained(timeout)
     }
 
+    /// The `--state-file` sink's live drain report — the named
+    /// backpressure state the persist-isolation fix (#982) stamps into
+    /// every publication's `state_sink` section: `healthy` while the
+    /// writer keeps up, `lagging` while checkpoints wait in its
+    /// bounded queue, `failed` after a write error — with `lost`
+    /// accounting the queued captures the file never took. `None`
+    /// when no state file is configured.
+    pub fn state_sink_health(&self) -> Option<StateSinkHealth> {
+        self.store.state_sink_health()
+    }
+
+    /// Waits — at most `timeout` — for the state-file sink's writer to
+    /// have replaced the file through or accounted every queued
+    /// capture, and returns the standing health either way:
+    /// `drained + lost == accepted` says the durable file caught up.
+    /// `None` when no state file is configured. The wait rides the
+    /// caller's thread alone — the graceful-shutdown and
+    /// durability-attestation flush, never the executor lock.
+    pub fn flush_state_sink(&self, timeout: Duration) -> Option<StateSinkHealth> {
+        self.store.wait_state_drained(timeout)
+    }
+
     /// The executor's current transferable state, taken under the lock —
     /// the same between-scans [`Checkpoint`] `GET /checkpoint` serves.
     pub fn checkpoint(&self) -> Checkpoint {
         self.shared.lock().unwrap().peer.checkpoint()
     }
 
-    /// Captures the run's checkpoint under the shared lock and hands it
-    /// to `persist` still held — the serialization point every
-    /// `--state-file` write goes through: a pacing loop's end-of-cycle
-    /// write and a command's admission-boundary write
-    /// ([`with_command_persist`](Self::with_command_persist)) order
-    /// against each other at a scan boundary, so a persist slow on its
-    /// own I/O can never overwrite a newer admission's file with an
-    /// older capture.
-    pub fn persist_state(
-        &self,
-        persist: impl FnOnce(&Checkpoint) -> Result<(), String>,
-    ) -> Result<(), String> {
+    /// The pacing loop's end-of-cycle `--state-file` persist: captures
+    /// the run's checkpoint under the shared lock — after the scan and
+    /// the plant step, where the caller invokes it — and hands it to
+    /// the state sink's bounded queue, so the write drains off the
+    /// lock on the sink's own writer instead of lengthening the cycle.
+    /// The push can never wait on the sink: a queue full past its
+    /// declared bound — or a recorded write failure — is refused here
+    /// with the named error the caller fails the run on, the same
+    /// fatal rule the journal sink applies. `Ok` once the checkpoint
+    /// is queued — FIFO behind every earlier capture, so a stale
+    /// overwrite is impossible — and a no-op `Ok` when no state file
+    /// is configured.
+    pub fn persist_state(&self) -> Result<(), String> {
+        let Some(sink) = &self.state_sink else {
+            return Ok(());
+        };
         let shared = self.shared.lock().unwrap();
-        persist(&shared.peer.checkpoint())
+        sink.offer(shared.peer.checkpoint()).map(|_| ())
+    }
+
+    /// Captures `peer`'s checkpoint and hands it to the state-file
+    /// sink's bounded queue — every in-handler persist, the caller
+    /// already holding the shared lock so the queue's FIFO order is
+    /// the run's true capture order and a stale overwrite is
+    /// impossible. Returns the pushed record's ordinal — what a
+    /// durability-attesting answer waits through — or `None` when no
+    /// state file is configured. A refusal — the queue full past its
+    /// declared bound, or a recorded write failure — is the run's
+    /// fatal point and panics naming the sink, the same rule the
+    /// journal's pushes apply.
+    fn push_state_checkpoint(&self, peer: &Peer<'_>) -> Option<u64> {
+        self.state_sink.as_ref().map(|sink| {
+            sink.offer(peer.checkpoint())
+                .unwrap_or_else(|error| panic!("{error}"))
+        })
+    }
+
+    /// Test seam: swap in a constructed state sink — the stalled- and
+    /// failing-writer coverage drives the writer through closures a
+    /// real file cannot produce deterministically, the same seam the
+    /// journal sink's tests use. The store's probe follows, so the
+    /// publication stamp reports the injected sink's counters.
+    #[cfg(test)]
+    pub(crate) fn with_state_sink(&mut self, sink: StateSink) -> &mut Self {
+        self.store.set_state_sink(sink.shared());
+        self.state_sink = Some(sink);
+        self
     }
 
     /// The executor's current virtual tick.
@@ -1746,6 +1829,12 @@ impl<'d> Monitor<'d> {
         // bound answers degraded — its pushes are already fatal.
         let attests_durable =
             method == Method::Post || (method == Method::Get && path == "/journal");
+        // The state-file ordinal an accepted `POST /command` pushed —
+        // the `200` answers only after the durable file has caught up
+        // through it, so a restart between admission and the applying
+        // scan re-queues the carried receipt rather than losing the
+        // command unaudited. The wait runs below, off the lock.
+        let mut admission = None;
         let response = match (method, path) {
             (Method::Get, "/") | (Method::Get, "/index.html") => html(PAGE),
             (Method::Get, "/signals") => json(200, &self.signals),
@@ -1875,17 +1964,17 @@ impl<'d> Monitor<'d> {
                         recorder.note_command(index, receipt.clone(), tick);
                         // An accepted admission is owed durability
                         // before its receipt answers: a `--state-file`
-                        // run persists the just-captured checkpoint —
-                        // receipt log included — at this boundary, so a
-                        // restart before the applying scan re-queues the
-                        // carried receipt rather than losing the command
-                        // unaudited. The write rides the shared lock
-                        // like the cycle-end persist, so the two never
-                        // interleave into a stale overwrite.
-                        if matches!(receipt.outcome, CommandOutcome::Accepted { .. })
-                            && let Some(persist) = &self.command_persist
-                        {
-                            persist(&peer.checkpoint()).unwrap_or_else(|error| panic!("{error}"));
+                        // run queues the just-captured checkpoint —
+                        // receipt log included — to the sink at this
+                        // boundary, under this same lock hold so the
+                        // queue's order is the run's and no stale
+                        // capture can overwrite it. The write itself
+                        // drains on the sink's writer; the request
+                        // attests the file caught up through this
+                        // ordinal before its `200` answers — the wait
+                        // below, off the lock.
+                        if matches!(receipt.outcome, CommandOutcome::Accepted { .. }) {
+                            admission = self.push_state_checkpoint(peer);
                         }
                         // Refresh the store's mirror so `GET /receipts`
                         // answers the just-submitted receipt before its
@@ -1918,6 +2007,11 @@ impl<'d> Monitor<'d> {
             (Method::Post, "/scan") => match read_json::<ScanRequest>(&mut request) {
                 Ok(body) => {
                     let mut failure = None;
+                    // The last state-file checkpoint the batch pushed —
+                    // the `200` attests the durable file caught up
+                    // through it, so a restart after this answer
+                    // resumes through every scan the batch ran.
+                    let mut attested = None;
                     for _ in 0..body.scans {
                         // A tracking standby resynchronizes once per scan
                         // cycle — the pull a paced standby's loop runs
@@ -1956,6 +2050,29 @@ impl<'d> Monitor<'d> {
                             failure = Some(error);
                             break;
                         }
+                        // The scan cycle's end-of-cycle boundary —
+                        // after the plant step, the same point the
+                        // paced loop persists at: the checkpoint queues
+                        // to the state sink under this lock hold, the
+                        // write itself draining on the sink's writer.
+                        attested = self.push_state_checkpoint(&shared.peer);
+                    }
+                    // The batch's `200` attests the file caught up
+                    // through its last pushed checkpoint — FIFO makes
+                    // that one ordinal cover every capture the batch
+                    // queued. The wait is this worker's own, the lock
+                    // long released; a failure the wait names fails
+                    // the request rather than promising state the
+                    // file never took.
+                    if failure.is_none()
+                        && let Some(ordinal) = attested
+                        && let Err(error) = self
+                            .state_sink
+                            .as_ref()
+                            .unwrap()
+                            .attest(ordinal, STATE_DRAIN_WAIT)
+                    {
+                        failure = Some(error);
                     }
                     match failure {
                         Some(error) => json(500, &error),
@@ -1972,6 +2089,21 @@ impl<'d> Monitor<'d> {
             },
             _ => json(404, "not found"),
         };
+        // The admission-durability boundary: an accepted command's
+        // checkpoint must have replaced the state file before its
+        // receipt answers — the wait is this worker's own, the shared
+        // lock long released. A wait that cannot attest — a recorded
+        // write failure, a writer stalled past the bound — is the
+        // run's fatal point: it dies naming the file rather than
+        // answering a receipt it cannot recover, the same rule the
+        // admission's synchronous write applied.
+        if let Some(ordinal) = admission {
+            self.state_sink
+                .as_ref()
+                .unwrap()
+                .attest(ordinal, STATE_DRAIN_WAIT)
+                .unwrap_or_else(|error| panic!("{error}"));
+        }
         if attests_durable {
             self.store.wait_journal_drained(JOURNAL_DRAIN_WAIT);
         }

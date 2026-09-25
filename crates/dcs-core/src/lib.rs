@@ -82,5 +82,5 @@ pub use state::{StateError, StateMap};
 pub use telemetry::{
     CommandQueueDiagnostics, CommandVerdict, ComponentCommands, ComponentDiagnostics,
     ComponentParameters, ForcedPoint, IoFault, IoHealth, JournalSinkHealth, JournalSinkState,
-    PointTelemetry, PublicationHealth, TelemetrySnapshot,
+    PointTelemetry, PublicationHealth, StateSinkHealth, StateSinkState, TelemetrySnapshot,
 };
