@@ -1716,19 +1716,49 @@ assert any("command_refused" in f for f in failures), failures
 failures = simulate.settlement_misses([("sequencer:39", "advance")], [])
 assert any("no settled receipt" in f for f in failures), failures
 
-# A kind-emitted event absent from the journal is named.
+# A journal-retained kind-emitted event absent from the journal is
+# named.
 event = {
-    "name": "step_completed",
-    "payload": [{"name": "step", "kind": "int"}],
+    "name": "sequence_completed",
+    "payload": [{"name": "steps", "kind": "int"}],
+    "retention": "journal",
     "adapted": "declared",
 }
 failures = simulate.emitted_event_misses([("sequencer:39", event)], [])
+assert any("sequence_completed" in f for f in failures), failures
+
+# A history/latest-retained event landing in the journal is named —
+# the durable record carries no routed emission.
+routed = {
+    "name": "step_completed",
+    "payload": [{"name": "step", "kind": "int"}],
+    "retention": "history",
+    "adapted": "declared",
+}
+failures = simulate.emitted_event_misses(
+    [("sequencer:39", routed)],
+    [
+        {
+            "seq": 1,
+            "tick": 1,
+            "event": {
+                "event_emitted": {
+                    "event": {
+                        "event": "step_completed",
+                        "component": "sequencer:39",
+                        "fields": {"step": {"value": {"int": 1}}},
+                    }
+                }
+            },
+        }
+    ],
+)
 assert any("step_completed" in f for f in failures), failures
 
 # A kind-emitted event missing from the instance's resource view is
 # named.
 failures = simulate.resource_event_misses(
-    [("sequencer:39", event)],
+    [("sequencer:39", routed)],
     {"components": [{"name": "sequencer:39", "events": []}]},
 )
 assert any(

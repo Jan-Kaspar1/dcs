@@ -62,8 +62,9 @@
 //!    observation the way the served page's poll would) killed at the
 //!    leg's midpoint and respawned, rejoining on the served
 //!    publication counters; the batch program's first `step_completed`
-//!    lands at its producing tick on every journal and in the served
-//!    recent-events view while it does.
+//!    lands at its producing tick in every peer's served event-history
+//!    ring — the `History`-routed record, never the journal — while it
+//!    does.
 //! 7. **promotion** — demote, then promote, with an admitted `reset`
 //!    invocation still in flight: the promote boundary's final
 //!    checkpoint pull carries it and it settles exactly once on the
@@ -71,7 +72,9 @@
 //!    reference's.
 //! 8. **polling** again and a closing **no-ui** leg against the
 //!    promoted peer: the restarted table's second `step_completed`
-//!    keeps the emitted-event sequence monotonic across the switch.
+//!    keeps the routed event record marching across the switch, the
+//!    durable journal's emitted stream holding the one
+//!    `sequence_completed` boundary the completing `advance` produced.
 //!
 //! Every leg boundary compares the pair view's snapshot, the receipt
 //! log, and the checkpoint digest — model fingerprint normalized, the
@@ -213,8 +216,9 @@ fn batch_run(running: bool) -> Command {
 }
 
 /// The `step_completed` event the batch program emits on a step's
-/// completing scan — the kind-declared emission the journal and the
-/// served recent-events view carry.
+/// completing scan — the kind-declared `History`-retained emission the
+/// routed event-history ring and the served recent-events view carry,
+/// never the durable journal.
 fn step_completed(step: i64) -> JournalEvent {
     JournalEvent::EventEmitted {
         event: EmittedEvent {
@@ -224,6 +228,28 @@ fn step_completed(step: i64) -> JournalEvent {
                 .into_iter()
                 .collect(),
         },
+    }
+}
+
+/// The `sequence_completed` event the batch program's completing
+/// `advance` emitted — the `Journal`-retained run-level boundary the
+/// durable record carries, `steps` reporting the declared table
+/// length.
+fn sequence_completed() -> JournalEvent {
+    JournalEvent::EventEmitted {
+        event: sequence_completed_event(),
+    }
+}
+
+/// The emitted-event payload the durable-stream assertions compare
+/// against — `sequence_completed` carries the table's step count.
+fn sequence_completed_event() -> EmittedEvent {
+    EmittedEvent {
+        event: "sequence_completed".to_string(),
+        component: BATCH_COMPONENT.to_string(),
+        fields: [("steps".to_string(), EventValue::Value(Value::Int(5)))]
+            .into_iter()
+            .collect(),
     }
 }
 
@@ -1209,7 +1235,11 @@ fn run_verification(tag: &str) -> Outcome {
 
     // The batch program is the composition's declared-contract kind:
     // `advance`/`reset` under the `Declared` provenance and the
-    // kind-emitted `step_completed` beside the adapted entries.
+    // kind-emitted events beside the adapted entries — one declared
+    // per retention class, each spec's `retention` telling the
+    // consumer which store the emission routes to: `step_completed`
+    // the bounded `history` ring, `sequence_completed` the durable
+    // `journal`, `progress` the superseding `latest` view.
     let schema = active.schema().unwrap();
     let batch = &schema
         .interfaces
@@ -1229,14 +1259,20 @@ fn run_verification(tag: &str) -> Outcome {
         assert_eq!(spec.adapted, AdaptedCommand::Declared, "{command}");
         assert_eq!(spec.availability, availability, "{command}");
     }
-    let declared = batch
-        .events
-        .iter()
-        .find(|spec| spec.name == "step_completed")
-        .expect("the schema declares step_completed");
-    assert_eq!(declared.adapted, AdaptedEvent::Declared);
-    assert_eq!(declared.emission, EventEmission::KindEmitted);
-    assert_eq!(declared.retention, EventRetention::Journal);
+    for (event, retention) in [
+        ("step_completed", EventRetention::History),
+        ("sequence_completed", EventRetention::Journal),
+        ("progress", EventRetention::Latest),
+    ] {
+        let declared = batch
+            .events
+            .iter()
+            .find(|spec| spec.name == event)
+            .unwrap_or_else(|| panic!("the schema declares {event}"));
+        assert_eq!(declared.adapted, AdaptedEvent::Declared, "{event}");
+        assert_eq!(declared.emission, EventEmission::KindEmitted, "{event}");
+        assert_eq!(declared.retention, retention, "{event}");
+    }
 
     // --- Leg 2: polling — a declared command settles Applied ---
     // `advance {count: 9}` lands past the table's last step: admitted
@@ -1555,10 +1591,19 @@ fn run_verification(tag: &str) -> Outcome {
         &mut checkpoints,
     );
 
-    // The kind-emitted event landed at the producing tick on every
-    // controller's journal — the tracking peer's included — and in the
-    // durable journal files; the served recent-events view attributes
-    // it to the instance.
+    // The kind-emitted events landed at their producing ticks, routed
+    // by declared retention identically on every controller — the
+    // tracking peer's included. `step_completed` — `History`-retained —
+    // stays out of every journal and every durable journal file: the
+    // routed record is the consumer-visible one, the resource view's
+    // attributed entry carrying the `history` mark at the producing
+    // tick. `sequence_completed` — the completing `advance`'s run
+    // boundary — is the emission the durable record does carry, on the
+    // peers that dispatched the invoke: the tracking peer carried the
+    // admitted receipt undispatched and adopted the applied checkpoint
+    // (#689), so the invoke-sourced emission has no producer on its
+    // quiesced image — the durable record of the same boundary there is
+    // the adopted `CommandSettled` the receipt assertions pinned.
     let event_tick = Tick(EVENT_TICK);
     assert_eq!(reference.snapshot().unwrap().tick, event_tick);
     for (peer, journal) in [
@@ -1567,35 +1612,63 @@ fn run_verification(tag: &str) -> Outcome {
         ("the reference", reference.journal(0).unwrap()),
     ] {
         assert!(
-            journal
-                .iter()
-                .any(|entry| entry.tick == event_tick && entry.event == step_completed(1)),
-            "{peer} journaled the emission at the producing tick"
+            journal.iter().all(|entry| entry.tick != event_tick
+                || !matches!(&entry.event, JournalEvent::EventEmitted { event }
+                    if event.event == "step_completed" || event.event == "progress")),
+            "{peer} journaled a History/Latest emission — the durable record stays unchanged"
         );
     }
-    for path in [&active_journal, &standby_journal, &reference_journal] {
+    for (peer, journal) in [
+        ("the field owner", active.journal(0).unwrap()),
+        ("the reference", reference.journal(0).unwrap()),
+    ] {
+        assert!(
+            journal.iter().any(
+                |entry| entry.tick == Tick(ADVANCE_TICK) && entry.event == sequence_completed()
+            ),
+            "{peer} journaled the run boundary at the completing tick"
+        );
+    }
+    assert!(
+        emitted(&standby).is_empty(),
+        "the tracking peer journaled an emitted event — a carried invoke never dispatches on the quiesced image (#689)"
+    );
+    for path in [&active_journal, &reference_journal] {
         assert!(
             read_journal_file(path)
                 .unwrap()
                 .entries
                 .iter()
-                .any(|entry| entry.tick == event_tick && entry.event == step_completed(1)),
-            "the durable journal {} carries the emission",
+                .any(
+                    |entry| entry.tick == Tick(ADVANCE_TICK) && entry.event == sequence_completed()
+                ),
+            "the durable journal {} carries the run boundary",
             path.display()
         );
     }
+    assert!(
+        read_journal_file(&standby_journal)
+            .unwrap()
+            .entries
+            .iter()
+            .all(|entry| entry.event != sequence_completed()),
+        "the tracking peer's durable journal carries the run boundary only as its adopted settlement"
+    );
     let resources = active.resources().unwrap();
     let batch_resources = resources
         .components
         .iter()
         .find(|component| component.name == BATCH_COMPONENT)
         .expect("the resource view covers the batch program");
-    assert!(
-        batch_resources
-            .events
-            .iter()
-            .any(|entry| entry.tick == event_tick && entry.event == step_completed(1)),
-        "the served events tail carries the emission at the producing tick"
+    let step_record = batch_resources
+        .events
+        .iter()
+        .find(|entry| entry.tick == event_tick && entry.event == step_completed(1))
+        .expect("the served events tail carries the emission at the producing tick");
+    assert_eq!(
+        step_record.retention,
+        EventRetention::History,
+        "the routed record carries the declared class"
     );
 
     // --- Promotion mid-schedule: an admitted command in flight ---
@@ -1681,20 +1754,26 @@ fn run_verification(tag: &str) -> Outcome {
     assert_clean(&closed);
     assert_eq!(closed.tick, Tick(END_TICK));
 
-    // The pinned record: the promoted peer's emitted-event stream is
-    // the uninterrupted reference's — `step_completed` at both
-    // producing ticks, the sequence continuing monotonically across
-    // the switch — its receipt log is identical, and every admitted
-    // command settled exactly once: one journaled settlement per
-    // receipt on every peer.
-    assert_eq!(emitted(&standby), emitted(&reference));
-    let stream = emitted(&standby);
-    assert_eq!(stream.len(), 2, "{stream:?}");
-    assert_eq!(stream[0], (EVENT_TICK, emitted_event(1)));
-    assert_eq!(stream[1], (SECOND_EVENT_TICK, emitted_event(1)));
+    // The pinned record: the field-owning runs' journaled emitted-event
+    // stream is the uninterrupted reference's — the `Journal`-retained
+    // `sequence_completed` boundary the completing `advance` produced
+    // the one durable emission the run carries. The promoted peer's
+    // journal holds no emitted events at all: every step-derived
+    // emission routed to the bounded `History`/`Latest` stores on all
+    // peers alike — `step_completed` at both producing ticks, `progress`
+    // every scan, the journal's volume unchanged — and the boundary
+    // event was invoke-sourced, produced inside `invoke_command`'s
+    // dispatch, which a carried receipt never runs on the quiesced
+    // image (#689): the tracker's durable record of the same run
+    // boundary is the adopted `CommandSettled`, its receipt log
+    // identical, every admitted command settling exactly once — one
+    // journaled settlement per receipt on every peer.
+    let boundary = (ADVANCE_TICK, sequence_completed_event());
+    assert_eq!(emitted(&reference), vec![boundary.clone()]);
+    assert_eq!(emitted(&active), vec![boundary]);
     assert!(
-        stream[0].0 < stream[1].0,
-        "the emitted-event sequence continues monotonically across the promotion"
+        emitted(&standby).is_empty(),
+        "the promoted peer's journal must hold no emission its quiesced scans never produced"
     );
     assert_eq!(standby.receipts().unwrap(), reference.receipts().unwrap());
     for client in [&active, &standby, &reference] {
@@ -1759,17 +1838,6 @@ fn run_verification(tag: &str) -> Outcome {
             }
             journals
         },
-    }
-}
-
-/// The emitted-event payload the stream assertions compare against.
-fn emitted_event(step: i64) -> EmittedEvent {
-    EmittedEvent {
-        event: "step_completed".to_string(),
-        component: BATCH_COMPONENT.to_string(),
-        fields: [("step".to_string(), EventValue::Value(Value::Int(step)))]
-            .into_iter()
-            .collect(),
     }
 }
 

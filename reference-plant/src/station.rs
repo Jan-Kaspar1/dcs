@@ -56,8 +56,11 @@
 //!   machine's fault stays named without annunciating.
 //! - **Program:** the exercise program — the station's `sequencer`
 //!   instance — steps its declared table while its `run` input holds,
-//!   reporting `step`/`done` and emitting `step_completed` per
-//!   finished step; the kind's declared `advance`/`reset` commands
+//!   reporting `step`/`done` and emitting one declared event per
+//!   retention class: `step_completed` per finished step into the
+//!   bounded history record, `sequence_completed` at the run boundary
+//!   into the durable journal, and `progress` each scan into the
+//!   latest-value view; the kind's declared `advance`/`reset` commands
 //!   pace or restart it through the receipted command path.
 //!
 //! ## The declared point-id scheme
@@ -1066,7 +1069,8 @@ pub fn lift_station(config: &SiteConfig) -> Result<Station, BuildError> {
 
     // The exercise program — the station's `sequencer` and the kind
     // carrying the declared command/event vocabulary (`advance`,
-    // `reset`, and the kind-emitted `step_completed` event) the
+    // `reset`, and the kind-emitted `step_completed`/`sequence_completed`/
+    // `progress` events, one per retention class) the
     // consumer surface proof exercises. `run` is the writable held
     // request that starts the table; `reset` binds read-only — the
     // declared command is the one-shot path. Each step's declared

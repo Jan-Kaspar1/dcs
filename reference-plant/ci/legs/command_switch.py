@@ -250,21 +250,33 @@ def assert_exactly_one(journal, command, label, failures):
     return settled[0]
 
 
-def emitted_step_completed(journal, component):
-    """The `(seq, tick, step)` of a served journal's `event_emitted`
-    entries for `component`'s `step_completed` — the emitted-event
-    record the continuity assertions read."""
+def emitted_step_completed(view, component):
+    """The `(tick, step)` of a served `GET /resources` view's routed
+    `event_emitted` records for `component`'s `step_completed` — the
+    `History`-retained emission record the continuity assertions read.
+    `step_completed` declares `history` retention (#478), so its
+    consumer-visible record lives in the bounded event-history ring the
+    resource view serves under the `history` mark — never the durable
+    journal. The stream-local `seq` is excluded: each peer's store
+    numbers its own records, so only tick and payload carry across the
+    promoted peer join."""
     found = []
-    for entry in journal:
-        emitted = entry.get("event", {}).get("event_emitted", {}).get("event")
-        if emitted is None:
+    for entry in view.get("components", []):
+        if entry.get("name") != component:
             continue
-        if emitted.get("component") != component:
-            continue
-        if emitted.get("event") != "step_completed":
-            continue
-        found.append((entry["seq"], entry["tick"],
-                      emitted.get("fields", {}).get("step")))
+        for record in entry.get("events", []):
+            if record.get("retention") != "history":
+                continue
+            emitted = record.get("event", {}).get(
+                "event_emitted", {}).get("event")
+            if emitted is None:
+                continue
+            if emitted.get("component") != component:
+                continue
+            if emitted.get("event") != "step_completed":
+                continue
+            found.append((record["tick"],
+                          emitted.get("fields", {}).get("step")))
     return found
 
 
@@ -356,19 +368,21 @@ def command_switch_pass(args, tamper):
         )
 
         # Phase 2 — the pre-promotion emission: hold `run` across the
-        # declared step length so one `step_completed` journals.
+        # declared step length so one `step_completed` lands in the
+        # served event-history record.
         ctl_write(args.ctl, duty_addr, run_point, "true", failures)
         for _ in range(EMIT_TICKS):
             rig.tick(standby_url, duty_url, failures)
-        duty_journal, _receipts = journals(duty_url, failures)
-        pre_emitted = emitted_step_completed(duty_journal, component)
+        duty_view = pair.get(f"{duty_url}/resources",
+                             "GET /resources", failures)
+        pre_emitted = emitted_step_completed(duty_view, component)
         if not pre_emitted:
             failures.append(
                 f"no emitted step_completed from {component} reached "
-                "the active's journal before the switch"
+                "the active's served event record before the switch"
             )
             raise Abort
-        evidence["emitted_before"] = pre_emitted[-1][1]
+        evidence["emitted_before"] = pre_emitted[-1][0]
         digest_entries.append(
             {
                 "phase": "emit-before",
@@ -484,8 +498,9 @@ def command_switch_pass(args, tamper):
         ctl_write(args.ctl, new_addr, run_point, "true", failures)
         for _ in range(EMIT_TICKS):
             rig.tick(demoted, new_active, failures)
-        new_journal, _receipts = journals(new_active, failures)
-        post_emitted = emitted_step_completed(new_journal, component)
+        new_view = pair.get(f"{new_active}/resources",
+                            "GET /resources", failures)
+        post_emitted = emitted_step_completed(new_view, component)
         if len(post_emitted) <= len(pre_emitted):
             failures.append(
                 f"the promoted peer's emitted record holds "
@@ -501,20 +516,20 @@ def command_switch_pass(args, tamper):
                 "pre-promotion entry re-emitted"
             )
             raise Abort
-        ticks = [tick for _seq, tick, _step in post_emitted]
+        ticks = [tick for tick, _step in post_emitted]
         if any(later <= earlier for earlier, later in zip(ticks, ticks[1:])):
             failures.append(
                 "the promoted peer's emitted events do not continue in "
                 "tick order"
             )
             raise Abort
-        if post_emitted[len(pre_emitted)][1] <= pre_emitted[-1][1]:
+        if post_emitted[len(pre_emitted)][0] <= pre_emitted[-1][0]:
             failures.append(
                 "the promoted peer's first post-promotion emission does "
                 "not land after the pre-promotion record"
             )
             raise Abort
-        evidence["emitted_through"] = post_emitted[-1][1]
+        evidence["emitted_through"] = post_emitted[-1][0]
         digest_entries.append(
             {
                 "phase": "emit-after",
