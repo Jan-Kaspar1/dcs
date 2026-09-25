@@ -241,6 +241,23 @@ class RuntimeTests(unittest.TestCase):
             while sleeper.pid not in process_tree(sleeper.pid):
                 self.assertLess(time.monotonic(), deadline)
                 time.sleep(.02)
+            # The child is tree-visible while its interpreter still starts;
+            # wait until it is blocked inside time.sleep ('S' sustained across
+            # two samples) so startup CPU under CI load is not misread as
+            # tree activity.
+            stat = Path('/proc/%d/stat' % sleeper.pid)
+            while True:
+                self.assertLess(time.monotonic(), deadline)
+                try:
+                    state = stat.read_text()
+                except OSError:
+                    self.fail('sleeper exited before reaching sleep state')
+                if state[state.rfind(')') + 2] == 'S':
+                    time.sleep(.02)
+                    state = stat.read_text()
+                    if state[state.rfind(')') + 2] == 'S':
+                        break
+                time.sleep(.02)
             busy, snapshot = process_activity(sleeper.pid, interval=.1)
             self.assertFalse(busy)
             self.assertIn(sleeper.pid, snapshot)

@@ -1851,18 +1851,55 @@ static SEQUENCER_COMMANDS: LazyLock<Vec<CommandDecl>> = LazyLock::new(|| {
 });
 
 /// The `sequencer` kind's declared emitted events — the spec mirror of
-/// the descriptor's `events`: `step_completed` journals the 1-based
-/// index of each step that ran its `ticks` out.
+/// the descriptor's `events`, one per retention class: `step_completed`
+/// records the 1-based index of each step that ran its `ticks` out —
+/// the bounded operational record `History` retains; `sequence_completed`
+/// journals the table length once the run reaches its end — the durable
+/// run-level audit boundary; and `progress` stands in the
+/// latest-emission view — each scan's newest `step`/`elapsed`/`done`
+/// superseding the last.
 static SEQUENCER_EVENTS: LazyLock<Vec<EventDecl>> = LazyLock::new(|| {
-    vec![EventDecl {
-        name: "step_completed".to_string(),
-        payload: vec![EventField {
-            name: "step".to_string(),
-            kind: EventFieldKind::Value(ValueKind::Int),
-            optional: false,
-        }],
-        retention: EventRetention::Journal,
-    }]
+    vec![
+        EventDecl {
+            name: "step_completed".to_string(),
+            payload: vec![EventField {
+                name: "step".to_string(),
+                kind: EventFieldKind::Value(ValueKind::Int),
+                optional: false,
+            }],
+            retention: EventRetention::History,
+        },
+        EventDecl {
+            name: "sequence_completed".to_string(),
+            payload: vec![EventField {
+                name: "steps".to_string(),
+                kind: EventFieldKind::Value(ValueKind::Int),
+                optional: false,
+            }],
+            retention: EventRetention::Journal,
+        },
+        EventDecl {
+            name: "progress".to_string(),
+            payload: vec![
+                EventField {
+                    name: "step".to_string(),
+                    kind: EventFieldKind::Value(ValueKind::Int),
+                    optional: false,
+                },
+                EventField {
+                    name: "elapsed".to_string(),
+                    kind: EventFieldKind::Value(ValueKind::Int),
+                    optional: false,
+                },
+                EventField {
+                    name: "done".to_string(),
+                    kind: EventFieldKind::Value(ValueKind::Bool),
+                    optional: false,
+                },
+            ],
+            retention: EventRetention::Latest,
+        },
+    ]
 });
 
 /// Spec for the `sequencer` kind: stepping through a declared ordered
@@ -1871,8 +1908,9 @@ static SEQUENCER_EVENTS: LazyLock<Vec<EventDecl>> = LazyLock::new(|| {
 /// Ports mirror the descriptor: `run` (`In`, `Bool`), `reset` (`In`,
 /// `Bool`), `out` (`Out`, `Float`), `step` (`Out`, `Int`), `done`
 /// (`Out`, `Bool`). The kind also declares the native commands
-/// `advance`/`reset` and the emitted `step_completed` event — mirrored
-/// by [`SEQUENCER_COMMANDS`]/[`SEQUENCER_EVENTS`].
+/// `advance`/`reset` and the emitted `step_completed`/
+/// `sequence_completed`/`progress` events — mirrored by
+/// [`SEQUENCER_COMMANDS`]/[`SEQUENCER_EVENTS`].
 ///
 /// The parameter set is *not statically enumerable*: `step_count`
 /// declares the table length `N` and each step `n` in `1..=N` adds
