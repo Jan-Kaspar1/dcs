@@ -810,6 +810,11 @@ fn the_pages_hardcoded_spellings_are_the_emitted_contract() {
                 component: String::new(),
                 command: String::new(),
             }),
+            emitted_spelling(&CommandError::UnknownArgument {
+                component: String::new(),
+                command: String::new(),
+                argument: String::new(),
+            }),
             emitted_spelling(&CommandError::ArgumentTypeMismatch {
                 component: String::new(),
                 command: String::new(),

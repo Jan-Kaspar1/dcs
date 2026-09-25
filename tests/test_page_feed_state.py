@@ -237,24 +237,24 @@ PINS = [
     # rides, isNotActive's rejected-not_active shape, and
     # submitCommand's active-peer routing with the single re-poll/retry
     # the abort verdict precedes.
-    (3764, 'function isAbortError(error) {'),
-    (3766, '(error.name === "AbortError" || error.name === "TimeoutError");'),
-    (3795, 'function sameSubmission(receipt, pending) {'),
-    (3808, 'function abandonedSubmission(command, reason, error) {'),
-    (3811, 'outcome: { indeterminate: { detail: String(error) } },'),
-    (3819, 'pendingCommands.push({'),
-    (3847, 'async function postCommand(base, command, reason) {'),
-    (3858, 'signal: AbortSignal.timeout(POLL_MS),'),
-    (3863, 'function isNotActive(receipt) {'),
-    (3889, 'async function submitCommand(command, reason) {'),
-    (3903, 'answer = await postCommand(peers[target].base, command, reason);'),
-    (3905, 'if (isAbortError(error)) {'),
-    (3906, 'return abandonedSubmission(command, reason, error);'),
-    (3910, 'if (isNotActive(answer)) {'),
-    (3928, 'receipt.textContent = JSON.stringify(answer, null, 2);'),
+    (3769, 'function isAbortError(error) {'),
+    (3771, '(error.name === "AbortError" || error.name === "TimeoutError");'),
+    (3800, 'function sameSubmission(receipt, pending) {'),
+    (3813, 'function abandonedSubmission(command, reason, error) {'),
+    (3816, 'outcome: { indeterminate: { detail: String(error) } },'),
+    (3824, 'pendingCommands.push({'),
+    (3852, 'async function postCommand(base, command, reason) {'),
+    (3863, 'signal: AbortSignal.timeout(POLL_MS),'),
+    (3868, 'function isNotActive(receipt) {'),
+    (3894, 'async function submitCommand(command, reason) {'),
+    (3908, 'answer = await postCommand(peers[target].base, command, reason);'),
+    (3910, 'if (isAbortError(error)) {'),
+    (3911, 'return abandonedSubmission(command, reason, error);'),
+    (3915, 'if (isNotActive(answer)) {'),
+    (3933, 'receipt.textContent = JSON.stringify(answer, null, 2);'),
     # The cadence both tickers share.
-    (4060, 'setInterval(refreshOverview, POLL_MS);'),
-    (4277, 'setInterval(refresh, POLL_MS);'),
+    (4065, 'setInterval(refreshOverview, POLL_MS);'),
+    (4282, 'setInterval(refresh, POLL_MS);'),
 ]
 
 
