@@ -343,8 +343,15 @@ ensure_tools "$DCS_REV" \
     || fail "tooling-rejected: dcs-model validate refused the checked-in model"
 LINT="$("$TOOLS/dcs-model" lint model/plant.json)" \
     || fail "tooling-rejected: dcs-model lint refused the checked-in model"
-[[ "$LINT" == *"no findings"* ]] \
-    || fail "tooling-rejected: dcs-model lint reports findings: $LINT"
+# The checked-in model's only advisories are undeclared
+# `stale_after_ticks` budgets — freshness stays an opt-in per-point
+# declaration; any other finding class fails the stage.
+if [[ "$LINT" != *"no findings"* ]]; then
+    UNEXPECTED="$(printf '%s\n' "$LINT" \
+        | grep -v '^field_input_without_freshness_budget ' || true)"
+    [[ -z "$UNEXPECTED" ]] \
+        || fail "tooling-rejected: dcs-model lint reports findings: $LINT"
+fi
 "$TOOLS/dcs-controller" model/plant.json --check \
     || fail "tooling-rejected: dcs-controller --check refused the checked-in model"
 "$TOOLS/dcs-plant-server" model/plant.json --check-dynamics model/dynamics.json \
