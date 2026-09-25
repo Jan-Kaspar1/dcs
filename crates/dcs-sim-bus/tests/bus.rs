@@ -593,9 +593,12 @@ fn the_writer_claim_fences_every_attachment_not_holding_it() {
             Err(IoError::Fenced(PointId(2)))
         );
         assert_eq!(old_b.step(0.1), Err(LinkError::Fenced));
+        // The register's value is untouched; its stamp is the last
+        // served step's — the bank's second step re-stamped the held
+        // sample before the field fenced the old owner out.
         assert_eq!(
             server.bank().read(9).unwrap(),
-            Sample::good(Value::Float(2.0), Tick(1))
+            Sample::good(Value::Float(2.0), Tick(2))
         );
 
         // The claim covers the whole owner token: the takeover side's
@@ -760,10 +763,12 @@ fn injection_is_open_while_another_attachment_holds_the_writer_claim() {
         );
         assert_eq!(tool.step(0.1), Err(LinkError::Fenced));
 
+        // The clear restores Good on the stored value; the holder's
+        // step re-stamped the held sample at the bank's new tick.
         tool.clear_quality(4).unwrap();
         assert_eq!(
             holder.read(PointId(1)).unwrap(),
-            Sample::good(Value::Float(0.0), Tick::ZERO)
+            Sample::good(Value::Float(0.0), Tick(1))
         );
     });
 }

@@ -45,6 +45,16 @@ fn loopback_map() -> ChannelMap {
         })
 }
 
+/// A plant whose `In` point is a bare channel — no loopback routes onto
+/// it and no element output owns it: the scanned-input-card shape the
+/// driver's step re-stamps every tick. Point 20 stays bound so the
+/// `Accumulator` component's output write has a field point to land on.
+fn bare_map() -> ChannelMap {
+    ChannelMap::new()
+        .with_point(binding(10, Direction::In, Value::Float(0.0)))
+        .with_point(binding(20, Direction::Out, Value::Float(0.0)))
+}
+
 /// The scripted executor scenario: a stateful component reads the
 /// lag-driven `In` point 1 and drives the `Out` point 2 feeding it —
 /// a closed loop through the simulated field.
@@ -763,6 +773,51 @@ fn a_resumed_field_owner_clears_the_stale_an_unstepped_window_left() {
             executor.scan();
             assert_eq!(executor.sample(PointId(10)).unwrap().quality, Quality::Good);
         }
+    });
+}
+
+#[test]
+fn a_bare_field_input_reads_fresh_while_the_plant_steps_and_stales_when_it_stops() {
+    // The QA finding's shared-plant half: a `sim-tcp` input no
+    // loopback or element drives re-stamps every step the field owner
+    // calls, so a budgeted bare point stays fresh while the plant
+    // steps — and the held report ages out on the declared budget once
+    // stepping stops.
+    with_server(bare_map(), |addr| {
+        let remote = RemoteDriver::connect(addr).unwrap();
+        remote.claim_writer(1).unwrap();
+        let mut executor = Executor::new(
+            &remote,
+            budgeted_map(10, 2),
+            vec![Box::new(Accumulator {
+                input: PointId(10),
+                output: PointId(20),
+                total: 0.0,
+            })],
+        )
+        .unwrap();
+
+        // Each plant step re-stamps the bare channel's held sample —
+        // a changed report every scan, fresh forever under the budget.
+        for _ in 0..5 {
+            remote.step(0.1).unwrap();
+            executor.scan();
+            assert_eq!(executor.sample(PointId(10)).unwrap().quality, Quality::Good);
+        }
+
+        // The owner stops stepping: the report freezes and the run's
+        // own lag accrues — past the budget the point presents stale.
+        executor.run(3);
+        assert_eq!(
+            executor.sample(PointId(10)).unwrap().quality,
+            Quality::Uncertain(QualityReason::Stale)
+        );
+
+        // Resumed stepping re-stamps on the next step; the changed
+        // report restores the driver's own quality on the first read.
+        remote.step(0.1).unwrap();
+        executor.scan();
+        assert_eq!(executor.sample(PointId(10)).unwrap().quality, Quality::Good);
     });
 }
 
