@@ -1109,8 +1109,9 @@ fn invoke_rejections_print_the_receipt_and_name_the_command_error() {
         // Each named submission rejection prints the server's rejected
         // receipt on stdout and exits nonzero naming the CommandError:
         // unknown component and undeclared command — including a kind
-        // declaring none. An argument whose text is not its declared
-        // request kind's value never reaches the server: the
+        // declaring none — and an argument name the declared `request`
+        // schema does not carry. An argument whose text is not its
+        // declared request kind's value never reaches the server: the
         // schema-driven parse fails it as usage (see
         // `value_parse_errors_print_usage_against_a_live_monitor`).
         for (args, name) in [
@@ -1122,6 +1123,10 @@ fn invoke_rejections_print_the_receipt_and_name_the_command_error() {
             (
                 ["invoke", "plain", "anything"].as_slice(),
                 "unknown_command",
+            ),
+            (
+                ["invoke", "seq", "advance", "stride=2"].as_slice(),
+                "unknown_argument",
             ),
         ] {
             let output = ctl(addr, args);

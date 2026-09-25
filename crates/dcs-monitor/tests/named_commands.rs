@@ -363,9 +363,10 @@ fn command_state<'a>(view: &'a ResourceView, name: &str) -> &'a CommandState {
 #[test]
 fn invoke_submission_rejections_journal_at_the_run_tick() {
     with_sequencer(MonitorConfig::default(), |_driver, client| {
-        // Unknown component, undeclared command, and argument-kind
-        // mismatch all refuse at admission — the receipted rejection
-        // journals immediately at the run's tick.
+        // Unknown component, undeclared command, argument-kind
+        // mismatch, and an undeclared argument name all refuse at
+        // admission — the receipted rejection journals immediately at
+        // the run's tick.
         let rejected = client.command(&invoke("nope", "advance", &[])).unwrap();
         assert_eq!(
             rejected.outcome,
@@ -400,11 +401,27 @@ fn invoke_submission_rejections_journal_at_the_run_tick() {
                 }
             }
         );
+        // An argument name the declared `request` schema does not
+        // carry refuses at admission with the named reason — the
+        // schema bounds the names a submission may carry.
+        let rejected = client
+            .command(&invoke("seq", "advance", &[("stride", Value::Int(2))]))
+            .unwrap();
+        assert_eq!(
+            rejected.outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::UnknownArgument {
+                    component: "seq".to_string(),
+                    command: "advance".to_string(),
+                    argument: "stride".to_string(),
+                }
+            }
+        );
 
         // Every admission rejection journaled `command_settled` at tick
         // 0 — the run's current tick, before any scan.
         let entries = settled(client, 0);
-        assert_eq!(entries.len(), 3);
+        assert_eq!(entries.len(), 4);
         assert!(entries.iter().all(|entry| entry.tick == Tick(0)));
     });
 }
