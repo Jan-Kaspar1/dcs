@@ -218,7 +218,14 @@ memberships stay disjoint across pairs, and the pair's standby
 wiring closes inside it — one member tracking the other; the
 reference rig's `deploy` stage fails `rig-mismatch` on a member the
 manifest does not declare, a shared member, or wiring that leaves
-the declared pair. A single-pair manifest omits the section: URL
+the declared pair. Each declared pair deploys its members against
+the manifest's one (model, plant) binding — one deployment is one
+field, whose single-writer claim admits exactly one field-owning
+duty run — so decision 99's bound refuses a second pair's duty
+member, like any second `controllers` entry without `standby`, as
+`rig-mismatch`; a site running several pairs composes one manifest
+per field and the overview's `?pair=` URL names addresses across
+them. A single-pair manifest omits the section: URL
 `?pair=` configuration remains the interface the overview consumes,
 and the section carries no runtime, wire, or persisted-format
 change. The shape is a schema-enforced
@@ -228,7 +235,8 @@ Schema — recorded in the release record as
 recorded schemas — covering structure, field types, and the
 membership shape the schema vocabulary can express; the referential
 rules above (members naming declared controllers, disjoint
-memberships, the pair's wiring closing inside it) stay check-side
+memberships, the pair's wiring closing inside it, and the
+one-duty-per-deployment bound) stay check-side
 with the `deploy` stage's rig agreement, the same split the model
 schema records for its cross-reference limits.
 `reference-plant/deploy/manifest.json`
