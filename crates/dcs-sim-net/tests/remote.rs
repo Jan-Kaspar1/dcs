@@ -599,6 +599,67 @@ fn a_killed_server_reports_link_disconnected_health_in_the_snapshot() {
 }
 
 #[test]
+fn a_recovered_link_clears_the_standing_failure_from_diagnostics() {
+    let server =
+        PlantServer::bind(("127.0.0.1", 0), SimDriver::new(loopback_map()).unwrap()).unwrap();
+    let addr = server.local_addr().unwrap();
+    let remote = thread::scope(|scope| {
+        scope.spawn(|| server.serve());
+        let remote = RemoteDriver::connect(addr).unwrap();
+        assert!(remote.read(PointId(10)).is_ok());
+        server.shutdown();
+        // The severed link records the failure it stands under.
+        assert_eq!(
+            remote.read(PointId(10)),
+            Err(IoError::Disconnected(PointId(10)))
+        );
+        let diagnostics = remote.diagnostics().unwrap();
+        assert_eq!(diagnostics.link, LinkState::Disconnected);
+        assert_eq!(
+            diagnostics.last_error.as_deref(),
+            Some("no live connection to the plant server")
+        );
+        remote
+    });
+    // The plant returns on the same port: the first exchange that
+    // answers — here the re-attach probe's own read — clears the
+    // standing record, so the health surface reports the link as it is.
+    let restarted = PlantServer::bind(addr, SimDriver::new(loopback_map()).unwrap()).unwrap();
+    thread::scope(|scope| {
+        scope.spawn(|| restarted.serve());
+        let _guard = ShutdownOnDrop(&restarted);
+
+        wait_for_reattach(&remote, Duration::from_secs(10));
+        assert_eq!(
+            remote.diagnostics().unwrap(),
+            DriverDiagnostics {
+                link: LinkState::Connected,
+                last_error: None,
+                exchange: None,
+            }
+        );
+
+        // A request failing again re-records, and continued failures
+        // keep the newest error: the fresh field's unclaimed refusal
+        // stands until the next failure replaces it.
+        assert_eq!(remote.step(0.1), Err(RemoteError::Unclaimed));
+        assert_eq!(
+            remote.diagnostics().unwrap().last_error.as_deref(),
+            Some("field mutation refused: no attachment owns field writes")
+        );
+        restarted.shutdown();
+        assert_eq!(
+            remote.read(PointId(10)),
+            Err(IoError::Disconnected(PointId(10)))
+        );
+        assert_eq!(
+            remote.diagnostics().unwrap().last_error.as_deref(),
+            Some("no live connection to the plant server")
+        );
+    });
+}
+
+#[test]
 fn an_unresponsive_peer_surfaces_timeout_on_every_access() {
     // A listener that never answers: the handshake completes out of the
     // backlog but no response ever arrives.
@@ -1153,11 +1214,12 @@ fn a_restarted_server_is_re_served_by_the_same_attachment() {
         remote.write(PointId(20), Value::Float(2.0)).unwrap();
         remote.step(0.1).unwrap();
         assert_eq!(remote.read(PointId(20)).unwrap().value, Value::Float(2.0));
-        // Diagnostics report the link live again while retaining the
-        // outage's failure record.
+        // Diagnostics report the link live again with the outage's
+        // failure record cleared — the first successful exchange after
+        // recovery drops it, so the surface describes current health.
         let diagnostics = remote.diagnostics().unwrap();
         assert_eq!(diagnostics.link, LinkState::Connected);
-        assert!(diagnostics.last_error.is_some());
+        assert_eq!(diagnostics.last_error, None);
     });
 }
 

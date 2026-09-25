@@ -159,7 +159,9 @@ struct Connection {
     /// The most recent transport- or protocol-level failure's
     /// description. The failure that severed the link stays recorded —
     /// the `Disconnected`s every later access reports are its
-    /// consequence, not new failures.
+    /// consequence, not new failures — and the first successful
+    /// exchange clears it, so the health surface reports the standing
+    /// failure while it stands and nothing once it clears.
     last_error: Option<String>,
     /// The owner token the field's standing claim named the last time
     /// it fenced this attachment's request — the claimant a fenced-out
@@ -335,7 +337,9 @@ fn exchange(
 /// [`LinkState::Disconnected`] while no live connection stands — a dead
 /// or unanswerable plant server, including the span between a severed
 /// link's drop and its re-attach — with the last transport- or
-/// protocol-level failure's description. That surface is link health,
+/// protocol-level failure's description, which the first successful
+/// exchange after recovery clears so the surface describes the link as
+/// it is. That surface is link health,
 /// distinct from the per-point [`IoError`]s `read`/`write` return: every
 /// point's read failing with `Disconnected` and the link reporting
 /// `disconnected` are the same event told at the two levels the
@@ -821,7 +825,10 @@ impl RemoteDriver {
     /// connection: the response stream's position is unknown afterward,
     /// and a later read could pick up a stale answer. A dead link reports
     /// `Disconnected` until the next
-    /// [`REATTACH_INTERVAL`](Self::REATTACH_INTERVAL) window opens.
+    /// [`REATTACH_INTERVAL`](Self::REATTACH_INTERVAL) window opens. A
+    /// completed exchange clears the recorded failure — the health
+    /// surface reports the standing failure while it stands and nothing
+    /// once it clears.
     fn request(&self, request: &PlantRequest) -> Result<PlantResponse, RemoteError> {
         let mut connection = self.connection.lock().unwrap();
         if connection.stream.is_none() {
@@ -835,6 +842,13 @@ impl RemoteDriver {
         };
         match exchange(stream, request) {
             Ok(response) => {
+                // The exchange landed, so whatever severed the link has
+                // cleared with it — drop the standing failure record.
+                // A response that parses but does not answer the
+                // request is the caller's `protocol_violation`, and a
+                // carried refusal re-records through `fail`, so only a
+                // genuinely answered request leaves the record clear.
+                connection.last_error = None;
                 // Claim-state verdicts update the recorded fencing
                 // claimant: a `fenced` answer names the standing
                 // claim's owner — the claimant the fenced-out field
@@ -970,7 +984,8 @@ impl IoDriver for RemoteDriver {
     /// section: `disconnected` while no live connection stands — a dead
     /// or unanswerable plant, including the span between a severed
     /// link's drop and its lazy re-attach — plus the last transport- or
-    /// protocol-level failure's description.
+    /// protocol-level failure's description, cleared by the first
+    /// successful exchange after it stops standing.
     fn diagnostics(&self) -> Option<DriverDiagnostics> {
         let connection = self.connection.lock().unwrap();
         Some(DriverDiagnostics {
