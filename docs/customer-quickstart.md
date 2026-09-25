@@ -47,12 +47,17 @@ Its `README.md` walks the full customer path:
    startup claim preempts the dead owner's field claim (decision 86,
    `docs/architecture.md`). A consumer without durable storage
    omits both fields and the flags stay absent. A deployment
-   running more than one controller pair may carry the optional
-   top-level `topology` section — named pairs each listing their
-   two member `controllers`, the pair's standby wiring closing
-   inside it — the declared pair index a `?pair=` overview URL is
-   generated from; a single-pair deployment omits the section and
-   configures the overview by URL exactly as before.
+   may carry the optional top-level `topology` section naming its
+   pair — each entry listing its two member `controllers`, the
+   pair's standby wiring closing inside it — the declared pair
+   index a `?pair=` overview URL is generated from. One deployment
+   binds one field, so a manifest carries at most one field-owning
+   pair: a second duty controller — a second pair's duty member
+   included — is undeployable and the deploy stage refuses it
+   `rig-mismatch` (decision 99), while a site running several pairs
+   deploys one manifest per field and names their addresses across
+   them in the overview URL. A single-pair deployment omits the
+   section and configures the overview by URL exactly as before.
 7. **Upgrade** by repinning to a compatible release; an incompatible
    crossing surfaces as a named diagnostic (`pin-unresolvable`,
    `surface-incompatible`, `tooling-rejected`,

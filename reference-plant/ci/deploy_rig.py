@@ -34,6 +34,15 @@ declares:
   the `--state-file`/`--journal-file` flag argument; a field the
   manifest omits means the flag is absent, and a writable mount or
   flag the manifest does not declare diverges the same way;
+- the one-field-per-deployment bound (decision 99): the manifest's
+  single `plant` section is one field whose single-writer claim
+  admits exactly one field-owning run — a duty controller's
+  conditional startup grant refuses a second live claimant
+  (decision 89) — so at most one `controllers` entry may omit
+  `standby`, and a second duty claimant — a second declared pair's
+  duty member included — is a manifest that validates yet describes
+  a rig that cannot run. Tracking entries stay unbounded: a duty
+  may carry several standbys;
 - `topology` — the optional named-pair index (decision 47's deferred
   plant-index artifact, the declaration a `?pair=` overview URL is
   generated from): each declared pair names two distinct member
@@ -471,6 +480,27 @@ def main():
             f"manifest standby {controller['standby']!r} does not name a "
             f"declared controller at its declared listen port",
         )
+
+    # The one-field-per-deployment bound (decision 99): every
+    # declared controller attaches to the manifest's single `plant`,
+    # so each duty entry — a controller without `standby` — is a
+    # claimant on that one field's single-writer claim, whose
+    # conditional startup grant refuses a second live claimant
+    # (decision 89). A second duty — a second declared pair's duty
+    # member or a standalone entry — validates the schema yet
+    # describes a rig that cannot run. Tracking entries stay
+    # unbounded: a duty may carry several standbys.
+    duties = sorted(
+        name
+        for name, controller in declared.items()
+        if "standby" not in controller
+    )
+    expect(
+        len(duties) <= 1,
+        f"manifest declares {len(duties)} duty controllers {duties} "
+        f"over the one plant — the field's single-writer claim "
+        f"admits exactly one field-owning run (decision 99)",
+    )
 
     # The optional topology section: the deployment's declared
     # named-pair index — the artifact a `?pair=` overview URL is
