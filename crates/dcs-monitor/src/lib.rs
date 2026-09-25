@@ -2817,6 +2817,12 @@ fn track_and_record(
     for orphan in peer.take_orphans() {
         recorder.note_field_orphaned(orphan);
     }
+    // A foreign owner the orphan cycle's re-arm probe just met —
+    // the claimant token the refusal named — journals beside the
+    // orphan record it answered, once per distinct claimant.
+    for observation in peer.take_claim_observations() {
+        recorder.note_claim_observed(observation);
+    }
     for restart in peer.take_source_restarts() {
         recorder.note_source_restart(restart);
     }
@@ -2859,6 +2865,12 @@ fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Tick {
     // already counted.
     for loss in peer.take_fencing_losses() {
         recorder.note_field_claim_lost(loss.tick, loss.point, loss.claimant);
+    }
+    // A foreign owner the fencing-loss reclaim probe just met —
+    // the claimant token the refusal named — journals beside the
+    // scan's own events, once per distinct claimant.
+    for observation in peer.take_claim_observations() {
+        recorder.note_claim_observed(observation);
     }
     for change in peer.take_role_changes() {
         recorder.note_role_change(&change);

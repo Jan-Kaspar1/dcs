@@ -242,6 +242,22 @@ pub enum JournalEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         claimant: Option<u64>,
     },
+    /// A claim probe — the orphan re-arm's conditional grant or the
+    /// bound fencing-loss reclaim — was refused by a standing claim
+    /// naming this owner token: a foreign `claim_writer` episode the
+    /// peer observed through its probes while never owning or fencing
+    /// a write against the field, so no `FieldClaimLost` fired for
+    /// it. The audit record that the episode happened at all — one
+    /// entry per distinct claimant a probe names on this run, not one
+    /// per probe, so a standing foreign claim journals once however
+    /// many scans its refusals span.
+    FieldClaimObserved {
+        /// The point the refused conditional grant was probed against.
+        point: PointId,
+        /// The owner token the standing claim names — the claimant
+        /// the field's arbitration answered the refusal with.
+        claimant: u64,
+    },
     /// A tracking peer's applied checkpoint stamped its serving run as
     /// not owning field writes — the checkpoint's `source_owns_field`
     /// stamp — meaning the tracked line has no field owner: the
@@ -478,6 +494,14 @@ mod tests {
             JournalEntry {
                 seq: 12,
                 tick: Tick(14),
+                event: JournalEvent::FieldClaimObserved {
+                    point: PointId(20),
+                    claimant: 424243,
+                },
+            },
+            JournalEntry {
+                seq: 13,
+                tick: Tick(14),
                 event: JournalEvent::EventEmitted {
                     event: EmittedEvent {
                         event: "stroke_complete".to_string(),
@@ -492,7 +516,7 @@ mod tests {
                 },
             },
             JournalEntry {
-                seq: 13,
+                seq: 14,
                 tick: Tick(15),
                 event: JournalEvent::SourceRestarted {
                     was_aligned: Some(Tick(14)),
@@ -500,14 +524,14 @@ mod tests {
                 },
             },
             JournalEntry {
-                seq: 14,
+                seq: 15,
                 tick: Tick(20),
                 event: JournalEvent::TrackingSourceAdopted {
                     source: "127.0.0.1:8081".parse().unwrap(),
                 },
             },
             JournalEntry {
-                seq: 15,
+                seq: 16,
                 tick: Tick(20),
                 event: JournalEvent::SourceRestarted {
                     was_aligned: None,
@@ -515,12 +539,12 @@ mod tests {
                 },
             },
             JournalEntry {
-                seq: 16,
+                seq: 17,
                 tick: Tick(20),
                 event: JournalEvent::RunBoundary { run: 2 },
             },
             JournalEntry {
-                seq: 17,
+                seq: 18,
                 tick: Tick(21),
                 event: JournalEvent::FieldOrphaned { aligned: Tick(20) },
             },
@@ -541,6 +565,7 @@ mod tests {
         assert!(json.contains("\"reinitialized\""), "{json}");
         assert!(json.contains("\"event_emitted\""), "{json}");
         assert!(json.contains("\"field_claim_lost\""), "{json}");
+        assert!(json.contains("\"field_claim_observed\""), "{json}");
         assert!(json.contains("\"field_orphaned\""), "{json}");
         assert!(json.contains("\"source_restarted\""), "{json}");
         assert!(json.contains("\"tracking_source_adopted\""), "{json}");

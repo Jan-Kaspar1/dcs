@@ -167,6 +167,17 @@
 //! joins, and releases nothing, so reporting `unclaimed` cannot seize
 //! the field — a peer that observes it keeps its role, its closed
 //! gate, and its sync verdict, and the observation journals nothing.
+//!
+//! The *conditional* probes — the orphan cycle's re-arm and the
+//! fencing-loss reclaim — observe too: a refusal means the field's
+//! arbitration found a different owner standing, and where the verdict
+//! names its token [`with_claim_observer`](Peer::with_claim_observer)
+//! queues one [`ClaimObservation`] per distinct claimant for the
+//! journal — deduplicated so a standing foreign claim records once
+//! rather than once per refused probe. A foreign `claim_writer`
+//! preempt-and-release landing between the peer's own writes is thereby
+//! attributed even when it never fenced one — the episode the
+//! probe-only observation would otherwise absorb without a trace.
 
 use crate::checkpoint::{Checkpoint, RestoreError, SUPPORTED_FORMAT_VERSIONS};
 use crate::divergence::{
@@ -370,6 +381,31 @@ pub struct Peer<'d> {
     /// [`with_field_claimant`](Self::with_field_claimant); a peer built
     /// without it records each loss unattributed.
     claimant: Option<Claimant<'d>>,
+    /// The observed-claimant lookup the conditional grant probes consult
+    /// on a refusal — the standing-owner tokens the field's arbitration
+    /// named — so a foreign `claim_writer` episode the peer only ever
+    /// met through its probes journals one attributed
+    /// [`ClaimObservation`] rather than passing silently. Installed by
+    /// [`with_claim_observer`](Self::with_claim_observer); a peer built
+    /// without it observes nothing.
+    observer: Option<Observer<'d>>,
+    /// The claimant tokens this ownership epoch has already journaled —
+    /// seeded by the fenced-write verdict's claimant (the `field_claim_lost`
+    /// entry already attributes that episode) and grown by each queued
+    /// [`ClaimObservation`]: the dedup that keeps a standing foreign
+    /// claim to one entry rather than one per refused probe. Cleared by
+    /// every granted claim lift — a claimant observed after this run
+    /// retook the field is a new episode.
+    observed_claimants: BTreeSet<u64>,
+    /// The point the standing fencing-loss mark was recorded on — the
+    /// claim domain the reclaim probes — so an observation's journal
+    /// `point` attributes the refusal through the point whose write the
+    /// field fenced rather than an arbitrary one.
+    fencing_point: Option<PointId>,
+    /// Foreign-claim observations not yet consumed for journaling — one
+    /// [`ClaimObservation`] per distinct claimant a refused conditional
+    /// grant probe named.
+    pending_observations: Vec<ClaimObservation>,
     /// The claim's fencing-loss counterpart — the *bound* conditional
     /// re-grant a fencing-demoted ex-owner probes each scan while its
     /// loss mark stands, installed by
@@ -526,6 +562,22 @@ impl fmt::Debug for Reclaim<'_> {
     }
 }
 
+/// The observed-claimant counterpart of [`Ensure`]/[`Reclaim`]: asked
+/// only after one of those conditional grant probes answers
+/// `Ok(false)` — a refusal means a different owner's claim stands — it
+/// answers the owner token(s) the refusing verdicts named, so the
+/// journaled `field_claim_observed` attributes the foreign claim the
+/// peer observed rather than recording nothing of the episode. An
+/// empty answer means no refusal carried an owner identity — the
+/// episode then journals unattributed nowhere rather than guessing.
+struct Observer<'d>(Box<dyn Fn() -> Vec<u64> + Send + Sync + 'd>);
+
+impl fmt::Debug for Observer<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("claim observer")
+    }
+}
+
 /// One reported-role transition, queued for the transition journal: the
 /// tick it is attributed to, the reported roles before and after, and
 /// the switch's attribution — `origin` distinguishing a requested
@@ -580,6 +632,25 @@ pub struct FencingLoss {
     /// whose fencing answer carries no owner identity, or a peer built
     /// without the claimant hook.
     pub claimant: Option<u64>,
+}
+
+/// A conditional claim probe — the orphan cycle's re-arm or the bound
+/// fencing-loss reclaim — was refused while a foreign owner stands:
+/// the observed-claimant record carrying the token the field's
+/// arbitration named, so a `claim_writer` preempt-and-release episode
+/// the peer only ever met through its probes is not silent in the
+/// audit. One report queues per distinct claimant the run observes —
+/// a standing foreign claim journals once, not once per refused probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimObservation {
+    /// The run tick the refused probe was observed at.
+    pub tick: Tick,
+    /// The field point the observation attributes through — the point
+    /// the fencing-loss mark was recorded on where one stands, else a
+    /// field-served point of this run's map.
+    pub point: PointId,
+    /// The standing claim's owner token the refusal named.
+    pub claimant: u64,
 }
 
 /// A tracking peer's applied checkpoint reported its serving run owns
@@ -858,6 +929,10 @@ impl<'d> Peer<'d> {
             pending_adoption_receipts: Vec::new(),
             probe: None,
             claimant: None,
+            observer: None,
+            observed_claimants: BTreeSet::new(),
+            fencing_point: None,
+            pending_observations: Vec::new(),
             reclaim: None,
             field_claim: None,
         }
@@ -996,6 +1071,31 @@ impl<'d> Peer<'d> {
         self
     }
 
+    /// Arms the claim-observation hook — consulted each time a
+    /// conditional grant probe, the orphan cycle's
+    /// [`with_field_ensure`](Self::with_field_ensure) re-arm or the
+    /// loss-marked [`with_field_reclaim`](Self::with_field_reclaim),
+    /// answers `Ok(false)`. A refusal means the field's arbitration
+    /// found a different owner standing; `observer` answers the owner
+    /// token(s) the refusing verdicts named — one per refusing claim
+    /// domain — so the peer queues a [`ClaimObservation`] for the
+    /// journal's `field_claim_observed` entry rather than letting a
+    /// foreign `claim_writer` episode the peer only ever probed pass
+    /// silently. Observations deduplicate on the observed token: a
+    /// claimant this run already journaled — whether by an earlier
+    /// observation or by the fencing-loss verdict that marked the
+    /// claim — queues nothing further. An empty answer means no
+    /// refusal named a claimant, and the episode records nothing it
+    /// cannot attribute. A peer built without the hook leaves
+    /// probe-only episodes unobserved.
+    pub fn with_claim_observer(
+        mut self,
+        observer: impl Fn() -> Vec<u64> + Send + Sync + 'd,
+    ) -> Self {
+        self.observer = Some(Observer(Box::new(observer)));
+        self
+    }
+
     /// Arms the claim's fencing-loss counterpart — the *bound*
     /// conditional re-grant a fencing-demoted ex-owner probes each
     /// scan while its loss mark stands. `reclaim` takes the field's
@@ -1090,6 +1190,10 @@ impl<'d> Peer<'d> {
             pending_adoption_receipts: Vec::new(),
             probe: None,
             claimant: None,
+            observer: None,
+            observed_claimants: BTreeSet::new(),
+            fencing_point: None,
+            pending_observations: Vec::new(),
             reclaim: None,
             field_claim: None,
         }
@@ -2400,6 +2504,7 @@ impl<'d> Peer<'d> {
                 // failover paths' to arbitrate.
                 if checkpoint.source_owns_field == Some(true) {
                     self.fencing_lost = false;
+                    self.fencing_point = None;
                 }
                 let orphaned = checkpoint.source_owns_field == Some(false);
                 return match self.transfer(&checkpoint) {
@@ -2448,12 +2553,20 @@ impl<'d> Peer<'d> {
     /// grab, and no probe ever preempts. A peer that never owned has
     /// no claim to re-arm; a peer built without the hook probes
     /// nothing; a probe's refusal or failure leaves the wedge
-    /// surfaced, not silently worsened.
+    /// surfaced, not silently worsened. A refusal the field's
+    /// arbitration attributes to a standing foreign owner journals one
+    /// observed-claimant record per distinct token — see
+    /// [`observe_claim_refusal`](Self::observe_claim_refusal).
     fn ensure_field_claim(&mut self) {
-        if self.was_owner
-            && let Some(ensure) = &self.ensure
-        {
-            let _ = ensure.0();
+        if !self.was_owner {
+            return;
+        }
+        let refused = self
+            .ensure
+            .as_ref()
+            .is_some_and(|ensure| matches!(ensure.0(), Ok(false)));
+        if refused {
+            self.observe_claim_refusal(self.tick());
         }
     }
 
@@ -2476,25 +2589,85 @@ impl<'d> Peer<'d> {
     /// rogue claim keeps the field until it releases and a concurrent
     /// reclaimer's grant refuses the loser. A peer built without the
     /// hook probes nothing — the wedge stands until an operator's
-    /// promote unwedges, the pre-hook behavior.
+    /// promote unwedges, the pre-hook behavior. A refused probe the
+    /// field's arbitration attributes to a standing foreign owner
+    /// journals one observed-claimant record per distinct token — the
+    /// audit trail the preempt-and-release episode between this run's
+    /// writes would otherwise leave empty.
     fn reclaim_field_claim(&mut self, tick: Tick) {
         if self.role != Role::Standby || !self.fencing_lost {
             return;
         }
-        if let Some(reclaim) = &self.reclaim
-            && let Ok(true) = reclaim.0()
-        {
-            self.open_gate();
-            self.attribution = SwitchAttribution {
-                origin: SwitchOrigin::Reclaim,
-                actor: None,
-            };
-            self.change(tick, Role::Promoting);
-            // The probe granted the claim rather than observing it —
-            // report the held claim the grant just took without
-            // waiting on next scan's observation.
-            self.field_claim = Some(FieldClaim::Held);
+        let Some(outcome) = self.reclaim.as_ref().map(|reclaim| reclaim.0()) else {
+            return;
+        };
+        match outcome {
+            Ok(true) => {
+                self.open_gate();
+                self.attribution = SwitchAttribution {
+                    origin: SwitchOrigin::Reclaim,
+                    actor: None,
+                };
+                self.change(tick, Role::Promoting);
+                // The probe granted the claim rather than observing it —
+                // report the held claim the grant just took without
+                // waiting on next scan's observation.
+                self.field_claim = Some(FieldClaim::Held);
+            }
+            // A refusal names the standing owner the verdict carried —
+            // journal it once per claimant, deduplicated on the token.
+            Ok(false) => self.observe_claim_refusal(tick),
+            Err(_) => {}
         }
+    }
+
+    /// A conditional grant probe was refused — the field's arbitration
+    /// found a different owner's claim standing. Queue one
+    /// [`ClaimObservation`] per claimant token the run has not already
+    /// journaled this ownership epoch: deduplicated so a standing
+    /// foreign claim journals once rather than once per refused probe,
+    /// and the claimant the fencing-loss verdict already attributed —
+    /// seeded into `observed_claimants` when the loss was marked —
+    /// repeats nothing.
+    fn observe_claim_refusal(&mut self, tick: Tick) {
+        let Some(observer) = &self.observer else {
+            return;
+        };
+        let claimants = observer.0();
+        let Some(point) = self.observation_point() else {
+            return;
+        };
+        for claimant in claimants {
+            if self.observed_claimants.insert(claimant) {
+                self.pending_observations.push(ClaimObservation {
+                    tick,
+                    point,
+                    claimant,
+                });
+            }
+        }
+    }
+
+    /// The field point a claim observation attributes through — the
+    /// point the standing fencing-loss mark was recorded on where one
+    /// stands (the reclaim probes the claim domain that point's write
+    /// was fenced from), else a field-served `Out` point: the claim
+    /// arbitrates writes, so a writable point anchors the record, any
+    /// field point serving where the map declares none.
+    fn observation_point(&self) -> Option<PointId> {
+        self.fencing_point.or_else(|| {
+            self.executor
+                .point_map()
+                .iter()
+                .find(|(_, spec)| spec.internal.is_none() && spec.direction == Direction::Out)
+                .or_else(|| {
+                    self.executor
+                        .point_map()
+                        .iter()
+                        .find(|(_, spec)| spec.internal.is_none())
+                })
+                .map(|(point, _)| point)
+        })
     }
 
     /// Runs one scan and settles a pending role transition: the first
@@ -2576,18 +2749,27 @@ impl<'d> Peer<'d> {
         {
             if !self.fencing_lost {
                 self.fencing_lost = true;
+                self.fencing_point = Some(point);
+                // The field's own arbitration names the preempting
+                // claim's owner — the claimant the journaled
+                // `field_claim_lost` attributes the takeover to.
+                // `None` where no hook is installed or the verdict
+                // carried no owner identity.
+                let claimant = self
+                    .claimant
+                    .as_ref()
+                    .and_then(|claimant| claimant.0(point));
+                // The loss entry already attributes this claimant's
+                // episode — seed the observation dedup with it, so
+                // reclaim probes the same standing claim refuses
+                // queue no second record.
+                if let Some(claimant) = claimant {
+                    self.observed_claimants.insert(claimant);
+                }
                 self.pending_fencing.push(FencingLoss {
                     tick,
                     point,
-                    // The field's own arbitration names the preempting
-                    // claim's owner — the claimant the journaled
-                    // `field_claim_lost` attributes the takeover to.
-                    // `None` where no hook is installed or the verdict
-                    // carried no owner identity.
-                    claimant: self
-                        .claimant
-                        .as_ref()
-                        .and_then(|claimant| claimant.0(point)),
+                    claimant,
                 });
             }
             // Superseded: the field's single-writer claim belongs to
@@ -2676,6 +2858,15 @@ impl<'d> Peer<'d> {
     /// them into.
     pub fn take_fencing_losses(&mut self) -> Vec<FencingLoss> {
         std::mem::take(&mut self.pending_fencing)
+    }
+
+    /// Drains foreign-claim observations queued since the last call —
+    /// one [`ClaimObservation`] per distinct standing-owner token a
+    /// refused conditional grant probe named this ownership epoch —
+    /// for the transition journal the monitoring layer records them
+    /// into.
+    pub fn take_claim_observations(&mut self) -> Vec<ClaimObservation> {
+        std::mem::take(&mut self.pending_observations)
     }
 
     /// Drains tracked-source restarts queued since the last call — one
@@ -2855,6 +3046,11 @@ impl<'d> Peer<'d> {
         // A fresh claim re-arms the loss report — a fenced write under
         // this ownership is a new event, not a repeat of a prior one.
         self.fencing_lost = false;
+        self.fencing_point = None;
+        // The new ownership opens a new observation epoch too: a
+        // claimant a later refused probe names is a new episode the
+        // journal has not seen.
+        self.observed_claimants.clear();
         // This run held the field — the mark the orphan cycle's
         // conditional re-arm probes on: only a peer that owned the
         // claim re-arms it once released.
