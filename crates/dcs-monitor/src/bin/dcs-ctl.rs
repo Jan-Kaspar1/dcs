@@ -392,10 +392,7 @@ fn parse(args: &[String]) -> Result<(&str, Action), String> {
         ("scan", [scans]) => Action::Scan {
             scans: parse_count(scans).map_err(usage)?,
         },
-        (
-            "snapshot" | "signals" | "schema" | "role" | "receipts" | "promote" | "demote" | "scan",
-            _,
-        ) => {
+        ("snapshot" | "signals" | "schema" | "role" | "receipts" | "scan", _) => {
             return Err(usage(format!("wrong arguments for {command:?}")));
         }
         _ => return Err(usage(format!("unknown command {command:?}"))),
@@ -637,9 +634,7 @@ fn execute(client: &MonitorClient, addr: SocketAddr, action: &Action) -> Result<
         Action::Promote { actor } => {
             switchover(client, addr, "/promote", "promote", actor.as_deref())
         }
-        Action::Demote { actor } => {
-            switchover(client, addr, "/demote", "demote", actor.as_deref())
-        }
+        Action::Demote { actor } => switchover(client, addr, "/demote", "demote", actor.as_deref()),
         Action::Scan { scans } => print_json(
             &client.advance(*scans).map_err(|e| transport(addr, e))?,
             addr,

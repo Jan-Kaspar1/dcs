@@ -1873,7 +1873,10 @@ mod tests {
             assert_eq!(change.actor, None);
         }
         assert_eq!(
-            changes.iter().map(|change| (change.from, change.to)).collect::<Vec<_>>(),
+            changes
+                .iter()
+                .map(|change| (change.from, change.to))
+                .collect::<Vec<_>>(),
             vec![
                 (Role::Standby, Role::Promoting),
                 (Role::Promoting, Role::Active),
