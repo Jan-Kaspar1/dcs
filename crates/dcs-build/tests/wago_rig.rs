@@ -330,9 +330,15 @@ fn emitted_documents_validate_lint_and_serde_roundtrip() {
             "{binding:?} emitted document fails validation: {:?}",
             model.validate()
         );
+        // The emitted document's only advisories are undeclared
+        // `stale_after_ticks` budgets — freshness stays an opt-in
+        // per-point declaration (decision 45); every other lint class
+        // stays empty.
         assert!(
-            model.lint().is_empty(),
-            "{binding:?} emitted document has lint findings: {:?}",
+            model.lint().iter().all(
+                |finding| finding.rule == dcs_model::LintRule::FieldInputWithoutFreshnessBudget
+            ),
+            "{binding:?} emitted document has unexpected lint findings: {:?}",
             model.lint()
         );
         let json = serde_json::to_string_pretty(&model).unwrap();
