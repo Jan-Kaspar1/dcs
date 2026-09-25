@@ -246,7 +246,16 @@ impl BusDriver {
         timeout: Duration,
         points: &[PointRegister],
     ) -> std::io::Result<Self> {
-        let stream = TcpStream::connect(addr)?;
+        let stream = loop {
+            match TcpStream::connect(&addr) {
+                // An interrupted connect attempt is abandoned with its
+                // socket and retried fresh — a caught signal (e.g. a
+                // spawned helper's `SIGCHLD`) is not a reachability
+                // verdict on the address.
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                other => break other?,
+            }
+        };
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
         // Requests are small and answered immediately; coalescing delays
@@ -463,6 +472,15 @@ impl IoDriver for BusDriver {
                 expected: mapping.kind,
                 found: value,
             });
+        }
+        // The bank refuses a non-finite `Float`; the same refusal a
+        // local driver reports, made before any request leaves — the
+        // write the device cannot represent is a caller error, not a
+        // link fault.
+        if let Value::Float(v) = value
+            && !v.is_finite()
+        {
+            return Err(IoError::InvalidValue { point });
         }
         match self.request(&BusRequest::WriteRegister {
             register: mapping.register,

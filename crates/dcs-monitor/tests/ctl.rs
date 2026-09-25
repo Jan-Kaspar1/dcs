@@ -13,7 +13,7 @@ use dcs_core::{
     StandbySync, SwitchOrigin, Tick, Value, ValueKind,
 };
 use dcs_model::{PointSignal, SignalIndex};
-use dcs_monitor::{Monitor, MonitorClient};
+use dcs_monitor::{Monitor, MonitorClient, PairFaultKind};
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap, StepError,
 };
@@ -128,6 +128,7 @@ fn entry(point: PointId, direction: Direction, kind: ValueKind, writable: bool) 
         description: None,
         group: None,
         writable,
+        requires_reason: false,
     }
 }
 
@@ -268,13 +269,25 @@ impl PeerRig {
     /// `None`: this test exercises the role surface, not field
     /// quiescence — and serves its monitor on a spawned thread.
     fn start(role: Role) -> Self {
+        Self::start_tracking(role, None)
+    }
+
+    /// [`start`](Self::start) with `source` recorded as the monitor's
+    /// tracking source — the configured `--peer`/`--standby` half of
+    /// the follow-peer contract a demotion tracks.
+    fn start_tracking(role: Role, source: Option<SocketAddr>) -> Self {
         let driver: &'static StubDriver = Box::leak(Box::new(field_driver()));
         let executor = Executor::new(driver, point_map(), components()).unwrap();
         let peer = match role {
             Role::Active => Peer::active(executor, None),
             _ => Peer::standby(executor, None),
         };
-        let monitor = Arc::new(Monitor::bind_peer("127.0.0.1:0", peer, signal_index()).unwrap());
+        let monitor = Monitor::bind_peer("127.0.0.1:0", peer, signal_index()).unwrap();
+        let monitor = match source {
+            Some(source) => monitor.with_standby_source(source),
+            None => monitor,
+        };
+        let monitor = Arc::new(monitor);
         let addr = monitor.local_addr();
         let client = MonitorClient::new(addr);
         let serving = Arc::clone(&monitor);
@@ -391,6 +404,7 @@ fn read_subcommands_roundtrip_the_served_payloads() {
                 role: Role::Active,
                 tick: Tick(2),
                 sync: None,
+                field_claim: None,
             }
         );
 
@@ -518,18 +532,19 @@ fn schema_prints_the_served_interface_registry() {
 #[test]
 fn events_print_each_components_recent_emissions() {
     with_monitor(|driver, addr, client| {
-        // Before the first scan the retained journal tail is empty —
+        // Before the first scan the attributed event record is empty —
         // the empty case prints an empty list for a served component.
-        let events: Vec<dcs_core::JournalEntry> =
+        let events: Vec<dcs_core::ResourceEvent> =
             serde_json::from_value(ctl_ok(addr, &["events", "seq"])).unwrap();
         assert!(events.is_empty());
 
         // Holding `run` through a scan completes the one-tick step: the
         // kind-emitted `step_completed` journals attributed to `seq` —
-        // the emitted event the run produced reflected in `events`.
+        // the emitted event the run produced reflected in `events`,
+        // marked `journal`-retained: the durable record's mark.
         driver.write(SEQ_RUN, Value::Bool(true)).unwrap();
         client.advance(1).unwrap();
-        let events: Vec<dcs_core::JournalEntry> =
+        let events: Vec<dcs_core::ResourceEvent> =
             serde_json::from_value(ctl_ok(addr, &["events", "seq"])).unwrap();
         assert!(events.iter().any(|entry| matches!(
             &entry.event,
@@ -538,6 +553,11 @@ fn events_print_each_components_recent_emissions() {
                     && event.component == "seq"
                     && event.fields["step"] == dcs_core::EventValue::Value(Value::Int(1))
         )));
+        assert!(
+            events
+                .iter()
+                .all(|entry| entry.retention == dcs_core::EventRetention::Journal)
+        );
 
         // The all-components form keys every served instance's list by
         // name — `seq`'s carries the same tail, and `level-pid`'s the
@@ -547,7 +567,7 @@ fn events_print_each_components_recent_emissions() {
             assert!(all.get(name).is_some(), "{name} missing: {all}");
         }
         assert_eq!(
-            serde_json::from_value::<Vec<dcs_core::JournalEntry>>(all["seq"].clone()).unwrap(),
+            serde_json::from_value::<Vec<dcs_core::ResourceEvent>>(all["seq"].clone()).unwrap(),
             events
         );
         assert!(all["level-pid"].as_array().unwrap().iter().any(|entry| {
@@ -641,6 +661,35 @@ fn resources_print_the_served_live_resource_view() {
             Some("I/O point PointId(50) is not declared writable")
         );
 
+        // The `KindDeclared` probe's published verdict joins the same
+        // read: `advance` landing the table's last step completes the
+        // run, and the served state turns unavailable carrying the
+        // kind's standing refusal — the text a refused submission's
+        // receipt settles — while `reset` stays available.
+        let receipt: CommandReceipt =
+            serde_json::from_value(ctl_ok(addr, &["invoke", "seq", "advance"])).unwrap();
+        assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+        ctl_ok(addr, &["scan", "1"]);
+        let seq: dcs_core::ComponentResources =
+            serde_json::from_value(ctl_ok(addr, &["resources", "seq"])).unwrap();
+        let advance = seq
+            .commands
+            .iter()
+            .find(|command| command.name == "advance")
+            .unwrap();
+        assert!(!advance.available, "{advance:?}");
+        assert_eq!(
+            advance.refusal.as_deref(),
+            Some("the sequence has run to its end; reset restarts it")
+        );
+        assert!(
+            seq.commands
+                .iter()
+                .find(|command| command.name == "reset")
+                .unwrap()
+                .available
+        );
+
         // A name the served registry does not carry fails the
         // invocation naming it — the same lookup `events <component>`
         // performs, never a rejection.
@@ -673,6 +722,7 @@ fn write_parses_per_the_declared_kind_and_reports_receipts() {
                     apply_tick: Tick(2)
                 },
                 actor: None,
+                reason: None,
             }
         );
         let receipt: CommandReceipt =
@@ -1014,6 +1064,7 @@ fn invoke_submits_declared_commands_and_prints_the_receipt() {
                     apply_tick: Tick(2)
                 },
                 actor: None,
+                reason: None,
             }
         );
 
@@ -1235,9 +1286,74 @@ fn an_unattributed_submission_journals_unattributed() {
 }
 
 #[test]
-fn promote_and_demote_print_role_reports_and_named_refusals() {
+fn pair_health_prints_healthy_json_for_all_resolved_peers() {
     let active = PeerRig::start(Role::Active);
     let standby = PeerRig::start(Role::Standby);
+    let other_standby = PeerRig::start(Role::Standby);
+    active.client.advance(1).unwrap();
+    let checkpoint = active.client.checkpoint().unwrap();
+    standby.monitor.apply_checkpoint(&checkpoint).unwrap();
+    other_standby.monitor.apply_checkpoint(&checkpoint).unwrap();
+
+    for (first, second) in [(active.addr, standby.addr), (standby.addr, active.addr)] {
+        let output = ctl(
+            first,
+            &[
+                "pair-health",
+                &second.to_string(),
+                &other_standby.addr.to_string(),
+            ],
+        );
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert!(stderr(&output).is_empty());
+        let health: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(health["active"], active.addr.to_string());
+        assert_eq!(health["faults"], serde_json::json!([]));
+        assert!(health.get("fault_kinds").is_none());
+        let decoded: dcs_monitor::PairHealth = serde_json::from_value(health.clone()).unwrap();
+        assert!(decoded.fault_kinds.is_empty());
+        assert!(health["fault_kinds_version"].is_u64());
+    }
+}
+
+#[test]
+fn pair_health_faults_exit_nonzero_with_serialized_named_kinds() {
+    for (role, kind) in [
+        (Role::Active, PairFaultKind::DualActive),
+        (Role::Standby, PairFaultKind::NoActivePeer),
+    ] {
+        let first = PeerRig::start(role);
+        let second = PeerRig::start(role);
+        let output = ctl(first.addr, &["pair-health", &second.addr.to_string()]);
+        assert!(!output.status.success(), "{output:?}");
+        let health: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let kinds = vec![kind];
+        assert_eq!(health["active"], serde_json::Value::Null);
+        assert_eq!(health["fault_kinds"], serde_json::to_value(&kinds).unwrap());
+        assert_eq!(health["faults"].as_array().unwrap().len(), kinds.len());
+        assert!(health["fault_kinds_version"].is_u64());
+        assert_eq!(
+            stderr(&output),
+            format!(
+                "dcs-ctl: {}: pair-health faults: {}\n",
+                first.addr,
+                serde_json::to_string_pretty(&kinds).unwrap()
+            )
+        );
+        for peer in [&first, &second] {
+            let report: RoleReport = serde_json::from_value(ctl_ok(peer.addr, &["role"])).unwrap();
+            assert_eq!(report, peer.client.role().unwrap());
+            assert_eq!(report.role, role);
+        }
+    }
+}
+
+#[test]
+fn promote_and_demote_print_role_reports_and_named_refusals() {
+    let active = PeerRig::start(Role::Active);
+    // The standby names its tracking source — the configured peer its
+    // later demotion follows back to the active.
+    let standby = PeerRig::start_tracking(Role::Standby, Some(active.addr));
 
     // `role` on the standby reports its convergence.
     let report: RoleReport = serde_json::from_value(ctl_ok(standby.addr, &["role"])).unwrap();
@@ -1255,6 +1371,17 @@ fn promote_and_demote_print_role_reports_and_named_refusals() {
     let output = ctl(standby.addr, &["demote"]);
     assert!(!output.status.success());
     assert!(stderr(&output).contains("not_active"), "{output:?}");
+    // And demoting a field owner with no checkpoint source — nothing
+    // configured, no peer that ever announced itself — is refused up
+    // front rather than stranding the peer permanently unsynchronized.
+    // A rig of its own: this pair's standby already announced its
+    // address through the premature `promote`'s final-sync pull, so
+    // `active` legitimately holds a tracking source.
+    let lonely = PeerRig::start(Role::Active);
+    let output = ctl(lonely.addr, &["demote"]);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("no_tracking_source"), "{output:?}");
+    lonely.stop();
 
     // A command on a non-active peer answers the not_active rejection
     // through the ordinary receipted path — invoke included.
@@ -1325,7 +1452,9 @@ fn converge(active: &PeerRig, standby: &PeerRig) {
 #[test]
 fn promote_and_demote_carry_the_declared_actor() {
     let active = PeerRig::start(Role::Active);
-    let standby = PeerRig::start(Role::Standby);
+    // The standby names its tracking source — the configured peer its
+    // demotions follow back to the active.
+    let standby = PeerRig::start_tracking(Role::Standby, Some(active.addr));
     converge(&active, &standby);
 
     // `promote --actor` declares the identity the switch request
@@ -1426,22 +1555,36 @@ fn scan_runs_on_an_unpaced_monitor_and_is_refused_on_a_paced_one() {
 #[test]
 fn an_unreachable_monitor_exits_nonzero_naming_the_address() {
     // Bind once to learn a free port, then drop the listener so the
-    // address refuses connections.
-    let addr = TcpListener::bind(("127.0.0.1", 0))
-        .unwrap()
-        .local_addr()
-        .unwrap();
-    for args in [
-        ["snapshot"].as_slice(),
-        ["write", "11", "5"].as_slice(),
-        ["invoke", "seq", "advance"].as_slice(),
-        ["promote"].as_slice(),
-    ] {
-        let output = ctl(addr, args);
-        assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
-        let stderr = stderr(&output);
-        assert!(stderr.contains(&addr.to_string()), "{args:?}: {stderr}");
+    // address refuses connections. A concurrently bound fixture can
+    // legitimately take the freed port — a probe then answers — so
+    // retry until a probed port stays refused.
+    for _ in 0..20 {
+        let addr = TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let mut rebound = false;
+        for args in [
+            ["snapshot"].as_slice(),
+            ["write", "11", "5"].as_slice(),
+            ["invoke", "seq", "advance"].as_slice(),
+            ["promote"].as_slice(),
+        ] {
+            let output = ctl(addr, args);
+            if output.status.success() {
+                rebound = true;
+                break;
+            }
+            let stderr = stderr(&output);
+            assert!(stderr.contains(&addr.to_string()), "{args:?}: {stderr}");
+        }
+        if !rebound {
+            return;
+        }
     }
+    panic!(
+        "twenty dead ports each answered — a concurrent listener keeps taking the freed port or the tool accepts a refused address"
+    );
 }
 
 #[test]
@@ -1454,6 +1597,12 @@ fn malformed_arguments_fail_with_usage_never_a_panic() {
         vec![dead],
         vec![dead, "bogus"],
         vec![dead, "snapshot", "extra"],
+        vec![dead, "role", "extra"],
+        vec![dead, "pair-health"],
+        vec![dead, "pair-health", "--actor", "op"],
+        vec![dead, "pair-health", dead, "--bogus"],
+        vec![dead, "pair-health", "not-an-address"],
+        vec![dead, "pair-health", dead, "not-an-address"],
         vec![dead, "journal", "--since"],
         vec![dead, "journal", "--since", "abc"],
         vec![dead, "journal", "--bogus", "1"],

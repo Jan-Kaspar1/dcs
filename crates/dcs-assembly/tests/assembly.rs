@@ -344,7 +344,7 @@ fn tank_loop_reaches_setpoint_with_no_manual_wiring() {
     // The field-side setpoint: what an operator or upstream device writes.
     driver.write(SETPOINT, Value::Float(50.0)).unwrap();
     for _ in 0..500 {
-        executor.scan().unwrap();
+        executor.scan();
         driver.step(0.1);
     }
 
@@ -398,7 +398,7 @@ fn m1_tank_level_fixture_reaches_setpoint() {
 
     driver.write(setpoint, Value::Float(60.0)).unwrap();
     for _ in 0..400 {
-        executor.scan().unwrap();
+        executor.scan();
         driver.step(0.1);
     }
 
@@ -425,7 +425,7 @@ fn identical_runs_snapshot_identically() {
         let mut executor = assemble(&model, &registry(), &driver).unwrap();
         driver.write(SETPOINT, Value::Float(50.0)).unwrap();
         for _ in 0..200 {
-            executor.scan().unwrap();
+            executor.scan();
             driver.step(0.1);
         }
         serde_json::to_string(&executor.snapshot()).unwrap()
@@ -436,7 +436,7 @@ fn identical_runs_snapshot_identically() {
 /// Steps the executor once and returns the value the driver holds on
 /// `point` — what the field side of the cyclic fixture observes.
 fn field_value(executor: &mut Executor<'_>, driver: &SimDriver, point: PointId) -> Value {
-    executor.scan().unwrap();
+    executor.scan();
     driver.read(point).unwrap().value
 }
 
@@ -488,18 +488,18 @@ fn cyclic_fixture_runs_timer_counter_and_limiter() {
 
     // Two more rising edges bring the counter to its preset.
     driver.write(PULSE, Value::Bool(true)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(COUNT).unwrap().value, Value::Int(2));
     driver.write(PULSE, Value::Bool(false)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     driver.write(PULSE, Value::Bool(true)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(COUNT).unwrap().value, Value::Int(3));
     assert_eq!(driver.read(DONE).unwrap().value, Value::Bool(true));
 
     // Reset clears the count and the flag.
     driver.write(RESET, Value::Bool(true)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(COUNT).unwrap().value, Value::Int(0));
     assert_eq!(driver.read(DONE).unwrap().value, Value::Bool(false));
 
@@ -535,14 +535,14 @@ fn latching_alarm_fixture_trips_latches_and_acknowledges() {
 
     // A trip asserts both outputs on the field points.
     driver.write(ALARM_PV, Value::Float(95.0)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(ALARM_OUT).unwrap().value, Value::Bool(true));
     assert_eq!(driver.read(UNACK_OUT).unwrap().value, Value::Bool(true));
 
     // The input receding inside the limits clears the alarm through the
     // hysteresis rule; the latch stands until acknowledged.
     driver.write(ALARM_PV, Value::Float(50.0)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(ALARM_OUT).unwrap().value, Value::Bool(false));
     assert_eq!(driver.read(UNACK_OUT).unwrap().value, Value::Bool(true));
 
@@ -560,7 +560,7 @@ fn latching_alarm_fixture_trips_latches_and_acknowledges() {
             apply_tick: Tick(3)
         }
     );
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(UNACK_OUT).unwrap().value, Value::Bool(false));
 
     // A fresh trip after acknowledgment latches again.
@@ -570,7 +570,7 @@ fn latching_alarm_fixture_trips_latches_and_acknowledges() {
         value: Value::Bool(false),
     });
     driver.write(ALARM_PV, Value::Float(95.0)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(ALARM_OUT).unwrap().value, Value::Bool(true));
     assert_eq!(driver.read(UNACK_OUT).unwrap().value, Value::Bool(true));
 
@@ -613,7 +613,7 @@ fn bool_latching_alarm_fixture_latches_a_motor_fault() {
         value: Value::Bool(true),
     });
     assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(MOTOR_OUT).unwrap().value, Value::Bool(true));
     assert_eq!(
         executor.sample(MOTOR_FAULT).unwrap().value,
@@ -623,7 +623,7 @@ fn bool_latching_alarm_fixture_latches_a_motor_fault() {
     // later — the same boundary a field loopback crosses.
     assert_eq!(driver.read(FAULT_ALARM).unwrap().value, Value::Bool(false));
 
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(FAULT_ALARM).unwrap().value, Value::Bool(true));
     assert_eq!(driver.read(FAULT_UNACK).unwrap().value, Value::Bool(true));
 
@@ -633,7 +633,7 @@ fn bool_latching_alarm_fixture_latches_a_motor_fault() {
         kind: ValueKind::Bool,
         value: Value::Bool(true),
     });
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(FAULT_UNACK).unwrap().value, Value::Bool(false));
     assert_eq!(driver.read(FAULT_ALARM).unwrap().value, Value::Bool(true));
 
@@ -645,12 +645,12 @@ fn bool_latching_alarm_fixture_latches_a_motor_fault() {
         value: Value::Bool(false),
     });
     driver.write(RUN_FEEDBACK, Value::Bool(true)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(
         executor.sample(MOTOR_FAULT).unwrap().value,
         Value::Bool(false)
     );
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(FAULT_ALARM).unwrap().value, Value::Bool(false));
     assert_eq!(driver.read(FAULT_UNACK).unwrap().value, Value::Bool(false));
 
@@ -675,7 +675,7 @@ fn bool_latching_alarm_fixture_runs_deterministically() {
             value: Value::Bool(true),
         });
         for _ in 0..3 {
-            executor.scan().unwrap();
+            executor.scan();
         }
         executor.submit_command(Command::WriteValue {
             point: FAULT_ACK,
@@ -684,7 +684,7 @@ fn bool_latching_alarm_fixture_runs_deterministically() {
         });
         driver.write(RUN_FEEDBACK, Value::Bool(true)).unwrap();
         for _ in 0..3 {
-            executor.scan().unwrap();
+            executor.scan();
         }
         serde_json::to_string(&executor.snapshot()).unwrap()
     };
@@ -703,7 +703,7 @@ fn operator_fixture_runs_station_and_filter() {
     driver.write(CV, Value::Float(10.0)).unwrap();
     driver.write(MANUAL, Value::Float(30.0)).unwrap();
     driver.write(RAW, Value::Float(4.0)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(DRIVE).unwrap().value, Value::Float(10.0));
     assert_eq!(driver.read(ACTIVE).unwrap().value, Value::Bool(false));
     assert_eq!(driver.read(FILTERED).unwrap().value, Value::Float(4.0));
@@ -713,22 +713,22 @@ fn operator_fixture_runs_station_and_filter() {
     // asserts on the switch scan.
     driver.write(MODE, Value::Bool(true)).unwrap();
     for expected in [15.0, 20.0, 25.0, 30.0] {
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(driver.read(DRIVE).unwrap().value, Value::Float(expected));
     }
     assert_eq!(driver.read(ACTIVE).unwrap().value, Value::Bool(true));
 
     // Arrived: the manual source passes through unbounded.
     driver.write(MANUAL, Value::Float(33.0)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(DRIVE).unwrap().value, Value::Float(33.0));
 
     // The filter's documented recurrence out += alpha * (in - out)
     // with alpha = 0.5 halves the gap per scan.
     driver.write(RAW, Value::Float(12.0)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(FILTERED).unwrap().value, Value::Float(8.0));
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(FILTERED).unwrap().value, Value::Float(10.0));
 
     assert!(
@@ -761,7 +761,7 @@ fn voting_totalizer_fixture_votes_accumulates_and_restores() {
     driver.write(VOTE_B, Value::Float(11.0)).unwrap();
     driver.write(VOTE_C, Value::Float(11.5)).unwrap();
     driver.write(FLOW, Value::Float(10.0)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(VOTED).unwrap().value, Value::Float(11.0));
     assert_eq!(driver.read(SPREAD).unwrap().value, Value::Bool(false));
     assert_eq!(driver.read(ACCUM).unwrap().value, Value::Float(5.0));
@@ -769,7 +769,7 @@ fn voting_totalizer_fixture_votes_accumulates_and_restores() {
     // in_3 deviating past the tolerance asserts the flag; the median
     // is unaffected, and accumulation continues per scan.
     driver.write(VOTE_C, Value::Float(20.0)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(VOTED).unwrap().value, Value::Float(11.0));
     assert_eq!(driver.read(SPREAD).unwrap().value, Value::Bool(true));
     assert_eq!(driver.read(ACCUM).unwrap().value, Value::Float(10.0));
@@ -783,8 +783,8 @@ fn voting_totalizer_fixture_votes_accumulates_and_restores() {
     standby.apply(&checkpoint).unwrap();
     assert_eq!(standby.tick(), Tick(2));
     for _ in 0..3 {
-        executor.scan().unwrap();
-        standby.scan().unwrap();
+        executor.scan();
+        standby.scan();
         assert_eq!(
             standby_driver.read(VOTED).unwrap(),
             driver.read(VOTED).unwrap()
@@ -799,8 +799,8 @@ fn voting_totalizer_fixture_votes_accumulates_and_restores() {
     // Reset clears the total on both runs; release resumes banking.
     driver.write(TRESET, Value::Bool(true)).unwrap();
     standby_driver.write(TRESET, Value::Bool(true)).unwrap();
-    executor.scan().unwrap();
-    standby.scan().unwrap();
+    executor.scan();
+    standby.scan();
     assert_eq!(driver.read(ACCUM).unwrap().value, Value::Float(0.0));
     assert_eq!(standby_driver.read(ACCUM).unwrap().value, Value::Float(0.0));
 
@@ -830,7 +830,7 @@ fn sequencer_fixture_advances_holds_at_end_and_restores() {
 
     // Parked on step 1 before `run` asserts: the first step's value is
     // already driven and `step` reports it.
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(SEQ_OUT).unwrap().value, Value::Float(10.0));
     assert_eq!(driver.read(SEQ_STEP).unwrap().value, Value::Int(1));
     assert_eq!(driver.read(SEQ_DONE).unwrap().value, Value::Bool(false));
@@ -840,7 +840,7 @@ fn sequencer_fixture_advances_holds_at_end_and_restores() {
     // 1,1,2,2,3 across the five running scans.
     driver.write(SEQ_RUN, Value::Bool(true)).unwrap();
     for (out, step) in [(10.0, 1), (10.0, 1), (20.0, 2)] {
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(driver.read(SEQ_OUT).unwrap().value, Value::Float(out));
         assert_eq!(driver.read(SEQ_STEP).unwrap().value, Value::Int(step));
         assert_eq!(driver.read(SEQ_DONE).unwrap().value, Value::Bool(false));
@@ -856,8 +856,8 @@ fn sequencer_fixture_advances_holds_at_end_and_restores() {
     assert_eq!(standby.tick(), Tick(4));
     standby_driver.write(SEQ_RUN, Value::Bool(true)).unwrap();
     for (out, step, done) in [(20.0, 2, false), (30.0, 3, true), (30.0, 3, true)] {
-        executor.scan().unwrap();
-        standby.scan().unwrap();
+        executor.scan();
+        standby.scan();
         assert_eq!(
             standby_driver.read(SEQ_OUT).unwrap(),
             driver.read(SEQ_OUT).unwrap()
@@ -874,7 +874,7 @@ fn sequencer_fixture_advances_holds_at_end_and_restores() {
     // Hold-at-end: the final step keeps driving while `run` holds; only
     // `reset` parks the table back on step 1.
     driver.write(SEQ_RESET, Value::Bool(true)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(SEQ_OUT).unwrap().value, Value::Float(10.0));
     assert_eq!(driver.read(SEQ_STEP).unwrap().value, Value::Int(1));
     assert_eq!(driver.read(SEQ_DONE).unwrap().value, Value::Bool(false));
@@ -907,10 +907,10 @@ fn logic_fixture_folds_latches_pulses_and_restores() {
     // the third input opens it.
     driver.write(GATE_A, Value::Bool(true)).unwrap();
     driver.write(GATE_B, Value::Bool(true)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(GATED).unwrap().value, Value::Bool(false));
     driver.write(GATE_C, Value::Bool(true)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(GATED).unwrap().value, Value::Bool(true));
 
     // Simultaneous set and reset exercises the latch's recorded
@@ -919,14 +919,14 @@ fn logic_fixture_folds_latches_pulses_and_restores() {
     driver.write(LATCH_SET, Value::Bool(true)).unwrap();
     driver.write(LATCH_RESET, Value::Bool(true)).unwrap();
     driver.write(TRIG_IN, Value::Bool(true)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(LATCHED).unwrap().value, Value::Bool(false));
     assert_eq!(driver.read(PULSED).unwrap().value, Value::Bool(true));
 
     // Releasing reset lets the still-asserted set latch; the held
     // pulse level produces no second pulse.
     driver.write(LATCH_RESET, Value::Bool(false)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(driver.read(LATCHED).unwrap().value, Value::Bool(true));
     assert_eq!(driver.read(PULSED).unwrap().value, Value::Bool(false));
 
@@ -942,8 +942,8 @@ fn logic_fixture_folds_latches_pulses_and_restores() {
         standby_driver.write(point, Value::Bool(true)).unwrap();
     }
     for _ in 0..3 {
-        executor.scan().unwrap();
-        standby.scan().unwrap();
+        executor.scan();
+        standby.scan();
         for point in [GATED, LATCHED, PULSED] {
             assert_eq!(
                 standby_driver.read(point).unwrap(),
@@ -960,19 +960,19 @@ fn logic_fixture_folds_latches_pulses_and_restores() {
     // The next rising edge pulses exactly once on both runs.
     driver.write(TRIG_IN, Value::Bool(false)).unwrap();
     standby_driver.write(TRIG_IN, Value::Bool(false)).unwrap();
-    executor.scan().unwrap();
-    standby.scan().unwrap();
+    executor.scan();
+    standby.scan();
     driver.write(TRIG_IN, Value::Bool(true)).unwrap();
     standby_driver.write(TRIG_IN, Value::Bool(true)).unwrap();
-    executor.scan().unwrap();
-    standby.scan().unwrap();
+    executor.scan();
+    standby.scan();
     assert_eq!(driver.read(PULSED).unwrap().value, Value::Bool(true));
     assert_eq!(
         standby_driver.read(PULSED).unwrap().value,
         Value::Bool(true)
     );
-    executor.scan().unwrap();
-    standby.scan().unwrap();
+    executor.scan();
+    standby.scan();
     assert_eq!(driver.read(PULSED).unwrap().value, Value::Bool(false));
     assert_eq!(
         standby_driver.read(PULSED).unwrap().value,
@@ -1225,7 +1225,7 @@ fn internal_setpoint_holds_then_follows_a_command() {
         Value::Float(25.0)
     );
     driver.write(LEVEL_RAW, Value::Float(12.0)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     let before = executor.sample(PID_OUT).unwrap().value;
 
     // A command to the internal point applies at the next scan boundary:
@@ -1242,7 +1242,7 @@ fn internal_setpoint_holds_then_follows_a_command() {
             apply_tick: Tick(2)
         }
     );
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(
         executor.receipts()[0].outcome,
         CommandOutcome::Applied { tick: Tick(2) }
@@ -1272,7 +1272,7 @@ fn port_to_port_wire_delivers_one_scan_later() {
 
     // Field-side input: raw 12.0 mA scales to 50.0 engineering units.
     driver.write(LEVEL_RAW, Value::Float(12.0)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     // Scan 1: the analog-input wrote onto the synthesized internal `Out`
     // point, but the link routes at the input phase — the consuming `In`
     // point still held its seeded initial.
@@ -1281,7 +1281,7 @@ fn port_to_port_wire_delivers_one_scan_later() {
 
     // Scan 2's input phase delivered the producer's scan-1 write — the
     // same boundary a field loopback crosses.
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(executor.sample(LINK_IN).unwrap().value, Value::Float(50.0));
 }
 
@@ -1292,12 +1292,12 @@ fn declared_internal_pair_carries_a_component_write() {
     let mut executor = assemble(&model, &registry(), &driver).unwrap();
 
     driver.write(LEVEL_RAW, Value::Float(12.0)).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     let pid_out = executor.sample(PID_OUT).unwrap().value;
     // Scan 1 routed the carrier's seeded initial onto the analog-output's
     // eng point; the pid's write arrives at scan 2's input phase.
     assert_eq!(executor.sample(AO_ENG).unwrap().value, Value::Float(0.0));
-    executor.scan().unwrap();
+    executor.scan();
     assert_eq!(executor.sample(AO_ENG).unwrap().value, pid_out);
 }
 

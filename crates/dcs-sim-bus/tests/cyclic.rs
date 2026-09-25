@@ -651,6 +651,7 @@ fn point_map() -> PointMap {
                 kind: ValueKind::Float,
                 internal: None,
                 writable: false,
+                requires_reason: false,
                 stale_after_ticks: Some(1),
                 journaled: false,
             },
@@ -685,7 +686,7 @@ fn the_executor_runs_the_exchange_at_the_boundary_over_the_wire() {
             kind: ValueKind::Float,
             value: Value::Float(3.0),
         });
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(server.bank().read(5).unwrap().value, Value::Float(3.0));
         // The input image latched the census at the scan's tick.
         assert_eq!(
@@ -697,7 +698,7 @@ fn the_executor_runs_the_exchange_at_the_boundary_over_the_wire() {
         // carries the initial value until scan 2's exchange publishes
         // it: the documented one-scan actuation delay.
         assert_eq!(server.bank().read(9).unwrap().value, Value::Float(0.0));
-        executor.scan().unwrap();
+        executor.scan();
         assert_eq!(server.bank().read(9).unwrap().value, Value::Float(9.0));
 
         // A scripted miss: the exchange counts once at the boundary,
@@ -706,7 +707,7 @@ fn the_executor_runs_the_exchange_at_the_boundary_over_the_wire() {
         driver
             .script_exchange(&[ExchangeOutcome::Miss, ExchangeOutcome::Miss])
             .unwrap();
-        executor.scan().unwrap();
+        executor.scan();
         let snapshot = executor.snapshot();
         assert_eq!(snapshot.io_health.failed_exchanges, 1);
         assert_eq!(snapshot.io_health.failed_reads, 0);
@@ -717,7 +718,7 @@ fn the_executor_runs_the_exchange_at_the_boundary_over_the_wire() {
 
         // The second miss ages the held sample past its budget — the
         // landed quality merges Uncertain(Stale).
-        executor.scan().unwrap();
+        executor.scan();
         let sample = executor.sample(PointId(10)).unwrap();
         assert_eq!(sample.value, Value::Float(7.0));
         assert_eq!(sample.quality, Quality::Uncertain(QualityReason::Stale));

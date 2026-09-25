@@ -351,9 +351,10 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "dcs-assembly"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dcs-blocks",
+ "dcs-build",
  "dcs-core",
  "dcs-ethercat",
  "dcs-model",
@@ -366,7 +367,7 @@ dependencies = [
 
 [[package]]
 name = "dcs-blocks"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dcs-build",
  "dcs-core",
@@ -379,7 +380,7 @@ dependencies = [
 
 [[package]]
 name = "dcs-build"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dcs-assembly",
  "dcs-controller",
@@ -390,12 +391,13 @@ dependencies = [
  "dcs-runtime",
  "dcs-sim",
  "dcs-sim-bus",
+ "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "dcs-controller"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dcs-assembly",
  "dcs-blocks",
@@ -414,7 +416,7 @@ dependencies = [
 
 [[package]]
 name = "dcs-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -422,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "dcs-demo"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dcs-assembly",
  "dcs-blocks",
@@ -438,7 +440,7 @@ dependencies = [
 
 [[package]]
 name = "dcs-ethercat"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-channel",
  "dcs-assembly",
@@ -451,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "dcs-model"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dcs-core",
  "jsonschema",
@@ -462,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "dcs-monitor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dcs-blocks",
  "dcs-core",
@@ -470,25 +472,27 @@ dependencies = [
  "dcs-runtime",
  "serde",
  "serde_json",
+ "sha2",
  "tiny_http",
 ]
 
 [[package]]
 name = "dcs-plant"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dcs-assembly",
  "dcs-core",
  "dcs-model",
  "dcs-sim",
  "dcs-sim-net",
+ "jsonschema",
  "serde_json",
  "signal-hook",
 ]
 
 [[package]]
 name = "dcs-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dcs-core",
  "serde",
@@ -497,16 +501,17 @@ dependencies = [
 
 [[package]]
 name = "dcs-sim"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dcs-core",
+ "jsonschema",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "dcs-sim-bus"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dcs-core",
  "dcs-model",
@@ -519,7 +524,7 @@ dependencies = [
 
 [[package]]
 name = "dcs-sim-net"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dcs-core",
  "dcs-model",

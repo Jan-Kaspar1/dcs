@@ -5,8 +5,12 @@
 //! `pump_station.json` is the emitted PlantModel,
 //! `pump_station_dynamics.json` the decision-44 dynamics declaration —
 //! a declared inflow plus two `bool_flow` pump draws summed into the
-//! level integrator, with a first-order lag producing the backup
-//! measurement. These tests assert the helper re-emits the checked-in
+//! level integrator, with a second integrator on the same net flow
+//! producing the backup measurement — the decoupled form
+//! `reference-plant/model/dynamics.json` records, seeded below the
+//! primary's initial so the backup tracks the well on a lower datum
+//! and neither instrument's served quality reaches the other. These
+//! tests assert the helper re-emits the checked-in
 //! document exactly, that the document validates and lints clean,
 //! assembles through the standard registries, serde-roundtrips, and
 //! that a scripted run over the merged dynamics shows the closed
@@ -27,8 +31,13 @@
 //!   and their `unacknowledged` latches hold until the operator acks;
 //! - a `Bad` primary level flips the failover to the backup
 //!   measurement and raises its alarm;
+//! - a `Bad` backup while the primary serves leaves `backup_active`
+//!   down but raises `backup_unhealthy` and its alarm — the
+//!   standby-loss annunciation issue #502 calls for;
 //! - the manual-takeover path drives `p101-cmd` from the operator's
-//!   `hand` request while the group no longer requests that pump;
+//!   `hand` request while the group no longer requests that pump —
+//!   under the decision-88 protection set the separate regression
+//!   below exercises;
 //! - a `Disconnected` run contact proves the motor fault, drops the
 //!   pump from the group, and latches the fault alarm;
 //! - out-of-service blocks even a hand start through the guard;
@@ -52,7 +61,7 @@ use dcs_build::station::{
 use dcs_build::{PointId, Value};
 use dcs_core::{
     AdaptedCommand, Command, CommandError, CommandOutcome, CommandReceipt, IoDriver, JournalEntry,
-    JournalEvent, Quality, QualityReason, Sample, ValueKind,
+    JournalEvent, Quality, QualityReason, Sample, Tick, ValueKind,
 };
 use dcs_model::PlantModel;
 use dcs_monitor::{Monitor, MonitorClient};
@@ -164,6 +173,7 @@ struct Scan {
     below_cutoff: bool,
     high_level: bool,
     backup_active: bool,
+    backup_unhealthy: bool,
     none_available: bool,
     all_faulted: bool,
     /// The group's `cmd_i` requests, per pump.
@@ -178,6 +188,8 @@ struct Scan {
     lal_unack: bool,
     ba_alarm: bool,
     ba_unack: bool,
+    buh_alarm: bool,
+    buh_unack: bool,
     na_alarm: bool,
     na_unack: bool,
     pw_alarm: bool,
@@ -334,6 +346,7 @@ fn run() -> Run {
             below_cutoff: bool_(sample(layout.below_cutoff)),
             high_level: bool_(sample(layout.high_level)),
             backup_active: bool_(sample(layout.backup_active)),
+            backup_unhealthy: bool_(sample(layout.backup_unhealthy)),
             none_available: bool_(sample(layout.none_available)),
             all_faulted: bool_(sample(layout.all_faulted)),
             group_cmd: [
@@ -354,6 +367,8 @@ fn run() -> Run {
             lal_unack: bool_(sample(layout.low_level_alarm.unacknowledged)),
             ba_alarm: bool_(sample(layout.backup_active_alarm.alarm)),
             ba_unack: bool_(sample(layout.backup_active_alarm.unacknowledged)),
+            buh_alarm: bool_(sample(layout.backup_unhealthy_alarm.alarm)),
+            buh_unack: bool_(sample(layout.backup_unhealthy_alarm.unacknowledged)),
             na_alarm: bool_(sample(layout.none_available_alarm.alarm)),
             na_unack: bool_(sample(layout.none_available_alarm.unacknowledged)),
             pw_alarm: bool_(sample(layout.power_fail_alarm.alarm)),
@@ -366,7 +381,7 @@ fn run() -> Run {
     };
 
     for scan in 1..=SCANS {
-        executor.scan().unwrap();
+        executor.scan();
         observe(&executor, &mut scans);
         match scan {
             // Pump-down phase done — drop the inflow below zero so the
@@ -503,6 +518,21 @@ fn run() -> Run {
                 sim.write(layout.pumps[0].thermal, Value::Bool(false))
                     .unwrap();
             }
+            // The issue-#502 leg: the backup transmitter goes Bad while
+            // the primary keeps serving — the failover stays on the
+            // primary and the standby-health carrier and its alarm
+            // annunciate the lost redundancy.
+            106 => sim
+                .inject_fault(
+                    layout.level_backup,
+                    Fault::Quality(Quality::Bad(QualityReason::DeviceFault)),
+                )
+                .unwrap(),
+            110 => ack(&mut executor, &layout.backup_unhealthy_alarm),
+            112 => {
+                release_ack(&mut executor, &layout.backup_unhealthy_alarm);
+                sim.clear_fault(layout.level_backup).unwrap();
+            }
             _ => {}
         }
         driver.step(DT).unwrap();
@@ -586,8 +616,10 @@ fn journaled_marks_the_durable_record_points() {
         layout.below_cutoff,
         layout.high_level,
         layout.backup_active,
+        layout.backup_unhealthy,
         layout.none_available,
         layout.all_faulted,
+        layout.power_tripped,
     ];
     let mut off_record = vec![
         layout.level_primary,
@@ -600,11 +632,13 @@ fn journaled_marks_the_durable_record_points() {
         layout.staged,
         layout.duty_call,
         layout.lag_call,
+        layout.any_manual,
     ];
     let alarms = [
         &layout.high_level_alarm,
         &layout.low_level_alarm,
         &layout.backup_active_alarm,
+        &layout.backup_unhealthy_alarm,
         &layout.none_available_alarm,
         &layout.all_faulted_alarm,
         &layout.power_fail_alarm,
@@ -632,6 +666,8 @@ fn journaled_marks_the_durable_record_points() {
             pump.out_of_service,
             pump.fault,
             pump.avail,
+            pump.protect_tripped,
+            pump.protections_ok,
         ]);
         off_record.extend([pump.cmd, pump.draw, pump.hand, pump.group_cmd]);
         for alarm in [&pump.fault_alarm, &pump.thermal_alarm, &pump.moisture_alarm] {
@@ -683,6 +719,67 @@ fn dynamics_document_loads_through_the_dynamics_merge() {
     // revalidates — the same path `dcs-plant-server --dynamics` takes.
     let model = fixture_model();
     build_driver(&model);
+}
+
+#[test]
+fn dynamics_decouples_the_backup_level_quality_from_the_primary() {
+    // The two instrument points are independent integrators on the
+    // net-flow sum — the `reference-plant/model/dynamics.json` form —
+    // so neither served sample's quality reaches the other: a faulted
+    // primary leaves a healthy backup to fail over to, and a faulted
+    // backup cannot hide behind the primary. The lag the backup
+    // element used to be consumed the primary's sample, stamping its
+    // injected quality onto the backup and making the
+    // primary-faulted/backup-healthy state unproducible. The backup's
+    // seed sits below the chain's `start` setpoint, so the failover
+    // leg's selected trajectory keeps the scripted run's pinned
+    // envelope — only the quality path decouples.
+    let model = fixture_model();
+    let layout = ids();
+    let driver = build_driver(&model);
+    let sim = driver
+        .sim()
+        .expect("the station's devices all serve the local sim");
+    let bad = Quality::Bad(QualityReason::CommunicationFault);
+
+    // A standing inflow moves the well: both integrators accumulate
+    // the same net flow, so the backup tracks the level at the
+    // declaration's offset below the primary.
+    sim.write(layout.inflow, Value::Float(0.5)).unwrap();
+    driver.step(DT).unwrap();
+    assert_eq!(
+        sim.read(layout.level_primary).unwrap(),
+        Sample::good(Value::Float(1.3), Tick(1))
+    );
+    assert_eq!(
+        sim.read(layout.level_backup).unwrap(),
+        Sample::good(Value::Float(-1.5), Tick(1))
+    );
+
+    // The primary-faulted/backup-healthy direction: the injected Bad
+    // stays on the primary's served sample while the backup keeps
+    // advancing on the well's net flow, Good.
+    sim.inject_fault(layout.level_primary, Fault::Quality(bad))
+        .unwrap();
+    driver.step(DT).unwrap();
+    assert_eq!(sim.read(layout.level_primary).unwrap().quality, bad);
+    assert_eq!(
+        sim.read(layout.level_backup).unwrap(),
+        Sample::good(Value::Float(-1.0), Tick(2))
+    );
+
+    // The backup-faulted/primary-healthy direction: with the primary
+    // restored, a fault stamped on the backup leaves the primary's
+    // served sample Good.
+    sim.clear_fault(layout.level_primary).unwrap();
+    sim.inject_fault(layout.level_backup, Fault::Quality(bad))
+        .unwrap();
+    driver.step(DT).unwrap();
+    assert_eq!(
+        sim.read(layout.level_primary).unwrap(),
+        Sample::good(Value::Float(2.3), Tick(3))
+    );
+    assert_eq!(sim.read(layout.level_backup).unwrap().quality, bad);
 }
 
 #[test]
@@ -842,6 +939,30 @@ fn scripted_run_shows_the_closed_station_loop() {
     );
     assert!(scans[103..].iter().all(|scan| !scan.p1_thermal_unack));
 
+    // The issue-#502 leg: a Bad backup while the primary serves leaves
+    // `backup_active` down but raises `backup_unhealthy` and its alarm,
+    // latching unacknowledged until the scan-110 ack; recovery drops
+    // the carrier.
+    assert!(
+        scans[106..112].iter().all(|scan| scan.backup_unhealthy),
+        "backup_unhealthy must stand while the unused backup is Bad"
+    );
+    assert!(
+        scans[106..113].iter().all(|scan| !scan.backup_active),
+        "the primary keeps serving — backup_active must stay down"
+    );
+    assert!(
+        scans[107..112]
+            .iter()
+            .any(|scan| scan.buh_alarm && scan.buh_unack)
+    );
+    assert!(scans[110..].iter().all(|scan| !scan.buh_unack));
+    assert!(
+        scans[112..].iter().all(|scan| !scan.backup_unhealthy),
+        "a healthy backup must clear the indication"
+    );
+    assert!(scans[113..].iter().all(|scan| !scan.buh_alarm));
+
     // Duty rotates between cycles: the first pump-down's duty holder is
     // not the later one's.
     let first_duty = scans
@@ -859,6 +980,375 @@ fn scripted_run_shows_the_closed_station_loop() {
         )),
         "a command did not apply: {:?}",
         run.receipts
+    );
+}
+
+/// Scans until `condition` observes true, stepping the plant between
+/// scans — `false` when the bound runs out first.
+fn drive_until(
+    executor: &mut dcs_runtime::Executor<'_>,
+    driver: &FanoutDriver,
+    bound: u64,
+    condition: impl Fn(&dcs_runtime::Executor<'_>) -> bool,
+) -> bool {
+    for _ in 0..bound {
+        executor.scan();
+        if condition(executor) {
+            return true;
+        }
+        driver.step(DT).unwrap();
+    }
+    false
+}
+
+fn point_bool(executor: &dcs_runtime::Executor<'_>, point: PointId) -> bool {
+    bool_(executor.sample(point).unwrap())
+}
+
+#[test]
+fn hand_command_holds_the_declared_protections() {
+    // Issue #782's contract — decision 88: the operator's `hand`
+    // request stays a demand the protection set bounds. A
+    // hand-commanded pump runs while its protections are healthy and
+    // releases on the station power-fail, the thermal and moisture
+    // contacts, the dry-run cutoff, out-of-service, and on any
+    // *untrusted* protection input — while the cause alarm
+    // annunciates on the same reading that trips the command, and the
+    // `none-available` annunciation is designed-suppressed while an
+    // operator holds a pump in manual.
+    let model = fixture_model();
+    let layout = ids();
+    let driver = build_driver(&model);
+    let sim = driver
+        .sim()
+        .expect("the station's devices all serve the local sim");
+    let mut executor = assemble(&model, &dcs_controller::registry(), &driver).unwrap();
+    let pump = &layout.pumps[0];
+
+    // An inflow matched to one pump's draw parks the well mid-band:
+    // the standby pump's auto demand keeps the level off the dry-run
+    // cutoff while the hand legs below run.
+    sim.write(layout.inflow, Value::Float(1.0)).unwrap();
+    driver.step(DT).unwrap();
+    for _ in 0..3 {
+        executor.scan();
+        driver.step(DT).unwrap();
+    }
+
+    // Hand takeover: `mode` plus the operator's `hand` request drive
+    // the field command once the protections have stood their
+    // holdout.
+    write(&mut executor, pump.mode, ValueKind::Bool, Value::Bool(true));
+    write(&mut executor, pump.hand, ValueKind::Bool, Value::Bool(true));
+    assert!(
+        drive_until(&mut executor, &driver, 10, |e| point_bool(e, pump.cmd)),
+        "the hand request must drive the command while the protections stand"
+    );
+
+    // The thermal contact: the command releases on the trip and
+    // re-engages only after the protections have stood the holdout.
+    sim.write(pump.thermal, Value::Bool(true)).unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| !point_bool(e, pump.cmd)),
+        "a thermal trip must release the hand command"
+    );
+    assert!(point_bool(&executor, pump.protect_tripped));
+    sim.write(pump.thermal, Value::Bool(false)).unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 12, |e| point_bool(e, pump.cmd)),
+        "the cleared thermal trip must re-admit the standing hand request"
+    );
+
+    // The moisture contact trips the same path.
+    sim.write(pump.moisture, Value::Bool(true)).unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| !point_bool(e, pump.cmd)),
+        "a moisture trip must release the hand command"
+    );
+    sim.write(pump.moisture, Value::Bool(false)).unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 12, |e| point_bool(e, pump.cmd)),
+        "the cleared moisture trip must re-admit the standing hand request"
+    );
+
+    // The station power-fail: the command releases, every pump's
+    // availability collapses to `none_available`, and the cause alarm
+    // annunciates on the same reading — while `any_manual` holds the
+    // alarm suppressed as designed state, not a fault.
+    sim.write(layout.power_fail, Value::Bool(true)).unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| !point_bool(e, pump.cmd)),
+        "the power trip must release the hand command"
+    );
+    assert!(
+        drive_until(&mut executor, &driver, 4, |e| !point_bool(e, pump.run)),
+        "the power trip must stop the hand-running pump"
+    );
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| point_bool(
+            e,
+            layout.power_fail_alarm.alarm
+        )),
+        "the power-fail alarm must annunciate the trip"
+    );
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| point_bool(
+            e,
+            layout.none_available
+        )),
+        "no pump is available while station power is failed"
+    );
+    assert!(
+        point_bool(&executor, layout.none_available_alarm.suppressed),
+        "a pump held in manual must suppress the none-available annunciation"
+    );
+    assert!(!point_bool(
+        &executor,
+        layout.none_available_alarm.unacknowledged
+    ));
+
+    // Issue #801's reproduction: a *fresh* `mode`+`hand` request
+    // submitted while the power trip stands is receipted as the
+    // operator's demand, but the standing protection trip holds the
+    // command guard closed — the field command never energizes and
+    // the run loopback settles de-energized.
+    let other = &layout.pumps[1];
+    write(
+        &mut executor,
+        other.mode,
+        ValueKind::Bool,
+        Value::Bool(true),
+    );
+    write(
+        &mut executor,
+        other.hand,
+        ValueKind::Bool,
+        Value::Bool(true),
+    );
+    for _ in 0..4 {
+        executor.scan();
+        assert!(
+            !point_bool(&executor, other.cmd),
+            "a hand request submitted during the power trip must not drive the command"
+        );
+        driver.step(DT).unwrap();
+    }
+    assert!(point_bool(&executor, other.protect_tripped));
+    assert!(!point_bool(&executor, other.protections_ok));
+    assert!(
+        drive_until(&mut executor, &driver, 4, |e| !point_bool(e, other.run)),
+        "a hand request submitted during the power trip must not run the pump"
+    );
+    write(
+        &mut executor,
+        other.hand,
+        ValueKind::Bool,
+        Value::Bool(false),
+    );
+    write(
+        &mut executor,
+        other.mode,
+        ValueKind::Bool,
+        Value::Bool(false),
+    );
+
+    sim.write(layout.power_fail, Value::Bool(false)).unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 12, |e| point_bool(e, pump.cmd)),
+        "restored power must re-admit the standing hand request"
+    );
+
+    // The degraded-input case the consolidated issue owns: a Bad
+    // power-fail contact — value healthy, quality untrusted — must
+    // release the command and annunciate the cause alarm on the same
+    // reading, not leave a clean alarm over a tripped station.
+    sim.inject_fault(
+        layout.power_fail,
+        Fault::Quality(Quality::Bad(QualityReason::CommunicationFault)),
+    )
+    .unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| !point_bool(e, pump.cmd)),
+        "an untrusted power contact must release the hand command"
+    );
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| point_bool(
+            e,
+            layout.power_fail_alarm.alarm
+        )),
+        "the cause alarm must annunciate the untrusted input"
+    );
+    sim.clear_fault(layout.power_fail).unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 12, |e| point_bool(e, pump.cmd)),
+        "a trusted contact must re-admit the standing hand request"
+    );
+
+    // Issue #809's reproduction: a Bad thermal contact — value
+    // healthy, quality untrusted — must release the command AND
+    // annunciate its own cause alarm on the same reading, so a
+    // hand-held pump cannot stop with no annunciation at all.
+    sim.inject_fault(
+        pump.thermal,
+        Fault::Quality(Quality::Bad(QualityReason::CommunicationFault)),
+    )
+    .unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| !point_bool(e, pump.cmd)),
+        "an untrusted thermal contact must release the hand command"
+    );
+    assert!(point_bool(&executor, pump.protect_tripped));
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| point_bool(
+            e,
+            pump.thermal_alarm.alarm
+        )),
+        "the thermal cause alarm must annunciate the untrusted contact"
+    );
+    assert!(point_bool(&executor, pump.thermal_alarm.unacknowledged));
+    sim.clear_fault(pump.thermal).unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 12, |e| point_bool(e, pump.cmd)),
+        "a trusted thermal contact must re-admit the standing hand request"
+    );
+
+    // The degraded moisture contact trips and annunciates the same
+    // way on its own cause alarm.
+    sim.inject_fault(
+        pump.moisture,
+        Fault::Quality(Quality::Bad(QualityReason::CommunicationFault)),
+    )
+    .unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| !point_bool(e, pump.cmd)),
+        "an untrusted moisture contact must release the hand command"
+    );
+    assert!(point_bool(&executor, pump.protect_tripped));
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| point_bool(
+            e,
+            pump.moisture_alarm.alarm
+        )),
+        "the moisture cause alarm must annunciate the untrusted contact"
+    );
+    assert!(point_bool(&executor, pump.moisture_alarm.unacknowledged));
+    sim.clear_fault(pump.moisture).unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 12, |e| point_bool(e, pump.cmd)),
+        "a trusted moisture contact must re-admit the standing hand request"
+    );
+
+    // Issue #826's fourth protection cause — the level-derived path:
+    // the failover-selected level is the interlock's `in`, so an
+    // untrusted measurement trips the command exactly as an asserted
+    // contact does. Both instruments Bad leaves the failover serving
+    // an untrusted value: the delivered command releases, and the
+    // measurement path's own managed alarms — `backup-active` for the
+    // failed primary, `backup-unhealthy` for the failed standby —
+    // annunciate the cause on the same reading, so the protective
+    // stop never stands unannounced.
+    sim.inject_fault(
+        layout.level_primary,
+        Fault::Quality(Quality::Bad(QualityReason::CommunicationFault)),
+    )
+    .unwrap();
+    sim.inject_fault(
+        layout.level_backup,
+        Fault::Quality(Quality::Bad(QualityReason::CommunicationFault)),
+    )
+    .unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| !point_bool(e, pump.cmd)),
+        "an untrusted selected level must release the hand command"
+    );
+    assert!(point_bool(&executor, pump.protect_tripped));
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| point_bool(
+            e,
+            layout.backup_active_alarm.alarm
+        )),
+        "the backup-serving alarm must annunciate the failed primary"
+    );
+    assert!(
+        point_bool(&executor, layout.backup_unhealthy_alarm.alarm),
+        "the standby-loss alarm must annunciate the failed backup"
+    );
+    sim.clear_fault(layout.level_primary).unwrap();
+    sim.clear_fault(layout.level_backup).unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 12, |e| point_bool(e, pump.cmd)),
+        "trusted measurements must re-admit the standing hand request"
+    );
+
+    // The dry-run cutoff: the hand pump cannot run the well below the
+    // declared level — a negative inflow draws the well down, the
+    // command releases and stays released while the cutoff stands,
+    // and the recovered level re-admits the request.
+    sim.write(layout.inflow, Value::Float(-4.0)).unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 12, |e| point_bool(
+            e,
+            layout.below_cutoff
+        )),
+        "the well must reach the dry-run cutoff"
+    );
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| !point_bool(e, pump.cmd)),
+        "the dry-run cutoff must release the hand command"
+    );
+    for _ in 0..3 {
+        executor.scan();
+        assert!(
+            !point_bool(&executor, pump.cmd),
+            "the hand command must stay released below the dry-run cutoff"
+        );
+        driver.step(DT).unwrap();
+    }
+    sim.write(layout.inflow, Value::Float(5.0)).unwrap();
+    assert!(
+        drive_until(&mut executor, &driver, 30, |e| point_bool(e, pump.cmd)),
+        "the recovered level must re-admit the standing hand request"
+    );
+    sim.write(layout.inflow, Value::Float(1.0)).unwrap();
+
+    // Out of service releases the standing hand command.
+    write(
+        &mut executor,
+        pump.out_of_service,
+        ValueKind::Bool,
+        Value::Bool(true),
+    );
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| !point_bool(e, pump.cmd)),
+        "out of service must release the hand command"
+    );
+    write(
+        &mut executor,
+        pump.out_of_service,
+        ValueKind::Bool,
+        Value::Bool(false),
+    );
+    write(
+        &mut executor,
+        pump.hand,
+        ValueKind::Bool,
+        Value::Bool(false),
+    );
+    write(
+        &mut executor,
+        pump.mode,
+        ValueKind::Bool,
+        Value::Bool(false),
+    );
+    executor.scan();
+
+    assert!(
+        executor
+            .snapshot()
+            .components
+            .iter()
+            .all(|component| component.step_errors == 0),
+        "a component failed to step"
     );
 }
 
@@ -1101,6 +1591,7 @@ fn alarms_emit_the_managed_kinds_and_wiring() {
     );
     for alarm in [
         &layout.backup_active_alarm,
+        &layout.backup_unhealthy_alarm,
         &layout.none_available_alarm,
         &layout.all_faulted_alarm,
         &layout.power_fail_alarm,
@@ -1120,6 +1611,7 @@ fn alarms_emit_the_managed_kinds_and_wiring() {
         &layout.high_level_alarm,
         &layout.low_level_alarm,
         &layout.backup_active_alarm,
+        &layout.backup_unhealthy_alarm,
         &layout.none_available_alarm,
         &layout.all_faulted_alarm,
         &layout.power_fail_alarm,
@@ -1184,7 +1676,7 @@ fn alarms_emit_the_managed_kinds_and_wiring() {
     assert!(writable(model, layout.low_level_alarm.shelve.unwrap()));
     for alarm in [
         &layout.backup_active_alarm,
-        &layout.none_available_alarm,
+        &layout.backup_unhealthy_alarm,
         &layout.all_faulted_alarm,
         &layout.power_fail_alarm,
     ] {
@@ -1194,6 +1686,19 @@ fn alarms_emit_the_managed_kinds_and_wiring() {
         assert_eq!(bound_point(model, alarm.component, "oos"), None);
         assert_eq!(bound_point(model, alarm.component, "suppress"), None);
     }
+    // Decision 88's designed suppression: the none-available alarm
+    // declares `suppress` bound to the delivered `any-manual` copy — a
+    // pump held in manual withdraws from the group's roster, so an
+    // empty roster is designed state, not a fault.
+    let none_available = &layout.none_available_alarm;
+    assert!(none_available.shelve.is_none());
+    assert!(none_available.oos.is_none());
+    assert_eq!(bound_point(model, none_available.component, "shelve"), None);
+    assert_eq!(bound_point(model, none_available.component, "oos"), None);
+    let suppress = bound_point(model, none_available.component, "suppress")
+        .expect("the none-available alarm's suppress port is bound");
+    assert_ne!(suppress, layout.any_manual);
+    assert!(!writable(model, suppress));
 
     // The designed suppression: each pump's fault alarm binds `oos` to
     // the pump's own writable maintenance-inhibit point and `suppress`
@@ -1217,6 +1722,83 @@ fn alarms_emit_the_managed_kinds_and_wiring() {
             assert_eq!(bound_point(model, alarm.component, "oos"), None);
             assert_eq!(bound_point(model, alarm.component, "suppress"), None);
         }
+    }
+}
+
+/// Issue #825's reproduction leg: demand at zero with every pump
+/// unavailable — the carrier and its alarm still annunciate the empty
+/// roster, and the declared consequence must describe that condition
+/// rather than claim a standing demand the snapshot disproves.
+#[test]
+fn none_available_annunciation_never_claims_standing_demand() {
+    let model = fixture_model();
+    let layout = ids();
+    let driver = build_driver(&model);
+    let mut executor = assemble(&model, &dcs_controller::registry(), &driver).unwrap();
+
+    // The inflow is never forced: the well sits at the dynamics' 0.8
+    // seed below the chain's `start`, so demand reads zero throughout.
+    executor.scan();
+    assert_eq!(int(executor.sample(layout.demand).unwrap()), 0);
+
+    // The reproduction's OOS variant: both pumps written out of
+    // service collapses availability while no demand stands.
+    for pump in &layout.pumps {
+        write(
+            &mut executor,
+            pump.out_of_service,
+            ValueKind::Bool,
+            Value::Bool(true),
+        );
+    }
+    assert!(
+        drive_until(&mut executor, &driver, 8, |e| point_bool(
+            e,
+            layout.none_available
+        )),
+        "none_available never asserted with every pump out of service"
+    );
+    // The alarm's condition reads the carrier a scan later.
+    assert!(
+        drive_until(&mut executor, &driver, 4, |e| point_bool(
+            e,
+            layout.none_available_alarm.alarm
+        )),
+        "the alarm must still annunciate the empty roster"
+    );
+    assert_eq!(
+        int(executor.sample(layout.demand).unwrap()),
+        0,
+        "the reproduction requires demand at zero"
+    );
+    assert!(
+        point_bool(&executor, layout.none_available_alarm.unacknowledged),
+        "the unsuppressed annunciation must latch"
+    );
+
+    // The defect was the narrative, not the carrier: the declared
+    // consequence names the empty roster and makes no demand claim —
+    // in the platform fixture and in the consumer plant's emitted
+    // document alike.
+    let consumer =
+        PlantModel::load(&std::fs::read_to_string(REFERENCE_MODEL_JSON).unwrap()).unwrap();
+    for (document, name) in [(&model, "fixture"), (&consumer, "consumer")] {
+        let record = document
+            .components
+            .iter()
+            .find_map(|instance| {
+                instance
+                    .rationalization
+                    .as_ref()
+                    .filter(|record| record.reference == "none-available-alarm")
+            })
+            .unwrap_or_else(|| panic!("the {name} document declares no none-available alarm"));
+        assert!(
+            !record.consequence.to_lowercase().contains("demand"),
+            "the {name} document's none-available consequence claims a \
+             standing demand: {:?}",
+            record.consequence
+        );
     }
 }
 

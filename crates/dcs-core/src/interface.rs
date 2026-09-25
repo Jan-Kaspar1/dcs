@@ -199,8 +199,9 @@ pub struct CommandArgument {
 }
 
 /// When a [`CommandSpec`] may be submitted at all — the static
-/// availability rule; live availability is the served resource state
-/// a later tranche adds.
+/// availability rule; live availability is the `available`/`refusal`
+/// pair the served [`CommandState`](crate::CommandState) reports per
+/// rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandAvailability {
@@ -219,7 +220,11 @@ pub enum CommandAvailability {
     /// reports: the component's kind decides per submission, and a
     /// refusal is answered
     /// [`CommandRefused`](crate::CommandError::CommandRefused) carrying
-    /// the kind's declared refusal reason.
+    /// the kind's declared refusal reason. The kind's standing
+    /// availability probe publishes the per-scan
+    /// [`CommandVerdict`](crate::CommandVerdict) the resource view
+    /// serves as the command's `available` — advisory, never replacing
+    /// the receipted path's answer.
     KindDeclared,
 }
 
@@ -258,9 +263,7 @@ pub enum AdaptedCommand {
 /// [`applied`](crate::CommandOutcome::Applied) or
 /// [`rejected`](crate::CommandOutcome::Rejected) with the named
 /// [`CommandError`](crate::CommandError) reason, journaled through
-/// `command_settled`. This tranche declares the command surface only;
-/// named-command execution beyond the adapted generic variants is a
-/// later slice.
+/// `command_settled`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandSpec {
     /// The command's stable identity within the interface —
@@ -318,18 +321,31 @@ pub struct EventField {
 }
 
 /// How an emitted event is retained — the small initial vocabulary
-/// aligned with the existing consumers' stores.
+/// aligned with the consumers' stores: the serving layer routes each
+/// drained emission to the store its declared class names, and only
+/// there — no emission is double-recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventRetention {
     /// The durable, ordered transition journal —
     /// [`JournalEntry`](crate::JournalEntry) stream — where the adapted
-    /// transitions already land.
+    /// transitions already land. `Journal`-retained and undeclared
+    /// emissions journal as
+    /// [`EventEmitted`](crate::JournalEvent::EventEmitted) at the
+    /// producing tick.
     Journal,
-    /// Bounded per-point history — the [`PointHistory`](crate::PointHistory)
-    /// ring a trend view reads.
+    /// The bounded event-history ring — the read model's
+    /// [`EventRecord`](crate::EventRecord) stream, evicting
+    /// oldest-first at its declared bound under the same
+    /// numbering-gap convention the point-history and journal rings
+    /// follow. The resource view's `events` collection serves the
+    /// retained tail attributed per instance.
     History,
-    /// Latest-value telemetry — the snapshot's points section.
+    /// The latest-emission view — the newest
+    /// [`EventRecord`](crate::EventRecord) per (component, declared
+    /// event name) with its producing tick and payload, superseded by
+    /// each newer emission. The resource view's `events` collection
+    /// serves the standing records attributed per instance.
     Latest,
 }
 
@@ -351,9 +367,12 @@ pub enum EventEmission {
     OnStepFailure,
     /// Emitted by the component's kind itself during a scan — the
     /// kind-emitted form an [`EventDecl`](crate::EventDecl) reports;
-    /// a durable-retention emission journals as
-    /// [`EventEmitted`](crate::JournalEvent::EventEmitted) at the
-    /// producing scan's tick.
+    /// the emission routes by its declared [`EventRetention`] at the
+    /// producing scan's tick — `Journal` and undeclared emissions
+    /// journal as
+    /// [`EventEmitted`](crate::JournalEvent::EventEmitted), `History`
+    /// and `Latest` land in the read model's event-history ring and
+    /// latest-emission view.
     KindEmitted,
 }
 

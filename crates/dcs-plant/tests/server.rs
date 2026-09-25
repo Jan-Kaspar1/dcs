@@ -1,8 +1,9 @@
 //! Process-level integration tests for `dcs-plant-server`: the binary
 //! spawned against the checked-in tank-loop fixture pair, two attached
 //! `RemoteDriver`s sharing the stepped plant, stepping on explicit
-//! request only, the named failure surface, graceful shutdown, and
-//! identical scripted runs across restarts.
+//! request only, the named failure surface, graceful shutdown, the
+//! standalone `--check-dynamics` preflight, and identical scripted runs
+//! across restarts.
 
 use dcs_core::{IoDriver, IoError, PointId, Sample, Value};
 use dcs_sim_net::RemoteDriver;
@@ -48,6 +49,18 @@ const UNBOUND_DYNAMICS: &str = concat!(
 const MALFORMED_DYNAMICS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/invalid/dynamics_malformed.json"
+);
+const UNBOUND_CONFLICTING_DYNAMICS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/invalid/dynamics_unbound_and_conflicting.json"
+);
+const SELF_POINT_DYNAMICS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/invalid/dynamics_self_point.json"
+);
+const OUT_POINT_DYNAMICS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/invalid/dynamics_out_point.json"
 );
 const UNKNOWN_DEVICE_MODEL: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -137,6 +150,9 @@ fn two_attached_drivers_observe_the_same_stepped_state() {
     let mut plant = spawn(&[MODEL, "--dynamics", DYNAMICS, "--listen", "127.0.0.1:0"]);
     let active = RemoteDriver::connect(plant.addr).unwrap();
     let standby = RemoteDriver::connect(plant.addr).unwrap();
+    // The driving attachment owns the field's write claim — the
+    // fail-closed field refuses a claim-less mutation.
+    active.claim_writer(1).unwrap();
 
     // The lag seeds its output — the raw tank level — at its declared
     // initial value, before any step.
@@ -161,6 +177,7 @@ fn two_attached_drivers_observe_the_same_stepped_state() {
 fn a_declared_lag_advances_only_on_explicit_step_requests() {
     let mut plant = spawn(&[MODEL, "--dynamics", DYNAMICS, "--listen", "127.0.0.1:0"]);
     let driver = RemoteDriver::connect(plant.addr).unwrap();
+    driver.claim_writer(1).unwrap();
 
     // Reads and writes alone never advance the plant: the tick and the
     // lag's output hold until a step request arrives.
@@ -194,6 +211,7 @@ fn a_declared_second_order_lag_loads_and_overshoots_its_step_input() {
         "127.0.0.1:0",
     ]);
     let driver = RemoteDriver::connect(plant.addr).unwrap();
+    driver.claim_writer(1).unwrap();
 
     // The element seeds its output — the raw tank level — at its
     // declared initial value.
@@ -240,6 +258,7 @@ fn a_declared_noise_element_loads_and_deviates_within_amplitude() {
     // restarted server must reproduce bit-for-bit.
     let script = |addr: SocketAddr| -> Vec<(f64, f64)> {
         let driver = RemoteDriver::connect(addr).unwrap();
+        driver.claim_writer(1).unwrap();
         // The element seeds its output at its declared initial before
         // any step.
         assert_eq!(driver.read(PointId(11)).unwrap().value, Value::Float(4.0));
@@ -299,6 +318,7 @@ fn a_pump_command_drains_the_well_only_while_it_stands() {
         "127.0.0.1:0",
     ]);
     let driver = RemoteDriver::connect(plant.addr).unwrap();
+    driver.claim_writer(1).unwrap();
     let level = |driver: &RemoteDriver| {
         let Value::Float(level) = driver.read(PointId(10)).unwrap().value else {
             panic!("the level point is Float")
@@ -340,6 +360,7 @@ fn a_pump_command_drains_the_well_only_while_it_stands() {
 /// then 20, then 0 — the trace identical runs must reproduce.
 fn dosing_script(addr: SocketAddr) -> Vec<Sample> {
     let driver = RemoteDriver::connect(addr).unwrap();
+    driver.claim_writer(1).unwrap();
     let mut trace = Vec::new();
     for demand in [50.0, 20.0, 0.0] {
         driver.write(PointId(20), Value::Float(demand)).unwrap();
@@ -368,6 +389,7 @@ fn an_analog_demand_drains_the_tank_proportionally_through_the_merge() {
     ];
     let mut plant = spawn(&args);
     let driver = RemoteDriver::connect(plant.addr).unwrap();
+    driver.claim_writer(1).unwrap();
     let read = |point: u64| {
         let Value::Float(value) = driver.read(PointId(point)).unwrap().value else {
             panic!("the skid's points are Float")
@@ -419,6 +441,7 @@ fn an_analog_demand_drains_the_tank_proportionally_through_the_merge() {
 /// reproduce.
 fn protection_script(addr: SocketAddr) -> Vec<(Sample, Sample)> {
     let driver = RemoteDriver::connect(addr).unwrap();
+    driver.claim_writer(1).unwrap();
     (0..6)
         .map(|_| {
             driver.step(1.0).unwrap();
@@ -446,6 +469,7 @@ fn the_level_crossing_drives_the_protection_contact_through_the_merge() {
     ];
     let mut plant = spawn(&args);
     let driver = RemoteDriver::connect(plant.addr).unwrap();
+    driver.claim_writer(1).unwrap();
     let level = || {
         let Value::Float(level) = driver.read(PointId(10)).unwrap().value else {
             panic!("the level point is Float")
@@ -500,6 +524,201 @@ fn the_level_crossing_drives_the_protection_contact_through_the_merge() {
             .iter()
             .any(|(_, contact)| contact.value == Value::Bool(false))
     );
+}
+
+#[test]
+fn check_dynamics_accepts_a_valid_document_without_serving() {
+    // The standalone preflight: a valid document exits zero with the
+    // element summary on stdout — and since no listener binds, stderr
+    // stays silent and the process exits on its own, no signal needed.
+    let output = Command::new(SERVER)
+        .args([MODEL, "--check-dynamics", DYNAMICS])
+        .output()
+        .expect("dcs-plant-server runs");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("check ok"), "{stdout}");
+    assert!(stdout.contains("elements: 1"), "{stdout}");
+    assert!(stdout.contains("first_order_lag: 1"), "{stdout}");
+    assert!(output.stderr.is_empty(), "{}", stderr(&output));
+}
+
+#[test]
+fn check_dynamics_rejects_invalid_documents_without_serving() {
+    // An element driving a point the model does not bind is named by
+    // index and driving point — the same message `--dynamics` reports
+    // at startup.
+    let output = run_fail(&[MODEL, "--check-dynamics", UNBOUND_DYNAMICS]);
+    let message = stderr(&output);
+    assert!(message.contains("dynamics element 0"), "{message}");
+    assert!(message.contains("99"), "{message}");
+    assert!(!message.contains("listening on"), "{message}");
+
+    // A document with several malformed elements reports each rejection
+    // in one pass: indices 0 and 2 drive unbound points, index 3
+    // conflicts with the point the valid element 1 merged onto, and
+    // element 1 itself is not named.
+    let output = run_fail(&[MODEL, "--check-dynamics", UNBOUND_CONFLICTING_DYNAMICS]);
+    let message = stderr(&output);
+    for (index, point) in [(0, 98), (2, 97), (3, 10)] {
+        assert!(
+            message.contains(&format!("dynamics element {index} (driving point {point})")),
+            "{message}"
+        );
+    }
+    assert!(!message.contains("dynamics element 1"), "{message}");
+
+    // A document that is not a process-element list at all.
+    let output = run_fail(&[MODEL, "--check-dynamics", MALFORMED_DYNAMICS]);
+    let message = stderr(&output);
+    assert!(message.contains("dynamics"), "{message}");
+    assert!(message.contains("dynamics_malformed.json"), "{message}");
+
+    // A dynamics path that does not exist names the path.
+    let output = run_fail(&[MODEL, "--check-dynamics", "no-such-dynamics.json"]);
+    assert!(stderr(&output).contains("no-such-dynamics.json"));
+
+    // A model failing validation reports before any element is read.
+    let output = run_fail(&[INVALID_MODEL, "--check-dynamics", DYNAMICS]);
+    let message = stderr(&output);
+    assert!(message.contains("invalid plant model"), "{message}");
+
+    // The serve-mode options do not combine with the preflight: each is
+    // rejected as a usage error, naming the refused flag.
+    for flag in ["--listen", "--dynamics"] {
+        let output = Command::new(SERVER)
+            .args([MODEL, "--check-dynamics", DYNAMICS, flag, "x"])
+            .output()
+            .expect("dcs-plant-server runs");
+        assert_eq!(output.status.code(), Some(2), "{flag}");
+        let message = stderr(&output);
+        assert!(message.contains("--check-dynamics"), "{message}");
+        assert!(message.contains(flag), "{message}");
+    }
+
+    // The flag requires its document argument.
+    let output = Command::new(SERVER)
+        .args([MODEL, "--check-dynamics"])
+        .output()
+        .expect("dcs-plant-server runs");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("--check-dynamics"));
+}
+
+#[test]
+fn self_point_dynamics_are_refused_before_the_plant_serves() {
+    // QA finding dynamics-self-point-validation-panics-plant-server: a
+    // bool_flow or threshold whose input and output name the same Bool
+    // point passed the emitted schema and this preflight, then panicked
+    // the served plant's first step — the panic unwound out of the
+    // driver mutex, so every later request on every connection met a
+    // PoisonError and went unanswered while the listener stayed up.
+    // No point kind satisfies both legs, so the merge now refuses the
+    // document: the preflight names each offending element and the
+    // serving run exits before binding.
+    let output = run_fail(&[STATION_MODEL, "--check-dynamics", SELF_POINT_DYNAMICS]);
+    let message = stderr(&output);
+    for index in [0, 1] {
+        assert!(
+            message.contains(&format!("dynamics element {index} (driving point 20)")),
+            "{message}"
+        );
+    }
+    assert!(message.contains("Float"), "{message}");
+    assert!(!message.contains("listening on"), "{message}");
+
+    // The serving run reports the same merge rejection at startup
+    // instead of coming up and dying on the first step request.
+    let output = run_fail(&[
+        STATION_MODEL,
+        "--dynamics",
+        SELF_POINT_DYNAMICS,
+        "--listen",
+        "127.0.0.1:0",
+    ]);
+    let message = stderr(&output);
+    assert!(
+        message.contains("dynamics element 0 (driving point 20)"),
+        "{message}"
+    );
+    assert!(!message.contains("listening on"), "{message}");
+
+    // The same model serving an honest document answers the claim and
+    // the step — including from a second attachment, the requests the
+    // poisoned mutex used to leave unanswered.
+    let mut plant = spawn(&[
+        STATION_MODEL,
+        "--dynamics",
+        STATION_DYNAMICS,
+        "--listen",
+        "127.0.0.1:0",
+    ]);
+    let driver = RemoteDriver::connect(plant.addr).unwrap();
+    driver.claim_writer(1).unwrap();
+    driver.step(0.1).unwrap();
+    let observer = RemoteDriver::connect(plant.addr).unwrap();
+    assert!(observer.list_points().is_ok());
+    assert!(observer.read(PointId(10)).is_ok());
+    assert!(stop(&mut plant).success());
+}
+
+#[test]
+fn elements_driving_out_points_are_refused_before_the_plant_serves() {
+    // QA finding dynamics-element-drives-controller-out-point: a
+    // threshold whose contact output named a pump's bool `out` command
+    // point passed the emitted schema and this preflight, then the
+    // served element rewrote the operator's command every step — a
+    // write of `true` to the command read back `false` after one step,
+    // the element and the writer fighting over the same point. The
+    // merge now refuses the class: an element drives an `in` point —
+    // field-side physics the controller reads — never the command
+    // point itself. The preflight names each offending element and the
+    // direction rule; the serving run exits before binding.
+    let output = run_fail(&[STATION_MODEL, "--check-dynamics", OUT_POINT_DYNAMICS]);
+    let message = stderr(&output);
+    for (index, point) in [(0, 20), (1, 21)] {
+        assert!(
+            message.contains(&format!("dynamics element {index} (driving point {point})")),
+            "{message}"
+        );
+    }
+    // The rejection names the direction rule, not just the point.
+    assert!(message.contains("in point"), "{message}");
+    assert!(message.contains("out"), "{message}");
+    assert!(!message.contains("listening on"), "{message}");
+
+    // The serving run reports the same merge rejection at startup
+    // instead of serving a plant whose elements stomp command points.
+    let output = run_fail(&[
+        STATION_MODEL,
+        "--dynamics",
+        OUT_POINT_DYNAMICS,
+        "--listen",
+        "127.0.0.1:0",
+    ]);
+    let message = stderr(&output);
+    assert!(
+        message.contains("dynamics element 0 (driving point 20)"),
+        "{message}"
+    );
+    assert!(!message.contains("listening on"), "{message}");
+
+    // The same model serving an honest document keeps command points
+    // operator-owned: a written command survives the step that used to
+    // overwrite it.
+    let mut plant = spawn(&[
+        STATION_MODEL,
+        "--dynamics",
+        STATION_DYNAMICS,
+        "--listen",
+        "127.0.0.1:0",
+    ]);
+    let driver = RemoteDriver::connect(plant.addr).unwrap();
+    driver.claim_writer(1).unwrap();
+    driver.write(PointId(20), Value::Bool(true)).unwrap();
+    driver.step(0.1).unwrap();
+    assert_eq!(driver.read(PointId(20)).unwrap().value, Value::Bool(true));
+    assert!(stop(&mut plant).success());
 }
 
 #[test]
@@ -595,6 +814,7 @@ fn identical_request_sequences_produce_identical_responses_across_restarts() {
     // the responses a restart must reproduce bit-for-bit.
     let script = |addr: SocketAddr| -> Vec<serde_json::Value> {
         let driver = RemoteDriver::connect(addr).unwrap();
+        driver.claim_writer(1).unwrap();
         let mut responses = Vec::new();
         responses.push(serde_json::to_value(driver.read(PointId(10)).unwrap()).unwrap());
         driver.write(PointId(20), Value::Float(12.0)).unwrap();

@@ -51,7 +51,7 @@ mod signal;
 mod state;
 mod telemetry;
 
-pub use carryover::{CarriedPoint, CarryoverReport, DroppedElement};
+pub use carryover::{CarriedPoint, CarryoverReport, DroppedElement, RevertedParameter};
 pub use command::{Command, CommandError, CommandOutcome, CommandReceipt};
 pub use descriptor::{
     CommandDecl, ComponentDescriptor, EventDecl, ParameterDescriptor, ParameterRange,
@@ -69,18 +69,18 @@ pub use io::{
     CyclicIoDriver, Direction, DriverDiagnostics, ExchangeDiagnostics, Input, IoDriver, IoError,
     LinkState, Output, PointType, TypedSample,
 };
-pub use journal::{EmittedEvent, EventValue, JournalEntry, JournalEvent};
+pub use journal::{EmittedEvent, EventRecord, EventValue, JournalEntry, JournalEvent};
 pub use resources::{
-    CommandState, ComponentInterface, ComponentResources, ConfigValue, ResourceSample,
-    ResourceView, SchemaView,
+    CommandState, ComponentInterface, ComponentResources, ConfigValue, ResourceEvent,
+    ResourceSample, ResourceView, SchemaView,
 };
-pub use role::{Divergence, Role, RoleReport, StandbySync, SwitchError, SwitchOrigin};
+pub use role::{Divergence, FieldClaim, Role, RoleReport, StandbySync, SwitchError, SwitchOrigin};
 pub use signal::{
     CoercionError, PointId, Quality, QualityReason, Sample, SignalId, Tick, Value, ValueKind,
 };
 pub use state::{StateError, StateMap};
 pub use telemetry::{
     CommandQueueDiagnostics, CommandVerdict, ComponentCommands, ComponentDiagnostics,
-    ComponentParameters, ForcedPoint, IoFault, IoHealth, PointTelemetry, PublicationHealth,
-    TelemetrySnapshot,
+    ComponentParameters, ForcedPoint, IoFault, IoHealth, JournalSinkHealth, JournalSinkState,
+    PointTelemetry, PublicationHealth, TelemetrySnapshot,
 };

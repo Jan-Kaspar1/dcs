@@ -117,16 +117,19 @@ use dcs_runtime::Checkpoint;
 use dcs_sim::Fault;
 use dcs_sim_net::{RemoteDriver, RemoteError};
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command as Process, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
-/// The controller binary under test.
-const CONTROLLER: &str = env!("CARGO_BIN_EXE_dcs-controller");
+mod support;
+
+use support::{
+    SimTcp, controller_model, image_sample, image_value, kill, pump, settle_sink_health,
+    settled_receipts, spawn_controller, spawn_controller_logged, spawn_plant,
+};
+
 /// The plant-side dynamics — the checked-in decision-75 declaration
 /// merged over the served model: the gate's admitted flow, the
 /// independent layer's draw, the tide, and the level integrator.
@@ -140,6 +143,16 @@ const MODEL_SOURCE: &str = include_str!("../../dcs-demo/fixtures/ijmuiden.json")
 
 /// Process time advanced per scan — the dynamics declaration's dt.
 const DT: &str = "1.0";
+/// The field-ownership token the launched active pins via
+/// `--owner-token` — the claim the scripted field attachment shares,
+/// so its stimulus writes keep passing the plant's fencing while the
+/// active owns the field (and across the state-file restart, whose
+/// respawned process claims the same token).
+const OWNER_TOKEN: u64 = 499_002;
+/// The throwaway token the harness's pre-launch field seeding claims
+/// under — `ensure_writer`, then released — so the seeding leaves no
+/// claim standing against the launched active's.
+const SEED_TOKEN: u64 = 499_902;
 /// The declared actor identity every operator command lands under —
 /// the receipted path's attribution the journal keeps.
 const OPERATOR: &str = "ops-lead";
@@ -147,113 +160,6 @@ const OPERATOR: &str = "ops-lead";
 /// the re-trip itself is found dynamically since the extra plant-side
 /// step shifts it a scan or two.
 const SCRIPTED_SCANS: u64 = 78;
-
-/// The `dcs-plant-server` binary — a sibling of the controller binary
-/// under test in the workspace target dir; workspace builds produce it.
-fn plant_server() -> PathBuf {
-    let binary = Path::new(CONTROLLER)
-        .parent()
-        .unwrap()
-        .join(format!("dcs-plant-server{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "{} not found — build the workspace first",
-        binary.display()
-    );
-    binary
-}
-
-/// A spawned process: its bound address learned from the `listening on`
-/// stderr line, stderr held open so a later diagnostic write never meets
-/// a closed pipe, and a kill on drop so a panicking test leaves no stray
-/// processes behind.
-struct Spawned {
-    child: Child,
-    addr: SocketAddr,
-    _stderr: BufReader<ChildStderr>,
-}
-
-impl Drop for Spawned {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Spawns `binary`, reads stderr until its `listening on <addr>` line,
-/// and returns the running process plus the lines that preceded it —
-/// the state-file resume report lives there.
-fn spawn_logged(binary: &Path, args: &[String]) -> (Spawned, Vec<String>) {
-    let mut child = Process::new(binary)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("cannot spawn {}: {error}", binary.display()));
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut preamble = Vec::new();
-    let addr = loop {
-        let mut line = String::new();
-        if stderr.read_line(&mut line).unwrap() == 0 {
-            panic!("{} exited before reporting its address", binary.display());
-        }
-        match line.trim().strip_prefix("listening on ") {
-            Some(addr) => break addr.parse().unwrap(),
-            None => preamble.push(line.trim().to_string()),
-        }
-    };
-    (
-        Spawned {
-            child,
-            addr,
-            _stderr: stderr,
-        },
-        preamble,
-    )
-}
-
-/// Spawns `binary` and returns the running process — the plain shape
-/// for processes that report nothing before their address.
-fn spawn(binary: &Path, args: &[String]) -> Spawned {
-    spawn_logged(binary, args).0
-}
-
-/// A plant-server process serving the plant-side model document with
-/// the checked-in dynamics merged in, on an ephemeral port.
-fn spawn_plant(model: &Path) -> Spawned {
-    spawn(
-        &plant_server(),
-        &[
-            model.to_str().unwrap().to_string(),
-            "--dynamics".to_string(),
-            PLANT_DYNAMICS.to_string(),
-            "--listen".to_string(),
-            "127.0.0.1:0".to_string(),
-        ],
-    )
-}
-
-/// A `--driven` controller process on `model`: the monitor serves on an
-/// ephemeral port and scans run only when `POST /scan` requests them.
-fn spawn_controller(model: &Path, extra: &[String]) -> Spawned {
-    spawn_controller_logged(model, extra).0
-}
-
-/// The state-file restart's spawn: the resume report is a stderr line
-/// before `listening on`, so the preamble comes back with the process.
-fn spawn_controller_logged(model: &Path, extra: &[String]) -> (Spawned, Vec<String>) {
-    let mut args = vec![model.to_str().unwrap().to_string()];
-    args.extend(extra.iter().cloned());
-    for arg in ["--listen", "127.0.0.1:0", "--driven", "--dt", DT] {
-        args.push(arg.to_string());
-    }
-    spawn_logged(Path::new(CONTROLLER), &args)
-}
-
-fn kill(spawned: &mut Spawned) {
-    spawned.child.kill().unwrap();
-    spawned.child.wait().unwrap();
-}
 
 /// Writes the plant-side document: the checked-in model with the two
 /// `sim-scripted` devices re-declared as plain simulated devices. The
@@ -277,37 +183,6 @@ fn plant_model(dir: &Path) -> PathBuf {
     let path = dir.join("ijmuiden-plant.json");
     std::fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
     path
-}
-
-/// Writes the controller-side model for a plant server at `plant`: the
-/// checked-in document with every device's channels merged onto one
-/// `sim-tcp` device carrying the plant's address. One remote backend
-/// means one plant step per owner scan — the pacing the dynamics
-/// declaration assumes. Returns the written path plus the loaded model
-/// for its fingerprint and declared-`journaled` set.
-fn controller_model(dir: &Path, plant: SocketAddr) -> (PathBuf, PlantModel) {
-    let mut document: serde_json::Value = serde_json::from_str(MODEL_SOURCE).unwrap();
-    let mut channels = serde_json::Map::new();
-    for device in document["devices"].as_array().unwrap() {
-        for (name, channel) in device["channels"].as_object().unwrap() {
-            channels.insert(name.clone(), channel.clone());
-        }
-    }
-    document["devices"] = serde_json::json!([{
-        "id": 1,
-        "kind": "sim-tcp",
-        "parameters": { "address": plant.to_string() },
-        "channels": channels,
-    }]);
-    for point in document["io_points"].as_array_mut().unwrap() {
-        if let Some(channel) = point["channel"].as_object_mut() {
-            channel["device"] = 1.into();
-        }
-    }
-    let path = dir.join("ijmuiden-controller.json");
-    std::fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
-    let model = PlantModel::load(&serde_json::to_string(&document).unwrap()).unwrap();
-    (path, model)
 }
 
 /// The schedule the checked-in document declares: every scripted
@@ -362,33 +237,6 @@ fn apply_script(field: &RemoteDriver, schedule: &BTreeMap<u64, Vec<(PointId, Val
             field.write(*point, *value).unwrap();
         }
     }
-}
-
-/// Pumps one accepted relay connection against the real monitor: two
-/// copy loops, one per direction, each ending by half-closing the other
-/// side so the request/response pair completes and the sockets close
-/// cleanly.
-fn pump(client: TcpStream, upstream: SocketAddr) {
-    let Ok(server) = TcpStream::connect(upstream) else {
-        return;
-    };
-    let Ok(client_reader) = client.try_clone() else {
-        return;
-    };
-    let Ok(server_reader) = server.try_clone() else {
-        return;
-    };
-    let writer = thread::spawn(move || {
-        let mut from = client_reader;
-        let mut to = server;
-        let _ = std::io::copy(&mut from, &mut to);
-        let _ = to.shutdown(Shutdown::Write);
-    });
-    let mut from = server_reader;
-    let mut to = client;
-    let _ = std::io::copy(&mut from, &mut to);
-    let _ = to.shutdown(Shutdown::Write);
-    let _ = writer.join();
 }
 
 /// The standby's checkpoint-pull path: a TCP forwarder whose upstream
@@ -446,21 +294,6 @@ impl Drop for PeerRelay {
             let _ = accept.join();
         }
     }
-}
-
-/// The sample `snapshot`'s image reports for `point`.
-fn image_sample(snapshot: &TelemetrySnapshot, point: PointId) -> Sample {
-    snapshot
-        .points
-        .iter()
-        .find(|telemetry| telemetry.point == point)
-        .and_then(|telemetry| telemetry.sample)
-        .unwrap_or_else(|| panic!("no sample for {point:?}"))
-}
-
-/// The value `snapshot`'s image reports for `point`.
-fn image_value(snapshot: &TelemetrySnapshot, point: PointId) -> Value {
-    image_sample(snapshot, point).value
 }
 
 fn float(sample: Sample) -> f64 {
@@ -528,6 +361,7 @@ fn observe(layout: &IjmuidenLayout, owner: &TelemetrySnapshot) -> serde_json::Va
         "manual_active": b(layout.manual_active),
         "discrepancy": b(layout.discrepancy),
         "backup_active": b(layout.backup_active),
+        "backup_unhealthy": b(layout.backup_unhealthy),
         "deviating": b(layout.deviating),
         "duty_call": b(layout.duty_call),
         "lag_call": b(layout.lag_call),
@@ -545,6 +379,7 @@ fn observe(layout: &IjmuidenLayout, owner: &TelemetrySnapshot) -> serde_json::Va
         "disc": managed(&layout.discrepancy_alarm),
         "ror": unmanaged(&layout.rate_of_rise_alarm),
         "backup": unmanaged(&layout.backup_active_alarm),
+        "buh": unmanaged(&layout.backup_unhealthy_alarm),
         "trip": unmanaged(&layout.sis_trip_alarm),
         "bypass": unmanaged(&layout.sis_bypass_alarm),
         "fault": unmanaged(&layout.sis_fault_alarm),
@@ -580,6 +415,7 @@ fn managed_lists(
     let unmanaged = [
         &layout.rate_of_rise_alarm,
         &layout.backup_active_alarm,
+        &layout.backup_unhealthy_alarm,
         &layout.sis_trip_alarm,
         &layout.sis_bypass_alarm,
         &layout.sis_fault_alarm,
@@ -759,15 +595,23 @@ fn file_boundaries(path: &Path) -> Vec<(u64, u64)> {
         .collect()
 }
 
-/// The settled-command journal entries of a served journal, in order.
-fn settled_receipts(journal: &[JournalEntry]) -> Vec<CommandReceipt> {
-    journal
-        .iter()
-        .filter_map(|entry| match &entry.event {
-            JournalEvent::CommandSettled { receipt } => Some(receipt.clone()),
-            _ => None,
-        })
-        .collect()
+/// The durable record covers the served page: `served` was fetched
+/// through `GET /journal`, which waits the sink's drain out, so the
+/// file holds every served entry in order — while the paced run keeps
+/// journaling, the tail a post-flush append may add behind them.
+fn assert_file_covers(path: &Path, served: &[JournalEntry]) {
+    let file = file_entries(path);
+    assert!(
+        file.len() >= served.len(),
+        "the durable journal {} is shorter than the served record",
+        path.display()
+    );
+    assert_eq!(
+        &file[..served.len()],
+        served,
+        "the durable journal {} must hold the served record in order",
+        path.display()
+    );
 }
 
 /// The role transitions a journal stream recorded.
@@ -904,8 +748,14 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
         "the declared schedule must carry the incident's scripted beats"
     );
 
-    let plant = spawn_plant(&plant_model(&dir));
-    let (model_path, model) = controller_model(&dir, plant.addr);
+    let plant = spawn_plant(&plant_model(&dir), Path::new(PLANT_DYNAMICS));
+    let (model_path, model) = controller_model(
+        &dir,
+        "ijmuiden-controller.json",
+        MODEL_SOURCE,
+        plant.addr,
+        SimTcp::Merged,
+    );
 
     // The plant serves exactly the scenario's channel-bound field points.
     let field = RemoteDriver::connect(plant.addr).unwrap();
@@ -926,10 +776,15 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
     // The declared schedule's tick-0 entries, the tide forcing, and the
     // gate confirmed open — plus one step so the first scan sees the
     // dynamics' declared level rather than the bindings' neutral seed.
+    // The field fails closed while unclaimed, so the seeding rides a
+    // conditional claim released afterward — the tool's shape — leaving
+    // no dead token standing against the launched active's claim.
+    field.ensure_writer(SEED_TOKEN).unwrap();
     apply_script(&field, &script, 0);
     field.write(points::INFLOW, Value::Float(0.08)).unwrap();
     field.write(points::GATE_FB, Value::Float(1.0)).unwrap();
     field.step(1.0).unwrap();
+    field.release_writer().unwrap();
 
     // The pair: the field owner first — persisted and journaled for the
     // restart and record legs — then the tracking standby pulling
@@ -942,8 +797,16 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
         state_active.to_str().unwrap().to_string(),
         "--journal-file".to_string(),
         journal_active.to_str().unwrap().to_string(),
+        "--owner-token".to_string(),
+        OWNER_TOKEN.to_string(),
     ];
-    let mut active_process = spawn_controller_logged(&model_path, &active_args).0;
+    let mut active_process = spawn_controller_logged(&model_path, &active_args, DT).0;
+    // The launched active holds the plant's single-writer claim from
+    // startup: this stimulus attachment joins that claim — the pinned
+    // token's other half — so the scripted field writes keep passing
+    // where any third attachment's would fence. The promotion below
+    // still fences it: the promoted peer's claim carries its own token.
+    field.claim_writer(OWNER_TOKEN).unwrap();
     let relay = PeerRelay::forwarding(active_process.addr);
     let standby_process = spawn_controller(
         &model_path,
@@ -953,6 +816,7 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
             "--journal-file".to_string(),
             journal_standby.to_str().unwrap().to_string(),
         ],
+        DT,
     );
     let mut active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
@@ -1060,9 +924,17 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
             }
             // The primary recovers.
             26 => field.clear_fault(points::LEVEL).unwrap(),
-            // The backup-serving annunciation is acknowledged.
-            28 => issued.push(ack_unmanaged(&active, &layout.backup_active_alarm)),
-            29 => issued.push(release_unmanaged(&active, &layout.backup_active_alarm)),
+            // The backup-serving annunciation is acknowledged — and the
+            // standby-health annunciation the frozen repeater already
+            // raised.
+            28 => {
+                issued.push(ack_unmanaged(&active, &layout.backup_active_alarm));
+                issued.push(ack_unmanaged(&active, &layout.backup_unhealthy_alarm));
+            }
+            29 => {
+                issued.push(release_unmanaged(&active, &layout.backup_active_alarm));
+                issued.push(release_unmanaged(&active, &layout.backup_unhealthy_alarm));
+            }
             // Shelving: the request stands past the declared bound —
             // `shelved` asserts inside it and expires while the request
             // still stands.
@@ -1323,6 +1195,22 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
         .unwrap(),
         Quality::Good
     );
+    // The issue-#502 annunciation: the repeater's stale sample makes
+    // the standby leg unhealthy from the first stale presentation —
+    // before the primary ever fails — and its alarm latches until the
+    // scan-28 ack.
+    assert!(
+        trace[schedule::REMOTE_LAST_UPDATE as usize + 3..schedule::REMOTE_RECOVERY as usize - 1]
+            .iter()
+            .all(|row| bool_of(row, "backup_unhealthy")),
+        "the standby leg must annunciate while the repeater's own sample is untrusted"
+    );
+    assert!(
+        trace
+            .iter()
+            .any(|row| alarm_pair(row, "buh", 0) && alarm_pair(row, "buh", 1))
+    );
+    assert!(trace[28..].iter().all(|row| !alarm_pair(row, "buh", 1)));
     // The `Bad` primary flips the failover onto that stale repeater —
     // `backup_active` stands and its alarm latches until the scan-28
     // ack; the selected level carries the degraded quality through.
@@ -1580,7 +1468,7 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
         !before_restart.is_empty(),
         "the pre-restart run must have journaled entries"
     );
-    assert_eq!(file_entries(&journal_active), before_restart);
+    assert_file_covers(&journal_active, &before_restart);
     assert_eq!(file_boundaries(&journal_active), vec![(1, 0)]);
 
     kill(&mut active_process);
@@ -1624,7 +1512,7 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
         "owner": "dead",
     }));
 
-    let (resumed_process, preamble) = spawn_controller_logged(&model_path, &active_args);
+    let (resumed_process, preamble) = spawn_controller_logged(&model_path, &active_args, DT);
     active_process = resumed_process;
     active = MonitorClient::new(active_process.addr);
     assert!(
@@ -1652,11 +1540,22 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
         )),
         "the resumed run carries the standing shelve"
     );
+    let served = active.journal(0).unwrap();
     assert_eq!(
-        active.journal(0).unwrap(),
-        before_restart,
+        &served[..before_restart.len()],
+        &before_restart[..],
         "the journal replays verbatim"
     );
+    assert_eq!(
+        served[before_restart.len()],
+        JournalEntry {
+            seq: before_restart.last().unwrap().seq + 1,
+            tick: interrupted,
+            event: JournalEvent::RunBoundary { run: 2 },
+        },
+        "the restart marker must be served at the restored tick: {served:?}"
+    );
+    assert_eq!(served.len(), before_restart.len() + 1);
     assert_eq!(
         file_boundaries(&journal_active),
         vec![(1, 0), (2, interrupted.0)]
@@ -1839,6 +1738,7 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
                 command: receipt.command.clone(),
                 outcome: CommandOutcome::Applied { tick: apply_tick },
                 actor: Some(OPERATOR.to_string()),
+                reason: None,
             }),
             "no journaled settle matches {receipt:?}"
         );
@@ -1876,7 +1776,7 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
         ],
         "the durable journal records the demotion across the restart"
     );
-    assert_eq!(file_entries(&journal_standby), served_standby);
+    assert_file_covers(&journal_standby, &served_standby);
     assert_eq!(file_boundaries(&journal_standby), vec![(1, 0)]);
 
     // -- Close-out: decision 74's durable lifecycle record -------------
@@ -2266,7 +2166,17 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
         "operator_view": operator_view,
         "served_parameters": serde_json::to_value(&final_snapshot.parameters).unwrap(),
         "issued": issued,
-        "final": masked(serde_json::to_value(&image).unwrap(), &masks),
+        // The journal sink's live counters ride the writer thread's
+        // beat — pin the run-stable fields so the digests compare.
+        "final": masked(
+            serde_json::to_value({
+                let mut image = image.clone();
+                settle_sink_health(&mut image);
+                image
+            })
+            .unwrap(),
+            &masks,
+        ),
     });
 
     let _ = std::fs::remove_dir_all(&dir);

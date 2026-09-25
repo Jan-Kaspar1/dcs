@@ -28,8 +28,9 @@
 use crate::assembly::{neutral, resolve};
 use crate::error::AssemblyError;
 use dcs_core::{
-    CyclicIoDriver, DriverDiagnostics, ExchangeDiagnostics, IoDriver, IoError, LinkState, PointId,
-    Quality, QualityReason, Sample, StateError, StateMap, Tick, Value, ValueKind,
+    CyclicIoDriver, DriverDiagnostics, ExchangeDiagnostics, FieldClaim, IoDriver, IoError,
+    LinkState, PointId, Quality, QualityReason, Sample, StateError, StateMap, Tick, Value,
+    ValueKind,
 };
 use dcs_ethercat::{AttachError, BusPoint, ChannelDecl, EthercatBuses};
 use dcs_model::{Channel, DeviceId, Direction, PlantModel};
@@ -41,7 +42,7 @@ use dcs_sim_bus::{
     BusDriver, CyclicBusDriver, CyclicDeviceParameters, CyclicPoint, DeviceParameters,
     PointRegister,
 };
-use dcs_sim_net::RemoteDriver;
+use dcs_sim_net::{RemoteDriver, RemoteError};
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
@@ -319,6 +320,77 @@ pub type StepHook = Arc<dyn Fn(f64) -> Result<Tick, StepError> + Send + Sync>;
 /// the claim.
 pub type ClaimHook = Arc<dyn Fn(u64) -> Result<(), StepError> + Send + Sync>;
 
+/// Forgets the backend's recorded field write-ownership — the
+/// per-backend half of [`FanoutDriver::release_field_claims`], run when
+/// this peer demotes: an attachment that gave the field up must not
+/// re-assert a stale claim when a re-attach finds the field's
+/// arbitration reset. `None` on kinds whose claim bookkeeping needs no
+/// forgetting — e.g. `sim-bus`, where a claim dies with its connection.
+pub type ReleaseHook = Arc<dyn Fn() + Send + Sync>;
+
+/// The conditional counterpart of [`ClaimHook`] — the per-backend half
+/// of [`FanoutDriver::ensure_field_writer`], run while the tracked
+/// line reports no field owner: re-arms the claim under `owner` only
+/// where the field stands unclaimed or already names the token —
+/// `Ok(true)` — refusing `Ok(false)` where a different owner stands,
+/// so a demoted ex-owner's released claim re-arms once the field frees
+/// and no probe ever preempts a standing owner. `Err` reports the
+/// backend could not be asked. `None` on kinds whose arbitration
+/// cannot be probed conditionally.
+pub type EnsureHook = Arc<dyn Fn(u64) -> Result<bool, StepError> + Send + Sync>;
+
+/// The fencing-loss counterpart of [`EnsureHook`] — the per-backend
+/// half of [`FanoutDriver::reclaim_field_writer`], run while a
+/// fencing-demoted ex-owner's loss mark stands: re-takes the claim
+/// under `owner` only where the field stands unclaimed or already
+/// names the token — `Ok(true)` — refusing `Ok(false)` where a
+/// different owner stands, so a released preemption ends with the
+/// ex-owner holding the claim again and no probe ever preempts.
+/// Unlike `ensure` the grant is *bound*: the reclaiming attachment
+/// joins the claim's holders, because the peer's gate lifts on success
+/// and its writes must pass the claim it just took back. `Err`
+/// reports the backend could not be asked. `None` on kinds whose
+/// arbitration has no bound conditional grant.
+pub type ReclaimHook = Arc<dyn Fn(u64) -> Result<bool, StepError> + Send + Sync>;
+
+/// The claimant-attribution counterpart of [`ProbeHook`] — the
+/// per-backend half of [`FanoutDriver::fencing_claimant`]: reports the
+/// owner token the field's standing claim named the last time it
+/// fenced one of this backend's mutations, so a superseded field
+/// owner's `field_claim_lost` journal record names the preempting
+/// claimant rather than an anonymous "another". `None` answers mean
+/// the verdict carried no claimant identity — no fenced answer
+/// recorded yet, or a backend whose arbitration names no owner.
+pub type FencedByHook = Arc<dyn Fn() -> Option<u64> + Send + Sync>;
+
+/// The launched-controller counterpart of [`ClaimHook`] — the
+/// per-backend half of [`FanoutDriver::claim_field_writer_unless_held`],
+/// run once at startup activation: claims the field's write-ownership
+/// under `owner` only while no *live* attachment holds a different
+/// owner's claim — `Ok(true)` — answering `Ok(false)` where a live
+/// incumbent stands. A restarted controller cannot prove its resumed
+/// state is current with that incumbent's — a stale `--state-file`
+/// would silently roll back commands the incumbent receipted and
+/// applied — so the startup refuses rather than preempting. A claim a
+/// dead owner left standing — holders gone — is still preempted, the
+/// restart-as-active recovery path. `Err` reports the backend could
+/// not be asked. `None` on kinds whose arbitration cannot distinguish
+/// live holders — for them the field falls back to the unconditional
+/// [`ClaimHook`].
+pub type StartupClaimHook = Arc<dyn Fn(u64) -> Result<bool, StepError> + Send + Sync>;
+
+/// The read-only half of [`ClaimHook`] — the per-backend half of
+/// [`FanoutDriver::probe_field_claim`]: reports the verdict a mutation
+/// from this attachment would meet, without mutating —
+/// [`FieldClaim::Held`] while an owner stands (this attachment's own
+/// hold or a standing owner's, which the report need not distinguish),
+/// [`FieldClaim::Unclaimed`] while no claim stands. `Err` reports the
+/// backend could not be asked — no observation, so the last one
+/// stands. The probe asserts, joins, and releases nothing: an
+/// observation cannot seize the field it reports. `None` on kinds
+/// whose arbitration cannot be observed without taking it.
+pub type ProbeHook = Arc<dyn Fn() -> Result<FieldClaim, StepError> + Send + Sync>;
+
 /// A self-contained device backend: the point-facing driver plus the
 /// step hook advancing its simulated plant, when it has one.
 pub struct DeviceBackend {
@@ -333,6 +405,45 @@ pub struct DeviceBackend {
     /// arbitrate a single writer, which keeps automatic failover off
     /// for models built on it.
     pub claim: Option<ClaimHook>,
+    /// Forgets the backend's recorded write-ownership claim — the
+    /// demotion counterpart of `claim`; `None` when the backend records
+    /// no claim state a released owner could wrongly re-assert.
+    pub release: Option<ReleaseHook>,
+    /// The conditional claim re-arm — the orphan-cycle probe a demoted
+    /// ex-owner runs while the tracked line reports no field owner:
+    /// granted only while the field is unclaimed or already names the
+    /// token, never preempting a standing owner. `None` on kinds whose
+    /// arbitration cannot be probed conditionally.
+    pub ensure: Option<EnsureHook>,
+    /// The startup counterpart of `claim` — the conditional grant a
+    /// launched controller's activation asserts: takes the claim only
+    /// where no *live* attachment holds a different owner's, refusing
+    /// (`Ok(false)`) while a live incumbent stands so a stale restart
+    /// cannot preempt it. `None` on kinds whose arbitration cannot
+    /// distinguish live holders; [`FanoutDriver`] falls back to the
+    /// unconditional `claim` for them.
+    pub startup_claim: Option<StartupClaimHook>,
+    /// The claim's observational counterpart — the read-only probe a
+    /// peer runs once per scan to learn the field's write-ownership
+    /// state without disturbing it: `held` while an owner stands,
+    /// `unclaimed` while none does. `None` on kinds whose arbitration
+    /// cannot be observed without taking it — for them the served
+    /// report carries no claim observation rather than a guessed one.
+    pub probe: Option<ProbeHook>,
+    /// The fencing-loss reclaim — the bound conditional re-grant a
+    /// fencing-demoted ex-owner probes each scan while its loss mark
+    /// stands: granted while the field is unclaimed or already names
+    /// the token, refused while a different owner stands, never
+    /// preempting. `None` on kinds whose arbitration has no bound
+    /// conditional grant.
+    pub reclaim: Option<ReclaimHook>,
+    /// The claimant-attribution counterpart of `probe` — reports the
+    /// owner token the field's arbitration named when it last fenced
+    /// this backend's mutation, so the superseded owner's
+    /// `field_claim_lost` journal entry can name the preempting
+    /// claimant. `None` on kinds whose fencing verdicts carry no
+    /// claimant identity.
+    pub fenced_by: Option<FencedByHook>,
     /// The backend's concrete driver, for typed inspection through
     /// [`FanoutDriver::inspect`] — e.g. a scripted device's
     /// recorded-write log. `None` when the backend exposes nothing
@@ -564,12 +675,18 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
             }
         }
     };
-    let remote =
-        RemoteDriver::connect_with_timeout(addresses.as_slice(), timeout).map_err(|error| {
+    let remote = RemoteDriver::connect_with_timeout(addresses.as_slice(), timeout)
+        .map_err(|error| {
             DeviceError::backend(format!(
                 "cannot connect to plant server at {address:?}: {error}"
             ))
-        })?;
+        })?
+        // A controller's device backend claims the field as a
+        // controller: the claim records the marker, so a peer's
+        // conditional takeover refuses to preempt it while the owner
+        // stays attached — where a tool attachment's claim never
+        // blocks that recovery.
+        .as_controller();
     // Probe every declared point: the remote plant must serve it, with
     // the value kind the model declares — a plant configured for a
     // different model fails here, at assembly, not mid-scan.
@@ -592,6 +709,12 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
     let remote = Arc::new(remote);
     let stepping = Arc::clone(&remote);
     let claiming = Arc::clone(&remote);
+    let releasing = Arc::clone(&remote);
+    let ensuring = Arc::clone(&remote);
+    let starting = Arc::clone(&remote);
+    let probing = Arc::clone(&remote);
+    let reclaiming = Arc::clone(&remote);
+    let attributing = Arc::clone(&remote);
     let inspect: Arc<dyn Any + Send + Sync> = remote.clone();
     let device = spec.id.0;
     Ok(DeviceDriver::Backend(DeviceBackend {
@@ -603,15 +726,96 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
             })
         })),
         // The plant server's single-writer claim — the fencing a
-        // promoted peer takes out on the old field owner.
+        // promoted peer takes out on the old field owner. A grant
+        // flagged `Shared` still holds: one owner's several sim-tcp
+        // devices on one plant claim the same token by design, so the
+        // flag is the claimer's to heed, not the hook's to refuse.
         claim: Some(Arc::new(move |owner| {
             claiming
                 .claim_writer(owner)
+                .map(|_| ())
                 .map_err(|error| StepError::Backend {
                     backend: format!("device {device}"),
                     detail: error.to_string(),
                 })
         })),
+        // The claim's demotion counterpart: the attachment drops its
+        // hold on the field's claim and forgets its recorded owner —
+        // the claim itself stays standing, marked yielded, so the
+        // field never opens an unclaimed window and a successor's
+        // conditional claim can still tell the step-down from a live
+        // incumbent's. Best-effort: a dead plant drops the connection
+        // — and the hold with it — anyway.
+        release: Some(Arc::new(move || {
+            let _ = releasing.release_writer_keep_claim();
+        })),
+        // The claim's orphan-cycle counterpart: the plant server's
+        // conditional `ensure_writer` grant in its unbound shape — a
+        // demoted ex-owner's probe keeps the released claim standing
+        // for the token while the field stands unclaimed or already
+        // names it, `Fenced` while a different owner stands, and never
+        // joins the holders: the probing attachment must not read as a
+        // live incumbent to another owner's conditional claim.
+        ensure: Some(Arc::new(move |owner| {
+            match ensuring.ensure_writer_unbound(owner) {
+                Ok(()) => Ok(true),
+                Err(RemoteError::Fenced) => Ok(false),
+                Err(error) => Err(StepError::Backend {
+                    backend: format!("device {device}"),
+                    detail: error.to_string(),
+                }),
+            }
+        })),
+        // The claim's startup counterpart: the plant server's
+        // conditional `claim_writer_unless_held` grant — a launched
+        // controller takes the field from a dead owner's standing
+        // claim but never from a live incumbent, whose newer state a
+        // stale restart would silently roll back.
+        startup_claim: Some(Arc::new(move |owner| {
+            match starting.claim_writer_unless_held(owner) {
+                Ok(_) => Ok(true),
+                Err(RemoteError::Fenced) => Ok(false),
+                Err(error) => Err(StepError::Backend {
+                    backend: format!("device {device}"),
+                    detail: error.to_string(),
+                }),
+            }
+        })),
+        // The claim's observational counterpart: the plant server's
+        // `probe_writer` — the verdict a mutation from this attachment
+        // would meet, without mutating. An observation cannot seize
+        // the field it reports, so a peer may ask every scan.
+        probe: Some(Arc::new(move || {
+            probing.probe_writer().map_err(|error| StepError::Backend {
+                backend: format!("device {device}"),
+                detail: error.to_string(),
+            })
+        })),
+        // The fencing-loss reclaim: the plant server's *bound*
+        // `ensure_writer` — a fencing-demoted ex-owner takes its claim
+        // back once the field stands unclaimed or already names its
+        // token, the grant joining this attachment to the holders so
+        // the re-lifted gate's writes pass the claim it re-took. A
+        // different owner's claim refuses it whether held or standing
+        // holderless — the reclaim never preempts, so a foreign claim
+        // that outlives its attachment still wedges the pair as an
+        // operator-promotable state rather than silently handing the
+        // field back over a live arbitration.
+        reclaim: Some(Arc::new(move |owner| {
+            match reclaiming.ensure_writer(owner) {
+                Ok(_) => Ok(true),
+                Err(RemoteError::Fenced) => Ok(false),
+                Err(error) => Err(StepError::Backend {
+                    backend: format!("device {device}"),
+                    detail: error.to_string(),
+                }),
+            }
+        })),
+        // The claimant attribution: the owner token the plant server's
+        // last fencing verdict named for this attachment — the
+        // claimant a superseded field owner's `field_claim_lost`
+        // journal entry attributes the preemption to.
+        fenced_by: Some(Arc::new(move || attributing.fenced_by())),
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -702,6 +906,26 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                     detail: error.to_string(),
                 })
         })),
+        // The device claim dies with its connection, so a re-attach
+        // never re-asserts it — there is nothing to forget.
+        release: None,
+        // The device's claim protocol has no conditional grant — and
+        // needs none: the claim dying with its connection frees the
+        // field on the peer's death, so no dead token ever fences it.
+        ensure: None,
+        // The same protocol has no live-holder query the startup
+        // claim could consult; the startup path falls back to the
+        // unconditional grant.
+        startup_claim: None,
+        // Nor a read-only claim observation — the device claim binds
+        // to the connection, so "unclaimed" never outlives a holder's
+        // link and there is no probe to ask.
+        probe: None,
+        // No bound conditional grant either — a claim that dies with
+        // its connection needs no reclaim path — and the device's
+        // fencing verdict names no claimant.
+        reclaim: None,
+        fenced_by: None,
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -794,6 +1018,21 @@ fn sim_cyclic_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError>
                     detail: error.to_string(),
                 })
         })),
+        // As `sim-bus`: the claim is bound to the connection, so a
+        // re-attach carries no stale claim to forget.
+        release: None,
+        // As `sim-bus`: no conditional grant exists — or is needed,
+        // the claim dying with its connection.
+        ensure: None,
+        // As `sim-bus`: no live-holder query for the startup claim;
+        // the startup path falls back to the unconditional grant.
+        startup_claim: None,
+        // As `sim-bus`: no read-only claim observation either.
+        probe: None,
+        // As `sim-bus`: no bound conditional grant and no claimant
+        // attribution — the claim dies with its connection.
+        reclaim: None,
+        fenced_by: None,
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -885,6 +1124,12 @@ fn ethercat_backend(
         io: device.clone(),
         step: None,
         claim: None,
+        release: None,
+        ensure: None,
+        startup_claim: None,
+        probe: None,
+        reclaim: None,
+        fenced_by: None,
         inspect: Some(Arc::clone(device.master()) as Arc<dyn Any + Send + Sync>),
         field_facing: true,
     }))
@@ -1076,6 +1321,12 @@ fn scripted_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         step: Some(Arc::new(move |dt| Ok(stepping.step(dt)))),
         // Not field-facing — there is no shared field to claim.
         claim: None,
+        release: None,
+        ensure: None,
+        startup_claim: None,
+        probe: None,
+        reclaim: None,
+        fenced_by: None,
         inspect: Some(inspect),
         field_facing: false,
     }))
@@ -1091,6 +1342,24 @@ struct Backend {
     /// [`DeviceBackend::claim`] carried into the built driver — the
     /// field-ownership claim a promotion takes out.
     claim: Option<ClaimHook>,
+    /// [`DeviceBackend::release`] carried into the built driver — the
+    /// claim-forgetting hook a demotion runs.
+    release: Option<ReleaseHook>,
+    /// [`DeviceBackend::ensure`] carried into the built driver — the
+    /// conditional claim re-arm an orphan cycle probes.
+    ensure: Option<EnsureHook>,
+    /// [`DeviceBackend::startup_claim`] carried into the built driver —
+    /// the conditional grant a launched controller's activation asserts.
+    startup_claim: Option<StartupClaimHook>,
+    /// [`DeviceBackend::probe`] carried into the built driver — the
+    /// read-only claim-state observation a peer reports.
+    probe: Option<ProbeHook>,
+    /// [`DeviceBackend::reclaim`] carried into the built driver — the
+    /// bound conditional re-grant a fencing-demoted ex-owner probes.
+    reclaim: Option<ReclaimHook>,
+    /// [`DeviceBackend::fenced_by`] carried into the built driver —
+    /// the claimant attribution a fencing-loss report reads.
+    fenced_by: Option<FencedByHook>,
     /// The factory-installed typed inspection handle, if any.
     inspect: Option<Arc<dyn Any + Send + Sync>>,
     /// [`DeviceBackend::field_facing`] carried into the built driver —
@@ -1158,6 +1427,12 @@ impl DriverPlan {
                 io: driver.clone(),
                 step: Some(Arc::new(move |dt| Ok(stepping.step(dt)))),
                 claim: None,
+                release: None,
+                ensure: None,
+                startup_claim: None,
+                probe: None,
+                reclaim: None,
+                fenced_by: None,
                 inspect: None,
                 field_facing: false,
             });
@@ -1173,6 +1448,12 @@ impl DriverPlan {
                 io: planned.backend.io,
                 step: planned.backend.step,
                 claim: planned.backend.claim,
+                release: planned.backend.release,
+                ensure: planned.backend.ensure,
+                startup_claim: planned.backend.startup_claim,
+                probe: planned.backend.probe,
+                reclaim: planned.backend.reclaim,
+                fenced_by: planned.backend.fenced_by,
                 inspect: planned.backend.inspect,
                 field_facing: planned.backend.field_facing,
             });
@@ -1418,6 +1699,151 @@ impl FanoutDriver {
         Ok(())
     }
 
+    /// The launched-controller counterpart of
+    /// [`claim_field_writer`](Self::claim_field_writer) — run once at
+    /// startup activation: claims the field's write-ownership under
+    /// `owner` on every field-facing backend only where no *live*
+    /// attachment holds a different owner's claim. `Ok(true)` means the
+    /// claim now stands under `owner`; `Ok(false)` that a live
+    /// incumbent stands on at least one arbitrating backend — a
+    /// restarted controller refusing the stale-checkpoint takeover it
+    /// cannot prove safe rather than rolling back the incumbent's
+    /// receipted state. A claim a dead owner left standing is still
+    /// preempted, the restart-as-active recovery path. Field-facing
+    /// backends without a startup hook — kinds whose arbitration cannot
+    /// distinguish live holders — fall back to the unconditional
+    /// [`DeviceBackend::claim`] hook exactly as `claim_field_writer`
+    /// runs it.
+    pub fn claim_field_writer_unless_held(&self, owner: u64) -> Result<bool, StepError> {
+        let mut held = true;
+        for backend in &self.backends {
+            if !backend.field_facing {
+                continue;
+            }
+            if let Some(startup_claim) = &backend.startup_claim {
+                held &= startup_claim(owner)?;
+            } else if let Some(claim) = &backend.claim {
+                claim(owner)?;
+            }
+        }
+        Ok(held)
+    }
+
+    /// Forgets every field-facing backend's recorded write-ownership
+    /// claim — the demotion counterpart of
+    /// [`claim_field_writer`](Self::claim_field_writer): a peer that gave
+    /// the field up does not re-assert a stale claim when a re-attach
+    /// finds the field's arbitration reset, so the restarted field's
+    /// claim stays free for the peer that legitimately owns it.
+    /// Backends without a release hook record nothing to forget.
+    pub fn release_field_claims(&self) {
+        for backend in &self.backends {
+            if backend.field_facing
+                && let Some(release) = &backend.release
+            {
+                release();
+            }
+        }
+    }
+
+    /// The conditional counterpart of
+    /// [`claim_field_writer`](Self::claim_field_writer): the orphan-cycle
+    /// probe a demoted ex-owner runs while the tracked line reports no
+    /// field owner — re-arms the claim under `owner` only where the
+    /// field stands unclaimed or already names the token, never
+    /// preempting a standing owner. `Ok(true)` means the claim now
+    /// stands under `owner` on every probed backend; `Ok(false)` that a
+    /// different owner stands on at least one; `Err` that a backend
+    /// could not be asked. Field-facing backends without an ensure hook
+    /// are skipped, exactly as `claim_field_writer` skips unfenceable
+    /// kinds — for them the claim either dies with the connection or
+    /// the deployment simply reports the orphan wedge without re-arm.
+    pub fn ensure_field_writer(&self, owner: u64) -> Result<bool, StepError> {
+        let mut held = true;
+        for backend in &self.backends {
+            if backend.field_facing
+                && let Some(ensure) = &backend.ensure
+            {
+                held &= ensure(owner)?;
+            }
+        }
+        Ok(held)
+    }
+
+    /// The read-only half of the field's write-ownership claim — the
+    /// per-scan observation a peer reports as
+    /// [`RoleReport::field_claim`](dcs_core::RoleReport::field_claim):
+    /// asks every field-facing backend that can answer for the verdict a
+    /// mutation from this attachment would meet, without mutating.
+    /// [`FieldClaim::Unclaimed`] while at least one answering backend
+    /// holds no claim — some of this field's writes would meet the
+    /// fail-closed refusal — and [`FieldClaim::Held`] while every
+    /// answering backend reports an owner standing. The probe asserts,
+    /// joins, and releases nothing: an observation cannot seize the
+    /// field it reports. `Err` reports that no field-facing backend
+    /// could answer — no observation, so the run's last one stands.
+    pub fn probe_field_claim(&self) -> Result<FieldClaim, StepError> {
+        let mut claim = None;
+        for backend in &self.backends {
+            if backend.field_facing
+                && let Some(probe) = &backend.probe
+            {
+                match probe()? {
+                    FieldClaim::Unclaimed => return Ok(FieldClaim::Unclaimed),
+                    FieldClaim::Held => claim = Some(FieldClaim::Held),
+                }
+            }
+        }
+        claim.ok_or_else(|| StepError::Backend {
+            backend: "field claim probe".to_string(),
+            detail: "no field-facing backend can answer the claim observation".to_string(),
+        })
+    }
+
+    /// The fencing-loss counterpart of
+    /// [`ensure_field_writer`](Self::ensure_field_writer) — the *bound*
+    /// conditional re-grant a fencing-demoted ex-owner probes each scan
+    /// while its loss mark stands: takes the claim under `owner` on
+    /// every field-facing backend that answers, granted only where the
+    /// field stands unclaimed or already names the token — the grant
+    /// joining this attachment to the claim's holders, so the peer's
+    /// re-lifted gate writes pass the claim it just took back.
+    /// `Ok(true)` means the claim stands under `owner` on every probed
+    /// backend; `Ok(false)` that a different owner stands on at least
+    /// one — the reclaim never preempts, so a preemptor's claim that
+    /// outlives its attachment leaves the wedge standing as an
+    /// operator-promotable state — or that no backend can answer a
+    /// conditional grant at all; `Err` that a backend could not be
+    /// asked. Field-facing backends without a reclaim hook are skipped
+    /// exactly as `ensure_field_writer` skips unprobeable kinds.
+    pub fn reclaim_field_writer(&self, owner: u64) -> Result<bool, StepError> {
+        let mut asked = false;
+        let mut held = true;
+        for backend in &self.backends {
+            if backend.field_facing
+                && let Some(reclaim) = &backend.reclaim
+            {
+                asked = true;
+                held &= reclaim(owner)?;
+            }
+        }
+        Ok(asked && held)
+    }
+
+    /// The owner token the field's standing claim named the last time
+    /// it fenced a mutation on the backend serving `point` — the
+    /// claimant a superseded field owner's `field_claim_lost` journal
+    /// record attributes the preemption to. `None` where the backend
+    /// records no verdict or its fencing answers carry no claimant
+    /// identity: the journal then records the loss unattributed rather
+    /// than guessing a claimant.
+    pub fn fencing_claimant(&self, point: PointId) -> Option<u64> {
+        self.points
+            .get(&point)
+            .and_then(|&index| self.backends[index].fenced_by.as_ref())
+            .and_then(|fenced_by| fenced_by())
+    }
+
     /// The field-facing devices whose backends cannot arbitrate a single
     /// writer — the ids a promotion cannot take a claim out on. The
     /// failover decision makes automatic promotion honest only when this
@@ -1590,19 +2016,30 @@ impl IoDriver for FanoutDriver {
 
 /// The fan-out's cyclic surface: each backend owns its process image, so
 /// the aggregate `exchange` calls every cyclic backend's exchange in
-/// turn — one call publishing and latching each bus's image. The first
-/// failing backend ends the call with its error, matching the fan-out's
-/// per-point dispatch semantics: an aggregate is only as strong as its
-/// parts, and a bus the call never reached simply holds its image for
-/// the next scan's exchange.
+/// backend order — one call publishing and latching each bus's image.
+///
+/// Every cyclic backend gets its attempt each scan (#547): the iteration
+/// is bounded and never returns early, so a failure on one bus cannot
+/// skip another's exchange — each backend's exchange counters, miss
+/// streak, and `last_error` record its own boundary outcome, and its
+/// declared `exchange_miss_threshold` escalation tracks its own link.
+/// A scan in which any exchange failed returns the first failing
+/// backend's error in backend order — the single-failure shape the
+/// boundary's [`IoError`] carries; every failed bus's own diagnostics
+/// still name it through the aggregate
+/// [`diagnostics`](IoDriver::diagnostics) merge, which prefixes each
+/// reporting backend's `last_error` with its device.
 impl CyclicIoDriver for FanoutDriver {
     fn exchange(&self, tick: Tick) -> Result<(), IoError> {
+        let mut failure = None;
         for backend in &self.backends {
-            if let Some(cyclic) = backend.io.cyclic() {
-                cyclic.exchange(tick)?;
+            if let Some(cyclic) = backend.io.cyclic()
+                && let Err(error) = cyclic.exchange(tick)
+            {
+                failure.get_or_insert(error);
             }
         }
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
 }
 
@@ -1628,37 +2065,73 @@ mod tests {
 
     /// A cyclic backend stub: `exchange` is the only transport call,
     /// counted and ticked; while `fail` stands every exchange misses.
+    /// The stub keeps the contract's per-bus bookkeeping — a miss
+    /// streak escalating `read` at `miss_threshold`, and the boundary
+    /// failure's record in `last_error` — so tests can assert each
+    /// backend's diagnostics reflect its own outcome.
     struct CyclicBackend {
+        /// The point the bus attributes its boundary errors to.
+        point: PointId,
+        miss_threshold: u64,
         attempted: AtomicU64,
         succeeded: AtomicU64,
+        misses: AtomicU64,
         last_tick: Mutex<Option<Tick>>,
+        last_error: Mutex<Option<String>>,
         fail: AtomicBool,
     }
 
     impl CyclicBackend {
-        fn new() -> Self {
+        fn new(point: PointId, miss_threshold: u64) -> Self {
             Self {
+                point,
+                miss_threshold,
                 attempted: AtomicU64::new(0),
                 succeeded: AtomicU64::new(0),
+                misses: AtomicU64::new(0),
                 last_tick: Mutex::new(None),
+                last_error: Mutex::new(None),
                 fail: AtomicBool::new(false),
             }
         }
     }
 
     impl IoDriver for CyclicBackend {
+        /// The held image serves while the miss streak stays under the
+        /// threshold, then escalates — the contract's per-bus
+        /// `exchange_miss_threshold` rule.
         fn read(&self, point: PointId) -> Result<Sample, IoError> {
-            Err(IoError::Disconnected(point))
+            if point != self.point {
+                return Err(IoError::UnknownPoint(point));
+            }
+            if self.misses.load(Ordering::Relaxed) >= self.miss_threshold {
+                return Err(IoError::Disconnected(point));
+            }
+            Ok(Sample::good(
+                Value::Float(0.0),
+                self.last_tick.lock().unwrap().unwrap_or(Tick::ZERO),
+            ))
         }
 
+        /// Staging is local and never escalates.
         fn write(&self, point: PointId, _value: Value) -> Result<(), IoError> {
-            Err(IoError::Disconnected(point))
+            if point != self.point {
+                return Err(IoError::UnknownPoint(point));
+            }
+            Ok(())
         }
 
+        /// The per-bus diagnostics surface: the link reports any
+        /// standing miss, `last_error` the most recent boundary
+        /// failure.
         fn diagnostics(&self) -> Option<DriverDiagnostics> {
             Some(DriverDiagnostics {
-                link: LinkState::Connected,
-                last_error: None,
+                link: if self.misses.load(Ordering::Relaxed) > 0 {
+                    LinkState::Disconnected
+                } else {
+                    LinkState::Connected
+                },
+                last_error: self.last_error.lock().unwrap().clone(),
                 exchange: Some(ExchangeDiagnostics {
                     attempted: self.attempted.load(Ordering::Relaxed),
                     succeeded: self.succeeded.load(Ordering::Relaxed),
@@ -1678,8 +2151,12 @@ mod tests {
         fn exchange(&self, tick: Tick) -> Result<(), IoError> {
             self.attempted.fetch_add(1, Ordering::Relaxed);
             if self.fail.load(Ordering::Relaxed) {
-                return Err(IoError::Disconnected(PointId(0)));
+                self.misses.fetch_add(1, Ordering::Relaxed);
+                let error = IoError::Disconnected(self.point);
+                *self.last_error.lock().unwrap() = Some(error.to_string());
+                return Err(error);
             }
+            self.misses.store(0, Ordering::Relaxed);
             self.succeeded.fetch_add(1, Ordering::Relaxed);
             *self.last_tick.lock().unwrap() = Some(tick);
             Ok(())
@@ -1692,6 +2169,12 @@ mod tests {
             io,
             step: None,
             claim: None,
+            release: None,
+            ensure: None,
+            startup_claim: None,
+            probe: None,
+            reclaim: None,
+            fenced_by: None,
             inspect: None,
             field_facing: false,
         }
@@ -1712,8 +2195,8 @@ mod tests {
         // A fan-out with cyclic backends answers `Some`, and one
         // `exchange` turns each cyclic backend's image in order —
         // the point-wise backend has no exchange to run.
-        let bus_a = Arc::new(CyclicBackend::new());
-        let bus_b = Arc::new(CyclicBackend::new());
+        let bus_a = Arc::new(CyclicBackend::new(PointId(31), 2));
+        let bus_b = Arc::new(CyclicBackend::new(PointId(33), 2));
         let fanout = FanoutDriver {
             backends: vec![
                 backend(1, bus_a.clone()),
@@ -1729,15 +2212,18 @@ mod tests {
         assert_eq!(bus_a.attempted.load(Ordering::Relaxed), 1);
         assert_eq!(bus_b.attempted.load(Ordering::Relaxed), 1);
 
-        // A failing backend's error propagates and ends the call —
-        // bus_b, later in order, never saw this exchange.
+        // A failing backend's error propagates — the scan's reported
+        // failure is the first failing bus's own — but the exchange
+        // still reaches bus_b that scan: a failure on one bus never
+        // skips another's exchange (#547).
         bus_a.fail.store(true, Ordering::Relaxed);
         assert_eq!(
             cyclic.exchange(Tick(8)),
-            Err(IoError::Disconnected(PointId(0)))
+            Err(IoError::Disconnected(PointId(31)))
         );
         assert_eq!(bus_a.attempted.load(Ordering::Relaxed), 2);
-        assert_eq!(bus_b.attempted.load(Ordering::Relaxed), 1);
+        assert_eq!(bus_b.attempted.load(Ordering::Relaxed), 2);
+        assert_eq!(bus_b.succeeded.load(Ordering::Relaxed), 2);
 
         // The aggregate diagnostics merge each reporting backend's
         // exchange section: counters sum, the freshest exchange every
@@ -1746,12 +2232,120 @@ mod tests {
         assert_eq!(
             diagnostics.exchange,
             Some(ExchangeDiagnostics {
-                attempted: 3,
-                succeeded: 2,
+                attempted: 4,
+                succeeded: 3,
                 working_counter_mismatches: 0,
                 last_exchange_tick: Some(Tick(7)),
                 missed_deadlines: 0,
             })
         );
+    }
+
+    #[test]
+    fn a_failed_cyclic_exchange_skips_no_later_backend() {
+        // #547's shape: two cyclic backends, the first's exchange
+        // fails — the second must still get its attempt that scan,
+        // each backend's counters and miss streak recording its own
+        // boundary outcome.
+        let bus_a = Arc::new(CyclicBackend::new(PointId(31), 2));
+        let bus_b = Arc::new(CyclicBackend::new(PointId(32), 2));
+        let fanout = FanoutDriver {
+            backends: vec![backend(1, bus_a.clone()), backend(2, bus_b.clone())],
+            points: HashMap::from([(PointId(31), 0), (PointId(32), 1)]),
+            routes: Vec::new(),
+            sim: None,
+        };
+        let cyclic = fanout.cyclic().unwrap();
+
+        bus_a.fail.store(true, Ordering::Relaxed);
+        assert_eq!(
+            cyclic.exchange(Tick(1)),
+            Err(IoError::Disconnected(PointId(31))),
+            "the reported failure is the first failing bus's own error"
+        );
+        // bus_b still exchanged — its counters show its own completed
+        // boundary, not a skip.
+        assert_eq!(bus_b.attempted.load(Ordering::Relaxed), 1);
+        assert_eq!(bus_b.succeeded.load(Ordering::Relaxed), 1);
+        assert_eq!(*bus_b.last_tick.lock().unwrap(), Some(Tick(1)));
+        // bus_a's counters and miss streak show its own failure.
+        assert_eq!(bus_a.attempted.load(Ordering::Relaxed), 1);
+        assert_eq!(bus_a.succeeded.load(Ordering::Relaxed), 0);
+        assert_eq!(bus_a.misses.load(Ordering::Relaxed), 1);
+
+        // The aggregate diagnostics name the failing bus by device;
+        // the still-healthy bus contributes no error.
+        let diagnostics = fanout.diagnostics().unwrap();
+        assert_eq!(diagnostics.link, LinkState::Disconnected);
+        let last_error = diagnostics.last_error.unwrap();
+        assert!(last_error.contains("device 1"), "{last_error}");
+        assert!(!last_error.contains("device 2"), "{last_error}");
+
+        // Miss-threshold escalation tracks each bus independently:
+        // bus_a's second consecutive miss reaches its declared
+        // threshold and its reads escalate, while bus_b — still
+        // exchanging every scan — keeps serving.
+        assert_eq!(
+            cyclic.exchange(Tick(2)),
+            Err(IoError::Disconnected(PointId(31)))
+        );
+        assert_eq!(
+            fanout.read(PointId(31)),
+            Err(IoError::Disconnected(PointId(31)))
+        );
+        assert!(fanout.read(PointId(32)).is_ok());
+        assert_eq!(bus_b.succeeded.load(Ordering::Relaxed), 2);
+
+        // bus_a's recovery is its own too: its next completed exchange
+        // resets its miss streak while bus_b never missed.
+        bus_a.fail.store(false, Ordering::Relaxed);
+        cyclic.exchange(Tick(3)).unwrap();
+        assert_eq!(bus_a.misses.load(Ordering::Relaxed), 0);
+        assert!(fanout.read(PointId(31)).is_ok());
+    }
+
+    #[test]
+    fn a_later_cyclic_failure_still_reports_its_own_bus() {
+        // The reverse-order case: the failing backend sits behind a
+        // healthy one — the earlier bus's exchange is untouched and
+        // the reported error names the bus that actually failed.
+        let bus_a = Arc::new(CyclicBackend::new(PointId(31), 2));
+        let bus_b = Arc::new(CyclicBackend::new(PointId(32), 2));
+        let fanout = FanoutDriver {
+            backends: vec![backend(1, bus_a.clone()), backend(2, bus_b.clone())],
+            points: HashMap::from([(PointId(31), 0), (PointId(32), 1)]),
+            routes: Vec::new(),
+            sim: None,
+        };
+        let cyclic = fanout.cyclic().unwrap();
+
+        bus_b.fail.store(true, Ordering::Relaxed);
+        assert_eq!(
+            cyclic.exchange(Tick(1)),
+            Err(IoError::Disconnected(PointId(32)))
+        );
+        // bus_a's own boundary completed and shows it.
+        assert_eq!(bus_a.attempted.load(Ordering::Relaxed), 1);
+        assert_eq!(bus_a.succeeded.load(Ordering::Relaxed), 1);
+        assert_eq!(*bus_a.last_tick.lock().unwrap(), Some(Tick(1)));
+        assert_eq!(bus_a.misses.load(Ordering::Relaxed), 0);
+        // bus_b's own boundary failed and shows it.
+        assert_eq!(bus_b.attempted.load(Ordering::Relaxed), 1);
+        assert_eq!(bus_b.succeeded.load(Ordering::Relaxed), 0);
+        assert_eq!(bus_b.misses.load(Ordering::Relaxed), 1);
+
+        // Both buses failing in one scan still visits each: the
+        // reported error is the first failing bus's in backend order —
+        // the documented single-failure shape — while every failed bus
+        // names itself in the merged diagnostics.
+        bus_a.fail.store(true, Ordering::Relaxed);
+        assert_eq!(
+            cyclic.exchange(Tick(2)),
+            Err(IoError::Disconnected(PointId(31)))
+        );
+        assert_eq!(bus_b.attempted.load(Ordering::Relaxed), 2);
+        let last_error = fanout.diagnostics().unwrap().last_error.unwrap();
+        assert!(last_error.contains("device 1"), "{last_error}");
+        assert!(last_error.contains("device 2"), "{last_error}");
     }
 }

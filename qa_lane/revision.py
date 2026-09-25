@@ -21,6 +21,16 @@ ids, signal source resolution, and the internal-point
 `initial`/`writable`/`journaled` rules — so a broken recipe or a
 surprising base model fails the derivation with a named problem rather
 than shipping a document the third controller would reject at load.
+
+`revision-incompatible.json` beside this module is the refusal half's
+checked-in input: the documented post-derivation step
+`derive_incompatible_model` applies after the additive recipe. It
+retypes a point present in *both* documents — a checkpointed internal
+`In` point the revision still serves as writable — so the crossing
+refuses with the named `InternalKindMismatch` rather than a fingerprint
+degrade, and repoints the retyped point's connection ends onto a
+same-kind point so the derived document still validates and loads: the
+carryover crossing, not the model load, is what fails.
 """
 import copy
 import json
@@ -29,7 +39,13 @@ from pathlib import Path
 #: The checked-in recipe beside this module.
 RECIPE_PATH = Path(__file__).with_name('revision.json')
 
+#: The checked-in incompatible-derivation spec beside this module —
+#: the post-derivation step the refusal scenario applies.
+INCOMPATIBLE_PATH = Path(__file__).with_name('revision-incompatible.json')
+
 _RECIPE_KEYS = {'description', 'add_io_points', 'add_signals'}
+_INCOMPATIBLE_KEYS = {'description', 'retype_io_point'}
+_RETYPE_KEYS = {'id', 'value_type', 'initial', 'rewire_to'}
 _POINT_KEYS = {'id', 'direction', 'value_type', 'channel', 'initial',
                'writable', 'journaled', 'stale_after_ticks'}
 _SIGNAL_KEYS = {'id', 'name', 'source', 'unit', 'description', 'group'}
@@ -257,3 +273,151 @@ def derive_revised_model(model_path, out_path, recipe_path=None):
                              for p in recipe.get('add_io_points', [])],
             'added_signals': [s['id']
                               for s in recipe.get('add_signals', [])]}
+
+
+def load_incompatible(path=None):
+    """Read and shape-check the incompatible-derivation spec (defaults
+    to the checked-in `revision-incompatible.json`)."""
+    path = Path(path or INCOMPATIBLE_PATH)
+    try:
+        spec = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise RevisionError('cannot read incompatible-derivation spec '
+                            + str(path) + ': ' + str(exc))
+    if not isinstance(spec, dict) or not set(spec) <= _INCOMPATIBLE_KEYS:
+        raise RevisionError('incompatible-derivation spec ' + str(path)
+                            + ' keys must be a subset of '
+                            + str(sorted(_INCOMPATIBLE_KEYS)))
+    retype = spec.get('retype_io_point')
+    if not isinstance(retype, dict) or not set(retype) <= _RETYPE_KEYS \
+            or not {'id', 'value_type', 'initial', 'rewire_to'} \
+            <= set(retype):
+        raise RevisionError('incompatible-derivation spec ' + str(path)
+                            + ': retype_io_point must declare exactly '
+                            'id, value_type, initial, and rewire_to')
+    return spec
+
+
+def apply_incompatible(document, spec):
+    """Apply the checked-in post-derivation step to `document` — the
+    recipe-derived revised model — and return the deliberately
+    incompatible variant.
+
+    The step retypes the spec's named point to the spec's declared
+    `value_type`/`initial`, then repoints every connection end that
+    named the point onto `rewire_to` so the document still validates:
+    the retyped point must be an internal writable `In` point — the
+    carried set the checkpoint's internal section crosses — and the
+    rewire target must already exist in the document with the point's
+    *old* direction and kind, so every repointed connection keeps its
+    matched end types. The result lints clean by construction; the
+    carryover rule is what refuses it. Raises RevisionError on any
+    spec violation; the input document is left untouched.
+    """
+    if not isinstance(document, dict):
+        raise RevisionError('the derived document is not a JSON object')
+    points = document.get('io_points')
+    connections = document.get('connections')
+    if not isinstance(points, list) or not isinstance(connections, list):
+        raise RevisionError('the derived document lacks '
+                            'io_points/connections lists')
+    retype = spec['retype_io_point']
+    pid = retype['id']
+    value_type = retype['value_type']
+    initial = retype['initial']
+    rewire_to = retype['rewire_to']
+    if value_type not in _VALUE_KINDS:
+        raise RevisionError('incompatible retype of io point '
+                            + str(pid) + ': value_type must be '
+                            'bool|int|float')
+    if not isinstance(initial, dict) or set(initial) != {value_type}:
+        raise RevisionError('incompatible retype of io point '
+                            + str(pid) + ' must declare exactly one {'
+                            + value_type + ': ...} initial value')
+    value = initial[value_type]
+    valid = ((value_type == 'bool' and isinstance(value, bool))
+             or (value_type == 'int' and isinstance(value, int)
+                 and not isinstance(value, bool))
+             or (value_type == 'float'
+                 and isinstance(value, (int, float))
+                 and not isinstance(value, bool)))
+    if not valid:
+        raise RevisionError('incompatible retype of io point '
+                            + str(pid) + ' initial value is not a '
+                            + value_type)
+    incompatible = copy.deepcopy(document)
+    target = substitute = None
+    for point in incompatible['io_points']:
+        if isinstance(point, dict) and point.get('id') == pid:
+            target = point
+        if isinstance(point, dict) and point.get('id') == rewire_to:
+            substitute = point
+    if target is None:
+        raise RevisionError('incompatible retype names unknown io '
+                            'point ' + str(pid))
+    if 'channel' in target or target.get('direction') != 'in' \
+            or not target.get('writable'):
+        raise RevisionError('incompatible retype of io point '
+                            + str(pid) + ' must name a writable '
+                            'internal in point — the carried set')
+    if target.get('value_type') == value_type:
+        raise RevisionError('incompatible retype of io point '
+                            + str(pid) + ' declares its current '
+                            'value_type — nothing is retyped')
+    if substitute is None:
+        raise RevisionError('incompatible retype of io point '
+                            + str(pid) + ' rewire_to names unknown io '
+                            'point ' + str(rewire_to))
+    if substitute.get('value_type') != target.get('value_type') \
+            or substitute.get('direction') != target.get('direction') \
+            or 'channel' in substitute:
+        raise RevisionError('incompatible retype of io point '
+                            + str(pid) + ': rewire target '
+                            + str(rewire_to) + ' must be an internal '
+                            'point of the old direction and kind')
+    target['value_type'] = value_type
+    target['initial'] = copy.deepcopy(initial)
+    rewired = 0
+    for connection in incompatible['connections']:
+        for end in ('from', 'to'):
+            endpoint = connection.get(end) \
+                if isinstance(connection, dict) else None
+            if isinstance(endpoint, dict) and endpoint.get('point') == pid:
+                endpoint['point'] = rewire_to
+                rewired += 1
+    findings = lint(incompatible)
+    if findings:
+        raise RevisionError('the incompatible document fails '
+                            'validation: ' + '; '.join(findings[:5]))
+    return {'document': incompatible,
+            'retyped_point': pid,
+            'rewired_connections': rewired}
+
+
+def derive_incompatible_model(model_path, out_path, recipe_path=None,
+                              incompatible_path=None):
+    """The refusal half's derivation: apply the checked-in additive
+    recipe to the run's mounted model exactly as
+    `derive_revised_model` does, then apply the checked-in
+    incompatible post-derivation step and write the result to
+    `out_path` with deterministic serialization. Returns the
+    derivation summary — the recipe's added ids plus the retyped point
+    the carryover rule must refuse."""
+    recipe = load_recipe(recipe_path)
+    spec = load_incompatible(incompatible_path)
+    try:
+        document = json.loads(Path(model_path).read_text())
+    except (OSError, ValueError) as exc:
+        raise RevisionError('cannot read the mounted model '
+                            + str(model_path) + ': ' + str(exc))
+    revised = derive(document, recipe)
+    applied = apply_incompatible(revised, spec)
+    Path(out_path).write_text(json.dumps(applied['document'], indent=1,
+                                         sort_keys=True) + '\n')
+    return {'document': str(out_path),
+            'added_points': [p['id']
+                             for p in recipe.get('add_io_points', [])],
+            'added_signals': [s['id']
+                              for s in recipe.get('add_signals', [])],
+            'retyped_point': applied['retyped_point'],
+            'rewired_connections': applied['rewired_connections']}

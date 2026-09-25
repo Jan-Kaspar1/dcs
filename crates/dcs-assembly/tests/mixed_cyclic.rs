@@ -210,6 +210,10 @@ fn mixed_cyclic_and_pointwise_kinds_assemble_and_scan() {
     with_field(|bus, plant, bus_addr, plant_addr| {
         let model = mixed_model(bus_addr, plant_addr);
         let driver = build_driver(&model);
+        // The field-facing backends claim the shared field's write
+        // ownership — the fail-closed plant refuses a claim-less
+        // mutation.
+        driver.claim_field_writer(1).unwrap();
 
         // All three kinds resolved: the local `sim` device joined the
         // shared simulated map, the cyclic device carries the
@@ -266,7 +270,7 @@ fn mixed_cyclic_and_pointwise_kinds_assemble_and_scan() {
         // every scan's per-point reads and writes keep flowing.
         let mut executor = assemble(&model, &registry(), &driver).unwrap();
         for _ in 0..5 {
-            executor.scan().unwrap();
+            executor.scan();
         }
         let exchange = executor
             .snapshot()
@@ -301,6 +305,7 @@ fn a_missed_cyclic_exchange_degrades_only_the_cyclic_backend() {
     with_field(|bus, plant, bus_addr, plant_addr| {
         let model = mixed_model(bus_addr, plant_addr);
         let driver = build_driver(&model);
+        driver.claim_field_writer(1).unwrap();
 
         // A failed exchange completes nothing: the staged output image
         // is retained — unpublished while the exchange misses, carried
@@ -337,18 +342,18 @@ fn a_missed_cyclic_exchange_degrades_only_the_cyclic_backend() {
         // escalates to Disconnected at it — degrading only the cyclic
         // device's points while `sim-tcp` points stay Good.
         let mut executor = assemble(&model, &registry(), &driver).unwrap();
-        executor.scan().unwrap();
+        executor.scan();
         cyclic_backend(&driver)
             .script_exchange(&[ExchangeOutcome::Miss, ExchangeOutcome::Miss])
             .unwrap();
-        executor.scan().unwrap();
+        executor.scan();
         // One miss under the threshold: the boundary failure counts
         // once, and the held image still serves the cyclic read.
         let snapshot = executor.snapshot();
         assert_eq!(snapshot.io_health.failed_exchanges, 1);
         assert_eq!(image_sample(&snapshot, LEVEL_RAW).quality, Quality::Good);
         assert_eq!(image_sample(&snapshot, FLOW_RAW).quality, Quality::Good);
-        executor.scan().unwrap();
+        executor.scan();
         // The second miss reaches the declared threshold: the cyclic
         // input escalates to Bad(CommunicationFault) — the per-point
         // failure a held image becomes — while the remote plant's
@@ -382,7 +387,7 @@ fn a_missed_cyclic_exchange_degrades_only_the_cyclic_backend() {
         // Recovery: the script queue drained, the next exchange
         // completes — the miss count resets, the retained staged image
         // publishes, and the held image relatches Good.
-        executor.scan().unwrap();
+        executor.scan();
         let snapshot = executor.snapshot();
         assert_eq!(snapshot.io_health.failed_exchanges, 2);
         assert_eq!(image_sample(&snapshot, LEVEL_RAW).quality, Quality::Good);
@@ -399,6 +404,7 @@ fn a_tracking_standby_gate_quiesces_both_backends_field_writes() {
     with_field(|bus, plant, bus_addr, plant_addr| {
         let model = mixed_model(bus_addr, plant_addr);
         let driver = build_driver(&model);
+        driver.claim_field_writer(1).unwrap();
         // The tracking standby's posture: a closed gate covering the
         // field-facing points — both field backends' writes quiesce,
         // the local simulated backend's pass through.
@@ -412,7 +418,7 @@ fn a_tracking_standby_gate_quiesces_both_backends_field_writes() {
         plant.driver().write(PUMP_CMD, Value::Float(7.0)).unwrap();
 
         for _ in 0..3 {
-            standby.scan().unwrap();
+            standby.scan();
         }
         let snapshot = standby.snapshot();
 
@@ -463,13 +469,13 @@ fn a_tracking_standby_gate_quiesces_both_backends_field_writes() {
         // the following scan's exchange — the contract's one-scan
         // actuation delay.
         gate.open();
-        standby.scan().unwrap();
+        standby.scan();
         assert_eq!(
             plant.driver().read(PUMP_CMD).unwrap().value,
             Value::Float(50.0),
             "the remote output lands the scan the gate opens — flow 12.0 raw scales to 50.0"
         );
-        standby.scan().unwrap();
+        standby.scan();
         assert_eq!(
             bus.bank().read(VALVE_REGISTER).unwrap().value,
             driver.read(VALVE_CMD).unwrap().value,

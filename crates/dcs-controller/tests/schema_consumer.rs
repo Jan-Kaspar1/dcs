@@ -92,17 +92,19 @@ use dcs_monitor::{MonitorClient, PairClient, PeerStatus, read_journal_file};
 use dcs_runtime::{Checkpoint, DEFAULT_COMMAND_QUEUE_CAPACITY};
 use dcs_sim_net::RemoteDriver;
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command as Process, Stdio};
+use std::path::Path;
+use std::process::{Child, Command as Process, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-/// The controller binary under test.
-const CONTROLLER: &str = env!("CARGO_BIN_EXE_dcs-controller");
+mod support;
+
+use support::{SimTcp, controller_model, settle_sink_health, spawn_controller, spawn_plant};
+
 /// The showcase plant model the plant servers load — the #69 fixture.
 const PLANT_MODEL: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -164,124 +166,22 @@ const SECOND_EVENT_TICK: u64 = CARRIED_TICK + BATCH_STEP1_TICKS - 1;
 /// The run's final tick.
 const END_TICK: u64 = SECOND_EVENT_TICK;
 
-/// A `dcs-*` binary sibling of the controller binary under test in the
-/// workspace target dir; workspace builds produce them.
-fn workspace_binary(name: &str) -> PathBuf {
-    let binary = Path::new(CONTROLLER)
-        .parent()
-        .unwrap()
-        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "{} not found — build the workspace first",
-        binary.display()
-    );
-    binary
-}
-
-/// A spawned process: its bound address learned from the `listening on`
-/// stderr line, stderr held open so a later diagnostic write never meets
-/// a closed pipe, and a kill on drop so a panicking test leaves no stray
-/// processes behind.
-struct Spawned {
-    child: Child,
-    addr: SocketAddr,
-    _stderr: BufReader<ChildStderr>,
-}
-
-impl Drop for Spawned {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Spawns `binary`, reads its `listening on <addr>` line, and returns
-/// the running process.
-fn spawn(binary: &Path, args: &[String]) -> Spawned {
-    let mut child = Process::new(binary)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("cannot spawn {}: {error}", binary.display()));
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut line = String::new();
-    if stderr.read_line(&mut line).unwrap() == 0 {
-        panic!("{} exited before reporting its address", binary.display());
-    }
-    let addr = line
-        .trim()
-        .strip_prefix("listening on ")
-        .unwrap_or_else(|| {
-            panic!(
-                "expected a `listening on` line from {}, found {line:?}",
-                binary.display()
-            )
-        })
-        .parse()
-        .unwrap();
-    Spawned {
-        child,
-        addr,
-        _stderr: stderr,
-    }
-}
-
-/// A plant-server process serving the showcase plant — model plus
-/// dynamics document — on an ephemeral port.
-fn spawn_plant() -> Spawned {
-    spawn(
-        &workspace_binary("dcs-plant-server"),
-        &[
-            PLANT_MODEL.to_string(),
-            "--dynamics".to_string(),
-            PLANT_DYNAMICS.to_string(),
-            "--listen".to_string(),
-            "127.0.0.1:0".to_string(),
-        ],
-    )
-}
-
-/// A `--driven` controller process on `model`: the monitor serves on an
-/// ephemeral port and scans run only when `POST /scan` requests them.
-fn spawn_controller(model: &Path, extra: &[String]) -> Spawned {
-    let mut args = vec![model.to_str().unwrap().to_string()];
-    args.extend(extra.iter().cloned());
-    for arg in ["--listen", "127.0.0.1:0", "--driven", "--dt", DT] {
-        args.push(arg.to_string());
-    }
-    spawn(Path::new(CONTROLLER), &args)
-}
-
-/// Writes the controller-side model for a plant server at `plant`: the
-/// shared showcase model with every declared channel merged onto one
-/// `sim-tcp` device carrying the plant's address — the remote-sim path
-/// through the assembly driver registry. One remote backend steps the
-/// plant once per scan, keeping the dynamics document's dt pacing.
-fn controller_model(dir: &Path, name: &str, plant: SocketAddr) -> PathBuf {
-    let mut document: serde_json::Value = serde_json::from_str(MODEL_SOURCE).unwrap();
-    let mut channels = serde_json::Map::new();
-    for device in document["devices"].as_array().unwrap() {
-        for (channel, declaration) in device["channels"].as_object().unwrap() {
-            channels.insert(channel.clone(), declaration.clone());
-        }
-    }
-    document["devices"] = serde_json::json!([{
-        "id": 1,
-        "kind": "sim-tcp",
-        "parameters": { "address": plant.to_string() },
-        "channels": channels,
-    }]);
-    for point in document["io_points"].as_array_mut().unwrap() {
-        if let Some(channel) = point.get_mut("channel") {
-            channel["device"] = serde_json::json!(1);
-        }
-    }
-    let path = dir.join(name);
-    std::fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
-    path
-}
+/// Ticks whose scan settles a command on the field owners while the
+/// tracking peer carries its adopted receipt (issue #689) — the one
+/// tick per admission the tracker's image and queue depth lag the run
+/// before the next pull adopts the settlement: the completing
+/// `advance`, the refused `advance` (queue depth only — a refusal
+/// moves no image), the first `reset`, the held `run` write, the
+/// flood drain, and the post-switch carried `reset` (lagged on the
+/// demoted peer).
+const CARRY_LAG_TICKS: [u64; 6] = [
+    ADVANCE_TICK,
+    REFUSED_TICK,
+    RESET_TICK,
+    RUN_TICK,
+    DRAIN_TICK,
+    CARRIED_TICK,
+];
 
 /// The sample `snapshot`'s image reports for `point`.
 fn image_sample(snapshot: &TelemetrySnapshot, point: PointId) -> Sample {
@@ -359,14 +259,19 @@ fn settlements_of(client: &MonitorClient, command: &Command) -> Vec<(u64, Comman
         .collect()
 }
 
-/// The checkpoint a client serves with its model fingerprint
-/// normalized out: the pair and reference models differ only in the
-/// plant address, so the rest of the transferable state — tick,
-/// component states, output and internal images, forces, receipts,
-/// admission counters — must serialize identically.
+/// The checkpoint a client serves with its model fingerprint, stream
+/// generation, and line-owner name normalized out: the pair and
+/// reference models differ only in the plant address, each process
+/// mints its own generation at boot, and each serving run stamps its
+/// own monitor as the line's field owner, so the rest of the
+/// transferable state — tick, component states, output and internal
+/// images, forces, receipts, admission counters — must serialize
+/// identically.
 fn checkpoint_digest(client: &MonitorClient) -> Vec<u8> {
     let mut checkpoint: Checkpoint = client.checkpoint().unwrap();
     checkpoint.model_fingerprint = None;
+    checkpoint.generation = None;
+    checkpoint.line_owner = None;
     serde_json::to_vec(&checkpoint).unwrap()
 }
 
@@ -406,6 +311,17 @@ fn observe(field: &RemoteDriver, tick: Tick) -> FieldRow {
 /// the uninterrupted reference scan and step their plants. The three
 /// snapshots must be equal and the field must carry the owner's write.
 /// Returns the field owner's snapshot.
+///
+/// The exception is a tick whose scan settles a command the field
+/// owners apply while the tracking peer carries it
+/// ([`CARRY_LAG_TICKS`], issue #689): a quiesced scan must not mint an
+/// `Applied` the line never ordered, so the tracker's adopted receipt
+/// stays `Accepted` for exactly one tick — its image and queue depth
+/// lag the owners' by the command's effect until the next pull adopts
+/// the applied checkpoint. On those ticks time still marches in
+/// lockstep and the field-owning run still equals the reference; only
+/// the tracker's carried-not-settled lag is excused, and each such
+/// tick names the receipt assertion covering it.
 fn tick(
     quiesced: &MonitorClient,
     owner: &MonitorClient,
@@ -417,10 +333,17 @@ fn tick(
     let owner_image = owner.advance(1).unwrap();
     let alone = reference.advance(1).unwrap();
     let n = owner_image.tick;
-    assert_eq!(
-        tracking, owner_image,
-        "quiesced peer diverged at tick {n:?}"
-    );
+    if CARRY_LAG_TICKS.contains(&n.0) {
+        assert_eq!(
+            tracking.tick, owner_image.tick,
+            "time must march in lockstep at carried-command tick {n:?}"
+        );
+    } else {
+        assert_eq!(
+            tracking, owner_image,
+            "quiesced peer diverged at tick {n:?}"
+        );
+    }
     assert_eq!(
         owner_image, alone,
         "pair diverged from the no-consumer reference at tick {n:?}"
@@ -469,12 +392,15 @@ fn leg_boundary(
     stages: &mut Vec<TelemetrySnapshot>,
     checkpoints: &mut Vec<Vec<u8>>,
 ) {
-    let view = pair.snapshot().unwrap();
+    let mut view = pair.snapshot().unwrap();
     let own = owner.snapshot().unwrap();
     assert_eq!(
         view, own,
         "{name}: the pair view must source the field owner"
     );
+    // The journal sink's live counters ride the writer thread's beat —
+    // pin the run-stable fields so the cross-run compare holds.
+    settle_sink_health(&mut view);
     stages.push(view);
     let owner_checkpoint = checkpoint_digest(owner);
     assert_eq!(
@@ -1078,8 +1004,8 @@ fn assert_resources(client: &MonitorClient, snapshot: &TelemetrySnapshot) {
 fn assert_generic_page(client: &MonitorClient) {
     let page = client.page().unwrap();
     for needle in [
-        "fetch(base + \"/schema\")",
-        "fetch(base + \"/resources\")",
+        "pollFetch(base + \"/schema\")",
+        "pollFetch(base + \"/resources\")",
         "interfaceMarkup(descriptor.name, generic)",
         "interfaceOpen.get(name) : generic",
         "resourceTable(\"measurements\", iface.measurements",
@@ -1174,10 +1100,24 @@ fn run_verification(tag: &str) -> Outcome {
     // Two shared plants: the pair's and the no-consumer reference
     // run's — identical model and dynamics, identical request
     // sequences, identical runs.
-    let pair_plant = spawn_plant();
-    let reference_plant = spawn_plant();
-    let pair_model = controller_model(&dir, "pair.json", pair_plant.addr);
-    let reference_model = controller_model(&dir, "reference.json", reference_plant.addr);
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let reference_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        pair_plant.addr,
+        SimTcp::Merged,
+    )
+    .0;
+    let reference_model = controller_model(
+        &dir,
+        "reference.json",
+        MODEL_SOURCE,
+        reference_plant.addr,
+        SimTcp::Merged,
+    )
+    .0;
 
     let active_journal = dir.join("active.journal.jsonl");
     let standby_journal = dir.join("standby.journal.jsonl");
@@ -1188,6 +1128,7 @@ fn run_verification(tag: &str) -> Outcome {
             "--journal-file".to_string(),
             active_journal.to_str().unwrap().to_string(),
         ],
+        DT,
     );
     let standby_process = spawn_controller(
         &pair_model,
@@ -1197,6 +1138,7 @@ fn run_verification(tag: &str) -> Outcome {
             "--journal-file".to_string(),
             standby_journal.to_str().unwrap().to_string(),
         ],
+        DT,
     );
     let reference_process = spawn_controller(
         &reference_model,
@@ -1204,6 +1146,7 @@ fn run_verification(tag: &str) -> Outcome {
             "--journal-file".to_string(),
             reference_journal.to_str().unwrap().to_string(),
         ],
+        DT,
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
@@ -1368,13 +1311,21 @@ fn run_verification(tag: &str) -> Outcome {
             reason: "the sequence has run to its end; reset restarts it".to_string(),
         },
     };
-    for client in [&active, &standby, &reference] {
+    for client in [&active, &reference] {
         assert_eq!(
             settlements_of(client, &unavailable),
             vec![(REFUSED_TICK, refused.clone())],
             "the declared-unavailable advance settled once, refused by name"
         );
     }
+    // #689: the tracking peer carried the adopted receipt instead of
+    // refusing it in place, so it journals the adopted refusal when
+    // the next pull observes it — one tick later, same named reason.
+    assert_eq!(
+        settlements_of(&standby, &unavailable),
+        vec![(REFUSED_TICK + 1, refused.clone())],
+        "the tracking peer journals the carried refusal on adoption"
+    );
 
     // --- Leg 4: disconnect-reconnect — reset, then the run starts ---
     let reset = invoke("reset", &[]);
@@ -1554,7 +1505,24 @@ fn run_verification(tag: &str) -> Outcome {
         UI_RESTART_TICKS / 2,
         true,
     );
-    let after = read_ui_seen(&ui_seen_b).expect("the restarted UI process never rejoined");
+    // The restarted process's own observation is the evidence, and on
+    // a loaded runner its first polls can all land inside the phase —
+    // the seen file then trails the run's advance. Wait for the file
+    // to record a publication past what the first incarnation saw
+    // rather than reading a poll that predates it.
+    let deadline = Instant::now();
+    let after = loop {
+        if let Some(seen) = read_ui_seen(&ui_seen_b)
+            && seen["published"].as_u64() > before["published"].as_u64()
+        {
+            break seen;
+        }
+        assert!(
+            deadline.elapsed() < Duration::from_secs(10),
+            "the restarted UI process never observed a freshness advance"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
     drop(ui);
     // The restart's evidence — the `ui_evidence_failures` shape:
     // neither incarnation met a fault, the restarted process read the
@@ -1748,15 +1716,49 @@ fn run_verification(tag: &str) -> Outcome {
         checkpoints,
         receipts: standby.receipts().unwrap(),
         emitted: emitted(&standby),
-        journals: [
-            active.journal(0).unwrap(),
-            standby.journal(0).unwrap(),
-            reference.journal(0).unwrap(),
-            read_journal_file(&active_journal).unwrap().entries,
-            read_journal_file(&standby_journal).unwrap().entries,
-            read_journal_file(&reference_journal).unwrap().entries,
-        ]
-        .into(),
+        journals: {
+            let served = [
+                active.journal(0).unwrap(),
+                standby.journal(0).unwrap(),
+                reference.journal(0).unwrap(),
+            ];
+            let mut journals: Vec<Vec<JournalEntry>> = served.to_vec();
+            // The durable file covers each served page — `GET
+            // /journal` waits the sink's drain out — but the paced
+            // run may journal post-flush appends behind it, so the
+            // comparison reads the file's served-length prefix.
+            for (path, served) in [&active_journal, &standby_journal, &reference_journal]
+                .iter()
+                .zip(served.iter())
+            {
+                let entries = read_journal_file(path).unwrap().entries;
+                assert!(
+                    entries.len() >= served.len(),
+                    "the durable journal {} is shorter than the served record",
+                    path.display()
+                );
+                assert_eq!(
+                    &entries[..served.len()],
+                    &served[..],
+                    "the durable journal {} must hold the served record",
+                    path.display()
+                );
+                journals.push(entries[..served.len()].to_vec());
+            }
+            // The adopted-source entry names the peer's monitor
+            // address — its ephemeral listen port run-unique by
+            // nature — so the identical-runs comparison masks the
+            // port while keeping the event's presence, `seq`, `tick`,
+            // and named host.
+            for journal in &mut journals {
+                for entry in journal {
+                    if let JournalEvent::TrackingSourceAdopted { source } = &mut entry.event {
+                        source.set_port(0);
+                    }
+                }
+            }
+            journals
+        },
     }
 }
 

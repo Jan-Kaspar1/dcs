@@ -16,10 +16,28 @@
 //! The `components`, `outputs`, and `internal` sections transfer verbatim —
 //! they are controller-side state: `outputs` carries the image's `Out`
 //! samples and `internal` the image-carried `In` samples. So does the
-//! `receipts` log — the run's command audit, so `GET /receipts` answers
-//! identically on a peer that adopted the checkpoint — along with the
-//! `command_admission` counters measuring that audit, so the pair's
-//! command-ingress telemetry agrees too. The `driver`
+//! `receipts` log — the bounded tail of the run's command audit, so
+//! `GET /receipts` answers identically on a peer that adopted the
+//! checkpoint — along with the `command_admission` counters measuring
+//! that audit, so the pair's command-ingress telemetry agrees too and
+//! the adopted window's place in the submission sequence stays known:
+//! `attempts` minus the retained length is the count the source already
+//! evicted. The `generation` stamp is the stream's tick-domain
+//! identity: minted by the process that begins a run and adopted
+//! verbatim by every run that applies one of its checkpoints, so the
+//! whole tracked line — across a switchover, across a demoted peer's
+//! reconvergence — names one generation, while a cold-restarted or
+//! replaced source begins a new one. A tracking peer reads it to tell
+//! the source's new generation — the journaled
+//! `JournalEvent::SourceRestarted` — from its own tracking-state reset:
+//! a demoted peer's first pull on its uninterrupted successor regresses
+//! in tick but names the generation the demoted run's own captures
+//! stamped, which is no restart. The `source_owns_field` stamp — set by
+//! the serving peer, absent on a bare executor's capture — lets a
+//! tracking peer name the mutual-standby wedge: a checkpoint applied
+//! cleanly from a run owning no field writes means the tracked line
+//! has no field owner, and the puller reports `orphaned` rather than a
+//! healthy `tracking`. The `driver`
 //! section is simulation-specific:
 //! on live hardware the standby's driver observes the actual process
 //! through its own channels rather than reconstructing captured field
@@ -33,6 +51,7 @@ use dcs_core::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::net::SocketAddr;
 
 /// The checkpoint format version this build writes.
 ///
@@ -118,6 +137,21 @@ pub struct Checkpoint {
     /// carrying the same value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_fingerprint: Option<ModelFingerprint>,
+    /// The tick-domain generation the capturing run belongs to —
+    /// minted when a process begins a fresh run and adopted verbatim by
+    /// every run whose executor applied, restored, or reinitialized one
+    /// of its checkpoints, so the whole tracked line names the same
+    /// generation while a cold-started or replaced source begins a new
+    /// one. A tracking peer compares it against its own to tell the
+    /// source's restart from its own tracking reset: a demoted peer's
+    /// first pull on the uninterrupted successor regresses in tick but
+    /// names the generation the demoted run's own captures stamped, so
+    /// it journals no `SourceRestarted`. `None` on checkpoints a
+    /// pre-generation build wrote or an unminted run captured — an
+    /// unidentified generation can prove nothing, so a regression
+    /// involving one journals the restart exactly as it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
     /// The executor's tick at capture; the restored executor resumes
     /// numbering from here.
     pub tick: Tick,
@@ -140,9 +174,18 @@ pub struct Checkpoint {
     /// The scan image's internal `In` samples at capture: held operator
     /// values and link carriers, which field reads never refresh.
     /// Restoring them means a commanded setpoint survives a switchover
-    /// instead of reverting to its declared initial. Absent from
-    /// checkpoints written before internal points existed; defaults to
-    /// empty.
+    /// instead of reverting to its declared initial. The captured stamp
+    /// is the line's claim of when the held value last changed — the
+    /// pair shares one tick domain, so
+    /// [`apply`](crate::Executor::apply) adopts it verbatim, keeping a
+    /// tracked peer's served samples identical to the line's. One stamp
+    /// cannot be the claim it reads as: `Tick::ZERO` means "unchanged
+    /// since before the line's first scan", which only the seed value
+    /// honestly carries — an adopted *change* stamped zero would
+    /// mis-date its origin to run start, so the apply's landing tick
+    /// stamps it instead, the same stamp a `WriteValue` there would
+    /// carry. Absent from checkpoints written before internal points
+    /// existed; defaults to empty.
     #[serde(default)]
     pub internal: BTreeMap<PointId, Sample>,
     /// The operator force set at capture: each forced point and the
@@ -152,11 +195,20 @@ pub struct Checkpoint {
     /// checkpoints written before forces existed; defaults to empty.
     #[serde(default)]
     pub forces: BTreeMap<PointId, Value>,
-    /// The command receipt log at capture: every submitted command's
-    /// receipt in submission order — the run's command audit, served
-    /// as `GET /receipts`. Restoring it converges the tracking peer's
-    /// log to the active's, so the pair presents one continuous audit
-    /// trail across a switchover; entries still `Accepted` at capture
+    /// The command receipt log at capture: the retained tail of the
+    /// run's audit — the most recent receipts in submission order,
+    /// bounded by the capturing run's receipt-log capacity, served as
+    /// `GET /receipts`. The window's place in the submission sequence
+    /// is recoverable from the `command_admission` counters — see
+    /// [`receipt_base`](Self::receipt_base). Restoring it converges
+    /// the tracking peer's log to the active's, so the pair presents
+    /// one continuous audit trail across a switchover — evictions the
+    /// source already made showing on the peer as the same numbering
+    /// gap — except the contiguous tail of the restoring run's own
+    /// log this window's high-water never reached: those receipts are
+    /// submissions the capture predates, not entries the line dropped,
+    /// so the restore keeps them suspended rather than settling their
+    /// absence as a verdict; entries still `Accepted` at capture
     /// re-queue on the restoring run — verbatim, past the pending
     /// queue's admission bound: carried run state is not new admission,
     /// so a command taken over between its submission boundary and its
@@ -169,10 +221,98 @@ pub struct Checkpoint {
     /// The pending-command queue's admission counters at capture,
     /// converging beside the `receipts` log they measure — the pair's
     /// `command_queue` telemetry section answers identically on either
-    /// peer. Absent from checkpoints written before the section existed;
-    /// defaults to zeroed.
+    /// peer. `attempts` doubles as the receipt window's high-water mark:
+    /// every submission produced exactly one receipt. Absent from
+    /// checkpoints written before the section existed; defaults to
+    /// zeroed — a legacy log is then the never-evicted prefix it always
+    /// was, and [`receipt_base`](Self::receipt_base) resolves to 0.
     #[serde(default)]
     pub command_admission: CommandAdmissionCounts,
+    /// Whether the run serving this checkpoint owns field writes —
+    /// stamped by the serving [`Peer`](crate::Peer) at capture, not by
+    /// the executor, which has no role view. `Some(true)` marks a
+    /// field-owning source — `active` or `promoting`; `Some(false)`
+    /// marks a serving run that writes nothing — the stamp a tracking
+    /// peer reads to name the mutual-standby wedge: a cleanly applied
+    /// checkpoint whose serving run owns no field writes means the
+    /// tracked line has no field owner, and the puller reports
+    /// [`StandbySync::Orphaned`](dcs_core::StandbySync) instead of a
+    /// converged `tracking` that only looks healthy. `None` — every
+    /// checkpoint a bare executor captures, and everything a
+    /// pre-stamping build wrote — carries no ownership claim, so an
+    /// apply treats it as owner-produced exactly as it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_owns_field: Option<bool>,
+    /// The monitor address this checkpoint line currently names as its
+    /// field owner — serve-time decoration like
+    /// [`line_proof`](Self::line_proof), never run state: a serving
+    /// field owner stamps its own address, a non-owning serving run
+    /// propagates the address the checkpoints it pulls carried, and a
+    /// bare [`Executor::checkpoint`] leaves it absent. A tracking peer
+    /// whose tracked line reports no owner — [`StandbySync::Orphaned`]
+    /// — probes it to re-resolve onto the run that actually holds the
+    /// field, so a demoted peer pinned onto a sibling standby's
+    /// checkpoints follows the line onward to the real owner instead
+    /// of orphaned-tracking a stale island forever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_owner: Option<SocketAddr>,
+    /// The keyed line proof a serving monitor injects into this
+    /// document's wire form on a `?prove=` pull — response decoration,
+    /// never run state: [`Executor::checkpoint`](crate::Executor::checkpoint)
+    /// never sets it, [`Executor::restore`](crate::Executor::restore)
+    /// ignores it, and it is absent on every captured checkpoint and
+    /// every response to an unproven pull. A pulling peer compares it
+    /// against the proof it computes over the received document and
+    /// its request's nonce under the pair's shared key, so a checkpoint
+    /// served by an endpoint that merely replays or fabricates this
+    /// line's documents — without holding the key — cannot masquerade
+    /// as a tracked peer's production.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_proof: Option<u64>,
+}
+
+/// Mints a fresh checkpoint-stream generation — the value a run's
+/// assembling shell stamps through
+/// [`Executor::with_generation`](crate::Executor::with_generation) so
+/// every checkpoint the run serves names this tick-domain line.
+///
+/// Process id plus the wall clock keeps a restarted process's mint
+/// distinct from the run it replaced, and a process-unique counter
+/// keeps two mints inside one process distinct — the same uniqueness
+/// budget the field-claim owner token accepts. The value carries no
+/// meaning beyond identity: equal generations name the same tracked
+/// line, different ones a new tick domain.
+pub fn mint_generation() -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u32(std::process::id());
+    if let Ok(since) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        hasher.write_u128(since.as_nanos());
+    }
+    hasher.write_u64(NEXT.fetch_add(1, Ordering::Relaxed));
+    hasher.finish()
+}
+
+impl Checkpoint {
+    /// The absolute submission index of `receipts[0]` — the count of
+    /// settled receipts the capturing run had already evicted at
+    /// capture.
+    ///
+    /// Derived rather than carried: `attempts` counts every lifetime
+    /// submission and each produced exactly one receipt, so
+    /// `attempts - receipts.len()` is the evicted prefix's length. A
+    /// checkpoint captured before admission counters existed reports
+    /// zeroed counters; saturating subtraction then resolves to 0 —
+    /// the base those logs genuinely had, since nothing had ever been
+    /// evicted.
+    pub fn receipt_base(&self) -> u64 {
+        self.command_admission
+            .attempts
+            .saturating_sub(self.receipts.len() as u64)
+    }
 }
 
 /// Why [`Executor::restore`](crate::Executor::restore) failed.

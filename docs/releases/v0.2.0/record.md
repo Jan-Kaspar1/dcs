@@ -11,15 +11,15 @@ cut.
 
 | Field | Value |
 |---|---|
-| Tag | `v0.2.0` — *pending*: the release tag is placed on the recorded commit when the release is cut |
-| Commit | *pending* — the tagged `main` commit, the revision this record's schemas are emitted at |
+| Tag | `v0.2.0` — the release tag on the recorded commit |
+| Commit | `c2b5694d9fd6f6168b85c1dfc2e1542b369b3a3f` — the tagged `main` commit closing the M12 tranche, the revision this record's schemas are emitted at |
 | Crate versions | `0.2.0` for every crate in the release set — one workspace version covers `dcs-build`, `dcs-core`, `dcs-model` (and the `dcs-model` / `dcs-controller` binaries built from it); the `[workspace.package]` bump lands with the cut |
 | Plant-model JSON Schema | `plant-model.schema.json` beside this record — `dcs-model schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the schema drift test in `crates/dcs-model/tests/schema.rs` |
 | Plant-model schema sha256 | `68f77f99081a8e7bdc5e63b180c643b0b2e33b9459a8275ccd0da84362f26fe4` |
 | Served-registry JSON Schema | `block-interfaces.schema.json` beside this record — `dcs-model interface-schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the drift test in `crates/dcs-model/tests/interface_schema.rs`. The first record carrying it: `v0.1.0`'s recorded commit predates the served block-interface registry (#375) |
 | Served-registry schema sha256 | `ddc00496814a4e8cd0d6ec8a5d9fbb95e83f518dcd927b17a4802f13ac84013a` |
-| `dcs-controller` image digest | *pending* — `dcs-controller@sha256:<digest>`, the image `docker build` produces from `Dockerfile` at the tag |
-| `dcs-plant-server` image digest | *pending* — `dcs-plant-server@sha256:<digest>`, the image `docker build -f Dockerfile.plant` produces at the tag |
+| `dcs-controller` image digest | `dcs-controller@sha256:1831b590945ded4c1e0cecdc2505aab78a5e2217c608e23ba5f15ef7f5b89831` — the image `docker build` produces from `Dockerfile` at the tag |
+| `dcs-plant-server` image digest | `dcs-plant-server@sha256:c6a8e29b4e4909ae584684a7dc33b1b89f850bdd28d6eeb08585cc2cea3c316c` — the image `docker build -f Dockerfile.plant` produces at the tag |
 
 ## Compatibility notes
 
@@ -91,10 +91,11 @@ The determination:
 ## Consumer pins
 
 - Crates: `dcs-build = { git = "<repo>", tag = "v0.2.0" }` — or
-  `rev = "<commit>"` (*pending*) for the identical immutable commit;
-  `dcs-core` and `dcs-model` under the same pin.
+  `rev = "c2b5694d9fd6f6168b85c1dfc2e1542b369b3a3f"` for the identical
+  immutable commit; `dcs-core` and `dcs-model` under the same pin.
 - Tooling: `cargo install --git <repo> --tag v0.2.0 dcs-model` (and
   `dcs-controller`), or binaries built from the tag.
-- Images: *pending* — `dcs-controller@sha256:<digest>` and
-  `dcs-plant-server@sha256:<digest>` recorded above, or
-  `docker build` / `docker build -f Dockerfile.plant` at the tag.
+- Images: `dcs-controller@sha256:1831b590945ded4c1e0cecdc2505aab78a5e2217c608e23ba5f15ef7f5b89831`
+  and
+  `dcs-plant-server@sha256:c6a8e29b4e4909ae584684a7dc33b1b89f850bdd28d6eeb08585cc2cea3c316c`,
+  or `docker build` / `docker build -f Dockerfile.plant` at the tag.

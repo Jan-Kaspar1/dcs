@@ -12,7 +12,7 @@ from agent_pool.supervisor import Supervisor
 def issue(number=1, group='core', dependencies=()):
     item = dict(key=f'issue-{number}', title=f'Task {number}', scope='s', acceptance='a',
                 tests='t', dependencies=list(dependencies), priority=2,
-                milestone='m', group=group)
+                milestone='m', group=group, area='control-runtime')
     return dict(number=number, title=item['title'], body=planning.body(item),
                 state='OPEN', labels=[{'name': 'agent:ready'}])
 
@@ -29,8 +29,8 @@ class FakeRuntime(Runtime):
         super().__init__(*args, **kwargs)
         self.spawned = []
 
-    def spawn(self, key, cwd, prompt, resume_session=None):
-        self.spawned.append({'key': key, 'cwd': str(cwd), 'resume': resume_session})
+    def spawn(self, key, cwd, prompt, resume_session=None, timeout=None, model='swe-2-high'):
+        self.spawned.append({'key': key, 'cwd': str(cwd), 'resume': resume_session, 'model': model})
         return {'key': key, 'cwd': str(cwd), 'pid': 999999999, 'identity': 'fake',
                 'receipt': str(self.state_root / key / 'receipt.json'),
                 'invocation': str(self.state_root / key), 'log': '/nonexistent',

@@ -185,9 +185,15 @@ only. Per point kind:
 - a writable *field* `in` point's command write is forwarded to the
   driver at the scan boundary and the same scan's input phase reads it
   back — documented operator substitution of the input image, holding
-  until the field side asserts a different value;
+  until the field side asserts a different value; while the point is
+  forced the write still reaches the driver, which holds it for the
+  release to observe;
 - a writable *internal* `in` point takes the write in the image and
-  holds it until the next command — the common setpoint target.
+  holds it until the next command — the common setpoint target; while
+  the point is forced the write refuses with
+  `CommandError::PointForced`, because the image the force owns is the
+  point's only store — a staged value could never land. Release the
+  force, then write.
 
 A channel-bound `writable` point is part of the operator surface worth
 reviewing, so lint flags it (`writable_field_point`); writable internal
@@ -205,34 +211,48 @@ availability: every bound `In` port's adapted `write_value:<port>`,
 ### `stale_after_ticks` and input freshness
 
 `stale_after_ticks` declares how fresh a field `in` point's samples must
-stay: the number of executor scan ticks a driver-stamped sample tick may
-lag before the point's data is stale (decision 45). The budget lives in
-the point map assembly produces, and the *executor's input phase*
-applies the rule — each scan, for a budgeted field `in` point, it
-compares the tick the driver returned on the sample against the scan
-tick before re-stamping:
+stay: the number of executor scan ticks the point's driver-returned
+report may go unchanged before the point's data is stale (decision 45).
+The budget lives in the point map assembly produces, and the *executor's
+input phase* applies the rule in the run's own tick domain — each scan,
+for a budgeted field `in` point, it compares the sample the driver
+returned against the report last observed on that point:
 
-- a lag within the budget leaves the driver-returned quality untouched;
-- a lag exceeding it merges `Uncertain(Stale)` by the worst-of rule, so
-  a driver-reported `Bad` or worse-named `Uncertain` is never improved,
-  while a held `Good` value degrades to `Uncertain(Stale)` until the
-  first sample inside the budget returns it to `Good`;
+- a changed report — value, quality, or stamp — is fresh evidence: the
+  observation age restarts at the current scan tick and the
+  driver-returned quality lands untouched;
+- a report unchanged for more scan ticks than the budget merges
+  `Uncertain(Stale)` by the worst-of rule, so a driver-reported `Bad`
+  or worse-named `Uncertain` is never improved, while a held `Good`
+  value degrades to `Uncertain(Stale)` until the next changed report
+  returns it to `Good`;
 - the landed image sample always carries the scan tick — the executor
-  is the only timestamp authority; the driver tick is freshness
-  evidence, never an image timestamp;
+  is the only timestamp authority; the driver-returned sample is
+  freshness evidence, never an image timestamp;
 - a failed read is not a stale sample: the documented `Bad` mapping and
   last-known-value behavior stand, and a forced point never reads the
   driver, so `Substituted` stands too.
 
-A budget of `0` requires a sample stamped at the current scan tick —
-the strictest declaration, for sources expected to refresh every scan.
-The sim bank, the remote plant, and the sim-bus register bank all stamp
-their writes with a device tick the driver protocols carry, so field
-devices integrated through them supply freshness evidence without
-protocol changes. A driver whose samples carry no usable freshness
-signal — one that stamps every read with the current tick, or a fixed
-tick — simply makes the declaration inert or always-stale; declare the
-field only where the source distinguishes fresh samples from held ones.
+Judging the report's age in scan ticks — never subtracting the driver
+stamp — is what keeps the verdict consistent across drivers whose
+stamps live in a different domain: a remote driver's `Sample::tick`
+carries the plant server's step tick, which a paused or demoted field
+owner leaves frozen while the run keeps ticking. A lag computed across
+the two domains would read a stopped-then-resumed field as stale
+forever, and a run resumed behind the driver's domain as fresh forever;
+change-tracking marks both correctly — stale while the report holds,
+the driver's own quality the scan it moves again.
+
+A budget of `0` requires a changed report every scan — the strictest
+declaration, for sources expected to refresh every scan. The sim bank,
+the remote plant, and the sim-bus register bank all stamp their writes
+with a device tick the driver protocols carry, so field devices
+integrated through them supply freshness evidence without protocol
+changes. A driver whose samples carry no usable freshness signal — one
+that returns a changed report every read, or one whose report never
+varies — simply makes the declaration inert or always-stale; declare
+the field only where the source distinguishes fresh samples from held
+ones.
 
 ### `journaled` and the durable transition record
 
@@ -337,7 +357,14 @@ declared retention (see `journaled` above). `GET /schema` serves each
 instance's derived `BlockInterface` — ports as measurements/state,
 parameters as configuration, the adapted generic and declared native
 commands, and the adapted and declared events — and `GET /resources`
-its live values, command availability, and attributed events.
+its live values, command availability, and attributed events. The
+served availability is live per rule: a `kind_declared` command joins
+the snapshot `command_verdicts` section's published standing verdict —
+`available` while the kind's probe permits invocation, `false` carrying
+the kind's named refusal reason where it refuses — while
+`bound_point_writable` answers live from the point's mark and `always`
+is unconditionally invocable. The verdict is advisory: submissions
+settle through the receipted path either way.
 
 Some kinds are variable-arity: the declared `ports` set fixes the
 instance's size at assembly. `interlock` declares `trip_1` … `trip_N`;
@@ -361,8 +388,13 @@ parameter) and `on_bad_demand` (`Int`, `0`–`2`): the stage count the
 chain emits while `level` is non-`Good`, the decision's declared
 answer to a failed measurement. `failover-select` is parameterless:
 `primary` and `backup` (`in`, `Float`), `out` (`out`, `Float`)
-carrying the selected sample with its quality, and `backup_active`
-(`out`, `Bool`) asserted while the backup serves. The switch rule is
+carrying the selected sample with its quality, `backup_active`
+(`out`, `Bool`) asserted while the backup serves, and the optional
+`backup_unhealthy` (`out`, `Bool`) — declared only where the model
+wires it — asserted while the backup's own sample is non-`Good` or
+non-finite, independent of which source is serving, so a failed
+standby annunciates before the primary's loss would select it
+(issue #502). The switch rule is
 quality-driven — `out` carries `primary` while it reads `Good` with a
 finite value, else `backup` verbatim, quality included — and the
 return rule is immediate: a primary reading `Good` again re-selects
@@ -372,7 +404,8 @@ point pair — an internal link carries quality, a field loopback does
 not — and `threshold-chain.demand` onto `pump-group.demand` likewise.
 `backup_active` takes the same route into a `bool-latching-alarm`'s
 `in` — the alarmed backup-mode engagement decision 43 maps — with a
-model-writable `ack` point releasing the latch.
+model-writable `ack` point releasing the latch; `backup_unhealthy`
+takes the same route where bound, alarmed as the standby's loss.
 `crates/dcs-assembly/fixtures/station_level.json` is the recorded
 composition, manual-takeover gates included; per-port semantics live
 beside `ThresholdChain::KIND` and `FailoverSelect::KIND`.
@@ -382,10 +415,11 @@ one fixed-arity kind. `bool-latching-alarm` keeps `latching-alarm`'s
 `in`/`ack`/`alarm`/`unacknowledged` vocabulary exactly, with `in` a
 `Bool`: `alarm` follows the input directly — no hysteresis and no
 standing-limit parameter — and
-`unacknowledged` latches the input's false-to-true edge, clearing while
-the model-wired writable `ack` point reads `true` under the same
-level-sensitive, ack-dominates rule (a held `ack` suppresses a fresh
-latch). Both outputs carry the worst of the two inputs' qualities.
+`unacknowledged` latches the input's false-to-true edge, clearing on
+the model-wired writable `ack` point's rising edge under the same
+consumed-pulse rule — a held `ack` level acknowledges once and cannot
+pre-acknowledge a later trip. Both outputs carry the worst of the two
+inputs' qualities.
 `crates/dcs-assembly/fixtures/bool_latching_alarm.json` is the recorded
 composition — a `motor`'s `fault` output carried through a declared
 internal point pair into `in`; per-port semantics live beside
@@ -430,9 +464,12 @@ instance declares only where the model wires one, and the `Int`
 commands ride the receipted `WriteValue` path: a `true` level requests
 the state, `false` returns it manually — out-of-service has no
 automatic return. Shelving asserts `shelved` while the request stands
-inside the bound, counts the request's asserting scan as the first,
-and drops at `max_shelve_ticks` even while the request still stands —
-a re-shelve requires the request to cycle through `false`. A zero
+inside the bound, counts the request's asserting scan as the first —
+aging the request from its sample's line stamp, the admitting run's
+`apply_tick`, which a receipt-carried replay on a promoted peer
+preserves — and drops at `max_shelve_ticks` even while the request
+still stands — a re-shelve requires the request to cycle through
+`false`. A zero
 `max_shelve_ticks` declares never-shelvable; an unbound or unwritable
 `shelve` point rejects stronger still, `NotWritable` at submission.
 `suppress` binds declared wiring — designed or state-based — asserting
@@ -446,7 +483,11 @@ normally, a trip mid-OOS evaluates and latches, and an unbound
 managed input reports its flag standing-clear. The shelve-expiry
 countdown, the out-of-service state, and the suppression state all
 ride `capture_state`, so a tracking standby promoted mid-shelve
-continues the remaining bound identically.
+continues the remaining bound identically — including across a
+promotion whose final-sync checkpoint predates the write's
+application, where the carried write replays under its original
+schedule stamp rather than restarting the countdown at the replay
+scan.
 `crates/dcs-assembly/fixtures/managed_alarms.json` is the recorded
 composition — three instances covering the full surface, a
 bound-but-unwritable `shelve`, and an unbound `suppress`; per-port
@@ -556,6 +597,54 @@ order and grant mid-queue.
 recorded composition — a three-filter FIFO bank beside a two-filter
 operator-managed bank driving the reorder point; per-port semantics
 live beside `BackwashCoordinator::KIND`.
+
+The per-filter backwash contract architecture decisions 57-60 record
+adds one variable-arity kind. `backwash-sequence` runs one filter's
+declared step table — `sequencer`'s shape extended with the
+sequence-domain rules the general timed table does not carry:
+measured advance, the coordinator grant handshake, trigger
+attribution, and the abort/fault steps. The `parameters` are
+`step_count` plus `auto_start`, `abort_step`, `on_fault_step`
+(`Int`s — `abort_step`/`on_fault_step` in `1..=step_count`),
+`on_fault_policy`, and per step `n` the entries `step_<n>_ticks`
+(the timed duration or, under the measured modes, the overrun
+timeout), `step_<n>_out` (the `Float` `out` drives while the step
+reports), `step_<n>_advance` (`Int` — `0` timed, `1` measured:
+advance when the selected `meas_i` reads `Good` at or above
+`step_<n>_bound`, `2` whichever first), `step_<n>_on_overrun` (`Int`
+— `0` advance anyway, `1` hold and raise `overrun`), and the
+measured modes' `step_<n>_bound` (`Float`) and `step_<n>_meas`
+(`Int` selecting among `meas_1`…`meas_K`). The port set is the four
+triggers `trig_time`, `trig_headloss`, `trig_turbidity`,
+`trig_operator` (`in`, `Bool`), `grant` (`in`, `Bool`) — the
+coordinator's run permissive — `abort` and `fault` (`in`, `Bool`),
+the indexed `meas_<i>` (`in`, `Float`) family, and the outputs:
+`request` (`out`, `Bool`) asserting from the first armed trigger
+until `done` or `aborted` drops it — the grant release —
+`active`, `pending`, `done`, `aborted`, `overrun` (`out`, `Bool`),
+`trigger_source` (`out`, `Int` — `0` none, `1` time, `2` headloss,
+`3` turbidity, `4` operator — the first asserted source when the
+request arms, simultaneous edges resolving in declaration order, and
+held for the backwash's duration), `step` (`out`, `Int`, 1-based),
+`out` (`out`, `Float`), and `phase_<n>` (`out`, `Bool`, one per
+declared step) asserting while `step` reports `n`. `auto_start` `0`
+arms `request` on any trigger edge; `1` latches automatic edges into
+`pending` until a `trig_operator` edge releases the run attributed
+to the captured source — `trig_operator` and `abort` conventionally
+bind writable internal `in` points so writes ride the journaled
+receipted command path. `abort` while armed drives `abort_step`,
+raises `aborted`, and drops `request`; while unarmed it cancels a
+latched `pending`. A proven `fault` drives `on_fault_step` under
+`on_fault_policy` — `0` holds there with `request` still armed (the
+grant keeps its holder), a `trig_operator` edge with the fault
+cleared resuming the table; `1` takes the abort path. Non-`Good`
+inputs read fail-safe: an unproven `grant` holds the table, an
+untrusted `meas_i` cannot satisfy its bound so the timeout/overrun
+rule governs, and every other control input reads as not asserted.
+`crates/dcs-assembly/fixtures/backwash_sequence.json` is the
+recorded composition — a four-step timed/measured/first-of table
+under each fault policy beside a `pending`-latched two-step table;
+per-port semantics live beside `BackwashSequence::KIND`.
 
 The post-wash verification checks architecture decision 61 records
 add one fixed-arity kind. `phase-monitor` reads `in` (`in`, `Float`)
@@ -1162,6 +1251,14 @@ it into the resolved `sim_channel_map`, and test rigs do the same by
 adding `ProcessElement`s to a `ChannelMap` before constructing
 `SimDriver`.
 
+`dcs-plant-server --dynamics-schema` prints the document's draft
+2020-12 JSON Schema — the `ProcessElement::json_schema` emission
+(decision 93) — so non-Rust tooling can check a document against the
+recorded artifact: structure, field types, and the numeric bounds the
+schema language can express. The merge-time rules below stay with
+`ChannelMap::validate`; the schema is a first screen, not the
+validator.
+
 Each list entry is one `dcs_sim::ProcessElement` — an externally tagged
 object whose single key is the snake_case element name:
 
@@ -1189,6 +1286,12 @@ point it drives):
   `bool_flow`'s gate `input`, which must be a `bool` point
   (`ElementGateKind`), and a `threshold`'s contact `output`, which must
   be a `bool` point (`ElementContactKind`);
+- an element's `output` must be an `in` point — the field-side value
+  the controller reads (`ElementOutputDirection`). Elements model
+  physics *answering* commands: a `bool_flow`'s gate or a
+  `scaled_flow`'s demand reads the `out` command point, but driving an
+  `out` point would rewrite the operator's command each step — the
+  merge rejects it;
 - `time_constant`, `damping_ratio`, and `delay` must be finite and
   positive (`InvalidTimeConstant`, `InvalidDamping`, `InvalidDelay`),
   `amplitude` finite and non-negative (`InvalidAmplitude`), `on_rate`,

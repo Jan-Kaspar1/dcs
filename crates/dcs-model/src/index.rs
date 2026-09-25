@@ -57,6 +57,14 @@ pub struct PointSignal {
     /// writes to `Out` points and unmarked points are refused with a
     /// `not_writable` rejection.
     pub writable: bool,
+    /// Whether the point's `io_point` declaration marks its commands
+    /// reason-carrying: a writable `In` point's reasonless command
+    /// refuses at admission with a `reason_required` rejection, so a
+    /// consumer may demand the operator declare one up front. Serde-
+    /// defaulted like [`Signal::unit`](crate::Signal::unit): an index
+    /// served before the field existed decodes it `false`.
+    #[serde(default)]
+    pub requires_reason: bool,
 }
 
 /// A component instance's monitoring record — the per-instance model
@@ -154,6 +162,7 @@ impl PlantModel {
                     description: signal.description.clone(),
                     group: signal.group.clone(),
                     writable: point.writable,
+                    requires_reason: point.requires_reason,
                 },
                 None => PointSignal {
                     point: point.id,
@@ -165,6 +174,7 @@ impl PlantModel {
                     description: None,
                     group: None,
                     writable: point.writable,
+                    requires_reason: point.requires_reason,
                 },
             })
             .collect();

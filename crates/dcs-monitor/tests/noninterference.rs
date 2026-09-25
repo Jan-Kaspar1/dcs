@@ -680,10 +680,12 @@ impl Case {
 
     fn config(&self, journal_path: &Path) -> MonitorConfig {
         MonitorConfig {
+            journal_file: Some(journal_path.to_path_buf()),
             history_capacity: self.history_capacity,
             journal_capacity: self.journal_capacity,
+            event_history_capacity: self.journal_capacity,
             publication_capacity: self.publication_capacity,
-            journal_file: Some(journal_path.to_path_buf()),
+            ..MonitorConfig::default()
         }
     }
 }
@@ -797,7 +799,7 @@ fn run(case: &Case, with_consumers: bool) -> (Artifacts, ConsumerLog, Duration) 
             Op::Scans(scans) => {
                 for _ in 0..*scans {
                     let start = Instant::now();
-                    monitor.monitor.paced_scan().unwrap();
+                    monitor.monitor.paced_scan();
                     slowest = slowest.max(start.elapsed());
                     // The paced period's stand-in: gives concurrent
                     // consumers a real share of the run's duration.
@@ -974,7 +976,7 @@ fn a_stalled_reader_adds_no_scan_boundary_delay_and_no_liveness_dependency() {
         // lock, so the paced loop's scans complete on schedule.
         let deadline = Instant::now() + Duration::from_secs(10);
         for _ in 0..20 {
-            monitor.paced_scan().unwrap();
+            monitor.paced_scan();
         }
         assert!(
             Instant::now() < deadline,
@@ -1099,8 +1101,10 @@ fn bounded_eviction_exposes_named_gaps_never_silent_loss() {
         MonitorConfig {
             history_capacity: 3,
             journal_capacity: 4,
+            event_history_capacity: 4,
             publication_capacity: 3,
             journal_file: None,
+            ..MonitorConfig::default()
         },
     )
     .unwrap();
@@ -1186,8 +1190,13 @@ fn published_reads_cover_every_execution_mode() {
         // stands — visible between scans.
         assert_eq!(client.receipts().unwrap(), monitor.checkpoint().receipts);
         // The executor's between-scans capture — the standby's pull
-        // target — is consistent with the in-process view.
-        assert_eq!(client.checkpoint().unwrap(), monitor.checkpoint());
+        // target — is consistent with the in-process view, modulo
+        // `line_owner`: the serving monitor stamps its own address on
+        // the wire form as owner-propagation decoration, never part of
+        // the captured run state.
+        let mut served = client.checkpoint().unwrap();
+        served.line_owner = None;
+        assert_eq!(served, monitor.checkpoint());
         // The bounded streams answer from the store.
         let history = client.history(&[PointId(10), PointId(20)], 0).unwrap();
         assert!(history.iter().all(|history| !history.samples.is_empty()));
@@ -1217,7 +1226,7 @@ fn published_reads_cover_every_execution_mode() {
         let client = MonitorClient::new(monitor.local_addr());
         serving(&monitor, || {
             for _ in 0..3 {
-                monitor.paced_scan().unwrap();
+                monitor.paced_scan();
             }
             assert_published_surfaces(&monitor, &client, Tick(3));
         });
@@ -1275,7 +1284,12 @@ fn published_reads_cover_every_execution_mode() {
                     report.sync,
                     Some(StandbySync::Tracking { aligned: Tick(4) })
                 );
-                assert_published_surfaces(&standby, &standby_client, Tick(5));
+                // Tick 6, not 5: the second pull repeats the tick-4
+                // checkpoint and a tracking apply never rewinds the
+                // run's clock — it lands at the run's own tick, so the
+                // second requested scan produces tick 6 rather than
+                // re-recording tick 5.
+                assert_published_surfaces(&standby, &standby_client, Tick(6));
                 // The role gate holds: a command on the tracking peer
                 // takes the named `not_active` rejection receipt, never
                 // a phantom application.
@@ -1319,16 +1333,19 @@ fn published_reads_cover_every_execution_mode() {
         let first_client = MonitorClient::new(monitor.local_addr());
         let checkpoint = serving(&monitor, || {
             for _ in 0..4 {
-                monitor.paced_scan().unwrap();
+                monitor.paced_scan();
             }
             first_client.command(&write_value(10, 3.0)).unwrap();
-            monitor.paced_scan().unwrap();
+            monitor.paced_scan();
             assert_published_surfaces(&monitor, &first_client, Tick(5));
             monitor.checkpoint()
         });
 
-        // The restart: a fresh executor restored from the checkpoint,
-        // a fresh monitor replaying the same journal file.
+        // The restart: the old monitor's process lifetime ends — its
+        // drop releases the journal file's writer lock — then a fresh
+        // executor restored from the checkpoint and a fresh monitor
+        // replaying the same journal file take over.
+        drop(monitor);
         let restored =
             Executor::restore(driver, point_map(), components(), &checkpoint, None).unwrap();
         let monitor = Monitor::bind_paced_peer_with(
@@ -1340,15 +1357,15 @@ fn published_reads_cover_every_execution_mode() {
         .unwrap();
         let client = MonitorClient::new(monitor.local_addr());
         serving(&monitor, || {
-            monitor.paced_scan().unwrap();
+            monitor.paced_scan();
             client.command(&write_value(10, 5.0)).unwrap();
-            monitor.paced_scan().unwrap();
+            monitor.paced_scan();
             assert_published_surfaces(&monitor, &client, Tick(7));
             // The served journal is continuous across the restart:
             // the replayed pre-restart entries stand beside the
-            // post-restart ones in one `seq` domain — the restored
-            // run's adopted receipt re-journals at its applied tick,
-            // and the post-restart command settles at tick 7.
+            // post-restart ones in one `seq` domain — the restart's
+            // served boundary entry separates the lifetimes, and the
+            // post-restart command settles at tick 7.
             let journal = client.journal(0).unwrap();
             assert_eq!(journal[0].seq, 1);
             assert!(

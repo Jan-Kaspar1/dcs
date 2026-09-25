@@ -258,6 +258,7 @@ impl PlantBuilder {
             channel: Some(channel),
             initial: None,
             writable,
+            requires_reason: false,
             stale_after_ticks: None,
             journaled: false,
         });
@@ -296,6 +297,7 @@ impl PlantBuilder {
             channel: Some(channel),
             initial: None,
             writable: false,
+            requires_reason: false,
             stale_after_ticks: None,
             journaled: false,
         });
@@ -322,6 +324,7 @@ impl PlantBuilder {
             channel: None,
             initial: Some(initial.into_value()),
             writable,
+            requires_reason: false,
             stale_after_ticks: None,
             journaled: false,
         });
@@ -339,6 +342,7 @@ impl PlantBuilder {
             channel: None,
             initial: Some(initial.into_value()),
             writable: false,
+            requires_reason: false,
             stale_after_ticks: None,
             journaled: false,
         });
@@ -364,6 +368,29 @@ impl PlantBuilder {
             .find(|declared| declared.id == point)
             .unwrap_or_else(|| panic!("journaled names undeclared io_point {}", point.0));
         declared.journaled = true;
+        self
+    }
+
+    /// Marks a declared point `requires_reason`: commands against it
+    /// must carry a declared `reason` on the attributed envelope —
+    /// refusing `reason_required` at admission without one — the
+    /// per-alarm mandatory-reason declaration the shelving-reason
+    /// decision records for managed request points.
+    ///
+    /// `point` may be a bare [`PointId`] or a handle a point declaration
+    /// returned. Marking an id the builder never declared is a
+    /// programming error and panics naming it; marking anything but a
+    /// writable `In` point surfaces as [`BuildError::Invalid`] at
+    /// [`build`](Self::build), where the same validation a loaded
+    /// document faces rejects the dead declaration.
+    pub fn requires_reason(&mut self, point: impl Into<PointId>) -> &mut Self {
+        let point = point.into();
+        let declared = self
+            .io_points
+            .iter_mut()
+            .find(|declared| declared.id == point)
+            .unwrap_or_else(|| panic!("requires_reason names undeclared io_point {}", point.0));
+        declared.requires_reason = true;
         self
     }
 

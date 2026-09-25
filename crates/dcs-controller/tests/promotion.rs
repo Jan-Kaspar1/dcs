@@ -12,14 +12,14 @@
 //! switch, the journal carries the transitions, and premature or
 //! repeated promotion answers the named `SwitchError`s.
 
-use dcs_assembly::{assemble, sim_channel_map};
+use dcs_assembly::{assemble, sim_channel_map, sim_driver};
 use dcs_controller::registry;
 use dcs_core::{
     Command, CommandError, CommandOutcome, IoDriver, JournalEvent, PointId, Role, StandbySync,
-    SwitchError, Tick, Value, ValueKind,
+    SwitchError, TelemetrySnapshot, Tick, Value, ValueKind,
 };
 use dcs_model::PlantModel;
-use dcs_monitor::{Monitor, MonitorClient};
+use dcs_monitor::{Driven, Monitor, MonitorClient};
 use dcs_runtime::{Peer, WriteGate};
 use dcs_sim::SimDriver;
 use dcs_sim_net::{PlantServer, RemoteDriver};
@@ -86,41 +86,69 @@ fn image_valve(snapshot: &dcs_core::TelemetrySnapshot) -> Value {
 fn promotion_is_bumpless_and_exactly_one_peer_writes_the_field() {
     let model = PlantModel::load(TANK_LOOP).unwrap();
     let registry = registry();
-    let plant = PlantServer::bind(
-        ("127.0.0.1", 0),
-        SimDriver::new(sim_channel_map(&model).unwrap()).unwrap(),
-    )
-    .unwrap();
+    let plant = std::sync::Arc::new(
+        PlantServer::bind(
+            ("127.0.0.1", 0),
+            SimDriver::new(sim_channel_map(&model).unwrap()).unwrap(),
+        )
+        .unwrap(),
+    );
+    let _plant = ShutdownOnDrop(&*plant);
     let plant_addr = plant.local_addr().unwrap();
 
-    // The active: a remote driver behind a gate `Peer::active` opens —
-    // the gate a later demotion re-closes — serving the monitor the
-    // standby pulls checkpoints from.
-    let active_driver = RemoteDriver::connect(plant_addr).unwrap();
-    let active_gate = WriteGate::closed(&active_driver);
-    let active = Peer::active(
-        assemble(&model, &registry, &active_gate).unwrap(),
-        Some(&active_gate),
-    );
-    let active_monitor =
-        Monitor::bind_peer(("127.0.0.1", 0), active, model.signal_index()).unwrap();
-    let active_client = MonitorClient::new(active_monitor.local_addr());
+    // The plant serves before the peers construct: a launched active's
+    // startup claim needs the server answering, and a bound-but-unserved
+    // listener lets a connect through while the claim request waits for
+    // nobody.
+    let serving = thread::spawn({
+        let plant = std::sync::Arc::clone(&plant);
+        move || plant.serve()
+    });
 
     // The standby: a second remote attachment behind a closed gate, its
-    // own monitor serving `/role` and `/promote`.
+    // own monitor serving `/role` and `/promote` — its promotion takes
+    // the same claim under its own token.
     let standby_driver = RemoteDriver::connect(plant_addr).unwrap();
     let standby_gate = WriteGate::closed(&standby_driver);
     let standby = Peer::standby(
         assemble(&model, &registry, &standby_gate).unwrap(),
         Some(&standby_gate),
-    );
+    )
+    .with_field_claim(|| {
+        standby_driver
+            .claim_writer(2)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    });
     let standby_monitor =
         Monitor::bind_peer(("127.0.0.1", 0), standby, model.signal_index()).unwrap();
     let standby_client = MonitorClient::new(standby_monitor.local_addr());
 
+    // The active: a remote driver behind a gate `activate` lifts only
+    // after taking the plant's write-ownership claim — the startup
+    // claim a launched active runs — serving the monitor the standby
+    // pulls checkpoints from. The monitor names the standby as the
+    // tracking source — the configured `--peer` half of the follow-peer
+    // contract — so the demotion below has somewhere to track.
+    let active_driver = RemoteDriver::connect(plant_addr).unwrap();
+    let active_gate = WriteGate::closed(&active_driver);
+    let mut active = Peer::active(
+        assemble(&model, &registry, &active_gate).unwrap(),
+        Some(&active_gate),
+    )
+    .with_field_claim(|| {
+        active_driver
+            .claim_writer(1)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    });
+    active.activate().unwrap();
+    let active_monitor = Monitor::bind_peer(("127.0.0.1", 0), active, model.signal_index())
+        .unwrap()
+        .with_standby_source(standby_monitor.local_addr());
+    let active_client = MonitorClient::new(active_monitor.local_addr());
+
     thread::scope(|scope| {
-        scope.spawn(|| plant.serve());
-        let _plant = ShutdownOnDrop(&plant);
         scope.spawn(|| active_monitor.serve());
         let _active_monitor = ShutdownOnDrop(&active_monitor);
         scope.spawn(|| standby_monitor.serve());
@@ -303,6 +331,169 @@ fn promotion_is_bumpless_and_exactly_one_peer_writes_the_field() {
                 (Role::Active, Role::Demoting),
                 (Role::Demoting, Role::Standby)
             ]
+        );
+    });
+    drop(_plant);
+    serving.join().unwrap();
+}
+
+/// The QA finding `shelve-bound-restarts-on-stale-final-sync-promotion`
+/// on the driven pair: `POST /scan` makes the checkpoint lag
+/// deterministic. The shelve write admits on the active; the standby's
+/// tracking pull is withheld so the promote boundary's `final_sync`
+/// serves a checkpoint captured before the write's apply scan — the
+/// receipt log's still-`Accepted` tail is all the stale carry can
+/// deliver, and the promoted run replays the write scans after the tick
+/// the line scheduled it for. `max_shelve_ticks` must bound the
+/// operator-visible shelving window the pair serves — measured across
+/// both peers' served ticks — rather than the countdown restarting at
+/// the handover's replay scan.
+///
+/// The fixture is `managed_alarms` on private local-`sim` plants: no
+/// shared field, so nothing fences either peer — each keeps counting
+/// its own shelve clock exactly as the QA rig's two journal streams
+/// recorded. The Bool instance's declared bound is 3 scans.
+#[test]
+fn a_stale_final_sync_carry_serves_only_the_shelve_bounds_remainder() {
+    const MANAGED_ALARMS: &str = include_str!("../../dcs-assembly/fixtures/managed_alarms.json");
+    /// The Bool instance's writable internal `shelve` request point.
+    const SHELVE: PointId = PointId(17);
+    /// Its `shelved` status carrier — the operator-visible flag.
+    const SHELVED: PointId = PointId(32);
+    /// The fixture's declared `max_shelve_ticks`.
+    const BOUND: u64 = 3;
+
+    let model = PlantModel::load(MANAGED_ALARMS).unwrap();
+    let registry = registry();
+
+    let shelved = |snapshot: &TelemetrySnapshot| -> bool {
+        snapshot
+            .points
+            .iter()
+            .find(|point| point.point == SHELVED)
+            .and_then(|point| point.sample)
+            .is_some_and(|sample| sample.value == Value::Bool(true))
+    };
+
+    // The active on its own local-sim plant — no gate, no field claim:
+    // the model writes no field `Out` point, so the promoted peer's
+    // takeover never fences it and its own countdown keeps running.
+    let active_driver = sim_driver(&model).unwrap();
+    let mut active = Peer::active(assemble(&model, &registry, &active_driver).unwrap(), None);
+    active.activate().unwrap();
+    let active_monitor =
+        Monitor::bind_peer(("127.0.0.1", 0), active, model.signal_index()).unwrap();
+    let active_client = MonitorClient::new(active_monitor.local_addr());
+
+    // The standby on a second private plant, `POST /scan` pulling
+    // `GET /checkpoint` from the active's monitor once per requested
+    // scan — the driven cadence's tracking cycle.
+    let standby_driver = sim_driver(&model).unwrap();
+    let standby = Peer::standby(assemble(&model, &registry, &standby_driver).unwrap(), None);
+    let standby_monitor = Monitor::bind_peer(("127.0.0.1", 0), standby, model.signal_index())
+        .unwrap()
+        .driven(Driven {
+            track: Some(active_monitor.local_addr()),
+            after_scan: None,
+        });
+    let standby_client = MonitorClient::new(standby_monitor.local_addr());
+
+    thread::scope(|scope| {
+        scope.spawn(|| active_monitor.serve());
+        let _active_monitor = ShutdownOnDrop(&active_monitor);
+        scope.spawn(|| standby_monitor.serve());
+        let _standby_monitor = ShutdownOnDrop(&standby_monitor);
+
+        // Converge through two lockstep ticks: the standby rests at the
+        // driven cadence's shape — one tick past the checkpoint it last
+        // applied — so the pre-apply checkpoint the promote boundary is
+        // about to serve is stale by the run's clock.
+        for _ in 0..2 {
+            active_client.advance(1).unwrap();
+            standby_client.advance(1).unwrap();
+        }
+        assert_eq!(active_client.role().unwrap().tick, Tick(2));
+        let report = standby_client.role().unwrap();
+        assert_eq!(report.tick, Tick(3));
+        assert_eq!(
+            report.sync,
+            Some(StandbySync::Tracking { aligned: Tick(2) })
+        );
+
+        // The admission lands on the active for its next scan. No
+        // standby scan intervenes — the withheld pull — so `POST
+        // /promote`'s final sync fetches the checkpoint whose receipt
+        // log still carries the write `Accepted`: the QA finding's
+        // pre-apply carry.
+        let receipt = active_client
+            .command(&Command::WriteValue {
+                point: SHELVE,
+                kind: ValueKind::Bool,
+                value: Value::Bool(true),
+            })
+            .unwrap();
+        assert_eq!(
+            receipt.outcome,
+            CommandOutcome::Accepted {
+                apply_tick: Tick(3)
+            }
+        );
+        let promoted = standby_client.promote().unwrap();
+        assert_eq!(promoted.role, Role::Promoting);
+
+        // The line applies its own admission and counts its bound —
+        // ticks 3, 4, 5 shelved, expiry at 6 — while the promoted
+        // run's first field-owning scan replays the carried write.
+        // Stamped with the schedule the line admitted (tick 3), not
+        // the replay tick (4), the standby's countdown seeds at the
+        // request's line age: it serves the bound's remainder rather
+        // than a fresh bound.
+        let mut shelved_ticks = std::collections::BTreeSet::new();
+        for _ in 0..4 {
+            let snapshot = active_client.advance(1).unwrap();
+            if shelved(&snapshot) {
+                shelved_ticks.insert(snapshot.tick);
+            }
+        }
+        let mut standby_ticks = Vec::new();
+        for _ in 0..3 {
+            let snapshot = standby_client.advance(1).unwrap();
+            if shelved(&snapshot) {
+                standby_ticks.push(snapshot.tick);
+                shelved_ticks.insert(snapshot.tick);
+            }
+        }
+        assert_eq!(standby_client.role().unwrap().role, Role::Active);
+        assert_eq!(
+            standby_ticks,
+            vec![Tick(4), Tick(5)],
+            "the promoted run serves only the bound's remainder past the handover"
+        );
+        assert!(
+            shelved_ticks.len() <= BOUND as usize,
+            "the pair's operator-visible shelved window stays inside max_shelve_ticks"
+        );
+        assert_eq!(
+            shelved_ticks.into_iter().collect::<Vec<_>>(),
+            vec![Tick(3), Tick(4), Tick(5)]
+        );
+
+        // The replayed write kept the line's schedule as its image
+        // stamp, and the receipt settled once at the replaying scan.
+        let snapshot = standby_client.snapshot().unwrap();
+        assert_eq!(
+            snapshot
+                .points
+                .iter()
+                .find(|point| point.point == SHELVE)
+                .and_then(|point| point.sample)
+                .map(|sample| sample.tick),
+            Some(Tick(3)),
+            "the carried write's stamp is the admitting line's schedule"
+        );
+        assert_eq!(
+            standby_client.receipts().unwrap().last().unwrap().outcome,
+            CommandOutcome::Applied { tick: Tick(4) }
         );
     });
 }

@@ -9,6 +9,13 @@ reference are platform conformance tests owned by this repository,
 not customer-project examples; a customer plant is an external consumer
 of a pinned release (decision 79).
 
+Every externally reachable transport the artifacts below stand up —
+the monitor HTTP surface, the peer checkpoint link, the remote-driver
+plant protocol, the sim-bus register protocol, and the EtherCAT cyclic
+binding — is enumerated with its bind posture and authentication
+boundary in `docs/conduit-boundaries.md`, the artifact a deployment's
+zone-and-conduit design consumes.
+
 ## Controller container image
 
 The root `Dockerfile` packages the `dcs-controller` binary as a container
@@ -44,6 +51,21 @@ All remaining arguments are the binary's own (`--ticks N` bounds the run
 deterministically and prints the final telemetry snapshot; see
 `docker run --rm dcs-controller --help`).
 
+A `--scan-ms` run without `--ticks` also prints one telemetry-snapshot
+JSON line per scan on stdout. That stream is a bounded consumer of the
+scan loop (decision 83): each line is handed to a dedicated writer
+thread through a 64-line queue, so a consumer that stops draining
+stdout — an unflushed or filled process pipe — never paces the scan.
+Once the queue saturates, further lines drop under the named
+`stdout_snapshot_drops` counter, reported on stderr at the episode's
+start, at each doubling of the count, and once more when the reader
+drains; a failed stdout write (a closed pipe) is reported once and
+later lines drop on the same counter. `io_health.scan_overruns` and the
+failover miss budget are unaffected by a stalled stdout consumer.
+Consumers that need every scan's telemetry should use the `--listen`
+monitor endpoints, not the stdout stream. (Mechanism adopted from
+review finding #545.)
+
 ### Redundant pair
 
 A redundant pair is two of these containers on separate hosts, both built
@@ -54,14 +76,44 @@ container while the active keeps scanning; peer management and takeover
 semantics are recorded in `docs/architecture.md` (decisions 9, 10, and
 11–15) and are not part of this image.
 
+### Rolling a revised model
+
+The no-interruption path is the pair roll: start a third container as
+`--standby <active> --revised` mounting the revised document, let it
+converge `reinitialized` on the active's checkpoint stream under the
+documented carryover rule, then demote the old peer and promote it —
+the field writer changes models at a scan boundary without the process
+ever stopping (decision 25).
+
+A lone controller has no peer to carry the run, so its roll is the
+scheduled outage the restart already is — the unattended-station
+deployment class the lifecycle evidence names. The container runs with
+a persistent `--state-file` mount; for the roll the deployment stops
+it, swaps its mounted model for the revised document, and restarts it
+armed `--revised` on the same state file. The persisted checkpoint's
+foreign fingerprint crosses the model boundary through the same
+carryover rule the pair uses — carried setpoints, the output image,
+and the force set survive where a cold start would lose them — the run
+resumes at the last persisted cycle, and the crossing's carryover
+report prints at startup and lands in the durable record when
+`--journal-file` runs. A revision the rule cannot carry fails startup
+naming the `CarryoverError` and leaves the state file untouched, so
+the operator rolls back to the previous document and restarts into the
+known-good checkpoint; restarting on the revised document *without*
+`--revised` still refuses the fingerprint, so the crossing never
+happens undeclared. The outage is bounded by the restart itself — the
+pair roll remains the path when the process must not stop.
+
 ## Plant container image
 
 `Dockerfile.plant` packages the `dcs-plant-server` binary — the shared
 simulated plant of `dcs-sim-net` — the same way: a
 `rust:1.98.1-bookworm` build stage runs
-`cargo build --release --locked -p dcs-plant`, and a
-`debian:bookworm-slim` runtime stage carries only the resulting binary,
-executed as the same non-root user. A second Dockerfile, rather than a
+`cargo build --release --locked -p dcs-plant -p dcs-sim-net`, and a
+`debian:bookworm-slim` runtime stage carries the resulting server
+binary plus `dcs-plant-ctl`, the plant-side wire-protocol tool, beside
+it for `docker exec` perturbation of the running plant — executed as
+the same non-root user. A second Dockerfile, rather than a
 build-arg-parameterized shared one, keeps each image a self-contained,
 statically inspectable artifact; the two files are deliberately kept in
 lockstep. Together with the controller image it completes the
@@ -124,7 +176,12 @@ pass. The standby (`ctrl-b`) pulls a checkpoint per scan from the
 active's monitoring address (`--standby ctrl-a:8080`), scans
 output-quiesced behind its write gate, and promotes through
 `POST /promote` on its own monitor — or self-promotes with
-`--auto-promote N`. In a cross-host rig the same commands hold with the
+`--auto-promote N`. Launching both peers with the same
+`--pair-token TOKEN` adds the keyed tracking contract: announced-source
+demotions and every checkpoint the adopted source serves must carry the
+token-keyed `line_proof`, so an endpoint that merely replays or
+fabricates the line's checkpoints can neither arm a demotion nor feed
+the demoted peer forged state. In a cross-host rig the same commands hold with the
 plant's published `host:port` in place of `dcs-plant:9001` and the
 active's published monitoring address in place of `ctrl-a:8080`.
 Alternatively the model can declare `sim-tcp` devices whose
@@ -195,7 +252,10 @@ http://localhost:8080/?peer=localhost:8081
 
 The page polls `GET /role` on both peers, renders the settled-active
 peer's telemetry plus per-peer pair health, and submits commands only
-to the peer reporting `active`.
+to the peer reporting `active`. The plant image also ships
+`dcs-plant-ctl`, the plant-side tool `docs/architecture.md` records —
+`docker exec dcs-plant dcs-plant-ctl dcs-plant:9001 <command>` perturbs
+the running plant's field points for a live demonstration.
 
 ### Demonstrating a promotion
 

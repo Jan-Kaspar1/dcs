@@ -101,9 +101,9 @@
 
 use dcs_core::{
     AdaptedCommand, AdaptedEvent, Command, CommandAvailability, CommandError, CommandOutcome,
-    EmittedEvent, EventEmission, EventRetention, EventValue, JournalEntry, JournalEvent, PointId,
-    Quality, QualityReason, Role, RoleReport, Sample, StandbySync, SwitchError, TelemetrySnapshot,
-    Tick, Value, ValueKind,
+    EmittedEvent, EventEmission, EventRetention, EventValue, FieldClaim, JournalEntry,
+    JournalEvent, PointId, Quality, QualityReason, Role, RoleReport, Sample, StandbySync,
+    SwitchError, TelemetrySnapshot, Tick, Value, ValueKind,
 };
 use dcs_demo::showcase::{
     self, BATCH_STEP1_TICKS, FAULT_SCANS, INITIAL_SETPOINT, MOVED_SCANS, MOVED_SETPOINT,
@@ -112,13 +112,16 @@ use dcs_demo::showcase::{
 use dcs_monitor::{MonitorClient, PairClient, PeerStatus, read_journal_file};
 use dcs_sim_net::RemoteDriver;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command as Process, Stdio};
+use std::path::Path;
+use std::process::Command as Process;
 
-/// The controller binary under test.
-const CONTROLLER: &str = env!("CARGO_BIN_EXE_dcs-controller");
+mod support;
+
+use support::{
+    SimTcp, controller_model, settle_sink_health, spawn_controller, spawn_plant, workspace_binary,
+};
+
 /// The showcase plant model the plant servers load — the #69 fixture.
 const PLANT_MODEL: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -150,96 +153,6 @@ const BATCH_COMPONENT: &str = "sequencer:20";
 /// peer re-converging on the invocations' checkpoints.
 const BATCH_CLOSE_SCANS: u64 = 3;
 
-/// A `dcs-*` binary sibling of the controller binary under test in the
-/// workspace target dir; workspace builds produce them.
-fn workspace_binary(name: &str) -> PathBuf {
-    let binary = Path::new(CONTROLLER)
-        .parent()
-        .unwrap()
-        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "{} not found — build the workspace first",
-        binary.display()
-    );
-    binary
-}
-
-/// A spawned process: its bound address learned from the `listening on`
-/// stderr line, stderr held open so a later diagnostic write never meets
-/// a closed pipe, and a kill on drop so a panicking test leaves no stray
-/// processes behind.
-struct Spawned {
-    child: Child,
-    addr: SocketAddr,
-    _stderr: BufReader<ChildStderr>,
-}
-
-impl Drop for Spawned {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Spawns `binary`, reads its `listening on <addr>` line, and returns
-/// the running process.
-fn spawn(binary: &Path, args: &[String]) -> Spawned {
-    let mut child = Process::new(binary)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("cannot spawn {}: {error}", binary.display()));
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut line = String::new();
-    if stderr.read_line(&mut line).unwrap() == 0 {
-        panic!("{} exited before reporting its address", binary.display());
-    }
-    let addr = line
-        .trim()
-        .strip_prefix("listening on ")
-        .unwrap_or_else(|| {
-            panic!(
-                "expected a `listening on` line from {}, found {line:?}",
-                binary.display()
-            )
-        })
-        .parse()
-        .unwrap();
-    Spawned {
-        child,
-        addr,
-        _stderr: stderr,
-    }
-}
-
-/// A plant-server process serving the showcase plant — model plus
-/// dynamics document — on an ephemeral port.
-fn spawn_plant() -> Spawned {
-    spawn(
-        &workspace_binary("dcs-plant-server"),
-        &[
-            PLANT_MODEL.to_string(),
-            "--dynamics".to_string(),
-            PLANT_DYNAMICS.to_string(),
-            "--listen".to_string(),
-            "127.0.0.1:0".to_string(),
-        ],
-    )
-}
-
-/// A `--driven` controller process on `model`: the monitor serves on an
-/// ephemeral port and scans run only when `POST /scan` requests them.
-fn spawn_controller(model: &Path, extra: &[String]) -> Spawned {
-    let mut args = vec![model.to_str().unwrap().to_string()];
-    args.extend(extra.iter().cloned());
-    for arg in ["--listen", "127.0.0.1:0", "--driven", "--dt", DT] {
-        args.push(arg.to_string());
-    }
-    spawn(Path::new(CONTROLLER), &args)
-}
-
 /// One `dcs-plant-ctl` invocation against `plant` — the plant tooling
 /// the scenario perturbs the world through. Returns the server's
 /// response payload; a nonzero exit or an unparseable answer fails the
@@ -266,35 +179,6 @@ fn plant_ctl_done(plant: SocketAddr, args: &[&str]) {
         serde_json::json!({ "result": "done" }),
         "dcs-plant-ctl {args:?} was not acknowledged"
     );
-}
-
-/// Writes the controller-side model for a plant server at `plant`: the
-/// shared showcase model with every declared channel merged onto one
-/// `sim-tcp` device carrying the plant's address — the remote-sim path
-/// through the assembly driver registry. One remote backend steps the
-/// plant once per scan, keeping the dynamics document's dt pacing.
-fn controller_model(dir: &Path, name: &str, plant: SocketAddr) -> PathBuf {
-    let mut document: serde_json::Value = serde_json::from_str(MODEL_SOURCE).unwrap();
-    let mut channels = serde_json::Map::new();
-    for device in document["devices"].as_array().unwrap() {
-        for (channel, declaration) in device["channels"].as_object().unwrap() {
-            channels.insert(channel.clone(), declaration.clone());
-        }
-    }
-    document["devices"] = serde_json::json!([{
-        "id": 1,
-        "kind": "sim-tcp",
-        "parameters": { "address": plant.to_string() },
-        "channels": channels,
-    }]);
-    for point in document["io_points"].as_array_mut().unwrap() {
-        if let Some(channel) = point.get_mut("channel") {
-            channel["device"] = serde_json::json!(1);
-        }
-    }
-    let path = dir.join(name);
-    std::fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
-    path
 }
 
 /// The sample `snapshot`'s image reports for `point`.
@@ -511,10 +395,24 @@ fn run_full_stack(tag: &str) -> Outcome {
 
     // Two shared plants: the pair's and the reference run's — identical
     // model and dynamics, identical request sequences, identical runs.
-    let pair_plant = spawn_plant();
-    let reference_plant = spawn_plant();
-    let pair_model = controller_model(&dir, "pair.json", pair_plant.addr);
-    let reference_model = controller_model(&dir, "reference.json", reference_plant.addr);
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let reference_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let pair_model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        pair_plant.addr,
+        SimTcp::Merged,
+    )
+    .0;
+    let reference_model = controller_model(
+        &dir,
+        "reference.json",
+        MODEL_SOURCE,
+        reference_plant.addr,
+        SimTcp::Merged,
+    )
+    .0;
 
     // The plant tooling lists the served field surface — the eleven
     // channel-bound points of the extended showcase model: the three
@@ -553,6 +451,7 @@ fn run_full_stack(tag: &str) -> Outcome {
             "--journal-file".to_string(),
             active_journal.to_str().unwrap().to_string(),
         ],
+        DT,
     );
     let standby_process = spawn_controller(
         &pair_model,
@@ -562,6 +461,7 @@ fn run_full_stack(tag: &str) -> Outcome {
             "--journal-file".to_string(),
             standby_journal.to_str().unwrap().to_string(),
         ],
+        DT,
     );
     let reference_process = spawn_controller(
         &reference_model,
@@ -569,6 +469,7 @@ fn run_full_stack(tag: &str) -> Outcome {
             "--journal-file".to_string(),
             reference_journal.to_str().unwrap().to_string(),
         ],
+        DT,
     );
     let active = MonitorClient::new(active_process.addr);
     let standby = MonitorClient::new(standby_process.addr);
@@ -647,7 +548,11 @@ fn run_full_stack(tag: &str) -> Outcome {
     // The pair view reads the field owner's image.
     let view = pair.snapshot().unwrap();
     assert_eq!(view, settled);
-    stages.push(view.clone());
+    // The journal sink's live counters ride the writer thread's beat —
+    // the cross-run compare pins the run-stable fields.
+    let mut staged = view.clone();
+    settle_sink_health(&mut staged);
+    stages.push(staged);
     assert!(
         (float(&view, points::LEVEL_PERCENT) - INITIAL_SETPOINT).abs() < 0.5,
         "the loop settled at the declared setpoint"
@@ -728,7 +633,11 @@ fn run_full_stack(tag: &str) -> Outcome {
     );
     let view = pair.snapshot().unwrap();
     assert_eq!(view, moved);
-    stages.push(view.clone());
+    // The journal sink's live counters ride the writer thread's beat —
+    // the cross-run compare pins the run-stable fields.
+    let mut staged = view.clone();
+    settle_sink_health(&mut staged);
+    stages.push(staged);
     assert_eq!(view.tick, Tick(SETTLE_SCANS + MOVED_SCANS));
     assert_eq!(float(&view, points::LEVEL_SETPOINT), MOVED_SETPOINT);
     assert!(
@@ -973,9 +882,10 @@ fn run_full_stack(tag: &str) -> Outcome {
         &mut trace,
         BATCH_CLOSE_SCANS,
     );
-    let view = pair.snapshot().unwrap();
+    let mut view = pair.snapshot().unwrap();
     assert_eq!(view, closed);
     assert_clean(&view);
+    settle_sink_health(&mut view);
     stages.push(view);
     for path in [&active_journal, &standby_journal] {
         let data = read_journal_file(path).unwrap();
@@ -1030,7 +940,11 @@ fn run_full_stack(tag: &str) -> Outcome {
     );
     let view = pair.snapshot().unwrap();
     assert_eq!(view, faulted);
-    stages.push(view.clone());
+    // The journal sink's live counters ride the writer thread's beat —
+    // the cross-run compare pins the run-stable fields.
+    let mut staged = view.clone();
+    settle_sink_health(&mut staged);
+    stages.push(staged);
     // The documented fault behavior, through the monitor snapshot: the
     // feedback reads Bad, the interlock trips and drives the valve safe,
     // the level drains through the low alarm — horn asserted, motor
@@ -1097,26 +1011,36 @@ fn run_full_stack(tag: &str) -> Outcome {
         POST_SWITCH_SCANS,
     );
     // Roles settled on the first post-switch scan: the promoted peer
-    // reports active, the demoted peer standby — unsynchronized, its
-    // track ended with its field ownership.
+    // reports active, the demoted peer standby — and already tracking
+    // its successor again through the announced follow-peer source.
     assert_eq!(
         standby.role().unwrap(),
         RoleReport {
             role: Role::Active,
             tick: continued.tick,
             sync: None,
+            // The per-scan claim probe's observation: the promoted
+            // peer's own claim stands at the field.
+            field_claim: Some(FieldClaim::Held),
         }
     );
     let report = active.role().unwrap();
     assert_eq!(report.role, Role::Standby);
-    assert_eq!(report.sync, Some(StandbySync::Unsynchronized));
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted peer must follow its successor and reconverge: {report:?}"
+    );
     let reports = poll(&mut pair);
     assert_eq!(reports[0].role, Role::Standby);
     assert_eq!(reports[1].role, Role::Active);
     assert_eq!(pair.source(), Some(standby_process.addr));
     let view = pair.snapshot().unwrap();
     assert_eq!(view, continued);
-    stages.push(view.clone());
+    // The journal sink's live counters ride the writer thread's beat —
+    // the cross-run compare pins the run-stable fields.
+    let mut staged = view.clone();
+    settle_sink_health(&mut staged);
+    stages.push(staged);
     assert!(bool_point(&view, points::INTERLOCK_TRIPPED));
     assert_eq!(float(&view, points::VALVE_RAW), 4.0);
     // The journals carry both peers' sides of the switch.
@@ -1148,7 +1072,11 @@ fn run_full_stack(tag: &str) -> Outcome {
     );
     let view = pair.snapshot().unwrap();
     assert_eq!(view, recovered);
-    stages.push(view.clone());
+    // The journal sink's live counters ride the writer thread's beat —
+    // the cross-run compare pins the run-stable fields.
+    let mut staged = view.clone();
+    settle_sink_health(&mut staged);
+    stages.push(staged);
     assert_eq!(image_sample(&view, points::PUMP_RUN).quality, Quality::Good);
     assert!(!bool_point(&view, points::INTERLOCK_TRIPPED));
     assert!(!bool_point(&view, points::LEVEL_ALARM));
@@ -1209,8 +1137,9 @@ fn run_full_stack(tag: &str) -> Outcome {
     assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
     let image = standby.advance(1).unwrap();
     trace.push(observe(&field, image.tick));
-    let view = pair.snapshot().unwrap();
+    let mut view = pair.snapshot().unwrap();
     assert_eq!(view, image);
+    settle_sink_health(&mut view);
     stages.push(view);
 
     // Final role reporting: the pair view's poll sees the settled pair.

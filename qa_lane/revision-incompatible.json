@@ -1,0 +1,5 @@
+{
+    "description": "QA lane deliberately-incompatible rolling revision: after the checked-in additive recipe (revision.json) derives the revised document, this post-derivation step retypes writable internal In point 302 (the p101-oos operator point) bool->int — the revision keeps the point's declared identity but changes its kind, exactly the carryover break crates/dcs-runtime/src/revision.rs names CarryoverError::InternalKindMismatch, so the --revised peer must refuse every pulled checkpoint and report degraded naming point 302 rather than converging. The point's port wirings move onto the recipe's added bool point 900 so the derived document still validates, assembles, and loads — the crossing, not the load, is what fails.",
+    "retype_io_point": {"id": 302, "value_type": "int",
+                        "initial": {"int": 0}, "rewire_to": 900}
+}

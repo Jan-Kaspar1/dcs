@@ -244,6 +244,7 @@ fn entry(point: PointId, direction: Direction, kind: ValueKind, writable: bool) 
         description: None,
         group: None,
         writable,
+        requires_reason: false,
     }
 }
 
@@ -348,8 +349,8 @@ fn the_page_carries_the_generic_five_category_renderers() {
         // poll as the snapshot, tolerating a peer that predates the
         // endpoints — the absent-section convention.
         for needle in [
-            "fetch(base + \"/schema\")",
-            "fetch(base + \"/resources\")",
+            "pollFetch(base + \"/schema\")",
+            "pollFetch(base + \"/resources\")",
             "(r.ok ? r.json() : null)",
             "interfaceByName",
             "resourcesByName",
@@ -385,6 +386,7 @@ fn the_page_carries_the_generic_five_category_renderers() {
             "data-category=\\\"events\\\"",
             "none declared",
             "no recent events",
+            "entry.retention",
             "unwired",
             "no sample",
             "EVENT_LIMIT",

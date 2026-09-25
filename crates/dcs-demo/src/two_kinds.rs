@@ -74,7 +74,8 @@
 
 use dcs_assembly::{AssemblyError, DriverRegistry, FanoutDriver, assemble, resolve_drivers};
 use dcs_core::{
-    Command, CommandReceipt, IoDriver, JournalEntry, PointId, TelemetrySnapshot, Value, ValueKind,
+    Command, CommandReceipt, IoDriver, JournalEntry, PointHistory, PointId, TelemetrySnapshot,
+    Value, ValueKind,
 };
 use dcs_model::{LoadError, PlantModel};
 use dcs_monitor::{Driven, Monitor, MonitorClient};
@@ -366,6 +367,10 @@ pub struct VariantRun {
     /// The receipts the run's operator commands returned, in
     /// submission order.
     pub receipts: Vec<CommandReceipt>,
+    /// The bounded point-history rings after the run — `GET /history`'s
+    /// payload: every point's retained samples in `seq` order, the
+    /// durable record a lagging consumer reads back.
+    pub history: Vec<PointHistory>,
 }
 
 /// The value kind's neutral initial — the same `0`/`false`/`0.0` the
@@ -482,10 +487,12 @@ fn driven_run<'d>(
                 snapshots.push(client.advance(1)?);
             }
             let journal = client.journal(0)?;
+            let history = client.history(&[], 0)?;
             Ok(VariantRun {
                 snapshots,
                 journal,
                 receipts,
+                history,
             })
         })();
         monitor.shutdown();

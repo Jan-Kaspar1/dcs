@@ -1,4 +1,5 @@
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,10 +10,10 @@ from agent_pool.github import GitHubError
 from agent_pool.supervisor import Supervisor
 
 
-def issue(number=1, priority=2, group='core', dependencies=()):
+def issue(number=1, priority=2, group='core', dependencies=(), area='control-runtime'):
     item = dict(key=f'issue-{number}',title=f'Task {number}',scope='Implement a simulation',
                 acceptance='Test passes',tests='unit test',dependencies=list(dependencies),
-                priority=priority,milestone='foundation',group=group)
+                priority=priority,milestone='foundation',group=group,area=area)
     return dict(number=number,title=item['title'],body=planning.body(item),
                 state='OPEN',labels=[{'name':'agent:ready'}])
 
@@ -81,12 +82,18 @@ class SupervisorTests(unittest.TestCase):
         self.supervisor.state.close()
         self.tmp.cleanup()
 
+    def attributed_events(self, number):
+        return [(e['kind'], json.loads(e['payload']).get('cause'))
+                for e in self.supervisor.state.events(number)
+                if e['kind'] in ('repair', 'redispatch')]
+
     def test_research_issue_worker_prompt_defines_research_role(self):
         research_issue = issue(group='docs/research')
         text = self.supervisor.worker_prompt(research_issue, 'codex/issue-1-1')
         self.assertIn('act as the product research worker', text)
         self.assertIn('separate source facts from proposed DCS behavior', text)
         self.assertIn('does not implement vendor-derived product behavior', text)
+        self.assertIn('never edit files outside this checkout', text)
 
     def test_full_issue_pr_merge_closed_flow(self):
         s=self.supervisor
@@ -101,6 +108,23 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(s.state.get('merges'),1)
         s.dispatch(self.github.items)
         self.assertEqual(self.github.created,1)
+
+    def test_dispatch_defaults_to_swe_2_high(self):
+        self.supervisor.dispatch(self.github.items)
+        self.assertEqual(self.runtime.spawn.call_args.kwargs['model'], 'swe-2-high')
+
+    def test_dispatch_rotates_models_by_worker_slot(self):
+        self.supervisor.models = ['swe-2-high', 'opencode/union-alpha']
+        self.supervisor.dispatch(self.github.items)
+        self.assertEqual(self.runtime.spawn.call_args.kwargs['model'], 'opencode/union-alpha')
+
+    def test_dispatch_skips_workers_whose_model_is_capped(self):
+        self.supervisor.models = ['swe-2-high', 'opencode/union-alpha']
+        self.supervisor.model_caps = {'opencode/union-alpha': 1}
+        self.github.items = [issue(1), issue(2), issue(3)]
+        self.supervisor.dispatch(self.github.items)
+        workers = sorted(j['worker'] for j in self.supervisor.state.jobs())
+        self.assertEqual(workers, ['worker-01', 'worker-02', 'worker-04'])
 
     def test_supervisor_commits_completed_edits(self):
         self.supervisor.dispatch(self.github.items)
@@ -176,6 +200,18 @@ class SupervisorTests(unittest.TestCase):
         self.assertIsNotNone(self.supervisor.state.job(2))
         self.assertIn('Task 2', self.runtime.spawn.call_args_list[0].args[2])
 
+    def test_equal_priority_favors_underinvested_area(self):
+        completed = issue(3, area='engineering')
+        completed['state'] = 'CLOSED'
+        self.github.items = [issue(1, area='engineering'),
+                             issue(2, area='library'), completed]
+        self.supervisor.state.reserve(3, 'worker-20', 'g')
+        self.supervisor.state.complete(3)
+        self.supervisor.dispatch(self.github.items)
+        self.assertIn('Task 2', self.runtime.spawn.call_args_list[0].args[2])
+        summary = self.supervisor.state.get('area_allocation')
+        self.assertEqual(summary['library']['active'], 1)
+
     def test_failed_ci_repairs_with_session(self):
         s=self.supervisor
         s.dispatch(self.github.items)
@@ -184,6 +220,63 @@ class SupervisorTests(unittest.TestCase):
         s.integrate(self.github.items)
         self.assertEqual(s.state.job(1)['repairs'],1)
         self.assertEqual(self.runtime.spawn.call_args.kwargs['resume_session'],'session-one')
+        self.assertIn(('repair','ci-failure'), self.attributed_events(1))
+
+    def test_merge_conflict_repair_records_merge_conflict_cause(self):
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        s.reconcile_workers(self.github.items)
+        self.github.includes_main=lambda head, base: False
+        def run_git(cwd, *args):
+            if args and args[0] == 'merge':
+                raise subprocess.CalledProcessError(1, 'merge', '', 'conflict')
+            return 'base'
+        self.runtime.run_git.side_effect=run_git
+        s.integrate(self.github.items)
+        self.assertEqual(s.state.job(1)['repairs'],1)
+        self.assertIn(('repair','merge-conflict'), self.attributed_events(1))
+
+    def test_publish_error_repair_records_publish_cause(self):
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        self.runtime.inspect_result.side_effect=ValueError('unclean result')
+        s.reconcile_workers(self.github.items)
+        self.assertIn(('repair','publish-error'), self.attributed_events(1))
+
+    def test_blocked_worker_retry_records_worker_failure_cause(self):
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        self.runtime.poll.return_value={'exit_code':1}
+        s.reconcile_workers(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'blocked')
+        self.runtime.pool_root=Path(self.config['pool_root'])
+        s.state.set('recovery:1', {'branch':'codex/issue-1-1',
+                                   'clone':s.state.job(1)['clone'],
+                                   'work':False,'phase':'captured'})
+        s.state.set('retry:1', True)
+        s.retries(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'working')
+        self.assertIn(('redispatch','worker-failure'), self.attributed_events(1))
+
+    def test_quota_requeue_records_quota_requeue_cause(self):
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        self.runtime.poll.return_value={'exit_code':1}
+        log = Path(self.tmp.name)/'quota.log'
+        log.write_text('Reached free model rate limit')
+        record = s.state.get('process:1')
+        record['log']=str(log)
+        s.state.set('process:1', record)
+        s.reconcile_workers(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'blocked')
+        self.assertEqual(s.state.get('retry:1'),'quota-requeue')
+        s.admission.reset('swe-2-high')
+        self.runtime.pool_root=Path(self.config['pool_root'])
+        s.state.set('recovery:1', {'branch':'codex/issue-1-1',
+                                   'clone':s.state.job(1)['clone'],
+                                   'work':False,'phase':'captured'})
+        s.retries(self.github.items)
+        self.assertIn(('redispatch','quota-requeue'), self.attributed_events(1))
 
     def test_missing_checks_do_not_merge_or_repair(self):
         s=self.supervisor
@@ -214,6 +307,32 @@ class SupervisorTests(unittest.TestCase):
         s.state.set('last_plan', 0)
         s.planner([], [])
         self.assertIn('Invalid disposition fields', self.runtime.spawn.call_args[0][2])
+
+    def test_planner_publishes_root_when_ready_labels_are_dependency_blocked(self):
+        s = self.supervisor
+        issues = [issue(1)] + [issue(n, dependencies=(1,)) for n in range(2, 22)]
+        issues[0]['labels'] = [{'name': 'agent:blocked'}]
+        candidate = dict(key='new-root', title='Independent repair', scope='Repair dispatch',
+                         acceptance='Dispatch resumes', tests='supervisor test',
+                         dependencies=[], priority=1, milestone='recovery',
+                         group='agent_pool', area='delivery-platform')
+        s.state.set('pending_proposal', {'issues': [candidate], 'dispositions': []})
+        s.github.create_issue = Mock(return_value=99)
+        s.planner(issues, [])
+        s.github.create_issue.assert_called_once()
+        self.assertIsNone(s.state.get('pending_proposal'))
+
+    def test_planner_caps_dispatchable_frontier(self):
+        s = self.supervisor
+        issues = [issue(n) for n in range(1, 21)]
+        candidate = dict(key='new-root', title='Independent repair', scope='Repair dispatch',
+                         acceptance='Dispatch resumes', tests='supervisor test',
+                         dependencies=[], priority=1, milestone='recovery',
+                         group='agent_pool', area='delivery-platform')
+        s.state.set('pending_proposal', {'issues': [candidate], 'dispositions': []})
+        s.github.create_issue = Mock(return_value=99)
+        s.planner(issues, [])
+        s.github.create_issue.assert_not_called()
 
     def test_unowned_running_invocation_pauses(self):
         self.runtime.recover.return_value=[{'invocation':'orphan','key':'unknown'}]

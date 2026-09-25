@@ -137,7 +137,7 @@ fn group(name: &str) -> PumpGroup {
 type Outputs = [Sample; 6];
 
 fn iterate(executor: &mut Executor<'_>, sim: &SimDriver, outputs: &mut Vec<Outputs>) {
-    executor.scan().unwrap();
+    executor.scan();
     sim.step(DT);
     outputs.push([
         sim.read(CMD_1).unwrap(),

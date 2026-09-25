@@ -16,7 +16,17 @@
 //! - the **served history rings** — the per-point [`HistorySample`]
 //!   retention `GET /history` reads;
 //! - the **served journal** — the [`JournalEntry`] retention
-//!   `GET /journal` reads; and
+//!   `GET /journal` reads, plus the pinned run-boundary markers the
+//!   ring's bound would otherwise evict: a `run_boundary` entry is the
+//!   semantic marker the run-attribution contract stands on, so aging
+//!   one out of the tail migrates it to the pinned stream instead of
+//!   dropping it — bounded by the process lifetimes the journal
+//!   records, not by event volume;
+//! - the **routed emission stores** — the bounded
+//!   [`EventRecord`](dcs_core::EventRecord) ring `History`-declared
+//!   emissions land in and the latest-emission view `Latest`-declared
+//!   emissions stand in, both joined into `GET /resources`'s
+//!   per-instance `events` beside the journal tail; and
 //! - the **receipt mirror** — the latest-value copy `GET /receipts`
 //!   answers, refreshed wherever the control-plane lock changes the
 //!   log so a between-scans submission stays immediately visible.
@@ -36,12 +46,15 @@
 //! snapshot's `publication` section ([`PublicationHealth`]) reports
 //! the store's overload accounting as of each publish.
 
+use crate::drain::{DrainHealth, DrainShared, DrainState};
 use dcs_core::{
-    CommandReceipt, HistorySample, JournalEntry, PointHistory, PointId, PublicationHealth, Sample,
-    TelemetrySnapshot, Tick,
+    CommandReceipt, EmittedEvent, EventRecord, EventRetention, HistorySample, JournalEntry,
+    JournalEvent, JournalSinkHealth, JournalSinkState, PointHistory, PointId, PublicationHealth,
+    Sample, TelemetrySnapshot, Tick,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// One immutable post-scan read model — the unit the store publishes.
 ///
@@ -73,6 +86,10 @@ pub struct Publication {
     /// the event delta, including entries the control plane journaled
     /// between scans.
     pub journal: Vec<JournalEntry>,
+    /// The routed emission records appended since the previous
+    /// publication — the `History`/`Latest` classes' delta beside the
+    /// journal's, in routed-append order.
+    pub events: Vec<EventRecord>,
 }
 
 /// The named gap a lagging publication consumer observes: the seqs its
@@ -102,7 +119,10 @@ pub struct PublicationPage {
 
 /// One point's ring of recent samples.
 struct Ring {
-    /// The `seq` the next appended sample takes.
+    /// The `seq` floor the next appended sample takes — the actual
+    /// stamp is the scan's own tick when that lies ahead, so the axis
+    /// rides the run's tick domain and a restart continuing that
+    /// domain keeps numbering instead of silently restarting it.
     next_seq: u64,
     samples: VecDeque<HistorySample>,
 }
@@ -129,6 +149,30 @@ struct Inner {
     rings: BTreeMap<PointId, Ring>,
     /// Served journal entries, oldest first.
     journal: VecDeque<JournalEntry>,
+    /// The `run_boundary` entries the served ring's bound evicted,
+    /// pinned aside rather than dropped: the markers are the
+    /// run-attribution contract's only record that a new process
+    /// lifetime began, so they outlive ordinary event volume. Every
+    /// pinned entry precedes the ring's front in `seq`, and their
+    /// count is bounded by the process lifetimes the journal records —
+    /// one per run — not by `journal_capacity`.
+    boundaries: VecDeque<JournalEntry>,
+    /// The bounded event-history ring: `History`-retained emission
+    /// records, oldest first — the diagnostic stream the resource
+    /// view's `events` joins beside the journal tail.
+    event_history: VecDeque<EventRecord>,
+    /// The latest-emission view: the newest `Latest`-retained record
+    /// per (component, event) identity — each newer emission
+    /// supersedes the last. Bounded by the declared event surface:
+    /// one entry per identity a kind declares.
+    latest_events: BTreeMap<(String, String), EventRecord>,
+    /// Routed emission records appended since the last publish — the
+    /// next publication's event delta, drained there.
+    pending_events: VecDeque<EventRecord>,
+    /// The `seq` the next routed emission takes — one stream numbering
+    /// both routed classes, never reused, so ring eviction reads as a
+    /// numbering gap like the journal's.
+    next_event_seq: u64,
     /// The latest receipt-log mirror — refreshed wherever the
     /// control-plane lock changes the log, so `GET /receipts` answers
     /// the log as it stands, not as of the last scan.
@@ -136,9 +180,20 @@ struct Inner {
     /// History samples appended since the last publish — the next
     /// publication's history delta, drained there.
     pending_history: BTreeMap<PointId, VecDeque<HistorySample>>,
+    /// The serving process's lifetime ordinal — the journal file's run
+    /// count when one is configured, `1` without — stamped on every
+    /// served [`PointHistory`] envelope so a `since`-cursor consumer
+    /// detects a restart whose new tick domain restarted the seq axis:
+    /// the marker answers even when the cursor's filter empties the
+    /// samples list.
+    run: u64,
     /// Journal entries appended since the last publish — the next
     /// publication's event delta, drained there.
     pending_journal: VecDeque<JournalEntry>,
+    /// The `run_boundary` entries the pending delta's bound evicted —
+    /// the same pinning rule the served ring follows, so a publication
+    /// delta keeps its lifetime markers under a between-scans flood.
+    pending_boundaries: VecDeque<JournalEntry>,
     /// The `seq` the next publication takes — never reused.
     next_seq: u64,
     /// Publications produced since the store was created — the
@@ -153,6 +208,66 @@ struct Inner {
     history_capacity: usize,
     /// Journal retention bound.
     journal_capacity: usize,
+    /// Event-history retention bound — the `History`-retained ring's.
+    event_history_capacity: usize,
+    /// The durable journal sink's drain counters — `Some` when a
+    /// journal file is configured: each publish stamps the standing
+    /// backpressure health into the snapshot's
+    /// `publication.journal_sink` section, and a durability-attesting
+    /// answer waits on the same counters. The journal-append
+    /// isolation decision (#942): the file's writer drains off the
+    /// executor lock, so the sink's lag reads here as telemetry,
+    /// never as lock hold.
+    journal_sink: Option<Arc<DrainShared>>,
+}
+
+/// Evicts `ring` down to `capacity` oldest-first, migrating each
+/// evicted `run_boundary` marker into `pinned` instead of dropping it —
+/// the pinning rule the served ring and the pending delta share. Every
+/// migrated entry precedes `ring`'s front in `seq`, so `pinned` stays
+/// `seq`-ordered and entirely older than the ring.
+fn evict_journal(
+    ring: &mut VecDeque<JournalEntry>,
+    pinned: &mut VecDeque<JournalEntry>,
+    capacity: usize,
+) {
+    while ring.len() > capacity {
+        let evicted = ring.pop_front().unwrap();
+        if matches!(evicted.event, JournalEvent::RunBoundary { .. }) {
+            pinned.push_back(evicted);
+        }
+    }
+}
+
+impl Inner {
+    /// Stamps `event` with the routed stream's next `seq` and `tick`,
+    /// appends the record to the pending event delta — bounded like
+    /// the ring — and returns it for the caller's store.
+    fn route(&mut self, event: EmittedEvent, retention: EventRetention, tick: Tick) -> EventRecord {
+        let record = EventRecord {
+            seq: self.next_event_seq,
+            tick,
+            retention,
+            event,
+        };
+        self.next_event_seq += 1;
+        self.pending_events.push_back(record.clone());
+        while self.pending_events.len() > self.event_history_capacity {
+            self.pending_events.pop_front();
+        }
+        record
+    }
+}
+
+/// The store's routed-event streams — what [`Store::routed_events`]
+/// fetches for the resource view's per-instance `events` join.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(crate) struct RoutedEvents {
+    /// The retained `History` ring's records, oldest first.
+    pub history: Vec<EventRecord>,
+    /// The `Latest` view's standing records — the newest emission per
+    /// (component, event) identity — in identity order.
+    pub latest: Vec<EventRecord>,
 }
 
 /// The publication store's shared handle — a monitor and its recorder
@@ -168,11 +283,14 @@ impl Store {
     /// An empty store with the given retention bounds — a
     /// [`Monitor`](crate::Monitor)'s bind publishes the seed read
     /// model immediately after, so a store without any publication
-    /// exists only inside construction.
+    /// exists only inside construction. `run` is the serving process's
+    /// lifetime ordinal, stamped on every served [`PointHistory`].
     pub(crate) fn new(
         history_capacity: usize,
         journal_capacity: usize,
         window_capacity: usize,
+        event_history_capacity: usize,
+        run: u64,
     ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
@@ -180,32 +298,53 @@ impl Store {
                 window: VecDeque::new(),
                 rings: BTreeMap::new(),
                 journal: VecDeque::new(),
+                boundaries: VecDeque::new(),
+                event_history: VecDeque::new(),
+                latest_events: BTreeMap::new(),
+                pending_events: VecDeque::new(),
+                next_event_seq: 1,
                 receipts: Arc::new(Vec::new()),
                 pending_history: BTreeMap::new(),
+                run,
                 pending_journal: VecDeque::new(),
+                pending_boundaries: VecDeque::new(),
                 next_seq: 1,
                 published: 0,
                 coalesced: 0,
                 window_capacity,
                 history_capacity,
                 journal_capacity,
+                event_history_capacity,
+                journal_sink: None,
             })),
         }
     }
 
+    /// Points the store at the journal sink's drain counters — set by
+    /// the recorder when a `journal_file` is configured, before the
+    /// bind-time publication, so every publish stamps the sink's
+    /// standing health into the snapshot's `publication` section.
+    pub(crate) fn set_journal_sink(&self, sink: Arc<DrainShared>) {
+        self.inner.lock().unwrap().journal_sink = Some(sink);
+    }
+
     /// Appends `point`'s fresh scan sample to its served ring and to
     /// the pending history delta the next publication drains. The
-    /// sample's `seq` comes from the ring — never reused, so a
-    /// `since`-cursor consumer detects eviction as a numbering gap.
-    pub(crate) fn push_sample(&self, point: PointId, sample: Sample) {
+    /// sample's `seq` is the scan's own `tick` when that lies ahead of
+    /// the ring's floor — never reused, so a `since`-cursor consumer
+    /// detects eviction as a numbering gap. Riding the run's tick
+    /// domain keeps the axis continuous across a restart that adopts
+    /// the same domain (a checkpoint-adopted standby, a restored state
+    /// file) instead of silently restarting it at 1; a restart that
+    /// begins a new tick domain restarts the axis, which the served
+    /// envelope's `run` marker distinguishes.
+    pub(crate) fn push_sample(&self, point: PointId, tick: Tick, sample: Sample) {
         let mut inner = self.inner.lock().unwrap();
         let capacity = inner.history_capacity;
         let ring = inner.rings.entry(point).or_insert_with(Ring::new);
-        let stamped = HistorySample {
-            seq: ring.next_seq,
-            sample,
-        };
-        ring.next_seq += 1;
+        let seq = ring.next_seq.max(tick.0);
+        let stamped = HistorySample { seq, sample };
+        ring.next_seq = seq + 1;
         ring.samples.push_back(stamped);
         while ring.samples.len() > capacity {
             ring.samples.pop_front();
@@ -220,16 +359,62 @@ impl Store {
     /// Appends one journaled entry to the served ring and to the
     /// pending event delta the next publication drains — incremental,
     /// so a between-scans control-plane event reaches the served
-    /// stream immediately.
+    /// stream immediately. Both streams evict oldest-first past the
+    /// bound, except a `run_boundary` marker never drops: eviction
+    /// migrates it to the pinned stream its serve merges back in
+    /// `seq` order.
     pub(crate) fn push_journal(&self, entry: JournalEntry) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap();
+        let inner = &mut *guard;
         inner.journal.push_back(entry.clone());
-        while inner.journal.len() > inner.journal_capacity {
-            inner.journal.pop_front();
-        }
+        evict_journal(
+            &mut inner.journal,
+            &mut inner.boundaries,
+            inner.journal_capacity,
+        );
         inner.pending_journal.push_back(entry);
-        while inner.pending_journal.len() > inner.journal_capacity {
-            inner.pending_journal.pop_front();
+        evict_journal(
+            &mut inner.pending_journal,
+            &mut inner.pending_boundaries,
+            inner.journal_capacity,
+        );
+    }
+
+    /// Routes a `History`-retained emission: stamped with the routed
+    /// stream's next `seq` and the producing scan's `tick`, appended
+    /// to the bounded event-history ring — evicting oldest-first past
+    /// the declared bound — and to the pending event delta the next
+    /// publication drains.
+    pub(crate) fn push_event_history(&self, event: EmittedEvent, tick: Tick) {
+        let mut inner = self.inner.lock().unwrap();
+        let record = inner.route(event, EventRetention::History, tick);
+        inner.event_history.push_back(record);
+        while inner.event_history.len() > inner.event_history_capacity {
+            inner.event_history.pop_front();
+        }
+    }
+
+    /// Routes a `Latest`-retained emission: stamped like the ring's
+    /// records and stood as the newest record for its (component,
+    /// event) identity — superseding the previous one — also appended
+    /// to the pending event delta the next publication drains.
+    pub(crate) fn push_latest_event(&self, event: EmittedEvent, tick: Tick) {
+        let mut inner = self.inner.lock().unwrap();
+        let key = (event.component.clone(), event.event.clone());
+        let record = inner.route(event, EventRetention::Latest, tick);
+        inner.latest_events.insert(key, record);
+    }
+
+    /// The served routed-event streams in one fetch: the retained
+    /// `History` ring, oldest first, and the `Latest` view — the
+    /// newest standing record per (component, event) identity — keyed
+    /// by identity order. The resource view joins both beside the
+    /// journal tail.
+    pub(crate) fn routed_events(&self) -> RoutedEvents {
+        let inner = self.inner.lock().unwrap();
+        RoutedEvents {
+            history: inner.event_history.iter().cloned().collect(),
+            latest: inner.latest_events.values().cloned().collect(),
         }
     }
 
@@ -268,7 +453,9 @@ impl Store {
             coalesced: inner.coalesced,
             depth: (inner.window.len() + 1).min(inner.window_capacity) as u64,
             window: inner.window_capacity as u64,
+            journal_sink: inner.journal_sink_health(),
         });
+        let run = inner.run;
         let publication = Arc::new(Publication {
             seq,
             tick,
@@ -279,10 +466,18 @@ impl Store {
                 .iter_mut()
                 .map(|(&point, samples)| PointHistory {
                     point,
+                    run,
                     samples: samples.drain(..).collect(),
                 })
                 .collect(),
-            journal: inner.pending_journal.drain(..).collect(),
+            journal: inner
+                .pending_boundaries
+                .drain(..)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .chain(inner.pending_journal.drain(..))
+                .collect(),
+            events: inner.pending_events.drain(..).collect(),
         });
         inner.window.push_back(publication.clone());
         while inner.window.len() > inner.window_capacity {
@@ -324,6 +519,7 @@ impl Store {
             .into_iter()
             .map(|point| PointHistory {
                 point,
+                run: inner.run,
                 samples: inner
                     .rings
                     .get(&point)
@@ -340,13 +536,16 @@ impl Store {
     }
 
     /// Retained journal entries with a `seq` above `since`, oldest
-    /// first.
+    /// first — the pinned run-boundary markers ahead of the ring's
+    /// tail. Every pinned `seq` precedes the ring's front, so the
+    /// concatenation stays in `seq` order and an evicted stretch still
+    /// reads as a numbering gap.
     pub(crate) fn journal(&self, since: u64) -> Vec<JournalEntry> {
-        self.inner
-            .lock()
-            .unwrap()
-            .journal
+        let inner = self.inner.lock().unwrap();
+        inner
+            .boundaries
             .iter()
+            .chain(inner.journal.iter())
             .filter(|entry| entry.seq > since)
             .cloned()
             .collect()
@@ -400,6 +599,161 @@ impl Store {
             coalesced: inner.coalesced,
             depth: inner.window.len() as u64,
             window: inner.window_capacity as u64,
+            journal_sink: inner.journal_sink_health(),
         }
+    }
+
+    /// The journal sink's live drain report — `None` when no journal
+    /// file is configured.
+    pub(crate) fn journal_sink_health(&self) -> Option<JournalSinkHealth> {
+        self.inner.lock().unwrap().journal_sink_health()
+    }
+
+    /// Waits — at most `timeout` — for the journal sink's writer to
+    /// have appended or accounted every queued record, returning the
+    /// standing health either way: `drained + lost == accepted` says
+    /// the durable file caught up. `None` when no journal file is
+    /// configured. The wait rides the caller's thread alone — a
+    /// durability-attesting answer or a test's settle point, never
+    /// the executor lock.
+    pub(crate) fn wait_journal_drained(&self, timeout: Duration) -> Option<JournalSinkHealth> {
+        let probe = self.inner.lock().unwrap().journal_sink.clone();
+        probe.map(|shared| shared.wait_drained(timeout).into())
+    }
+}
+
+impl Inner {
+    /// The journal sink's standing health for the publication stamp —
+    /// read under the inner lock from the drain's lock-free counters.
+    fn journal_sink_health(&self) -> Option<JournalSinkHealth> {
+        self.journal_sink
+            .as_ref()
+            .map(|shared| shared.health().into())
+    }
+}
+
+impl From<DrainHealth> for JournalSinkHealth {
+    fn from(health: DrainHealth) -> Self {
+        Self {
+            state: match health.state {
+                DrainState::Healthy => JournalSinkState::Healthy,
+                DrainState::Lagging => JournalSinkState::Lagging,
+                DrainState::Failed => JournalSinkState::Failed,
+            },
+            accepted: health.accepted,
+            drained: health.drained,
+            lost: health.lost,
+            depth: health.depth,
+            high_water: health.high_water,
+            capacity: health.capacity,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dcs_core::{EventValue, IoHealth, Value};
+    use std::collections::BTreeMap;
+
+    /// A bare snapshot — the publication only carries it.
+    fn snapshot(tick: Tick) -> TelemetrySnapshot {
+        TelemetrySnapshot {
+            tick,
+            points: Vec::new(),
+            components: Vec::new(),
+            descriptors: Vec::new(),
+            io_health: IoHealth::default(),
+            forces: Vec::new(),
+            parameters: Vec::new(),
+            command_queue: Default::default(),
+            command_verdicts: Vec::new(),
+            publication: None,
+        }
+    }
+
+    /// One emission of `event` from `component` carrying `n` — the
+    /// routed store's test fixture.
+    fn emission(component: &str, event: &str, n: i64) -> EmittedEvent {
+        EmittedEvent {
+            event: event.to_string(),
+            component: component.to_string(),
+            fields: [("n".to_string(), EventValue::Value(Value::Int(n)))]
+                .into_iter()
+                .collect::<BTreeMap<_, _>>(),
+        }
+    }
+
+    #[test]
+    fn history_emissions_evict_oldest_first_at_the_bound() {
+        // A two-slot ring keeps the newest records; the never-reused
+        // seqs show the evicted stretch as a numbering gap.
+        let store = Store::new(0, 0, 4, 2, 1);
+        for n in 1..=4 {
+            store.push_event_history(emission("em", "shift", n), Tick(n as u64));
+        }
+        let routed = store.routed_events();
+        assert_eq!(
+            routed
+                .history
+                .iter()
+                .map(|record| (record.seq, record.tick))
+                .collect::<Vec<_>>(),
+            vec![(3, Tick(3)), (4, Tick(4))]
+        );
+        assert!(
+            routed
+                .history
+                .iter()
+                .all(|record| record.retention == EventRetention::History)
+        );
+    }
+
+    #[test]
+    fn latest_emissions_stand_one_record_per_identity() {
+        // Each newer emission supersedes the identity's standing
+        // record; a second identity sits beside it. The standing
+        // record carries the superseding emission's seq and tick.
+        let store = Store::new(0, 0, 4, 8, 1);
+        for n in 1..=3 {
+            store.push_latest_event(emission("em", "beat", n), Tick(n as u64));
+        }
+        store.push_latest_event(emission("other", "beat", 9), Tick(4));
+
+        let routed = store.routed_events();
+        assert_eq!(routed.latest.len(), 2);
+        let em = &routed.latest[0];
+        assert_eq!(em.event.component, "em");
+        assert_eq!(em.event.event, "beat");
+        assert_eq!((em.seq, em.tick), (3, Tick(3)));
+        assert_eq!(
+            em.event.fields["n"],
+            EventValue::Value(Value::Int(3)),
+            "the newest emission superseded"
+        );
+        assert_eq!(routed.latest[1].event.component, "other");
+        // Both classes draw on the one routed-event stream's seqs.
+        assert!(routed.latest.iter().map(|record| record.seq).eq([3, 4]));
+    }
+
+    #[test]
+    fn routed_emissions_ride_the_publication_delta() {
+        // Every routed emission — both classes — appends to the event
+        // delta the next publication drains, in routed order.
+        let store = Store::new(0, 0, 4, 8, 1);
+        store.push_event_history(emission("em", "shift", 1), Tick(1));
+        store.push_latest_event(emission("em", "beat", 1), Tick(1));
+        let publication = store.publish(Tick(1), snapshot(Tick(1)), &[]);
+        assert_eq!(
+            publication
+                .events
+                .iter()
+                .map(|record| (record.retention, record.seq))
+                .collect::<Vec<_>>(),
+            vec![(EventRetention::History, 1), (EventRetention::Latest, 2)]
+        );
+        // Drained: the next publication carries no stale delta.
+        let publication = store.publish(Tick(2), snapshot(Tick(2)), &[]);
+        assert!(publication.events.is_empty());
     }
 }

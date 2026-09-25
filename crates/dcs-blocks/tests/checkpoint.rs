@@ -84,7 +84,7 @@ fn pid(name: &str) -> Pid {
 /// One loop iteration: the executor scans, the simulated process
 /// advances, and the valve output the driver holds is recorded.
 fn iterate(executor: &mut Executor<'_>, sim: &SimDriver, outputs: &mut Vec<Sample>) {
-    executor.scan().unwrap();
+    executor.scan();
     sim.step(DT);
     outputs.push(sim.read(OUT).unwrap());
 }
@@ -324,7 +324,7 @@ fn stateless_components_and_drivers_are_unaffected() {
     driver.write(OPERATOR, Value::Float(9.0)).unwrap();
     driver.write(SELECT, Value::Bool(true)).unwrap();
     let mut executor = Executor::new(&driver, map.clone(), vec![Box::new(block())]).unwrap();
-    executor.scan().unwrap();
+    executor.scan();
     let checkpoint = executor.checkpoint();
 
     assert!(checkpoint.components["ovr"].is_empty());
@@ -350,7 +350,7 @@ fn stateless_components_and_drivers_are_unaffected() {
         None,
     )
     .unwrap();
-    restored.scan().unwrap();
+    restored.scan();
     assert_eq!(restored.tick(), Tick(2));
     assert_eq!(standby_driver.read(FIELD).unwrap().value, Value::Float(9.0));
 }
