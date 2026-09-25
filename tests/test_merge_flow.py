@@ -202,6 +202,154 @@ class RepairCauseTests(unittest.TestCase):
         self.assertEqual(repair["redispatches_by_cause"], {})
 
 
+def blocked_job(number, updated, error):
+    return dict(job(number, NOW - 3 * WEEK, updated), status="blocked",
+                error=error)
+
+
+class FlowAttributionTests(unittest.TestCase):
+    """Per-window dispatch/park/merge attribution from the work ledger."""
+
+    def test_dispatches_without_merges(self):
+        t = NOW - 1000
+        commits = merge_flow.parse_git_log(git_log_text(
+            ("a", NOW - 50, "Implement issue #7: lone merge (#70)", ""),))
+        events = [event("reserved", t, 1),
+                  event("reserved", t + 10, 2),
+                  event("retry-reserved", t + 20, 2),
+                  event("merged-and-closed", t + 30, 3)]
+        report = merge_flow.window_report(commits, NOW - WEEK, NOW, {}, {},
+                                          events)
+        flow = report["flow"]
+        self.assertEqual(flow["dispatches"], 3)
+        self.assertEqual(flow["first_dispatches"], 2)
+        self.assertEqual(flow["retry_dispatches"], 1)
+        self.assertEqual(flow["merged_and_closed"], 1)
+        self.assertEqual(flow["parked"], 0)
+        self.assertEqual(flow["still_blocked"], 0)
+        # The git-history merge count and the ledger completion count are
+        # reported independently.
+        self.assertEqual(report["merges"], 1)
+
+    def test_park_heavy_window_classifies_mixed_causes(self):
+        boundary = NOW - WEEK
+        t = NOW - 1000
+        events = [
+            # issue 1: timeout read from the terminal recorded error
+            event("reserved", t, 1),
+            event("status:blocked", t + 10, 1),
+            # issue 2: timeout read from the attempt's invocation outcome;
+            # the operator retry recorded worker-failure
+            event("reserved", t, 2),
+            event("invocation:timeout", t + 20, 2),
+            event("status:blocked", t + 30, 2),
+            event("retry-reserved", t + 40, 2),
+            event("redispatch", t + 40, 2, "worker-failure"),
+            # issue 3: quota-kill, requeued by the quota-requeue redispatch
+            event("reserved", t, 3),
+            event("invocation:rate", t + 50, 3),
+            event("status:blocked", t + 60, 3),
+            event("retry-reserved", t + 70, 3),
+            event("redispatch", t + 70, 3, "quota-requeue"),
+            # issue 4: stall-kill, still parked
+            event("reserved", t, 4),
+            event("status:blocked", t + 80, 4),
+            # issue 5: repair budget exhausted on CI failures
+            event("reserved", t, 5),
+            event("repair", t + 90, 5, "ci-failure"),
+            event("repair", t + 91, 5, "ci-failure"),
+            event("repair", t + 92, 5, "ci-failure"),
+            event("status:blocked", t + 93, 5),
+            # issue 6: repair budget exhausted on a merge conflict
+            event("reserved", t, 6),
+            event("status:blocked", t + 100, 6),
+            # issue 7: repair budget exhausted; cause carried by the ledger
+            event("reserved", t, 7),
+            event("repair", t + 110, 7, "publish-error"),
+            event("repair", t + 111, 7, "publish-error"),
+            event("repair", t + 112, 7, "publish-error"),
+            event("status:blocked", t + 113, 7),
+            # issue 8: generic invocation failure
+            event("reserved", t, 8),
+            event("invocation:failure", t + 120, 8),
+            event("status:blocked", t + 121, 8),
+            # issue 9: a park matching no known class
+            event("reserved", t, 9),
+            event("status:blocked", t + 130, 9),
+            # issue 10: parked in the previous window, still blocked
+            event("reserved", boundary - 20, 10),
+            event("status:blocked", boundary - 10, 10),
+            # issue 11: completed in-window
+            event("reserved", t, 11),
+            event("merged-and-closed", t + 200, 11),
+            # issue 12: parked before the window pair, still blocked
+            event("status:blocked", NOW - 3 * WEEK, 12),
+        ]
+        jobs = {
+            1: blocked_job(1, t + 10,
+                           'Local agent failed: {"status": "timeout", '
+                           '"exit_code": -15}'),
+            4: blocked_job(4, t + 80,
+                           'Local agent failed: {"status": "failed", '
+                           '"error": "No agent output for 190s; treating '
+                           'as hang"}'),
+            5: blocked_job(5, t + 93, "Repair limit exhausted: CI failed. "
+                           "Inspect gh pr checks"),
+            6: blocked_job(6, t + 100, "Repair limit exhausted: Resolve the "
+                           "existing merge conflict with origin/main."),
+            7: blocked_job(7, t + 113, "Repair limit exhausted: push "
+                           "rejected by remote"),
+            8: blocked_job(8, t + 121, 'Local agent failed: '
+                           '{"status": "failed", "exit_code": 1}'),
+            9: blocked_job(9, t + 130, "Pull request closed without merging"),
+            10: blocked_job(10, boundary - 10,
+                            'Local agent failed: {"status": "failed"}'),
+        }
+        bounds = merge_flow.window_bounds(NOW, WEEK)
+        cur = merge_flow.window_report([], *bounds["current"], {}, jobs,
+                                       events)
+        prev = merge_flow.window_report([], *bounds["previous"], {}, jobs,
+                                        events)
+        flow = cur["flow"]
+        self.assertEqual(flow["dispatches"], 12)
+        self.assertEqual(flow["first_dispatches"], 10)
+        self.assertEqual(flow["retry_dispatches"], 2)
+        self.assertEqual(flow["parked"], 9)
+        self.assertEqual(flow["merged_and_closed"], 1)
+        self.assertEqual(flow["park_causes"], {
+            "quota-kill": 1, "timeout": 2, "stall-kill": 1, "ci-failure": 1,
+            "merge-conflict": 1, "publish-error": 1, "worker-failure": 1,
+            "other": 1})
+        # Seven in-window parks stayed parked; issues 10 and 12 were parked
+        # before the window and still sit blocked at its end.
+        self.assertEqual(flow["still_blocked"], 9)
+        previous = prev["flow"]
+        self.assertEqual(previous["dispatches"], 1)
+        self.assertEqual(previous["parked"], 1)
+        self.assertEqual(previous["park_causes"]["worker-failure"], 1)
+        self.assertEqual(previous["merged_and_closed"], 0)
+        self.assertEqual(previous["still_blocked"], 2)
+
+    def test_empty_window_reports_zeros(self):
+        report = merge_flow.window_report([], NOW - WEEK, NOW, {}, {}, [])
+        flow = report["flow"]
+        self.assertEqual(flow["dispatches"], 0)
+        self.assertEqual(flow["first_dispatches"], 0)
+        self.assertEqual(flow["retry_dispatches"], 0)
+        self.assertEqual(flow["parked"], 0)
+        self.assertEqual(flow["merged_and_closed"], 0)
+        self.assertEqual(flow["still_blocked"], 0)
+        self.assertEqual(flow["park_causes"],
+                         {cause: 0 for cause in merge_flow.PARK_CAUSES})
+        none_events = merge_flow.window_report([], NOW - WEEK, NOW, {}, {})
+        self.assertEqual(none_events["flow"], flow)
+        text = merge_flow.render_text(merge_flow.build_report(
+            [], [], [], NOW, 7, []))
+        self.assertIn("dispatches=0", text)
+        self.assertIn("park_causes:", text)
+        self.assertIn("limitation:", text)
+
+
 class BacklogTests(unittest.TestCase):
     def test_ready_blocked_share_and_dependency_blocked(self):
         issues = [

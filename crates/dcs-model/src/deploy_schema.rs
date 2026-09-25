@@ -45,6 +45,10 @@
 //!
 //! - a `standby` address naming a declared controller at its declared
 //!   listen port;
+//! - at most one duty controller — an entry without `standby` — per
+//!   deployment: the manifest's one `plant` is one field whose
+//!   single-writer claim admits one field-owning run (decision 99),
+//!   and a count over an absent key is beyond the vocabulary;
 //! - each `members` entry naming a declared `controllers` entry;
 //! - memberships disjoint across pairs, and pair names unique among
 //!   non-identical pairs;
