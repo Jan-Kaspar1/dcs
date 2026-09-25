@@ -80,16 +80,19 @@
 //! rides the attributed envelope `POST /command` accepts onto the
 //! returned [`CommandReceipt`] and so into the journaled
 //! `CommandSettled` entry; an invocation declaring neither submits the
-//! bare [`Command`] body and journals unattributed, exactly as before. `promote`/`demote` are switch
-//! requests outside the `Command` path — the landed contract carries
-//! no actor on them, so they take no flag and journal their role
-//! change unattributed.
+//! bare [`Command`] body and journals unattributed, exactly as before.
+//! `promote`/`demote` carry the same declared-actor convention to the
+//! switch endpoints: `POST /promote` and `POST /demote` accept the
+//! attributed `{"actor":…}` body, and the `RoleChanged` entries a
+//! requested switch journals carry it — while a failover
+//! self-promotion's entries journal `origin: failover` instead, so an
+//! automatic takeover never reads as an unattributed request.
 
 use dcs_core::{
     Command, CommandOutcome, CommandReceipt, ComponentResources, PointId, ResourceEvent,
     ResourceView, RoleReport, SwitchError, Value, ValueKind,
 };
-use dcs_monitor::{MonitorClient, PairClient};
+use dcs_monitor::{MonitorClient, PairClient, SwitchRequest};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io;
@@ -133,19 +136,19 @@ operator commands:
                               invoke a component's declared command;
                               arguments parse per the served schema's
                               declared request kinds
-  promote                     promote a converged standby to active
-  demote                      demote the field-owning peer to standby
+  promote [--actor <name>]    promote a converged standby to active
+  demote [--actor <name>]     demote the field-owning peer to standby
   scan <n>                    run <n> scans; only a driven, unpaced
                               instance accepts — a paced one refuses
 
-actor: --actor <name> declares the identity the command's receipt and
-journaled CommandSettled entry carry; DCS_ACTOR is the configured
-default the flag overrides, and an invocation declaring neither submits
+actor: --actor <name> declares the identity the submission carries: a
+command's receipt and journaled CommandSettled entry, a switch's
+journaled RoleChanged entries. DCS_ACTOR is the configured default the
+flag overrides, and an invocation declaring neither submits
 unattributed — never a rejection. --reason <text> declares the reason
-the same record carries — required by a point declared requires_reason,
-advisory elsewhere — with no environment default: a reason belongs to
-one submission. promote/demote carry no actor: the switch-request
-contract has no field for one.
+the attributed command envelope carries — required by a point declared
+requires_reason, advisory elsewhere — with no environment default: a
+reason belongs to one submission.
 
 values: <value> parses per the declared value kind — true|false for
 Bool, an integer for Int, a finite number for Float — declared by the
@@ -287,8 +290,14 @@ enum Action {
         actor: Option<String>,
         reason: Option<String>,
     },
-    Promote,
-    Demote,
+    Promote {
+        /// The declared actor the switch request carries.
+        actor: Option<String>,
+    },
+    Demote {
+        /// The declared actor the switch request carries.
+        actor: Option<String>,
+    },
     Scan {
         scans: u64,
     },
@@ -417,15 +426,38 @@ fn parse(args: &[String]) -> Result<(&str, Action), String> {
                 _ => return Err(usage(format!("wrong arguments for {command:?}"))),
             }
         }
-        ("promote", []) => Action::Promote,
-        ("demote", []) => Action::Demote,
+        ("promote", rest) => {
+            let CommandArgs {
+                positional,
+                actor,
+                reason,
+            } = command_args(rest).map_err(usage)?;
+            if reason.is_some() {
+                return Err(usage("--reason applies to command submissions".to_string()));
+            }
+            match positional.as_slice() {
+                [] => Action::Promote { actor },
+                _ => return Err(usage(format!("wrong arguments for {command:?}"))),
+            }
+        }
+        ("demote", rest) => {
+            let CommandArgs {
+                positional,
+                actor,
+                reason,
+            } = command_args(rest).map_err(usage)?;
+            if reason.is_some() {
+                return Err(usage("--reason applies to command submissions".to_string()));
+            }
+            match positional.as_slice() {
+                [] => Action::Demote { actor },
+                _ => return Err(usage(format!("wrong arguments for {command:?}"))),
+            }
+        }
         ("scan", [scans]) => Action::Scan {
             scans: parse_count(scans).map_err(usage)?,
         },
-        (
-            "snapshot" | "signals" | "schema" | "role" | "receipts" | "promote" | "demote" | "scan",
-            _,
-        ) => {
+        ("snapshot" | "signals" | "schema" | "role" | "receipts" | "scan", _) => {
             return Err(usage(format!("wrong arguments for {command:?}")));
         }
         _ => return Err(usage(format!("unknown command {command:?}"))),
@@ -730,8 +762,10 @@ fn execute(client: &MonitorClient, addr: SocketAddr, action: &Action) -> Result<
                 reason.as_deref(),
             )
         }
-        Action::Promote => switchover(client, addr, "/promote", "promote"),
-        Action::Demote => switchover(client, addr, "/demote", "demote"),
+        Action::Promote { actor } => {
+            switchover(client, addr, "/promote", "promote", actor.as_deref())
+        }
+        Action::Demote { actor } => switchover(client, addr, "/demote", "demote", actor.as_deref()),
         Action::Scan { scans } => print_json(
             &client.advance(*scans).map_err(|e| transport(addr, e))?,
             addr,
@@ -951,15 +985,31 @@ fn command(
 /// `POST /promote` or `POST /demote`: prints the post-change
 /// [`RoleReport`] on success; a `409` refusal decodes the named
 /// [`SwitchError`] the endpoint answered and fails the invocation with
-/// it.
+/// it. `actor` is the requester's declared identity from
+/// `--actor`/`DCS_ACTOR`: `Some` sends the attributed `{"actor":…}`
+/// body the journaled `RoleChanged` entries carry, `None` sends the
+/// bare request and journals unattributed.
 fn switchover(
     client: &MonitorClient,
     addr: SocketAddr,
     path: &str,
     verb: &str,
+    actor: Option<&str>,
 ) -> Result<String, Failure> {
+    let body = actor
+        .map(|actor| {
+            serde_json::to_string(&SwitchRequest {
+                actor: Some(actor.to_string()),
+            })
+            .map_err(|error| {
+                Failure::message(format!(
+                    "dcs-ctl: {addr}: cannot encode the {verb} request: {error}"
+                ))
+            })
+        })
+        .transpose()?;
     let (status, body) = client
-        .request("POST", path, None)
+        .request("POST", path, body.as_deref())
         .map_err(|e| transport(addr, e))?;
     match status {
         200 => {
