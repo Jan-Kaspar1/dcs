@@ -48,11 +48,12 @@
 //!    managed high-level alarm at the declared `high`, the divergence
 //!    detector's composed rate-of-rise annunciation latches, and the
 //!    operator ack clears `unacknowledged` while the hazard stands.
-//! 5. **Bad and stale measurement** — the remote repeater's declared
-//!    silence presents `Uncertain(Stale)` past `stale_after_ticks`,
-//!    never a healthy last-known value; the `Bad` primary flips the
-//!    failover onto it (`backup_active` asserts and alarms), and the
-//!    quality transitions journal as `QualityChanged` entries.
+//! 5. **Bad and stale measurement** — the remote repeater's field
+//!    reports its held reading `Uncertain(Stale)` while its upstream
+//!    stops updating, never a healthy last-known value; the `Bad`
+//!    primary flips the failover onto it (`backup_active` asserts and
+//!    alarms), and the quality transitions journal as `QualityChanged`
+//!    entries.
 //! 6. **The protection boundary (decision 77)** — the layer's reported
 //!    states (`sis-available`/`sis-fault`/`sis-trip`/`sis-proof-test`)
 //!    land on schedule; the dynamics' `threshold` element drives the
@@ -888,13 +889,24 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
                 );
             }
             // The operator demands the gate safe — the field fault
-            // holds it confirmed open.
-            13 => issued.push(command(
-                &active,
-                layout.gate_manual_demand,
-                ValueKind::Float,
-                Value::Float(0.0),
-            )),
+            // holds it confirmed open — and the remote repeater's field
+            // reports its held reading stale: the shared plant keeps
+            // scanning the channel, so the frozen upstream declares
+            // its own served quality degraded.
+            13 => {
+                issued.push(command(
+                    &active,
+                    layout.gate_manual_demand,
+                    ValueKind::Float,
+                    Value::Float(0.0),
+                ));
+                field
+                    .inject_fault(
+                        layout.level_remote,
+                        Fault::Quality(Quality::Uncertain(QualityReason::Stale)),
+                    )
+                    .unwrap();
+            }
             // The primary level transmitter drops off the DCS's I/O —
             // the failover switches to the frozen remote repeater —
             // and the high-level trip is acknowledged. The fault is
@@ -934,6 +946,9 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
             29 => {
                 issued.push(release_unmanaged(&active, &layout.backup_active_alarm));
                 issued.push(release_unmanaged(&active, &layout.backup_unhealthy_alarm));
+                // The repeater's upstream recovers: the field clears
+                // the declared stale for the next scan's read.
+                field.clear_fault(layout.level_remote).unwrap();
             }
             // Shelving: the request stands past the declared bound —
             // `shelved` asserts inside it and expires while the request
@@ -1169,8 +1184,8 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
     assert!(trace[..24].iter().any(|row| bool_of(row, "deviating")));
     assert!(trace[..25].iter().any(|row| alarm_pair(row, "ror", 1)));
 
-    // Bad and stale data: the repeater's last declared update stands —
-    // past `stale_after_ticks` the point presents `Uncertain(Stale)`,
+    // Bad and stale data: the repeater's held reading stands — the
+    // field's own declared `Uncertain(Stale)` on the frozen upstream —
     // never a healthy last-known value.
     assert_eq!(
         serde_json::from_value::<Quality>(

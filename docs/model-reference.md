@@ -149,7 +149,7 @@ carried by the controller's scan image — decision 14).
 | `channel` | `{"device": <device id>, "name": "<channel>"}` | Optional. Present → a field point: the device must be declared (`ValidationError::UnknownDevice`), the channel must exist on it (`UnknownChannel`), and the point's `direction` and `value_type` must agree with the channel's (`ChannelDirectionMismatch`, `ChannelTypeMismatch`). Absent → an internal point. |
 | `initial` | tagged `Value`, e.g. `{"float": 25.0}` | Optional; required when `channel` is absent (`MissingInitial`), and its variant must equal `value_type` (`InitialKindMismatch`). Forbidden when `channel` is present (`FieldInitial`) — the field owns a bound point's value. |
 | `writable` | bool | Optional; unset means not writable. Valid on `in` points only — `writable` on an `out` point is `ValidationError::WritableOut`. |
-| `stale_after_ticks` | u64 | Optional; unset means no freshness check. Valid on field-bound `in` points only — on an `out` point it is `ValidationError::StaleOut`, on a channel-less internal point `StaleInternal`. |
+| `stale_after_ticks` | u64 | Optional; unset means no freshness check. Valid on field-bound `in` points only — on an `out` point it is `ValidationError::StaleOut`, on a channel-less internal point `StaleInternal`. A field-bound `in` point that leaves it unset is lint `field_input_without_freshness_budget`. |
 | `journaled` | bool | Optional; unset means the point's value transitions stay out of the durable journal. Valid on `bool`/`int` points of either direction — `journaled` on a `float` point is `ValidationError::JournaledFloat`. |
 
 ### Internal points
@@ -253,6 +253,13 @@ that returns a changed report every read, or one whose report never
 varies — simply makes the declaration inert or always-stale; declare
 the field only where the source distinguishes fresh samples from held
 ones.
+
+A channel-bound `in` point that declares no budget is lint
+`field_input_without_freshness_budget`: the stale-data honesty rule
+binds only where the model declares it, so an undeclared field input
+keeps serving a stalled source's last-known value as `Good` and nothing
+else names the omission. The finding is advisory — budgets stay opt-in
+per point — not a validation error.
 
 ### `journaled` and the durable transition record
 
@@ -1383,7 +1390,7 @@ next sees it; lint never blocks anything.
 | Version | `PlantModel::load` | `LoadError::UnsupportedVersion` — `version` other than `MODEL_VERSION` |
 | Validation | `PlantModel::validate` (inside `load`, or standalone for programmatically built models) | Every `ValidationError`, all reported together: `DuplicateId`, `UnknownDevice`, `UnknownChannel`, `ChannelDirectionMismatch`, `ChannelTypeMismatch`, `FieldInitial`, `MissingInitial`, `InitialKindMismatch`, `WritableOut`, `UnknownSource`, `UnknownPoint`, `UnknownComponent`, `UnknownPort`, `ConnectionDirectionMismatch`, `ConnectionTypeMismatch` |
 | Assembly | `dcs_assembly::resolve_drivers` + `DriverPlan::build` + `assemble` | Every `AssemblyError`: kind resolution — `UnknownDeviceKind`, `UnknownComponentKind`; device `parameters` and backends — `InvalidDeviceParameters`, `DeviceBackend`; the merged local sim map's consistency — `InvalidChannelMap` (`ConfigError`); port wiring — `PortBoundTwice`, `UnboundPort`; requirement verification — `UnmappedPoint`, `DirectionMismatch`, `TypeMismatch`; constructor failures — `Component`; executor wiring — `Wiring`; and `UnroutedPoint`, `InvalidInternalPoint`, `MixedPointLink`, `UnresolvedEndpoint`, the mirrors reachable for a model assembled without validation |
-| Lint | `PlantModel::lint`, `dcs-model lint` | Advisory `LintFinding`s over a validated document, in rule order: `point_without_signal`, `signal_missing_unit`, `signal_missing_description`, `signal_missing_group`, `writable_field_point`, `unbound_channel`. Findings exit zero unless `--strict`; a document failing validation is never linted |
+| Lint | `PlantModel::lint`, `dcs-model lint` | Advisory `LintFinding`s over a validated document, in rule order: `point_without_signal`, `signal_missing_unit`, `signal_missing_description`, `signal_missing_group`, `writable_field_point`, `field_input_without_freshness_budget`, `unbound_channel`. Findings exit zero unless `--strict`; a document failing validation is never linted |
 | Dynamics merge | `dcs-plant-server --dynamics`, or a rig extending a `ChannelMap` | A malformed document is a startup parse error; each element's merge is `ChannelMap::validate` — `ConfigError` naming the element index and the point it drives |
 
 The deliberate split: the model validates structure — ids, references,
@@ -1393,10 +1400,11 @@ that depends on the registered kinds: which `kind` strings exist, what
 `parameters` each kind accepts, whether every port is bound, and whether
 each constructed component's declared I/O matches the point map. Lint
 checks engineering completeness the contract does not require — signals
-for points, display metadata, the writable field surface, dead channel
-declarations. Runtime failures are a different surface entirely: a
-component `step` error lands in `ComponentDiagnostics`, and driver
-problems surface as `IoError`s — never as document errors.
+for points, display metadata, the writable field surface, undeclared
+input freshness budgets, dead channel declarations. Runtime failures
+are a different surface entirely: a component `step` error lands in
+`ComponentDiagnostics`, and driver problems surface as `IoError`s —
+never as document errors.
 
 ## Authoring and checking a document
 

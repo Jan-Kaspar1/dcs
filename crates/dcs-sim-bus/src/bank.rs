@@ -5,8 +5,11 @@
 //! register-map analogue of `dcs-sim`'s point storage, addressed by
 //! `u16` register index rather than by point. Writes stamp the stored
 //! sample with the bank's current tick; the tick advances only on
-//! [`step`](RegisterBank::step), so identical write and step sequences
-//! produce identical samples on every run. A stored sample's quality is
+//! [`step`](RegisterBank::step), which also re-stamps every register no
+//! element drives — the field's scan stamp, so a stepped bank keeps a
+//! held register's report fresh — and identical write and step
+//! sequences produce identical samples on every run. A stored sample's
+//! quality is
 //! `Good` unless a development-tooling injection stamps it otherwise —
 //! see [`inject_quality`](RegisterBank::inject_quality).
 //!
@@ -519,6 +522,10 @@ impl RegisterBank {
     /// lifetime, shared by every attachment like the `dcs-sim-net`
     /// plant — never checkpointed controller state.
     ///
+    /// A register no element drives carries its stored value and
+    /// quality forward at the new tick — the field re-scanned, so the
+    /// served report is fresh even though nothing wrote it.
+    ///
     /// `dt` must be finite and non-negative.
     ///
     /// # Panics
@@ -597,10 +604,12 @@ mod tests {
             bank.read(0).unwrap(),
             Sample::good(Value::Float(3.5), Tick(1))
         );
-        // A register untouched by the step keeps its stamped tick.
+        // A register untouched by any write still re-stamps at the
+        // step — the field's scan stamp, so a stepped bank reports the
+        // held value fresh.
         assert_eq!(
             bank.read(4).unwrap(),
-            Sample::good(Value::Bool(false), Tick(0))
+            Sample::good(Value::Bool(false), Tick(1))
         );
     }
 

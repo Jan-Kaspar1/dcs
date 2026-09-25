@@ -21,7 +21,8 @@
       "id": 10,
       "direction": "in",
       "value_type": "float",
-      "channel": { "device": 1, "name": "ch0" }
+      "channel": { "device": 1, "name": "ch0" },
+      "stale_after_ticks": 5
     },
     {
       "id": 11,

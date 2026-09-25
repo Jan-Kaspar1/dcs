@@ -368,6 +368,8 @@ fn lint_reports_each_finding_class_naming_its_element() {
         "signal_missing_group signal 101 \"reactor-level-switch\": declares no group",
         "signal_missing_description signal 102 \"level-setpoint\": declares no description",
         "writable_field_point io_point 10: writable field point bound to channel \"ch0\" on device 1 (operator surface)",
+        "field_input_without_freshness_budget io_point 10: declares no stale_after_ticks freshness budget; a stalled field source reads as healthy last-known",
+        "field_input_without_freshness_budget io_point 12: declares no stale_after_ticks freshness budget; a stalled field source reads as healthy last-known",
         "unbound_channel device 1 channel \"ch7\": is bound by no io_point",
         "unbound_channel device 2 channel \"ch3\": is bound by no io_point",
     ] {
@@ -379,6 +381,15 @@ fn lint_reports_each_finding_class_naming_its_element() {
         !stdout.contains("writable_field_point io_point 13"),
         "{stdout}"
     );
+    // Freshness budgets bind only on channel-bound `in` points: the
+    // `out` point (11) and the internal point (13) never carry the
+    // advisory.
+    for point in ["io_point 11", "io_point 13"] {
+        assert!(
+            !stdout.contains(&format!("field_input_without_freshness_budget {point}")),
+            "{point} flagged:\n{stdout}"
+        );
+    }
 }
 
 #[test]

@@ -4366,6 +4366,73 @@ mod tests {
     }
 
     #[test]
+    fn a_stepping_sim_keeps_a_budgeted_bare_input_fresh() {
+        // The QA finding's local-sim shape end to end: a bare `sim`
+        // channel — no loopback routing onto it, no element output
+        // owning it — re-stamps its held sample every plant step, so
+        // the report each scan reads changes and the declared
+        // `stale_after_ticks` budget never trips while the field
+        // scans; the moment stepping stops the held report ages out on
+        // budget exactly as a frozen field's would.
+        let sim = dcs_sim::SimDriver::new(dcs_sim::ChannelMap::new().with_point(
+            dcs_sim::PointBinding {
+                point: PointId(10),
+                channel: dcs_sim::ChannelId {
+                    device: 1,
+                    name: "ai0".to_string(),
+                },
+                direction: Direction::In,
+                initial: Value::Float(0.0),
+            },
+        ))
+        .unwrap();
+        let mut executor = Executor::new(
+            &sim,
+            stale_map(PointId(10), 2),
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        // While the field steps, the unchanged value still reads fresh:
+        // each step's stamp is a changed report — the scanned-card
+        // behavior the budget is declared against.
+        for _ in 0..5 {
+            sim.step(0.1);
+            executor.scan();
+            assert_eq!(
+                executor.snapshot().points[0].sample.unwrap().quality,
+                Quality::Good
+            );
+        }
+
+        // Stepping stops: the report freezes mid-run and ages past the
+        // declared budget — stale on the third lagging scan (lags of 1
+        // and 2 sit within the budget), the run's own tick domain.
+        executor.run(2);
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap().quality,
+            Quality::Good
+        );
+        executor.scan();
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap().quality,
+            Quality::Uncertain(QualityReason::Stale)
+        );
+
+        // A resumed step is a changed report: the first read back
+        // carries the driver's own quality again.
+        sim.step(0.1);
+        executor.scan();
+        assert_eq!(
+            executor.snapshot().points[0].sample.unwrap().quality,
+            Quality::Good
+        );
+    }
+
+    #[test]
     fn forced_budgeted_input_reports_substituted_not_stale() {
         let driver = StubDriver::new(&[float(10)], &[]);
         let map = PointMap::new().with_spec(

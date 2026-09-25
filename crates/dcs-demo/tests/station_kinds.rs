@@ -198,7 +198,7 @@ fn the_bus_dynamics_decouple_the_backup_level_quality() {
 }
 
 #[test]
-fn both_documents_validate_and_lint_clean() {
+fn both_documents_validate_and_lint_without_unexpected_findings() {
     for source in [LOCAL_DOCUMENT, BUS_DOCUMENT] {
         // The overlay's placeholder address never reaches the loader —
         // validation is kind-agnostic — so load it with a stand-in.
@@ -206,7 +206,17 @@ fn both_documents_validate_and_lint_clean() {
             .expect("the document loads");
         assert_eq!(model.version, dcs_model::MODEL_VERSION);
         assert!(model.validate().is_empty(), "{:?}", model.validate());
-        assert!(model.lint().is_empty(), "{:?}", model.lint());
+        // The station's only advisories are undeclared
+        // `stale_after_ticks` budgets — freshness stays an opt-in
+        // per-point declaration (decision 45); every other lint class
+        // stays empty.
+        let findings = model.lint();
+        assert!(
+            findings.iter().all(
+                |finding| finding.rule == dcs_model::LintRule::FieldInputWithoutFreshnessBudget
+            ),
+            "{findings:?}"
+        );
     }
 }
 
