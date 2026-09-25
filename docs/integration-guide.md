@@ -403,13 +403,15 @@ command is a one-shot where the `reset` input is a held condition.
 A consumer submits one as `Command::Invoke { component, command,
 arguments }` — `component` the instance name, `command` the declared
 name, `arguments` keyed by the declared argument names. Submission-time
-validation refuses an unknown component, an undeclared command name, or
-a declared argument carrying the wrong `Value` kind before the command
-ever queues (`UnknownComponent`, `UnknownCommand`,
-`ArgumentTypeMismatch` — each naming the instance); what the schema does
-not constrain — a supplied argument name the schema does not declare, a
-missing argument, a value outside the command's domain, the
-`KindDeclared` predicate — is the implementation's to refuse in
+validation refuses an unknown component, an undeclared command name, an
+argument name the request schema does not declare, or a declared
+argument carrying the wrong `Value` kind before the command ever queues
+(`UnknownComponent`, `UnknownCommand`, `UnknownArgument`,
+`ArgumentTypeMismatch` — each naming the instance); a declared argument
+left absent stays legal — the schema bounds names and kinds, not
+presence — so what the schema does not constrain — a missing argument's
+default, a value outside the command's domain, the `KindDeclared`
+predicate — is the implementation's to own or refuse in
 `Component::invoke_command`, which the executor calls at the scan
 boundary in deterministic submission order.
 `Ok` applies the command; `Err(reason)` settles the invocation
@@ -1570,7 +1572,7 @@ a monitored run is platform machinery. The split:
 | The scoped `ComponentIo` enforcing declared I/O during `step`, and the deterministic scan order | A `describe()` override for role hints and parameter metadata (a correct default exists) |
 | Per-component diagnostics (`step_errors`, `last_error`, `last_tick`) and point samples in `TelemetrySnapshot`, served by `dcs-monitor`'s HTTP+JSON endpoints | `capture_state`/`restore_state` field coverage for every value carried between scans |
 | Descriptor publication in `TelemetrySnapshot.descriptors`, so the UI renders any registered kind generically | The registration call in the deployed `ComponentRegistry` |
-| The `BlockInterface` derivation, its serving over `GET /schema`/`GET /resources`, invoke submission validation (`UnknownComponent`/`UnknownCommand`/`ArgumentTypeMismatch`), scan-boundary dispatch in submission order, the settled `command_refused` receipt, post-`step` event draining (failing steps included), `event_emitted` journaling at the producing tick, and the emit-identical standby behavior | The `CommandDecl`/`EventDecl` declarations on the descriptor, the `invoke_command`/`drain_events` implementations, the `dcs-build` spec mirror (`declared_commands`/`declared_events`), and `capture_state` coverage of command-mutated and event-sequence state |
+| The `BlockInterface` derivation, its serving over `GET /schema`/`GET /resources`, invoke submission validation (`UnknownComponent`/`UnknownCommand`/`UnknownArgument`/`ArgumentTypeMismatch`), scan-boundary dispatch in submission order, the settled `command_refused` receipt, post-`step` event draining (failing steps included), `event_emitted` journaling at the producing tick, and the emit-identical standby behavior | The `CommandDecl`/`EventDecl` declarations on the descriptor, the `invoke_command`/`drain_events` implementations, the `dcs-build` spec mirror (`declared_commands`/`declared_events`), and `capture_state` coverage of command-mutated and event-sequence state |
 | `DeviceSpec` construction, `FanoutDriver` point routing, cross-backend wire routes, and `UnknownDeviceKind` / `InvalidDeviceParameters` / `DeviceBackend` failures naming the device | The `IoDriver` implementation: protocol, timeouts, `IoError` mapping |
 | The shared local `SimDriver` merge for `DeviceDriver::Sim` contributions, `FanoutDriver::step(dt)` invoking each backend's `StepHook` (and `step_local(dt)` invoking only non-field-facing hooks), and `FanoutDriver::inspect::<T>` reaching an installed typed handle | Parameter validation (`DeviceError::parameters`), eager backend probing (`DeviceError::backend`), the `field_facing` flag, and the optional `inspect` handle |
 | Namespaced per-backend checkpoint state for drivers implementing `capture_state` | The `Sim` vs `Backend` contribution choice, the step hook for simulated kinds, and the capture/restore decision |

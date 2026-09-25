@@ -1,47 +1,50 @@
 //! A bounded queue drained by a dedicated writer thread — the
 //! mechanism the journal-append isolation decision (issue #942,
 //! adopting unmanaged finding #546) lands for the durable journal
-//! sink, and the seam the durable-history store drain (#907) reuses.
+//! sink, the state-file persist isolation fix (#982) reuses for the
+//! `--state-file` checkpoint sink, and the seam the durable-history
+//! store drain (#907) reuses.
 //!
-//! The problem the decision records: a durable sink's append used to
-//! run synchronously at the journal's recording point — inside the
-//! monitor's shared executor lock — so disk or share latency lengthened
+//! The problem the decision records: a durable sink's write used to
+//! run synchronously at the recording point — inside the monitor's
+//! shared executor lock — so disk or share latency lengthened
 //! every scan and pinned the lock the whole control plane serializes
 //! on, the no-serialization rule's violation for the deployment's most
 //! important durability output.
 //!
 //! A [`Drain`] splits the recording point in two: the producing side —
-//! the recorder under the executor lock — hands each record to a
-//! bounded channel through a non-blocking `try_send` that can never
-//! wait on the sink, while one writer thread receives the records in
-//! order and runs the sink's real append. The queue's `capacity` is
-//! the declared bound: a producer finding it full — the sink stalled
-//! or slower than the run's recording rate — is refused at the push,
-//! which the journal sink answers with the fatal-on-append-failure
-//! rule it has always applied, now at the handoff instead of the file
-//! write. A sink whose write itself errors records the failure into
-//! the shared health, consumes and counts the queue's remainder as
-//! `lost` — the honest loss accounting — and every later push is
-//! refused naming it, so the run fails at the recorded point rather
-//! than claiming journaled entries the file never took.
+//! under the executor lock — hands each record to a bounded channel
+//! through a non-blocking `try_send` that can never wait on the sink,
+//! while one writer thread receives the records in order and runs the
+//! sink's real write. The queue's `capacity` is the declared bound: a
+//! producer finding it full — the sink stalled or slower than the
+//! run's recording rate — is refused at the push, which the sink
+//! answers with the fatal-on-write-failure rule it has always
+//! applied, now at the handoff instead of the file write. A sink
+//! whose write itself errors records the failure into the shared
+//! health, consumes and counts the queue's remainder as `lost` — the
+//! honest loss accounting — and every later push is refused naming
+//! it, so the run fails at the recorded point rather than claiming
+//! entries the file never took.
 //!
 //! Ordering is the channel's FIFO: a single producer's records reach
-//! the writer in push order, which for the journal is `seq` order —
-//! the file's gap-free continuity is preserved, and a failed write
-//! ends the record at the last durably appended `seq` rather than a
-//! torn or reordered one. Dropping the drain closes the channel and
-//! joins the writer, so a graceful shutdown's file is complete through
-//! the last accepted record; a killed process simply ends the file
-//! where the writer had reached, which replay reads as the run's
-//! recorded tail.
+//! the writer in push order — for the journal that is `seq` order, so
+//! the file's gap-free continuity is preserved; for the state file it
+//! is capture order, so a newer checkpoint can never be overwritten
+//! by an older one — and a failed write ends the record at the last
+//! durably written record rather than a torn or reordered one.
+//! Dropping the drain closes the channel and joins the writer, so a
+//! graceful shutdown's file is complete through the last accepted
+//! record; a killed process simply ends the file where the writer had
+//! reached, which the next start reads as the run's recorded tail.
 //!
 //! The health surface — [`DrainShared::health`] — is the named
 //! degraded/backpressure state the decision requires: `Healthy` while
 //! the writer keeps up, `Lagging` while records wait in the queue, and
 //! `Failed` after a sink error, with `lost` accounting what the file
 //! never held. The store stamps it into each publication and a
-//! durability-attesting answer waits on [`DrainShared::wait_drained`],
-//! both off the executor lock.
+//! durability-attesting answer waits on [`DrainShared::wait_drained`]
+//! or [`DrainShared::wait_through`], both off the executor lock.
 
 use std::fmt;
 use std::io;
@@ -114,8 +117,10 @@ pub(crate) struct DrainShared {
 }
 
 impl DrainShared {
-    /// The first sink error the writer recorded, if any.
-    fn failed(&self) -> Option<String> {
+    /// The first sink error the writer recorded, if any — what a
+    /// durability-attesting wait names when the attested record never
+    /// reached the file.
+    pub(crate) fn failed(&self) -> Option<String> {
         self.failure.lock().unwrap().clone()
     }
 
@@ -155,11 +160,31 @@ impl DrainShared {
             thread::sleep(Duration::from_millis(1).min(deadline - Instant::now()));
         }
     }
+
+    /// Waits — at most `timeout` — for the writer to have drained or
+    /// accounted the record [`Drain::push`] numbered `ordinal`, and no
+    /// further: records pushed after it — even by another producer —
+    /// cannot stretch the wait. `drained + lost` advances through the
+    /// queue in push order, so reaching `ordinal` attests that record
+    /// and everything pushed before it. The wait is the caller's own,
+    /// never the producing side's — a durability-attesting answer
+    /// runs it, then reads [`failed`](Self::failed) to tell a drained
+    /// record from an accounted loss.
+    pub(crate) fn wait_through(&self, ordinal: u64, timeout: Duration) -> DrainHealth {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let health = self.health();
+            if health.drained + health.lost >= ordinal || Instant::now() >= deadline {
+                return health;
+            }
+            thread::sleep(Duration::from_millis(1).min(deadline - Instant::now()));
+        }
+    }
 }
 
 /// A push the queue refused — the record comes back with it so the
 /// caller's accounting decides the consequence; `message` names the
-/// drain and the cause for the fatal report the journal applies.
+/// drain and the cause for the fatal report the caller applies.
 #[derive(Debug)]
 pub(crate) struct DrainError<T> {
     /// The record the queue refused.
@@ -175,13 +200,14 @@ impl<T> fmt::Display for DrainError<T> {
 }
 
 /// One bounded producer→writer channel: `push` never blocks, the
-/// writer thread appends in push order, and drop drains the standing
+/// writer thread writes in push order, and drop drains the standing
 /// queue and joins the writer.
 ///
-/// Generic over the record and the sink's append — `FnMut(&T) ->
+/// Generic over the record and the sink's write — `FnMut(&T) ->
 /// io::Result<()>` — so the same machinery serves any sink whose
-/// writes must leave the executor lock's path; the journal file is
-/// the first, the durable-history store drain (#907) the next.
+/// writes must leave the executor lock's path: the journal file
+/// (#942) is the first, the `--state-file` checkpoint sink (#982)
+/// the second.
 pub(crate) struct Drain<T> {
     /// The producing side's queue handle — `Option` so `Drop` can
     /// close the channel before joining the writer.
@@ -220,13 +246,12 @@ impl<T: Send + 'static> Drain<T> {
         let writer = thread::Builder::new()
             .name("dcs-drain".to_string())
             .spawn(move || {
-                // The channel's FIFO is the record's ordering: for the
-                // journal it is `seq` order, so the file's continuity
-                // is the queue's. A recorded failure turns the
-                // standing queue into accounted loss — the writer
-                // consumes the rest without writing so the counters
-                // settle and the producers' refusals keep naming the
-                // first error.
+                // The channel's FIFO is the record's ordering: the
+                // file's order is the queue's. A recorded failure
+                // turns the standing queue into accounted loss — the
+                // writer consumes the rest without writing so the
+                // counters settle and the producers' refusals keep
+                // naming the first error.
                 while let Ok(record) = receiver.recv() {
                     writer_shared.taken.fetch_add(1, Ordering::SeqCst);
                     if writer_shared.failed().is_some() {
@@ -241,13 +266,17 @@ impl<T: Send + 'static> Drain<T> {
                             continue;
                         }
                         Ok(Err(error)) => error.to_string(),
-                        // A panicking append counts like a failing one:
+                        // A panicking write counts like a failing one:
                         // the record is lost and the failure named so
                         // producers refuse at the push.
-                        Err(_) => format!("{writer_label}: the sink writer panicked mid-append"),
+                        Err(_) => format!("{writer_label}: the sink writer panicked mid-write"),
                     };
-                    writer_shared.lost.fetch_add(1, Ordering::SeqCst);
+                    // The failure lands first: a `wait_through` woken
+                    // by the lost accounting below already reads the
+                    // error it names, and producers' refusals name it
+                    // the same.
                     *writer_shared.failure.lock().unwrap() = Some(message);
+                    writer_shared.lost.fetch_add(1, Ordering::SeqCst);
                 }
             })
             .expect("the drain writer thread spawns");
@@ -260,21 +289,26 @@ impl<T: Send + 'static> Drain<T> {
     }
 
     /// Hands `record` to the writer's queue without ever waiting on
-    /// the sink: `Ok` once the record is queued — the writer's order
-    /// is the push order — or the refusal the run turns fatal: a full
-    /// queue (the sink fell past the declared bound), a recorded sink
-    /// failure, or a gone writer.
-    pub(crate) fn push(&self, record: T) -> Result<(), DrainError<T>> {
+    /// the sink: `Ok` carrying the record's ordinal — its position in
+    /// the queue's push order, what [`DrainShared::wait_through`]
+    /// attests — once the record is queued, or the refusal the run
+    /// turns fatal: a full queue (the sink fell past the declared
+    /// bound), a recorded sink failure, or a gone writer. The ordinal
+    /// contract assumes the single-producer convention the drain
+    /// documents: producers pushing concurrently can skip ordinals a
+    /// refused push borrowed, but never duplicate one across queued
+    /// records.
+    pub(crate) fn push(&self, record: T) -> Result<u64, DrainError<T>> {
         if let Some(message) = self.shared.failed() {
             return Err(DrainError { record, message });
         }
-        self.shared.accepted.fetch_add(1, Ordering::SeqCst);
+        let ordinal = self.shared.accepted.fetch_add(1, Ordering::SeqCst) + 1;
         match self.queue.as_ref().unwrap().try_send(record) {
             Ok(()) => {
                 let depth = self.shared.accepted.load(Ordering::SeqCst)
                     - self.shared.taken.load(Ordering::SeqCst);
                 self.shared.high_water.fetch_max(depth, Ordering::SeqCst);
-                Ok(())
+                Ok(ordinal)
             }
             Err(TrySendError::Full(record)) => {
                 self.shared.accepted.fetch_sub(1, Ordering::SeqCst);
@@ -282,8 +316,8 @@ impl<T: Send + 'static> Drain<T> {
                     record,
                     message: format!(
                         "cannot append to {}: the drain queue's bound ({}) is full — \
-                         the sink fell behind the run's recording and the journal \
-                         cannot lose an entry unaccounted",
+                         the sink fell behind the run's recording and a record \
+                         cannot be lost unaccounted",
                         self.label, self.shared.capacity
                     ),
                 })
