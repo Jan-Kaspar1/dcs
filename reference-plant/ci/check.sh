@@ -74,13 +74,17 @@
 #                declaration carried as its --auto-promote flag, and
 #                the optional per-controller persistence
 #                paths (state_file/journal_file) backed by writable
-#                mounts and flags, and the optional topology
+#                mounts and flags, the optional topology
 #                section's declared pairs — each naming two
 #                declared members whose standby wiring closes
-#                inside the pair — parsed and validated through
-#                `docker compose config` or the fallback parser, with
-#                the fields' divergence cases exercised against
-#                doctored copies
+#                inside the pair — and the one-field-per-deployment
+#                bound (decision 98): at most one field-owning duty
+#                controller over the manifest's single plant, a
+#                second claimant — a second declared pair's duty
+#                member included — being undeployable; parsed and
+#                validated through `docker compose config` or the
+#                fallback parser, with the fields' divergence cases
+#                exercised against doctored copies
 #                (rig-invalid, rig-unverifiable, rig-mismatch)
 #   simulate     the scripted simulation's declared outcomes hold, and
 #                two runs produce identical digests (scenario-failed,
@@ -638,12 +642,16 @@ python3 ci/deploy_rig.py
 # flag or writable mount the manifest does not declare, a persistence
 # mount left read-only — while the fields omitted outright (with their
 # mounts and flags) stay a valid deployment. The same harness proves
-# the optional topology section: a declared named pair validates —
-# over the single pair and over a beyond-one-pair rig — while a
-# member the rig does not declare, a member two pairs share, or a
-# declared pair whose standby wiring does not close inside it each
-# report rig-mismatch. The checked-in manifest carries no section —
-# the single-pair default every passing case starts from.
+# the optional topology section: a declared named pair validates over
+# the single pair, while a member the rig does not declare, a member
+# two pairs share, or a declared pair whose standby wiring does not
+# close inside it each report rig-mismatch — and the
+# one-field-per-deployment bound (decision 98) refuses the planted
+# undeployable shapes: a second declared pair over the manifest's
+# one plant and a second duty controller the section never names,
+# each a second field-owning claimant on the single-writer claim.
+# The checked-in manifest carries no section — the single-pair
+# default every passing case starts from.
 RIG_DIR="$(mktemp -d)"
 mkdir -p "$RIG_DIR/deploy" "$RIG_DIR/ci" "$RIG_DIR/model"
 cp deploy/manifest.json deploy/compose.yaml "$RIG_DIR/deploy/"
@@ -736,10 +744,12 @@ elif case == "topology-declared":
     }
     manifest = json.dumps(document, indent=2)
 elif case == "topology-multi-pair":
-    # Two named pairs over a four-controller rig — the
-    # beyond-one-pair declaration the section exists for. The rig
-    # grows the matching second pair's services and volumes, cloned
-    # from the first pair's blocks on fresh names and ports.
+    # Two named pairs over a four-controller rig on the manifest's
+    # one plant — the planted undeployable topology decision 98
+    # rules out: each pair needs a duty member, and two duty
+    # claimants cannot both hold the field's single-writer claim.
+    # The rig grows the matching second pair's services and volumes,
+    # cloned from the first pair's blocks on fresh names and ports.
     document = json.loads(manifest)
     document["controllers"] += [
         {
@@ -785,6 +795,31 @@ elif case == "topology-multi-pair":
         "  ctrl-a-data:\n  ctrl-b-data:\n  ctrl-c-data:\n  ctrl-d-data:\n",
         1,
     )
+elif case == "undeployable-second-duty":
+    # The same undeployable shape with no topology section at all:
+    # a second duty controller — an entry without `standby` — is a
+    # second field-owning claimant on the manifest's one plant.
+    document = json.loads(manifest)
+    document["controllers"].append(
+        {
+            "name": "ctrl-c",
+            "listen": "0.0.0.0:8082",
+            "state_file": "/var/tmp/state.json",
+            "journal_file": "/var/tmp/journal.jsonl",
+        }
+    )
+    manifest = json.dumps(document, indent=2)
+    block_c = compose[
+        compose.index("  ctrl-a:"):compose.index("  ctrl-b:")
+    ].replace("ctrl-a", "ctrl-c").replace("8080", "8082")
+    compose = compose.replace(
+        "\nnetworks:", "\n" + block_c + "\nnetworks:", 1
+    )
+    compose = compose.replace(
+        "  ctrl-a-data:\n  ctrl-b-data:\n",
+        "  ctrl-a-data:\n  ctrl-b-data:\n  ctrl-c-data:\n",
+        1,
+    )
 elif case == "topology-undeclared-member":
     # A named pair member the rig does not declare.
     document = json.loads(manifest)
@@ -822,7 +857,7 @@ PY
     local out
     if out="$(cd "$RIG_DIR" && python3 ci/deploy_rig.py 2>&1)"; then
         case "$1" in
-            persistence-omitted|topology-declared|topology-multi-pair)
+            persistence-omitted|topology-declared)
                 echo "  $1: optional declaration — the manifest and the rig agree"
                 return
                 ;;
@@ -830,7 +865,7 @@ PY
         fail "rig-mismatch-unchecked: the $1 divergence passed the rig check"
     fi
     case "$1" in
-        persistence-omitted|topology-declared|topology-multi-pair)
+        persistence-omitted|topology-declared)
             fail "rig-mismatch-unchecked: the $1 case reported: $out"
             ;;
     esac
@@ -844,8 +879,8 @@ for divergence in persistence-mount-divergence persistence-flag-divergence \
         undeclared-writable-mount failover-flag-missing \
         failover-flag-undeclared failover-wrong-peer \
         persistence-omitted topology-declared topology-multi-pair \
-        topology-undeclared-member topology-shared-member \
-        topology-unwired-pair; do
+        undeployable-second-duty topology-undeclared-member \
+        topology-shared-member topology-unwired-pair; do
     rig_case "$divergence"
 done
 

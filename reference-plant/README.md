@@ -506,7 +506,16 @@ and the redundant controller pair:
   [<controller>, <controller>]}` entry naming two `controllers`
   members whose standby wiring closes inside the pair — the
   declared pair index a `?pair=` overview URL is generated from.
-  A single-pair deployment omits the section; this manifest does.
+  Each declared pair deploys its members against the manifest's one
+  (model, plant) binding, so one deployment is one field — whose
+  single-writer claim admits exactly one field-owning duty run
+  (decision 98). A second pair's duty member, like any second
+  `controllers` entry without `standby`, is a manifest that
+  validates yet describes a rig that cannot run, and the deploy
+  stage refuses it `rig-mismatch`; a site running several pairs
+  deploys one manifest per field and names the addresses across
+  them in the overview URL. A single-pair deployment omits the
+  section; this manifest does.
 
 The deployment maps directly onto the platform's documented run
 commands: `dcs-plant-server <model> --dynamics <doc> --listen <addr>`
@@ -533,8 +542,10 @@ fingerprint, listen addresses, pair wiring, the standby's
 optional `topology` section's declared pairs — a declared
 budget with no flag, a flag with no declaration, a diverging value,
 the field placed on the duty entry, a pair member the manifest does
-not declare, a member two pairs share, or a declared pair whose
-standby wiring does not close inside it each fail `rig-mismatch`, an
+not declare, a member two pairs share, a declared pair whose
+standby wiring does not close inside it, or a second field-owning
+duty controller over the manifest's one plant — the shape a second
+declared pair needs (decision 98) — each fail `rig-mismatch`, an
 unparsable file `rig-invalid`, a host with
 neither parser `rig-unverifiable`.
 

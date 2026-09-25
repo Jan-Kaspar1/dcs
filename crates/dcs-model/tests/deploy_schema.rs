@@ -104,7 +104,10 @@ fn deploy_schema_validates_the_documented_optional_variants() {
     // The optional-field shapes the reference plant's deploy stage
     // exercises (`ci/check.sh`'s rig cases): the persistence-omitted
     // deployment, the topology-declared single pair, and the
-    // topology-multi-pair four-controller rig.
+    // topology-multi-pair four-controller rig. The last stays
+    // schema-valid under decision 98 — the one-field bound is a
+    // count over absent `standby` keys the vocabulary cannot
+    // express, so the rig check's `rig-mismatch` is its rejection.
     let validator = validator();
 
     // persistence-omitted: both per-controller durability fields dropped.
@@ -278,5 +281,23 @@ fn deploy_schema_leaves_the_referential_rules_check_side() {
     assert!(
         validator.is_valid(&shared),
         "a shared member is check-side, not schema-rejected"
+    );
+
+    // A second duty controller — an entry without `standby` — over the
+    // manifest's one plant: decision 98's one-field bound counts absent
+    // keys, which the schema vocabulary cannot express, so the
+    // undeployable shape stays schema-valid and the rig check's
+    // `rig-mismatch` is its rejection.
+    let mut second_duty = reference_manifest();
+    second_duty["controllers"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "name": "ctrl-c",
+            "listen": "0.0.0.0:8082"
+        }));
+    assert!(
+        validator.is_valid(&second_duty),
+        "a second duty entry is check-side, not schema-rejected"
     );
 }
