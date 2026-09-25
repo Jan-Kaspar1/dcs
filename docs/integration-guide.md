@@ -682,11 +682,15 @@ A factory returns one of two `DeviceDriver` contributions:
   conditional grant leaves it `None` and the demoted peer keeps the
   pre-hook wedge — an operator's promote unwedges.
   `fenced_by` is an optional `FencedByHook` (`Fn() -> Option<u64>`) —
-  the claimant attribution a fencing-loss journal entry reads:
+  the claimant attribution the field-ownership audit reads:
   `FanoutDriver::fencing_claimant(point)` asks it for the owner token
   the field's standing claim named the last time it fenced a mutation
   on `point`'s backend, so `field_claim_lost` attributes the takeover
-  rather than recording an anonymous loss. `sim-tcp` installs
+  rather than recording an anonymous loss, and the refused `ensure`/
+  `reclaim` probes read it again so `field_claim_observed` names the
+  standing foreign owner a preempt-and-release episode would otherwise
+  hide — one journaled record per distinct claimant, not one per
+  refused probe. `sim-tcp` installs
   `RemoteDriver::fenced_by`; a kind whose fencing verdicts carry no
   owner identity leaves it `None` and the entry records `claimant:
   null`.

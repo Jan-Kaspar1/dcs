@@ -4005,6 +4005,135 @@ mod tests {
         );
     }
 
+    /// The observed-claimant record the reclaim probe's refusals leave:
+    /// a preemptor the fenced-write demotion already attributed seeds
+    /// the dedup — its standing claim's refusals journal nothing the
+    /// `field_claim_lost` entry did not already say — while a *second*
+    /// foreign claimant the probes then meet is an episode no fenced
+    /// write ever recorded: one `ClaimObservation` queues naming the
+    /// token the field's arbitration answered with, once however many
+    /// scans its claim stands, and the peer's reclaim after it releases
+    /// still walks the role changes beside it in order.
+    #[test]
+    fn a_reclaim_probe_refusal_journals_the_second_foreign_claimant_once() {
+        const OWNER: u64 = 7;
+        const FOREIGN: u64 = 999;
+        const SECOND: u64 = 555;
+        let field = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let fenced = FencingDriver {
+            inner: &field,
+            armed: AtomicBool::new(false),
+        };
+        let gate = WriteGate::closed(&fenced);
+        let claim = ScriptedClaim::unclaimed();
+        let mut peer = Peer::active(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        )
+        .with_field_claim(|| {
+            claim.claim(OWNER);
+            Ok(())
+        })
+        .with_field_probe(|| Ok(claim.probe()))
+        .with_field_claimant(|_| claim.holder())
+        .with_field_reclaim(|| Ok(claim.ensure(OWNER)))
+        .with_claim_observer(|| claim.holder().into_iter().collect());
+        peer.activate().unwrap();
+        assert_eq!(peer.scan(), Tick(1));
+        assert_eq!(claim.holder(), Some(OWNER));
+
+        // The first preemption: the fenced write's demotion journals
+        // `field_claim_lost` attributed to the claimant the verdict
+        // named — seeding the dedup, so this standing claim's refused
+        // reclaim probes queue no second record for it.
+        claim.claim(FOREIGN);
+        fenced.armed.store(true, Ordering::Relaxed);
+        assert_eq!(peer.scan(), Tick(2));
+        assert_eq!(
+            peer.take_fencing_losses(),
+            vec![FencingLoss {
+                tick: Tick(2),
+                point: OUTPUT,
+                claimant: Some(FOREIGN),
+            }]
+        );
+        assert_eq!(peer.scan(), Tick(3));
+        assert_eq!(peer.role(), Role::Standby);
+        assert_eq!(peer.scan(), Tick(4));
+        assert_eq!(claim.holder(), Some(FOREIGN));
+        assert!(
+            peer.take_claim_observations().is_empty(),
+            "the claimant the loss entry attributed is not re-journaled"
+        );
+
+        // The preemptor released and a *different* foreign attachment
+        // took the claim before the probe ran again: this refusal names
+        // a claimant no journal record of this run carries — the
+        // episode that would otherwise pass silently.
+        claim.release();
+        claim.claim(SECOND);
+        assert_eq!(peer.scan(), Tick(5));
+        assert_eq!(
+            peer.take_claim_observations(),
+            vec![ClaimObservation {
+                tick: Tick(5),
+                point: OUTPUT,
+                claimant: SECOND,
+            }]
+        );
+
+        // The standing second claim journals once: repeat refusals
+        // queue nothing further while its token stands.
+        assert_eq!(peer.scan(), Tick(6));
+        assert!(peer.take_claim_observations().is_empty());
+
+        // The second claimant's release lets the next reclaim grant:
+        // the role changes walk the peer back `promoting` → `active`,
+        // and the observation's tick orders the episode between the
+        // demotion the first preemption drove and the reclaim the
+        // release allowed — the audit order the journaled records keep.
+        claim.release();
+        fenced.armed.store(false, Ordering::Relaxed);
+        assert_eq!(peer.scan(), Tick(7));
+        assert_eq!(peer.role(), Role::Promoting);
+        assert_eq!(claim.holder(), Some(OWNER));
+        assert_eq!(peer.scan(), Tick(8));
+        assert_eq!(peer.role(), Role::Active);
+        assert_eq!(
+            peer.take_role_changes(),
+            vec![
+                RoleChange {
+                    tick: Tick(2),
+                    from: Role::Active,
+                    to: Role::Demoting,
+                    origin: SwitchOrigin::Fenced,
+                    actor: None,
+                },
+                RoleChange {
+                    tick: Tick(3),
+                    from: Role::Demoting,
+                    to: Role::Standby,
+                    origin: SwitchOrigin::Fenced,
+                    actor: None,
+                },
+                RoleChange {
+                    tick: Tick(7),
+                    from: Role::Standby,
+                    to: Role::Promoting,
+                    origin: SwitchOrigin::Reclaim,
+                    actor: None,
+                },
+                RoleChange {
+                    tick: Tick(8),
+                    from: Role::Promoting,
+                    to: Role::Active,
+                    origin: SwitchOrigin::Reclaim,
+                    actor: None,
+                },
+            ]
+        );
+    }
+
     /// The pre-hook behavior a driver surface without the reclaim
     /// grant keeps: a fencing-demoted ex-owner stays `standby` across
     /// the preemptor's release — the wedge an operator's promote
@@ -5743,6 +5872,98 @@ mod tests {
         assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
         assert_eq!(*field.lock().unwrap(), Some(99));
         assert_eq!(peer.role(), Role::Standby);
+    }
+
+    /// The audit half of the orphan probe's refusal: a foreign
+    /// `claim_writer` that took the released field is an episode the
+    /// demoted run never fenced a write against — no
+    /// `field_claim_lost` can fire for it — so the refused re-arm's
+    /// verdict is the only evidence. The observation journals one
+    /// attributed record naming the standing owner token, once however
+    /// many orphaned pulls refuse against the same claim, and a claim
+    /// that changes hands mid-episode journals each distinct claimant.
+    #[test]
+    fn a_refused_orphan_probe_journals_the_observed_claimant_once() {
+        let driver = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let gate = WriteGate::closed(&driver);
+        // The field's single-writer claim as the driver surface sees
+        // it: `Some(owner)` while claimed, `None` once released.
+        let field = Mutex::new(None::<u64>);
+        let mut peer = Peer::active(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        )
+        .with_field_claim(|| {
+            *field.lock().unwrap() = Some(7);
+            Ok(())
+        })
+        .with_field_release(|| {
+            let mut held = field.lock().unwrap();
+            if *held == Some(7) {
+                *held = None;
+            }
+        })
+        .with_field_ensure(|| {
+            let mut held = field.lock().unwrap();
+            match *held {
+                None | Some(7) => {
+                    *held = Some(7);
+                    Ok(true)
+                }
+                Some(_) => Ok(false),
+            }
+        })
+        .with_claim_observer(|| (*field.lock().unwrap()).into_iter().collect());
+        peer.activate().unwrap();
+        peer.scan();
+        peer.demote().unwrap();
+        peer.scan();
+        assert!(peer.take_claim_observations().is_empty());
+
+        // A foreign claim_writer takes the field the demotion
+        // released — landing between the run's own writes, so no
+        // fencing verdict ever attributes it.
+        *field.lock().unwrap() = Some(99);
+
+        let source_driver =
+            StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let mut source =
+            Executor::new(&source_driver, loop_map(), vec![Box::new(PassThrough)]).unwrap();
+        source.run(9);
+        let mut checkpoint = source.checkpoint();
+        checkpoint.source_owns_field = Some(false);
+
+        // The refused re-arm names the standing owner — one attributed
+        // record, the episode no longer silent in the audit. The tick
+        // is the run's own — tracking adopted the stream's tick 9.
+        peer.track_once(|| Ok(checkpoint.clone()));
+        assert_eq!(
+            peer.take_claim_observations(),
+            vec![ClaimObservation {
+                tick: Tick(9),
+                point: OUTPUT,
+                claimant: 99,
+            }]
+        );
+
+        // The standing foreign claim journals once: however many
+        // orphaned pulls refuse against it, nothing further queues.
+        peer.track_once(|| Ok(checkpoint.clone()));
+        peer.track_once(|| Ok(checkpoint.clone()));
+        assert!(peer.take_claim_observations().is_empty());
+
+        // The claim changing hands is a new episode: the next refusal
+        // names a token the run has not journaled and records it too.
+        *field.lock().unwrap() = Some(55);
+        peer.track_once(|| Ok(checkpoint));
+        assert_eq!(
+            peer.take_claim_observations(),
+            vec![ClaimObservation {
+                tick: Tick(9),
+                point: OUTPUT,
+                claimant: 55,
+            }]
+        );
     }
 
     /// Each orphan pull counts the heartbeat miss the missing field

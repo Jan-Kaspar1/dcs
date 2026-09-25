@@ -2244,6 +2244,7 @@ mod tests {
             points: HashMap::new(),
             routes: Vec::new(),
             sim: None,
+            refusals: Mutex::new(Vec::new()),
         };
         assert!(plain.cyclic().is_none());
 
@@ -2261,6 +2262,7 @@ mod tests {
             points: HashMap::new(),
             routes: Vec::new(),
             sim: None,
+            refusals: Mutex::new(Vec::new()),
         };
         let cyclic = fanout.cyclic().unwrap();
         cyclic.exchange(Tick(7)).unwrap();
@@ -2309,6 +2311,7 @@ mod tests {
             points: HashMap::from([(PointId(31), 0), (PointId(32), 1)]),
             routes: Vec::new(),
             sim: None,
+            refusals: Mutex::new(Vec::new()),
         };
         let cyclic = fanout.cyclic().unwrap();
 
@@ -2371,6 +2374,7 @@ mod tests {
             points: HashMap::from([(PointId(31), 0), (PointId(32), 1)]),
             routes: Vec::new(),
             sim: None,
+            refusals: Mutex::new(Vec::new()),
         };
         let cyclic = fanout.cyclic().unwrap();
 
