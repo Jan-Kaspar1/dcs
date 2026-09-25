@@ -54,7 +54,7 @@ Its `README.md` walks the full customer path:
    binds one field, so a manifest carries at most one field-owning
    pair: a second duty controller — a second pair's duty member
    included — is undeployable and the deploy stage refuses it
-   `rig-mismatch` (decision 98), while a site running several pairs
+   `rig-mismatch` (decision 99), while a site running several pairs
    deploys one manifest per field and names their addresses across
    them in the overview URL. A single-pair deployment omits the
    section and configures the overview by URL exactly as before.

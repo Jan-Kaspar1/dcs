@@ -509,7 +509,7 @@ and the redundant controller pair:
   Each declared pair deploys its members against the manifest's one
   (model, plant) binding, so one deployment is one field — whose
   single-writer claim admits exactly one field-owning duty run
-  (decision 98). A second pair's duty member, like any second
+  (decision 99). A second pair's duty member, like any second
   `controllers` entry without `standby`, is a manifest that
   validates yet describes a rig that cannot run, and the deploy
   stage refuses it `rig-mismatch`; a site running several pairs
@@ -545,7 +545,7 @@ the field placed on the duty entry, a pair member the manifest does
 not declare, a member two pairs share, a declared pair whose
 standby wiring does not close inside it, or a second field-owning
 duty controller over the manifest's one plant — the shape a second
-declared pair needs (decision 98) — each fail `rig-mismatch`, an
+declared pair needs (decision 99) — each fail `rig-mismatch`, an
 unparsable file `rig-invalid`, a host with
 neither parser `rig-unverifiable`.
 

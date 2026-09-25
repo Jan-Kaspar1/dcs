@@ -143,11 +143,15 @@ pub enum Command {
     /// diagnostics report; `command` is the declared
     /// [`CommandSpec`](crate::CommandSpec)'s `name`; `arguments` is
     /// keyed by the declared [`CommandArgument`](crate::CommandArgument)
-    /// names — each supplied value's variant must equal the argument's
-    /// declared [`ValueKind`], strict and never coercing like the rest
-    /// of the command surface. The named refusals are
-    /// [`UnknownComponent`](CommandError::UnknownComponent),
+    /// names — every supplied name must be one the request schema
+    /// declares, and each supplied value's variant must equal the
+    /// argument's declared [`ValueKind`], strict and never coercing
+    /// like the rest of the command surface. A declared argument left
+    /// absent stays legal: the kind owns absent-argument defaults — the
+    /// schema bounds names and kinds, not presence. The named refusals
+    /// are [`UnknownComponent`](CommandError::UnknownComponent),
     /// [`UnknownCommand`](CommandError::UnknownCommand),
+    /// [`UnknownArgument`](CommandError::UnknownArgument),
     /// [`ArgumentTypeMismatch`](CommandError::ArgumentTypeMismatch), and
     /// [`CommandRefused`](CommandError::CommandRefused).
     ///
@@ -321,6 +325,22 @@ pub enum CommandError {
         /// The rejected command identity.
         command: String,
     },
+    /// An [`Invoke`](crate::Command::Invoke) carries an argument name
+    /// the declared command's [`request`](crate::CommandSpec) schema
+    /// does not declare — the schema bounds the names a submission may
+    /// carry, so an undeclared argument refuses at submission rather
+    /// than settle `applied` for a payload outside the declared
+    /// request. Only presence is bounded this way: a *declared*
+    /// argument left out of the submission stays legal, the kind
+    /// owning its absent-argument default.
+    UnknownArgument {
+        /// The offending component name.
+        component: String,
+        /// The invoked command's identity.
+        command: String,
+        /// The argument name the request schema does not declare.
+        argument: String,
+    },
     /// An [`Invoke`](crate::Command::Invoke) argument's kind differs
     /// from the kind the declared command's
     /// [`request`](crate::CommandSpec) schema declares — strict, never
@@ -420,6 +440,7 @@ impl CommandError {
             | CommandError::OutOfRange { component, .. }
             | CommandError::InvalidParameter { component, .. }
             | CommandError::UnknownCommand { component, .. }
+            | CommandError::UnknownArgument { component, .. }
             | CommandError::ArgumentTypeMismatch { component, .. }
             | CommandError::CommandRefused { component, .. } => Some(component),
             _ => None,
@@ -504,6 +525,14 @@ impl fmt::Display for CommandError {
             CommandError::UnknownCommand { component, command } => {
                 write!(f, "component {component:?} declares no command {command:?}")
             }
+            CommandError::UnknownArgument {
+                component,
+                command,
+                argument,
+            } => write!(
+                f,
+                "command {component:?}.{command:?} declares no argument {argument:?}"
+            ),
             CommandError::ArgumentTypeMismatch {
                 component,
                 command,
@@ -785,6 +814,14 @@ mod tests {
                 r#"{"unknown_command":{"component":"vlv:1","command":"stroke_test"}}"#,
             ),
             (
+                CommandError::UnknownArgument {
+                    component: "vlv:1".to_string(),
+                    command: "stroke_test".to_string(),
+                    argument: "rate".to_string(),
+                },
+                r#"{"unknown_argument":{"component":"vlv:1","command":"stroke_test","argument":"rate"}}"#,
+            ),
+            (
                 CommandError::ArgumentTypeMismatch {
                     component: "vlv:1".to_string(),
                     command: "stroke_test".to_string(),
@@ -849,6 +886,11 @@ mod tests {
             CommandError::UnknownCommand {
                 component: "vlv:1".to_string(),
                 command: "stroke_test".to_string(),
+            },
+            CommandError::UnknownArgument {
+                component: "vlv:1".to_string(),
+                command: "stroke_test".to_string(),
+                argument: "rate".to_string(),
             },
             CommandError::ArgumentTypeMismatch {
                 component: "vlv:1".to_string(),
@@ -932,6 +974,13 @@ mod tests {
             CommandOutcome::Rejected {
                 reason: CommandError::UnknownComponent {
                     component: "ghost".to_string(),
+                },
+            },
+            CommandOutcome::Rejected {
+                reason: CommandError::UnknownArgument {
+                    component: "vlv:1".to_string(),
+                    command: "stroke_test".to_string(),
+                    argument: "rate".to_string(),
                 },
             },
             CommandOutcome::Rejected {

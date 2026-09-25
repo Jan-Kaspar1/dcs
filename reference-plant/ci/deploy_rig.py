@@ -34,7 +34,7 @@ declares:
   the `--state-file`/`--journal-file` flag argument; a field the
   manifest omits means the flag is absent, and a writable mount or
   flag the manifest does not declare diverges the same way;
-- the one-field-per-deployment bound (decision 98): the manifest's
+- the one-field-per-deployment bound (decision 99): the manifest's
   single `plant` section is one field whose single-writer claim
   admits exactly one field-owning run — a duty controller's
   conditional startup grant refuses a second live claimant
@@ -481,7 +481,7 @@ def main():
             f"declared controller at its declared listen port",
         )
 
-    # The one-field-per-deployment bound (decision 98): every
+    # The one-field-per-deployment bound (decision 99): every
     # declared controller attaches to the manifest's single `plant`,
     # so each duty entry — a controller without `standby` — is a
     # claimant on that one field's single-writer claim, whose
@@ -499,7 +499,7 @@ def main():
         len(duties) <= 1,
         f"manifest declares {len(duties)} duty controllers {duties} "
         f"over the one plant — the field's single-writer claim "
-        f"admits exactly one field-owning run (decision 98)",
+        f"admits exactly one field-owning run (decision 99)",
     )
 
     # The optional topology section: the deployment's declared

@@ -221,7 +221,7 @@ manifest does not declare, a shared member, or wiring that leaves
 the declared pair. Each declared pair deploys its members against
 the manifest's one (model, plant) binding — one deployment is one
 field, whose single-writer claim admits exactly one field-owning
-duty run — so decision 98's bound refuses a second pair's duty
+duty run — so decision 99's bound refuses a second pair's duty
 member, like any second `controllers` entry without `standby`, as
 `rig-mismatch`; a site running several pairs composes one manifest
 per field and the overview's `?pair=` URL names addresses across

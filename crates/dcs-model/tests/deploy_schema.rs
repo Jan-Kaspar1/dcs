@@ -105,7 +105,7 @@ fn deploy_schema_validates_the_documented_optional_variants() {
     // exercises (`ci/check.sh`'s rig cases): the persistence-omitted
     // deployment, the topology-declared single pair, and the
     // topology-multi-pair four-controller rig. The last stays
-    // schema-valid under decision 98 — the one-field bound is a
+    // schema-valid under decision 99 — the one-field bound is a
     // count over absent `standby` keys the vocabulary cannot
     // express, so the rig check's `rig-mismatch` is its rejection.
     let validator = validator();
@@ -284,7 +284,7 @@ fn deploy_schema_leaves_the_referential_rules_check_side() {
     );
 
     // A second duty controller — an entry without `standby` — over the
-    // manifest's one plant: decision 98's one-field bound counts absent
+    // manifest's one plant: decision 99's one-field bound counts absent
     // keys, which the schema vocabulary cannot express, so the
     // undeployable shape stays schema-valid and the rig check's
     // `rig-mismatch` is its rejection.

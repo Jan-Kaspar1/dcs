@@ -78,7 +78,7 @@
 #                section's declared pairs — each naming two
 #                declared members whose standby wiring closes
 #                inside the pair — and the one-field-per-deployment
-#                bound (decision 98): at most one field-owning duty
+#                bound (decision 99): at most one field-owning duty
 #                controller over the manifest's single plant, a
 #                second claimant — a second declared pair's duty
 #                member included — being undeployable; parsed and
@@ -646,7 +646,7 @@ python3 ci/deploy_rig.py
 # the single pair, while a member the rig does not declare, a member
 # two pairs share, or a declared pair whose standby wiring does not
 # close inside it each report rig-mismatch — and the
-# one-field-per-deployment bound (decision 98) refuses the planted
+# one-field-per-deployment bound (decision 99) refuses the planted
 # undeployable shapes: a second declared pair over the manifest's
 # one plant and a second duty controller the section never names,
 # each a second field-owning claimant on the single-writer claim.
@@ -745,7 +745,7 @@ elif case == "topology-declared":
     manifest = json.dumps(document, indent=2)
 elif case == "topology-multi-pair":
     # Two named pairs over a four-controller rig on the manifest's
-    # one plant — the planted undeployable topology decision 98
+    # one plant — the planted undeployable topology decision 99
     # rules out: each pair needs a duty member, and two duty
     # claimants cannot both hold the field's single-writer claim.
     # The rig grows the matching second pair's services and volumes,
