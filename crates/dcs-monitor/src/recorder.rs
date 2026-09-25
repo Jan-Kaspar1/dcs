@@ -102,6 +102,31 @@ pub struct MonitorConfig {
     /// well above the command queue's, at the served journal's own
     /// default.
     pub journal_drain_capacity: usize,
+    /// When set, the run's transferable checkpoint persists to this
+    /// path at its documented boundaries — every completed scan
+    /// cycle's close and every accepted command's admission — the
+    /// fault-tolerance foundation's recovery state a restarted
+    /// runtime resumes through. The write itself runs off the
+    /// executor lock — the state-file persist isolation fix (#982),
+    /// the same shape the journal sink's drain landed: the capture
+    /// rides the lock at the boundary, then a bounded queue hands it
+    /// to the sink's dedicated writer, which serializes and
+    /// atomically replaces the file in push order — a stalled disk
+    /// surfaces as the `state_sink` health section, never as a
+    /// lengthened scan.
+    pub state_file: Option<PathBuf>,
+    /// The bound on captured checkpoints queued for the state-file
+    /// sink's writer — the persist-isolation decision's declared
+    /// bound. The capture-and-queue never waits on the sink: a push
+    /// finding the queue full — the writer stalled or slower than
+    /// the run's capture rate — fails fatally at that push naming
+    /// the file, rather than lengthening a scan or silently dropping
+    /// a checkpoint the restart path would have resumed. The bound
+    /// must absorb the burst the producing side can emit between
+    /// writer beats — an admission wave bounded by the executor's
+    /// own command-queue capacity, a `POST /scan` batch's one push
+    /// per scan — so it sits at the command queue's own default.
+    pub state_drain_capacity: usize,
 }
 
 impl Default for MonitorConfig {
@@ -115,6 +140,8 @@ impl Default for MonitorConfig {
             publication_capacity: 16,
             journal_file: None,
             journal_drain_capacity: 1024,
+            state_file: None,
+            state_drain_capacity: crate::state_file::DEFAULT_STATE_DRAIN_CAPACITY,
         }
     }
 }

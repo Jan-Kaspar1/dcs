@@ -50,7 +50,7 @@ use crate::drain::{DrainHealth, DrainShared, DrainState};
 use dcs_core::{
     CommandReceipt, EmittedEvent, EventRecord, EventRetention, HistorySample, JournalEntry,
     JournalEvent, JournalSinkHealth, JournalSinkState, PointHistory, PointId, PublicationHealth,
-    Sample, TelemetrySnapshot, Tick,
+    Sample, StateSinkHealth, StateSinkState, TelemetrySnapshot, Tick,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -219,6 +219,15 @@ struct Inner {
     /// executor lock, so the sink's lag reads here as telemetry,
     /// never as lock hold.
     journal_sink: Option<Arc<DrainShared>>,
+    /// The `--state-file` checkpoint sink's drain counters — `Some`
+    /// when a state file is configured: each publish stamps the
+    /// standing backpressure health into the snapshot's
+    /// `publication.state_sink` section, the same shape the journal
+    /// sink's carries — the state-file persist isolation fix (#982):
+    /// the capture rides the executor lock at its boundary, the
+    /// write drains off it, so a stalled sink reports `lagging` here
+    /// instead of lengthening a scan.
+    state_sink: Option<Arc<DrainShared>>,
 }
 
 /// Evicts `ring` down to `capacity` oldest-first, migrating each
@@ -316,6 +325,7 @@ impl Store {
                 journal_capacity,
                 event_history_capacity,
                 journal_sink: None,
+                state_sink: None,
             })),
         }
     }
@@ -326,6 +336,14 @@ impl Store {
     /// standing health into the snapshot's `publication` section.
     pub(crate) fn set_journal_sink(&self, sink: Arc<DrainShared>) {
         self.inner.lock().unwrap().journal_sink = Some(sink);
+    }
+
+    /// Points the store at the state-file sink's drain counters — set
+    /// at bind when a `state_file` is configured, before the bind-time
+    /// publication, so every publish stamps the sink's standing health
+    /// into the snapshot's `publication` section.
+    pub(crate) fn set_state_sink(&self, sink: Arc<DrainShared>) {
+        self.inner.lock().unwrap().state_sink = Some(sink);
     }
 
     /// Appends `point`'s fresh scan sample to its served ring and to
@@ -454,6 +472,7 @@ impl Store {
             depth: (inner.window.len() + 1).min(inner.window_capacity) as u64,
             window: inner.window_capacity as u64,
             journal_sink: inner.journal_sink_health(),
+            state_sink: inner.state_sink_health(),
         });
         let run = inner.run;
         let publication = Arc::new(Publication {
@@ -600,6 +619,7 @@ impl Store {
             depth: inner.window.len() as u64,
             window: inner.window_capacity as u64,
             journal_sink: inner.journal_sink_health(),
+            state_sink: inner.state_sink_health(),
         }
     }
 
@@ -620,6 +640,23 @@ impl Store {
         let probe = self.inner.lock().unwrap().journal_sink.clone();
         probe.map(|shared| shared.wait_drained(timeout).into())
     }
+
+    /// The state-file sink's live drain report — `None` when no state
+    /// file is configured.
+    pub(crate) fn state_sink_health(&self) -> Option<StateSinkHealth> {
+        self.inner.lock().unwrap().state_sink_health()
+    }
+
+    /// Waits — at most `timeout` — for the state-file sink's writer to
+    /// have replaced the file through or accounted every queued
+    /// checkpoint, returning the standing health either way. `None`
+    /// when no state file is configured. The wait rides the caller's
+    /// thread alone — the completion-attesting flush and the tests'
+    /// settle point, never the executor lock.
+    pub(crate) fn wait_state_drained(&self, timeout: Duration) -> Option<StateSinkHealth> {
+        let probe = self.inner.lock().unwrap().state_sink.clone();
+        probe.map(|shared| shared.wait_drained(timeout).into())
+    }
 }
 
 impl Inner {
@@ -627,6 +664,15 @@ impl Inner {
     /// read under the inner lock from the drain's lock-free counters.
     fn journal_sink_health(&self) -> Option<JournalSinkHealth> {
         self.journal_sink
+            .as_ref()
+            .map(|shared| shared.health().into())
+    }
+
+    /// The state-file sink's standing health for the publication
+    /// stamp — read under the inner lock from the drain's lock-free
+    /// counters.
+    fn state_sink_health(&self) -> Option<StateSinkHealth> {
+        self.state_sink
             .as_ref()
             .map(|shared| shared.health().into())
     }
@@ -639,6 +685,24 @@ impl From<DrainHealth> for JournalSinkHealth {
                 DrainState::Healthy => JournalSinkState::Healthy,
                 DrainState::Lagging => JournalSinkState::Lagging,
                 DrainState::Failed => JournalSinkState::Failed,
+            },
+            accepted: health.accepted,
+            drained: health.drained,
+            lost: health.lost,
+            depth: health.depth,
+            high_water: health.high_water,
+            capacity: health.capacity,
+        }
+    }
+}
+
+impl From<DrainHealth> for StateSinkHealth {
+    fn from(health: DrainHealth) -> Self {
+        Self {
+            state: match health.state {
+                DrainState::Healthy => StateSinkState::Healthy,
+                DrainState::Lagging => StateSinkState::Lagging,
+                DrainState::Failed => StateSinkState::Failed,
             },
             accepted: health.accepted,
             drained: health.drained,

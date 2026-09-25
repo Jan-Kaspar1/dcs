@@ -192,6 +192,16 @@ pub struct PublicationHealth {
     /// existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub journal_sink: Option<JournalSinkHealth>,
+    /// The `--state-file` checkpoint sink's drain report when the run
+    /// persists its checkpoints — `None` (absent on the wire) without
+    /// one. The capture rides the executor lock at its scan or
+    /// admission boundary; the serialize-and-replace itself drains on
+    /// the sink's own writer off the lock: `lagging` reports captured
+    /// checkpoints still queued, `failed` a write that is already
+    /// failing the run at its next push. Absent from snapshots
+    /// serialized before the section existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_sink: Option<StateSinkHealth>,
 }
 
 /// The named health state of the durable journal sink's drain — the
@@ -245,6 +255,65 @@ pub struct JournalSinkHealth {
     /// The deepest the queue has run.
     pub high_water: u64,
     /// The queue's configured bound — a journaled entry finding it
+    /// full fails the run fatally at the push.
+    pub capacity: u64,
+}
+
+/// The named health state of the `--state-file` checkpoint sink's
+/// drain — the state-file persist isolation fix's (#982) backpressure
+/// report, the same shape the journal sink's carries. The queue's
+/// bound is declared in `capacity`: a sink behind the run's capture
+/// rate reports `Lagging`, and a write that failed reports `Failed` —
+/// the run dies at its next persist push naming the file, the
+/// fatal-on-write-failure rule moved to the queue's handoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateSinkState {
+    /// The writer is keeping up — no checkpoint waits in the drain
+    /// queue.
+    Healthy,
+    /// Checkpoints wait for the writer — the sink is behind the run's
+    /// persist rate. A lag that fills `capacity` is fatal at the next
+    /// capture's push rather than lengthening a scan.
+    Lagging,
+    /// A sink write failed — the run is failing fatally at the
+    /// recorded point; `lost` accounts the queued checkpoints the
+    /// file never took.
+    Failed,
+}
+
+/// The `--state-file` checkpoint sink's drain accounting — the
+/// overload surface beside the journal sink's, stamped into the
+/// snapshot's `publication` section as of each publish and readable
+/// live through the monitor.
+///
+/// The queue sits between the executor lock's capture point and the
+/// writer thread that serializes each pushed `Checkpoint` and
+/// atomically replaces the file in push order: `accepted` counts
+/// every checkpoint handed over, `drained` the ones the file durably
+/// took, and `lost` the ones a failed writer consumed without
+/// writing — the honest loss accounting for a capture the file never
+/// held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateSinkHealth {
+    /// The sink's standing state.
+    pub state: StateSinkState,
+    /// Captured checkpoints handed to the drain queue since bind.
+    pub accepted: u64,
+    /// Checkpoints the writer durably replaced the file with —
+    /// `accepted` minus `lost` minus the in-flight and queued
+    /// remainder.
+    pub drained: u64,
+    /// Checkpoints the queue admitted but the sink never wrote —
+    /// nonzero only after a writer failure: the loss the durable file
+    /// cannot carry, counted rather than hidden.
+    pub lost: u64,
+    /// Checkpoints waiting in the queue now — what `lagging` reports
+    /// on.
+    pub depth: u64,
+    /// The deepest the queue has run.
+    pub high_water: u64,
+    /// The queue's configured bound — a checkpoint capture finding it
     /// full fails the run fatally at the push.
     pub capacity: u64,
 }
@@ -588,6 +657,7 @@ mod tests {
                 depth: 4,
                 window: 8,
                 journal_sink: None,
+                state_sink: None,
             }),
         };
         let json = serde_json::to_string(&snapshot).unwrap();
