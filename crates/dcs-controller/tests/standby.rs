@@ -341,37 +341,79 @@ fn standby_binary_pulls_checkpoints_from_a_listening_active() {
 
     // An ephemeral port the active then binds — the usual test-side
     // probe; the brief window where it is free is inherent to spawning
-    // a separate listener process.
-    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = probe.local_addr().unwrap();
-    drop(probe);
+    // a separate listener process. On a busy host another process can
+    // take the freed port before the child binds — the child then
+    // exits at startup while whatever foreign listener answered the
+    // probe goes away mid-test — so a lost bind retries the probe.
+    let (addr, client, mut active) = {
+        let mut attempt = 0;
+        loop {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = probe.local_addr().unwrap();
+            drop(probe);
 
-    let mut active = Command::new(BINARY)
-        .args([
-            TANK_LOOP_PATH,
-            "--listen",
-            &addr.to_string(),
-            "--scan-ms",
-            "20",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+            let mut active = Command::new(BINARY)
+                .args([
+                    TANK_LOOP_PATH,
+                    "--listen",
+                    &addr.to_string(),
+                    "--scan-ms",
+                    "20",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
 
-    // Wait until the active's monitor is up before the standby pulls.
-    let client = MonitorClient::new(addr);
-    let mut serving = false;
-    for _ in 0..100 {
-        if client.snapshot().is_ok() {
-            serving = true;
+            // Wait until the active's monitor is up before the standby
+            // pulls — `try_wait` catching the bind-lost exit so a
+            // foreign answer never counts as the active serving.
+            let client = MonitorClient::new(addr);
+            let mut serving = false;
+            for _ in 0..100 {
+                if active.try_wait().unwrap().is_some() {
+                    break;
+                }
+                if client.snapshot().is_ok() {
+                    serving = true;
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            if serving {
+                // The first answer could still be a foreign listener
+                // the child has not yet raced to the port; give a lost
+                // bind's exit a moment to land, then require the same
+                // child both alive and serving.
+                thread::sleep(Duration::from_millis(150));
+                serving = active.try_wait().unwrap().is_none() && client.snapshot().is_ok();
+            }
+            attempt += 1;
+            if serving {
+                break (addr, client, active);
+            }
+            let _ = active.kill();
+            let _ = active.wait();
+            assert!(
+                attempt < 3,
+                "the active's monitor never came up — its binds kept \
+                 losing the ephemeral-port race"
+            );
+        }
+    };
+
+    let mut active_before = None;
+    for _ in 0..50 {
+        if active.try_wait().unwrap().is_some() {
+            break;
+        }
+        if let Ok(snapshot) = client.snapshot() {
+            active_before = Some(snapshot.tick.0);
             break;
         }
         thread::sleep(Duration::from_millis(20));
     }
-    assert!(serving, "the active's monitor never came up");
-
-    let active_before = client.snapshot().unwrap().tick.0;
+    let active_before = active_before.expect("the active's monitor stopped serving");
     let standby = Command::new(BINARY)
         .args([
             TANK_LOOP_PATH,
@@ -384,7 +426,18 @@ fn standby_binary_pulls_checkpoints_from_a_listening_active() {
         ])
         .output()
         .unwrap();
-    let active_after = client.snapshot().unwrap().tick.0;
+    let mut active_after = None;
+    for _ in 0..50 {
+        if active.try_wait().unwrap().is_some() {
+            break;
+        }
+        if let Ok(snapshot) = client.snapshot() {
+            active_after = Some(snapshot.tick.0);
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let active_after = active_after.expect("the active's monitor stopped serving");
     let _ = active.kill();
     let _ = active.wait();
 
