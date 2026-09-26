@@ -88,6 +88,12 @@ impl FencingDriver {
     fn preempt(&self) {
         self.preempted.store(true, Ordering::Relaxed);
     }
+
+    /// The preemption lifting — the foreign claim's release: writes
+    /// under the arbitration's standing owner pass again.
+    fn release(&self) {
+        self.preempted.store(false, Ordering::Relaxed);
+    }
 }
 
 impl IoDriver for FencingDriver {
@@ -1811,6 +1817,143 @@ fn an_involuntary_demote_with_only_unproven_hints_pulls_nothing() {
     // resolution stays empty: no pull ever follows it.
     assert_eq!(active.monitor.tracking_source(), Some(probe.addr));
     assert_eq!(active.monitor.verified_tracking_source(), None);
+}
+
+/// The QA finding `claim-episode-invisible-in-audit` (#987): a foreign
+/// `claim_writer` episode a peer only ever met through its claim
+/// probes — never through a fenced write of its own — used to journal
+/// nothing: `field_claim_lost` fires only on the fencing demotion, so
+/// a standing foreign claim the reclaim's refused grants observed
+/// recorded no trace the episode ever happened. The peer now queues
+/// one claim observation per distinct claimant a refused conditional
+/// grant names, journaled `field_claim_observed` — the claimant the
+/// fenced write already attributed re-journals nothing — landing in
+/// seq order between the attributed preemption and the role changes
+/// the release's reclaim walks, once however many scans the foreign
+/// claim stands.
+#[test]
+fn a_probe_observed_foreign_claim_journals_once_beside_the_reclaim() {
+    let fencing = FencingDriver::start();
+    // The field's write-ownership arbitration the claim hooks script:
+    // `Some(token)` while an owner stands — the launched peer's own
+    // token until the foreign preempt — `None` while unclaimed.
+    let claim: &'static Mutex<Option<u64>> = Box::leak(Box::new(Mutex::new(Some(7))));
+    const OWNER: u64 = 7;
+    const FIRST: u64 = 999;
+    const SECOND: u64 = 555;
+    let peer = Peer::active(fenced_executor(fencing), None)
+        .with_field_claimant(move |_| *claim.lock().unwrap())
+        .with_field_release(move || {
+            let mut held = claim.lock().unwrap();
+            if *held == Some(OWNER) {
+                *held = None;
+            }
+        })
+        .with_field_reclaim(move || {
+            let mut held = claim.lock().unwrap();
+            Ok(match *held {
+                Some(standing) if standing != OWNER => false,
+                _ => {
+                    *held = Some(OWNER);
+                    true
+                }
+            })
+        })
+        .with_claim_observer(move || (*claim.lock().unwrap()).into_iter().collect());
+    let active = Serving::start(Monitor::bind_peer("127.0.0.1:0", peer, signal_index()).unwrap());
+
+    active.client.advance(1).unwrap();
+    assert_eq!(active.client.role().unwrap().role, Role::Active);
+
+    // The first preemption: the fenced write demotes the owner and the
+    // journaled `field_claim_lost` attributes the claimant the verdict
+    // named — seeding the observation dedup, so this standing claim's
+    // refused reclaim probes add no second record.
+    *claim.lock().unwrap() = Some(FIRST);
+    fencing.preempt();
+    active.client.advance(1).unwrap();
+    assert_eq!(active.client.role().unwrap().role, Role::Demoting);
+    active.client.advance(2).unwrap();
+    assert_eq!(active.client.role().unwrap().role, Role::Standby);
+    assert_eq!(*claim.lock().unwrap(), Some(FIRST));
+
+    // The preemptor released and a *different* foreign attachment
+    // claimed before the probe ran again: the refused reclaim names a
+    // claimant no record of this run carries — the episode that would
+    // otherwise pass the audit silently.
+    *claim.lock().unwrap() = Some(SECOND);
+    active.client.advance(1).unwrap();
+    assert_eq!(active.client.role().unwrap().role, Role::Standby);
+    active.client.advance(1).unwrap();
+
+    // The second claimant's release: the next reclaim grants and the
+    // peer walks `promoting` → `active` — the journaled record keeps
+    // the episode in seq order between the attributed loss and the
+    // reclaim transitions it preceded.
+    *claim.lock().unwrap() = None;
+    fencing.release();
+    active.client.advance(1).unwrap();
+    assert_eq!(active.client.role().unwrap().role, Role::Promoting);
+    active.client.advance(1).unwrap();
+    assert_eq!(active.client.role().unwrap().role, Role::Active);
+
+    let journal = active.client.journal(0).unwrap();
+    let at = |probe: &dyn Fn(&JournalEvent) -> bool| {
+        journal
+            .iter()
+            .position(|entry| probe(&entry.event))
+            .unwrap_or_else(|| panic!("missing journal entry: {journal:?}"))
+    };
+    let lost = at(&|event| {
+        matches!(
+            event,
+            JournalEvent::FieldClaimLost {
+                claimant: Some(FIRST),
+                ..
+            }
+        )
+    });
+    let observed = at(&|event| {
+        matches!(
+            event,
+            JournalEvent::FieldClaimObserved {
+                claimant: SECOND,
+                ..
+            }
+        )
+    });
+    let promoting = at(&|event| {
+        matches!(
+            event,
+            JournalEvent::RoleChanged {
+                from: Role::Standby,
+                to: Role::Promoting,
+                ..
+            }
+        )
+    });
+    let settled = at(&|event| {
+        matches!(
+            event,
+            JournalEvent::RoleChanged {
+                from: Role::Promoting,
+                to: Role::Active,
+                ..
+            }
+        )
+    });
+    assert!(
+        lost < observed && observed < promoting && promoting < settled,
+        "the observed claim must journal in seq order beside the role changes: {journal:?}"
+    );
+    assert_eq!(
+        journal
+            .iter()
+            .filter(|entry| matches!(entry.event, JournalEvent::FieldClaimObserved { .. }))
+            .count(),
+        1,
+        "a standing foreign claim journals once, not once per refused probe: {journal:?}"
+    );
 }
 
 /// A lone field owner fixture for the announced-demotion tests —

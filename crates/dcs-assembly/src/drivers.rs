@@ -47,7 +47,7 @@ use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::net::ToSocketAddrs;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// The remote simulated device kind: a [`PlantServer`](dcs_sim_net::PlantServer)
@@ -1463,6 +1463,7 @@ impl DriverPlan {
             points,
             routes: self.routes,
             sim,
+            refusals: Mutex::new(Vec::new()),
         })
     }
 }
@@ -1618,6 +1619,16 @@ pub struct FanoutDriver {
     /// The shared local simulated backend, when the plan built one —
     /// kept for fault injection and inspection beside `step`.
     sim: Option<Arc<SimDriver>>,
+    /// The standing-owner tokens the most recent conditional grant
+    /// probe's refusals named — recorded by
+    /// [`ensure_field_writer`](Self::ensure_field_writer) and
+    /// [`reclaim_field_writer`](Self::reclaim_field_writer) at the
+    /// refusing backend, read from that backend's own claimant verdict
+    /// the moment its grant refused, so
+    /// [`refused_claimants`](Self::refused_claimants) answers the
+    /// refusal that just landed rather than a verdict an older episode
+    /// left standing.
+    refusals: Mutex<Vec<u64>>,
 }
 
 impl FanoutDriver {
@@ -1758,15 +1769,33 @@ impl FanoutDriver {
     /// are skipped, exactly as `claim_field_writer` skips unfenceable
     /// kinds — for them the claim either dies with the connection or
     /// the deployment simply reports the orphan wedge without re-arm.
+    /// A refused backend's fencing verdict — the standing owner the
+    /// refusal named — lands in [`refused_claimants`](Self::refused_claimants)
+    /// for the observed-claimant journal record.
     pub fn ensure_field_writer(&self, owner: u64) -> Result<bool, StepError> {
         let mut held = true;
+        let mut refused = Vec::new();
         for backend in &self.backends {
             if backend.field_facing
                 && let Some(ensure) = &backend.ensure
             {
-                held &= ensure(owner)?;
+                match ensure(owner)? {
+                    true => {}
+                    // The refusal's own verdict named the standing
+                    // owner — the backend's fencing record carries the
+                    // claimant this probe just met, so the audit can
+                    // attribute the foreign claim rather than journal
+                    // an anonymous refusal.
+                    false => {
+                        held = false;
+                        if let Some(fenced_by) = &backend.fenced_by {
+                            refused.extend(fenced_by());
+                        }
+                    }
+                }
             }
         }
+        *self.refusals.lock().unwrap() = refused;
         Ok(held)
     }
 
@@ -1815,19 +1844,45 @@ impl FanoutDriver {
     /// operator-promotable state — or that no backend can answer a
     /// conditional grant at all; `Err` that a backend could not be
     /// asked. Field-facing backends without a reclaim hook are skipped
-    /// exactly as `ensure_field_writer` skips unprobeable kinds.
+    /// exactly as `ensure_field_writer` skips unprobeable kinds. A
+    /// refused backend's fencing verdict lands in
+    /// [`refused_claimants`](Self::refused_claimants) exactly as the
+    /// orphan probe's does.
     pub fn reclaim_field_writer(&self, owner: u64) -> Result<bool, StepError> {
         let mut asked = false;
         let mut held = true;
+        let mut refused = Vec::new();
         for backend in &self.backends {
             if backend.field_facing
                 && let Some(reclaim) = &backend.reclaim
             {
                 asked = true;
-                held &= reclaim(owner)?;
+                match reclaim(owner)? {
+                    true => {}
+                    false => {
+                        held = false;
+                        if let Some(fenced_by) = &backend.fenced_by {
+                            refused.extend(fenced_by());
+                        }
+                    }
+                }
             }
         }
+        *self.refusals.lock().unwrap() = refused;
         Ok(asked && held)
+    }
+
+    /// The standing-owner tokens the last conditional grant probe's
+    /// refusals named — one per refusing field-facing backend, read
+    /// from the backend's own fencing verdict the moment its grant
+    /// refused. A peer's `field_claim_observed` journal record
+    /// attributes through this answer the foreign claim its
+    /// `ensure`/`reclaim` probe just met — not a stale or anonymous
+    /// refusal. Empty when the last probe round granted everywhere,
+    /// ran no conditional grant, or met refusals carrying no claimant
+    /// identity.
+    pub fn refused_claimants(&self) -> Vec<u64> {
+        self.refusals.lock().unwrap().clone()
     }
 
     /// The owner token the field's standing claim named the last time
@@ -2189,6 +2244,7 @@ mod tests {
             points: HashMap::new(),
             routes: Vec::new(),
             sim: None,
+            refusals: Mutex::new(Vec::new()),
         };
         assert!(plain.cyclic().is_none());
 
@@ -2206,6 +2262,7 @@ mod tests {
             points: HashMap::new(),
             routes: Vec::new(),
             sim: None,
+            refusals: Mutex::new(Vec::new()),
         };
         let cyclic = fanout.cyclic().unwrap();
         cyclic.exchange(Tick(7)).unwrap();
@@ -2254,6 +2311,7 @@ mod tests {
             points: HashMap::from([(PointId(31), 0), (PointId(32), 1)]),
             routes: Vec::new(),
             sim: None,
+            refusals: Mutex::new(Vec::new()),
         };
         let cyclic = fanout.cyclic().unwrap();
 
@@ -2316,6 +2374,7 @@ mod tests {
             points: HashMap::from([(PointId(31), 0), (PointId(32), 1)]),
             routes: Vec::new(),
             sim: None,
+            refusals: Mutex::new(Vec::new()),
         };
         let cyclic = fanout.cyclic().unwrap();
 
