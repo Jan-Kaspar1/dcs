@@ -1022,6 +1022,34 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
             "the commissioning leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
+    // The pair contract's rolling controller-upgrade leg ran and
+    // held: the pair launched on the upgrade-from revision's
+    // tooling (under the file:// stand-in the same substituted
+    // binaries), each peer rolled onto the pinned binary one
+    // process at a time resuming at its persisted tick, the
+    // promoted peer's receipted command settled exactly once, and
+    // the plant's step record named no unowned window — its digest
+    // line reports the evidence, and the doctored expectation
+    // reported its named diagnostic.
+    let rolling_line = stdout
+        .lines()
+        .find(|line| line.contains("rolling-upgrade-digest"))
+        .unwrap_or_else(|| panic!("the rolling-upgrade leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "rolled and resumed at tick",
+        "promoted at tick",
+        "launch roles restored at tick",
+        "owner scans",
+    ] {
+        assert!(
+            rolling_line.contains(phrase),
+            "the rolling-upgrade digest names no '{phrase}' evidence: {rolling_line}"
+        );
+    }
+    assert!(
+        stdout.contains("expect-degraded: reported, rolling-upgrade-failed"),
+        "the rolling-upgrade leg's expect-degraded case did not report its named diagnostic:\n{stdout}"
+    );
     assert!(
         stdout.contains("== consumers =="),
         "the consumers stage did not run:\n{stdout}"
