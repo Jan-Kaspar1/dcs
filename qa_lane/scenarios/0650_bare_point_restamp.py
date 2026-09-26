@@ -388,8 +388,6 @@ def scenario_bare_point_restamp(ctx):
         except Exception:
             pass
         stream = None
-        floor_b, floor_d = ticks_b[-1], ticks_d[-1]
-        floor_dv = kept[-1]['driven_value']
         try:
             stop(active)
         except Exception as exc:
@@ -399,7 +397,20 @@ def scenario_bare_point_restamp(ctx):
         case.observe('writer stopped — polling the plant for the '
                      'frozen stamps')
 
+        # The freeze floor is established post-stop, not from the last
+        # stepped-window read: owner scans landing between the window
+        # and the stop — and one in-flight scan landing after it —
+        # advance the stored stamps honestly. What the contract
+        # forbids is movement once the plant is actually frozen, so a
+        # served stamp that still advances re-establishes the floor
+        # and the hold restarts; RESTAMP_HOLD consecutive static reads
+        # at one floor prove the freeze. `seen` bounds the rewind
+        # check at the highest tick the plant ever served — a stored
+        # stamp can never drop below what a read already observed.
+        seen = max(ticks_b[-1], ticks_d[-1])
+        floor_b = floor_d = floor_dv = None
         static = 0
+        advances = 0
         moved = None
         promoted = False
         freeze_obs = []
@@ -421,17 +432,25 @@ def scenario_bare_point_restamp(ctx):
             if got_b[0] is None or got_d[0] is None:
                 moved = 'unstamped'
                 break
-            if got_b[0] < floor_b or got_d[0] < floor_d:
+            if got_b[0] < seen or got_d[0] < seen:
                 moved = 'rewound'
                 break
-            if got_b[0] != floor_b or got_d[0] != floor_d \
+            seen = max(seen, got_b[0], got_d[0])
+            if floor_b is None:
+                floor_b, floor_d, floor_dv = \
+                    got_b[0], got_d[0], got_d[1]
+            elif got_b[0] != floor_b or got_d[0] != floor_d \
                     or got_d[1] != floor_dv:
-                moved = 'advanced'
-                break
+                floor_b, floor_d, floor_dv = \
+                    got_b[0], got_d[0], got_d[1]
+                static = 0
+                advances += 1
             static += 1
             time.sleep(RESTAMP_POLL)
         case.observe('freeze: ' + str(static)
                      + ' static reads'
+                     + (', ' + str(advances) + ' late advances'
+                        if advances else '')
                      + (', moved: ' + moved if moved else '')
                      + (', peer promoted' if promoted else ''))
 
@@ -451,7 +470,10 @@ def scenario_bare_point_restamp(ctx):
             _try_role(ctx, base)
             _try_role(ctx, peer_base)
             got = _restamp_read(ctx, bare)
-            if got is None or got[0] is None or got[0] <= floor_b:
+            if got is None or got[0] is None:
+                return None
+            floor = floor_b if floor_b is not None else seen
+            if got[0] <= floor:
                 return None
             return {'tick': got[0]}
 
@@ -463,7 +485,8 @@ def scenario_bare_point_restamp(ctx):
             {'seam': 'writer-stop', 'floor': {
                 'bare': floor_b, 'driven': floor_d,
                 'driven_value': floor_dv},
-             'static': static, 'moved': moved, 'promoted': promoted,
+             'static': static, 'advances': advances, 'moved': moved,
+             'promoted': promoted,
              'observations': freeze_obs, 'resumed': back})
         case.evidence('file', ref, 'per-poll stamps through the '
                       'freeze and the resume read')
@@ -478,18 +501,18 @@ def scenario_bare_point_restamp(ctx):
                 'failed', 'bare-point-restamp-nondeterministic: a '
                 'served sample carried no integer stamp through '
                 'the freeze: ' + json.dumps(freeze_obs)[:400])
-        if moved:
-            return case.finish(
-                'inconclusive', 'the writer-stop induction never '
-                'took effect — the plant\'s stepping kept advancing '
-                'the served stamps, so no freeze honesty can be '
-                'attributed')
         if promoted and static < RESTAMP_MIN_STATIC:
             return case.finish(
                 'inconclusive', 'the peer\'s failover promotion '
                 'reclaimed the field before the frozen stamps could '
                 'be observed — no freeze window to judge')
         if not promoted and static < RESTAMP_HOLD:
+            if advances:
+                return case.finish(
+                    'inconclusive', 'the writer-stop induction never '
+                    'took effect — the plant\'s stepping kept '
+                    'advancing the served stamps, so no freeze '
+                    'honesty can be attributed')
             return case.finish(
                 'inconclusive', 'the freeze window never produced '
                 + str(RESTAMP_HOLD) + ' static reads — the plant '

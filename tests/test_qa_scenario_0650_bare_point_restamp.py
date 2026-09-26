@@ -75,7 +75,7 @@ class RestampPlantPeer(FakePlantPeer):
         self.element_drives = False # an element owns the named point
         self.refuse_claim = False   # ensure_writer answers refused
         self.refuse_write = False   # a granted write answers fenced
-        self.gap_steps = frozenset()  # step indexes losing the re-stamp
+        self.gap_steps = frozenset()  # step index the re-stamp dies at
         self.rewind_reads = frozenset()  # bare reads stamping backwards
         self.rewind_frozen = False  # a frozen read serves a rewound stamp
         self.unstamp_frozen = False # a frozen read serves no stamp
@@ -141,9 +141,14 @@ class RestampPlantPeer(FakePlantPeer):
             if self.steps_allowed is not None \
                     and self.step_requests > self.steps_allowed:
                 return self._fenced()
-            # The driven step and the reads it sets up lose the bare
-            # re-stamp while a gap is staged for this step index.
-            self._skip_bare = self.step_requests in self.gap_steps
+            # A staged gap kills the bare channel's re-stamp from the
+            # tripped step on — the step lands but the stored stamp
+            # keeps the tick it held, so every read after serves the
+            # held stamp: the held-across-a-step shape the contract
+            # fails on. (A single-step miss is unobservable in this
+            # fake — the next owner scan re-stamps it away.)
+            self._skip_bare = self._skip_bare \
+                or self.step_requests in self.gap_steps
             self._advance(request.get('dt') or 0.25)
             return {'result': 'stepped', 'tick': self.plant_tick}
         if op == 'read' and not self.stepping:
