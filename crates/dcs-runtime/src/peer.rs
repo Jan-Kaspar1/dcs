@@ -1539,7 +1539,11 @@ impl<'d> Peer<'d> {
     /// unreached tail is restored suspended — still served for the
     /// successor's carry — and the receipt keeps exactly one terminal
     /// settle ahead of it rather than a provisional `superseded` the
-    /// next, fresher adoption would contradict.
+    /// next, fresher adoption would contradict. And when the demoted
+    /// run itself re-takes the field — re-promoted with no covering
+    /// adoption ever adjudicating its tail — the surviving line is
+    /// this run: its first field-owning scan re-queues the suspended
+    /// entries and settles them at that boundary.
     ///
     /// Only a field-owning instance demotes; anything else is refused
     /// with [`SwitchError::NotActive`]. The demoted peer's reported
@@ -2821,7 +2825,11 @@ impl<'d> Peer<'d> {
     /// promotion, not settled here: a quiesced scan must not mint an
     /// `Applied` the line never ordered, on an image the field never
     /// sees. The carried entries settle once at the promoted run's
-    /// first field-owning scan.
+    /// first field-owning scan — which also re-queues this run's own
+    /// suspended tail ([`Executor::scan`]): a demoted peer re-promoted
+    /// is the surviving line its suspended admissions were made on, so
+    /// they settle at that boundary rather than parking `Accepted`
+    /// against an empty queue.
     pub fn scan(&mut self) -> Tick {
         // The per-scan claim observation: ask the field's arbitration
         // what a mutation from this run's attachments would meet —
@@ -7274,6 +7282,118 @@ mod tests {
             CommandOutcome::Applied { tick: Tick(4) }
         );
         assert_eq!(Clocked::count(&peer.checkpoint()), Value::Int(7));
+    }
+
+    /// QA finding `suspended-commands-park-on-repromoted-owner`: the
+    /// demote-carry contract's uncovered tail on the *same* run. The
+    /// suspended entry's adjudication runs through covering adoptions
+    /// alone — covered and re-queued, or passed by into `superseded` —
+    /// so a demoted peer re-promoted with no covering adoption ever
+    /// landing on its tail parks the receipt `Accepted` forever, the
+    /// queue reading depth 0 while the served checkpoint still offers
+    /// the command to a successor's deferred apply. But the
+    /// re-promoted run *is* the surviving line: its first field-owning
+    /// scan re-queues its own suspended commands and settles them at
+    /// that boundary — the once-settle the contract owes, on the owner
+    /// the operator submitted to.
+    #[test]
+    fn a_repromoted_owner_settles_its_own_suspended_commands() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::active(Clocked::executor(&gate), Some(&gate));
+        peer.activate().unwrap();
+        peer.scan();
+        peer.submit_command(Clocked::bump(7));
+        peer.demote().unwrap();
+
+        // The demoted peer's first tracking pull lands the ownerless
+        // line's document — the reproduction's orphaned-sync shape: a
+        // serving standby's own checkpoint, whose receipt window's
+        // high-water never reached the suspended index. The unreached
+        // tail restores suspended beside `Orphaned`, the convergence
+        // the re-promotion stands on.
+        let rest_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let rest_gate = WriteGate::closed(&rest_driver);
+        let rest = Peer::standby(Clocked::executor(&rest_gate), Some(&rest_gate));
+        peer.apply(&rest.checkpoint()).unwrap();
+        assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
+        assert!(matches!(
+            peer.receipts()[0].outcome,
+            CommandOutcome::Accepted { .. }
+        ));
+        peer.scan();
+        assert_eq!(peer.role(), Role::Standby);
+        assert!(matches!(
+            peer.receipts()[0].outcome,
+            CommandOutcome::Accepted { .. }
+        ));
+
+        // The same run re-promotes — the field's claim answers, no
+        // covering adoption ever adjudicated the tail — and its first
+        // field-owning scan settles the suspended command itself:
+        // `Applied` once on this line, the receipt leaving `Accepted`
+        // rather than parking beside a depth-0 queue.
+        peer.promote().unwrap();
+        peer.scan();
+        assert_eq!(peer.role(), Role::Active);
+        assert!(matches!(
+            peer.receipts()[0].outcome,
+            CommandOutcome::Applied { .. }
+        ));
+        assert_eq!(Clocked::count(&peer.checkpoint()), Value::Int(7));
+        assert!(peer.take_superseded_commands().is_empty());
+    }
+
+    /// The finding's deferred-apply half: a fresh standby adopting the
+    /// re-promoted run's checkpoint must not apply the suspended
+    /// command at its own promotion. The owner's first field-owning
+    /// scan already settled it, so the adopted window carries the
+    /// line's one verdict — the successor queues nothing for it and
+    /// its promotion applies nothing the line did not order.
+    #[test]
+    fn a_standby_adopting_the_repromoted_owner_applies_no_deferred_command() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::active(Clocked::executor(&gate), Some(&gate));
+        peer.activate().unwrap();
+        peer.scan();
+        peer.submit_command(Clocked::bump(7));
+        peer.demote().unwrap();
+
+        // The reproduction's orphaned re-promotion: the suspended
+        // command settles on the re-taken line's own first
+        // field-owning scan, so every checkpoint the owner serves
+        // from there carries the settled verdict.
+        let rest_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let rest_gate = WriteGate::closed(&rest_driver);
+        let rest = Peer::standby(Clocked::executor(&rest_gate), Some(&rest_gate));
+        peer.apply(&rest.checkpoint()).unwrap();
+        peer.promote().unwrap();
+        peer.scan();
+        assert_eq!(peer.role(), Role::Active);
+        assert!(matches!(
+            peer.receipts()[0].outcome,
+            CommandOutcome::Applied { .. }
+        ));
+
+        // The fresh probe tracks the re-promoted owner: its window
+        // adopts the verdict, not a live admission — nothing queues
+        // for the command, so the probe's own promotion and
+        // field-owning scans apply nothing a second time and the two
+        // logs stay the line's one audit.
+        let probe_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let probe_gate = WriteGate::closed(&probe_driver);
+        let mut probe = Peer::standby(Clocked::executor(&probe_gate), Some(&probe_gate));
+        probe.apply(&peer.checkpoint()).unwrap();
+        probe.promote().unwrap();
+        probe.scan();
+        assert_eq!(probe.role(), Role::Active);
+        assert_eq!(probe.receipts(), peer.receipts());
+        assert_eq!(Clocked::count(&probe.checkpoint()), Value::Int(7));
+        probe.scan();
+        assert_eq!(probe.receipts(), peer.receipts());
+        assert_eq!(Clocked::count(&probe.checkpoint()), Value::Int(7));
+        assert!(probe.take_superseded_commands().is_empty());
     }
 
     /// QA finding `quiesced-standby-scan-settles-adopted-pending-commands`

@@ -859,7 +859,11 @@ pub struct Executor<'d> {
     /// Bounded by `receipt_capacity`: once the log outgrows the bound
     /// the leading settled entries evict oldest-first — a receipt still
     /// `Accepted` is pending command state and never evicts, so the
-    /// log holds at most `capacity + pending` entries. The count of
+    /// log holds at most `capacity + pending` entries. An `Accepted`
+    /// receipt no queue carries is *suspended* — a demotion's parked
+    /// admission awaiting adjudication by the surviving line: a
+    /// covering adoption's verdict, or this run's own re-taken
+    /// field-owning boundary. The count of
     /// evicted entries is [`receipt_base`](Executor::receipt_base) —
     /// `attempts` minus the retained length.
     receipts: Vec<CommandReceipt>,
@@ -1610,6 +1614,16 @@ impl<'d> Executor<'d> {
     /// for the phase order. Field-side faults never abort the scan:
     /// they degrade into `io_health` counters and held `Bad` samples,
     /// so the returned tick always reports a completed scan.
+    ///
+    /// A field-owning scan owes every still-`Accepted` receipt its
+    /// boundary: the suspended tail a demotion parked —
+    /// [`suspend_pending_commands`](Self::suspend_pending_commands),
+    /// [`suspend_boundary_commands`](Self::suspend_boundary_commands),
+    /// and the unrestored suffix [`adopt_receipts`](Self::adopt_receipts)
+    /// carries — re-queues at this head before the boundary drains it.
+    /// The re-promoted run is the surviving line itself, so its own
+    /// suspended admissions settle here like any carried command rather
+    /// than parking `Accepted` against an empty queue.
     pub fn scan(&mut self) -> Tick {
         self.tick = Tick(self.tick.0 + 1);
         let tick = self.tick;
@@ -1617,6 +1631,7 @@ impl<'d> Executor<'d> {
         self.emitted.clear();
         self.fenced_write = None;
         self.boundary_undo.clear();
+        self.requeue_suspended_commands();
         self.apply_commands(tick);
         self.exchange_image(tick);
         self.read_inputs(tick);
@@ -1957,7 +1972,11 @@ impl<'d> Executor<'d> {
     /// re-queue, a quiesced scan must not mint an `Applied` the line
     /// never ordered — and resolve when a covering adoption
     /// adjudicates their indices: carried then, settling with the
-    /// line, or passed by and abandoned. A suffix whose base index
+    /// line, or passed by and abandoned — or when the run re-takes
+    /// the field itself, its first field-owning
+    /// [`scan`](Executor::scan) re-queuing the suspended tail through
+    /// [`requeue_suspended_commands`](Self::requeue_suspended_commands).
+    /// A suffix whose base index
     /// sits past the adopted high-water — evictions the source never
     /// saw opening a gap the log cannot span — cannot be restored and
     /// drops with the rest of the abandoned window.
@@ -2932,7 +2951,11 @@ impl<'d> Executor<'d> {
     /// log, settling with the line's own verdict, or passed by its
     /// submission high-water into the one `Rejected`/`Superseded` the
     /// journal emits — never both, never a provisional verdict the
-    /// next adoption contradicts.
+    /// next adoption contradicts. The same adjudication covers the
+    /// run that re-takes the field itself: no covering adoption ever
+    /// sees its tail, so its first field-owning scan re-queues it —
+    /// [`requeue_suspended_commands`](Self::requeue_suspended_commands)
+    /// — and settles it there.
     ///
     /// The settlement replay is only half the reconciliation: the
     /// state those commands mutated is run state — internal `In`
@@ -3034,9 +3057,50 @@ impl<'d> Executor<'d> {
     /// for a covering checkpoint to adjudicate — a pending command
     /// neither vanishes unaudited, reports `applied` on an abandoned
     /// image, nor settles `superseded` on a verdict the line never
-    /// made.
+    /// made. And when no covering adoption runs because the demoted
+    /// run re-takes the field itself — the same peer re-promoted as
+    /// the owner — the surviving line *is* this run:
+    /// [`requeue_suspended_commands`](Self::requeue_suspended_commands)
+    /// puts the suspended entries back on the queue at the first
+    /// field-owning scan and they settle at that boundary.
     pub fn suspend_pending_commands(&mut self) {
         self.pending_commands.clear();
+    }
+
+    /// Re-queues the run's suspended commands — every still-`Accepted`
+    /// receipt the queue does not already carry — for the field-owning
+    /// scan's boundary to settle. [`scan`](Executor::scan) runs it at
+    /// the boundary head; [`scan_quiesced`](Executor::scan_quiesced)
+    /// never does, the suspended state existing only while the run
+    /// does not own the field.
+    ///
+    /// The demote-carry contract adjudicates a suspended receipt
+    /// through the tracked line's adoptions: covered by the adopted
+    /// window it re-queues there, passed by its high-water the peer
+    /// settles it `Rejected`/`Superseded`. A demoted run re-promoted
+    /// as the field owner has no covering adoption for its own tail —
+    /// it is the line those admissions were made on — so the field's
+    /// re-taken boundary adjudicates instead: every live `Accepted`
+    /// entry is a command this run owes a settlement, re-queued in
+    /// submission order (the log's own order) and settled once at this
+    /// scan like a carried command — never parked `Accepted` against a
+    /// depth-0 queue while the served checkpoint keeps offering it to
+    /// a successor's deferred apply.
+    fn requeue_suspended_commands(&mut self) {
+        self.pending_commands = self
+            .receipts
+            .iter()
+            .enumerate()
+            .filter(|(_, receipt)| matches!(receipt.outcome, CommandOutcome::Accepted { .. }))
+            .map(|(index, _)| index)
+            .collect();
+        // Re-queued depth is real depth the same way a carried queue's
+        // is: the re-taken line owes these entries their boundary, so
+        // the high-water record sees them.
+        self.command_admission.high_water = self
+            .command_admission
+            .high_water
+            .max(self.pending_commands.len());
     }
 
     /// The cyclic exchange at the read boundary: when the driver
