@@ -361,7 +361,7 @@ pub struct Peer<'d> {
     /// already settled `Rejected` carrying [`CommandError::Superseded`]
     /// and queued for the journal. Abandoned means adjudicated: the
     /// adopted window's submission high-water passed the receipt's
-    /// index without carrying the command, so the line demonstrably
+    /// index without carrying the submission, so the line demonstrably
     /// moved on without it — a stale checkpoint that never observed
     /// the submission drops nothing, `Executor::adopt_receipts`
     /// restoring the unreached tail suspended instead. A genuinely
@@ -2192,12 +2192,29 @@ impl<'d> Peer<'d> {
     /// Reconciles the pending commands a successful adoption left
     /// behind: the adopted receipt log is the line's one audit, so an
     /// entry this run still held `Accepted` that the new log does not
-    /// carry — at its absolute index, as the same command — can never
-    /// apply here: the gate quiesces this run's writes. It settles
-    /// `Rejected` carrying [`CommandError::Superseded`] and queues for
-    /// the journal rather than vanishing unaudited. A covered entry's
-    /// outcome is the line's own — re-queued still `Accepted`, or
-    /// already settled on the tracked run — and needs nothing.
+    /// carry — at its absolute index, as the same *submission* — can
+    /// never apply here: the gate quiesces this run's writes. It
+    /// settles `Rejected` carrying [`CommandError::Superseded`] and
+    /// queues for the journal rather than vanishing unaudited. A
+    /// covered entry's outcome is the line's own — re-queued still
+    /// `Accepted`, or already settled on the tracked run — and needs
+    /// nothing.
+    ///
+    /// The index alone does not make the adopted entry this
+    /// submission's carry: two different admissions can claim the same
+    /// absolute index — the receipt this run minted and one the
+    /// successor admitted to the same slot once it owned the sequence
+    /// — and an identical command there means nothing on its own: an
+    /// operator's repeat write to the same point collides exactly.
+    /// The adopted entry *is* this submission only when it is this
+    /// receipt — the verbatim copy the line adopted, still `Accepted`
+    /// on the submission's own apply boundary — or the line's
+    /// settlement of it: a settled adopted entry counts as carried
+    /// only when the whole submission record matches — `actor` and
+    /// `reason` ride a receipt unchanged from submission to terminal
+    /// verdict, so a difference convicts a different admission and the
+    /// suspended entry resolves `superseded`, never absorbed as the
+    /// line's carry.
     ///
     /// Absent means adjudicated, not merely unseen: the adoption keeps
     /// every prior receipt at or beyond its window's high-water — the
@@ -2214,7 +2231,22 @@ impl<'d> Peer<'d> {
                 self.executor
                     .receipts()
                     .get(position as usize)
-                    .is_some_and(|adopted| adopted.command == receipt.command)
+                    .is_some_and(|adopted| {
+                        // The verbatim carry: the adopted entry is this
+                        // very receipt — still `Accepted` on its own
+                        // apply boundary, submission record and all.
+                        adopted == &receipt
+                            // Or its settlement: the line's terminal
+                            // verdict on the carried copy. The outcome
+                            // legitimately advanced, so the test is the
+                            // submission record — command, actor, and
+                            // reason, the fields a receipt carries
+                            // unchanged — never the command alone.
+                            || (!matches!(adopted.outcome, CommandOutcome::Accepted { .. })
+                                && adopted.command == receipt.command
+                                && adopted.actor == receipt.actor
+                                && adopted.reason == receipt.reason)
+                    })
             });
             if !carried {
                 self.pending_superseded.push((
@@ -7138,6 +7170,136 @@ mod tests {
         assert!(peer.take_superseded_commands().is_empty());
         assert_eq!(peer.receipts(), source.receipts());
         assert_eq!(Clocked::count(&peer.checkpoint()), Value::Int(3));
+    }
+
+    /// QA finding `suspended-command-absorbed-by-identical-carry-unaudited`:
+    /// the carry test is the receipt's identity, not its command. The
+    /// reproduction's shape — a suspended `write_value` whose
+    /// `(index, command)` equals a *different* submission in the
+    /// successor's adopted window — must not read as the line's own
+    /// carry: the suspended entry is abandoned, settles `Rejected`
+    /// carrying `Superseded`, and queues for the journal, while the
+    /// admission counter never regresses below the receipts the run
+    /// ever minted.
+    #[test]
+    fn an_identical_command_at_the_index_is_not_the_suspended_submission() {
+        use dcs_core::Command;
+        let map = || {
+            PointMap::new()
+                .with_writable_internal(
+                    PointId(301),
+                    Direction::In,
+                    ValueKind::Float,
+                    Value::Float(0.0),
+                )
+                .with_writable_internal(
+                    PointId(333),
+                    Direction::In,
+                    ValueKind::Float,
+                    Value::Float(0.0),
+                )
+        };
+        let write = |point: PointId| Command::WriteValue {
+            point,
+            kind: ValueKind::Float,
+            value: Value::Float(7.0),
+        };
+        // The reproduction's alternating points — batchB's commands are
+        // value-identical to what the successor's window adopted at the
+        // same absolute indices.
+        let points = [PointId(301), PointId(333), PointId(301), PointId(333)];
+
+        let field = StubDriver::field(&[]);
+        let gate = WriteGate::closed(&field);
+        let mut peer = Peer::active(
+            Executor::new(&gate, map(), Vec::new()).unwrap(),
+            Some(&gate),
+        );
+        peer.activate().unwrap();
+        peer.scan();
+
+        // batchA: the receipted writes on the active, settling before
+        // the promotion flight.
+        for point in points {
+            peer.submit_command_as(write(point), Some("batch-a".to_string()));
+        }
+        peer.scan();
+
+        // The tracking standby converges on the post-batchA line and
+        // promotes — the successor that never observed batchB.
+        let source_field = StubDriver::field(&[]);
+        let source_gate = WriteGate::closed(&source_field);
+        let mut source = Peer::standby(
+            Executor::new(&source_gate, map(), Vec::new()).unwrap(),
+            Some(&source_gate),
+        );
+        source.apply(&peer.checkpoint()).unwrap();
+        source.promote().unwrap();
+
+        // batchB — the sub-scan window the incumbent still admits:
+        // identical writes under a distinct actor, all accepted on the
+        // still-active ex-owner, then suspended at its demote.
+        for point in points {
+            peer.submit_command_as(write(point), Some("batch-b".to_string()));
+        }
+        peer.demote().unwrap();
+        let minted = peer.snapshot().command_queue.attempts;
+
+        // batchC: the new owner's own admissions push the adopted
+        // window's submission high-water past batchB's indices — the
+        // first four carrying the identical commands under its own
+        // actor.
+        for point in points.into_iter().cycle().take(8) {
+            source.submit_command_as(write(point), Some("batch-c".to_string()));
+        }
+        source.scan();
+
+        // The covering adoption: the adopted window holds different
+        // submissions at batchB's indices — the identical command is
+        // not the receipt's identity — so each suspended entry settles
+        // `Rejected`/`Superseded` and queues for the journal rather
+        // than evaporating as the line's carry.
+        peer.apply(&source.checkpoint()).unwrap();
+        let superseded = peer.take_superseded_commands();
+        assert_eq!(superseded.len(), 4, "{superseded:?}");
+        for (position, (index, receipt)) in superseded.iter().enumerate() {
+            assert_eq!(*index, 4 + position as u64);
+            assert_eq!(receipt.command, write(points[position]));
+            assert_eq!(receipt.actor.as_deref(), Some("batch-b"));
+            assert_eq!(
+                receipt.outcome,
+                CommandOutcome::Rejected {
+                    reason: CommandError::Superseded {
+                        point: Some(points[position])
+                    }
+                }
+            );
+        }
+        // The drain empties — one settlement per abandoned admission,
+        // journaled once.
+        assert!(peer.take_superseded_commands().is_empty());
+        // The merged log is the line's one audit — the successor's own
+        // receipts at those indices, none actor `batch-b` — and
+        // `attempts` never regressed below the receipts this run ever
+        // minted: the counter converges to the adopted window's own
+        // high-water, standing above the ex-owner's admission count.
+        assert_eq!(peer.receipts(), source.receipts());
+        assert!(
+            peer.receipts()
+                .iter()
+                .all(|receipt| receipt.actor.as_deref() != Some("batch-b"))
+        );
+        let attempts = peer.snapshot().command_queue.attempts;
+        assert!(attempts >= minted, "{attempts} < {minted}");
+        assert_eq!(attempts, source.snapshot().command_queue.attempts);
+
+        // No strays: a later adoption or scan mints nothing further,
+        // and the abandoned submissions stay out of the queue — the
+        // demoted run applies nothing for them.
+        peer.scan();
+        peer.apply(&source.checkpoint()).unwrap();
+        assert!(peer.take_superseded_commands().is_empty());
+        assert_eq!(peer.snapshot().command_queue.attempts, attempts);
     }
 
     /// QA finding `superseded-command-still-settles-applied`: the
