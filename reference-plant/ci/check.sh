@@ -141,7 +141,12 @@
 #                diagnostics, the stem its file name with underscores
 #                turned to dashes; adding a leg is one new file under
 #                ci/legs/ — this script, the boundary lint, and the
-#                README need no edit.
+#                README need no edit. A leg declaring `upgrade_tools`
+#                additionally runs its flag arguments against the
+#                recorded upgrade-from revision's tooling, resolved
+#                through the same cargo-install mechanism at
+#                $DCS_UPGRADE_REV — the rolling-upgrade leg's
+#                predecessor-release binaries.
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -1124,6 +1129,18 @@ echo "== pair =="
 # launch roles for the next. Adding a leg is one new file under
 # ci/legs/ — nothing in this script changes. The driver reports each
 # leg's named diagnostics itself.
+# The legs' upgrade_from half: a leg declaring `upgrade_tools` runs
+# its flag arguments against the recorded upgrade-from revision's
+# tooling — the same `cargo install` resolution the pinned release's
+# went through, here at $DCS_UPGRADE_REV (the upgrade stage's recorded
+# baseline). Under a `DCS_TOOLS` substitution the directory resolves
+# to the substituted set, so the leg rolls the substituted binaries.
+PINNED_TOOLS="$TOOLS"
+ensure_tools "$DCS_UPGRADE_REV" \
+    || fail "pin-unresolvable: cargo install --git $DCS_REMOTE --rev $DCS_UPGRADE_REV failed"
+UPGRADE_TOOLS="$TOOLS"
+TOOLS="$PINNED_TOOLS"
+TOOLS_REV="$DCS_REV"
 python3 ci/legs.py \
     --plant-server "$TOOLS/dcs-plant-server" \
     --controller "$TOOLS/dcs-controller" \
@@ -1131,7 +1148,8 @@ python3 ci/legs.py \
     --dynamics model/dynamics.json \
     --scenario ci/scenario.json \
     --manifest deploy/manifest.json \
-    --tools "$TOOLS" || exit 1
+    --tools "$TOOLS" \
+    --upgrade-tools "$UPGRADE_TOOLS" || exit 1
 
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
