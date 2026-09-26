@@ -180,7 +180,10 @@ fn unkeyed_fenced_demote_converges_on_the_field_attested_successor() {
         "the ownerless line must surface orphaned on the tracking peer: {report:?}"
     );
     let (status, body) = standby.request("POST", "/promote", None).unwrap();
-    assert_eq!(status, 200, "the orphan promote must not be refused: {body}");
+    assert_eq!(
+        status, 200,
+        "the orphan promote must not be refused: {body}"
+    );
     standby.advance(1).unwrap();
     assert_eq!(
         standby.role().unwrap().role,

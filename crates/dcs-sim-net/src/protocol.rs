@@ -600,10 +600,8 @@ mod tests {
             }
         );
         assert_eq!(
-            serde_json::from_str::<PlantRequest>(
-                r#"{"op":"claim_writer_unless_held","owner":44}"#
-            )
-            .unwrap(),
+            serde_json::from_str::<PlantRequest>(r#"{"op":"claim_writer_unless_held","owner":44}"#)
+                .unwrap(),
             PlantRequest::ClaimWriterUnlessHeld {
                 owner: 44,
                 monitor: None,

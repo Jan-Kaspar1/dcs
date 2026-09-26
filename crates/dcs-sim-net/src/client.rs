@@ -921,7 +921,12 @@ impl RemoteDriver {
             if Instant::now() < connection.retry_at {
                 return Err(RemoteError::Disconnected);
             }
-            connection.reattach(&self.addresses, self.timeout, self.controller, self.claim_monitor());
+            connection.reattach(
+                &self.addresses,
+                self.timeout,
+                self.controller,
+                self.claim_monitor(),
+            );
         }
         let Some(stream) = connection.stream.as_mut() else {
             return Err(RemoteError::Disconnected);

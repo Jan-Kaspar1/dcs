@@ -855,9 +855,7 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         // port this instance declares on every claim it asserts or
         // re-arms, so the field's claim record names where its owner
         // serves checkpoints.
-        claim_endpoint: Some(Arc::new(move |port| {
-            registering.set_claim_endpoint(port)
-        })),
+        claim_endpoint: Some(Arc::new(move |port| registering.set_claim_endpoint(port))),
         // The claimant-endpoint attribution: the checkpoint endpoint
         // the plant server's last fencing verdict carried for this
         // attachment — the field-attested tracking source a

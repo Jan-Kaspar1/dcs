@@ -614,7 +614,7 @@ A factory returns one of two `DeviceDriver` contributions:
   initial value). The fragment merges with every other `Sim` contribution
   and the synthesized internal points into one `SimDriver` backend, so a
   model can mix many `sim*` devices freely.
-- `DeviceDriver::Backend(DeviceBackend { io, step, claim, release, ensure, startup_claim, probe, reclaim, fenced_by, inspect, field_facing })` — a
+- `DeviceDriver::Backend(DeviceBackend { io, step, claim, release, ensure, startup_claim, probe, reclaim, fenced_by, claim_endpoint, owner_endpoint, inspect, field_facing })` — a
   self-contained backend. `io` is the point-facing driver; `step` is an
   optional `StepHook` (`Fn(f64) -> Result<Tick, dcs_assembly::StepError>`)
   advancing the backend's simulated plant one `dt` per `FanoutDriver::step` —
@@ -694,6 +694,27 @@ A factory returns one of two `DeviceDriver` contributions:
   `RemoteDriver::fenced_by`; a kind whose fencing verdicts carry no
   owner identity leaves it `None` and the entry records `claimant:
   null`.
+  `claim_endpoint` is an optional `ClaimEndpointHook` (`Fn(u16)`) —
+  the checkpoint-endpoint registration half of `claim`:
+  `FanoutDriver::set_claim_endpoint(port)` runs it once the instance's
+  checkpoint monitor has bound, so every write-ownership claim the
+  backend asserts or re-arms records where that claim's owner serves
+  this line's checkpoints. `sim-tcp` installs
+  `RemoteDriver::set_claim_endpoint`; a kind whose arbitration records
+  no claimant endpoint leaves it `None` and its claims register no
+  endpoint.
+  `owner_endpoint` is an optional `OwnerEndpointHook`
+  (`Fn() -> Option<SocketAddr>`) — the claimant-endpoint counterpart
+  of `fenced_by`: `FanoutDriver::field_owner_endpoint(point)` asks it
+  for the checkpoint endpoint the field's arbitration carried on the
+  last verdict fencing a mutation on `point`'s backend — the address
+  the standing claim's owner itself registered, attested by the field
+  rather than announced through the unauthenticated `?peer=` channel,
+  so a fencing-demoted ex-owner on an unkeyed pair can verify and
+  track the successor the field named instead of stranding
+  `unsynchronized`. `sim-tcp` installs `RemoteDriver::fenced_endpoint`;
+  a kind whose fencing verdicts carry no endpoint leaves it `None` and
+  the demoted peer keeps the pre-hook park.
   `inspect` is an optional
   `Option<Arc<dyn Any + Send + Sync>>` typed handle the factory installs when
   the backend exposes more than the `IoDriver` surface — `sim-scripted`
@@ -882,6 +903,8 @@ fn memory_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         probe: None,
         reclaim: None,
         fenced_by: None,
+        claim_endpoint: None,
+        owner_endpoint: None,
         inspect: None,
         field_facing: false,
     }))
@@ -1357,6 +1380,8 @@ fn demo_bus(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         probe: None,
         reclaim: None,
         fenced_by: None,
+        claim_endpoint: None,
+        owner_endpoint: None,
         inspect: Some(inspect),
         field_facing: true,
     }))
