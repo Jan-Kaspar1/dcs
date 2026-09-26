@@ -1,0 +1,11 @@
+[
+  {
+    "noise": {
+      "input": 11,
+      "output": 10,
+      "amplitude": -0.5,
+      "seed": 7,
+      "initial": 0.0
+    }
+  }
+]
