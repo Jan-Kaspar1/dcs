@@ -135,6 +135,28 @@ def _settled_active(ctx):
     return None
 
 
+def _keyed_subject(ctx):
+    """The pair ctx the keyed announced-source contract legs exercise
+    (#1058): the deployed pair while the run config keys it —
+    ctx['pair_token'] set — else the lane-staged probe pair the
+    ctx['probe'] subject carries, or None when no keyed pair is
+    staged.
+
+    The probe subject is ctx-shaped: the same endpoint keys and
+    runner actions bound to the probe pair's own containers and
+    plant, its own claim-token pins, and the probe pair's always-set
+    --pair-token — so a leg that rebinds ctx to the returned subject
+    exercises the keyed contract for real instead of reporting
+    inconclusive on the deployed pair's unkeyed posture.
+    """
+    if ctx.get('pair_token'):
+        return ctx
+    probe = ctx.get('probe')
+    if probe and probe.get('pair_token'):
+        return probe
+    return None
+
+
 def _writable_bool_point(signals):
     """The scenarios' command target out of a SignalIndex: the
     pump-station 'p101-oos' writable bool in-point when the model

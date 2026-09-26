@@ -22,16 +22,22 @@
 #                and validating every element against the model's
 #                channel map with no server launched — and exercises the
 #                contract's
-#                remaining dcs-model surfaces: `dcs-model schema` and
-#                `dcs-model interface-schema` emissions byte-identical
-#                to the release record's schema artifacts (fetched from
-#                the pinned revision through the same git remote the
-#                pins resolve over), `dcs-model diff` naming a doctored
+#                remaining dcs-model surfaces: `dcs-model schema`,
+#                `dcs-model interface-schema`, `dcs-model deploy-schema`,
+#                and `dcs-plant-server --dynamics-schema` emissions
+#                byte-identical to the release record's schema artifacts
+#                (fetched from the pinned revision through the same git
+#                remote the pins resolve over), the checked-in
+#                deploy/manifest.json and model/dynamics.json screened
+#                against their declared schemas with doctored
+#                schema-violating copies refused, `dcs-model diff`
+#                naming a doctored
 #                compatible revision's changes and none on the
 #                identical document, and `dcs-model summary` /
 #                `dcs-model signal-index` outputs recorded to the run's
 #                evidence (tooling-rejected, pin-unresolvable,
-#                schema-drift, diff-mismatch)
+#                schema-drift, schema-mismatch,
+#                schema-mismatch-nondeterministic, diff-mismatch)
 #   alarm-validation
 #                the rejection half of decision 70's alarm record at
 #                the customer boundary — every managed alarm instance
@@ -437,6 +443,94 @@ fi
 [[ "$out" == *"schema-drift"* ]] \
     || fail "schema-drift-unchecked: a drifted record artifact did not report schema-drift: $out"
 echo "  a drifted record artifact refused: schema-drift"
+
+# The screening half of the same contract: the checked-in consumer
+# documents against the record artifacts declaring their shapes —
+# deploy/manifest.json against deploy-manifest.schema.json (the
+# screening the contract records before the deploy stage's
+# rig-agreement check runs) and model/dynamics.json against
+# dynamics.schema.json (before the merge's own validation runs).
+# ci/schema_conformance.py runs the consumer-side
+# required-keys/field-shape conformance and reports schema-mismatch
+# itself; two consecutive passes must produce identical digests.
+schema_screen() {
+    python3 ci/schema_conformance.py \
+        --schema "$RECORD/$1" --document "$2" --what "$3"
+}
+FIRST="$(schema_screen deploy-manifest.schema.json deploy/manifest.json "deployment manifest")"
+SECOND="$(schema_screen deploy-manifest.schema.json deploy/manifest.json "deployment manifest")"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "schema-mismatch-nondeterministic: two manifest-screening passes produced different digests"
+echo "  $FIRST"
+FIRST="$(schema_screen dynamics.schema.json model/dynamics.json "dynamics document")"
+SECOND="$(schema_screen dynamics.schema.json model/dynamics.json "dynamics document")"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "schema-mismatch-nondeterministic: two dynamics-screening passes produced different digests"
+echo "  $FIRST"
+
+# A consumer document violating its declared schema must report the
+# diagnostic — doctored copies under the scratch root, so the
+# checked-in pair stays pristine.
+manifest_case() {
+    local doctored="$SCRATCH/manifest-$1.json" out
+    python3 - deploy/manifest.json "$doctored" "$1" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+case = sys.argv[3]
+if case == "missing-required":
+    del document["model"]["fingerprint"]
+elif case == "mistyped-field":
+    document["controllers"][1]["failover_budget"] = "high"
+elif case == "undeclared-field":
+    # The pair's shared tracking secret is a deployment secret the
+    # manifest shape deliberately never records.
+    document["pair_token"] = "not-for-the-record"
+else:
+    sys.exit("unknown manifest case " + case)
+json.dump(document, open(sys.argv[2], "w"), indent=2)
+PY
+    if out="$(python3 ci/schema_conformance.py \
+            --schema "$RECORD/deploy-manifest.schema.json" \
+            --document "$doctored" \
+            --what "deployment manifest" 2>&1)"; then
+        fail "schema-mismatch-unchecked: the manifest's $1 case passed the schema conformance check"
+    fi
+    [[ "$out" == *"schema-mismatch"* ]] \
+        || fail "schema-mismatch-unchecked: the manifest's $1 case did not report schema-mismatch: $out"
+    echo "  manifest $1 refused: schema-mismatch"
+}
+dynamics_case() {
+    local doctored="$SCRATCH/dynamics-$1.json" out
+    python3 - model/dynamics.json "$doctored" "$1" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+case = sys.argv[3]
+if case == "missing-required":
+    del document[0]["bool_flow"]["initial"]
+elif case == "mistyped-field":
+    document[0]["bool_flow"]["input"] = "fifteen"
+elif case == "undeclared-element":
+    document.append({"not_an_element": {"input": 1, "output": 2}})
+else:
+    sys.exit("unknown dynamics case " + case)
+json.dump(document, open(sys.argv[2], "w"), indent=2)
+PY
+    if out="$(python3 ci/schema_conformance.py \
+            --schema "$RECORD/dynamics.schema.json" \
+            --document "$doctored" \
+            --what "dynamics document" 2>&1)"; then
+        fail "schema-mismatch-unchecked: the dynamics document's $1 case passed the schema conformance check"
+    fi
+    [[ "$out" == *"schema-mismatch"* ]] \
+        || fail "schema-mismatch-unchecked: the dynamics document's $1 case did not report schema-mismatch: $out"
+    echo "  dynamics $1 refused: schema-mismatch"
+}
+for case in missing-required mistyped-field undeclared-field; do
+    manifest_case "$case"
+done
+for case in missing-required mistyped-field undeclared-element; do
+    dynamics_case "$case"
+done
 
 # One `dcs-model diff` leg: $3 is `no changes` — the documents must
 # diff clean — or a field the diff listing must name on the element $4
