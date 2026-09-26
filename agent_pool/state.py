@@ -231,7 +231,7 @@ class State:
                                 ('status:' + fields['status'], issue, previous['attempt'],
                                  fields['updated'], json.dumps({'from': previous['status']})))
 
-    def repair(self, issue, cause):
+    def repair(self, issue, cause, detail=None):
         if cause not in REPAIR_CAUSES:
             raise ValueError('Invalid repair cause')
         with self.db:
@@ -239,10 +239,13 @@ class State:
             cursor = self.db.execute("UPDATE jobs SET repairs=repairs+1,status='working',updated=? WHERE issue=? AND repairs<3 AND status IN ('working','pr-open')", (now, issue))
             if cursor.rowcount:
                 row = self.db.execute('SELECT attempt,repairs FROM jobs WHERE issue=?', (issue,)).fetchone()
+                payload = {'cause': cause}
+                if detail:
+                    payload.update(detail)
                 self.db.execute('INSERT OR IGNORE INTO work_events(kind,issue,attempt,at,source_key,payload) VALUES(?,?,?,?,?,?)',
                                 ('repair', issue, row['attempt'], now,
                                  'repair:%s:%s:%s' % (issue, row['attempt'], row['repairs']),
-                                 json.dumps({'cause': cause})))
+                                 json.dumps(payload, sort_keys=True)))
                 return True
             self.db.execute("UPDATE jobs SET status='blocked',error='Repair limit exhausted',updated=? WHERE issue=? AND status!='done'", (now, issue))
             return False
