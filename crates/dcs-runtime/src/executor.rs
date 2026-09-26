@@ -3179,11 +3179,8 @@ impl<'d> Executor<'d> {
             .filter(|(_, receipt)| matches!(receipt.outcome, CommandOutcome::Accepted { .. }))
             .map(|(index, _)| base + index as u64)
             .collect();
-        self.pending_commands.retain(|position| {
-            !self
-                .restored_suspended
-                .contains(&(base + *position as u64))
-        });
+        self.pending_commands
+            .retain(|position| !self.restored_suspended.contains(&(base + *position as u64)));
     }
 
     /// Re-queues the run's suspended commands — every still-`Accepted`

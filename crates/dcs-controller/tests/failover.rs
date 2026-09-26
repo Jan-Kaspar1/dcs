@@ -3047,3 +3047,367 @@ fn a_standby_rejoin_adopting_an_older_image_journals_the_reverted_write() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The resumed-demotion double-apply regression — QA finding
+/// `resume-double-apply-stomps-newer-settle`. A fenced demotion
+/// suspends the owner's pending command back to `Accepted` — the
+/// shape the demoted run's state-file checkpoint persists, stamped
+/// `source_owns_field: false`. The replacement carries the admission
+/// and settles it `applied`, then settles a *newer* write to the same
+/// point. On the defective build the killed ex-owner's restart —
+/// `docker start` resuming the demoted checkpoint — re-queued the
+/// restored `Accepted` receipt and applied the command a second time
+/// on its own stale line: a second `command_settled` for one
+/// submission, and the restarted image's re-applied value stomping
+/// the newer settled verdict the rejoining peer then adopted — whose
+/// served receipt was rewritten to the restarted run's settle tick.
+///
+/// The contract the finding demands is the receipt log's settle-once
+/// convergence (decision 95) at the state-file seam: a receipt the
+/// demoted capture cannot prove never-applied stays suspended on the
+/// resumed run — honestly un-adjudicated — and a covering adoption's
+/// still-`Accepted` view must not regress the rejoining run's own
+/// settled verdict, so the pair's audit keeps exactly one terminal
+/// settlement for the submission and the image the newer verdict
+/// wrote.
+#[test]
+fn a_resumed_demotion_checkpoint_cannot_re_apply_the_carried_command() {
+    let dir =
+        std::env::temp_dir().join(format!("dcs-failover-double-apply-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let pair_plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    // The finding's command surface: one writable image-carried point
+    // the two conflicting writes target — the reproduction's
+    // `write_value{302,…}`.
+    let mut document = sim_tcp_document(MODEL_SOURCE, pair_plant.addr, SimTcp::PerDevice);
+    document["io_points"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": HELD.0,
+            "direction": "in",
+            "value_type": "bool",
+            "initial": { "bool": false },
+            "writable": true,
+        }));
+    let pair_model = write_model(&dir, "pair.json", &document).0;
+
+    let field = RemoteDriver::connect(pair_plant.addr).unwrap();
+    field.ensure_writer(SEED).unwrap();
+    field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    field.release_writer().unwrap();
+
+    // The launched active persists every cycle-end checkpoint — the
+    // file its demotion's suspended shape freezes into.
+    let a_state = dir.join("a-state.json");
+    let mut a_process = spawn_controller(
+        &pair_model,
+        &[
+            "--state-file".to_string(),
+            a_state.to_str().unwrap().to_string(),
+        ],
+        DT,
+    );
+    // The standby tracks through the retargetable relay the restart
+    // repoints at the relaunched process, and persists its own run —
+    // the state file its restart resumes the settled verdicts from,
+    // the journal file the durable audit the rejoin replays.
+    let relay = Relay::forwarding(a_process.addr);
+    let b_state = dir.join("b-state.json");
+    let b_journal = dir.join("b-journal.jsonl");
+    let mut b_process = spawn_controller(
+        &pair_model,
+        &[
+            "--standby".to_string(),
+            relay.addr.to_string(),
+            "--state-file".to_string(),
+            b_state.to_str().unwrap().to_string(),
+            "--journal-file".to_string(),
+            b_journal.to_str().unwrap().to_string(),
+        ],
+        DT,
+    );
+    let a = MonitorClient::new(a_process.addr);
+    let b = MonitorClient::new(b_process.addr);
+
+    for _ in 0..N {
+        b.advance(1).unwrap();
+        a.advance(1).unwrap();
+    }
+    assert!(
+        matches!(b.role().unwrap().sync, Some(StandbySync::Tracking { .. })),
+        "the standby never converged: {:?}",
+        b.role().unwrap()
+    );
+
+    // The reproduction's admission: the owner accepts the write, then
+    // loses the claim before its boundary — the promotion preempts the
+    // field claim and the standby's boundary pull carries the
+    // still-`Accepted` receipt onto the successor's line.
+    let raise = Command::WriteValue {
+        point: HELD,
+        kind: ValueKind::Bool,
+        value: Value::Bool(true),
+    };
+    let receipt = a.command(&raise).unwrap();
+    assert!(
+        matches!(receipt.outcome, CommandOutcome::Accepted { .. }),
+        "the owner must accept the carried command: {receipt:?}"
+    );
+    assert_eq!(b.promote().unwrap().role, Role::Promoting);
+    // The carried admission settles on the successor's first
+    // field-owning scan — the surviving line's one settlement.
+    b.advance(1).unwrap();
+    assert_eq!(b.role().unwrap().role, Role::Active);
+    let b_settle = b
+        .receipts()
+        .unwrap()
+        .iter()
+        .find(|receipt| receipt.command == raise)
+        .map(|receipt| receipt.outcome.clone())
+        .unwrap_or_else(|| panic!("the carried command must land on the successor's log"));
+    assert!(
+        matches!(b_settle, CommandOutcome::Applied { .. }),
+        "the carried command must settle applied on the successor: {b_settle:?}"
+    );
+
+    // The superseded owner's fenced scan demotes it in place: the
+    // boundary's provisional settlement replays back to `Accepted` and
+    // its staged mutation rolls back — the suspended shape the
+    // cycle-end persist freezes, stamped non-owning.
+    a.advance(1).unwrap();
+    assert_eq!(a.role().unwrap().role, Role::Demoting);
+    let persisted: Checkpoint = serde_json::from_slice(&std::fs::read(&a_state).unwrap()).unwrap();
+    assert_eq!(
+        persisted.source_owns_field,
+        Some(false),
+        "the demoted run's checkpoint must be stamped non-owning"
+    );
+    assert!(
+        persisted.receipts.iter().any(|receipt| {
+            receipt.command == raise && matches!(receipt.outcome, CommandOutcome::Accepted { .. })
+        }),
+        "the demoted run's file must carry the suspended receipt: {persisted:?}"
+    );
+    assert_eq!(
+        persisted.internal.get(&HELD).map(|sample| &sample.value),
+        Some(&Value::Bool(false)),
+        "the suspended boundary's mutation must have rolled back"
+    );
+    // `docker stop a` freezes the suspended document before the
+    // demoted run's own tracking adoption can overwrite it — the next
+    // quiesced scan pulls the successor's checkpoint and settles the
+    // receipt with the line's verdict — so the file the restart
+    // resumes is exactly the pre-adoption capture the rig's
+    // container restart carried.
+    kill(&mut a_process);
+
+    // The newer settled verdict: a second write to the same point
+    // lands on the surviving line — the truth the defect's re-apply
+    // stomped.
+    let settle = Command::WriteValue {
+        point: HELD,
+        kind: ValueKind::Bool,
+        value: Value::Bool(false),
+    };
+    b.command(&settle).unwrap();
+    b.advance(1).unwrap();
+    assert!(
+        b.receipts().unwrap().iter().any(|receipt| {
+            receipt.command == settle && matches!(receipt.outcome, CommandOutcome::Applied { .. })
+        }),
+        "the newer write must settle applied on the successor: {:?}",
+        b.receipts().unwrap()
+    );
+    assert_eq!(
+        image_value(&b.snapshot().unwrap(), HELD),
+        Value::Bool(false)
+    );
+
+    // The rig's container restarts: `docker stop` on the successor —
+    // the dead owner's claim reaping with its attachment — then
+    // `docker start a` resumes the frozen demoted checkpoint
+    // restart-as-active.
+    kill(&mut b_process);
+    let probe = RemoteDriver::connect(pair_plant.addr).unwrap();
+    let reap_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match probe.claim_writer_unless_held(0xf00d) {
+            Ok(_) => break,
+            Err(RemoteError::Fenced) => {
+                assert!(
+                    std::time::Instant::now() < reap_deadline,
+                    "the dead owner's claim was never reaped"
+                );
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("the conditional probe failed: {error}"),
+        }
+    }
+    probe.release_writer().unwrap();
+
+    // `docker start a`: the resume restores the demoted checkpoint's
+    // suspended receipt — and must not re-queue it. The file cannot
+    // tell this admission, which the surviving line already settled,
+    // from one it never carried, so the restored entry parks for the
+    // line's adjudication rather than minting a second `Applied`
+    // beside the carried copy's.
+    let (mut a_process, preamble) = spawn_controller_logged(
+        &pair_model,
+        &[
+            "--state-file".to_string(),
+            a_state.to_str().unwrap().to_string(),
+        ],
+        DT,
+    );
+    assert!(
+        preamble
+            .iter()
+            .any(|line| line.contains("resumed from state file")),
+        "the restart must report resuming the demoted checkpoint: {preamble:?}"
+    );
+    relay.retarget(a_process.addr);
+    let a2 = MonitorClient::new(a_process.addr);
+    a2.advance(1).unwrap();
+    assert_eq!(a2.role().unwrap().role, Role::Active);
+
+    // The defect's signatures on the restarted run, all closed: no
+    // second apply — the image keeps the rolled-back value, which is
+    // also the newer verdict's — no second `command_settled` for the
+    // one submission, and the receipt stays honestly `Accepted`
+    // pending the line's adjudication.
+    assert_eq!(
+        image_value(&a2.snapshot().unwrap(), HELD),
+        Value::Bool(false),
+        "the restarted run must not re-apply the carried command"
+    );
+    assert!(
+        !a2.journal(0).unwrap().iter().any(|entry| matches!(
+            &entry.event,
+            JournalEvent::CommandSettled { receipt } if receipt.command == raise
+        )),
+        "one admission must not settle twice — the restarted run's \
+         journal must hold no settlement for the carried command: {:?}",
+        a2.journal(0).unwrap()
+    );
+    assert!(
+        a2.receipts().unwrap().iter().any(|receipt| {
+            receipt.command == raise && matches!(receipt.outcome, CommandOutcome::Accepted { .. })
+        }),
+        "the restored receipt must stay suspended — honestly \
+         un-adjudicated — not re-applied on a guess: {:?}",
+        a2.receipts().unwrap()
+    );
+
+    // `docker start b`: the rejoin resumes its own persisted run —
+    // applied receipts and image included — and tracks the restarted
+    // peer's line. The adoption's still-`Accepted` view of the
+    // submission must not regress the rejoined run's settled verdict:
+    // durable-truth forward inside the covered stretch keeps this
+    // run's terminal receipt the served truth.
+    let (mut b_process, preamble) = spawn_controller_logged(
+        &pair_model,
+        &[
+            "--standby".to_string(),
+            relay.addr.to_string(),
+            "--state-file".to_string(),
+            b_state.to_str().unwrap().to_string(),
+            "--journal-file".to_string(),
+            b_journal.to_str().unwrap().to_string(),
+        ],
+        DT,
+    );
+    assert!(
+        preamble
+            .iter()
+            .any(|line| line.contains("resumed from state file")),
+        "the rejoin must resume the incumbent's own run: {preamble:?}"
+    );
+    let b2 = MonitorClient::new(b_process.addr);
+    let mut converged = false;
+    for _ in 0..2 * N {
+        b2.advance(1).unwrap();
+        a2.advance(1).unwrap();
+        if matches!(b2.role().unwrap().sync, Some(StandbySync::Tracking { .. })) {
+            converged = true;
+            break;
+        }
+    }
+    assert!(
+        converged,
+        "the rejoined peer never reconverged: {:?}",
+        b2.role().unwrap()
+    );
+
+    // The verdict mutation the defect produced, closed: the served
+    // receipt for the submission still reports the surviving line's
+    // own settlement — never regressed to the adopted `Accepted`,
+    // never rewritten to the restarted run's second settle.
+    assert!(
+        b2.receipts()
+            .unwrap()
+            .iter()
+            .any(|receipt| receipt.command == raise && receipt.outcome == b_settle),
+        "the rejoined peer's settled verdict must remain the served \
+         truth — the adoption must not regress or rewrite it: {:?}",
+        b2.receipts().unwrap()
+    );
+    // One admission, one terminal settlement across the pair's
+    // journals: the durable record replays the surviving line's own
+    // settle and gains nothing beside it — no second `command_settled`
+    // from the restarted run, no synthetic checkpoint-attributed
+    // settle for the point whose value never moved.
+    let journal = b2.journal(0).unwrap();
+    let settled = settled_receipts(&journal);
+    assert_eq!(
+        settled
+            .iter()
+            .filter(|receipt| receipt.command == raise)
+            .count(),
+        1,
+        "the pair's durable audit must hold exactly one settlement for \
+         the carried admission: {journal:?}"
+    );
+    assert!(
+        settled
+            .iter()
+            .any(|receipt| receipt.command == raise && receipt.outcome == b_settle),
+        "the one settlement must be the surviving line's own: {journal:?}"
+    );
+    assert_eq!(
+        settled
+            .iter()
+            .filter(|receipt| receipt.command == settle)
+            .count(),
+        1,
+        "the newer verdict must settle exactly once: {journal:?}"
+    );
+    assert!(
+        !settled.iter().any(|receipt| {
+            matches!(
+                &receipt.command,
+                Command::WriteValue { point, .. } if *point == HELD
+            ) && receipt
+                .actor
+                .as_deref()
+                .is_some_and(|actor| actor.starts_with("checkpoint"))
+        }),
+        "the adoption must not journal a synthetic settle — nothing \
+         reverted: {journal:?}"
+    );
+    assert_eq!(
+        image_value(&b2.snapshot().unwrap(), HELD),
+        Value::Bool(false),
+        "the newer verdict's value stands on the rejoined peer"
+    );
+
+    assert_eq!(a2.role().unwrap().role, Role::Active);
+    assert!(
+        a_process.child.try_wait().unwrap().is_none()
+            && b_process.child.try_wait().unwrap().is_none(),
+        "the recovered pair must stay up"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
