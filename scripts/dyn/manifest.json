@@ -1,0 +1,173 @@
+{
+  "comment": "Conformance corpus for the dynamics document's schema-vs-merge split (QA finding dynamics-schema-merge-differential-battery, issue #1040). Each case under cases/ pins two verdicts: 'schema' — whether the emitted dcs-plant-server --dynamics-schema document validates it — and 'merge' — whether dcs-plant-server <model> --check-dynamics accepts it — plus the model the merge runs against and the divergence class the case pins. The filename's '<schema>-<merge>' prefix must restate both verdicts. crates/dcs-plant/tests/dynamics_corpus.rs enforces every pin and proves each merge accept serves a runnable plant. A file that is not JSON at all fails both layers before either sees a document.",
+  "cases": [
+    {
+      "file": "scripts/dyn/cases/pass-pass__station_loop.json",
+      "model": "crates/dcs-plant/fixtures/pump_station.json",
+      "schema": "pass",
+      "merge": "pass",
+      "class": "valid",
+      "note": "The bool-gated pump-draw loop: two bool_flow draws gated on the out commands, a flow_sum balance, and the well integrator — the served plant must step."
+    },
+    {
+      "file": "scripts/dyn/cases/pass-pass__protection_loop.json",
+      "model": "crates/dcs-plant/fixtures/protection.json",
+      "schema": "pass",
+      "merge": "pass",
+      "class": "valid",
+      "note": "The threshold-closed protection loop: a float input driving a bool contact that gates an emergency draw."
+    },
+    {
+      "file": "scripts/dyn/cases/pass-pass__tank_lag.json",
+      "model": "crates/dcs-plant/fixtures/tank_loop.json",
+      "schema": "pass",
+      "merge": "pass",
+      "class": "valid",
+      "note": "The single first-order lag closing the tank level on the valve command — the checked-in tank_loop_dynamics document."
+    },
+    {
+      "file": "scripts/dyn/cases/pass-pass__empty.json",
+      "model": "crates/dcs-plant/fixtures/pump_station.json",
+      "schema": "pass",
+      "merge": "pass",
+      "class": "valid",
+      "note": "The empty declaration list merges to the untouched channel map; the served plant must still step."
+    },
+    {
+      "file": "scripts/dyn/cases/pass-pass__self_point_lag.json",
+      "model": "crates/dcs-plant/fixtures/pump_station.json",
+      "schema": "pass",
+      "merge": "pass",
+      "class": "self-point",
+      "note": "The self-point boundary the QA battery found undocumented: a lag reading and driving one point is legal — both legs want float and the element simply holds its input — and must produce a runnable plant. Only the bool_flow/threshold self-points, where the legs' kinds can never agree, are refused."
+    },
+    {
+      "file": "scripts/dyn/cases/fail-pass__unknown_inner_field.json",
+      "model": "crates/dcs-plant/fixtures/pump_station.json",
+      "schema": "fail",
+      "merge": "pass",
+      "class": "unknown-inner-field",
+      "note": "The one documented schema-FAIL/merge-PASS class: an unknown field inside an element — here a misspelled 'time_constnt' — trips additionalProperties:false while serde silently ignores it, so the merge accepts and the plant must run."
+    },
+    {
+      "file": "scripts/dyn/cases/pass-fail__unknown_point.json",
+      "model": "crates/dcs-plant/fixtures/pump_station.json",
+      "schema": "pass",
+      "merge": "fail",
+      "class": "unknown-point",
+      "note": "An output naming a point the model binds nowhere (UnknownPoint) — point references are beyond the schema vocabulary."
+    },
+    {
+      "file": "scripts/dyn/cases/pass-fail__gate_kind_mismatch.json",
+      "model": "crates/dcs-plant/fixtures/pump_station.json",
+      "schema": "pass",
+      "merge": "fail",
+      "class": "gate-kind-mismatch",
+      "note": "A bool_flow gate reading a float point (ElementGateKind) — the kind each leg requires is checked at merge, not in the schema."
+    },
+    {
+      "file": "scripts/dyn/cases/pass-fail__contact_kind_mismatch.json",
+      "model": "crates/dcs-plant/fixtures/pump_station.json",
+      "schema": "pass",
+      "merge": "fail",
+      "class": "contact-kind-mismatch",
+      "note": "A threshold contact driving a float point (ElementContactKind)."
+    },
+    {
+      "file": "scripts/dyn/cases/pass-fail__on_equals_off.json",
+      "model": "crates/dcs-plant/fixtures/protection.json",
+      "schema": "pass",
+      "merge": "fail",
+      "class": "on-equals-off",
+      "note": "A threshold whose on/off bounds are equal declares no hysteresis band (NonPositiveBand) — comparing two fields is beyond the schema vocabulary."
+    },
+    {
+      "file": "scripts/dyn/cases/pass-fail__nonfinite_literal.json",
+      "model": "crates/dcs-plant/fixtures/pump_station.json",
+      "schema": "pass",
+      "merge": "fail",
+      "class": "nonfinite-literal",
+      "note": "1e999 parses as a JSON number the schema accepts; the merge rejects the non-finite initial (NonFiniteInitial)."
+    },
+    {
+      "file": "scripts/dyn/cases/pass-fail__float_point_id.json",
+      "model": "crates/dcs-plant/fixtures/pump_station.json",
+      "schema": "pass",
+      "merge": "fail",
+      "class": "float-point-id",
+      "note": "The lexical integer/float distinction: 11.0 is mathematically an integer to the schema but a float the u64 serde reader rejects."
+    },
+    {
+      "file": "scripts/dyn/cases/pass-fail__u64_overflow_id.json",
+      "model": "crates/dcs-plant/fixtures/pump_station.json",
+      "schema": "pass",
+      "merge": "fail",
+      "class": "u64-overflow-id",
+      "note": "A point id past u64::MAX: the schema's id carries no maximum, the serde reader rejects the out-of-range number."
+    },
+    {
+      "file": "scripts/dyn/cases/pass-fail__conflicting_drivers.json",
+      "model": "crates/dcs-plant/fixtures/pump_station.json",
+      "schema": "pass",
+      "merge": "fail",
+      "class": "conflicting-driver",
+      "note": "Two distinct elements driving one point (ConflictingDriver) — uniqueItems only catches identical elements, so the merge owns the general rule."
+    },
+    {
+      "file": "scripts/dyn/cases/pass-fail__out_point.json",
+      "model": "crates/dcs-plant/fixtures/pump_station.json",
+      "schema": "pass",
+      "merge": "fail",
+      "class": "out-point",
+      "note": "A threshold driving a pump's bool out command (ElementOutputDirection) — the served map's directions are invisible to the schema."
+    },
+    {
+      "file": "scripts/dyn/cases/pass-fail__self_point_bool_flow.json",
+      "model": "crates/dcs-plant/fixtures/pump_station.json",
+      "schema": "pass",
+      "merge": "fail",
+      "class": "self-point",
+      "note": "Must-reject since #957: a bool_flow whose gate and output name one bool point — the gate leg wants bool, the output leg float, so no point kind satisfies both and the merge refuses (ElementPointKind) instead of serving a plant that panicked its first step."
+    },
+    {
+      "file": "scripts/dyn/cases/pass-fail__self_point_threshold.json",
+      "model": "crates/dcs-plant/fixtures/protection.json",
+      "schema": "pass",
+      "merge": "fail",
+      "class": "self-point",
+      "note": "Must-reject since #957: a threshold reading and driving one bool point — the input leg wants float — refused at merge (ElementPointKind) even though the driven direction is a legal in point."
+    },
+    {
+      "file": "scripts/dyn/cases/fail-fail__unknown_element_tag.json",
+      "model": "crates/dcs-plant/fixtures/pump_station.json",
+      "schema": "fail",
+      "merge": "fail",
+      "class": "unknown-element-tag",
+      "note": "An element tag outside the vocabulary: additionalProperties:false rejects the wrapper and serde rejects the unknown variant — a schema rejection that implies merge rejection."
+    },
+    {
+      "file": "scripts/dyn/cases/fail-fail__negative_amplitude.json",
+      "model": "crates/dcs-plant/fixtures/pump_station.json",
+      "schema": "fail",
+      "merge": "fail",
+      "class": "bound-violation",
+      "note": "A negative amplitude: the schema's nonnegative bound rejects it and the merge agrees (InvalidAmplitude)."
+    },
+    {
+      "file": "scripts/dyn/cases/fail-fail__duplicate_elements.json",
+      "model": "crates/dcs-plant/fixtures/pump_station.json",
+      "schema": "fail",
+      "merge": "fail",
+      "class": "duplicate-elements",
+      "note": "Two identical elements: uniqueItems rejects the list and the merge rejects the second element's driven point (ConflictingDriver) — the schema approximation of the conflict rule."
+    },
+    {
+      "file": "scripts/dyn/cases/fail-fail__malformed.json",
+      "model": "crates/dcs-plant/fixtures/pump_station.json",
+      "schema": "fail",
+      "merge": "fail",
+      "class": "malformed",
+      "note": "Not JSON at all — neither layer sees a document: the schema has nothing to validate and the merge's parse reports the file."
+    }
+  ]
+}

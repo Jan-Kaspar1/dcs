@@ -1,0 +1,11 @@
+[
+  {
+    "bool_flow": {
+      "input": 20,
+      "output": 20,
+      "on_rate": -10.0,
+      "off_rate": 0.0,
+      "initial": 0.0
+    }
+  }
+]
