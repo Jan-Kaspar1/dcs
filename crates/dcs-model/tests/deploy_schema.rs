@@ -9,6 +9,7 @@
 //! field.
 
 use dcs_model::deployment_manifest_schema;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -78,6 +79,46 @@ fn deploy_schema_subcommand_rejects_arguments() {
         String::from_utf8_lossy(&output.stderr).contains("deploy-schema"),
         "stderr does not name the subcommand: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+#[test]
+fn recorded_release_deploy_schema_matches_the_emitted_output() {
+    // `v0.3.0` is the first release record carrying `dcs-model
+    // deploy-schema`'s output — `v0.1.0` and `v0.2.0`'s recorded
+    // commits predate the deployment-manifest schema emission (#909).
+    // The same convention as the plant-model schema pin in
+    // `tests/schema.rs`: the checked-in file must stay byte-identical
+    // to the emitted output, and while the tag is pending its sha256
+    // must equal the digest `docs/releases/v0.3.0/record.md`
+    // publishes. Regenerate with `dcs-model deploy-schema >
+    // docs/releases/<tag>/deploy-manifest.schema.json` whenever the
+    // emitted schema legitimately changes — and update the record's
+    // published sha256 with it while the tag is pending.
+    let output = run_deploy_schema_subcommand();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path = "docs/releases/v0.3.0/deploy-manifest.schema.json";
+    let recorded = std::fs::read(workspace_root().join(path)).unwrap_or_else(|error| {
+        panic!("the release record's deploy-manifest schema file {path} must exist: {error}")
+    });
+    assert_eq!(
+        recorded, output.stdout,
+        "{path} drifted from `dcs-model deploy-schema`'s emitted output — \
+         regenerate the record file"
+    );
+    assert_eq!(
+        sha256_hex(&recorded),
+        "b43dadc6cf3455cb26b20ab1656137e892f0609387b9dbedfc3291716afd1005",
+        "{path}'s sha256 drifted from the digest its record publishes — \
+         regenerate the record file and update record.md"
     );
 }
 

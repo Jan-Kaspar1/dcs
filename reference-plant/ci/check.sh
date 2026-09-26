@@ -156,11 +156,13 @@
 #                produce identical digests (ctl-failed,
 #                ctl-nondeterministic)
 #   upgrade      the documented repin upgrade (README §7): this tree's
-#                composition is materialized pinned at the recorded
-#                release rev, repinned to a later compatible revision,
-#                and re-emitted — the bytes must equal the checked-in
-#                model/plant.json — and the full pipeline re-runs under
-#                the repin; the named incompatible crossings are refused
+#                composition is materialized pinned at the previous
+#                release's recorded rev, repinned to the recorded
+#                release rev — the crossing the manifest's dcs_release
+#                names — and re-emitted; the bytes must equal the
+#                checked-in model/plant.json, and the full pipeline
+#                re-runs under the repin; the named incompatible
+#                crossings are refused
 #                (emit-divergent, pin-unresolvable, crossing-unrefused)
 #
 # Environment:
@@ -169,17 +171,19 @@
 #                from (default: the published origin below). The
 #                workspace-side proof substitutes a file:// stand-in and
 #                rewrites this repository's Cargo.toml to match.
-#   DCS_REV      the pinned revision (default: the release-line rev
-#                this repository's manifest records — the v0.2.0
-#                commit whose tooling serves the interface registry,
-#                declared commands and their live availability
-#                verdicts, and emitted events the surface stage
+#   DCS_REV      the pinned revision (default: the release tag this
+#                repository's manifest records — v0.3.0, resolving to
+#                the recorded commit whose tooling serves the interface
+#                registry, declared commands and their live availability
+#                verdicts, and routed emitted events the surface stage
 #                proves).
 #   DCS_UPGRADE_REV
-#                the later compatible revision the upgrade stage repins
-#                to (default: $DCS_REV — a same-revision repin, still
-#                proving the mechanics; the workspace-side proof
-#                substitutes the checkout's HEAD).
+#                the earlier compatible revision the upgrade stage
+#                materializes the tree at before repinning to $DCS_REV
+#                (default: the previous release's recorded rev — the
+#                v0.2.0 commit — so the stage proves the v0.2.0 → v0.3.0
+#                crossing the manifest names; the workspace-side proof
+#                seeds its stand-in remote to serve it).
 #   DCS_UPGRADE  set to 0 to skip the upgrade stage — the stage's own
 #                repinned re-run uses this internally.
 #   DCS_TOOLS    a directory holding prebuilt `dcs-model`,
@@ -208,8 +212,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DCS_REMOTE="${DCS_REMOTE:-https://github.com/Jan-Kaspar1/dcs.git}"
-DCS_REV="${DCS_REV:-c2b5694d9fd6f6168b85c1dfc2e1542b369b3a3f}"
-DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-$DCS_REV}"
+DCS_REV="${DCS_REV:-v0.3.0}"
+DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-c2b5694d9fd6f6168b85c1dfc2e1542b369b3a3f}"
 DCS_TOOLS="${DCS_TOOLS:-}"
 DCS_RECORD_DIR="${DCS_RECORD_DIR:-}"
 TOOLS=""
@@ -370,7 +374,8 @@ git -C "$SCRATCH" fetch --depth 1 --quiet "$DCS_REMOTE" "$DCS_REV" \
     || fail "pin-unresolvable: the pinned rev $DCS_REV could not be fetched for the release record"
 RECORD="$SCRATCH/record"
 mkdir -p "$RECORD"
-for artifact in block-interfaces.schema.json plant-model.schema.json; do
+RECORD_ARTIFACTS="block-interfaces.schema.json plant-model.schema.json deploy-manifest.schema.json dynamics.schema.json"
+for artifact in $RECORD_ARTIFACTS; do
     git -C "$SCRATCH" show "FETCH_HEAD:docs/releases/$DCS_RELEASE/$artifact" \
         > "$RECORD/$artifact" \
         || fail "pin-unresolvable: the pinned rev serves no docs/releases/$DCS_RELEASE/$artifact"
@@ -380,35 +385,39 @@ if [ -n "$DCS_RECORD_DIR" ]; then
     # schemas, so the checkout's own record tree is the comparator;
     # the fetch above still proves the record stays fetchable at the
     # pinned rev through the consumer mechanism.
-    for artifact in block-interfaces.schema.json plant-model.schema.json; do
+    for artifact in $RECORD_ARTIFACTS; do
         cp "$DCS_RECORD_DIR/$DCS_RELEASE/$artifact" "$RECORD/$artifact" \
             || fail "record-missing: $DCS_RECORD_DIR serves no $DCS_RELEASE/$artifact"
     done
 fi
 
-# `dcs-model <subcommand>` emitted at the pinned rev must equal the
-# recorded artifact byte-for-byte — the consumer's non-drift leg for
-# the served-registry and plant-model schemas the contract records as
-# fetchable release artifacts. A divergence reports schema-drift on
-# stderr and returns 1.
+# Each recorded schema's emitting tool run at the pinned rev must
+# reproduce the recorded artifact byte-for-byte — the consumer's
+# non-drift leg for the served-registry, plant-model,
+# deployment-manifest, and dynamics-document schemas the contract
+# records as fetchable release artifacts. $1 is the tool invocation
+# (binary plus its mode arguments); $2 the recorded artifact; $3 its
+# name. A divergence reports schema-drift on stderr and returns 1.
 schema_nondrift() {
     local emitted
     emitted="$(mktemp)"
-    if ! "$TOOLS/dcs-model" "$1" > "$emitted"; then
+    if ! $1 > "$emitted"; then
         rm -f "$emitted"
-        echo "tooling-rejected: dcs-model $1 failed at the pinned rev" >&2
+        echo "tooling-rejected: $1 failed at the pinned rev" >&2
         return 1
     fi
     if ! cmp -s "$emitted" "$2"; then
         rm -f "$emitted"
-        echo "schema-drift: dcs-model $1 at the pinned rev does not emit the recorded $DCS_RELEASE artifact $3" >&2
+        echo "schema-drift: $1 at the pinned rev does not emit the recorded $DCS_RELEASE artifact $3" >&2
         return 1
     fi
     rm -f "$emitted"
 }
-schema_nondrift interface-schema "$RECORD/block-interfaces.schema.json" block-interfaces.schema.json || exit 1
-schema_nondrift schema "$RECORD/plant-model.schema.json" plant-model.schema.json || exit 1
-echo "  schema and interface-schema emit the $DCS_RELEASE record's artifacts byte-identically"
+schema_nondrift "$TOOLS/dcs-model interface-schema" "$RECORD/block-interfaces.schema.json" block-interfaces.schema.json || exit 1
+schema_nondrift "$TOOLS/dcs-model schema" "$RECORD/plant-model.schema.json" plant-model.schema.json || exit 1
+schema_nondrift "$TOOLS/dcs-model deploy-schema" "$RECORD/deploy-manifest.schema.json" deploy-manifest.schema.json || exit 1
+schema_nondrift "$TOOLS/dcs-plant-server --dynamics-schema" "$RECORD/dynamics.schema.json" dynamics.schema.json || exit 1
+echo "  schema, interface-schema, deploy-schema, and --dynamics-schema emit the $DCS_RELEASE record's artifacts byte-identically"
 
 # A drifted artifact must report the diagnostic — the same leg against
 # a doctored copy, so the recorded file stays pristine.
@@ -419,7 +428,7 @@ document = json.load(open(sys.argv[1]))
 document["required"].remove("tick")
 json.dump(document, open(sys.argv[2], "w"), indent=2)
 PY
-if out="$(schema_nondrift interface-schema "$DOCTORED_SCHEMA" block-interfaces.schema.json 2>&1)"; then
+if out="$(schema_nondrift "$TOOLS/dcs-model interface-schema" "$DOCTORED_SCHEMA" block-interfaces.schema.json 2>&1)"; then
     fail "schema-drift-unchecked: a drifted record artifact passed the interface-schema non-drift leg"
 fi
 [[ "$out" == *"schema-drift"* ]] \
@@ -1107,49 +1116,51 @@ if [ "${DCS_UPGRADE:-1}" != "0" ]; then
 
 echo "== upgrade =="
 # README §7's customer path exercised against this repository's own
-# composition: materialize the tree pinned at the recorded release rev,
-# repin to a later compatible revision, move the lockfile, and re-run
-# the check — a same-minor repin is a drop-in upgrade, so the emitted
-# bytes must not change (emit-divergent). The copy keeps the working
-# tree untouched.
+# composition: materialize the tree pinned at the previous release's
+# recorded rev — the release this tree upgraded from — repin to the
+# recorded release rev, move the lockfile, and re-run the check — a
+# compatible crossing is a drop-in upgrade, so the emitted bytes must
+# not change (emit-divergent). The copy keeps the working tree
+# untouched.
 UPGRADE_DIR="$(mktemp -d)"
 for path in Cargo.toml Cargo.lock rust-toolchain.toml README.md src model deploy ci; do
     cp -r "$path" "$UPGRADE_DIR/"
 done
 export CARGO_TARGET_DIR="$UPGRADE_DIR/target"
 
-# The baseline: the composition as the recorded release rev emits it.
+# The baseline: the composition as the previous release's recorded rev
+# emits it — the pinned side of the crossing this tree already ran.
+repin "rev = \"$DCS_UPGRADE_REV\""
+( cd "$UPGRADE_DIR" && cargo fetch ) \
+    || fail "pin-unresolvable: the upgrade-from revision $DCS_UPGRADE_REV did not resolve"
+( cd "$UPGRADE_DIR" && cargo build --quiet ) \
+    || fail "surface-incompatible: the composition does not compile against the upgrade-from revision"
+UPGRADE_BIN="$UPGRADE_DIR/target/debug/pump-station"
+"$UPGRADE_BIN" > "$UPGRADE_DIR/emit-released.json"
+cmp -s "$UPGRADE_DIR/emit-released.json" model/plant.json \
+    || fail "emit-divergent: the previous release's recorded rev emits different bytes than the approved model/plant.json"
+
+# The repin to the recorded release: only the pin changes — src/,
+# deploy/, and model/ are the unchanged tree. The fetch re-resolves
+# and moves the copied lockfile, README §7's `cargo update` step.
 repin "rev = \"$DCS_REV\""
 ( cd "$UPGRADE_DIR" && cargo fetch ) \
     || fail "pin-unresolvable: the recorded release rev $DCS_REV did not resolve"
 ( cd "$UPGRADE_DIR" && cargo build --quiet ) \
     || fail "surface-incompatible: the composition does not compile against the recorded release rev"
-UPGRADE_BIN="$UPGRADE_DIR/target/debug/pump-station"
-"$UPGRADE_BIN" > "$UPGRADE_DIR/emit-released.json"
-cmp -s "$UPGRADE_DIR/emit-released.json" model/plant.json \
-    || fail "emit-divergent: the recorded release rev emits different bytes than the approved model/plant.json"
-
-# The repin: only the pin changes — src/, deploy/, and model/ are the
-# unchanged tree. The fetch re-resolves and moves the copied lockfile,
-# README §7's `cargo update` step.
-repin "rev = \"$DCS_UPGRADE_REV\""
-( cd "$UPGRADE_DIR" && cargo fetch ) \
-    || fail "pin-unresolvable: the repinned revision $DCS_UPGRADE_REV did not resolve"
-( cd "$UPGRADE_DIR" && cargo build --quiet ) \
-    || fail "surface-incompatible: the composition does not compile against the repinned revision"
 "$UPGRADE_BIN" > "$UPGRADE_DIR/emit-upgraded.json"
 cmp -s "$UPGRADE_DIR/emit-upgraded.json" model/plant.json \
-    || fail "emit-divergent: the unchanged composition emitted different model bytes under $DCS_UPGRADE_REV"
-echo "  byte-identical emit across the repin $DCS_REV -> $DCS_UPGRADE_REV"
+    || fail "emit-divergent: the unchanged composition emitted different model bytes under $DCS_REV"
+echo "  byte-identical emit across the repin $DCS_UPGRADE_REV -> $DCS_REV"
 
 # The full pipeline under the repin — this check's own stages re-run
 # against the repinned materialization, with the release tooling
-# resolved at the repinned revision.
-ensure_tools "$DCS_UPGRADE_REV" \
-    || fail "pin-unresolvable: cargo install --git $DCS_REMOTE --rev $DCS_UPGRADE_REV failed"
+# resolved at the recorded release rev.
+ensure_tools "$DCS_REV" \
+    || fail "pin-unresolvable: cargo install --git $DCS_REMOTE --rev $DCS_REV failed"
 (
     cd "$UPGRADE_DIR"
-    DCS_UPGRADE=0 DCS_REMOTE="$DCS_REMOTE" DCS_REV="$DCS_UPGRADE_REV" \
+    DCS_UPGRADE=0 DCS_REMOTE="$DCS_REMOTE" DCS_REV="$DCS_REV" \
         DCS_TOOLS="$TOOLS" bash ci/check.sh
 ) || { echo "the repinned pipeline failed — its named diagnostic is above" >&2; exit 1; }
 echo "  the full pipeline passes under the repin"

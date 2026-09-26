@@ -2,7 +2,7 @@
 
 The entry point for engineering a customer plant is the
 **`reference-plant/` tree** in this repository — a complete,
-verbatim-publishable consumer repository pinning the v0.2.0 release
+verbatim-publishable consumer repository pinning the v0.3.0 release
 contract (`docs/release-contract.md`). Copy it into a new repository and
 it becomes your plant project: no platform checkout, no path
 dependencies, only the pinned release crates.
@@ -11,7 +11,7 @@ Its `README.md` walks the full customer path:
 
 1. **Create the repository** from the tree — every file it needs is
    inside it.
-2. **Pin a release** — `Cargo.toml`'s `git`/`rev` dependency on the
+2. **Pin a release** — `Cargo.toml`'s `git`/`tag` dependency on the
    release crates, locked by the committed `Cargo.lock`.
 3. **Compose and emit** — edit `src/station.rs` against the supported
    `dcs-build` primitives; `cargo run` emits the model deterministically.
