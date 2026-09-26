@@ -80,10 +80,11 @@
 #                declaration carried as its --auto-promote flag, and
 #                the optional per-controller persistence
 #                paths (state_file/journal_file) backed by writable
-#                mounts and flags, the optional topology
-#                section's declared pairs — each naming two
-#                declared members whose standby wiring closes
-#                inside the pair — and the one-field-per-deployment
+#                mounts and flags, the declared topology
+#                section's pairs — the checked-in manifest naming
+#                the deployed pair under topology.pairs, each pair
+#                naming two declared members whose standby wiring
+#                closes inside it — and the one-field-per-deployment
 #                bound (decision 99): at most one field-owning duty
 #                controller over the manifest's single plant, a
 #                second claimant — a second declared pair's duty
@@ -760,16 +761,17 @@ python3 ci/deploy_rig.py
 # flag or writable mount the manifest does not declare, a persistence
 # mount left read-only — while the fields omitted outright (with their
 # mounts and flags) stay a valid deployment. The same harness proves
-# the optional topology section: a declared named pair validates over
-# the single pair, while a member the rig does not declare, a member
-# two pairs share, or a declared pair whose standby wiring does not
-# close inside it each report rig-mismatch — and the
-# one-field-per-deployment bound (decision 99) refuses the planted
-# undeployable shapes: a second declared pair over the manifest's
-# one plant and a second duty controller the section never names,
-# each a second field-owning claimant on the single-writer claim.
-# The checked-in manifest carries no section — the single-pair
-# default every passing case starts from.
+# the checked-in manifest's declared topology section — the deployed
+# pair named under `topology.pairs`: the declaration validates under
+# another pair name, while a member the rig does not declare, a
+# member two pairs share, a pair whose standby edge leaves it, a
+# pair carrying two standby declarations, or a declared pair whose
+# standby wiring does not close inside it each report rig-mismatch —
+# and the one-field-per-deployment bound (decision 99) refuses the
+# planted undeployable shapes: a second declared pair over the
+# manifest's one plant and a second duty controller the section
+# never names, each a second field-owning claimant on the
+# single-writer claim.
 RIG_DIR="$(mktemp -d)"
 mkdir -p "$RIG_DIR/deploy" "$RIG_DIR/ci" "$RIG_DIR/model"
 cp deploy/manifest.json deploy/compose.yaml "$RIG_DIR/deploy/"
@@ -854,11 +856,13 @@ elif case == "persistence-omitted":
     ):
         compose = compose.replace(line, "")
 elif case == "topology-declared":
-    # The optional section naming the deployment's one pair —
-    # additive vocabulary a single-pair manifest may carry.
+    # The checked-in manifest declares the deployed pair; the
+    # declaration stays valid under another pair name — the name is
+    # the deployment's free index entry, the membership and the
+    # wiring what must close.
     document = json.loads(manifest)
     document["topology"] = {
-        "pairs": [{"name": "station", "members": ["ctrl-a", "ctrl-b"]}]
+        "pairs": [{"name": "pump-pair", "members": ["ctrl-a", "ctrl-b"]}]
     }
     manifest = json.dumps(document, indent=2)
 elif case == "topology-multi-pair":
@@ -955,6 +959,19 @@ elif case == "topology-shared-member":
         ]
     }
     manifest = json.dumps(document, indent=2)
+elif case == "topology-external-standby":
+    # The declared pair's standby edge leaves it: the pair's tracking
+    # member names a peer outside the pair — wiring that does not
+    # close inside the declaration.
+    document = json.loads(manifest)
+    document["controllers"][1]["standby"] = "ctrl-c:8082"
+    manifest = json.dumps(document, indent=2)
+elif case == "topology-two-standbys":
+    # Both members declare standby: a pair is one duty controller
+    # tracked by one standby, and the second declaration diverges.
+    document = json.loads(manifest)
+    document["controllers"][0]["standby"] = "ctrl-b:8081"
+    manifest = json.dumps(document, indent=2)
 elif case == "topology-unwired-pair":
     # The declared pair's wiring does not close inside it: dropping
     # the standby field and flag leaves two duty controllers the
@@ -998,7 +1015,8 @@ for divergence in persistence-mount-divergence persistence-flag-divergence \
         failover-flag-undeclared failover-wrong-peer \
         persistence-omitted topology-declared topology-multi-pair \
         undeployable-second-duty topology-undeclared-member \
-        topology-shared-member topology-unwired-pair; do
+        topology-shared-member topology-external-standby \
+        topology-two-standbys topology-unwired-pair; do
     rig_case "$divergence"
 done
 

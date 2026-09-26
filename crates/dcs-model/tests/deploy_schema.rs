@@ -159,11 +159,12 @@ fn deploy_schema_validates_the_documented_optional_variants() {
         entry.remove("journal_file");
     }
 
-    // topology-declared: the one named pair the single-pair deployment
-    // may carry.
+    // topology-declared: the checked-in manifest declares `station`;
+    // the case swaps in another pair name — the index entry is the
+    // deployment's free declaration.
     let mut declared = reference_manifest();
     declared["topology"] = serde_json::json!({
-        "pairs": [{"name": "station", "members": ["ctrl-a", "ctrl-b"]}]
+        "pairs": [{"name": "pump-pair", "members": ["ctrl-a", "ctrl-b"]}]
     });
 
     // topology-multi-pair: two named pairs over a four-controller rig.
