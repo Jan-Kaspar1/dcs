@@ -236,6 +236,64 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(s.state.job(1)['repairs'],1)
         self.assertIn(('repair','merge-conflict'), self.attributed_events(1))
 
+    def test_merge_conflict_repair_persists_conflicted_paths(self):
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        s.reconcile_workers(self.github.items)
+        self.github.includes_main=lambda head, base: False
+        out = ("Auto-merging docs/plan.md\n"
+               "CONFLICT (content): Merge conflict in docs/plan.md\n"
+               "Auto-merging agent_pool/state.py\n"
+               "CONFLICT (content): Merge conflict in agent_pool/state.py\n"
+               "Automatic merge failed; fix conflicts and then commit the result.\n")
+        def run_git(cwd, *args):
+            if args and args[0] == 'merge':
+                raise subprocess.CalledProcessError(1, 'merge', out, 'error: conflict')
+            return 'base'
+        self.runtime.run_git.side_effect=run_git
+        s.integrate(self.github.items)
+        self.assertEqual(s.state.job(1)['repairs'],1)
+        payloads = [json.loads(e['payload']) for e in s.state.events(1)
+                    if e['kind'] == 'repair']
+        self.assertEqual(payloads[0]['cause'], 'merge-conflict')
+        self.assertEqual(payloads[0]['paths'],
+                         ['docs/plan.md', 'agent_pool/state.py'])
+
+    def test_merge_conflict_repair_without_parseable_output_keeps_cause_only(self):
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        s.reconcile_workers(self.github.items)
+        self.github.includes_main=lambda head, base: False
+        def run_git(cwd, *args):
+            if args and args[0] == 'merge':
+                raise subprocess.CalledProcessError(1, 'merge', None, None)
+            return 'base'
+        self.runtime.run_git.side_effect=run_git
+        s.integrate(self.github.items)
+        payloads = [json.loads(e['payload']) for e in s.state.events(1)
+                    if e['kind'] == 'repair']
+        self.assertEqual(payloads[0], {'cause': 'merge-conflict'})
+
+    def test_clean_cause_repair_records_no_paths(self):
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        self.runtime.inspect_result.side_effect=ValueError('unclean result')
+        s.reconcile_workers(self.github.items)
+        payloads = [json.loads(e['payload']) for e in s.state.events(1)
+                    if e['kind'] == 'repair']
+        self.assertEqual(payloads[0], {'cause': 'publish-error'})
+
+    def test_ci_failure_repair_persists_failed_check_names(self):
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        s.reconcile_workers(self.github.items)
+        self.github.checks={'test':'failure','verify':'success'}
+        s.integrate(self.github.items)
+        payloads = [json.loads(e['payload']) for e in s.state.events(1)
+                    if e['kind'] == 'repair']
+        self.assertEqual(payloads[0]['cause'], 'ci-failure')
+        self.assertEqual(payloads[0]['checks'], ['test'])
+
     def test_publish_error_repair_records_publish_cause(self):
         s=self.supervisor
         s.dispatch(self.github.items)
