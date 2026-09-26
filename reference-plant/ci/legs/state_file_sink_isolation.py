@@ -90,7 +90,7 @@ import pair
 # the scan must surface the named diagnostic — never a silently
 # unexercised contract.
 LEG = {
-    "order": 340,
+    "order": 350,
     "title": "the state-file sink-isolation leg",
     "passes": "state-file-sink-isolation",
     "tampers": [
