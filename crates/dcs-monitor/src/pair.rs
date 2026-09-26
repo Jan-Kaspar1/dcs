@@ -44,8 +44,8 @@
 
 use crate::MonitorClient;
 use dcs_core::{
-    Command, CommandError, CommandOutcome, CommandReceipt, FieldClaim, JournalEntry, PointHistory,
-    PointId, Role, RoleReport, StandbySync, TelemetrySnapshot,
+    Command, CommandError, CommandOutcome, CommandReceipt, FailoverEvidence, FieldClaim,
+    JournalEntry, PointHistory, PointId, Role, RoleReport, StandbySync, TelemetrySnapshot,
 };
 use dcs_model::SignalIndex;
 use serde::{Deserialize, Serialize};
@@ -172,6 +172,37 @@ impl From<io::Error> for PairError {
 /// — leaves the pair with zero failover coverage, and the verdict
 /// says so rather than rendering "redundant pair healthy".
 pub const CONVERGENCE_GRACE: Duration = Duration::from_secs(5);
+
+/// The armed failover gate's evidence, appended to a reporting peer's
+/// sync-verdict fault — "failover proof stands, misses *k* of *N*" —
+/// so the two promotion gates' recorded divergence is legible from the
+/// verdict alone: a `degraded` peer inside a miss window refuses a
+/// requested `promote` on the fresh-verdict rule while its standing
+/// proof still arms the failover boundary the suffix names. While the
+/// proof stands the suffix also names the miss count the failover
+/// fires at; past the boundary it reads "proof voided". An unarmed
+/// report carries no failover evidence — the bare flag would bound
+/// nothing — so nothing is appended.
+fn failover_note(report: &RoleReport) -> String {
+    match report.failover {
+        Some(FailoverEvidence {
+            converged,
+            misses,
+            budget,
+        }) => format!(
+            " — failover proof {}, misses {} of {}{}",
+            if converged { "stands" } else { "voided" },
+            misses,
+            budget,
+            if converged {
+                format!(": failover fires at {budget}")
+            } else {
+                String::new()
+            },
+        ),
+        None => String::new(),
+    }
+}
 
 /// The pair's redundancy health as the view summarizes it — the unique
 /// settled-`active` peer plus the named faults of the last role poll;
@@ -408,26 +439,33 @@ impl PairClient {
                         }
                         Some(StandbySync::Degraded { detail }) => {
                             fault_kinds.push(PairFaultKind::StandbyDegraded);
-                            faults.push(format!("{} sync degraded: {detail}", peer.addr));
+                            faults.push(format!(
+                                "{} sync degraded: {detail}{}",
+                                peer.addr,
+                                failover_note(report)
+                            ));
                         }
                         Some(StandbySync::Diverged { mismatches }) => {
                             fault_kinds.push(PairFaultKind::StandbyDiverged);
                             faults.push(format!(
-                                "{} standby diverged: staged outputs mismatch the field at {}",
+                                "{} standby diverged: staged outputs mismatch the field at {}{}",
                                 peer.addr,
                                 mismatches
                                     .iter()
                                     .map(|mismatch| mismatch.point.0.to_string())
                                     .collect::<Vec<_>>()
-                                    .join(", ")
+                                    .join(", "),
+                                failover_note(report)
                             ));
                         }
                         Some(StandbySync::Orphaned { aligned }) => {
                             fault_kinds.push(PairFaultKind::StandbyOrphaned);
                             faults.push(format!(
                                 "{} reports the tracked line has no field owner \
-                                 (aligned at tick {})",
-                                peer.addr, aligned.0
+                                 (aligned at tick {}){}",
+                                peer.addr,
+                                aligned.0,
+                                failover_note(report)
                             ));
                         }
                         _ => {}
@@ -589,6 +627,7 @@ mod tests {
             tick: Tick(0),
             sync,
             field_claim,
+            failover: None,
         })
     }
 
@@ -660,5 +699,70 @@ mod tests {
         assert_eq!(health.active, Some(active));
         assert!(health.faults.is_empty(), "{:?}", health.faults);
         assert!(health.fault_kinds.is_empty());
+    }
+
+    /// The armed peer's failover evidence rides the sync-verdict
+    /// fault's prose: a mid-window `degraded` report names the standing
+    /// proof and the miss accounting bounding it — "proof stands,
+    /// misses k of N" — so a refused `promote` and the failover fire
+    /// the verdict diverges from explain themselves off the same
+    /// report. An unarmed peer's identical verdict appends nothing.
+    #[test]
+    fn a_degraded_armed_peers_fault_carries_the_failover_accounting() {
+        let active: SocketAddr = "127.0.0.1:5800".parse().unwrap();
+        let standby: SocketAddr = "127.0.0.1:5801".parse().unwrap();
+        let mut pair = PairClient::new([active, standby]);
+        let degraded = |detail: &str| StandbySync::Degraded {
+            detail: detail.to_string(),
+        };
+
+        // Unarmed: the same degraded verdict reads exactly as before —
+        // no failover field, no accounting.
+        pair.peers[0].status = reporting(Role::Active, None, None);
+        pair.peers[1].status = reporting(Role::Standby, Some(degraded("fetch failed")), None);
+        let health = pair.health();
+        assert_eq!(health.fault_kinds, [PairFaultKind::StandbyDegraded]);
+        assert_eq!(
+            health.faults[0],
+            format!("{standby} sync degraded: fetch failed")
+        );
+
+        // Armed and converged mid-window: the standing proof and its
+        // bound ride the verdict — "proof stands, misses 1 of 3" and
+        // the boundary the failover fires at.
+        let armed = |converged, misses| {
+            PeerStatus::Reporting(RoleReport {
+                role: Role::Standby,
+                tick: Tick(0),
+                sync: Some(degraded("fetch failed")),
+                field_claim: None,
+                failover: Some(FailoverEvidence {
+                    converged,
+                    misses,
+                    budget: 3,
+                }),
+            })
+        };
+        pair.peers[1].status = armed(true, 1);
+        let health = pair.health();
+        assert_eq!(health.fault_kinds, [PairFaultKind::StandbyDegraded]);
+        assert!(
+            health.faults[0].contains("sync degraded: fetch failed")
+                && health.faults[0].contains("failover proof stands, misses 1 of 3")
+                && health.faults[0].contains("failover fires at 3"),
+            "expected the failover accounting on the degraded fault, got {:?}",
+            health.faults
+        );
+
+        // Past the boundary the served proof reads voided — the
+        // failover window closed with it — and no fire point is named.
+        pair.peers[1].status = armed(false, 4);
+        let health = pair.health();
+        assert!(
+            health.faults[0].contains("failover proof voided, misses 4 of 3")
+                && !health.faults[0].contains("fires"),
+            "expected the voided proof's accounting, got {:?}",
+            health.faults
+        );
     }
 }

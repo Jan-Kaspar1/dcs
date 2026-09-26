@@ -168,6 +168,17 @@
 //! the field — a peer that observes it keeps its role, its closed
 //! gate, and its sync verdict, and the observation journals nothing.
 //!
+//! Where [`with_failover`](Peer::with_failover) armed the heartbeat-miss
+//! budget the report also carries the failover gate's own evidence —
+//! `failover` serving the standing convergence proof `self_promote`
+//! reads together with the consecutive-miss count and the armed budget
+//! bounding it — so the two promotion gates' recorded divergence is
+//! legible on the wire: a mid-window report reads verdict `degraded`,
+//! proof stands, misses *k* of *N*, where a requested `promote` still
+//! refuses on the fresh-verdict rule while the armed path fires at the
+//! *N*-th miss. An unarmed peer serves no accounting — the flag alone
+//! would survive unbounded misses and bound nothing.
+//!
 //! The *conditional* probes — the orphan cycle's re-arm and the
 //! fencing-loss reclaim — observe too: a refusal means the field's
 //! arbitration found a different owner standing, and where the verdict
@@ -188,8 +199,8 @@ use crate::gate::WriteGate;
 use crate::revision::CarryoverError;
 use dcs_core::{
     CarryoverReport, Command, CommandError, CommandOutcome, CommandReceipt, Direction, Divergence,
-    FieldClaim, PointId, Role, RoleReport, Sample, StandbySync, SwitchError, SwitchOrigin,
-    TelemetrySnapshot, Tick, Value,
+    FailoverEvidence, FieldClaim, PointId, Role, RoleReport, Sample, StandbySync, SwitchError,
+    SwitchOrigin, TelemetrySnapshot, Tick, Value,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -1281,6 +1292,16 @@ impl<'d> Peer<'d> {
 
     /// The instance's reported role as the serde [`RoleReport`] the
     /// monitoring contract serves.
+    ///
+    /// On a peer armed by [`with_failover`](Self::with_failover) the
+    /// report also carries the failover gate's evidence: the standing
+    /// convergence proof [`self_promote`](Self::self_promote) reads —
+    /// `converged` — together with the consecutive-miss count and the
+    /// armed budget bounding it, so a `degraded` report inside a miss
+    /// window reads "proof stands, misses *k* of *N*" instead of
+    /// silently diverging from the failover path. An unarmed peer
+    /// reports `None`: the flag alone survives misses without bound,
+    /// so it is never served without the budget it is read against.
     pub fn report(&self) -> RoleReport {
         RoleReport {
             role: self.role,
@@ -1290,6 +1311,11 @@ impl<'d> Peer<'d> {
                 _ => Some(self.sync.clone()),
             },
             field_claim: self.field_claim,
+            failover: self.failover.map(|budget| FailoverEvidence {
+                converged: self.converged,
+                misses: self.misses,
+                budget,
+            }),
         }
     }
 
@@ -3294,6 +3320,7 @@ mod tests {
                 tick: Tick(7),
                 sync: Some(StandbySync::Tracking { aligned: Tick(7) }),
                 field_claim: None,
+                failover: None,
             }
         );
 
@@ -5211,6 +5238,111 @@ mod tests {
             Err(SwitchError::NotConverged {
                 sync: StandbySync::Degraded { detail: "b".into() }
             })
+        );
+    }
+
+    /// An armed peer's report serves the failover gate's evidence: the
+    /// standing convergence proof `self_promote` reads, bundled with
+    /// the consecutive-miss count and the armed budget bounding it — a
+    /// mid-window `degraded` report reads "proof stands, misses k of
+    /// N", and past the budget the served proof reads voided.
+    #[test]
+    fn an_armed_peers_report_serves_the_failover_gates_evidence() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate)).with_failover(2);
+
+        // Armed but never converged: the accounting reports while the
+        // proof does not yet stand.
+        assert_eq!(
+            peer.report().failover,
+            Some(FailoverEvidence {
+                converged: false,
+                misses: 0,
+                budget: 2,
+            })
+        );
+
+        // Converged and tracking: proof stands with no misses on it.
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(3);
+        peer.apply(&source.checkpoint()).unwrap();
+        assert_eq!(
+            peer.report().failover,
+            Some(FailoverEvidence {
+                converged: true,
+                misses: 0,
+                budget: 2,
+            })
+        );
+
+        // Mid-window: the verdict degrades on the produced-nothing pull
+        // while the standing proof holds — "verdict degraded, proof
+        // stands, misses 1 of 2".
+        peer.note_transfer_failed("a");
+        let report = peer.report();
+        assert_eq!(
+            report.sync,
+            Some(StandbySync::Degraded { detail: "a".into() })
+        );
+        assert_eq!(
+            report.failover,
+            Some(FailoverEvidence {
+                converged: true,
+                misses: 1,
+                budget: 2,
+            })
+        );
+
+        // At the boundary the proof still stands — the failover's own
+        // fire point — and past it the served proof reads voided.
+        peer.note_transfer_failed("b");
+        assert!(peer.failover_due());
+        assert_eq!(
+            peer.report().failover,
+            Some(FailoverEvidence {
+                converged: true,
+                misses: 2,
+                budget: 2,
+            })
+        );
+        peer.note_transfer_failed("c");
+        assert!(!peer.failover_due());
+        assert_eq!(
+            peer.report().failover,
+            Some(FailoverEvidence {
+                converged: false,
+                misses: 3,
+                budget: 2,
+            })
+        );
+    }
+
+    /// An unarmed peer's report carries no failover accounting at all:
+    /// the bare proof flag would survive unbounded misses, so the
+    /// record forbids serving it without the armed budget's bound.
+    #[test]
+    fn an_unarmed_peers_report_carries_no_failover_accounting() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut peer = Peer::standby(executor(&driver), None);
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(3);
+        peer.apply(&source.checkpoint()).unwrap();
+        assert_eq!(peer.report().failover, None);
+
+        // Misses still count — `missed_transfers` reports them — but
+        // nothing of the failover gate lands on the served report.
+        peer.note_transfer_failed("a");
+        peer.note_transfer_failed("b");
+        assert_eq!(peer.missed_transfers(), 2);
+        let report = peer.report();
+        assert_eq!(report.failover, None);
+        assert_eq!(
+            report.sync,
+            Some(StandbySync::Degraded { detail: "b".into() })
         );
     }
 

@@ -9,8 +9,8 @@
 //! dropped so its port refuses connections.
 
 use dcs_core::{
-    Command, CommandError, CommandOutcome, CommandReceipt, Direction, FieldClaim, IoDriver,
-    IoError, JournalEvent, PointId, Role, Sample, StandbySync, Tick, Value, ValueKind,
+    Command, CommandError, CommandOutcome, CommandReceipt, Direction, FailoverEvidence, FieldClaim,
+    IoDriver, IoError, JournalEvent, PointId, Role, Sample, StandbySync, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{
@@ -131,7 +131,7 @@ impl PeerRig {
     /// tracking source — the configured `--peer`/`--standby` half of
     /// the follow-peer contract a demotion tracks.
     fn start_tracking(role: Role, source: Option<SocketAddr>) -> Self {
-        Self::assemble(role, source, None)
+        Self::assemble(role, source, None, None)
     }
 
     /// [`start`](Self::start) with a scripted field-claim probe: the
@@ -139,13 +139,21 @@ impl PeerRig {
     /// currently holds, so a test drives `field_claim` through `held` /
     /// `unclaimed` without field-side arbitration.
     fn start_probed(role: Role, claim: Arc<Mutex<FieldClaim>>) -> Self {
-        Self::assemble(role, None, Some(claim))
+        Self::assemble(role, None, Some(claim), None)
+    }
+
+    /// [`start`](Self::start) with the peer's failover budget armed —
+    /// `budget` as `--auto-promote N` — so the served report carries
+    /// the gate's standing proof and miss accounting.
+    fn start_failover(role: Role, budget: u32) -> Self {
+        Self::assemble(role, None, None, Some(budget))
     }
 
     fn assemble(
         role: Role,
         source: Option<SocketAddr>,
         claim: Option<Arc<Mutex<FieldClaim>>>,
+        failover: Option<u32>,
     ) -> Self {
         let driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
             (PointId(10), Value::Float(0.0)),
@@ -163,6 +171,10 @@ impl PeerRig {
         };
         let peer = match claim {
             Some(claim) => peer.with_field_probe(move || Ok(*claim.lock().unwrap())),
+            None => peer,
+        };
+        let peer = match failover {
+            Some(budget) => peer.with_failover(budget),
             None => peer,
         };
         let monitor = Monitor::bind_peer("127.0.0.1:0", peer, signal_index()).unwrap();
@@ -859,6 +871,87 @@ fn an_unclaimed_field_report_is_a_named_fault_until_a_holder_claims() {
         "field_claim === \"unclaimed\"",
         "the field unclaimed",
         "promote is the documented remedy",
+    ] {
+        assert!(page.contains(needle), "page lacks {needle}");
+    }
+
+    active.stop();
+    standby.stop();
+}
+
+/// The failover gate's evidence served through the pair view: an armed
+/// standby mid-miss-window reports `degraded` while its standing proof
+/// holds, and the view's named fault carries the accounting — "proof
+/// stands, misses k of N" — beside the verdict the requested-promote
+/// path refuses on, so the two gates' recorded divergence is legible
+/// from the served report.
+#[test]
+fn an_armed_standbys_miss_window_surfaces_the_failover_accounting() {
+    let active = PeerRig::start(Role::Active);
+    let standby = PeerRig::start_failover(Role::Standby, 2);
+    let mut pair = PairClient::new([active.addr, standby.addr]);
+
+    // Converge the armed standby, then one produced-nothing pull — the
+    // mid-window the finding names: verdict degraded, proof stands.
+    active.client.advance(3).unwrap();
+    standby
+        .monitor
+        .apply_checkpoint(&active.client.checkpoint().unwrap())
+        .unwrap();
+    standby.monitor.note_transfer_failed("fetch refused");
+
+    pair.poll_roles();
+    match status_of(&pair, standby.addr) {
+        PeerStatus::Reporting(report) => {
+            assert!(matches!(report.sync, Some(StandbySync::Degraded { .. })));
+            assert_eq!(
+                report.failover,
+                Some(FailoverEvidence {
+                    converged: true,
+                    misses: 1,
+                    budget: 2,
+                })
+            );
+        }
+        other => panic!("expected the standby's report, got {other:?}"),
+    }
+    let health = pair.health();
+    assert_eq!(health.active, Some(active.addr));
+    assert_fault_kinds(&health, &[PairFaultKind::StandbyDegraded]);
+    assert!(
+        health.faults[0].contains(&standby.addr.to_string())
+            && health.faults[0].contains("failover proof stands, misses 1 of 2")
+            && health.faults[0].contains("failover fires at 2"),
+        "expected the failover accounting on the degraded fault, got {:?}",
+        health.faults
+    );
+
+    // Past the boundary the served proof reads voided: the window
+    // closed with it and the fault's accounting says so.
+    standby.monitor.note_transfer_failed("fetch refused");
+    standby.monitor.note_transfer_failed("fetch refused");
+    pair.poll_roles();
+    let health = pair.health();
+    assert!(
+        health
+            .faults
+            .iter()
+            .any(|fault| fault.contains("failover proof voided, misses 3 of 2")),
+        "expected the voided proof's accounting, got {:?}",
+        health.faults
+    );
+
+    // The page surfaces the same accounting: the report field it reads,
+    // the proof's standing, the miss count against its budget, and the
+    // armed fire point.
+    let page = dcs_monitor::PAGE;
+    for needle in [
+        "report.failover",
+        "failoverNote",
+        "failover proof ",
+        "misses ",
+        " of ",
+        "failover fires at ",
     ] {
         assert!(page.contains(needle), "page lacks {needle}");
     }
