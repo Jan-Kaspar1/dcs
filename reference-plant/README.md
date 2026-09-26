@@ -386,7 +386,15 @@ runs on — converging the standby to `tracking`, driving scans through
 `POST /scan` on each peer keeping their served snapshots identical,
 submitting kind-declared commands through the receipted path, and
 issuing the documented `demote`/`promote` switchover with the run
-continuing bumplessly.
+continuing bumplessly. The pair stage's attributed-switch leg then
+audits who the durable record says asked: an attributed `POST
+/promote`/`POST /demote` declaring a `ci` actor journals `role_changed`
+entries carrying that actor on *both* peers' durable records, ordered
+after the request at its scan boundary, with the tracking peer's
+checkpoint-adopted journal showing the same attributed record, while
+the armed standby's automatic promotion at the miss budget journals
+`origin: "failover"` with no operator actor — reading distinguishably
+from any operator request before the pair's roles are restored.
 
 The stage's legs are files, not entries in the check script: every
 `ci/legs/<name>.py` is one leg — a runnable script carrying its
