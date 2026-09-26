@@ -566,8 +566,8 @@ class LagStagingTests(unittest.TestCase):
             order.index(scenarios.scenario_demote_forged_standby_source))
         # The stale-island leg's driven third controller shares the
         # same restored window and still clears before the tune case's
-        # a->b switch — the journal-boundary flood leg runs between
-        # them in the same launch-layout window.
+        # a->b switch — the journal-boundary flood and suspended-alias
+        # legs run between them in the same launch-layout window.
         self.assertEqual(
             order.index(scenarios.scenario_demote_forged_standby_source)
             + 1,
@@ -578,6 +578,10 @@ class LagStagingTests(unittest.TestCase):
             order.index(scenarios.scenario_journal_boundary_flood))
         self.assertEqual(
             order.index(scenarios.scenario_journal_boundary_flood)
+            + 1,
+            order.index(scenarios.scenario_suspended_alias_audit))
+        self.assertEqual(
+            order.index(scenarios.scenario_suspended_alias_audit)
             + 1,
             order.index(scenarios.scenario_parameter_tune_carryover))
         self.assertIs(verify.case_function('lag-staging'),
