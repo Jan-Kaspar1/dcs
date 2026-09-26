@@ -135,10 +135,13 @@ ci/ctl.py              the dcs-ctl leg — the released operator CLI
                        and the named refusal modes
 ci/deploy_rig.py       the rig-definition consistency check —
                        deploy/compose.yaml against the manifest
-ci/schema_conformance.py  the served-registry structural conformance
-                       check — the driven run's `GET /schema` document
-                       against the release record's
-                       block-interfaces.schema.json (stdlib-only)
+ci/schema_conformance.py  the structural conformance check — the
+                       driven run's `GET /schema` document against the
+                       release record's block-interfaces.schema.json,
+                       and the checked-in deploy/manifest.json /
+                       model/dynamics.json against the record's
+                       deploy-manifest.schema.json /
+                       dynamics.schema.json (stdlib-only)
 deploy/manifest.json   the deployment declaration
 deploy/compose.yaml    the checked-in rig definition instantiating it
 ```
@@ -221,7 +224,14 @@ lives in the release repository's tree at the pinned commit), and
 `dcs-model schema` / `dcs-model interface-schema` /
 `dcs-model deploy-schema` / `dcs-plant-server --dynamics-schema` at the
 pinned rev must emit those bytes exactly — a divergence is
-`schema-drift`.
+`schema-drift`. The stage then screens the checked-in consumer
+documents against the artifacts declaring their shapes —
+`deploy/manifest.json` against `deploy-manifest.schema.json` and
+`model/dynamics.json` against `dynamics.schema.json`, the same
+required-keys/field-shape conformance `ci/schema_conformance.py` runs
+for the served registry document — each screened twice with identical
+digests required, and a doctored schema-violating copy of each refused
+as `schema-mismatch` (a silent pass is `schema-mismatch-unchecked`).
 `dcs-model diff` runs two legs: against a doctored *compatible*
 revision of the checked-in model it must name the actual change, and
 against the identical document it must report `no changes` — a leg
@@ -612,8 +622,10 @@ a pin whose supported API no longer compiles your composition is
 is `tooling-rejected`; a model whose semantic content changed under a
 re-recorded fingerprint is `manifest-fingerprint-mismatch`; a recorded
 schema artifact the pinned tooling no longer emits byte-identically is
-`schema-drift`; a served registry document failing the artifact's
-required structure is `schema-mismatch`; a `dcs-model diff` leg whose
+`schema-drift`; a served registry document or a checked-in
+manifest/dynamics document failing its artifact's required structure
+is `schema-mismatch`; two screening passes diverging is
+`schema-mismatch-nondeterministic`; a `dcs-model diff` leg whose
 expectation fails is `diff-mismatch`; a served
 operator surface diverging from the emitted model's declaration is
 `surface-mismatch`; a restarted controller losing its persisted run —
