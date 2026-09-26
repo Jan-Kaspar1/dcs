@@ -4,11 +4,13 @@
 use dcs_core::{
     Command, CommandError, CommandOutcome, CommandReceipt, CyclicIoDriver, Direction,
     DriverDiagnostics, EmittedEvent, EventValue, ExchangeDiagnostics, ForcedPoint, IoDriver,
-    IoError, IoFault, IoHealth, JournalEvent, LinkState, PointId, Quality, QualityReason, Sample,
-    Tick, Value, ValueKind,
+    IoError, IoFault, IoHealth, JournalEvent, LinkState, PointId, Quality, QualityReason, Role,
+    Sample, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
-use dcs_monitor::{Monitor, MonitorClient, PAGE, PAIR_FAULT_KINDS_VERSION, PairFaultKind};
+use dcs_monitor::{
+    HealthReport, Monitor, MonitorClient, PAGE, PAIR_FAULT_KINDS_VERSION, PairFaultKind,
+};
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, PointMap, StepError,
 };
@@ -541,6 +543,39 @@ fn snapshot_roundtrips_over_http() {
         assert_eq!(snapshot.points[2].direction, Direction::Out);
         assert_eq!(snapshot.components[0].name, "scale");
         assert_eq!(snapshot.components[0].last_tick, Some(Tick(1)));
+    });
+}
+
+#[test]
+fn health_reports_liveness_role_and_scan_age() {
+    with_monitor(|_driver, client| {
+        // Before the first scan the listener already serves its
+        // liveness answer — the shape the container health check
+        // decodes: live, the served role, and the not-yet-scanned
+        // freshness spelled `null`.
+        let health = client.health().unwrap();
+        assert_eq!(
+            health,
+            HealthReport {
+                live: true,
+                role: Role::Active,
+                tick: Tick::ZERO,
+                last_scan_age_ms: None,
+            }
+        );
+
+        // A completed scan stamps the report: the tick advances and
+        // the wall-clock age of the last scan is a small number — the
+        // freshness the liveness declaration alone cannot attest.
+        client.advance(2).unwrap();
+        let health = client.health().unwrap();
+        assert_eq!(health.tick, Tick(2));
+        assert_eq!(health.role, Role::Active);
+        assert!(health.live);
+        assert!(
+            health.last_scan_age_ms.is_some(),
+            "a completed scan stamps the freshness"
+        );
     });
 }
 

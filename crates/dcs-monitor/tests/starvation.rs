@@ -16,9 +16,9 @@
 //! body-reading `POST /command` and `POST /scan`, plus any request
 //! still carrying body bytes the client owes, whose dropped reader
 //! drains the rest the same way — runs on a small submission lane
-//! behind a body-size bound; the pair-liveness reads `GET
-//! /checkpoint` and `GET /role` answer from a dedicated heartbeat
-//! lane; and everything else serves from a pool neither wait can
+//! behind a body-size bound; the pair-liveness reads `GET /health`,
+//! `GET /checkpoint`, and `GET /role` answer from a dedicated
+//! heartbeat lane; and everything else serves from a pool neither wait can
 //! reach. These tests hold stalled-body and never-reading connections
 //! against a live monitor and assert the liveness surface — and an
 //! armed standby's verdict on its active — never notices.
@@ -407,12 +407,17 @@ fn response_status(stream: &TcpStream, timeout: Duration) -> Option<u16> {
 }
 
 /// Every served surface the reproduction starved answers within the
-/// bound while `streams` still hold their stalled bodies open.
+/// bound while `streams` still hold their stalled bodies open — the
+/// container health check's `GET /health` probe rides the heartbeat
+/// lane beside the pair-liveness reads.
 fn assert_served_surface_survives(addr: SocketAddr) {
     let client = MonitorClient::with_timeout(addr, ANSWER_BOUND);
     client
         .role()
         .expect("GET /role starved behind stalled bodies");
+    client
+        .health()
+        .expect("GET /health starved behind stalled bodies");
     client
         .checkpoint()
         .expect("GET /checkpoint starved behind stalled bodies");
@@ -627,13 +632,17 @@ fn undrained_responses_never_starve_the_pair_liveness_reads() {
     // answer, serializing or blocked mid-write.
     thread::sleep(Duration::from_millis(250));
 
-    // The finding's timeouts: `GET /role` and `GET /checkpoint` now
-    // answer from the heartbeat lane the pinned writes can never
-    // reach — well inside the bound the reproduction blew through.
+    // The finding's timeouts: `GET /health`, `GET /role`, and
+    // `GET /checkpoint` now answer from the heartbeat lane the pinned
+    // writes can never reach — well inside the bound the reproduction
+    // blew through.
     let client = MonitorClient::with_timeout(rig.addr, ANSWER_BOUND);
     client
         .role()
         .expect("GET /role starved behind undrained responses");
+    client
+        .health()
+        .expect("GET /health starved behind undrained responses");
     client
         .checkpoint()
         .expect("GET /checkpoint starved behind undrained responses");

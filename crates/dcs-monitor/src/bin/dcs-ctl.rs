@@ -116,6 +116,9 @@ read commands:
                               named component's ComponentResources
                               entry
   role                        the instance's RoleReport
+  health                      the bounded liveness answer — liveness, role,
+                              and last-scan age; the container health
+                              check's probe
   pair-health <peer>...        JSON redundancy health of <addr> and peers;
                               faults exit nonzero naming their kinds
   receipts                    the executor's receipt log
@@ -246,6 +249,7 @@ enum Action {
         component: Option<String>,
     },
     Role,
+    Health,
     PairHealth {
         peers: Vec<String>,
     },
@@ -332,6 +336,7 @@ fn parse(args: &[String]) -> Result<(&str, Action), String> {
             _ => return Err(usage(format!("wrong arguments for {command:?}"))),
         },
         ("role", []) => Action::Role,
+        ("health", []) => Action::Health,
         ("pair-health", peers) => {
             if peers.is_empty() || peers.iter().any(|peer| peer.starts_with("--")) {
                 return Err(usage(format!("wrong arguments for {command:?}")));
@@ -457,7 +462,7 @@ fn parse(args: &[String]) -> Result<(&str, Action), String> {
         ("scan", [scans]) => Action::Scan {
             scans: parse_count(scans).map_err(usage)?,
         },
-        ("snapshot" | "signals" | "schema" | "role" | "receipts" | "scan", _) => {
+        ("snapshot" | "signals" | "schema" | "role" | "health" | "receipts" | "scan", _) => {
             return Err(usage(format!("wrong arguments for {command:?}")));
         }
         _ => return Err(usage(format!("unknown command {command:?}"))),
@@ -635,6 +640,7 @@ fn execute(client: &MonitorClient, addr: SocketAddr, action: &Action) -> Result<
             }
         }
         Action::Role => print_json(&client.role().map_err(|e| transport(addr, e))?, addr),
+        Action::Health => print_json(&client.health().map_err(|e| transport(addr, e))?, addr),
         Action::PairHealth { peers } => {
             let mut addrs = vec![addr];
             for peer in peers {

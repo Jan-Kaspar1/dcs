@@ -511,6 +511,16 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
                 },
             }
         }
+        PlantRequest::Ping => {
+            // The container health contract's probe: the listener
+            // answering at all is the liveness half, and the plant's
+            // current tick is the freshness half a probe watches
+            // advance across steps. No field access, no claim, no
+            // mutation — open to every attachment like `list_points`.
+            PlantResponse::Alive {
+                tick: shared.driver.tick(),
+            }
+        }
     }
 }
 

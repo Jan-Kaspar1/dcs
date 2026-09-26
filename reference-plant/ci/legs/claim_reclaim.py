@@ -79,7 +79,7 @@ import simulate
 # the foreign claimant must surface the named diagnostic on the
 # honest standing-owner re-arm — never a silently unexercised pass.
 LEG = {
-    "order": 370,
+    "order": 380,
     "title": "the claim-reclaim leg",
     "passes": "claim-reclaim",
     "tampers": [

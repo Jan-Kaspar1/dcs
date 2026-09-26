@@ -863,6 +863,20 @@ impl RemoteDriver {
         }
     }
 
+    /// The liveness probe — the container health contract's request
+    /// half: the server answers its current plant tick without touching
+    /// the field or consulting the write claim, so the probe answers on
+    /// every attachment exactly like a read. The returned tick is the
+    /// freshness half — a stepping plant's tick advances between
+    /// probes, a stalled one's does not.
+    pub fn ping(&self) -> Result<Tick, RemoteError> {
+        match self.request(&PlantRequest::Ping)? {
+            PlantResponse::Alive { tick } => Ok(tick),
+            PlantResponse::Error { error } => Err(self.fail(error.into())),
+            _ => Err(self.protocol_violation()),
+        }
+    }
+
     /// Removes any fault injected on `point` — `SimDriver::clear_fault`
     /// on the server.
     pub fn clear_fault(&self, point: PointId) -> Result<(), RemoteError> {

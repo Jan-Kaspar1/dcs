@@ -228,6 +228,27 @@ fn fault_and_clear_fault_roundtrip() {
 }
 
 #[test]
+fn ping_answers_the_plants_liveness() {
+    with_server(fixture_map(), |addr| {
+        // The container health contract's probe: `alive` carrying the
+        // plant's current tick — advancing as the plant steps, so a
+        // probe sees the freshness, not just the answer.
+        assert_eq!(
+            ctl_ok(addr, &["ping"]),
+            PlantResponse::Alive { tick: Tick::ZERO }
+        );
+        assert_eq!(
+            ctl_ok(addr, &["step", "0.5"]),
+            PlantResponse::Stepped { tick: Tick(1) }
+        );
+        assert_eq!(
+            ctl_ok(addr, &["ping"]),
+            PlantResponse::Alive { tick: Tick(1) }
+        );
+    });
+}
+
+#[test]
 fn an_injected_fault_is_visible_in_a_controllers_snapshot_and_journal() {
     with_server(fixture_map(), |addr| {
         // A connected controller: an executor scanning the shared plant
@@ -363,6 +384,7 @@ fn malformed_arguments_fail_with_usage_never_a_panic() {
         vec![dead, "step"],
         vec![dead, "step", "abc"],
         vec![dead, "step", "nan"],
+        vec![dead, "ping", "extra"],
     ];
     for args in &cases {
         let output = ctl_args(args);

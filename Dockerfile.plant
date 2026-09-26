@@ -10,11 +10,21 @@ RUN cargo build --release --locked -p dcs-plant -p dcs-sim-net
 # Runtime stage: minimal image carrying the plant server binary with
 # dcs-plant-ctl beside it — the entrypoint is unchanged; the tool runs
 # via `docker exec` against the server's loopback listener for live
-# perturbation of the running plant.
+# perturbation of the running plant, and is the declared health check's
+# probe.
 FROM debian:bookworm-slim AS runtime
 RUN useradd --no-create-home --shell /usr/sbin/nologin --uid 10001 dcs
 COPY --from=build /src/target/release/dcs-plant-server /usr/local/bin/dcs-plant-server
 COPY --from=build /src/target/release/dcs-plant-ctl /usr/local/bin/dcs-plant-ctl
 USER dcs
+# The health contract: the probe sends the plant protocol's liveness
+# request — {"op":"ping"}, answered {"result":"alive","tick":N} —
+# through the shipped tool, so the container reports healthy only once
+# the listener actually answers (a still-binding or restarted
+# container reads unhealthy until first service, never on a fixed
+# sleep). DCS_PLANT_ADDR overrides the probe's loopback target when
+# --listen uses a port other than the documented 9001.
+HEALTHCHECK --interval=2s --timeout=3s --start-period=10s --retries=15 \
+    CMD dcs-plant-ctl "${DCS_PLANT_ADDR:-127.0.0.1:9001}" ping
 ENTRYPOINT ["dcs-plant-server"]
 CMD ["--help"]

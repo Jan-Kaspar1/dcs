@@ -189,6 +189,37 @@ Alternatively the model can declare `sim-tcp` devices whose
 the attachment itself and `--remote` is not needed — the form the
 hot-swap test (`crates/dcs-controller/tests/hot_swap.rs`) exercises.
 
+## The health contract
+
+Both published images declare a `HEALTHCHECK` — the declared signal
+orchestrators and restart/rollback drills order on: a container reports
+`healthy` only once its listener actually serves its own liveness
+answer, and `unhealthy` before — a slow-starting or restarted container
+is never passed on a fixed sleep.
+
+- The controller image probes `GET /health`, the monitor's bounded
+  liveness answer on the heartbeat lane —
+  `{"live":true,"role":"active","tick":7,"last_scan_age_ms":12}`,
+  `null` freshness before the first scan — through the shipped
+  `dcs-ctl`:
+  `dcs-ctl "${DCS_MONITOR_ADDR:-127.0.0.1:8080}" health`.
+  `DCS_MONITOR_ADDR` retargets the loopback probe when `--listen` uses
+  a port other than the documented 8080 (the rig's standby declares
+  `127.0.0.1:8081`). A run without `--listen` serves no monitor and
+  never reports healthy — the contract is the served surface's, by
+  design.
+- The plant image probes the plant protocol's liveness request —
+  `{"op":"ping"}` answered `{"result":"alive","tick":N}` — through the
+  shipped `dcs-plant-ctl`:
+  `dcs-plant-ctl "${DCS_PLANT_ADDR:-127.0.0.1:9001}" ping`.
+  `DCS_PLANT_ADDR` retargets the loopback probe the same way.
+
+Both declare the same cadence — `--interval=2s --timeout=3s
+--start-period=10s --retries=15` — and the probes run inside the
+container against its own loopback listener: `healthy` means the
+served surface answers, nothing less. `docker inspect
+--format='{{.State.Health.Status}}'` reports the standing verdict.
+
 ## The demonstration rig
 
 `compose.yaml` at the repository root is the checked-in rig definition
@@ -200,8 +231,10 @@ dynamics documents `dcs-build`'s `pump_station` example emits — the
 `ctrl-a`/`ctrl-b` redundant pair mounting the same station model and
 attaching to its listener with the standby wired to the active's
 monitor, and the pair's monitor ports published on the host. The
-plant service's healthcheck orders the controllers' one-shot
-`--remote` attach behind the listener actually serving. The file is a
+plant service's ordering gate rides the image's declared `HEALTHCHECK`
+— the `ping` probe above — so the controllers' one-shot `--remote`
+attach waits on the listener actually serving; each controller's own
+health verdict probes its monitor address through `DCS_MONITOR_ADDR`. The file is a
 statically inspectable declaration — `docker compose config` checks
 it — and like the Dockerfiles it is a checked-in packaging artifact:
 a single-host orchestration declaration that defines no deployment.
