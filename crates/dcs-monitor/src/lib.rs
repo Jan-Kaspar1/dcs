@@ -39,10 +39,13 @@
 //! [`MAX_REQUEST_BODY`] is refused `413`. Lane queues are bounded too
 //! ([`LANE_QUEUE_DEPTH`], the command lane's [`command_lane_depth`]):
 //! a request arriving while its lane's queue is full falls to the
-//! refuse worker — `503` for anything but a command, which still runs
-//! the receipted admission path — instead of queueing without limit,
-//! so a request flood pinned behind wedged workers cannot grow
-//! memory. The executor lives behind a
+//! refuse worker's `503` instead of queueing without limit, while a
+//! `POST /command` past its lane's bound defers to the command lane's
+//! own bounded overflow deck — the admission contract owes it a
+//! receipted answer, and the deck's feeder hands it back to the one
+//! command worker in dispatch order — so a request flood pinned
+//! behind wedged workers cannot grow memory or scramble the receipt
+//! log's submission order. The executor lives behind a
 //! [`Mutex`]
 //! the control-plane endpoints and the scan loop share — scans, commands,
 //! checkpoints, and role changes hold it for their mutation, so a
@@ -752,9 +755,10 @@ const SUBMIT_WORKERS: usize = 2;
 /// draining worker keeps the log in dispatch order — two workers
 /// racing the shared lock could invert a settlement against a
 /// `queue_full` refusal — and a stalled command body pins only this
-/// lane. Past the bound the refuse path still runs the real admission
-/// handler rather than answering a bare `503`, so the receipt lands —
-/// just outside the queue's dispatch order.
+/// lane. Past the bound a submission defers to the lane's own
+/// overflow deck rather than a second worker running the admission
+/// path beside it: the deferred request re-enters at the queue's
+/// drained tail, so every receipt still lands in dispatch order.
 fn command_lane_depth(command_capacity: usize) -> usize {
     LANE_QUEUE_DEPTH.saturating_add(command_capacity.saturating_mul(2))
 }
@@ -1316,11 +1320,14 @@ impl<'d> Monitor<'d> {
     /// command lane by its [`command_lane_depth`] wave, the rest by
     /// [`LANE_QUEUE_DEPTH`]; a non-command overflow is refused `503`
     /// by the refuse worker rather than queueing without limit, while
-    /// a refused `POST /command` still runs the real admission path so
-    /// the submission is answered with its receipt, never a bare
-    /// fault. A request that cannot even queue for refusal is dropped
-    /// on its own detached thread so the dispatcher itself never joins
-    /// a client-paced wait. The executor's command/scan interleaving
+    /// an overflowed `POST /command` defers to the command lane's own
+    /// bounded overflow deck — the admission contract owes every
+    /// submission a receipted answer, and the deck's feeder hands it
+    /// back to the one draining worker in dispatch order, so the
+    /// receipt log keeps submission order exactly where the flood is
+    /// deepest. A request that cannot even queue for refusal is
+    /// dropped on its own detached thread so the dispatcher itself
+    /// never joins a client-paced wait. The executor's command/scan interleaving
     /// stays deterministic either way: the pools only decide which
     /// request waits on the shared lock next, and scans, commands,
     /// checkpoints, and role changes still serialize on it.
@@ -1334,7 +1341,8 @@ impl<'d> Monitor<'d> {
                 .command_queue_capacity(),
         );
         let submissions = Lane::new();
-        let commands = Lane::with_depth(command_depth);
+        let commands = CommandLane::with_depth(command_depth);
+        let command_overflow = Lane::new();
         let heartbeat = Lane::new();
         let control = Lane::new();
         let served = Lane::new();
@@ -1342,9 +1350,27 @@ impl<'d> Monitor<'d> {
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 while let Ok(request) = self.server.recv() {
-                    let lane = if command_request(&request) {
-                        &commands
-                    } else if submission(&request) {
+                    // `POST /command` owns its routing: a full lane
+                    // defers to the command overflow lane — whose
+                    // feeder hands each submission back to the lane's
+                    // drained tail — so the one command worker still
+                    // mints its receipt in dispatch order rather than
+                    // a second worker racing the queued wave on the
+                    // shared lock. Past even the overflow bound the
+                    // request drops like any over-bound request; its
+                    // deferral first goes back so the count keeps
+                    // matching the submissions the feeder still owes.
+                    if command_request(&request) {
+                        let Some(request) = commands.push(request) else {
+                            continue;
+                        };
+                        if let Some(request) = command_overflow.push(request) {
+                            commands.undefer();
+                            std::thread::spawn(move || drop(request));
+                        }
+                        continue;
+                    }
+                    let lane = if submission(&request) {
                         &submissions
                     } else if pair_liveness(&request) {
                         &heartbeat
@@ -1354,8 +1380,7 @@ impl<'d> Monitor<'d> {
                         &served
                     };
                     // A full lane never holds the dispatcher: the
-                    // request falls to the refuse lane — a `503`, or
-                    // the receipted admission path for a command —
+                    // request falls to the refuse lane — a `503` —
                     // and past even that bound it is dropped on a
                     // detached thread: a dropped request answers `500`
                     // on the way out, itself a write a wedged
@@ -1370,8 +1395,12 @@ impl<'d> Monitor<'d> {
                     }
                 }
                 // `recv` ending — `unblock` or a dead listener —
-                // drains every lane and releases their workers.
+                // drains every lane and releases their workers. The
+                // overflow lane closes ahead of the command lane so
+                // its feeder can still place the deferred submissions
+                // it is holding before the lane stops taking them.
                 submissions.close();
+                command_overflow.close();
                 commands.close();
                 heartbeat.close();
                 control.close();
@@ -1421,24 +1450,32 @@ impl<'d> Monitor<'d> {
                     self.handle(request);
                 }
             });
-            // The refuse worker answers the overflow every lane shares:
-            // one bounded queue of requests that get a `503` instead of
-            // an unbounded wait — except `POST /command`, which the
-            // admission contract still owes a receipted answer: it runs
-            // the real handler so the refusal is the named
-            // `queue_full` rejection rather than a bare fault. Its
-            // respond — or a refused command's body read — can wedge on
-            // a dead connection like any client-paced wait,
-            // quarantined to this one worker, whose own queue stays
-            // bounded the same way.
+            // The overflow feeder places the command lane's deferred
+            // submissions: `push_wait` lands each at the queue's
+            // drained tail — behind every earlier submission still
+            // queued — so the single command worker mints every
+            // receipt in dispatch order, flooded lane or not. A closed
+            // lane hands the request back for the same detached drop
+            // the dispatcher uses.
+            let overflow = &command_overflow;
+            let commands = &commands;
+            scope.spawn(move || {
+                while let Some(request) = overflow.pop() {
+                    if let Some(request) = commands.push_wait(request) {
+                        std::thread::spawn(move || drop(request));
+                    }
+                }
+            });
+            // The refuse worker answers the overflow every other lane
+            // shares: one bounded queue of requests that get a `503`
+            // instead of an unbounded wait. Its respond can wedge on a
+            // dead connection like any client-paced wait, quarantined
+            // to this one worker, whose own queue stays bounded the
+            // same way.
             let lane = &refused;
             scope.spawn(move || {
                 while let Some(request) = lane.pop() {
-                    if command_request(&request) {
-                        self.handle(request);
-                    } else {
-                        let _ = request.respond(json(503, "serving overloaded"));
-                    }
+                    let _ = request.respond(json(503, "serving overloaded"));
                 }
             });
         });
@@ -2759,10 +2796,11 @@ fn routable_addr(addr: SocketAddr, fallback: Option<IpAddr>) -> Option<SocketAdd
 
 /// Whether the request is a `POST /command` — the receipted ingress
 /// path. [`Monitor::serve`] routes these ahead of [`submission`] onto
-/// the dedicated command lane: they still qualify there (the handler
-/// reads a body, and a stalled one pins that lane's single worker),
-/// but their queue bound and drain order belong to the bounded
-/// admission contract, not the generic submission pool.
+/// the dedicated command lane and its overflow deck: they still
+/// qualify there (the handler reads a body, and a stalled one pins
+/// that lane's single worker), but their queue bound and drain order
+/// belong to the bounded admission contract, not the generic
+/// submission pool.
 fn command_request(request: &Request) -> bool {
     request.method() == &Method::Post && request.url().split('?').next() == Some("/command")
 }
@@ -2833,21 +2871,19 @@ fn role_change(request: &Request) -> bool {
 }
 
 /// One lane's bounded request queue — [`Monitor::serve`]'s dispatcher
-/// pushes, the lane's workers pop. The queue caps at its `depth` —
-/// [`LANE_QUEUE_DEPTH`] generally, [`command_lane_depth`] for the
-/// command lane: [`push`](Self::push) hands the request back once the
-/// lane is full or closed rather than queueing without limit, so a
-/// flood pinned behind wedged workers stays a bounded count of
-/// waiting requests — the dispatcher routes the overflow to the
-/// refuse lane. [`close`](Self::close) releases every blocked worker
-/// once the queued requests drain, so `shutdown` reaching the
+/// pushes, the lane's workers pop. The queue caps at
+/// [`LANE_QUEUE_DEPTH`]: [`push`](Self::push) hands the request back
+/// once the lane is full or closed rather than queueing without
+/// limit, so a flood pinned behind wedged workers stays a bounded
+/// count of waiting requests — the dispatcher routes the overflow to
+/// the refuse lane. [`close`](Self::close) releases every blocked
+/// worker once the queued requests drain, so `shutdown` reaching the
 /// dispatcher propagates down all lanes.
 struct Lane {
     inner: Mutex<LaneInner>,
     ready: Condvar,
     /// The queue bound [`push`](Self::push) enforces —
-    /// [`LANE_QUEUE_DEPTH`] for the generic lanes, the command lane's
-    /// [`command_lane_depth`] wave for `POST /command`.
+    /// [`LANE_QUEUE_DEPTH`].
     depth: usize,
 }
 
@@ -2858,17 +2894,13 @@ struct LaneInner {
 
 impl Lane {
     fn new() -> Self {
-        Self::with_depth(LANE_QUEUE_DEPTH)
-    }
-
-    fn with_depth(depth: usize) -> Self {
         Self {
             inner: Mutex::new(LaneInner {
                 queue: VecDeque::new(),
                 closed: false,
             }),
             ready: Condvar::new(),
-            depth,
+            depth: LANE_QUEUE_DEPTH,
         }
     }
 
@@ -2903,6 +2935,134 @@ impl Lane {
     fn close(&self) {
         self.inner.lock().unwrap().closed = true;
         self.ready.notify_all();
+    }
+}
+
+/// The command lane's bounded submission queue — a [`Lane`]-shaped
+/// queue with the overflow half built in, because `POST /command`'s
+/// contract is stronger than a generic lane's: every submission is
+/// owed a receipted answer, and the executor's log must append those
+/// receipts in submission order — the dispatch order the one command
+/// worker drains by, which a second consumer racing the shared lock
+/// would invert. A submission the lane cannot hold is *deferred* —
+/// [`push`](Self::push) counts it and hands it back for the
+/// dispatcher to queue on the overflow lane — and while any deferral
+/// stands unpaid the dispatcher defers every later submission too,
+/// so the overflow lane's FIFO is exactly the arrival order of the
+/// requests the lane could not hold. The overflow feeder then hands
+/// each one back through [`push_wait`](Self::push_wait), which admits
+/// it only at the queue's drained tail — behind every earlier
+/// submission still waiting — so the single command worker mints
+/// every receipt in dispatch order, flooded lane or not.
+/// [`close`](Self::close) ends the drain the same way a `Lane`'s
+/// does.
+struct CommandLane {
+    inner: Mutex<CommandLaneInner>,
+    /// Signals a queued request — the worker's wait.
+    ready: Condvar,
+    /// Signals a freed slot — a waiting feeder's wait.
+    room: Condvar,
+    /// The queue bound [`push`](Self::push) enforces —
+    /// [`command_lane_depth`]'s wave.
+    depth: usize,
+}
+
+struct CommandLaneInner {
+    queue: VecDeque<Request>,
+    /// Submissions the dispatcher handed to the overflow lane that the
+    /// feeder has not placed yet — those still queued there plus one
+    /// the feeder may be handing back right now. While nonzero,
+    /// [`push`](CommandLane::push) defers every later submission too:
+    /// a direct push would cut ahead of an earlier request still
+    /// waiting its turn — the receipt-order inversion this count
+    /// exists to bar.
+    deferred: usize,
+    closed: bool,
+}
+
+impl CommandLane {
+    fn with_depth(depth: usize) -> Self {
+        Self {
+            inner: Mutex::new(CommandLaneInner {
+                queue: VecDeque::new(),
+                deferred: 0,
+                closed: false,
+            }),
+            ready: Condvar::new(),
+            room: Condvar::new(),
+            depth,
+        }
+    }
+
+    /// Queues `request` for the command worker, or hands it back —
+    /// `Some(request)` — when the lane is closed, already holding
+    /// `depth` requests, or still owes an earlier deferred submission
+    /// its place. The hand-back counts a deferral: the dispatcher
+    /// owes the request to the overflow lane — or
+    /// [`undefer`](Self::undefer), when even that bound is met — so
+    /// the count always matches the submissions the feeder has left
+    /// to place. Never waits: queue room is the feeder's wait, not
+    /// the dispatcher's.
+    fn push(&self, request: Request) -> Option<Request> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.closed || inner.deferred > 0 || inner.queue.len() >= self.depth {
+            inner.deferred += 1;
+            return Some(request);
+        }
+        inner.queue.push_back(request);
+        self.ready.notify_one();
+        None
+    }
+
+    /// Places a deferred `request` back on the lane — the overflow
+    /// feeder's half of the submission-order guarantee. It waits for
+    /// queue room, lands the request at the drained tail behind every
+    /// earlier submission still queued, and releases its deferral so
+    /// a later arrival may queue directly once no older one is ahead
+    /// of it. A closed lane hands the request back for the
+    /// dispatcher's drop path instead.
+    fn push_wait(&self, request: Request) -> Option<Request> {
+        let mut inner = self.inner.lock().unwrap();
+        loop {
+            if inner.closed {
+                inner.deferred -= 1;
+                return Some(request);
+            }
+            if inner.queue.len() < self.depth {
+                inner.queue.push_back(request);
+                inner.deferred -= 1;
+                self.ready.notify_one();
+                return None;
+            }
+            inner = self.room.wait(inner).unwrap();
+        }
+    }
+
+    /// Releases a deferral whose request the overflow lane could not
+    /// hold — the drop path's half of the count, so `deferred` keeps
+    /// matching the submissions the feeder will place.
+    fn undefer(&self) {
+        self.inner.lock().unwrap().deferred -= 1;
+    }
+
+    fn pop(&self) -> Option<Request> {
+        let mut inner = self.inner.lock().unwrap();
+        loop {
+            if let Some(request) = inner.queue.pop_front() {
+                self.room.notify_one();
+                return Some(request);
+            }
+            if inner.closed {
+                return None;
+            }
+            inner = self.ready.wait(inner).unwrap();
+        }
+    }
+
+    fn close(&self) {
+        self.inner.lock().unwrap().closed = true;
+        self.ready.notify_all();
+        self.room.notify_all();
     }
 }
 
