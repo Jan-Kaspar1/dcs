@@ -809,10 +809,13 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
             "the deploy stage's doctored pairs lack '{line}':\n{stdout}"
         );
     }
-    // The optional topology section's deploy-stage cases each held:
-    // the declared single pair validates, while a member the rig does
-    // not declare, a member two pairs share, or a declared pair whose
-    // standby wiring does not close inside it each report the named
+    // The checked-in manifest declares the deployed pair under
+    // `topology.pairs`, and the deploy-stage cases each held: the
+    // declaration validates under another pair name, while a member
+    // the rig does not declare, a member two pairs share, a member
+    // whose standby edge leaves the pair, a pair carrying two
+    // standby declarations, or a declared pair whose standby wiring
+    // does not close inside it each report the named
     // mismatch — and decision 99's one-field-per-deployment bound
     // refuses the planted undeployable shapes: a second declared pair
     // over the manifest's one plant and a second duty controller the
@@ -824,6 +827,8 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         "undeployable-second-duty refused: rig-mismatch",
         "topology-undeclared-member refused: rig-mismatch",
         "topology-shared-member refused: rig-mismatch",
+        "topology-external-standby refused: rig-mismatch",
+        "topology-two-standbys refused: rig-mismatch",
         "topology-unwired-pair refused: rig-mismatch",
     ] {
         assert!(

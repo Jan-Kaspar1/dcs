@@ -37,17 +37,13 @@ services:
       - /model/dynamics.json
       - --listen
       - 0.0.0.0:9001
-    healthcheck:
-      # The controllers' --remote attach connects once at startup and
-      # exits if the listener is not yet bound, so the pair orders on
-      # the plant actually serving. The probe opens and closes a TCP
-      # connection; the plant's per-connection handler reads a line,
-      # sees the close, and exits.
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9001"]
-      interval: 2s
-      timeout: 3s
-      retries: 15
-      start_period: 2s
+    # The controllers' --remote attach connects once at startup and
+    # exits if the listener is not yet bound, so the pair orders on the
+    # plant actually serving. The gate is the image's declared
+    # HEALTHCHECK — dcs-plant-ctl's `ping` liveness probe on the
+    # default 127.0.0.1:9001 — which reports healthy only once the
+    # listener answers the plant protocol, not merely once the port
+    # accepts connections.
 
   ctrl-a:
     image: dcs-controller
@@ -64,6 +60,11 @@ services:
       - "8080:8080"
     volumes:
       - ./crates/dcs-demo/fixtures/pump_station.json:/model/plant.json:ro
+    # The image's HEALTHCHECK probes DCS_MONITOR_ADDR — the declared
+    # 8080 default already matches; naming it keeps the peer pair's
+    # declaration symmetric.
+    environment:
+      DCS_MONITOR_ADDR: 127.0.0.1:8080
     command:
       - /model/plant.json
       - --remote
@@ -97,6 +98,10 @@ services:
       - "8081:8081"
     volumes:
       - ./crates/dcs-demo/fixtures/pump_station.json:/model/plant.json:ro
+    # The image's HEALTHCHECK probes DCS_MONITOR_ADDR — this peer's
+    # monitor listens on 8081, not the 8080 default.
+    environment:
+      DCS_MONITOR_ADDR: 127.0.0.1:8081
     command:
       - /model/plant.json
       - --remote
