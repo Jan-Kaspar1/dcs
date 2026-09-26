@@ -221,6 +221,26 @@ fn a_second_client_observes_the_same_stepped_point_values() {
 }
 
 #[test]
+fn ping_reports_the_plants_tick_on_every_attachment() {
+    with_server(loopback_map(), |addr| {
+        // The container health contract's probe: the server answers
+        // its plant tick to an attachment holding no claim — the
+        // liveness half is the answer at all, the tick the freshness
+        // half.
+        let probe = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(probe.ping().unwrap(), Tick::ZERO);
+
+        // A stepping plant's tick advances between probes — and a
+        // non-owning attachment's probe reads the same freshness.
+        let owner = RemoteDriver::connect(addr).unwrap();
+        owner.claim_writer(1).unwrap();
+        owner.step(0.5).unwrap();
+        assert_eq!(owner.ping().unwrap(), Tick(1));
+        assert_eq!(probe.ping().unwrap(), Tick(1));
+    });
+}
+
+#[test]
 fn protocol_answers_map_to_named_io_errors() {
     with_server(loopback_map(), |addr| {
         let remote = RemoteDriver::connect(addr).unwrap();

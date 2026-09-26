@@ -13,7 +13,7 @@ use dcs_core::{
     StandbySync, SwitchOrigin, Tick, Value, ValueKind,
 };
 use dcs_model::{PointSignal, SignalIndex};
-use dcs_monitor::{Monitor, MonitorClient, PairFaultKind};
+use dcs_monitor::{HealthReport, Monitor, MonitorClient, PairFaultKind};
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap, StepError,
 };
@@ -408,6 +408,15 @@ fn read_subcommands_roundtrip_the_served_payloads() {
                 failover: None,
             }
         );
+
+        // `health` prints the bounded liveness answer — the container
+        // health check's probe shape: live, the served role, the run's
+        // tick, and the last completed scan's age.
+        let health: HealthReport = serde_json::from_value(ctl_ok(addr, &["health"])).unwrap();
+        assert_eq!(health.role, Role::Active);
+        assert_eq!(health.tick, Tick(2));
+        assert!(health.live);
+        assert!(health.last_scan_age_ms.is_some());
 
         // `receipts` prints the receipt log — empty so far.
         let receipts: Vec<CommandReceipt> =

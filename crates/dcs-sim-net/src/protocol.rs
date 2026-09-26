@@ -240,6 +240,12 @@ pub enum PlantRequest {
     /// cannot seize the field it reports, so reporting `unclaimed`
     /// leaves the claim exactly as closed as it found it.
     ProbeWriter,
+    /// The liveness probe — the container health contract's request
+    /// half: no field access, no claim, no mutation, so every
+    /// attachment's probe answers the same. The server answers
+    /// [`PlantResponse::Alive`] carrying the plant's current tick —
+    /// the freshness a probe watches advance across steps.
+    Ping,
 }
 
 /// The serde default for [`PlantRequest::EnsureWriter`]'s `rebind`:
@@ -277,6 +283,14 @@ pub enum PlantResponse {
     /// Answer to [`PlantRequest::Step`]: the plant's new tick.
     Stepped {
         /// The tick the step advanced to.
+        tick: Tick,
+    },
+    /// Answer to [`PlantRequest::Ping`]: the listener serves, and
+    /// `tick` is the plant's current step tick — the liveness answer's
+    /// freshness half, so a probe sees a stepping plant's tick advance
+    /// between calls.
+    Alive {
+        /// The plant's current tick.
         tick: Tick,
     },
     /// Answer to [`PlantRequest::ListPoints`]: every bound point's
@@ -599,6 +613,15 @@ mod tests {
             serde_json::to_string(&PlantRequest::ProbeWriter).unwrap(),
             r#"{"op":"probe_writer"}"#
         );
+        // The liveness probe is a bare op — no fields, no claim state.
+        assert_eq!(
+            serde_json::to_string(&PlantRequest::Ping).unwrap(),
+            r#"{"op":"ping"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<PlantRequest>(r#"{"op":"ping"}"#).unwrap(),
+            PlantRequest::Ping
+        );
     }
 
     #[test]
@@ -612,6 +635,7 @@ mod tests {
                 ),
             },
             PlantResponse::Stepped { tick: Tick(7) },
+            PlantResponse::Alive { tick: Tick(7) },
             PlantResponse::Points {
                 points: vec![PointInfo {
                     point: PointId(10),
@@ -704,6 +728,12 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&PlantResponse::Stepped { tick: Tick(7) }).unwrap(),
             r#"{"result":"stepped","tick":7}"#
+        );
+        // The liveness answer's wire shape the container health check
+        // decodes.
+        assert_eq!(
+            serde_json::to_string(&PlantResponse::Alive { tick: Tick(7) }).unwrap(),
+            r#"{"result":"alive","tick":7}"#
         );
         assert_eq!(
             serde_json::to_string(&PlantResponse::Error {
