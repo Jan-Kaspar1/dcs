@@ -4,15 +4,18 @@
 //! path the state-file decision records. The scripted runs below spawn
 //! the binary itself, deterministic like every `--ticks` run.
 
-use dcs_core::{Command, CommandOutcome, PointId, TelemetrySnapshot, Tick, Value, ValueKind};
+use dcs_core::{
+    Command, CommandOutcome, PointId, Role, StandbySync, TelemetrySnapshot, Tick, Value, ValueKind,
+};
 use dcs_monitor::MonitorClient;
 use dcs_runtime::{CHECKPOINT_FORMAT_VERSION, Checkpoint};
 use std::path::{Path, PathBuf};
 use std::process::Command as Process;
+use std::time::{Duration, Instant};
 
 mod support;
 
-use support::{Spawned, image_value, kill, listening_on, spawn};
+use support::{Spawned, image_value, kill, listening_on, spawn, spawn_logged};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_dcs-controller");
 /// The shared tank loop: a PID integrating a setpoint error against a
@@ -328,6 +331,198 @@ fn a_driven_run_resumes_from_its_state_file() {
     let resumed = spawn_driven(&args(true));
     let continued = MonitorClient::new(resumed.addr).advance(HALF).unwrap();
     assert_eq!(continued, reference);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The QA finding `standby-source-unresolvable-fatal-on-owner-resume`:
+/// a controller restarted mid-failover — its state file resuming, the
+/// `--standby` peer's name gone from DNS with the stopped peer — used
+/// to exit on the resolution failure, converting a degraded pair into
+/// a fully down rig. The unresolved name now stays the declared
+/// tracking source: each pull re-resolves it and reports the same
+/// miss an unreachable endpoint produces, so the restart stays up and
+/// tracks again when the peer's name answers. A peer name that cannot
+/// resolve — `.invalid` is never in DNS — stands in for the stopped
+/// member's container name.
+const UNRESOLVABLE_PEER: &str = "dcs-peer-down.invalid:8080";
+
+/// Polls `/role` until `expect` holds or the deadline passes — the
+/// paced loop's tracking verdict lands a cycle after the pull's miss.
+fn role_until(client: &MonitorClient, expect: impl Fn(&dcs_core::RoleReport) -> bool) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let report = client.role().unwrap();
+        if expect(&report) {
+            return format!("{report:?}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the role report never showed the expected state, last: {report:?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// The required test's driven half: a `--state-file` resume plus a
+/// `--standby` target whose name does not resolve must boot and count
+/// the source's pulls as tracking misses rather than exit.
+#[test]
+fn a_resumed_driven_standby_with_an_unresolvable_source_stays_up_tracking_misses() {
+    let dir = scratch("standby-source-down");
+    let state = dir.join("state.json");
+    let state_arg = state.to_str().unwrap().to_string();
+    let args = |extra: &[&str]| {
+        let mut args = vec![
+            TANK_LOOP.to_string(),
+            "--listen".to_string(),
+            "127.0.0.1:0".to_string(),
+            "--driven".to_string(),
+            "--state-file".to_string(),
+            state_arg.clone(),
+        ];
+        args.extend(extra.iter().map(|arg| arg.to_string()));
+        args
+    };
+
+    // The run before the restart: a driven controller persisting its
+    // checkpoint each requested scan.
+    let mut first = spawn_driven(&args(&[]));
+    MonitorClient::new(first.addr).advance(HALF).unwrap();
+    kill(&mut first);
+    assert_eq!(persisted(&state).tick, Tick(HALF));
+
+    // The restart joins the pair with --standby while the peer is
+    // down: the resume reports, the warning names the unresolved
+    // source, and the monitor binds — the boot that used to exit(1)
+    // on the resolution failure. Each requested scan then counts the
+    // unresolvable source as the tracking miss it is.
+    let (resumed, preamble) = spawn_logged(
+        Path::new(BINARY),
+        &args(&["--standby", UNRESOLVABLE_PEER]),
+        listening_on,
+    );
+    assert!(
+        preamble
+            .iter()
+            .any(|line| line.contains("resumed from state file")),
+        "{preamble:?}"
+    );
+    assert!(
+        preamble.iter().any(|line| line.contains("cannot resolve")),
+        "{preamble:?}"
+    );
+    let client = MonitorClient::new(resumed.addr);
+    client.advance(3).unwrap();
+    let report = client.role().unwrap();
+    assert_eq!(report.role, Role::Standby, "{report:?}");
+    match report.sync {
+        Some(StandbySync::Degraded { detail }) => {
+            assert!(detail.contains("cannot resolve"), "{detail}")
+        }
+        other => panic!("the unresolved source must degrade tracking, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The QA reproduction's paced half — the deployed pair's own shape:
+/// a wall-clock `--scan-ms` standby behind `CheckpointPuller`'s fetch
+/// worker keeps serving and counts the unresolved name's pulls as
+/// misses through the same resume.
+#[test]
+fn a_resumed_paced_standby_with_an_unresolvable_source_stays_up_tracking_misses() {
+    let dir = scratch("standby-source-paced");
+    let state = dir.join("state.json");
+    let first = run(&[
+        TANK_LOOP,
+        "--ticks",
+        &HALF.to_string(),
+        "--state-file",
+        state.to_str().unwrap(),
+    ]);
+    assert!(first.status.success());
+
+    let args = vec![
+        TANK_LOOP.to_string(),
+        "--standby".to_string(),
+        UNRESOLVABLE_PEER.to_string(),
+        "--state-file".to_string(),
+        state.to_str().unwrap().to_string(),
+        "--listen".to_string(),
+        "127.0.0.1:0".to_string(),
+        "--scan-ms".to_string(),
+        "25".to_string(),
+    ];
+    let (resumed, preamble) = spawn_logged(Path::new(BINARY), &args, listening_on);
+    assert!(
+        preamble
+            .iter()
+            .any(|line| line.contains("resumed from state file")),
+        "{preamble:?}"
+    );
+    let client = MonitorClient::new(resumed.addr);
+    // The first cycles report the pull still in flight while the
+    // worker's lookup runs; the degraded detail settles to the
+    // resolution failure itself once it returns.
+    let report = role_until(&client, |report| {
+        report.role == Role::Standby
+            && matches!(
+                &report.sync,
+                Some(StandbySync::Degraded { detail }) if detail.contains("cannot resolve")
+            )
+    });
+    assert!(report.contains("cannot resolve"), "{report}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The owner half of the required test: a run resuming its state file
+/// as field owner does not need its tracking source to take the field
+/// — a `--peer` name that does not resolve leaves the launched active
+/// owning its field while the deferred source reports misses only if
+/// it is later demoted.
+#[test]
+fn a_resumed_active_with_an_unresolvable_peer_stays_up_as_owner() {
+    let dir = scratch("peer-source-down");
+    let state = dir.join("state.json");
+    let state_arg = state.to_str().unwrap().to_string();
+    let args = |extra: &[&str]| {
+        let mut args = vec![
+            TANK_LOOP.to_string(),
+            "--listen".to_string(),
+            "127.0.0.1:0".to_string(),
+            "--driven".to_string(),
+            "--state-file".to_string(),
+            state_arg.clone(),
+        ];
+        args.extend(extra.iter().map(|arg| arg.to_string()));
+        args
+    };
+
+    let mut first = spawn_driven(&args(&[]));
+    MonitorClient::new(first.addr).advance(HALF).unwrap();
+    kill(&mut first);
+
+    // The restart names its demotion peer while that peer is down:
+    // the conditional startup grant still lifts the gate — the local
+    // plant has no incumbent to refuse it — and the run continues as
+    // the field owner it resumed as.
+    let (resumed, preamble) = spawn_logged(
+        Path::new(BINARY),
+        &args(&["--peer", UNRESOLVABLE_PEER]),
+        listening_on,
+    );
+    assert!(
+        preamble
+            .iter()
+            .any(|line| line.contains("resumed from state file")),
+        "{preamble:?}"
+    );
+    let client = MonitorClient::new(resumed.addr);
+    let snapshot = client.advance(3).unwrap();
+    assert_eq!(snapshot.tick, Tick(HALF + 3));
+    assert_eq!(client.role().unwrap().role, Role::Active);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

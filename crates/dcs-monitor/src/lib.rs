@@ -812,6 +812,59 @@ pub struct Driven<'d> {
     pub after_scan: Option<AfterScan<'d>>,
 }
 
+/// A configured tracking source — the operator-declared peer endpoint a
+/// standby pulls checkpoints from: the `--standby`/`--peer`/`track`
+/// target a deployment names.
+///
+/// A configured source is not necessarily an address. A peer name that
+/// does not resolve — the stopped container's name gone from DNS, the
+/// routine mid-failover condition a redundant pair exists for — stays a
+/// [`Name`](Self::Name): every pull the tracking path makes against it
+/// resolves the name fresh, and an unresolvable name produces the same
+/// failed pull an unreachable endpoint does — a counted tracking miss,
+/// never a startup failure. When the peer returns under the name the
+/// next pull resolves it and tracking resumes, so a member restarted
+/// mid-failover rejoins without reconfiguration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TrackTarget {
+    /// A resolved monitor address — the shape every learned or proven
+    /// source (a verified announced adoption, a probe-resolved owner,
+    /// the field-declared successor) takes.
+    Addr(SocketAddr),
+    /// A configured `host:port` that did not resolve when the source
+    /// was installed. Resolution is deferred to the pull itself; until
+    /// the name answers, the target is the same miss an unreachable
+    /// endpoint is.
+    Name(String),
+}
+
+impl TrackTarget {
+    /// The dialable monitor address — an `Addr` is already one; a
+    /// `Name` resolves it now, `Err` naming the resolution failure
+    /// while it does not resolve. A `Name` resolves on every call:
+    /// the peer appearing under it later is picked up without a
+    /// restart.
+    fn resolve(&self) -> Result<SocketAddr, String> {
+        match self {
+            Self::Addr(addr) => Ok(*addr),
+            Self::Name(name) => name
+                .to_socket_addrs()
+                .map_err(|error| format!("cannot resolve: {error}"))?
+                .next()
+                .ok_or_else(|| "cannot resolve: no address".to_string()),
+        }
+    }
+}
+
+impl std::fmt::Display for TrackTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Addr(addr) => std::fmt::Display::fmt(addr, formatter),
+            Self::Name(name) => std::fmt::Display::fmt(name, formatter),
+        }
+    }
+}
+
 /// A monitoring server sharing one executor over HTTP+JSON.
 ///
 /// See the crate docs for the endpoint contract and the two-lock split:
@@ -852,8 +905,13 @@ pub struct Monitor<'d> {
     /// launched active's, or `Driven`'s `track` on a driven one.
     /// `POST /promote` runs one final pull against it before the gate
     /// lifts ([`Peer::final_sync`]), so a command the active admitted up
-    /// to the promote request is carried into the promoted run.
-    standby_source: Option<SocketAddr>,
+    /// to the promote request is carried into the promoted run. A
+    /// configured source that is still a [`TrackTarget::Name`] resolves
+    /// per pull: the peer's name being gone from DNS while it is down
+    /// is the routine redundancy condition, not a misconfiguration, so
+    /// the unresolved target degrades as the same pull misses an
+    /// unreachable endpoint produces until the name answers.
+    standby_source: Option<TrackTarget>,
     /// The monitor address a tracking peer announced through its
     /// `GET /checkpoint?peer=` pulls — the follow-peer half of the
     /// tracking-source contract: a peer with no configured source that
@@ -1132,7 +1190,7 @@ impl<'d> Monitor<'d> {
     /// one refuses `POST /scan`, so the wiring never runs. The `track`
     /// address also becomes the promotion-boundary pull's source.
     pub fn driven(mut self, driven: Driven<'d>) -> Self {
-        self.standby_source = driven.track;
+        self.standby_source = driven.track.map(TrackTarget::Addr);
         self.driven = driven;
         self
     }
@@ -1142,8 +1200,19 @@ impl<'d> Monitor<'d> {
     /// `Driven` never sees. `POST /promote` runs one final pull against
     /// it so the promoted run carries every command the active admitted
     /// up to the promote request.
-    pub fn with_standby_source(mut self, source: SocketAddr) -> Self {
-        self.standby_source = Some(source);
+    pub fn with_standby_source(self, source: SocketAddr) -> Self {
+        self.with_standby_target(TrackTarget::Addr(source))
+    }
+
+    /// As [`with_standby_source`](Self::with_standby_source) for a
+    /// configured target that may still be a [`TrackTarget::Name`]: a
+    /// peer whose configured address did not resolve at startup is the
+    /// routine mid-failover condition — a stopped member's name leaves
+    /// DNS — so the name stays the declared tracking source and every
+    /// pull re-resolves it, reporting as the same tracking misses an
+    /// unreachable endpoint produces until the name answers.
+    pub fn with_standby_target(mut self, target: TrackTarget) -> Self {
+        self.standby_source = Some(target);
         self
     }
 
@@ -1216,14 +1285,28 @@ impl<'d> Monitor<'d> {
     /// which spends an announced hint only after the demote verify's
     /// scrutiny proves it. Read this for the recorded resolution —
     /// diagnostics and the demote guard's "any candidate exists" test
-    /// — not as the pull's destination.
+    /// — not as the pull's destination. A configured source still
+    /// waiting on DNS resolves here only while its name currently
+    /// answers: the recording is an address or nothing, while the pull
+    /// path keeps the name and retries it per cycle.
     pub fn tracking_source(&self) -> Option<SocketAddr> {
+        self.tracking_target()
+            .and_then(|target| target.resolve().ok())
+    }
+
+    /// The recorded tracking source as the pull path sees it — the
+    /// [`TrackTarget`] form of [`tracking_source`](Self::tracking_source):
+    /// a configured name that does not resolve yet is still the
+    /// declared source here (a `Name` the pulls retry), where the
+    /// address-shaped answer above can only report `None`.
+    fn tracking_target(&self) -> Option<TrackTarget> {
         self.pull_source().or_else(|| {
             // The bare announced hint resolves only under the keyed
             // contract — an unkeyed run could never prove the
             // endpoint, so it is no tracking source at all there.
             self.pair_key
                 .and_then(|_| self.announced.lock().unwrap().front().copied())
+                .map(TrackTarget::Addr)
         })
     }
 
@@ -1237,13 +1320,14 @@ impl<'d> Monitor<'d> {
     /// port from any other same-IP port the connection claims — so no
     /// pull ever follows one until the demote verify's scrutiny
     /// proves it and pins it into `adopted`.
-    fn pull_source(&self) -> Option<SocketAddr> {
+    fn pull_source(&self) -> Option<TrackTarget> {
         self.resolved
             .lock()
             .unwrap()
-            .or(self.driven.track)
-            .or(self.standby_source)
-            .or_else(|| *self.adopted.lock().unwrap())
+            .map(TrackTarget::Addr)
+            .or_else(|| self.driven.track.map(TrackTarget::Addr))
+            .or_else(|| self.standby_source.clone())
+            .or_else(|| self.adopted.lock().unwrap().map(TrackTarget::Addr))
     }
 
     /// The checkpoint source a tracking cycle pulls now — the
@@ -1265,10 +1349,10 @@ impl<'d> Monitor<'d> {
     /// ([`adopt_claimed_source`](Self::adopt_claimed_source)): the
     /// monitor endpoint the field's standing claim declares, the
     /// only address the pair's arbitration itself can vouch for.
-    pub fn verified_tracking_source(&self) -> Option<SocketAddr> {
+    pub fn verified_tracking_source(&self) -> Option<TrackTarget> {
         self.pull_source()
-            .or_else(|| self.adopt_announced_source())
-            .or_else(|| self.adopt_claimed_source())
+            .or_else(|| self.adopt_announced_source().map(TrackTarget::Addr))
+            .or_else(|| self.adopt_claimed_source().map(TrackTarget::Addr))
     }
 
     /// The address the listener is bound to.
@@ -2103,7 +2187,7 @@ impl<'d> Monitor<'d> {
                         // same per-hint bound before any pull targets
                         // one.
                         if let Some(active) = self.verified_tracking_source() {
-                            self.track_cycle(|| self.fetch_checkpoint(active));
+                            self.track_cycle(|| self.fetch_checkpoint(&active));
                         }
                         // Each scan takes the lock fresh and releases
                         // it at the boundary, so a request queued
@@ -2227,7 +2311,7 @@ impl<'d> Monitor<'d> {
         // checkpoint fetched while a concurrent promotion landed.
         let pulled = match self.pull_source() {
             Some(source) if promote && !self.shared.lock().unwrap().peer.owns_field() => {
-                Some(self.fetch_checkpoint(source))
+                Some(self.fetch_checkpoint(&source))
             }
             _ => None,
         };
@@ -2274,7 +2358,7 @@ impl<'d> Monitor<'d> {
                 self.store.sync_receipts(peer.receipts());
             }
             peer.promote_as(actor)
-        } else if peer.owns_field() && self.tracking_source().is_none() {
+        } else if peer.owns_field() && self.tracking_target().is_none() {
             // A field owner with no tracking source — nothing
             // configured and no standby that announced itself — would
             // demote into a permanently unsynchronized standby that no
@@ -2321,10 +2405,16 @@ impl<'d> Monitor<'d> {
     /// The explicitly configured tracking source — `Driven`'s `track`
     /// or [`with_standby_source`](Self::with_standby_source) — when
     /// set: operator-declared, so a demotion follows it without
-    /// proving anything. The announced follow-peer hint is not one of
+    /// proving anything, a still-unresolved [`TrackTarget::Name`]
+    /// included — the declared peer's name being down is the routine
+    /// redundancy condition, and the demoted run's pulls retry it.
+    /// The announced follow-peer hint is not one of
     /// these, and never satisfies the demotion guard on its own.
-    fn configured_source(&self) -> Option<SocketAddr> {
-        self.driven.track.or(self.standby_source)
+    fn configured_source(&self) -> Option<TrackTarget> {
+        self.driven
+            .track
+            .map(TrackTarget::Addr)
+            .or_else(|| self.standby_source.clone())
     }
 
     /// The pair key a pull toward `source` must prove under — `Some`
@@ -2340,11 +2430,17 @@ impl<'d> Monitor<'d> {
     /// nothing. `None` for a configured source
     /// — operator-declared, no proof owed — and whenever the run is
     /// unkeyed, where no announced address ever resolves as a source.
-    pub fn pull_proof_key(&self, source: SocketAddr) -> Option<u64> {
+    pub fn pull_proof_key(&self, source: &TrackTarget) -> Option<u64> {
         let key = self.pair_key?;
-        if *self.adopted.lock().unwrap() == Some(source)
-            || *self.resolved.lock().unwrap() == Some(source)
-            || self.announced.lock().unwrap().contains(&source)
+        let TrackTarget::Addr(addr) = source else {
+            // A configured name is operator-declared like the address
+            // it resolves to: the announced contract's proof does not
+            // apply to it.
+            return None;
+        };
+        if *self.adopted.lock().unwrap() == Some(*addr)
+            || *self.resolved.lock().unwrap() == Some(*addr)
+            || self.announced.lock().unwrap().contains(addr)
         {
             Some(key)
         } else {
@@ -2371,8 +2467,15 @@ impl<'d> Monitor<'d> {
     /// resolve to — also carrying a fresh
     /// `?prove=` nonce whose keyed `line_proof` the returned document
     /// must match, or the fetch fails like any refused pull.
-    fn fetch_checkpoint(&self, source: SocketAddr) -> Result<Checkpoint, String> {
-        let client = MonitorClient::with_timeout(source, CHECKPOINT_PULL_TIMEOUT);
+    fn fetch_checkpoint(&self, source: &TrackTarget) -> Result<Checkpoint, String> {
+        // A configured name resolves inside this fetch — the same
+        // bounded pull path an address takes, so an unresolvable name
+        // lands as the fetch failure it is rather than a startup
+        // fault: the cycle counts the miss and the next pull retries.
+        let addr = source
+            .resolve()
+            .map_err(|detail| format!("fetch from {source}: {detail}"))?;
+        let client = MonitorClient::with_timeout(addr, CHECKPOINT_PULL_TIMEOUT);
         let nonce = self.pull_proof_key(source).map(|_| mint_generation());
         let pulled = client
             .checkpoint_tracking(Some(self.local_addr()), nonce)
@@ -2730,21 +2833,28 @@ impl<'d> Monitor<'d> {
         let tracked = self
             .driven
             .track
-            .or(self.standby_source)
-            .or_else(|| *self.adopted.lock().unwrap())
+            .map(TrackTarget::Addr)
+            .or_else(|| self.standby_source.clone())
+            .or_else(|| self.adopted.lock().unwrap().map(TrackTarget::Addr))
             .or_else(|| {
                 // The bare announced hint resolves only under the
                 // keyed contract, exactly as in `tracking_source`.
                 self.pair_key
                     .and_then(|_| self.announced.lock().unwrap().front().copied())
+                    .map(TrackTarget::Addr)
             });
+        // A configured source still waiting on DNS offers no address
+        // to probe: it contributes no owner fallback and no candidate
+        // of its own while unresolvable — the pull path keeps retrying
+        // it regardless — and the probe's other candidates stand.
+        let tracked_addr = tracked.and_then(|target| target.resolve().ok());
         if let Some(owner) = *self.line_owner.lock().unwrap() {
-            let fallback = tracked.map(|source| source.ip());
+            let fallback = tracked_addr.map(|source| source.ip());
             if let Some(owner) = routable_addr(owner, fallback) {
                 candidates.push(owner);
             }
         }
-        if let Some(source) = tracked
+        if let Some(source) = tracked_addr
             && !candidates.contains(&source)
         {
             candidates.push(source);
@@ -2757,7 +2867,7 @@ impl<'d> Monitor<'d> {
         } else {
             Vec::new()
         };
-        extra.retain(|hint| !candidates.contains(hint) && Some(*hint) != tracked);
+        extra.retain(|hint| !candidates.contains(hint) && Some(*hint) != tracked_addr);
         candidates.extend(extra);
         let nonce = self.pair_key.map(|_| mint_generation());
         for candidate in candidates {
@@ -3586,8 +3696,9 @@ fn json<T: Serialize + ?Sized>(status: u16, value: &T) -> Response<Cursor<Vec<u8
 /// promotion and resumes on demotion; dropping the puller ends the
 /// worker thread once its in-flight fetch resolves.
 pub struct CheckpointPuller {
-    /// The pull target — the active's monitor address.
-    active: SocketAddr,
+    /// The pull target — the active's monitor address, or a configured
+    /// [`TrackTarget::Name`] each fetch resolves anew.
+    target: TrackTarget,
     /// Wakes the worker for one fetch; a send arms `pending`.
     requests: mpsc::Sender<()>,
     /// Completed fetches with their completion instant, consumed by
@@ -3608,7 +3719,7 @@ impl CheckpointPuller {
     /// each fetch as `?peer=` — the announcement that gives the serving
     /// peer somewhere to track if it is demoted later.
     pub fn new(active: SocketAddr, announce: Option<SocketAddr>) -> Self {
-        Self::spawn(active, announce, None)
+        Self::for_target(TrackTarget::Addr(active), announce, None)
     }
 
     /// As [`new`](Self::new) with each fetch carrying a fresh `?prove=`
@@ -3620,28 +3731,47 @@ impl CheckpointPuller {
     /// fabricates this line's checkpoints feeds the tracking peer
     /// nothing, and the heartbeat budget measures the miss.
     pub fn with_pair_proof(active: SocketAddr, announce: Option<SocketAddr>, key: u64) -> Self {
-        Self::spawn(active, announce, Some(key))
+        Self::for_target(TrackTarget::Addr(active), announce, Some(key))
     }
 
-    fn spawn(active: SocketAddr, announce: Option<SocketAddr>, proof_key: Option<u64>) -> Self {
+    /// The general [`new`](Self::new): `target` is the resolved
+    /// tracking source the pull bound to — or a configured
+    /// [`TrackTarget::Name`] the worker resolves inside each fetch, so
+    /// an unresolvable name is the same fetch failure an unreachable
+    /// endpoint produces and the name answering later tracks again
+    /// without a respawn. `proof_key`, when set, carries the
+    /// `?prove=` contract [`with_pair_proof`](Self::with_pair_proof)
+    /// describes.
+    pub fn for_target(
+        target: TrackTarget,
+        announce: Option<SocketAddr>,
+        proof_key: Option<u64>,
+    ) -> Self {
         let (requests, request_rx) = mpsc::channel::<()>();
         let (result_tx, results) = mpsc::channel();
+        let worker = target.clone();
         std::thread::spawn(move || {
-            let client = MonitorClient::with_timeout(active, CHECKPOINT_PULL_TIMEOUT);
             // One fetch per request; the channels closing — the puller
-            // dropped — ends the loop.
+            // dropped — ends the loop. A named target's resolution runs
+            // here per fetch — inside the worker like the network wait
+            // itself, never on the scan cycle's critical path.
             while request_rx.recv().is_ok() {
                 let nonce = proof_key.map(|_| mint_generation());
-                let pulled = client
-                    .checkpoint_tracking(announce, nonce)
-                    .map_err(|error| format!("fetch from {active}: {error}"))
+                let pulled = worker
+                    .resolve()
+                    .and_then(|active| {
+                        MonitorClient::with_timeout(active, CHECKPOINT_PULL_TIMEOUT)
+                            .checkpoint_tracking(announce, nonce)
+                            .map_err(|error| error.to_string())
+                    })
+                    .map_err(|detail| format!("fetch from {worker}: {detail}"))
                     .and_then(|checkpoint| match (proof_key, nonce) {
                         (Some(key), Some(nonce))
                             if checkpoint.line_proof
                                 != Some(line_proof(key, nonce, &checkpoint)) =>
                         {
                             Err(format!(
-                                "fetch from {active}: checkpoint carried no valid line proof"
+                                "fetch from {worker}: checkpoint carried no valid line proof"
                             ))
                         }
                         _ => Ok(checkpoint),
@@ -3652,7 +3782,7 @@ impl CheckpointPuller {
             }
         });
         Self {
-            active,
+            target,
             requests,
             results,
             pending: false,
@@ -3694,7 +3824,7 @@ impl CheckpointPuller {
             if self.requests.send(()).is_err() {
                 return Err(format!(
                     "fetch from {}: the pull worker is gone",
-                    self.active
+                    self.target
                 ));
             }
             self.pending = true;
@@ -3703,7 +3833,7 @@ impl CheckpointPuller {
             Err(self.last_error.clone().unwrap_or_else(|| {
                 format!(
                     "fetch from {}: checkpoint pull still in flight",
-                    self.active
+                    self.target
                 )
             }))
         })
