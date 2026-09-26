@@ -1041,6 +1041,7 @@ fn run_full_stack(tag: &str) -> Outcome {
             // The per-scan claim probe's observation: the promoted
             // peer's own claim stands at the field.
             field_claim: Some(FieldClaim::Held),
+            failover: None,
         }
     );
     let report = active.role().unwrap();
