@@ -495,16 +495,20 @@ def _demote_forged_pass(ctx, number, owner, point, baseline):
 
 
 def scenario_demote_forged_standby_source(ctx):
-    """Exercise the announced-source demote verify on the deployed
-    pair: a forged standby-shaped checkpoint at the announced address
-    — receipt-window-forked, internal-In-planted, or unproven —
-    refuses no_tracking_source while the honest document still adopts
-    and reconverges."""
+    """Exercise the announced-source demote verify on the run's
+    keyed pair: a forged standby-shaped checkpoint at the announced
+    address — receipt-window-forked, internal-In-planted, or
+    unproven — refuses no_tracking_source while the honest document
+    still adopts and reconverges. The subject is the deployed pair
+    while the run config keys it, else the lane-staged keyed probe
+    pair."""
     case = Case(
         'demote-forged-standby-source',
-        'Forged standby-source demote-verify refusal on the deployed '
+        'Forged standby-source demote-verify refusal on the keyed '
         'pair',
-        'with the deployed pair settled and the run keyed, each pass '
+        'with the keyed pair settled — the deployed pair, or the '
+        'lane-staged probe pair while the deployed pair runs '
+        'unkeyed — each pass '
         'opens the announced-only window — the tracking peer stopped, '
         'the field owner warm-restarted — so the bridge-placed forge '
         'endpoint\'s announce is the only recorded tracking hint; '
@@ -524,11 +528,22 @@ def scenario_demote_forged_standby_source(ctx):
             return case.finish('inconclusive', 'the run context '
                                'carries only one endpoint — the pair '
                                'the demote-verify leg needs is absent')
-        if not ctx.get('pair_token'):
-            return case.finish('inconclusive', 'the run carries no '
-                               '--pair-token — the keyed '
-                               'announced-source contract the leg '
-                               'exercises is off')
+        # The keyed subject (#1058): the deployed pair while the run
+        # config keys it, else the lane-staged probe pair — an
+        # unkeyed deployment with no staged probe pair is
+        # inconclusive on capability, not on the contract.
+        subject = _keyed_subject(ctx)
+        if subject is None:
+            return case.finish('inconclusive', 'the deployed pair '
+                               'carries no --pair-token and no '
+                               'keyed probe pair is staged — the '
+                               'keyed announced-source contract '
+                               'the leg exercises is off')
+        if subject is not ctx:
+            case.observe('exercised on the lane-staged keyed '
+                         'probe pair — the deployed pair runs '
+                         'unkeyed')
+            ctx = subject
         for action in ('stop_controller', 'start_controller',
                        'restart_controller', 'start_forge',
                        'stop_forge'):

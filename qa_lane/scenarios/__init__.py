@@ -60,6 +60,16 @@ refusal audits, and the keyed/unkeyed launch posture exercises both
 the proof gate and the command-record audit the verified document
 owes.
 
+The keyed announced-source legs' subject is the deployed pair while
+the run config keys it (ctx['pair_token'] set); when the run deploys
+an unkeyed primary pair, the lane stages a second always-keyed probe
+pair on its own bridge-placed sim-serve plant and hands the legs that
+pair through ctx['probe'] — the same ctx shape rebound to the probe
+pair's containers, published monitor ports, claim-token pins, and
+--pair-token — so the keyed legs exercise the contract for real
+instead of reporting inconclusive on the deployed pair's posture
+(#1058).
+
 The field-fault, backup-health, and unavailable-fallback cases
 inject and clear per-point faults on the shared simulated field
 through the shipped

@@ -126,7 +126,13 @@ DEFAULT_CONFIG = {
     # controllers on one token would silently defeat the fencing.
     'plant_owner_tokens': {'active': 424243, 'standby': 424244,
                            'revised': 424245, 'foreign': 424246,
-                           'driven': 424247},
+                           'driven': 424247,
+                           # The staged probe pair's pins — each a
+                           # distinct claim owner, never sharing the
+                           # deployed pair's tokens.
+                           'probe_active': 424248,
+                           'probe_standby': 424249,
+                           'probe_driven': 424250},
     # The pair's shared tracking secret: the announced-source contract
     # is keyed-only, so the rig's redundant pair — the revised peer a
     # model-revision roll promotes, and the driven peer a stale-island
@@ -139,8 +145,40 @@ DEFAULT_CONFIG = {
     # endpoint keyed so its answers are genuinely signed and only the
     # pulled document's content can convict it — the shape that reaches
     # the demote verify's command-record audit. The labeled foreign
-    # peer stays unkeyed on purpose.
+    # peer stays unkeyed on purpose. This pin is the DEPLOYED pair's
+    # posture: null/empty runs the pair unkeyed — the posture split the
+    # lane-staged probe pair beside it exists to cover.
     'pair_token': 'dcs-qa-pair',
+    # The lane-staged keyed probe pair (#1058): the keyed
+    # announced-source contract needs per-revision exercise even where
+    # the run config deploys its redundant pair unkeyed — the
+    # qax-20260926-002 run evidenced the gap: 2050's keyed halves and
+    # 2060's keyed precondition kept reporting inconclusive on absent
+    # capability rather than on the contract. So every rig also stages
+    # a second, always-keyed redundant pair: its own sim-serve plant —
+    # bridge-placed, its own declared dynamics, its own field (field
+    # ownership arbitration is per-plant, so the probe pair never
+    # touches the deployed pair's field or claim tokens) — plus two
+    # controllers sharing this block's --pair-token, bound to that
+    # plant, tracking each other with line_proof verification on. The
+    # keyed legs select it through ctx['probe'] whenever the deployed
+    # pair carries no token; 'probe_pair': null stages none and the
+    # keyed legs fall back to the absent-capability inconclusive.
+    'probe_pair': {
+        'pair_token': 'dcs-qa-pair',
+        # The probe monitors' published host-loopback ports — the
+        # keyed legs' host-side attachment surface — and the probe
+        # driven peer's publish for the island leg.
+        'active_port': 18085,
+        'standby_port': 18086,
+        'driven_port': 18087,
+        # The probe plant's sim-serve listener on the rig bridge —
+        # bridge-placed (no host publish): only the probe pair's
+        # rig-dialed --remote and plant-ctl attachments reach it.
+        'plant_port': 9002,
+        'model_fixture': 'crates/dcs-demo/fixtures/pump_station.json',
+        'dynamics_fixture': 'qa_lane/fixtures/probe_dynamics.json',
+    },
     # The rig bridge-to-host reachability rule the qax-20260922-001,
     # qax-20260922-005, and qax-20260923-001 exploration runs
     # demonstrated, recorded as the lane's endpoint-placement contract:
@@ -160,7 +198,12 @@ DEFAULT_CONFIG = {
         'active': 'loopback', 'standby': 'loopback',
         'revised': 'loopback', 'foreign': 'loopback',
         'driven': 'loopback', 'plant': 'loopback',
-        'interposer': 'bridge', 'forge': 'bridge'},
+        'interposer': 'bridge', 'forge': 'bridge',
+        # The probe pair's endpoints: its monitors publish on host
+        # loopback like the deployed pair's; its plant is rig-dialed
+        # only (bridge) — no host-side attachment exists.
+        'probe_active': 'loopback', 'probe_standby': 'loopback',
+        'probe_driven': 'loopback', 'probe_plant': 'bridge'},
     # The sink-isolation leg's declared impede lever (#999): the
     # controller endpoints whose --state-file mount the runner may
     # stall, each naming the staged-target kind. 'fifo' parks a
@@ -919,9 +962,11 @@ CONTAINER_STATE_FILE = CONTAINER_RUN_DIR + '/state.json'
 CONTAINER_JOURNAL_FILE = CONTAINER_RUN_DIR + '/journal.jsonl'
 
 # The endpoint keys whose controllers the runner launches — the pair
-# `_start_rig` brings up plus the three scenario-action peers.
+# `_start_rig` brings up, the three scenario-action peers, and the
+# lane-staged keyed probe pair's three endpoints.
 OWNER_TOKEN_ENDPOINTS = ('active', 'standby', 'revised', 'foreign',
-                         'driven')
+                         'driven', 'probe_active', 'probe_standby',
+                         'probe_driven')
 
 
 def _plant_owner_tokens(cfg):
@@ -964,10 +1009,128 @@ def _plant_owner_tokens(cfg):
 # The endpoint keys the run config records a placement for: the
 # monitor/plant services every scenario ctx carries plus the named
 # attachment endpoints the takeover-integrity legs (#573 and
-# successors) and the tracking-source/auth evidence place.
+# successors) and the tracking-source/auth evidence place — and the
+# probe pair's four endpoints: its monitors host-published
+# ('loopback'), its sim-serve plant rig-dialed only ('bridge').
 PLACEMENT_ENDPOINTS = ('active', 'standby', 'revised', 'foreign',
-                       'driven', 'plant', 'interposer', 'forge')
+                       'driven', 'plant', 'interposer', 'forge',
+                       'probe_active', 'probe_standby', 'probe_driven',
+                       'probe_plant')
 PLACEMENTS = ('loopback', 'bridge')
+
+
+# The redundant pairs the runner stages and each one's container
+# wiring: 'deployed' is the run config's own pair — keyed or unkeyed
+# per its pair_token posture — and 'probe' is the lane-staged
+# always-keyed pair on its own sim-serve plant. Each maps the scenario
+# ctx's endpoint keys ('active'/'standby') to the containers'
+# run-name suffixes; in-container monitor ports repeat across pairs
+# (separate netns), so the legs' port constants name both.
+PAIRS = {
+    'deployed': {'peers': {'active': 'a', 'standby': 'b'},
+                 'plant': 'plant', 'driven': 'd'},
+    'probe': {'peers': {'active': 'probe-a', 'standby': 'probe-b'},
+              'plant': 'probe-plant', 'driven': 'probe-d'},
+}
+# The --listen ports a pair member's monitor binds inside its
+# container — identical across pairs since every container owns its
+# netns; the island leg's PAIR_PORTS/DRIVEN_PORT constants name the
+# same in-container ports for either subject.
+PAIR_MONITOR_PORTS = {'active': 8080, 'standby': 8081}
+DRIVEN_MONITOR_PORT = 8082
+
+# The probe pair block's required keys: the staged pair's shared
+# --pair-token, its published monitor ports and the driven peer's,
+# its plant's bridge-side sim-serve port, and its fixtures.
+PROBE_PAIR_KEYS = ('pair_token', 'active_port', 'standby_port',
+                   'driven_port', 'plant_port', 'model_fixture',
+                   'dynamics_fixture')
+PROBE_PAIR_PORTS = ('active_port', 'standby_port', 'driven_port',
+                    'plant_port')
+
+
+def _probe_pair(cfg):
+    """The run's lane-staged keyed probe pair spec, or None when the
+    run config stages none ('probe_pair' absent or null).
+
+    The probe pair is keyed by definition — its reason for existing
+    is exercising the keyed announced-source contract while the
+    deployed pair runs whatever posture the run config gives it —
+    so a block missing its pair_token fails the launch loudly rather
+    than silently staging an unkeyed twin. Every port must be a
+    1..65535 int and both fixtures must name paths, same
+    fail-before-launch discipline _plant_owner_tokens applies.
+    """
+    spec = cfg.get('probe_pair')
+    if spec is None:
+        return None
+    if not isinstance(spec, dict):
+        raise RuntimeError('probe_pair must map the probe pair\'s '
+                           'staging keys, or be null to stage none')
+    missing = [key for key in PROBE_PAIR_KEYS if key not in spec]
+    if missing:
+        raise RuntimeError('probe_pair stages no '
+                           + ', '.join(missing))
+    bad = {key: spec[key] for key in PROBE_PAIR_PORTS
+           if not isinstance(spec[key], int)
+           or isinstance(spec[key], bool)
+           or not 0 < spec[key] <= 65535}
+    if bad:
+        raise RuntimeError('probe_pair ports must be int 1..65535: '
+                           + json.dumps(bad, sort_keys=True))
+    if not spec['pair_token']:
+        raise RuntimeError('probe_pair stages the KEYED probe pair — '
+                           'pair_token must name its shared secret; '
+                           'a null probe_pair stages none')
+    for key in ('model_fixture', 'dynamics_fixture'):
+        if not isinstance(spec[key], str) or not spec[key]:
+            raise RuntimeError('probe_pair ' + key
+                               + ' must name a fixture path')
+    return dict(spec)
+
+
+def _pair_token(cfg, pair):
+    """The --pair-token pair `pair`'s controllers sign under: the
+    deployed pair's run-configured token — None while the run config
+    runs it unkeyed — or the staged probe pair's always-keyed token."""
+    if pair == 'probe':
+        probe = _probe_pair(cfg)
+        if probe is None:
+            raise RuntimeError('the run config stages no probe pair')
+        return probe['pair_token']
+    return cfg.get('pair_token')
+
+
+def _pair_host_port(cfg, pair, key):
+    """The host-loopback port pair `pair`'s endpoint `key`
+    ('active'/'standby'/'driven') publishes its monitor on."""
+    if pair == 'probe':
+        probe = _probe_pair(cfg)
+        if probe is None:
+            raise RuntimeError('the run config stages no probe pair')
+        return probe[key + '_port']
+    return cfg[key + '_port']
+
+
+def _pair_owner_key(pair, name):
+    """The plant_owner_tokens pin pair `pair`'s endpoint `name`
+    carries: 'active' on the deployed pair vs 'probe_active' on the
+    probe pair — the probe pair never touches the deployed pair's
+    claim tokens."""
+    return name if pair == 'deployed' else 'probe_' + name
+
+
+def _pair_plant_remote(cfg, pair, prefix):
+    """The --remote sim-serve address pair `pair` binds, as a
+    container name on the run's rig bridge: each pair owns its own
+    plant — field ownership arbitration is per-plant, so the probe
+    pair's plant never shares the deployed pair's field."""
+    if pair == 'probe':
+        probe = _probe_pair(cfg)
+        if probe is None:
+            raise RuntimeError('the run config stages no probe pair')
+        return prefix + '-probe-plant:' + str(probe['plant_port'])
+    return prefix + '-plant:' + str(cfg['plant_port'])
 
 
 def _endpoint_placement(cfg):
@@ -1008,14 +1171,16 @@ def _controller_dir(run_dir, name):
     return Path(run_dir) / 'controllers' / name
 
 
-def _controller_container(run_id, name):
-    """The run's controller container for a scenario ctx endpoint key:
-    'active' is ctrl-a's container, 'standby' ctrl-b's, whichever role
-    each currently reports."""
-    return 'dcs-hw-' + run_id + '-' + {'active': 'a', 'standby': 'b'}[name]
+def _controller_container(run_id, name, pair='deployed'):
+    """The run's controller container for a scenario ctx endpoint key
+    on pair `pair`: the deployed pair's 'active' is ctrl-a's
+    container, 'standby' ctrl-b's; the staged probe pair's 'active'
+    is probe-a's, 'standby' probe-b's — whichever role each
+    currently reports."""
+    return 'dcs-hw-' + run_id + '-' + PAIRS[pair]['peers'][name]
 
 
-def restart_controller(run_id, name, timeline):
+def restart_controller(run_id, name, timeline, pair='deployed'):
     """The scenario-callable controller restart: `docker stop` then
     `docker start` on one of the run's already-launched controller
     containers — the supervisor-owned lifecycle action a scenario
@@ -1023,21 +1188,24 @@ def restart_controller(run_id, name, timeline):
     to the field.
 
     `name` is the scenario ctx's endpoint key: 'active' is ctrl-a's
-    container, 'standby' ctrl-b's, whichever role each currently
-    reports. The container keeps its mounts, labels, published port,
+    container, 'standby' ctrl-b's on the deployed pair (the probe
+    pair's ctx binds pair='probe' — 'active' is then probe-a's),
+    whichever role each currently reports. The container keeps its
+    mounts, labels, published port,
     and bridge name, so the restarted process resumes through the same
     --state-file and rejoins the pair unchanged. Both halves are
     recorded on the run's action timeline; a docker failure raises so
     the calling scenario reports the restart never completed.
     """
-    container = _controller_container(run_id, name)
+    container = _controller_container(run_id, name, pair)
     timeline('controller-restart', 'docker stop ' + container)
     docker('stop', '--time', '2', container, timeout=90)
     docker('start', container, timeout=60)
     timeline('controller-restarted', container + ' running')
 
 
-def cold_restart_controller(run_id, run_dir, name, timeline):
+def cold_restart_controller(run_id, run_dir, name, timeline,
+                            pair='deployed'):
     """The scenario-callable cold restart: `docker stop` on one of the
     run's controller containers, remove that controller's host-side
     --state-file inside the bounded run dir, then `docker start` — the
@@ -1051,7 +1219,9 @@ def cold_restart_controller(run_id, run_dir, name, timeline):
     stream from the beginning of a fresh run.
 
     `name` is the scenario ctx's endpoint key: 'active' is ctrl-a's
-    container and state dir, 'standby' ctrl-b's, whichever role each
+    container and state dir, 'standby' ctrl-b's (the probe pair's
+    ctx binds pair='probe', mapping the same keys onto probe-a/
+    probe-b), whichever role each
     currently reports. Only the named controller's state.json is
     removed, and only inside this run's bounded directory. Both
     docker halves are recorded on the run's action timeline; a docker
@@ -1059,8 +1229,8 @@ def cold_restart_controller(run_id, run_dir, name, timeline):
     cold restart never completed rather than silently performing a
     warm restart.
     """
-    container = _controller_container(run_id, name)
-    peer = container.rsplit('-', 1)[1]
+    container = _controller_container(run_id, name, pair)
+    peer = PAIRS[pair]['peers'][name]
     state = _controller_dir(run_dir, peer) / 'state.json'
     timeline('controller-cold-restart', 'docker stop ' + container
              + '; drop ' + str(state))
@@ -1131,13 +1301,16 @@ def _is_fifo(path):
         return False
 
 
-def impede_state_file(run_id, run_dir, name, timeline, mounts):
+def impede_state_file(run_id, run_dir, name, timeline, mounts,
+                      pair='deployed'):
     """Stall `name`'s --state-file mount for the sink-isolation leg:
     stage a reader-less FIFO at the sink's write-then-rename
     temporary path inside the controller's runner-owned bind mount.
 
     `name` is the scenario ctx's endpoint key ('active' is ctrl-a's
-    container and state dir, 'standby' ctrl-b's); `mounts` is the
+    container and state dir, 'standby' ctrl-b's — the probe pair's
+    ctx binds pair='probe', naming probe endpoints whose declared
+    mounts map their 'probe_' keys); `mounts` is the
     run's validated _state_file_mounts map — an endpoint the config
     never declared has no lever, and the action raises so the
     scenario reports the mount lever unavailable rather than staging
@@ -1151,14 +1324,15 @@ def impede_state_file(run_id, run_dir, name, timeline, mounts):
     idempotent. The FIFO is staged world-writable because the
     containerized writer runs uid 10001.
     """
-    if name not in mounts:
+    key = _pair_owner_key(pair, name)
+    if key not in mounts:
         raise RuntimeError('the run config declares no state-file '
-                           'mount lever for endpoint ' + name)
-    container = _controller_container(run_id, name)
-    peer = container.rsplit('-', 1)[1]
+                           'mount lever for endpoint ' + key)
+    container = _controller_container(run_id, name, pair)
+    peer = PAIRS[pair]['peers'][name]
     tmp = _controller_dir(run_dir, peer) / STATE_FILE_TMP
     timeline('state-file-impede', 'stall ' + str(tmp) + ' for '
-             + container + ' (' + mounts[name] + ')')
+             + container + ' (' + mounts[key] + ')')
     deadline = time.monotonic() + 10
     while True:
         try:
@@ -1179,7 +1353,8 @@ def impede_state_file(run_id, run_dir, name, timeline, mounts):
              + ' --state-file mount stalled')
 
 
-def restore_state_file(run_id, run_dir, name, timeline):
+def restore_state_file(run_id, run_dir, name, timeline,
+                       pair='deployed'):
     """Release the stall impede_state_file staged on `name`: attach a
     host-side reader to the staged FIFO so the drain writer's pending
     open() pairs, drain its bytes until the write's close+rename
@@ -1196,8 +1371,8 @@ def restore_state_file(run_id, run_dir, name, timeline):
     its pairing through our held read end. Raises when nothing was
     staged or a bounded wait lapses.
     """
-    container = _controller_container(run_id, name)
-    peer = container.rsplit('-', 1)[1]
+    container = _controller_container(run_id, name, pair)
+    peer = PAIRS[pair]['peers'][name]
     directory = _controller_dir(run_dir, peer)
     tmp = directory / STATE_FILE_TMP
     if not _is_fifo(tmp):
@@ -1242,7 +1417,7 @@ def restore_state_file(run_id, run_dir, name, timeline):
              + ' --state-file mount released')
 
 
-def stop_controller(run_id, name, timeline):
+def stop_controller(run_id, name, timeline, pair='deployed'):
     """The stop half of the lifecycle action, alone: `docker stop` on
     one of the run's controller containers, held down until the scenario
     issues `start_controller` — the seam the stale-freshness case uses
@@ -1250,48 +1425,50 @@ def stop_controller(run_id, name, timeline):
     peer. Recorded on the run's action timeline; a docker failure raises
     so the induction is reported as never completed.
     """
-    container = _controller_container(run_id, name)
+    container = _controller_container(run_id, name, pair)
     timeline('controller-stop', 'docker stop ' + container)
     docker('stop', '--time', '2', container, timeout=90)
     timeline('controller-stopped', container + ' down')
 
 
-def start_controller(run_id, name, timeline):
+def start_controller(run_id, name, timeline, pair='deployed'):
     """The matching start half: `docker start` on a container
     `stop_controller` stopped — the resumed process reclaims the shared
     plant's writer and the tracking peer's checkpoint stream resumes.
     """
-    container = _controller_container(run_id, name)
+    container = _controller_container(run_id, name, pair)
     timeline('controller-start', 'docker start ' + container)
     docker('start', container, timeout=60)
     timeline('controller-started', container + ' running')
 
 
-def stop_plant(run_id, timeline):
+def stop_plant(run_id, timeline, pair='deployed'):
     """The scenario-callable plant stop: `docker stop` on the run's
     shared-plant container — the field-loss half of the link-loss
     scenario, severing both controllers' remote-driver connections at
-    the same boundary. Recorded on the run's action timeline like the
+    the same boundary. `pair` selects which pair's plant —
+    'deployed' is the primary field, 'probe' the probe pair's
+    bridge-placed plant. Recorded on the run's action timeline like the
     controller restart; a docker failure raises so the calling
     scenario reports the stop never completed."""
-    container = 'dcs-hw-' + run_id + '-plant'
+    container = 'dcs-hw-' + run_id + '-' + PAIRS[pair]['plant']
     timeline('plant-stop', 'docker stop ' + container)
     docker('stop', '--time', '2', container, timeout=90)
     timeline('plant-stopped', container + ' stopped')
 
 
-def start_plant(run_id, timeline):
+def start_plant(run_id, timeline, pair='deployed'):
     """The recovery half: `docker start` relaunches the run's plant
     container — a fresh plant-server lifetime, so the single-writer
     claim the old process held is gone and the field owner must
     re-claim it."""
-    container = 'dcs-hw-' + run_id + '-plant'
+    container = 'dcs-hw-' + run_id + '-' + PAIRS[pair]['plant']
     timeline('plant-start', 'docker start ' + container)
     docker('start', container, timeout=60)
     timeline('plant-started', container + ' running')
 
 
-def plant_ctl(run_id, port, *args):
+def plant_ctl(run_id, port, *args, pair='deployed'):
     """The scenario-callable plant-tool invocation: `docker exec` runs
     the shipped `dcs-plant-ctl` inside the run's plant container
     against the server's loopback listener — the ticket's honest seam,
@@ -1299,10 +1476,12 @@ def plant_ctl(run_id, port, *args):
     rather than a second Python implementation of the wire protocol.
     The loopback address binds inside the container's own netns — the
     exchange never leaves the rig bridge the netpolicy closes.
+    `pair` selects which pair's plant container — 'deployed' or the
+    probe pair's bridge-placed 'probe-plant'.
     `check=False` returns the CompletedProcess on a refused request too
     — the tool's nonzero exit is the answer the caller classifies, not
     a docker failure."""
-    container = 'dcs-hw-' + run_id + '-plant'
+    container = 'dcs-hw-' + run_id + '-' + PAIRS[pair]['plant']
     return docker('exec', container, 'dcs-plant-ctl',
                   '127.0.0.1:' + str(port), *args,
                   check=False, timeout=60)
@@ -1366,11 +1545,12 @@ def start_revised_controller(cfg, record, run_dir, model, active,
     """
     run_id, sha = record['run_id'], record['attempted_sha']
     prefix = 'dcs-hw-' + run_id
-    peers = {'active': ('a', 8080), 'standby': ('b', 8081)}
+    peers = PAIRS['deployed']['peers']
     if active not in peers:
         raise RuntimeError('start_revised expects the active endpoint '
                            'key, got ' + repr(active))
-    peer_name, peer_port = peers[active]
+    peer_name = peers[active]
+    peer_port = PAIR_MONITOR_PORTS[active]
     name = ('model-revised-incompatible.json' if incompatible
             else 'model-revised.json')
     revised_doc = Path(run_dir) / name
@@ -1464,11 +1644,12 @@ def start_foreign_controller(cfg, record, run_dir, model, active,
     """
     run_id, sha = record['run_id'], record['attempted_sha']
     prefix = 'dcs-hw-' + run_id
-    peers = {'active': ('a', 8080), 'standby': ('b', 8081)}
+    peers = PAIRS['deployed']['peers']
     if active not in peers:
         raise RuntimeError('start_foreign expects the active endpoint '
                            'key, got ' + repr(active))
-    peer_name, peer_port = peers[active]
+    peer_name = peers[active]
+    peer_port = PAIR_MONITOR_PORTS[active]
     foreign_doc = Path(run_dir) / 'model-foreign.json'
     info = revision.derive_revised_model(model, foreign_doc)
     directory = _controller_dir(run_dir, 'foreign')
@@ -1513,7 +1694,7 @@ def stop_foreign_controller(run_id, timeline):
 
 
 def start_driven_controller(cfg, record, run_dir, model, active,
-                            timeline):
+                            timeline, pair='deployed'):
     """The scenario-callable driven-standby launch — the
     dead-peer-latency case's second survivor: the run's labeled
     driven controller on the same mounted model, `--standby <peer>
@@ -1525,13 +1706,16 @@ def start_driven_controller(cfg, record, run_dir, model, active,
     health surface reads.
 
     `active` is the scenario ctx key of the peer the driven standby
-    tracks ('active' is ctrl-a, 'standby' ctrl-b) — the checkpoint
-    source the case's stop induction then makes unreachable. The
-    container carries the run's managed and run labels so teardown
+    tracks ('active' is ctrl-a, 'standby' ctrl-b on the deployed
+    pair; pair='probe' names the probe pair's members) — the
+    checkpoint source the case's stop induction then makes
+    unreachable. The container carries the run's managed and run
+    labels so teardown
     reconciles it with the rest of the rig, mounts the run's model
-    read-only at /model/plant.json, publishes its monitor on
-    cfg['driven_port'], gets its own runner-owned state/journal
-    directory, and carries the run's --pair-token so its checkpoint
+    read-only at /model/plant.json, publishes its monitor on the
+    pair's driven_port, gets its own runner-owned state/journal
+    directory, binds the pair's own plant's --remote, and carries the
+    pair's --pair-token so its checkpoint
     answers sign the keyed line_proof an orphan-resolution probe's
     ?prove= pull demands. The launch is recorded on the run's action
     timeline; a docker failure raises so the calling scenario reports
@@ -1541,31 +1725,38 @@ def start_driven_controller(cfg, record, run_dir, model, active,
     """
     run_id, sha = record['run_id'], record['attempted_sha']
     prefix = 'dcs-hw-' + run_id
-    peers = {'active': ('a', 8080), 'standby': ('b', 8081)}
+    peers = PAIRS[pair]['peers']
     if active not in peers:
         raise RuntimeError('start_driven expects the active endpoint '
                            'key, got ' + repr(active))
-    peer_name, peer_port = peers[active]
-    directory = _controller_dir(run_dir, 'd')
+    peer_name = peers[active]
+    peer_port = PAIR_MONITOR_PORTS[active]
+    directory = _controller_dir(run_dir, PAIRS[pair]['driven'])
     directory.mkdir(parents=True, exist_ok=True)
     directory.chmod(0o777)
-    container = prefix + '-d'
+    container = prefix + '-' + PAIRS[pair]['driven']
     standby = prefix + '-' + peer_name + ':' + str(peer_port)
-    owner_token = _plant_owner_tokens(cfg)['driven']
+    tokens = _plant_owner_tokens(cfg)
+    owner_token = tokens[_pair_owner_key(pair, 'driven')]
+    remote = _pair_plant_remote(cfg, pair, prefix)
     timeline('driven-start', 'launch ' + container + ' --standby '
-             + standby + ' --driven --owner-token '
-             + str(owner_token))
+             + standby + ' --driven --remote ' + remote
+             + ' --owner-token ' + str(owner_token))
+    token = _pair_token(cfg, pair)
     docker(*_docker_run_args(cfg, run_id, container),
            '--network', 'dcs-hwtest-' + run_id,
-           '-p', '127.0.0.1:' + str(cfg['driven_port']) + ':8082',
+           '-p', '127.0.0.1:'
+           + str(_pair_host_port(cfg, pair, 'driven'))
+           + ':' + str(DRIVEN_MONITOR_PORT),
            '-v', str(model) + ':/model/plant.json:ro',
            '-v', str(directory) + ':' + CONTAINER_RUN_DIR,
            IMAGE_PREFIX + 'controller:' + sha,
            '/model/plant.json',
-           '--remote', prefix + '-plant:' + str(cfg['plant_port']),
+           '--remote', remote,
            '--owner-token', str(owner_token),
            '--standby', standby,
-           '--driven', '--listen', '0.0.0.0:8082',
+           '--driven', '--listen', '0.0.0.0:'
+           + str(DRIVEN_MONITOR_PORT),
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE,
            # The stale-island leg promotes this peer onto the field
@@ -1573,20 +1764,21 @@ def start_driven_controller(cfg, record, run_dir, model, active,
            # its checkpoint with ?prove= — under the keyed contract
            # only a peer carrying the pair's token can sign the
            # line_proof those verify pulls demand.
-           *(['--pair-token', str(cfg['pair_token'])]
-             if cfg.get('pair_token') else []))
+           *(['--pair-token', str(token)] if token else []))
     timeline('driven-up', container + ' serving a driven standby')
     return {'container': container}
 
 
-def stop_driven_controller(run_id, timeline):
+def stop_driven_controller(run_id, timeline, pair='deployed'):
     """The dead-peer-latency case's teardown: `docker rm -f` on the
     driven peer's container — removed outright, not held down, so
-    later cases see the rig's original pair. Recorded on the run's
+    later cases see the rig's original pair. `pair` selects which
+    pair's driven container ('d' on the deployed pair, 'probe-d' on
+    the probe pair). Recorded on the run's
     action timeline like the other lifecycle actions; a docker
     failure raises so the calling scenario reports the teardown
     never completed."""
-    container = 'dcs-hw-' + run_id + '-d'
+    container = 'dcs-hw-' + run_id + '-' + PAIRS[pair]['driven']
     timeline('driven-stop', 'docker rm -f ' + container)
     docker('rm', '-f', container, timeout=90)
     timeline('driven-stopped', container + ' removed')
@@ -1598,7 +1790,7 @@ FORGE_PORT = 8090
 
 
 def start_forge_endpoint(cfg, record, run_dir, document, owner,
-                         timeline, keyed=True):
+                         timeline, keyed=True, pair='deployed'):
     """The scenario-callable forged-checkpoint endpoint launch — the
     demote-forged-standby-source leg's hostile announce target: the
     run's labeled rig-bridge container running the shipped `dcs-forge`
@@ -1613,13 +1805,15 @@ def start_forge_endpoint(cfg, record, run_dir, document, owner,
     lands by rewriting the returned 'document' path between demote
     calls without a relaunch. `owner` is the ctx endpoint key of the
     field-owning peer whose monitor the endpoint announces to
-    ('active' is ctrl-a's container, 'standby' ctrl-b's). `keyed`
+    ('active' is ctrl-a's container, 'standby' ctrl-b's on the
+    deployed pair; pair='probe' names the probe pair's members).
+    `keyed`
     selects whether the endpoint signs `?prove=` answers under the
-    run's --pair-token: the key-holding shape — every pulled document
+    pair's --pair-token: the key-holding shape — every pulled document
     genuinely signed, so only its content can convict it — is what
     the forged legs need to reach the demote verify's command-record
     audit rather than the proof gate; unkeyed is the unproven leg's
-    tokenless hostile endpoint. A run config carrying no pair token
+    tokenless hostile endpoint. A pair carrying no pair token
     launches unkeyed regardless — matching the contract's keyed-only
     posture.
 
@@ -1641,7 +1835,7 @@ def start_forge_endpoint(cfg, record, run_dir, document, owner,
     """
     run_id, sha = record['run_id'], record['attempted_sha']
     prefix = 'dcs-hw-' + run_id
-    peers = {'active': ('a', 8080), 'standby': ('b', 8081)}
+    peers = PAIRS[pair]['peers']
     if owner not in peers:
         raise RuntimeError('start_forge expects the field-owning '
                            'endpoint key, got ' + repr(owner))
@@ -1652,7 +1846,11 @@ def start_forge_endpoint(cfg, record, run_dir, document, owner,
                            + ' but the endpoint must sit on the rig '
                            'bridge — a host socket is unreachable '
                            'from the rig')
-    directory = Path(run_dir) / 'forge'
+    # The probe subject's forge is its own container and staging
+    # directory — a leg exercising the probe pair never touches the
+    # deployed pair's forged endpoint or its served document.
+    suffix = 'forge' if pair == 'deployed' else 'probe-forge'
+    directory = Path(run_dir) / suffix
     directory.mkdir(parents=True, exist_ok=True)
     directory.chmod(0o777)
     document_path = directory / 'checkpoint.json'
@@ -1663,13 +1861,15 @@ def start_forge_endpoint(cfg, record, run_dir, document, owner,
     staged.replace(document_path)
     hits = directory / 'hits.jsonl'
     hits.unlink(missing_ok=True)
-    container = prefix + '-forge'
+    container = prefix + '-' + suffix
     # A leftover forge from an aborted pass leaves the same name; its
     # staged document and hits ledger are refreshed above regardless.
     docker('rm', '-f', container, check=False, timeout=60)
-    peer_name, peer_port = peers[owner]
+    peer_name = peers[owner]
+    peer_port = PAIR_MONITOR_PORTS[owner]
     announce = prefix + '-' + peer_name + ':' + str(peer_port)
-    keyed = bool(keyed and cfg.get('pair_token'))
+    token = _pair_token(cfg, pair)
+    keyed = bool(keyed and token)
     timeline('forge-start', 'launch ' + container + ' serving '
              + document_path.name + ', announcing to ' + announce
              + (' (keyed)' if keyed else ' (unkeyed)'))
@@ -1682,21 +1882,23 @@ def start_forge_endpoint(cfg, record, run_dir, document, owner,
            '--document', '/forge/checkpoint.json',
            '--hits', '/forge/hits.jsonl',
            '--announce', announce,
-           *(['--pair-token', str(cfg['pair_token'])]
-             if keyed else []))
+           *(['--pair-token', str(token)] if keyed else []))
     timeline('forge-up', container + ' serving the staged document')
     return {'container': container, 'dir': str(directory),
             'document': str(document_path), 'hits': str(hits),
             'keyed': keyed, 'port': FORGE_PORT}
 
 
-def stop_forge_endpoint(run_id, timeline):
+def stop_forge_endpoint(run_id, timeline, pair='deployed'):
     """The forged-checkpoint endpoint's teardown: `docker rm -f` on
-    the run's forge container — removed outright so the hint the demote
-    verify dials is a dead endpoint again. Recorded on the run's action
+    the pair's forge container — removed outright so the hint the demote
+    verify dials is a dead endpoint again. `pair` selects which
+    pair's forge ('forge' on the deployed pair, 'probe-forge' on the
+    probe pair). Recorded on the run's action
     timeline like the other lifecycle actions; a docker failure raises
     so the calling scenario reports the teardown never completed."""
-    container = 'dcs-hw-' + run_id + '-forge'
+    container = 'dcs-hw-' + run_id + '-' + (
+        'forge' if pair == 'deployed' else 'probe-forge')
     timeline('forge-stop', 'docker rm -f ' + container)
     docker('rm', '-f', container, timeout=90)
     timeline('forge-stopped', container + ' removed')
@@ -1723,12 +1925,15 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
     follows when it needs an endpoint a rig peer must dial — and the
     host-side
     per-controller state/journal files the restart and model-revision
-    scenarios read."""
+    scenarios read — and, under 'probe', the same ctx shape
+    re-pointed at the lane-staged keyed probe pair so the keyed
+    announced-source legs can name it their subject while the
+    deployed pair runs whichever posture the run config gives it."""
     run_id = record['run_id']
     names = {'active': 'a', 'standby': 'b', 'revised': 'c',
              'foreign': 'foreign', 'driven': 'd'}
     mounts = _state_file_mounts(cfg)
-    return {
+    ctx = {
         'active': 'http://127.0.0.1:' + str(cfg['active_port']),
         'standby': 'http://127.0.0.1:' + str(cfg['standby_port']),
         'revised': 'http://127.0.0.1:' + str(cfg['revised_port']),
@@ -1811,6 +2016,97 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
                           for key, peer in names.items()},
         'dcs_ctl': str(_dcs_ctl_path(cfg)),
     }
+    probe = _probe_pair(cfg)
+    if probe is not None:
+        subject = _probe_ctx(ctx, cfg, record, src, run_dir, probe,
+                             mounts, timeline)
+        ctx['probe'] = subject
+    else:
+        ctx['probe'] = None
+    return ctx
+
+
+def _probe_ctx(ctx, cfg, record, src, run_dir, probe, mounts,
+               timeline):
+    """The scenario ctx re-pointed at the run's staged probe pair —
+    the subject keyed announced-source legs exercise through
+    _keyed_subject while the deployed pair runs unkeyed.
+
+    Same keys the deployed ctx carries, rebound to the probe pair's
+    own containers, published monitor ports, and plant: the lifecycle
+    actions take the probe pair's containers, start_driven/
+    start_forge bind the probe pair's --remote and --pair-token, and
+    the host-side state/journal paths live under controllers/probe-*.
+    'plant' is None — the probe field is bridge-placed (rig-dialed
+    only); plant-side work goes through the probe pair's own
+    plant_ctl exec. The revised/foreign launch actions are deployed-
+    pair actions, not offered here — a leg needing them declines on
+    absence rather than launching on the wrong pair.
+    """
+    run_id = record['run_id']
+    probe_names = {'active': 'probe-a', 'standby': 'probe-b',
+                   'driven': 'probe-d'}
+    probe_mounts = any(key.startswith('probe_') for key in mounts)
+    tokens = _plant_owner_tokens(cfg)
+    subject = dict(ctx)
+    subject.update({
+        'active': 'http://127.0.0.1:' + str(probe['active_port']),
+        'standby': 'http://127.0.0.1:' + str(probe['standby_port']),
+        'revised': None,
+        'foreign': None,
+        'driven': 'http://127.0.0.1:' + str(probe['driven_port']),
+        'plant': None,
+        # The probe pair's own pinned claim tokens — never the
+        # deployed pair's.
+        'plant_owner': {'active': tokens['probe_active'],
+                        'standby': tokens['probe_standby'],
+                        'driven': tokens['probe_driven']},
+        'restart_controller': lambda name: restart_controller(
+            run_id, name, timeline, pair='probe'),
+        'cold_restart_controller': lambda name:
+            cold_restart_controller(run_id, run_dir, name, timeline,
+                                    pair='probe'),
+        'impede_state_file': (lambda name: impede_state_file(
+            run_id, run_dir, name, timeline, mounts, pair='probe'))
+            if probe_mounts else None,
+        'restore_state_file': (lambda name: restore_state_file(
+            run_id, run_dir, name, timeline, pair='probe'))
+            if probe_mounts else None,
+        'stop_controller': lambda name: stop_controller(
+            run_id, name, timeline, pair='probe'),
+        'start_controller': lambda name: start_controller(
+            run_id, name, timeline, pair='probe'),
+        'stop_plant': lambda: stop_plant(run_id, timeline,
+                                         pair='probe'),
+        'start_plant': lambda: start_plant(run_id, timeline,
+                                           pair='probe'),
+        'plant_ctl': lambda *args: plant_ctl(
+            run_id, probe['plant_port'], *args, pair='probe'),
+        'start_revised': None,
+        'start_foreign': None,
+        'stop_foreign': None,
+        'start_driven': lambda name: start_driven_controller(
+            cfg, record, run_dir, src / probe['model_fixture'],
+            name, timeline, pair='probe'),
+        'stop_driven': lambda: stop_driven_controller(
+            run_id, timeline, pair='probe'),
+        # The probe pair's shared --pair-token — always set: the
+        # keyed legs the deployed pair's posture cannot serve run
+        # against this subject.
+        'pair_token': probe['pair_token'],
+        'start_forge': lambda document, owner, keyed=True:
+            start_forge_endpoint(cfg, record, run_dir, document,
+                                 owner, timeline, keyed, pair='probe'),
+        'stop_forge': lambda: stop_forge_endpoint(run_id, timeline,
+                                                  pair='probe'),
+        'state_files': {key: str(_controller_dir(run_dir, peer)
+                                 / 'state.json')
+                        for key, peer in probe_names.items()},
+        'journal_files': {key: str(_controller_dir(run_dir, peer)
+                                   / 'journal.jsonl')
+                          for key, peer in probe_names.items()},
+    })
+    return subject
 
 
 def _start_rig(cfg, record, src, run_dir, timeline):
@@ -1829,6 +2125,27 @@ def _start_rig(cfg, record, src, run_dir, timeline):
                                + ' as ' + repr(placements[key])
                                + ' but the rig publishes it on host '
                                'loopback')
+    probe = _probe_pair(cfg)
+    if probe is not None:
+        # The staged probe pair's placements: its monitors publish
+        # on host loopback like the deployed pair's; its sim-serve
+        # plant is rig-dialed only — recorded 'bridge', since only
+        # the probe pair's own rig peers attach to it.
+        for key in ('probe_active', 'probe_standby',
+                    'probe_driven'):
+            if placements[key] != 'loopback':
+                raise RuntimeError('endpoint_placement records '
+                                   + key + ' as '
+                                   + repr(placements[key])
+                                   + ' but the rig publishes it on '
+                                   'host loopback')
+        if placements['probe_plant'] != 'bridge':
+            raise RuntimeError('endpoint_placement records '
+                               'probe_plant as '
+                               + repr(placements['probe_plant'])
+                               + ' but the probe field is rig-dialed '
+                               'only — no host-side attachment '
+                               'exists')
     model = src / cfg['model_fixture']
     dynamics = src / cfg['dynamics_fixture']
     for path in (model, dynamics):
@@ -1924,19 +2241,118 @@ def _start_rig(cfg, record, src, run_dir, timeline):
              + ' (owner tokens active=' + str(tokens['active'])
              + ', standby=' + str(tokens['standby'])
              + (', pair-keyed' if pair_flags else ', unkeyed') + ')')
+    if probe is not None:
+        _start_probe_pair(cfg, record, src, run_dir, net, probe,
+                          timeline)
+
+
+def _start_probe_pair(cfg, record, src, run_dir, net, probe,
+                      timeline):
+    """Stage the run's lane-staged keyed probe pair (#1058): its own
+    sim-serve plant plus a redundant controller pair bound to it —
+    the subject the keyed announced-source legs exercise while the
+    deployed pair runs whatever posture the run config gives it.
+
+    The probe plant is bridge-placed: nothing host-side dials it —
+    readiness is probed through the shipped dcs-plant-ctl exec'd
+    inside the container's own netns, and every field attachment is
+    a rig peer on this run's bridge. Field ownership arbitration is
+    per-plant: the pair's --remote and its distinct --owner-token
+    pins never touch the deployed pair's field or claim tokens.
+    Both controllers carry the probe block's --pair-token, so their
+    tracking pulls and checkpoint answers exercise line_proof
+    verification regardless of the deployed pair's keyed posture.
+    """
+    run_id, sha = record['run_id'], record['attempted_sha']
+    prefix = 'dcs-hw-' + run_id
+    tokens = _plant_owner_tokens(cfg)
+    model = src / probe['model_fixture']
+    dynamics = src / probe['dynamics_fixture']
+    for path in (model, dynamics):
+        if not path.is_file():
+            raise RuntimeError('probe fixture missing: ' + str(path))
+    for name in ('probe-a', 'probe-b'):
+        directory = _controller_dir(run_dir, name)
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(0o777)
+    container = prefix + '-probe-plant'
+    docker(*_docker_run_args(cfg, run_id, container),
+           '--network', net,
+           '-v', str(model) + ':/model/plant.json:ro',
+           '-v', str(dynamics) + ':/model/dynamics.json:ro',
+           'dcs-hwtest/plant:' + sha,
+           '/model/plant.json', '--dynamics', '/model/dynamics.json',
+           '--listen', '0.0.0.0:' + str(probe['plant_port']))
+    # The controllers' --remote attach connects once at startup and
+    # exits if the listener is not yet bound. No host port publishes
+    # this plant, so readiness runs through the shipped tool inside
+    # the container's own netns.
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        res = docker('exec', container, 'dcs-plant-ctl',
+                     '127.0.0.1:' + str(probe['plant_port']), 'list',
+                     check=False, timeout=10)
+        if res.returncode == 0:
+            break
+        time.sleep(1)
+    else:
+        raise RuntimeError('probe plant listener never bound')
+    token = str(probe['pair_token'])
+    docker(*_docker_run_args(cfg, run_id, prefix + '-probe-a'),
+           '--network', net,
+           '-p', '127.0.0.1:' + str(probe['active_port']) + ':8080',
+           '-v', str(model) + ':/model/plant.json:ro',
+           '-v', str(_controller_dir(run_dir, 'probe-a'))
+           + ':' + CONTAINER_RUN_DIR,
+           'dcs-hwtest/controller:' + sha,
+           '/model/plant.json',
+           '--remote', container + ':' + str(probe['plant_port']),
+           '--owner-token', str(tokens['probe_active']),
+           '--scan-ms', '100', '--listen', '0.0.0.0:8080',
+           '--state-file', CONTAINER_STATE_FILE,
+           '--journal-file', CONTAINER_JOURNAL_FILE,
+           '--pair-token', token)
+    docker(*_docker_run_args(cfg, run_id, prefix + '-probe-b'),
+           '--network', net,
+           '-p', '127.0.0.1:' + str(probe['standby_port']) + ':8081',
+           '-v', str(model) + ':/model/plant.json:ro',
+           '-v', str(_controller_dir(run_dir, 'probe-b'))
+           + ':' + CONTAINER_RUN_DIR,
+           'dcs-hwtest/controller:' + sha,
+           '/model/plant.json',
+           '--remote', container + ':' + str(probe['plant_port']),
+           '--owner-token', str(tokens['probe_standby']),
+           '--standby', prefix + '-probe-a:8080',
+           '--auto-promote', str(cfg['failover_misses']),
+           '--scan-ms', '100', '--listen', '0.0.0.0:8081',
+           '--state-file', CONTAINER_STATE_FILE,
+           '--journal-file', CONTAINER_JOURNAL_FILE,
+           '--pair-token', token)
+    timeline('probe-rig-up', 'probe plant + keyed probe pair on '
+             + net + ' (owner tokens probe_active='
+             + str(tokens['probe_active']) + ', probe_standby='
+             + str(tokens['probe_standby']) + ', pair-token '
+             + token + ')')
 
 
 def _wait_monitor(cfg, timeline):
+    """Poll every staged pair's monitor until all serve /role: the
+    deployed pair plus the staged probe pair — a launched controller
+    that never answers is a rig defect worth surfacing as the run's
+    inconclusive verdict rather than the keyed legs' silent
+    incapacity."""
+    urls = [str(cfg['active_port']), str(cfg['standby_port'])]
+    probe = _probe_pair(cfg)
+    if probe is not None:
+        urls += [str(probe['active_port']),
+                 str(probe['standby_port'])]
     deadline = time.monotonic() + cfg['monitor_timeout']
     while time.monotonic() < deadline:
         try:
-            status, _ = scenarios.http_json(
-                'GET', 'http://127.0.0.1:' + str(cfg['active_port'])
-                + '/role', timeout=5)
-            status_b, _ = scenarios.http_json(
-                'GET', 'http://127.0.0.1:' + str(cfg['standby_port'])
-                + '/role', timeout=5)
-            if status == 200 and status_b == 200:
+            statuses = [scenarios.http_json(
+                'GET', 'http://127.0.0.1:' + port + '/role',
+                timeout=5)[0] for port in urls]
+            if all(status == 200 for status in statuses):
                 timeline('monitors-ready')
                 return True
         except Exception:

@@ -232,6 +232,38 @@ Implementation order: second, after [daily architecture review](daily-architectu
   served `state_sink` section, or whose run config declares no mount
   lever reports inconclusive.
 
+### Landed 2026-09-26 (keyed probe pair on its own field, #1058)
+
+- The keyed announced-source contract needs per-revision exercise
+  even where the run config deploys its redundant pair unkeyed —
+  `qax-20260926-002` evidenced the gap: 2050's keyed halves and
+  2060's keyed precondition kept reporting inconclusive on absent
+  capability rather than on the contract, and the earlier
+  `keyed-island-replay-not-run` deferral parked on absent staging.
+  The runner now stages a second, always-keyed redundant pair per
+  rig: its own sim-serve plant — `probe_pair`'s own
+  `dcs-plant-server` deployment on bridge-placed endpoints with
+  its own declared dynamics (`qa_lane/fixtures/
+  probe_dynamics.json`), so the probe pair owns a dedicated field
+  and never touches the deployed pair's plant or claim tokens —
+  plus two controllers sharing the block's `--pair-token`
+  (`dcs-qa-pair`), tracking each other with `line_proof`
+  verification on, published monitor ports on host loopback, and
+  distinct `probe_*` owner-token pins.
+- The keyed legs select their subject through the same ctx shape
+  the `@require`-style gating consumes: `ctx['probe']` re-points
+  every endpoint key, runner action, owner token, and
+  state/journal path at the probe pair, and `common._keyed_subject`
+  returns the deployed ctx while `pair_token` keys it, else the
+  probe subject — so an unkeyed-primary run still reports real
+  keyed-contract verdicts instead of capability skips, and the
+  parked keyed-island replay can stage. The posture split is
+  recorded in the deploy config shape (`pair_token` vs
+  `probe_pair.pair_token`, `probe_*` entries in
+  `plant_owner_tokens` and `endpoint_placement`) and documented in
+  `qa_lane/deploy/README.md`; a `probe_pair: null` stages none
+  and restores the absent-capability inconclusive.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,
