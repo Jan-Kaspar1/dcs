@@ -63,6 +63,7 @@ class _FakeSink:
         self.high_water = 0
         self.capacity = 64
         self.failed = False
+        self._in_flight = 0
         self._pending = collections.deque()
         self._cv = threading.Condition()
         self._stop = False
@@ -124,25 +125,60 @@ class _FakeSink:
                 if self._stop:
                     return
                 payload = self._pending.popleft()
+                # The popped capture stays on the sink's backlog
+                # until its write+rename lands — a writer parked in
+                # the stalled mount's open() still owes the depth.
+                self._in_flight += 1
             tmp = self.directory / 'state.json.tmp'
-            if self.feed.fail_sink and runner._is_fifo(tmp):
-                # The mount error the contract names: the drain's
-                # next write to the staged mount fails and the sink
-                # reports its failed state.
-                with self._cv:
-                    self.failed = True
-                    self._pending.clear()
-                    self._cv.notify_all()
-                continue
+            # The nonblocking open turns an invisible park inside
+            # open() into an observable boundary: a readerless
+            # staged FIFO refuses it, so the failing sink's mount
+            # write errors at the mount instead of racing the
+            # staging. A regular temporary — or a mount whose
+            # restore already paired a reader — opens straight
+            # through.
             try:
-                tmp.write_text(payload)   # blocks on the staged FIFO
-                os.replace(tmp, self.directory / 'state.json')
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT
+                             | os.O_TRUNC | os.O_NONBLOCK)
             except OSError:
+                fd = None
+            if fd is None and runner._is_fifo(tmp):
+                if self.feed.fail_sink:
+                    # The mount error the contract names: the
+                    # drain's write to the staged mount fails and
+                    # the sink reports its failed state.
+                    with self._cv:
+                        self._in_flight -= 1
+                        self.failed = True
+                        self._pending.clear()
+                        self._cv.notify_all()
+                    continue
+                try:
+                    # The stalled-mount park the contract emulates:
+                    # the write blocks in open() until a reader
+                    # pairs.
+                    fd = os.open(tmp, os.O_WRONLY)
+                except OSError:
+                    fd = None
+            if fd is None:
                 # Teardown unlinked the run dir out from under a
                 # writer still parked in the staged open — the
                 # capture is abandoned, not drained.
+                with self._cv:
+                    self._in_flight -= 1
+                continue
+            try:
+                try:
+                    os.write(fd, payload.encode())
+                finally:
+                    os.close(fd)
+                os.replace(tmp, self.directory / 'state.json')
+            except OSError:
+                with self._cv:
+                    self._in_flight -= 1
                 continue
             with self._cv:
+                self._in_flight -= 1
                 self.drained += 1
                 self._cv.notify_all()
 
@@ -164,7 +200,7 @@ class _FakeSink:
     def health(self):
         """The publication.state_sink section the monitor serves."""
         with self._cv:
-            depth = len(self._pending)
+            depth = len(self._pending) + self._in_flight
             state = ('failed' if self.failed else
                      ('lagging' if depth else 'healthy'))
             if self.feed.lag_flickers and self.feed.stalled \
