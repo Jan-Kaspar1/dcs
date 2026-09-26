@@ -91,7 +91,7 @@ import simulate
 # is `queue_full` must surface the named diagnostic on the honest
 # `unknown_argument` answer — never a silently unexercised contract.
 LEG = {
-    "order": 280,
+    "order": 290,
     "title": "the invoke argument-schema leg",
     "passes": "invoke-args",
     "tools": {
