@@ -2671,16 +2671,25 @@ impl<'d> Monitor<'d> {
     /// Returns the tracking target after resolution, or `None` when
     /// the line named no routable owner and nothing resolves.
     pub fn resolve_tracking_source(&self) -> Option<SocketAddr> {
-        if self.shared.lock().unwrap().peer.owns_field() {
-            return None;
-        }
-        let own = self.shared.lock().unwrap().peer.checkpoint();
+        let (own, claimed) = {
+            let shared = self.shared.lock().unwrap();
+            if shared.peer.owns_field() {
+                return None;
+            }
+            (shared.peer.checkpoint(), shared.peer.claimed_monitor())
+        };
         let mut candidates: Vec<SocketAddr> = Vec::new();
-        // The line's own word for its owner leads — a wildcard stamp
+        // The field's own word for its claim holder leads — the
+        // monitor endpoint the standing claim declares, vouched for
+        // by the arbitration itself rather than announced — then the
+        // line's own word for its owner: a wildcard stamp
         // dials through the tracked source's IP, the monitor that
         // served it; then the tracked source itself — a standby may
         // simply not have propagated the stamp yet — then the recorded
         // announcers, any of which may already own the field.
+        if let Some(monitor) = claimed {
+            candidates.push(monitor);
+        }
         let tracked = self
             .driven
             .track
