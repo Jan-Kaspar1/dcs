@@ -253,7 +253,8 @@ fn recorded_release_schema_matches_the_emitted_output() {
     // from drifting apart. `v0.1.0` and `v0.2.0` carry `None`: their
     // recorded sha256 pins the tagged emission, which the tracked file
     // has legitimately moved past since the cut — `v0.2.0`'s with the
-    // `requires_reason` io_point field (#908).
+    // `requires_reason` io_point field (#908). `v0.3.0`'s tag is
+    // pending, so its artifact and published sha256 are still pinned.
     let output = run_schema_subcommand();
     assert!(
         output.status.success(),
@@ -266,6 +267,10 @@ fn recorded_release_schema_matches_the_emitted_output() {
             None::<&'static str>,
         ),
         ("docs/releases/v0.2.0/plant-model.schema.json", None),
+        (
+            "docs/releases/v0.3.0/plant-model.schema.json",
+            Some("b5dc56f7306bb4ad7f791ff05075401a871bebc0f5dc9babba52ad2c57252600"),
+        ),
     ] {
         let recorded = std::fs::read(workspace_root().join(path)).unwrap_or_else(|error| {
             panic!("the release record's schema file {path} must exist: {error}")

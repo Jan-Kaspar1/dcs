@@ -1,0 +1,183 @@
+{
+  "$defs": {
+    "address": {
+      "pattern": "^.+:[0-9]{1,5}$",
+      "type": "string"
+    },
+    "controller": {
+      "additionalProperties": false,
+      "dependentRequired": {
+        "failover_budget": [
+          "standby"
+        ]
+      },
+      "properties": {
+        "failover_budget": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "journal_file": {
+          "$ref": "#/$defs/path"
+        },
+        "listen": {
+          "$ref": "#/$defs/address"
+        },
+        "name": {
+          "$ref": "#/$defs/name"
+        },
+        "standby": {
+          "$ref": "#/$defs/address"
+        },
+        "state_file": {
+          "$ref": "#/$defs/path"
+        }
+      },
+      "required": [
+        "name",
+        "listen"
+      ],
+      "type": "object"
+    },
+    "fingerprint": {
+      "pattern": "^[0-9a-f]{16}$",
+      "type": "string"
+    },
+    "image": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "name": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "pair": {
+      "additionalProperties": false,
+      "properties": {
+        "members": {
+          "items": {
+            "$ref": "#/$defs/name"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "name": {
+          "$ref": "#/$defs/name"
+        }
+      },
+      "required": [
+        "name",
+        "members"
+      ],
+      "type": "object"
+    },
+    "path": {
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The consumer-owned deployment declaration: the pinned release, its controller and plant-server images, the model and dynamics artifacts' path/fingerprint pairs (the dynamics fingerprint optional), the plant listen address, the controller entries with their optional standby/failover/persistence fields, and the optional named-pair topology. The schema covers structure, field types, and the membership shape the vocabulary can express; the referential rules — members naming declared controllers, disjoint memberships, wiring closing inside a pair — remain with the deployment's rig check (docs/release-contract.md).",
+  "properties": {
+    "controllers": {
+      "items": {
+        "$ref": "#/$defs/controller"
+      },
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "dcs_release": {
+      "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "type": "string"
+    },
+    "dynamics": {
+      "additionalProperties": false,
+      "properties": {
+        "fingerprint": {
+          "$ref": "#/$defs/fingerprint"
+        },
+        "path": {
+          "$ref": "#/$defs/path"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "images": {
+      "additionalProperties": false,
+      "properties": {
+        "controller": {
+          "$ref": "#/$defs/image"
+        },
+        "plant_server": {
+          "$ref": "#/$defs/image"
+        }
+      },
+      "required": [
+        "controller",
+        "plant_server"
+      ],
+      "type": "object"
+    },
+    "model": {
+      "additionalProperties": false,
+      "properties": {
+        "fingerprint": {
+          "$ref": "#/$defs/fingerprint"
+        },
+        "path": {
+          "$ref": "#/$defs/path"
+        }
+      },
+      "required": [
+        "path",
+        "fingerprint"
+      ],
+      "type": "object"
+    },
+    "plant": {
+      "additionalProperties": false,
+      "properties": {
+        "listen": {
+          "$ref": "#/$defs/address"
+        }
+      },
+      "required": [
+        "listen"
+      ],
+      "type": "object"
+    },
+    "topology": {
+      "additionalProperties": false,
+      "properties": {
+        "pairs": {
+          "items": {
+            "$ref": "#/$defs/pair"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "pairs"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "dcs_release",
+    "images",
+    "model",
+    "dynamics",
+    "plant",
+    "controllers"
+  ],
+  "title": "DCS deployment manifest",
+  "type": "object"
+}
