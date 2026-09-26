@@ -199,6 +199,39 @@ Implementation order: second, after [daily architecture review](daily-architectu
   `demote-forged-standby-failed` and
   `demote-forged-standby-nondeterministic`.
 
+### Landed 2026-09-26 (state-file sink-isolation leg, #999)
+
+- The `--state-file` persistence-isolation contract (#982, in service
+  of WW-FND-004's "no durable sink may pace the scan") is exercised on
+  the deployed pair by scenario leg `3650_state_file_isolation`. The
+  run config's new `state_file_mounts` map declares each controller
+  endpoint's impede lever — the only declared kind, `fifo`, stages a
+  reader-less FIFO at the sink's write-then-rename temporary sibling
+  of `state.json` inside the controller's runner-owned bind mount, so
+  the drain writer's next `open()` blocks inside the mount while
+  captures queue behind the bounded handoff. The runner's
+  `impede_state_file`/`restore_state_file` actions are handed to the
+  scenario ctx; restore attaches a host reader that pairs the stalled
+  open, drains the pending write through its rename onto the state
+  path, and waits for an ordinary `state.json` again, unlinking the
+  orphaned node when no writer attaches inside the grace.
+- With the pair settled and tracking the leg stalls the field owner's
+  mount, then through the serving monitor asserts the contract's
+  claims: `publication.state_sink` reports the named `lagging` state
+  while the served tick and `io_health` counters keep advancing inside
+  the documented cadence bound, and a receipted command submitted
+  inside the impeded window stands unanswered until the file has
+  caught up through its admission — answered only after the drain
+  covered it, then settled `applied`, with the durable file audited to
+  cover the admission. Restoring the mount must drain the sink to
+  `healthy` with no lost captures and reconverge the pair to one
+  active plus one tracking standby with launch roles restored. Named
+  diagnostics are `state-file-isolation-failed` and
+  `state-file-isolation-nondeterministic`; two passes produce
+  identical digests; a rig that is unreachable, that predates the
+  served `state_sink` section, or whose run config declares no mount
+  lever reports inconclusive.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,
