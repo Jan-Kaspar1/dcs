@@ -11,6 +11,7 @@ use std::fmt;
 use std::io::{BufReader, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
 /// A failure on a [`RemoteDriver`] operation.
@@ -170,6 +171,15 @@ struct Connection {
     /// answer received yet, the field's last verdict was `unclaimed`,
     /// or the answering server predates the attribution field.
     fenced_by: Option<u64>,
+    /// The checkpoint endpoint the field's standing claim reported
+    /// alongside that verdict — where the claim's owner registered its
+    /// checkpoint monitor, the field-attested successor a fenced-out
+    /// peer may track where the unauthenticated announced-hint channel
+    /// cannot be trusted. `None` under the same conditions as
+    /// `fenced_by`, and also where the claim's owner registered no
+    /// endpoint — a field tool's claim, or a controller build
+    /// predating the field.
+    fenced_endpoint: Option<SocketAddr>,
 }
 
 impl Connection {
@@ -183,8 +193,15 @@ impl Connection {
     /// failed attach drops the stream and backs the next attempt off.
     /// `controller` carries the attachment's claim marker through the
     /// re-arm — a controller's re-asserted claim keeps refusing a
-    /// peer's conditional preemption.
-    fn reattach(&mut self, addresses: &[SocketAddr], timeout: Duration, controller: bool) {
+    /// peer's conditional preemption — and `monitor` re-registers its
+    /// checkpoint endpoint on the claim the same way.
+    fn reattach(
+        &mut self,
+        addresses: &[SocketAddr],
+        timeout: Duration,
+        controller: bool,
+        monitor: Option<u16>,
+    ) {
         let mut stream = match connect_stream(addresses, timeout) {
             Ok(stream) => BufReader::new(stream),
             Err(_) => {
@@ -199,6 +216,7 @@ impl Connection {
                     owner,
                     rebind: true,
                     controller,
+                    monitor,
                 },
             ) {
                 // `ClaimedShared` is a grant: the re-armed claim joins a
@@ -208,10 +226,14 @@ impl Connection {
                 // shares the token.
                 Ok(PlantResponse::Done) | Ok(PlantResponse::ClaimedShared { .. }) => {}
                 Ok(PlantResponse::Error {
-                    error: PlantError::Fenced { owner, .. },
+                    error:
+                        PlantError::Fenced {
+                            owner, endpoint, ..
+                        },
                 }) => {
                     self.owner = None;
                     self.fenced_by = owner;
+                    self.fenced_endpoint = endpoint;
                 }
                 Ok(_) => {
                     self.last_error = Some(
@@ -358,6 +380,14 @@ pub struct RemoteDriver {
     /// stale-island rule needs — where an unmarked tool attachment's
     /// claim never blocks a peer's documented recovery.
     controller: bool,
+    /// The checkpoint-monitor port this attachment declares on its
+    /// write-ownership claims — set by
+    /// [`with_claim_endpoint`](Self::with_claim_endpoint) or
+    /// [`set_claim_endpoint`](Self::set_claim_endpoint), `0` standing
+    /// for none — so the field's claim record names where the owner
+    /// serves checkpoints and its fencing verdicts can carry the
+    /// endpoint to a peer the claim fenced out.
+    monitor: AtomicU16,
     connection: Mutex<Connection>,
 }
 
@@ -409,8 +439,10 @@ impl RemoteDriver {
                 retry_at: Instant::now(),
                 last_error: None,
                 fenced_by: None,
+                fenced_endpoint: None,
             }),
             controller: false,
+            monitor: AtomicU16::new(0),
         })
     }
 
@@ -429,6 +461,38 @@ impl RemoteDriver {
     pub fn as_controller(mut self) -> Self {
         self.controller = true;
         self
+    }
+
+    /// Registers the port this attachment's checkpoint monitor listens
+    /// on — declared on every write-ownership claim it asserts or
+    /// re-arms, so the field's claim record names where the owner
+    /// serves this line's checkpoints and its fencing verdicts can
+    /// carry the endpoint to a fenced-out peer. The server pairs the
+    /// port with this connection's own source address, so the
+    /// registered endpoint is the field's attestation of its claimant,
+    /// not an address the attachment merely asserts. An attachment
+    /// serving no monitor — plant tooling, an in-process driver —
+    /// registers nothing and its claim verdicts carry no endpoint.
+    pub fn with_claim_endpoint(self, monitor: u16) -> Self {
+        self.set_claim_endpoint(monitor);
+        self
+    }
+
+    /// The post-construction half of
+    /// [`with_claim_endpoint`](Self::with_claim_endpoint) — the monitor
+    /// port is known only once the checkpoint endpoint binds, which
+    /// can be after the driver surface is built and shared. `0`
+    /// clears the registration.
+    pub fn set_claim_endpoint(&self, monitor: u16) {
+        self.monitor.store(monitor, Ordering::Relaxed);
+    }
+
+    /// The port claim requests carry, `None` while none registers.
+    fn claim_monitor(&self) -> Option<u16> {
+        match self.monitor.load(Ordering::Relaxed) {
+            0 => None,
+            monitor => Some(monitor),
+        }
     }
 
     /// Whether the link to the server is live — `false` between a failed
@@ -524,6 +588,7 @@ impl RemoteDriver {
             owner,
             rebind: true,
             controller: self.controller,
+            monitor: self.claim_monitor(),
         }) {
             Ok(PlantResponse::Done) | Ok(PlantResponse::ClaimedShared { .. }) => {
                 self.connection.lock().unwrap().owner = Some(owner);
@@ -588,6 +653,7 @@ impl RemoteDriver {
         let grant = match self.request(&PlantRequest::ClaimWriter {
             owner,
             controller: self.controller,
+            monitor: self.claim_monitor(),
         })? {
             PlantResponse::Done => ClaimGrant::Exclusive,
             PlantResponse::ClaimedShared { .. } => ClaimGrant::Shared,
@@ -615,7 +681,10 @@ impl RemoteDriver {
     /// A granted token is recorded exactly as `claim_writer` records it;
     /// a refused one records nothing — this attachment holds no claim.
     pub fn claim_writer_unless_held(&self, owner: u64) -> Result<ClaimGrant, RemoteError> {
-        let grant = match self.request(&PlantRequest::ClaimWriterUnlessHeld { owner })? {
+        let grant = match self.request(&PlantRequest::ClaimWriterUnlessHeld {
+            owner,
+            monitor: self.claim_monitor(),
+        })? {
             PlantResponse::Done => ClaimGrant::Exclusive,
             PlantResponse::ClaimedShared { .. } => ClaimGrant::Shared,
             PlantResponse::Error { error } => return Err(self.fail(error.into())),
@@ -645,6 +714,7 @@ impl RemoteDriver {
             owner,
             rebind: true,
             controller: self.controller,
+            monitor: self.claim_monitor(),
         })? {
             PlantResponse::Done => ClaimGrant::Exclusive,
             PlantResponse::ClaimedShared { .. } => ClaimGrant::Shared,
@@ -681,6 +751,7 @@ impl RemoteDriver {
             owner,
             rebind: false,
             controller: self.controller,
+            monitor: self.claim_monitor(),
         })? {
             PlantResponse::Done | PlantResponse::ClaimedShared { .. } => Ok(()),
             PlantResponse::Error { error } => {
@@ -764,6 +835,21 @@ impl RemoteDriver {
         self.connection.lock().unwrap().fenced_by
     }
 
+    /// The checkpoint endpoint the field's standing claim carried on
+    /// the last verdict that fenced this attachment — the address the
+    /// claim's owner itself registered for its monitor, attested by the
+    /// field's own arbitration rather than announced by the peer. A
+    /// demoted ex-owner reads it to track the successor the field
+    /// named where the unauthenticated announced-hint channel cannot
+    /// be trusted. `None` under the same conditions as
+    /// [`fenced_by`](Self::fenced_by), and also where the claim's
+    /// owner registered no endpoint. The endpoint is evidence of where
+    /// the owner serves — a tracking candidate to verify by pulling
+    /// its checkpoint — not proof the endpoint serves this line.
+    pub fn fenced_endpoint(&self) -> Option<SocketAddr> {
+        self.connection.lock().unwrap().fenced_endpoint
+    }
+
     /// The read-only half of the writer claim — the claim-state
     /// observation a peer reports through its role surface as
     /// [`RoleReport::field_claim`](dcs_core::RoleReport::field_claim).
@@ -835,7 +921,7 @@ impl RemoteDriver {
             if Instant::now() < connection.retry_at {
                 return Err(RemoteError::Disconnected);
             }
-            connection.reattach(&self.addresses, self.timeout, self.controller);
+            connection.reattach(&self.addresses, self.timeout, self.controller, self.claim_monitor());
         }
         let Some(stream) = connection.stream.as_mut() else {
             return Err(RemoteError::Disconnected);
@@ -852,21 +938,27 @@ impl RemoteDriver {
                 // Claim-state verdicts update the recorded fencing
                 // claimant: a `fenced` answer names the standing
                 // claim's owner — the claimant the fenced-out field
-                // owner's audit attributes the preemption to — and an
-                // `unclaimed` answer clears the record, the field
-                // naming no owner at all.
+                // owner's audit attributes the preemption to — and
+                // carries the checkpoint endpoint that owner
+                // registered, the field-attested successor a demoted
+                // peer may track; an `unclaimed` answer clears both
+                // records, the field naming no owner at all.
                 if let PlantResponse::Error { error } = &response {
                     let verdict = match error {
-                        PlantError::Fenced { owner, .. } => Some(*owner),
+                        PlantError::Fenced {
+                            owner, endpoint, ..
+                        } => Some((*owner, *endpoint)),
                         PlantError::Io {
                             error: IoError::Fenced(_),
                             owner,
-                        } => Some(*owner),
-                        PlantError::Unclaimed { .. } => Some(None),
+                            endpoint,
+                        } => Some((*owner, *endpoint)),
+                        PlantError::Unclaimed { .. } => Some((None, None)),
                         _ => None,
                     };
-                    if let Some(owner) = verdict {
+                    if let Some((owner, endpoint)) = verdict {
                         connection.fenced_by = owner;
+                        connection.fenced_endpoint = endpoint;
                     }
                 }
                 Ok(response)

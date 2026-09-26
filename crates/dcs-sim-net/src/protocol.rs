@@ -17,7 +17,7 @@ use dcs_core::{IoError, PointId, Sample, Tick, Value};
 use dcs_sim::{Fault, PointInfo};
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, BufReader};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 
 /// The maximum size of one protocol message in bytes, delimiter included.
 ///
@@ -116,12 +116,24 @@ pub enum PlantRequest {
     /// a takeover a deliberate unconditional claim still runs, where a
     /// mislabeled controller claim would reopen the stale-island
     /// preemption the conditional grant exists to refuse.
+    ///
+    /// `monitor` records the TCP port the claiming controller serves
+    /// its monitor's checkpoint endpoint on: the claim's fencing
+    /// verdicts carry it back as `endpoint` — the attachment's own
+    /// source address paired with the claimed port — so a fenced-out
+    /// peer can learn where the field's owner serves checkpoints
+    /// without the announced-hint channel an unkeyed pair cannot
+    /// authenticate. Payloads predating the field carry none and the
+    /// claim registers no endpoint.
     ClaimWriter {
         /// The ownership token the claim asserts.
         owner: u64,
         /// Whether the claiming attachment belongs to a controller.
         #[serde(default = "default_controller_claim")]
         controller: bool,
+        /// The port the claimant's checkpoint endpoint listens on.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<u16>,
     },
     /// The launched-controller half of the write-ownership claim: takes
     /// the claim for `owner` only while no *live* attachment holds a
@@ -145,6 +157,11 @@ pub enum PlantRequest {
     ClaimWriterUnlessHeld {
         /// The ownership token the claim asserts.
         owner: u64,
+        /// The port the claimant's checkpoint endpoint listens on —
+        /// recorded against the claim exactly as
+        /// [`ClaimWriter`](Self::ClaimWriter)'s `monitor` is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<u16>,
     },
     /// The re-attach half of the write-ownership claim: takes the claim
     /// for `owner` only while the field is unclaimed or the standing
@@ -183,6 +200,11 @@ pub enum PlantRequest {
         /// Whether the claiming attachment belongs to a controller.
         #[serde(default = "default_controller_claim")]
         controller: bool,
+        /// The port the claimant's checkpoint endpoint listens on —
+        /// recorded against the claim exactly as
+        /// [`ClaimWriter`](Self::ClaimWriter)'s `monitor` is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<u16>,
     },
     /// Drop this connection's hold on the write claim. `keep_claim:
     /// false` — the deliberate hand-back a mutation tool performs —
@@ -306,6 +328,16 @@ pub enum PlantError {
         /// recorded only as "another".
         #[serde(default, skip_serializing_if = "Option::is_none")]
         owner: Option<u64>,
+        /// When `error` is the fencing verdict — the endpoint the
+        /// standing claim's owner registered as its checkpoint
+        /// monitor: the claiming attachment's source address paired
+        /// with the port it declared, the field-attested successor
+        /// discovery a fenced-out peer follows instead of the
+        /// announced-hint channel. `None` on every other point error,
+        /// where the claim's owner registered none, and absent on the
+        /// wire from servers predating the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint: Option<SocketAddr>,
     },
     /// The request itself could not be served: a line that does not parse
     /// as a [`PlantRequest`], or a [`PlantRequest::Step`] whose `dt` is
@@ -330,6 +362,19 @@ pub enum PlantError {
         /// from servers predating the field.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         owner: Option<u64>,
+        /// The endpoint the standing claim's owner registered as its
+        /// checkpoint monitor — the claiming attachment's source
+        /// address paired with the port it declared. The field's own
+        /// arbitration attests it: the endpoint can only be the
+        /// claim holder's own registration, so a fenced-out peer may
+        /// pull this line's checkpoints from it where the
+        /// announced-hint channel — unauthenticated by construction —
+        /// cannot be trusted. `None` where the claim's owner
+        /// registered no endpoint (a field tool, or a controller
+        /// predating the field). Absent on the wire from servers
+        /// predating the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint: Option<SocketAddr>,
     },
     /// The request mutates the shared field but no write-ownership
     /// claim stands at all — the server is fresh or restarted, or the
@@ -438,17 +483,28 @@ mod tests {
             PlantRequest::ClaimWriter {
                 owner: 42,
                 controller: false,
+                monitor: None,
             },
-            PlantRequest::ClaimWriterUnlessHeld { owner: 44 },
+            PlantRequest::ClaimWriter {
+                owner: 46,
+                controller: true,
+                monitor: Some(8080),
+            },
+            PlantRequest::ClaimWriterUnlessHeld {
+                owner: 44,
+                monitor: Some(8080),
+            },
             PlantRequest::EnsureWriter {
                 owner: 43,
                 rebind: true,
                 controller: true,
+                monitor: Some(8080),
             },
             PlantRequest::EnsureWriter {
                 owner: 45,
                 rebind: false,
                 controller: true,
+                monitor: None,
             },
             PlantRequest::ReleaseWriter { keep_claim: false },
             PlantRequest::ReleaseWriter { keep_claim: true },
@@ -484,45 +540,73 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&PlantRequest::ClaimWriter {
                 owner: 42,
-                controller: false
+                controller: false,
+                monitor: None,
             })
             .unwrap(),
             r#"{"op":"claim_writer","owner":42,"controller":false}"#
         );
         assert_eq!(
-            serde_json::to_string(&PlantRequest::ClaimWriterUnlessHeld { owner: 44 }).unwrap(),
-            r#"{"op":"claim_writer_unless_held","owner":44}"#
+            serde_json::to_string(&PlantRequest::ClaimWriter {
+                owner: 46,
+                controller: true,
+                monitor: Some(8080),
+            })
+            .unwrap(),
+            r#"{"op":"claim_writer","owner":46,"controller":true,"monitor":8080}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PlantRequest::ClaimWriterUnlessHeld {
+                owner: 44,
+                monitor: Some(8080),
+            })
+            .unwrap(),
+            r#"{"op":"claim_writer_unless_held","owner":44,"monitor":8080}"#
         );
         assert_eq!(
             serde_json::to_string(&PlantRequest::EnsureWriter {
                 owner: 43,
                 rebind: true,
-                controller: true
+                controller: true,
+                monitor: Some(8080),
             })
             .unwrap(),
-            r#"{"op":"ensure_writer","owner":43,"rebind":true,"controller":true}"#
+            r#"{"op":"ensure_writer","owner":43,"rebind":true,"controller":true,"monitor":8080}"#
         );
         assert_eq!(
             serde_json::to_string(&PlantRequest::ReleaseWriter { keep_claim: false }).unwrap(),
             r#"{"op":"release_writer","keep_claim":false}"#
         );
         // The pre-flag wire shapes still decode: an absent `rebind`
-        // binds, an absent `keep_claim` releases fully, and an absent
-        // `controller` reads as a controller claim — the contract every
-        // earlier build's requests carried.
+        // binds, an absent `keep_claim` releases fully, an absent
+        // `controller` reads as a controller claim, and an absent
+        // `monitor` registers no checkpoint endpoint — the contract
+        // every earlier build's requests carried.
         assert_eq!(
             serde_json::from_str::<PlantRequest>(r#"{"op":"ensure_writer","owner":43}"#).unwrap(),
             PlantRequest::EnsureWriter {
                 owner: 43,
                 rebind: true,
-                controller: true
+                controller: true,
+                monitor: None,
             }
         );
         assert_eq!(
             serde_json::from_str::<PlantRequest>(r#"{"op":"claim_writer","owner":42}"#).unwrap(),
             PlantRequest::ClaimWriter {
                 owner: 42,
-                controller: true
+                controller: true,
+                monitor: None,
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<PlantRequest>(
+                r#"{"op":"claim_writer_unless_held","owner":44}"#
+            )
+            .unwrap(),
+            PlantRequest::ClaimWriterUnlessHeld {
+                owner: 44,
+                monitor: None,
             }
         );
         assert_eq!(
@@ -560,6 +644,7 @@ mod tests {
                 error: PlantError::Io {
                     error: IoError::UnknownPoint(PointId(4)),
                     owner: None,
+                    endpoint: None,
                 },
             },
             PlantResponse::Error {
@@ -570,18 +655,21 @@ mod tests {
                         found: Value::Bool(true),
                     },
                     owner: None,
+                    endpoint: None,
                 },
             },
             PlantResponse::Error {
                 error: PlantError::Io {
                     error: IoError::Timeout(PointId(6)),
                     owner: None,
+                    endpoint: None,
                 },
             },
             PlantResponse::Error {
                 error: PlantError::Io {
                     error: IoError::InvalidValue { point: PointId(8) },
                     owner: None,
+                    endpoint: None,
                 },
             },
             PlantResponse::Error {
@@ -593,6 +681,7 @@ mod tests {
                 error: PlantError::Fenced {
                     detail: "another attachment owns field writes".to_string(),
                     owner: Some(424242),
+                    endpoint: None,
                 },
             },
             PlantResponse::Error {
@@ -639,6 +728,7 @@ mod tests {
                 error: PlantError::Io {
                     error: IoError::UnknownPoint(PointId(4)),
                     owner: None,
+                    endpoint: None,
                 },
             })
             .unwrap(),
@@ -661,6 +751,7 @@ mod tests {
                 error: PlantError::Fenced {
                     detail: "another attachment owns field writes".to_string(),
                     owner: Some(424242),
+                    endpoint: None,
                 },
             })
             .unwrap(),
@@ -671,6 +762,7 @@ mod tests {
                 error: PlantError::Io {
                     error: IoError::Fenced(PointId(101)),
                     owner: Some(424242),
+                    endpoint: None,
                 },
             })
             .unwrap(),
@@ -687,6 +779,7 @@ mod tests {
                 error: PlantError::Fenced {
                     detail: "another attachment owns field writes".to_string(),
                     owner: None,
+                    endpoint: None,
                 },
             }
         );
@@ -699,6 +792,7 @@ mod tests {
                 error: PlantError::Io {
                     error: IoError::Fenced(PointId(101)),
                     owner: None,
+                    endpoint: None,
                 },
             }
         );
@@ -748,6 +842,7 @@ mod tests {
                         found: Value::Bool(true),
                     },
                     owner: None,
+                    endpoint: None,
                 },
             }
         );

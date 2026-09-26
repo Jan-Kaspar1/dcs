@@ -46,7 +46,7 @@ use dcs_sim_net::{RemoteDriver, RemoteError};
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
-use std::net::ToSocketAddrs;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -363,6 +363,28 @@ pub type ReclaimHook = Arc<dyn Fn(u64) -> Result<bool, StepError> + Send + Sync>
 /// recorded yet, or a backend whose arbitration names no owner.
 pub type FencedByHook = Arc<dyn Fn() -> Option<u64> + Send + Sync>;
 
+/// The checkpoint-endpoint registration half of [`ClaimHook`] — the
+/// per-backend half of [`FanoutDriver::set_claim_endpoint`]: declares
+/// the port this instance's checkpoint monitor listens on, so every
+/// write-ownership claim the backend asserts or re-arms carries it
+/// and the field's claim record names where the claim's owner serves
+/// checkpoints. `None` on kinds whose arbitration records no claimant
+/// endpoint.
+pub type ClaimEndpointHook = Arc<dyn Fn(u16) + Send + Sync>;
+
+/// The claimant-endpoint counterpart of [`FencedByHook`] — reports the
+/// checkpoint endpoint the field's arbitration carried on the last
+/// verdict that fenced this backend's request: the address the
+/// standing claim's owner itself registered for its monitor, attested
+/// by the field rather than announced by the peer — the
+/// field-attested tracking source a fencing-demoted ex-owner on an
+/// unkeyed pair may follow where an announced hint cannot be trusted.
+/// `None` answers mean the verdict carried no endpoint — no fenced
+/// answer recorded yet, the field's last claim named no owner, the
+/// claim's owner registered no monitor, or a backend whose
+/// arbitration carries no endpoint.
+pub type OwnerEndpointHook = Arc<dyn Fn() -> Option<SocketAddr> + Send + Sync>;
+
 /// The launched-controller counterpart of [`ClaimHook`] — the
 /// per-backend half of [`FanoutDriver::claim_field_writer_unless_held`],
 /// run once at startup activation: claims the field's write-ownership
@@ -444,6 +466,17 @@ pub struct DeviceBackend {
     /// claimant. `None` on kinds whose fencing verdicts carry no
     /// claimant identity.
     pub fenced_by: Option<FencedByHook>,
+    /// Registers the checkpoint-monitor port this instance declares on
+    /// its write-ownership claims — the claim record the field's
+    /// fencing verdicts report a successor's endpoint through. `None`
+    /// on kinds whose arbitration records no claimant endpoint.
+    pub claim_endpoint: Option<ClaimEndpointHook>,
+    /// The claimant-endpoint counterpart of `fenced_by` — reports the
+    /// checkpoint endpoint the field's arbitration carried on the last
+    /// verdict fencing this backend, the field-attested tracking
+    /// source a fencing-demoted ex-owner may follow. `None` on kinds
+    /// whose fencing verdicts carry no endpoint.
+    pub owner_endpoint: Option<OwnerEndpointHook>,
     /// The backend's concrete driver, for typed inspection through
     /// [`FanoutDriver::inspect`] — e.g. a scripted device's
     /// recorded-write log. `None` when the backend exposes nothing
@@ -715,6 +748,8 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
     let probing = Arc::clone(&remote);
     let reclaiming = Arc::clone(&remote);
     let attributing = Arc::clone(&remote);
+    let registering = Arc::clone(&remote);
+    let reporting = Arc::clone(&remote);
     let inspect: Arc<dyn Any + Send + Sync> = remote.clone();
     let device = spec.id.0;
     Ok(DeviceDriver::Backend(DeviceBackend {
@@ -816,6 +851,18 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         // claimant a superseded field owner's `field_claim_lost`
         // journal entry attributes the preemption to.
         fenced_by: Some(Arc::new(move || attributing.fenced_by())),
+        // The claim's endpoint registration: the checkpoint-monitor
+        // port this instance declares on every claim it asserts or
+        // re-arms, so the field's claim record names where its owner
+        // serves checkpoints.
+        claim_endpoint: Some(Arc::new(move |port| {
+            registering.set_claim_endpoint(port)
+        })),
+        // The claimant-endpoint attribution: the checkpoint endpoint
+        // the plant server's last fencing verdict carried for this
+        // attachment — the field-attested tracking source a
+        // fencing-demoted ex-owner follows to its successor.
+        owner_endpoint: Some(Arc::new(move || reporting.fenced_endpoint())),
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -926,6 +973,8 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         // fencing verdict names no claimant.
         reclaim: None,
         fenced_by: None,
+        claim_endpoint: None,
+        owner_endpoint: None,
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -1033,6 +1082,9 @@ fn sim_cyclic_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError>
         // attribution — the claim dies with its connection.
         reclaim: None,
         fenced_by: None,
+        // As `sim-bus`: no claimant endpoint registration or report.
+        claim_endpoint: None,
+        owner_endpoint: None,
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -1130,6 +1182,8 @@ fn ethercat_backend(
         probe: None,
         reclaim: None,
         fenced_by: None,
+        claim_endpoint: None,
+        owner_endpoint: None,
         inspect: Some(Arc::clone(device.master()) as Arc<dyn Any + Send + Sync>),
         field_facing: true,
     }))
@@ -1327,6 +1381,8 @@ fn scripted_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         probe: None,
         reclaim: None,
         fenced_by: None,
+        claim_endpoint: None,
+        owner_endpoint: None,
         inspect: Some(inspect),
         field_facing: false,
     }))
@@ -1360,6 +1416,13 @@ struct Backend {
     /// [`DeviceBackend::fenced_by`] carried into the built driver —
     /// the claimant attribution a fencing-loss report reads.
     fenced_by: Option<FencedByHook>,
+    /// [`DeviceBackend::claim_endpoint`] carried into the built
+    /// driver — the claim's checkpoint-endpoint registration.
+    claim_endpoint: Option<ClaimEndpointHook>,
+    /// [`DeviceBackend::owner_endpoint`] carried into the built
+    /// driver — the field-attested claimant endpoint a fencing-loss
+    /// report reads.
+    owner_endpoint: Option<OwnerEndpointHook>,
     /// The factory-installed typed inspection handle, if any.
     inspect: Option<Arc<dyn Any + Send + Sync>>,
     /// [`DeviceBackend::field_facing`] carried into the built driver —
@@ -1433,6 +1496,8 @@ impl DriverPlan {
                 probe: None,
                 reclaim: None,
                 fenced_by: None,
+                claim_endpoint: None,
+                owner_endpoint: None,
                 inspect: None,
                 field_facing: false,
             });
@@ -1454,6 +1519,8 @@ impl DriverPlan {
                 probe: planned.backend.probe,
                 reclaim: planned.backend.reclaim,
                 fenced_by: planned.backend.fenced_by,
+                claim_endpoint: planned.backend.claim_endpoint,
+                owner_endpoint: planned.backend.owner_endpoint,
                 inspect: planned.backend.inspect,
                 field_facing: planned.backend.field_facing,
             });
@@ -1690,6 +1757,23 @@ impl FanoutDriver {
         self.backends.iter().any(|backend| backend.field_facing)
     }
 
+    /// Declares the checkpoint-monitor port this instance serves on
+    /// every field-facing backend that registers one — carried on each
+    /// write-ownership claim the backend asserts or re-arms, so the
+    /// field's claim record names where its owner serves checkpoints
+    /// and the verdict fencing a superseded owner out can carry the
+    /// successor's endpoint with it. Backends without a registration
+    /// hook are skipped; their claims simply record no endpoint.
+    pub fn set_claim_endpoint(&self, port: u16) {
+        for backend in &self.backends {
+            if backend.field_facing
+                && let Some(claim_endpoint) = &backend.claim_endpoint
+            {
+                claim_endpoint(port);
+            }
+        }
+    }
+
     /// Claims the field's write-ownership under `owner` on every
     /// field-facing backend that can arbitrate it — the fencing action a
     /// promotion runs before lifting the write gate, so the shared field
@@ -1897,6 +1981,23 @@ impl FanoutDriver {
             .get(&point)
             .and_then(|&index| self.backends[index].fenced_by.as_ref())
             .and_then(|fenced_by| fenced_by())
+    }
+
+    /// The checkpoint endpoint the field's standing claim carried on
+    /// the last verdict fencing a mutation on the backend serving
+    /// `point` — the address the claim's owner itself registered for
+    /// its checkpoint monitor, attested by the field's own
+    /// arbitration. A fencing-demoted ex-owner reads it as the
+    /// tracking-source candidate the unauthenticated announced-hint
+    /// channel cannot supply on an unkeyed pair — a candidate still
+    /// verified by pulling its checkpoint before it is tracked.
+    /// `None` where the backend records no verdict endpoint or its
+    /// fencing answers carry none.
+    pub fn field_owner_endpoint(&self, point: PointId) -> Option<SocketAddr> {
+        self.points
+            .get(&point)
+            .and_then(|&index| self.backends[index].owner_endpoint.as_ref())
+            .and_then(|owner_endpoint| owner_endpoint())
     }
 
     /// The field-facing devices whose backends cannot arbitrate a single
@@ -2230,6 +2331,8 @@ mod tests {
             probe: None,
             reclaim: None,
             fenced_by: None,
+            claim_endpoint: None,
+            owner_endpoint: None,
             inspect: None,
             field_facing: false,
         }

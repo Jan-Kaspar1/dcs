@@ -565,6 +565,33 @@ impl Driver {
         }
     }
 
+    /// The checkpoint endpoint the field's standing claim carried on
+    /// the last verdict fencing a mutation on the claim domain `point`
+    /// routes to — the address the claim's owner registered for its
+    /// checkpoint monitor, attested by the field's own arbitration.
+    /// The peer's `field_owner_endpoint` asks it so a fencing-demoted
+    /// ex-owner can learn the successor the field named — the tracking
+    /// source an unkeyed pair's announced-hint channel cannot
+    /// authenticate. `None` where no verdict carried an endpoint.
+    fn field_owner_endpoint(&self, point: PointId) -> Option<SocketAddr> {
+        match self {
+            Self::Remote(remote) => remote.fenced_endpoint(),
+            Self::Local(fanout) => fanout.field_owner_endpoint(point),
+        }
+    }
+
+    /// Declares this instance's checkpoint-monitor port on every claim
+    /// the driver surface asserts or re-arms — wired once the monitor's
+    /// bound address is known, so the field's claim record names where
+    /// this owner serves checkpoints and the verdict fencing a
+    /// superseded owner out can carry its successor's endpoint to it.
+    fn set_claim_endpoint(&self, port: u16) {
+        match self {
+            Self::Remote(remote) => remote.set_claim_endpoint(port),
+            Self::Local(fanout) => fanout.set_claim_endpoint(port),
+        }
+    }
+
     /// The standing-owner tokens the last refused conditional grant
     /// probe — the orphan cycle's `ensure` or the fencing-loss
     /// `reclaim` — named, one per refusing claim domain. The peer's
@@ -1356,6 +1383,7 @@ fn main() -> ExitCode {
         .with_field_startup_claim(|| driver.claim_writer_unless_held(owner))
         .with_field_probe(|| driver.probe_field_claim())
         .with_field_claimant(|point| driver.fencing_claimant(point))
+        .with_field_owner_endpoint(|point| driver.field_owner_endpoint(point))
         .with_field_reclaim(|| driver.reclaim_writer(owner))
         .with_claim_observer(|| driver.refused_claimants());
     let peer = match options.auto_promote {
@@ -1417,6 +1445,11 @@ fn main() -> ExitCode {
                 }
             };
         let monitor = keyed_monitor(monitor, &options);
+        // Register the bound monitor port on the field claims: every
+        // claim this instance asserts or re-arms names where its owner
+        // serves checkpoints, so the verdict fencing a superseded peer
+        // out can carry this run's endpoint as its successor source.
+        driver.set_claim_endpoint(monitor.local_addr().port());
         let monitor = monitor.driven(Driven {
             track,
             after_scan: Some(Box::new(|peer: &Peer<'_>| {
@@ -1477,6 +1510,11 @@ fn main() -> ExitCode {
                     }
                 };
                 let monitor = keyed_monitor(monitor, &options);
+                // As on every monitored path: the bound monitor port
+                // registers on this instance's field claims, so a peer
+                // this run later fences out learns where its successor
+                // serves checkpoints from the field's own arbitration.
+                driver.set_claim_endpoint(monitor.local_addr().port());
                 // The promotion boundary runs one final pull against the
                 // tracking source, so a command the active admitted up
                 // to the promote request is carried.
@@ -1633,6 +1671,11 @@ fn main() -> ExitCode {
                     }
                 };
                 let monitor = keyed_monitor(monitor, &options);
+                // As on every monitored path: the bound monitor port
+                // registers on this instance's field claims, so a peer
+                // this run later fences out learns where its successor
+                // serves checkpoints from the field's own arbitration.
+                driver.set_claim_endpoint(monitor.local_addr().port());
                 // A --peer launched active names its tracking source up
                 // front — where this instance pulls checkpoints if it is
                 // demoted — ahead of anything a tracking peer announces

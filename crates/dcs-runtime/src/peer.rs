@@ -204,6 +204,7 @@ use dcs_core::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::net::SocketAddr;
 
 /// A controller instance in a redundant pair: an [`Executor`] plus the
 /// role and write-gate state deciding whether its scans reach the field.
@@ -413,6 +414,12 @@ pub struct Peer<'d> {
     /// `point` attributes the refusal through the point whose write the
     /// field fenced rather than an arbitrary one.
     fencing_point: Option<PointId>,
+    /// The claimant-endpoint lookup [`field_owner_endpoint`](Self::field_owner_endpoint)
+    /// asks — the checkpoint endpoint the field's arbitration carried
+    /// on the last verdict that fenced this run's attachment, installed
+    /// by [`with_field_owner_endpoint`](Self::with_field_owner_endpoint).
+    /// A peer built without it reports no field-attested source.
+    owner_endpoint: Option<OwnerEndpoint<'d>>,
     /// Foreign-claim observations not yet consumed for journaling — one
     /// [`ClaimObservation`] per distinct claimant a refused conditional
     /// grant probe named.
@@ -550,6 +557,26 @@ struct Claimant<'d>(Box<dyn Fn(PointId) -> Option<u64> + Send + Sync + 'd>);
 impl fmt::Debug for Claimant<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("fencing claimant")
+    }
+}
+
+/// The claimant-endpoint counterpart of [`Claimant`]: asked where a
+/// tracking source is needed, it answers the checkpoint endpoint the
+/// field's arbitration carried on the last verdict that fenced this
+/// run's attachment — the address the standing claim's owner itself
+/// registered for its monitor, attested by the field rather than
+/// announced by a peer. The answer is a candidate tracking source for
+/// the monitoring layer to verify — the field-attested channel an
+/// unkeyed pair can authenticate where the `?peer=` announced-hint
+/// contract cannot. `None` answers mean no verdict carried an
+/// endpoint: no fenced answer recorded yet, the claim's owner
+/// registered none, or a driver surface whose arbitration carries no
+/// claimant endpoint.
+struct OwnerEndpoint<'d>(Box<dyn Fn(PointId) -> Option<SocketAddr> + Send + Sync + 'd>);
+
+impl fmt::Debug for OwnerEndpoint<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("field owner endpoint")
     }
 }
 
@@ -943,6 +970,7 @@ impl<'d> Peer<'d> {
             observer: None,
             observed_claimants: BTreeSet::new(),
             fencing_point: None,
+            owner_endpoint: None,
             pending_observations: Vec::new(),
             reclaim: None,
             field_claim: None,
@@ -1082,6 +1110,46 @@ impl<'d> Peer<'d> {
         self
     }
 
+    /// Arms the claimant-endpoint lookup [`field_owner_endpoint`](Self::field_owner_endpoint)
+    /// asks: `endpoint` answers the checkpoint endpoint the field's
+    /// arbitration carried on the last verdict that fenced this run's
+    /// attachment — the address the standing claim's owner registered
+    /// for its checkpoint monitor, attested by the field's own
+    /// arbitration rather than announced through an unauthenticated
+    /// channel. The monitoring layer verifies the candidate by pulling
+    /// its checkpoint before tracking it; `None` answers mean no
+    /// verdict carried an endpoint. See [`OwnerEndpoint`].
+    pub fn with_field_owner_endpoint(
+        mut self,
+        endpoint: impl Fn(PointId) -> Option<SocketAddr> + Send + Sync + 'd,
+    ) -> Self {
+        self.owner_endpoint = Some(OwnerEndpoint(Box::new(endpoint)));
+        self
+    }
+
+    /// The checkpoint endpoint the field's own arbitration last
+    /// reported as its standing claim's registered monitor — the
+    /// field-attested successor a demoted peer may learn its tracking
+    /// source from where the announced-hint channel cannot
+    /// authenticate on an unkeyed pair. Asked through the observation
+    /// point the claim observation attributes — the fenced-write point
+    /// while the loss mark stands — and answered from the driver's
+    /// recorded verdict, so it tracks the field's standing owner as
+    /// the claim moves between claimants. `None` while this peer owns
+    /// the field — its own endpoint is no tracking source — and while
+    /// no verdict names an endpoint. The answer is a candidate, not a
+    /// verdict: the monitoring layer must still prove it serves this
+    /// line as its field owner before pulling.
+    pub fn field_owner_endpoint(&self) -> Option<SocketAddr> {
+        if self.owns_field() {
+            return None;
+        }
+        let point = self.observation_point()?;
+        self.owner_endpoint
+            .as_ref()
+            .and_then(|endpoint| endpoint.0(point))
+    }
+
     /// Arms the claim-observation hook — consulted each time a
     /// conditional grant probe, the orphan cycle's
     /// [`with_field_ensure`](Self::with_field_ensure) re-arm or the
@@ -1204,6 +1272,7 @@ impl<'d> Peer<'d> {
             observer: None,
             observed_claimants: BTreeSet::new(),
             fencing_point: None,
+            owner_endpoint: None,
             pending_observations: Vec::new(),
             reclaim: None,
             field_claim: None,
