@@ -17,7 +17,7 @@ use dcs_core::{IoError, PointId, Sample, Tick, Value};
 use dcs_sim::{Fault, PointInfo};
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, BufReader};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 
 /// The maximum size of one protocol message in bytes, delimiter included.
 ///
@@ -122,6 +122,16 @@ pub enum PlantRequest {
         /// Whether the claiming attachment belongs to a controller.
         #[serde(default = "default_controller_claim")]
         controller: bool,
+        /// The claimant's monitor endpoint, declared so a peer the
+        /// claim preempts can find the successor's tracking surface:
+        /// the fencing verdicts this claim produces carry it back, and
+        /// the demoted peer's tracking path can then resolve the
+        /// field-arbitrated owner where no announced hint could ever
+        /// prove itself. `None` — the default on requests predating
+        /// the field, and every non-controller claim — leaves the
+        /// verdicts naming no monitor.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<SocketAddr>,
     },
     /// The launched-controller half of the write-ownership claim: takes
     /// the claim for `owner` only while no *live* attachment holds a
@@ -145,6 +155,13 @@ pub enum PlantRequest {
     ClaimWriterUnlessHeld {
         /// The ownership token the claim asserts.
         owner: u64,
+        /// The claimant's monitor endpoint — the same
+        /// [`ClaimWriter`](Self::ClaimWriter) declaration: a granted
+        /// conditional claim is still the field's owner, so the
+        /// verdicts it later produces name this monitor to the peers
+        /// it supersedes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<SocketAddr>,
     },
     /// The re-attach half of the write-ownership claim: takes the claim
     /// for `owner` only while the field is unclaimed or the standing
@@ -183,6 +200,13 @@ pub enum PlantRequest {
         /// Whether the claiming attachment belongs to a controller.
         #[serde(default = "default_controller_claim")]
         controller: bool,
+        /// The claimant's monitor endpoint — the same
+        /// [`ClaimWriter`](Self::ClaimWriter) declaration: a re-armed
+        /// or probe-raised claim carries its owner's tracking surface
+        /// forward, so a claim rebuilt across a server restart keeps
+        /// naming where the owner serves.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<SocketAddr>,
     },
     /// Drop this connection's hold on the write claim. `keep_claim:
     /// false` — the deliberate hand-back a mutation tool performs —
@@ -306,6 +330,13 @@ pub enum PlantError {
         /// recorded only as "another".
         #[serde(default, skip_serializing_if = "Option::is_none")]
         owner: Option<u64>,
+        /// The monitor endpoint the standing claim's owner declared —
+        /// the tracking surface the superseded peer can re-join on:
+        /// the field's arbitration names the successor's address where
+        /// no announced hint could ever prove one. `None` when the
+        /// claim declared none or the server predates the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<SocketAddr>,
     },
     /// The request itself could not be served: a line that does not parse
     /// as a [`PlantRequest`], or a [`PlantRequest::Step`] whose `dt` is
@@ -330,6 +361,15 @@ pub enum PlantError {
         /// from servers predating the field.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         owner: Option<u64>,
+        /// The monitor endpoint the standing claim's owner declared —
+        /// the field arbitration's word for where the successor
+        /// serves checkpoints. A demoted peer's tracking path can
+        /// prove this address where no announced `?peer=` hint ever
+        /// proves itself: only actually holding the claim puts a
+        /// monitor under it. `None` when the claim declared none or
+        /// the server predates the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<SocketAddr>,
     },
     /// The request mutates the shared field but no write-ownership
     /// claim stands at all — the server is fresh or restarted, or the
@@ -438,17 +478,23 @@ mod tests {
             PlantRequest::ClaimWriter {
                 owner: 42,
                 controller: false,
+                monitor: Some("127.0.0.1:4190".parse().unwrap()),
             },
-            PlantRequest::ClaimWriterUnlessHeld { owner: 44 },
+            PlantRequest::ClaimWriterUnlessHeld {
+                owner: 44,
+                monitor: None,
+            },
             PlantRequest::EnsureWriter {
                 owner: 43,
                 rebind: true,
                 controller: true,
+                monitor: None,
             },
             PlantRequest::EnsureWriter {
                 owner: 45,
                 rebind: false,
                 controller: true,
+                monitor: None,
             },
             PlantRequest::ReleaseWriter { keep_claim: false },
             PlantRequest::ReleaseWriter { keep_claim: true },
@@ -484,20 +530,38 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&PlantRequest::ClaimWriter {
                 owner: 42,
-                controller: false
+                controller: false,
+                monitor: None,
             })
             .unwrap(),
             r#"{"op":"claim_writer","owner":42,"controller":false}"#
         );
+        // A claim declaring its monitor carries it on the wire: the
+        // successors this claim's verdicts name find its tracking
+        // surface there.
         assert_eq!(
-            serde_json::to_string(&PlantRequest::ClaimWriterUnlessHeld { owner: 44 }).unwrap(),
+            serde_json::to_string(&PlantRequest::ClaimWriter {
+                owner: 42,
+                controller: true,
+                monitor: Some("127.0.0.1:4190".parse().unwrap()),
+            })
+            .unwrap(),
+            r#"{"op":"claim_writer","owner":42,"controller":true,"monitor":"127.0.0.1:4190"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PlantRequest::ClaimWriterUnlessHeld {
+                owner: 44,
+                monitor: None
+            })
+            .unwrap(),
             r#"{"op":"claim_writer_unless_held","owner":44}"#
         );
         assert_eq!(
             serde_json::to_string(&PlantRequest::EnsureWriter {
                 owner: 43,
                 rebind: true,
-                controller: true
+                controller: true,
+                monitor: None,
             })
             .unwrap(),
             r#"{"op":"ensure_writer","owner":43,"rebind":true,"controller":true}"#
@@ -515,14 +579,16 @@ mod tests {
             PlantRequest::EnsureWriter {
                 owner: 43,
                 rebind: true,
-                controller: true
+                controller: true,
+                monitor: None,
             }
         );
         assert_eq!(
             serde_json::from_str::<PlantRequest>(r#"{"op":"claim_writer","owner":42}"#).unwrap(),
             PlantRequest::ClaimWriter {
                 owner: 42,
-                controller: true
+                controller: true,
+                monitor: None,
             }
         );
         assert_eq!(
@@ -560,6 +626,7 @@ mod tests {
                 error: PlantError::Io {
                     error: IoError::UnknownPoint(PointId(4)),
                     owner: None,
+                    monitor: None,
                 },
             },
             PlantResponse::Error {
@@ -570,18 +637,21 @@ mod tests {
                         found: Value::Bool(true),
                     },
                     owner: None,
+                    monitor: None,
                 },
             },
             PlantResponse::Error {
                 error: PlantError::Io {
                     error: IoError::Timeout(PointId(6)),
                     owner: None,
+                    monitor: None,
                 },
             },
             PlantResponse::Error {
                 error: PlantError::Io {
                     error: IoError::InvalidValue { point: PointId(8) },
                     owner: None,
+                    monitor: None,
                 },
             },
             PlantResponse::Error {
@@ -593,6 +663,7 @@ mod tests {
                 error: PlantError::Fenced {
                     detail: "another attachment owns field writes".to_string(),
                     owner: Some(424242),
+                    monitor: None,
                 },
             },
             PlantResponse::Error {
@@ -639,6 +710,7 @@ mod tests {
                 error: PlantError::Io {
                     error: IoError::UnknownPoint(PointId(4)),
                     owner: None,
+                    monitor: None,
                 },
             })
             .unwrap(),
@@ -661,6 +733,7 @@ mod tests {
                 error: PlantError::Fenced {
                     detail: "another attachment owns field writes".to_string(),
                     owner: Some(424242),
+                    monitor: None,
                 },
             })
             .unwrap(),
@@ -671,6 +744,7 @@ mod tests {
                 error: PlantError::Io {
                     error: IoError::Fenced(PointId(101)),
                     owner: Some(424242),
+                    monitor: None,
                 },
             })
             .unwrap(),
@@ -687,6 +761,7 @@ mod tests {
                 error: PlantError::Fenced {
                     detail: "another attachment owns field writes".to_string(),
                     owner: None,
+                    monitor: None,
                 },
             }
         );
@@ -699,6 +774,7 @@ mod tests {
                 error: PlantError::Io {
                     error: IoError::Fenced(PointId(101)),
                     owner: None,
+                    monitor: None,
                 },
             }
         );
@@ -748,6 +824,7 @@ mod tests {
                         found: Value::Bool(true),
                     },
                     owner: None,
+                    monitor: None,
                 },
             }
         );

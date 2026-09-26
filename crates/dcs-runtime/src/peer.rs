@@ -204,6 +204,7 @@ use dcs_core::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::net::SocketAddr;
 
 /// A controller instance in a redundant pair: an [`Executor`] plus the
 /// role and write-gate state deciding whether its scans reach the field.
@@ -400,6 +401,13 @@ pub struct Peer<'d> {
     /// [`with_claim_observer`](Self::with_claim_observer); a peer built
     /// without it observes nothing.
     observer: Option<Observer<'d>>,
+    /// The field-arbitrated successor lookup the monitor's
+    /// tracking-source resolution consults after a demotion — the
+    /// monitor endpoint the field's standing claim declared, as this
+    /// run's own fencing verdicts recorded it. Installed by
+    /// [`with_claimed_monitor`](Self::with_claimed_monitor); a peer
+    /// built without it reports no field-arbitrated successor.
+    claimed_monitor: Option<ClaimedMonitor<'d>>,
     /// The claimant tokens this ownership epoch has already journaled —
     /// seeded by the fenced-write verdict's claimant (the `field_claim_lost`
     /// entry already attributes that episode) and grown by each queued
@@ -586,6 +594,23 @@ struct Observer<'d>(Box<dyn Fn() -> Vec<u64> + Send + Sync + 'd>);
 impl fmt::Debug for Observer<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("claim observer")
+    }
+}
+
+/// The field-arbitrated successor lookup the monitor's tracking-source
+/// resolution consults: answers the monitor endpoint the field's
+/// standing write-ownership claim declared — recorded from the driver
+/// surface's own fencing verdicts, so the address is the claim
+/// arbitration's word for where the successor serves, not a peer's
+/// unprovable announcement. `None` answers mean no verdict has named
+/// one — the field's claim declared no monitor, or the driver surface
+/// reports none — and the tracking path resolves as if the lookup did
+/// not exist.
+struct ClaimedMonitor<'d>(Box<dyn Fn() -> Option<SocketAddr> + Send + Sync + 'd>);
+
+impl fmt::Debug for ClaimedMonitor<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("claimed monitor")
     }
 }
 
@@ -941,6 +966,7 @@ impl<'d> Peer<'d> {
             probe: None,
             claimant: None,
             observer: None,
+            claimed_monitor: None,
             observed_claimants: BTreeSet::new(),
             fencing_point: None,
             pending_observations: Vec::new(),
@@ -1107,6 +1133,39 @@ impl<'d> Peer<'d> {
         self
     }
 
+    /// Arms the field-arbitrated successor lookup — the monitor's
+    /// tracking-source resolution asks it after a demotion that left
+    /// this run sourceless: `claimed_monitor` answers the monitor
+    /// endpoint the field's standing write-ownership claim declared,
+    /// recorded from the driver surface's own fencing verdicts. The
+    /// field's arbitration is the identity claim no announced `?peer=`
+    /// hint could ever carry — only actually holding the claim puts a
+    /// monitor under it — so a demoted peer may pull toward the
+    /// endpoint on the field's word and let the pulled checkpoint's
+    /// own verification do the rest. `None` answers mean no verdict
+    /// has named one — the claim declared no monitor, or the driver
+    /// surface reports none — and the resolution answers as if the
+    /// hook did not exist. See [`ClaimedMonitor`].
+    pub fn with_claimed_monitor(
+        mut self,
+        claimed_monitor: impl Fn() -> Option<SocketAddr> + Send + Sync + 'd,
+    ) -> Self {
+        self.claimed_monitor = Some(ClaimedMonitor(Box::new(claimed_monitor)));
+        self
+    }
+
+    /// The monitor endpoint the field's standing write-ownership claim
+    /// declared, as this run's fencing verdicts recorded it — the
+    /// field-arbitrated successor a demoted peer's tracking path
+    /// re-joins on, or `None` while no verdict has named one (or no
+    /// [`with_claimed_monitor`](Self::with_claimed_monitor) hook is
+    /// installed).
+    pub fn claimed_monitor(&self) -> Option<SocketAddr> {
+        self.claimed_monitor
+            .as_ref()
+            .and_then(|claimed_monitor| (claimed_monitor.0)())
+    }
+
     /// Arms the claim's fencing-loss counterpart — the *bound*
     /// conditional re-grant a fencing-demoted ex-owner probes each
     /// scan while its loss mark stands. `reclaim` takes the field's
@@ -1202,6 +1261,7 @@ impl<'d> Peer<'d> {
             probe: None,
             claimant: None,
             observer: None,
+            claimed_monitor: None,
             observed_claimants: BTreeSet::new(),
             fencing_point: None,
             pending_observations: Vec::new(),
