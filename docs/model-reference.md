@@ -1047,6 +1047,16 @@ What each shape means at assembly:
 `crates/dcs-assembly/fixtures/internal_points.json` shows declared
 internal-point wiring.
 
+A channel-bound `out` point named as no connection's `to` end is dead
+engineering: the command path refuses `out` points outright, so
+nothing can ever write the point and the bound channel is never
+written while the model asserts a driven actuator — the
+forgotten-connection case `writable` (`WritableOut`) and
+`unbound_channel` do not cover. Lint flags it
+`undriven_field_output`, advisory only — a deliberately undriven
+output stays valid. Internal `out` points are image-carried values
+and stay silent; the field drives `in` points.
+
 ## Device kinds and their `parameters`
 
 `Device.kind` resolves through the deployment's `DriverRegistry`;
@@ -1390,7 +1400,7 @@ next sees it; lint never blocks anything.
 | Version | `PlantModel::load` | `LoadError::UnsupportedVersion` — `version` other than `MODEL_VERSION` |
 | Validation | `PlantModel::validate` (inside `load`, or standalone for programmatically built models) | Every `ValidationError`, all reported together: `DuplicateId`, `UnknownDevice`, `UnknownChannel`, `ChannelDirectionMismatch`, `ChannelTypeMismatch`, `FieldInitial`, `MissingInitial`, `InitialKindMismatch`, `WritableOut`, `UnknownSource`, `UnknownPoint`, `UnknownComponent`, `UnknownPort`, `ConnectionDirectionMismatch`, `ConnectionTypeMismatch` |
 | Assembly | `dcs_assembly::resolve_drivers` + `DriverPlan::build` + `assemble` | Every `AssemblyError`: kind resolution — `UnknownDeviceKind`, `UnknownComponentKind`; device `parameters` and backends — `InvalidDeviceParameters`, `DeviceBackend`; the merged local sim map's consistency — `InvalidChannelMap` (`ConfigError`); port wiring — `PortBoundTwice`, `UnboundPort`; requirement verification — `UnmappedPoint`, `DirectionMismatch`, `TypeMismatch`; constructor failures — `Component`; executor wiring — `Wiring`; and `UnroutedPoint`, `InvalidInternalPoint`, `MixedPointLink`, `UnresolvedEndpoint`, the mirrors reachable for a model assembled without validation |
-| Lint | `PlantModel::lint`, `dcs-model lint` | Advisory `LintFinding`s over a validated document, in rule order: `point_without_signal`, `signal_missing_unit`, `signal_missing_description`, `signal_missing_group`, `writable_field_point`, `field_input_without_freshness_budget`, `unbound_channel`. Findings exit zero unless `--strict`; a document failing validation is never linted |
+| Lint | `PlantModel::lint`, `dcs-model lint` | Advisory `LintFinding`s over a validated document, in rule order: `point_without_signal`, `signal_missing_unit`, `signal_missing_description`, `signal_missing_group`, `writable_field_point`, `field_input_without_freshness_budget`, `undriven_field_output`, `unbound_channel`. Findings exit zero unless `--strict`; a document failing validation is never linted |
 | Dynamics merge | `dcs-plant-server --dynamics`, or a rig extending a `ChannelMap` | A malformed document is a startup parse error; each element's merge is `ChannelMap::validate` — `ConfigError` naming the element index and the point it drives |
 
 The deliberate split: the model validates structure — ids, references,
@@ -1401,7 +1411,8 @@ that depends on the registered kinds: which `kind` strings exist, what
 each constructed component's declared I/O matches the point map. Lint
 checks engineering completeness the contract does not require — signals
 for points, display metadata, the writable field surface, undeclared
-input freshness budgets, dead channel declarations. Runtime failures
+input freshness budgets, undriven field outputs, dead channel
+declarations. Runtime failures
 are a different surface entirely: a component `step` error lands in
 `ComponentDiagnostics`, and driver problems surface as `IoError`s —
 never as document errors.
