@@ -1,0 +1,17 @@
+[
+  {
+    "integrator": {
+      "input": 11,
+      "output": 10,
+      "initial": 0.0
+    }
+  },
+  {
+    "first_order_lag": {
+      "input": 12,
+      "output": 10,
+      "time_constant": 1.0,
+      "initial": 0.0
+    }
+  }
+]

@@ -1,0 +1,10 @@
+[
+  {
+    "first_order_lag": {
+      "input": 11,
+      "output": 11,
+      "time_constant": 2.0,
+      "initial": 4.0
+    }
+  }
+]
