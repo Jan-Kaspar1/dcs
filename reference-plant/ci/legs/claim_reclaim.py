@@ -483,10 +483,10 @@ def claim_reclaim_pass(args, tamper):
                     "field_moved": held != held0,
                 }
             )
-            if report.get("role") != "standby":
+            if not converged_sync(report):
                 failures.append(
-                    "the marked ex-owner left standby while a "
-                    "different-owner claim stood — the bound grant "
+                    "the marked ex-owner left converged standby while "
+                    "a different-owner claim stood — the bound grant "
                     f"took what it must refuse: {report}"
                 )
                 raise Abort
@@ -496,10 +496,10 @@ def claim_reclaim_pass(args, tamper):
                     "through the held window"
                 )
                 raise Abort
-            if peer_report.get("role") != "standby":
+            if not converged_sync(peer_report):
                 failures.append(
-                    "the tracking peer left standby through the held "
-                    f"window: {peer_report}"
+                    "the tracking peer left converged standby through "
+                    f"the held window: {peer_report}"
                 )
                 raise Abort
             if not mutation_fenced(probe) or (
