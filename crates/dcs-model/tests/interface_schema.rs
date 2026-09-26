@@ -76,32 +76,49 @@ fn recorded_release_interface_schema_matches_the_emitted_output() {
     // interface-schema`'s output — `v0.1.0`'s recorded commit predates
     // the served registry (#375). The same convention as the
     // plant-model schema pin in `tests/schema.rs`: the checked-in file
-    // must stay byte-identical to the emitted output, and its sha256
-    // must equal the digest `docs/releases/v0.2.0/record.md`
-    // publishes. Regenerate with `dcs-model interface-schema >
-    // docs/releases/v0.2.0/block-interfaces.schema.json` whenever the
+    // must stay byte-identical to the emitted output, and `Some`
+    // asserts its sha256 equals the digest its record publishes.
+    // Regenerate with `dcs-model interface-schema >
+    // docs/releases/<tag>/block-interfaces.schema.json` whenever the
     // emitted schema legitimately changes — and update the record's
-    // published sha256 with it while the tag is pending.
+    // published sha256 with it while the tag is pending. `v0.2.0`'s
+    // tag is cut, so its recorded sha256 pins the tagged emission and
+    // the tracked file may legitimately move past it (`None`);
+    // `v0.3.0`'s tag is pending, so its artifact and published sha256
+    // are still pinned.
     let output = run_interface_schema_subcommand();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let path = "docs/releases/v0.2.0/block-interfaces.schema.json";
-    let recorded = std::fs::read(workspace_root().join(path))
-        .expect("the v0.2.0 release record's interface-schema file must exist");
-    assert_eq!(
-        recorded, output.stdout,
-        "{path} drifted from `dcs-model interface-schema`'s emitted output — \
-         regenerate the record file"
-    );
-    assert_eq!(
-        sha256_hex(&recorded),
-        "ddc00496814a4e8cd0d6ec8a5d9fbb95e83f518dcd927b17a4802f13ac84013a",
-        "{path}'s sha256 drifted from the digest its record publishes — \
-         regenerate the record file and update record.md"
-    );
+    for (path, recorded_sha256) in [
+        (
+            "docs/releases/v0.2.0/block-interfaces.schema.json",
+            None::<&'static str>,
+        ),
+        (
+            "docs/releases/v0.3.0/block-interfaces.schema.json",
+            Some("ddc00496814a4e8cd0d6ec8a5d9fbb95e83f518dcd927b17a4802f13ac84013a"),
+        ),
+    ] {
+        let recorded = std::fs::read(workspace_root().join(path)).unwrap_or_else(|error| {
+            panic!("the release record's interface-schema file {path} must exist: {error}")
+        });
+        assert_eq!(
+            recorded, output.stdout,
+            "{path} drifted from `dcs-model interface-schema`'s emitted output — \
+             regenerate the record file"
+        );
+        if let Some(expected) = recorded_sha256 {
+            assert_eq!(
+                sha256_hex(&recorded),
+                expected,
+                "{path}'s sha256 drifted from the digest its record publishes — \
+                 regenerate the record file and update record.md"
+            );
+        }
+    }
 }
 
 #[test]

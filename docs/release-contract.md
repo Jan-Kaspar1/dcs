@@ -432,11 +432,13 @@ procedure), and the deployment's document set digested with each
 peer's checkpoint-stamped fingerprint and durable journal/state
 files (the documentation turnover) — the completeness audit failing
 any record missing a named artifact by name, two passes producing
-identical digests — and the `upgrade` stage, which repins
-the materialized tree to the checkout's `HEAD` and re-runs the pipeline
-under the repin, requiring byte-identical emitted bytes and refusing
-the named incompatible crossings. Its negative cases prove the
-template's new stage names surface as the diagnostics below.
+identical digests — and the `upgrade` stage, which materializes
+the tree at the previous release's recorded rev, repins it to the
+recorded release — under the workspace proof, the stand-in's release
+tag resolving to the checkout's release-candidate commit — and re-runs
+the pipeline under the repin, requiring byte-identical emitted bytes
+and refusing the named incompatible crossings. Its negative cases
+prove the template's new stage names surface as the diagnostics below.
 
 ```sh
 cargo test -p dcs-build --test reference_plant

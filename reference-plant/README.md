@@ -21,7 +21,7 @@ command/event surface the clean check proves.
 ## Layout
 
 ```
-Cargo.toml             the package — git-pinned to the release rev
+Cargo.toml             the package — git-pinned to the release tag
 Cargo.lock             the resolved pin — release crates from git only
 rust-toolchain.toml    the toolchain the release declares
 src/station.rs         the consumer-owned station composition
@@ -153,16 +153,18 @@ platform checkout — the only platform coupling is the pinned release in
 
 ### 2. Pin a release
 
-`Cargo.toml` pins the release crates by immutable revision:
+`Cargo.toml` pins the release crates by release tag:
 
 ```toml
-dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "c2b5694…" }
-dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "c2b5694…" }
+dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.3.0" }
+dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.3.0" }
 ```
 
-`tag = "v0.2.0"` names the identical commit once the release tag
-exists; a `rev` pin is always supported. `Cargo.lock` is committed so
-every build resolves the same sources.
+`rev = "<commit>"` names the identical immutable commit — the recorded
+commit `docs/releases/v0.3.0/record.md` carries — and is always
+supported. `Cargo.lock` is committed so every build resolves the same
+sources; a tag pin resolves the tag once and the committed lockfile
+records the commit it landed on.
 
 ### 3. Compose and emit
 
@@ -192,7 +194,7 @@ The released tooling accepts the emitted model — `ci/check.sh` runs
 over `model/plant.json`. Install the tooling from the pinned release:
 
 ```sh
-cargo install --git https://github.com/Jan-Kaspar1/dcs.git --rev c2b5694… \
+cargo install --git https://github.com/Jan-Kaspar1/dcs.git --tag v0.3.0 \
     dcs-model dcs-controller dcs-plant dcs-monitor
 ```
 
@@ -209,13 +211,17 @@ set over the served journal, `dcs-alarm-report <addr> --journal-file
 
 The stage also exercises the contract's remaining `dcs-model` surfaces.
 The release record's schema artifacts —
-`docs/releases/<tag>/plant-model.schema.json` and
-`docs/releases/<tag>/block-interfaces.schema.json`, where `<tag>` is
+`docs/releases/<tag>/plant-model.schema.json`,
+`docs/releases/<tag>/block-interfaces.schema.json`,
+`docs/releases/<tag>/deploy-manifest.schema.json`, and
+`docs/releases/<tag>/dynamics.schema.json`, where `<tag>` is
 the manifest's `dcs_release` — are fetched through the same git remote
 and pinned revision the crates and tooling resolve over (the record
 lives in the release repository's tree at the pinned commit), and
-`dcs-model schema` / `dcs-model interface-schema` at the pinned rev
-must emit those bytes exactly — a divergence is `schema-drift`.
+`dcs-model schema` / `dcs-model interface-schema` /
+`dcs-model deploy-schema` / `dcs-plant-server --dynamics-schema` at the
+pinned rev must emit those bytes exactly — a divergence is
+`schema-drift`.
 `dcs-model diff` runs two legs: against a doctored *compatible*
 revision of the checked-in model it must name the actual change, and
 against the identical document it must report `no changes` — a leg
@@ -589,12 +595,13 @@ the duty's reachable monitor address, `<active-host>:8080` in place of
 
 A compatible upgrade is a repin: change the `rev`/`tag` in
 `Cargo.toml`, run `cargo update` to move the lockfile, and re-run
-`ci/check.sh`. Within a release's minor series the supported API and
+`ci/check.sh`. Within a compatible crossing the supported API and
 `MODEL_VERSION` are unchanged — the check passing is the upgrade's
 acceptance. `ci/check.sh` proves the path itself: its `upgrade` stage
-materializes this tree at the recorded release rev, repins it to a
-later compatible revision, and re-runs the full check requiring a
-byte-identical `model/plant.json`.
+materializes this tree at the previous release's recorded rev —
+`v0.2.0`'s recorded commit — repins it to this tree's recorded release,
+and re-runs the full check requiring a byte-identical
+`model/plant.json`.
 
 An **incompatible** crossing fails with named diagnostics, never
 silently: a pin that resolves no release crates is `pin-unresolvable`;
