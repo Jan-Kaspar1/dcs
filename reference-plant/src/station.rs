@@ -50,7 +50,12 @@
 //!   twice over — `max_shelve_ticks = 0` and a read-only shelve point,
 //!   so a shelve request answers `NotWritable` at submission — while
 //!   the low-level alarm is the shelvable nuisance case under
-//!   `alarms.low_level_shelve_ticks`. Each pump fault alarm binds its
+//!   `alarms.low_level_shelve_ticks`, and the backup-active alarm is
+//!   the shelvable reason-mandated case under
+//!   `alarms.backup_active_shelve_ticks`: its request point's
+//!   `requires_reason` mark refuses a reasonless shelve at admission,
+//!   so hiding the running-on-backup annunciation always records why.
+//!   Each pump fault alarm binds its
 //!   `oos` to the pump's own maintenance-inhibit point and its
 //!   `suppress` to the delivered copy, so a deliberately offline
 //!   machine's fault stays named without annunciating.
@@ -241,6 +246,13 @@ pub struct AlarmPolicy {
     /// first. The high-level alarm is never shelvable: bound `0` plus
     /// a read-only request point.
     pub low_level_shelve_ticks: i64,
+    /// The backup-active alarm's `max_shelve_ticks` — the second
+    /// shelvable case's bound. Its request point carries the site's
+    /// reason policy: shelving the running-on-backup annunciation
+    /// demands a declared `reason` on the receipted envelope — the
+    /// `requires_reason` mark refusing a reasonless submission
+    /// `reason_required` at admission.
+    pub backup_active_shelve_ticks: i64,
 }
 
 /// The station's site parameterization — pump count, threshold
@@ -317,6 +329,7 @@ impl SiteConfig {
                     response_ticks: 60,
                 },
                 low_level_shelve_ticks: 8,
+                backup_active_shelve_ticks: 6,
             },
         }
     }
@@ -883,18 +896,28 @@ pub fn lift_station(config: &SiteConfig) -> Result<Station, BuildError> {
             "lal-alarm",
         ),
     ));
-    // The remaining station alarms declare no lifecycle inputs —
-    // never-shelvable with no shelving surface, never suppressed,
-    // never out of service; their managed status outputs still report.
+    // The backup-active alarm is the site's reason-mandated shelve
+    // case: the running-on-backup annunciation may be shelved under
+    // `alarms.backup_active_shelve_ticks`, but the request point's
+    // `requires_reason` mark makes the shelve's declared reason
+    // mandatory at admission.
     let backup_alarm = plant.add(ManagedBoolLatchingAlarmSpec::new(
-        managed_parameters(equipment, 0),
-        ManagedInputs::default(),
+        managed_parameters(equipment, config.alarms.backup_active_shelve_ticks),
+        ManagedInputs {
+            shelve: true,
+            ..ManagedInputs::default()
+        },
         rationalization(
             "The backup level instrument carries the station unnoticed",
             "Check the primary level instrument",
             "backup-active-alarm",
         ),
     ));
+    // The remaining station alarms declare no lifecycle inputs —
+    // never-shelvable with no shelving surface, never suppressed,
+    // never out of service; their managed status outputs still report.
+    // The none-available alarm's lone declaration is its designed
+    // suppression on the any-manual condition.
     let none_available_alarm = plant.add(ManagedBoolLatchingAlarmSpec::new(
         managed_parameters(equipment, 0),
         ManagedInputs {
@@ -996,10 +1019,18 @@ pub fn lift_station(config: &SiteConfig) -> Result<Station, BuildError> {
         &backup_alarm.managed,
         &backup_alarm.alarm,
         &backup_alarm.unacknowledged,
-        false,
+        true,
         "backup-active",
     );
     plant.connect(backup_active_in, &backup_alarm.input);
+    // The declared reason is mandatory on this shelve alone: the
+    // point's `requires_reason` mark refuses a reasonless request at
+    // admission while the `lal` shelve keeps the voluntary record.
+    plant.requires_reason(
+        backup_active_alarm
+            .shelve
+            .expect("the backup-active alarm declares shelve"),
+    );
     let none_available_alarm_layout = wire_station_alarm(
         &mut plant,
         3,

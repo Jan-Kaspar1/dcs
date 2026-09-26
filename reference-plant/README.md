@@ -598,10 +598,12 @@ A compatible upgrade is a repin: change the `rev`/`tag` in
 `ci/check.sh`. Within a compatible crossing the supported API and
 `MODEL_VERSION` are unchanged — the check passing is the upgrade's
 acceptance. `ci/check.sh` proves the path itself: its `upgrade` stage
-materializes this tree at the previous release's recorded rev —
-`v0.2.0`'s recorded commit — repins it to this tree's recorded release,
-and re-runs the full check requiring a byte-identical
-`model/plant.json`.
+materializes this tree at the recorded upgrade-from revision — the
+earliest revision the composition still builds and emits under; this
+tree's `requires_reason` marks need the v0.3.0-line builder API, so
+`v0.2.0`'s recorded commit is behind it — repins it to this tree's
+recorded release, and re-runs the full check requiring a
+byte-identical `model/plant.json`.
 
 An **incompatible** crossing fails with named diagnostics, never
 silently: a pin that resolves no release crates is `pin-unresolvable`;

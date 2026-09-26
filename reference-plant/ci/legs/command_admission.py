@@ -123,13 +123,16 @@ CAPACITY_LIMIT = 512
 def writable_bool_points(model):
     """The writable boolean `in` point ids the emitted model declares,
     in point order — the receipted `write_value` targets the flood
-    rotates across."""
+    rotates across. `requires_reason`-marked points are excluded: the
+    flood submits reasonless, and a marked point's admission gate is
+    the shelving-reason leg's contract, not this one's."""
     return [
         point["id"]
         for point in sorted(model["io_points"], key=lambda entry: entry["id"])
         if point.get("writable")
         and point["direction"] == "in"
         and point["value_type"] == "bool"
+        and not point.get("requires_reason")
     ]
 
 
