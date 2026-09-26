@@ -104,7 +104,7 @@ import simulate
 # submission order must surface the named diagnostic on the honest
 # in-order log — never a silently unexercised ordering contract.
 LEG = {
-    "order": 330,
+    "order": 340,
     "title": "the command-overflow submission-order leg",
     "passes": "command-overflow-order",
     "tampers": [

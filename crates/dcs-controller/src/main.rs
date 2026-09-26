@@ -173,8 +173,12 @@
 //! peer's checkpoint source is therefore resolved per scan cycle: the
 //! configured `--peer ADDR` when given — "active now, but here is my
 //! peer for later" — else, on a `--pair-token` keyed run only, the
-//! address the tracking peer announced through its pulls. The
-//! announced fallback is a hint, not a proof:
+//! address the tracking peer announced through its pulls. A configured
+//! source that does not resolve — the named peer down with its DNS
+//! entry, the routine mid-failover condition — is no startup error
+//! either: the name stays the declared source, each pull retries it as
+//! the miss it is, and its later answer reconverges tracking without a
+//! restart. The announced fallback is a hint, not a proof:
 //! the serving side cannot tell the puller's monitor port from any
 //! other port its connection's source claims, so `POST /demote`
 //! toward an announced-only source first pulls one checkpoint from it
@@ -315,6 +319,7 @@ use dcs_core::{CarryoverReport, FieldClaim, IoDriver, PointId, TelemetrySnapshot
 use dcs_model::PlantModel;
 use dcs_monitor::{
     CheckpointPuller, DEFAULT_STATE_DRAIN_CAPACITY, Driven, Monitor, MonitorConfig, StateSink,
+    TrackTarget,
 };
 use dcs_runtime::{Checkpoint, Executor, Peer, TrackReport, WriteGate, mint_generation};
 use dcs_sim_net::{ClaimGrant, RemoteDriver, RemoteError};
@@ -770,11 +775,16 @@ controller scan.
   --standby ADDR  run as a standby: pull the active's checkpoints from
                   its monitoring address ADDR and apply one per scan;
                   combines with --listen, whose POST /promote is the
-                  switchover action
+                  switchover action. A target that does not resolve —
+                  the peer down with its name, the routine mid-failover
+                  condition — degrades tracking as pull misses the
+                  name's later answer reconverges; it is never a
+                  startup error
   --peer ADDR     run as the active, but name the peer's monitoring
                   address this instance tracks if it is later demoted
                   — so a demoted active reconverges and stays
-                  promotable. Mutually exclusive with --standby;
+                  promotable; degrades like --standby when the name
+                  does not resolve. Mutually exclusive with --standby;
                   requires --listen
   --revised       declare this instance's model a deliberate revision of
                   the run's previous one. On a --standby peer a pulled
@@ -1096,6 +1106,29 @@ fn resolve(addr: &str) -> Result<SocketAddr, String> {
         .ok_or_else(|| format!("{addr:?} resolves to no address"))
 }
 
+/// The tracking source a configured peer name becomes at startup:
+/// resolved, the [`TrackTarget::Addr`] every pull dials; unresolvable —
+/// the configured peer's name gone from DNS while it is down, the
+/// routine mid-failover condition a redundant pair exists for — a
+/// [`TrackTarget::Name`] the pulls keep retrying. A name that does not
+/// resolve is a degraded tracking source, never a startup failure: the
+/// run boots, its tracking reports the same pull misses an unreachable
+/// peer produces, and the name answering later resumes tracking
+/// without a restart. `--remote` is deliberately not handled this way:
+/// the field attachment is the run's primary interface, not a
+/// secondary one.
+fn track_target(addr: &str) -> TrackTarget {
+    match resolve(addr) {
+        Ok(addr) => TrackTarget::Addr(addr),
+        Err(error) => {
+            eprintln!(
+                "warning: {error}; the tracking source degrades to pull misses until it resolves"
+            );
+            TrackTarget::Name(addr.to_string())
+        }
+    }
+}
+
 /// What a `--state-file` resume did with an existing checkpoint — the
 /// answer [`resume_state_file`] reports so the caller can present and
 /// record the crossing a revision-armed resume ran.
@@ -1371,8 +1404,8 @@ fn main() -> ExitCode {
     // not holding the claim. The startup activation is deliberately
     // deferred to the run's last local step: the claim preempts
     // unconditionally and outlives a dead holder, so it runs only after
-    // every fallible startup step — journal replay, monitor bind,
-    // peer-address resolution — has proven this process can serve; a
+    // every fallible startup step — journal replay, monitor bind —
+    // has proven this process can serve; a
     // starter that fails earlier leaves no stale claim fencing the
     // field's standing owner. The activation's own claim is the
     // conditional startup grant: it preempts a dead owner's standing
@@ -1444,13 +1477,15 @@ fn main() -> ExitCode {
     // requests, tick by tick, without a wall clock.
     if options.driven {
         let addr = options.listen.as_deref().unwrap();
-        let track = match options.standby.as_deref().or(options.peer.as_deref()) {
-            Some(active) => match resolve(active) {
-                Ok(active) => Some(active),
-                Err(error) => return fail(error),
-            },
-            None => None,
-        };
+        // The configured tracking source: resolved, the address every
+        // scan's pull dials; unresolvable, the name the pulls keep
+        // retrying — a peer down mid-failover is the routine condition
+        // this instance tracks, not a startup fault.
+        let track = options
+            .standby
+            .as_deref()
+            .or(options.peer.as_deref())
+            .map(track_target);
         let monitor =
             match Monitor::bind_peer_with(addr, peer, model.signal_index(), monitor_config()) {
                 Ok(monitor) => monitor,
@@ -1465,7 +1500,10 @@ fn main() -> ExitCode {
         // only provable rendezvous back into tracking.
         driver.set_claim_monitor(monitor.local_addr());
         let monitor = monitor.driven(Driven {
-            track,
+            track: match &track {
+                Some(TrackTarget::Addr(addr)) => Some(*addr),
+                _ => None,
+            },
             after_scan: Some(Box::new(|peer: &Peer<'_>| {
                 // The scan cycle's plant step; the configured state
                 // file's capture+queue follows inside the same lock
@@ -1474,6 +1512,13 @@ fn main() -> ExitCode {
                 driver.step(dt, peer.owns_field())
             })),
         });
+        // A configured source still waiting on DNS stays the declared
+        // tracking source as the name each pull re-resolves — the
+        // same configured source `track` is, in its unresolved shape.
+        let monitor = match track {
+            Some(target @ TrackTarget::Name(_)) => monitor.with_standby_target(target),
+            _ => monitor,
+        };
         // The armed-resume crossing's report joins the durable record
         // behind the run-boundary marker the bind journaled.
         if let Some(report) = &resumed_crossing {
@@ -1483,11 +1528,11 @@ fn main() -> ExitCode {
         // runs the claim-then-lift sequence — the conditional startup
         // grant under this instance's token first, the gate second —
         // deferred to here, after every fallible local startup step
-        // (the track address resolved, the journal replayed, the
-        // monitor bound), so a starter that cannot serve never lands a
-        // claim on the field's standing owner. The grant preempts a
-        // dead owner's claim but refuses a live incumbent's, and a
-        // refused grant is a named startup failure, not an unfenced
+        // (the tracking source resolved or deferred, the journal
+        // replayed, the monitor bound), so a starter that cannot serve
+        // never lands a claim on the field's standing owner. The grant
+        // preempts a dead owner's claim but refuses a live incumbent's,
+        // and a refused grant is a named startup failure, not an unfenced
         // run: the incumbent's receipted state is never silently
         // reverted by a stale restart.
         if options.standby.is_none() {
@@ -1505,11 +1550,12 @@ fn main() -> ExitCode {
         // Standby operation: one checkpoint pull per scan cycle while the
         // peer does not own the field. A failed fetch or a rejected
         // checkpoint degrades the standby — named and recoverable —
-        // while the next good transfer reconverges it.
-        let active_addr = match resolve(active_addr) {
-            Ok(active_addr) => active_addr,
-            Err(error) => return fail(error),
-        };
+        // while the next good transfer reconverges it. A target that
+        // does not resolve — the configured peer's name down with it,
+        // the routine mid-failover condition — degrades the same way:
+        // the name stays the tracking source and each pull re-resolves
+        // it, a counting miss until the peer answers again.
+        let target = track_target(active_addr);
         match &options.listen {
             Some(addr) => {
                 let monitor = match Monitor::bind_paced_peer_with(
@@ -1533,7 +1579,7 @@ fn main() -> ExitCode {
                 // The promotion boundary runs one final pull against the
                 // tracking source, so a command the active admitted up
                 // to the promote request is carried.
-                let monitor = monitor.with_standby_source(active_addr);
+                let monitor = monitor.with_standby_target(target);
                 // The armed-resume crossing's report joins the durable
                 // record behind the run-boundary marker the bind
                 // journaled.
@@ -1559,7 +1605,7 @@ fn main() -> ExitCode {
                 // pulls — the serving peer could not track this one
                 // back anyway, since a monitorless standby serves no
                 // checkpoint endpoint.
-                let mut puller = CheckpointPuller::new(active_addr, None);
+                let mut puller = CheckpointPuller::for_target(target.clone(), None, None);
                 let peer = std::cell::RefCell::new(peer);
                 let state_sink = open_state_sink(&options);
                 let step = || driver.step(dt, peer.borrow().owns_field());
@@ -1574,7 +1620,7 @@ fn main() -> ExitCode {
                         // the network wait itself runs off the scan
                         // cycle's critical path.
                         let report = peer.track_once(|| puller.poll());
-                        report_tracking(&report, active_addr);
+                        report_tracking(&report, &target);
                         for divergence in peer.take_divergences() {
                             eprintln!(
                                 "standby: staged outputs diverged from the field at tick {}: {:?}",
@@ -1695,12 +1741,12 @@ fn main() -> ExitCode {
                 // A --peer launched active names its tracking source up
                 // front — where this instance pulls checkpoints if it is
                 // demoted — ahead of anything a tracking peer announces
-                // through its pulls.
+                // through its pulls. A target that does not resolve —
+                // the peer down with its name, the routine mid-failover
+                // condition — stays the declared source as a name the
+                // pulls retry, never a startup fault.
                 let monitor = match &options.peer {
-                    Some(peer) => match resolve(peer) {
-                        Ok(peer) => monitor.with_standby_source(peer),
-                        Err(error) => return fail(error),
-                    },
+                    Some(peer) => monitor.with_standby_target(track_target(peer)),
                     None => monitor,
                 };
                 // The armed-resume crossing's report joins the durable
@@ -1712,12 +1758,12 @@ fn main() -> ExitCode {
                 // The launched active's deferred startup activation —
                 // the same conditional-grant sequence the driven path
                 // runs: the claim lands only now, the journal replayed,
-                // the monitor bound, and the peer address resolved, so
-                // a startup that failed earlier left no stale claim
-                // fencing the field's standing owner. The grant
-                // preempts a dead owner's claim but refuses a live
-                // incumbent's — a refused grant is a named startup
-                // failure, not an unfenced run.
+                // the monitor bound, and the tracking source resolved
+                // or deferred, so a startup that failed earlier left
+                // no stale claim fencing the field's standing owner.
+                // The grant preempts a dead owner's claim but refuses
+                // a live incumbent's — a refused grant is a named
+                // startup failure, not an unfenced run.
                 if let Err(error) = monitor.activate() {
                     return fail(format!("{error}"));
                 }
@@ -1823,29 +1869,33 @@ fn main() -> ExitCode {
 /// hints leaves the peer pulling nothing rather than following one.
 /// The puller follows the resolved source, respawning when it
 /// changes, and announces this monitor's own address on every pull so
-/// the serving peer learns where to track back. A
+/// the serving peer learns where to track back. A configured source
+/// still waiting on DNS pulls as the name it is — the fetch worker
+/// resolves it per attempt, so the unresolved target's cycles count as
+/// the same misses an unreachable peer's do. A
 /// field-owning cycle's [`Monitor::track_cycle`] short-circuits before
 /// the pull, so the puller's fetch thread idles until a demotion.
 fn tracked_cycle(
     monitor: &Monitor<'_>,
-    puller: &mut Option<(SocketAddr, CheckpointPuller)>,
+    puller: &mut Option<(TrackTarget, CheckpointPuller)>,
 ) -> Tick {
     if let Some(source) = monitor.verified_tracking_source() {
-        if puller.as_ref().map(|(bound, _)| *bound) != Some(source) {
+        if puller.as_ref().map(|(bound, _)| bound) != Some(&source) {
             let announce = Some(monitor.local_addr());
             // A source a keyed run adopted through an announced
             // demotion must keep proving every checkpoint it serves —
             // an endpoint that only replays or fabricates this line's
             // documents feeds the demoted peer nothing. A configured
             // source — or an unkeyed run — pulls unproven, as before.
-            let fresh = match monitor.pull_proof_key(source) {
-                Some(key) => CheckpointPuller::with_pair_proof(source, announce, key),
-                None => CheckpointPuller::new(source, announce),
-            };
-            *puller = Some((source, fresh));
+            let fresh = CheckpointPuller::for_target(
+                source.clone(),
+                announce,
+                monitor.pull_proof_key(&source),
+            );
+            *puller = Some((source.clone(), fresh));
         }
         let report = monitor.track_cycle(|| puller.as_mut().unwrap().1.poll());
-        report_tracking(&report, source);
+        report_tracking(&report, &source);
     }
     monitor.paced_scan()
 }
@@ -1854,18 +1904,19 @@ fn tracked_cycle(
 /// the [`TrackReport`] `Peer::track_once` returned describes — a refused
 /// checkpoint, a produced-nothing pull counted as a heartbeat miss, or
 /// the failover self-promotion the miss budget triggered (and its named
-/// refusal). `active` is the pulled peer's monitoring address.
-fn report_tracking(report: &TrackReport, active: SocketAddr) {
+/// refusal). `source` is the pulled peer's tracking target — an address,
+/// or the configured name the pull is still waiting on DNS for.
+fn report_tracking(report: &TrackReport, source: &TrackTarget) {
     match report {
         TrackReport::OwnsField | TrackReport::Applied(_) => {}
         TrackReport::Refused(error) => {
-            eprintln!("standby: rejected checkpoint from {active}: {error}");
+            eprintln!("standby: rejected checkpoint from {source}: {error}");
         }
         TrackReport::Missed { detail } => eprintln!("standby: {detail}"),
         TrackReport::Promoted { detail, report } => {
             eprintln!("standby: {detail}");
             eprintln!(
-                "standby: {active} unreachable; self-promoted (role {})",
+                "standby: {source} unreachable; self-promoted (role {})",
                 report.role
             );
         }
