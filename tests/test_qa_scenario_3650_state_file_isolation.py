@@ -492,6 +492,11 @@ class StateFileIsolationTests(unittest.TestCase):
         # window admission the answered receipt attested.
         self.assertIn('state-file-impeded', events)
         self.assertIn('state-file-restored', events)
+        # The drain writer may still be covering the restored
+        # window's last captures — a regular tmp legitimately stands
+        # between write and rename until the queue is covered.
+        self.assertTrue(self.feed.sinks['a'].attest(
+            self.feed.sinks['a'].accepted))
         self.assertFalse(
             (self.dirs['a'] / 'state.json.tmp').exists())
         state = self.dirs['a'] / 'state.json'
