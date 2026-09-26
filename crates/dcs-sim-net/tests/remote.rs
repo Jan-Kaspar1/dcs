@@ -1795,50 +1795,48 @@ fn a_fenced_write_records_the_standing_claims_owner_as_fenced_by() {
     });
 }
 
-/// The endpoint half of the fencing verdict: a claimant that
-/// registers its checkpoint-monitor port on the claim arms the
-/// field's arbitration to name that endpoint to every attachment it
-/// fences — the field-attested successor source a fencing-demoted
-/// peer verifies and tracks on the unkeyed pair (#1045). The server
-/// derives the address from the claiming connection's own source IP
-/// paired with the declared port, so a claimant cannot plant an
-/// arbitrary endpoint; a claim registered without a port carries
-/// `None`, exactly like `fenced_by` on an unattributed verdict.
+/// The monitor half of the fencing verdict: a claimant that declares
+/// its monitor endpoint on the claim arms the field's arbitration to
+/// name that endpoint to every attachment it fences — the
+/// field-arbitrated successor a fencing-demoted peer verifies and
+/// tracks on the unkeyed pair (#1045). A claim declared without a
+/// monitor carries `None`, exactly like `fenced_by` on an
+/// unattributed verdict.
 #[test]
-fn a_fenced_write_carries_the_standing_claims_registered_endpoint() {
+fn a_fenced_write_carries_the_standing_claims_declared_monitor() {
     with_server(loopback_map(), |addr| {
         let owner = RemoteDriver::connect(addr).unwrap().as_controller();
-        owner.set_claim_endpoint(7741);
+        let declared = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7741);
+        owner.set_claim_monitor(declared);
         owner.claim_writer(1).unwrap();
 
         let intruder = RemoteDriver::connect(addr).unwrap();
-        assert_eq!(intruder.fenced_endpoint(), None);
+        assert_eq!(intruder.claimed_monitor(), None);
 
         // The intruder's write meets the point's fenced verdict —
-        // carrying the standing claim's registered monitor endpoint
-        // alongside its owner token.
+        // carrying the standing claim's declared monitor alongside its
+        // owner token.
         assert_eq!(
             intruder.write(PointId(20), Value::Float(1.0)),
             Err(IoError::Fenced(PointId(20)))
         );
-        let expected = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7741);
         assert_eq!(intruder.fenced_by(), Some(1));
-        assert_eq!(intruder.fenced_endpoint(), Some(expected));
+        assert_eq!(intruder.claimed_monitor(), Some(declared));
 
         // The conditional grant's live-incumbent refusal and the
         // claim probe carry the same endpoint — every fencing verdict
-        // reports what the standing claim registered.
+        // reports what the standing claim declared.
         assert_eq!(
             intruder.claim_writer_unless_held(9),
             Err(RemoteError::Fenced)
         );
-        assert_eq!(intruder.fenced_endpoint(), Some(expected));
+        assert_eq!(intruder.claimed_monitor(), Some(declared));
         assert_eq!(intruder.probe_writer().unwrap(), FieldClaim::Held);
-        assert_eq!(intruder.fenced_endpoint(), Some(expected));
+        assert_eq!(intruder.claimed_monitor(), Some(declared));
 
-        // A claim registered without a monitor port carries no
-        // endpoint: the foreign takeover's verdicts report `None`
-        // exactly where `fenced_by` reports the token.
+        // A claim declared without a monitor carries no endpoint: the
+        // foreign takeover's verdicts report `None` exactly where
+        // `fenced_by` reports the token.
         let rogue = RemoteDriver::connect(addr).unwrap();
         rogue.claim_writer(2).unwrap();
         assert_eq!(
@@ -1846,12 +1844,12 @@ fn a_fenced_write_carries_the_standing_claims_registered_endpoint() {
             Err(IoError::Fenced(PointId(20)))
         );
         assert_eq!(owner.fenced_by(), Some(2));
-        assert_eq!(owner.fenced_endpoint(), None);
+        assert_eq!(owner.claimed_monitor(), None);
 
         // The unclaimed verdict clears both records — the field names
-        // neither claimant nor endpoint once no claim stands.
+        // neither claimant nor monitor once no claim stands.
         rogue.release_writer().unwrap();
         assert_eq!(owner.probe_writer().unwrap(), FieldClaim::Unclaimed);
-        assert_eq!(owner.fenced_endpoint(), None);
+        assert_eq!(owner.claimed_monitor(), None);
     });
 }

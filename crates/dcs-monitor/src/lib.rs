@@ -899,6 +899,16 @@ pub struct Monitor<'d> {
     /// falls back within. Outside `shared`: request-path bookkeeping
     /// like `announced`.
     announced_verify: Mutex<Option<AnnouncedVerify>>,
+    /// The last field-arbitrated verify pass the tracking path ran —
+    /// the monitor endpoint the claim's fencing verdicts named and
+    /// when the pull ran. The claimed-monitor resolution is the
+    /// unkeyed pair's only provable rendezvous: a failed pass is
+    /// remembered so the next cycle's resolution does not re-pull the
+    /// same endpoint until the field's verdict names a changed
+    /// monitor or [`ANNOUNCED_VERIFY_RETRY`] elapses — the same bound
+    /// a dead announced hint falls back within. Outside `shared`:
+    /// request-path bookkeeping like `announced_verify`.
+    claimed_verify: Mutex<Option<ClaimedVerify>>,
     /// The tracking source a verified announced demotion pinned — the
     /// endpoint `POST /demote` proved serves this run's continuation
     /// under the pair's key and journaled as the adopted source. The
@@ -971,6 +981,18 @@ struct Shared<'d> {
 struct AnnouncedVerify {
     /// The announced hint set the pass probed, newest first.
     hints: Vec<SocketAddr>,
+    /// When the pass ran.
+    at: Instant,
+}
+
+/// One field-arbitrated verify pass's bookkeeping — the monitor
+/// endpoint the standing claim's verdicts declared and the wall-clock
+/// time the pull ran. The tracking path re-pulls only a changed
+/// declaration or one whose pass aged past
+/// [`ANNOUNCED_VERIFY_RETRY`].
+struct ClaimedVerify {
+    /// The declared monitor endpoint the pass pulled.
+    monitor: SocketAddr,
     /// When the pass ran.
     at: Instant,
 }
@@ -1093,6 +1115,7 @@ impl<'d> Monitor<'d> {
             standby_source: None,
             announced: Mutex::new(VecDeque::new()),
             announced_verify: Mutex::new(None),
+            claimed_verify: Mutex::new(None),
             adopted: Mutex::new(None),
             resolved: Mutex::new(None),
             line_owner: Mutex::new(None),
@@ -1225,75 +1248,23 @@ impl<'d> Monitor<'d> {
     /// while the peer owns no field on a keyed run, the announced
     /// hint set probed through the demote verify's own checks
     /// ([`adopt_announced_source`](Self::adopt_announced_source)),
-    /// a passing candidate pinning into `adopted`; and when neither
-    /// proves a source — every unkeyed run, whose announced hints can
-    /// never authenticate — the field-attested endpoint the claim's
-    /// arbitration reported, verified the same way before it earns a
-    /// pull ([`verify_field_attested_source`](Self::verify_field_attested_source)).
-    /// A bare `?peer=`
+    /// a passing candidate pinning into `adopted`. A bare `?peer=`
     /// announce can therefore never redirect a pull — the involuntary
     /// path applies the same scrutiny `POST /demote` does: a field
     /// claim's mid-run loss demotes the peer in place with no request
     /// boundary to hang the verification on, so it runs lazily here,
     /// and an endpoint that cannot prove it serves this run's
     /// continuation is refused the same way — a peer with only
-    /// unproven hints pulls nothing.
+    /// unproven hints pulls nothing. When no announced source
+    /// verifies — on an unkeyed run, where none ever can — the
+    /// field-arbitrated successor stands last
+    /// ([`adopt_claimed_source`](Self::adopt_claimed_source)): the
+    /// monitor endpoint the field's standing claim declares, the
+    /// only address the pair's arbitration itself can vouch for.
     pub fn verified_tracking_source(&self) -> Option<SocketAddr> {
         self.pull_source()
             .or_else(|| self.adopt_announced_source())
-            .or_else(|| self.verify_field_attested_source())
-    }
-
-    /// The field-attested successor channel — the checkpoint endpoint
-    /// the field's own claim arbitration reported on the verdict that
-    /// fenced this run's attachment out: where the standing claim's
-    /// owner registered its checkpoint monitor at claim time, paired
-    /// with the claiming connection's own source address. Unlike a
-    /// `?peer=` announce — any monitor's unauthenticated claim about
-    /// itself — the endpoint is something only the claim's holder
-    /// could have planted, so it stays meaningful on an unkeyed run
-    /// where every announced hint is inert. It is still only a
-    /// *candidate*: the endpoint could be stale — the claim handed on
-    /// to an owner that registered nothing since — so it earns a pull
-    /// only after the same owner check the orphan-resolution probe
-    /// applies: one bounded fetch whose document must prove it serves
-    /// this run's line *as its field owner* —
-    /// [`verify_owner_checkpoint`]'s readable-format,
-    /// same-generation, bounded-lead, `source_owns_field` checks —
-    /// plus the keyed `line_proof` where a pair key stands. A passing
-    /// candidate pins into `resolved` exactly like the orphan probe's,
-    /// so the demoted peer converges on the owner the field named
-    /// rather than stranding `unsynchronized` for want of a
-    /// verifiable address. `None` while the peer owns the field,
-    /// while no verdict named an endpoint — a claim registered by a
-    /// monitor-less tool carries none — and while the candidate
-    /// cannot prove it serves this line as owner.
-    fn verify_field_attested_source(&self) -> Option<SocketAddr> {
-        let endpoint = {
-            let shared = self.shared.lock().unwrap();
-            if shared.peer.owns_field() {
-                return None;
-            }
-            shared.peer.field_owner_endpoint()
-        }?;
-        // An endpoint naming this monitor would only ever serve this
-        // run's own document — never the successor's.
-        if endpoint == self.local_addr() {
-            return None;
-        }
-        let own = self.shared.lock().unwrap().peer.checkpoint();
-        let nonce = self.pair_key.map(|_| mint_generation());
-        let pulled = MonitorClient::with_timeout(endpoint, CHECKPOINT_PULL_TIMEOUT)
-            .checkpoint_tracking(None, nonce)
-            .ok()?;
-        if verify_owner_checkpoint(&pulled, &own).is_ok() && self.proven(&pulled, nonce) {
-            // The candidate proved it serves this line as its field
-            // owner — pin it like the orphan probe's resolution so
-            // later cycles pull it directly rather than re-verifying.
-            *self.resolved.lock().unwrap() = Some(endpoint);
-            return Some(endpoint);
-        }
-        None
+            .or_else(|| self.adopt_claimed_source())
     }
 
     /// The address the listener is bound to.
@@ -2604,6 +2575,86 @@ impl<'d> Monitor<'d> {
         self.resolve_tracking_source()
     }
 
+    /// The field-arbitrated successor half of the tracking-source
+    /// contract — the answer to the QA finding
+    /// `demoted-peer-strands-unsynchronized`. A demoted peer whose run
+    /// is unkeyed can prove no announced hint — every document shape
+    /// an endpoint could serve is derivable from this run's own
+    /// public `/checkpoint` — so without this it stays
+    /// `standby`/`unsynchronized` forever and the pair's redundancy
+    /// silently ends. The field's write-ownership claim is the
+    /// rendezvous the announced contract was never meant to be: the
+    /// fencing verdicts the claim produces carry the monitor endpoint
+    /// the claim's owner *declared* — where it serves the tracking
+    /// surface — so the demoted peer learns the successor's address
+    /// from the same arbitration that demoted it, and only actually
+    /// holding the claim could have put a monitor under it.
+    ///
+    /// The declaration is a candidate, never a pull target on its
+    /// own: the one bounded pull it earns must serve this run's line
+    /// *as its field owner* — the orphan-resolution probe's owner
+    /// check, whose `source_owns_field` stamp a standby's document
+    /// cannot produce — plus, on a keyed run, the pull's
+    /// `line_proof`. A passing endpoint pins into `adopted` and
+    /// journals the adoption exactly like a verified announced
+    /// source; one that cannot prove ownership — a stale verdict
+    /// naming a demoted peer, a dead monitor, a foreign claim's
+    /// undeclared endpoint — refuses, and the recorded pass re-arms
+    /// only when the field's verdict names a changed monitor or
+    /// [`ANNOUNCED_VERIFY_RETRY`] elapses, so a dead declared
+    /// endpoint costs one bounded pull per window rather than one
+    /// per scan. Runs outside `shared` under
+    /// [`CHECKPOINT_PULL_TIMEOUT`].
+    fn adopt_claimed_source(&self) -> Option<SocketAddr> {
+        let (claimed, own) = {
+            let shared = self.shared.lock().unwrap();
+            if shared.peer.owns_field() {
+                return None;
+            }
+            (shared.peer.claimed_monitor()?, shared.peer.checkpoint())
+        };
+        // The verdict could name this monitor itself — a stale
+        // record the field supplanted with a fresher claim would
+        // only ever serve this run's own standby document back,
+        // which can never prove succession.
+        if claimed == self.local_addr() {
+            return None;
+        }
+        {
+            let last = self.claimed_verify.lock().unwrap();
+            if let Some(last) = &*last
+                && last.monitor == claimed
+                && last.at.elapsed() < ANNOUNCED_VERIFY_RETRY
+            {
+                return None;
+            }
+        }
+        *self.claimed_verify.lock().unwrap() = Some(ClaimedVerify {
+            monitor: claimed,
+            at: Instant::now(),
+        });
+        let nonce = self.pair_key.map(|_| mint_generation());
+        let pulled = MonitorClient::with_timeout(claimed, CHECKPOINT_PULL_TIMEOUT)
+            .checkpoint_tracking(None, nonce)
+            .ok()?;
+        if verify_owner_checkpoint(&pulled, &own).is_err() || !self.proven(&pulled, nonce) {
+            return None;
+        }
+        // Pin only while nothing proven stands — a promotion or an
+        // orphan resolution landing mid-pull already answered where
+        // the pulls go — and journal the adoption exactly like the
+        // announced path does.
+        let mut shared = self.shared.lock().unwrap();
+        if shared.peer.owns_field() || self.pull_source().is_some() {
+            return None;
+        }
+        let Shared { peer, recorder } = &mut *shared;
+        recorder.note_tracking_source(peer.tick(), claimed);
+        drop(shared);
+        *self.adopted.lock().unwrap() = Some(claimed);
+        Some(claimed)
+    }
+
     /// Re-resolves the tracking source while the tracked line reports
     /// no field owner — the orphan half of the tracking-source
     /// contract: `StandbySync::Orphaned` proves only that the tracked
@@ -2620,24 +2671,24 @@ impl<'d> Monitor<'d> {
     /// Returns the tracking target after resolution, or `None` when
     /// the line named no routable owner and nothing resolves.
     pub fn resolve_tracking_source(&self) -> Option<SocketAddr> {
-        let (own, attested) = {
+        let (own, claimed) = {
             let shared = self.shared.lock().unwrap();
             if shared.peer.owns_field() {
                 return None;
             }
-            (shared.peer.checkpoint(), shared.peer.field_owner_endpoint())
+            (shared.peer.checkpoint(), shared.peer.claimed_monitor())
         };
         let mut candidates: Vec<SocketAddr> = Vec::new();
         // The field's own word for its claim holder leads — the
-        // endpoint the standing claim's owner registered, attested by
-        // the arbitration itself rather than announced — then the
+        // monitor endpoint the standing claim declares, vouched for
+        // by the arbitration itself rather than announced — then the
         // line's own word for its owner: a wildcard stamp
         // dials through the tracked source's IP, the monitor that
         // served it; then the tracked source itself — a standby may
         // simply not have propagated the stamp yet — then the recorded
         // announcers, any of which may already own the field.
-        if let Some(endpoint) = attested {
-            candidates.push(endpoint);
+        if let Some(monitor) = claimed {
+            candidates.push(monitor);
         }
         let tracked = self
             .driven

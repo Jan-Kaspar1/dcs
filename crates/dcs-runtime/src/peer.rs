@@ -401,6 +401,13 @@ pub struct Peer<'d> {
     /// [`with_claim_observer`](Self::with_claim_observer); a peer built
     /// without it observes nothing.
     observer: Option<Observer<'d>>,
+    /// The field-arbitrated successor lookup the monitor's
+    /// tracking-source resolution consults after a demotion — the
+    /// monitor endpoint the field's standing claim declared, as this
+    /// run's own fencing verdicts recorded it. Installed by
+    /// [`with_claimed_monitor`](Self::with_claimed_monitor); a peer
+    /// built without it reports no field-arbitrated successor.
+    claimed_monitor: Option<ClaimedMonitor<'d>>,
     /// The claimant tokens this ownership epoch has already journaled —
     /// seeded by the fenced-write verdict's claimant (the `field_claim_lost`
     /// entry already attributes that episode) and grown by each queued
@@ -414,12 +421,6 @@ pub struct Peer<'d> {
     /// `point` attributes the refusal through the point whose write the
     /// field fenced rather than an arbitrary one.
     fencing_point: Option<PointId>,
-    /// The claimant-endpoint lookup [`field_owner_endpoint`](Self::field_owner_endpoint)
-    /// asks — the checkpoint endpoint the field's arbitration carried
-    /// on the last verdict that fenced this run's attachment, installed
-    /// by [`with_field_owner_endpoint`](Self::with_field_owner_endpoint).
-    /// A peer built without it reports no field-attested source.
-    owner_endpoint: Option<OwnerEndpoint<'d>>,
     /// Foreign-claim observations not yet consumed for journaling — one
     /// [`ClaimObservation`] per distinct claimant a refused conditional
     /// grant probe named.
@@ -560,26 +561,6 @@ impl fmt::Debug for Claimant<'_> {
     }
 }
 
-/// The claimant-endpoint counterpart of [`Claimant`]: asked where a
-/// tracking source is needed, it answers the checkpoint endpoint the
-/// field's arbitration carried on the last verdict that fenced this
-/// run's attachment — the address the standing claim's owner itself
-/// registered for its monitor, attested by the field rather than
-/// announced by a peer. The answer is a candidate tracking source for
-/// the monitoring layer to verify — the field-attested channel an
-/// unkeyed pair can authenticate where the `?peer=` announced-hint
-/// contract cannot. `None` answers mean no verdict carried an
-/// endpoint: no fenced answer recorded yet, the claim's owner
-/// registered none, or a driver surface whose arbitration carries no
-/// claimant endpoint.
-struct OwnerEndpoint<'d>(Box<dyn Fn(PointId) -> Option<SocketAddr> + Send + Sync + 'd>);
-
-impl fmt::Debug for OwnerEndpoint<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("field owner endpoint")
-    }
-}
-
 /// The fencing-loss counterpart of [`Ensure`]: the *bound* conditional
 /// re-grant a fencing-demoted ex-owner probes each scan while its loss
 /// mark stands — the wedge escape a released preemption owes the pair.
@@ -613,6 +594,23 @@ struct Observer<'d>(Box<dyn Fn() -> Vec<u64> + Send + Sync + 'd>);
 impl fmt::Debug for Observer<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("claim observer")
+    }
+}
+
+/// The field-arbitrated successor lookup the monitor's tracking-source
+/// resolution consults: answers the monitor endpoint the field's
+/// standing write-ownership claim declared — recorded from the driver
+/// surface's own fencing verdicts, so the address is the claim
+/// arbitration's word for where the successor serves, not a peer's
+/// unprovable announcement. `None` answers mean no verdict has named
+/// one — the field's claim declared no monitor, or the driver surface
+/// reports none — and the tracking path resolves as if the lookup did
+/// not exist.
+struct ClaimedMonitor<'d>(Box<dyn Fn() -> Option<SocketAddr> + Send + Sync + 'd>);
+
+impl fmt::Debug for ClaimedMonitor<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("claimed monitor")
     }
 }
 
@@ -968,9 +966,9 @@ impl<'d> Peer<'d> {
             probe: None,
             claimant: None,
             observer: None,
+            claimed_monitor: None,
             observed_claimants: BTreeSet::new(),
             fencing_point: None,
-            owner_endpoint: None,
             pending_observations: Vec::new(),
             reclaim: None,
             field_claim: None,
@@ -1110,46 +1108,6 @@ impl<'d> Peer<'d> {
         self
     }
 
-    /// Arms the claimant-endpoint lookup [`field_owner_endpoint`](Self::field_owner_endpoint)
-    /// asks: `endpoint` answers the checkpoint endpoint the field's
-    /// arbitration carried on the last verdict that fenced this run's
-    /// attachment — the address the standing claim's owner registered
-    /// for its checkpoint monitor, attested by the field's own
-    /// arbitration rather than announced through an unauthenticated
-    /// channel. The monitoring layer verifies the candidate by pulling
-    /// its checkpoint before tracking it; `None` answers mean no
-    /// verdict carried an endpoint. See [`OwnerEndpoint`].
-    pub fn with_field_owner_endpoint(
-        mut self,
-        endpoint: impl Fn(PointId) -> Option<SocketAddr> + Send + Sync + 'd,
-    ) -> Self {
-        self.owner_endpoint = Some(OwnerEndpoint(Box::new(endpoint)));
-        self
-    }
-
-    /// The checkpoint endpoint the field's own arbitration last
-    /// reported as its standing claim's registered monitor — the
-    /// field-attested successor a demoted peer may learn its tracking
-    /// source from where the announced-hint channel cannot
-    /// authenticate on an unkeyed pair. Asked through the observation
-    /// point the claim observation attributes — the fenced-write point
-    /// while the loss mark stands — and answered from the driver's
-    /// recorded verdict, so it tracks the field's standing owner as
-    /// the claim moves between claimants. `None` while this peer owns
-    /// the field — its own endpoint is no tracking source — and while
-    /// no verdict names an endpoint. The answer is a candidate, not a
-    /// verdict: the monitoring layer must still prove it serves this
-    /// line as its field owner before pulling.
-    pub fn field_owner_endpoint(&self) -> Option<SocketAddr> {
-        if self.owns_field() {
-            return None;
-        }
-        let point = self.observation_point()?;
-        self.owner_endpoint
-            .as_ref()
-            .and_then(|endpoint| endpoint.0(point))
-    }
-
     /// Arms the claim-observation hook — consulted each time a
     /// conditional grant probe, the orphan cycle's
     /// [`with_field_ensure`](Self::with_field_ensure) re-arm or the
@@ -1173,6 +1131,39 @@ impl<'d> Peer<'d> {
     ) -> Self {
         self.observer = Some(Observer(Box::new(observer)));
         self
+    }
+
+    /// Arms the field-arbitrated successor lookup — the monitor's
+    /// tracking-source resolution asks it after a demotion that left
+    /// this run sourceless: `claimed_monitor` answers the monitor
+    /// endpoint the field's standing write-ownership claim declared,
+    /// recorded from the driver surface's own fencing verdicts. The
+    /// field's arbitration is the identity claim no announced `?peer=`
+    /// hint could ever carry — only actually holding the claim puts a
+    /// monitor under it — so a demoted peer may pull toward the
+    /// endpoint on the field's word and let the pulled checkpoint's
+    /// own verification do the rest. `None` answers mean no verdict
+    /// has named one — the claim declared no monitor, or the driver
+    /// surface reports none — and the resolution answers as if the
+    /// hook did not exist. See [`ClaimedMonitor`].
+    pub fn with_claimed_monitor(
+        mut self,
+        claimed_monitor: impl Fn() -> Option<SocketAddr> + Send + Sync + 'd,
+    ) -> Self {
+        self.claimed_monitor = Some(ClaimedMonitor(Box::new(claimed_monitor)));
+        self
+    }
+
+    /// The monitor endpoint the field's standing write-ownership claim
+    /// declared, as this run's fencing verdicts recorded it — the
+    /// field-arbitrated successor a demoted peer's tracking path
+    /// re-joins on, or `None` while no verdict has named one (or no
+    /// [`with_claimed_monitor`](Self::with_claimed_monitor) hook is
+    /// installed).
+    pub fn claimed_monitor(&self) -> Option<SocketAddr> {
+        self.claimed_monitor
+            .as_ref()
+            .and_then(|claimed_monitor| (claimed_monitor.0)())
     }
 
     /// Arms the claim's fencing-loss counterpart — the *bound*
@@ -1270,9 +1261,9 @@ impl<'d> Peer<'d> {
             probe: None,
             claimant: None,
             observer: None,
+            claimed_monitor: None,
             observed_claimants: BTreeSet::new(),
             fencing_point: None,
-            owner_endpoint: None,
             pending_observations: Vec::new(),
             reclaim: None,
             field_claim: None,
@@ -2524,15 +2515,23 @@ impl<'d> Peer<'d> {
     /// [`Diverged`](StandbySync::Diverged) verdict stands through the
     /// miss: the peer's promotability-blocking truth — its staged
     /// outputs differ from the field — is unresolved until a same-position
-    /// comparison reads the field and matches, while the miss still
-    /// counts toward the failover budget and reports in
-    /// [`TrackReport::Missed`].
+    /// comparison reads the field and matches. A standing
+    /// [`Orphaned`](StandbySync::Orphaned) verdict stands the same way:
+    /// the miss proves this cycle produced no checkpoint, not that the
+    /// tracked line gained a field owner — letting it flicker the
+    /// verdict to `Degraded` would re-transition `Orphaned` on every
+    /// later apply and re-journal the one episode's
+    /// [`OrphanReport`] per pull. The miss still counts toward the
+    /// failover budget and reports in [`TrackReport::Missed`].
     pub fn note_transfer_failed(&mut self, detail: impl fmt::Display) {
         self.misses += 1;
         if self.failover.is_some_and(|budget| self.misses > budget) {
             self.converged = false;
         }
-        if !matches!(self.sync, StandbySync::Diverged { .. }) {
+        if !matches!(
+            self.sync,
+            StandbySync::Diverged { .. } | StandbySync::Orphaned { .. }
+        ) {
             self.sync = StandbySync::Degraded {
                 detail: detail.to_string(),
             };
@@ -5681,6 +5680,62 @@ mod tests {
         peer.apply(&next).unwrap();
         assert_eq!(peer.missed_transfers(), 2);
         assert!(peer.take_orphans().is_empty());
+    }
+
+    /// The QA finding `field-orphaned-journal-flood`: a peer pinned on
+    /// a non-advancing adopted source — the same frozen checkpoint
+    /// landing on every completed pull while the fetch worker's
+    /// in-flight cycles count produced-nothing misses between them —
+    /// journaled `field_orphaned` on every apply, an unbounded run of
+    /// identical entries. The miss is the cycle producing no
+    /// checkpoint, not evidence the tracked line gained a field owner,
+    /// so it cannot end the episode: a standing `Orphaned` verdict
+    /// rides the miss out the way a standing `Diverged` does, and the
+    /// episode's one transition journals once.
+    #[test]
+    fn a_missed_pull_does_not_end_the_orphan_episode() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate));
+
+        // The pinned source's document is frozen — an unadvanced tick —
+        // and reports no field owner, the static standby shape an
+        // adopted endpoint can serve indefinitely.
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(5);
+        let mut checkpoint = source.checkpoint();
+        checkpoint.source_owns_field = Some(false);
+        assert!(matches!(
+            peer.track_once(|| Ok(checkpoint.clone())),
+            TrackReport::Applied(_)
+        ));
+        assert_eq!(
+            peer.sync_state(),
+            &StandbySync::Orphaned { aligned: Tick(5) }
+        );
+        assert_eq!(peer.take_orphans().len(), 1);
+
+        // The pull cadence's in-flight cycles count misses between the
+        // completed pulls; neither the miss nor the re-landed identical
+        // document may re-journal the episode, and the reported verdict
+        // must not flicker to `degraded` on evidence-free cycles.
+        for _ in 0..8 {
+            assert!(matches!(
+                peer.track_once(|| Err("checkpoint pull still in flight".to_string())),
+                TrackReport::Missed { .. }
+            ));
+            assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
+            peer.scan();
+            assert!(matches!(
+                peer.track_once(|| Ok(checkpoint.clone())),
+                TrackReport::Applied(_)
+            ));
+        }
+        assert!(
+            peer.take_orphans().is_empty(),
+            "the one orphan episode journals once, not once per pull"
+        );
     }
 
     /// `Orphaned` is promotable on the same evidence `Tracking` stands

@@ -6,7 +6,7 @@
   },
   "model": {
     "path": "model/plant.json",
-    "fingerprint": "9d4c956fab85654c"
+    "fingerprint": "7cf7191a15428da6"
   },
   "dynamics": {
     "path": "model/dynamics.json",

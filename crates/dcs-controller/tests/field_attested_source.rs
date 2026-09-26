@@ -12,13 +12,13 @@
 //! The contract the finding demands: after losing the field claim
 //! mid-run, the demoted peer resolves a tracking source and converges
 //! — the redundant pair keeps its hot standby. The shipped shape:
-//! every claim a controller asserts registers its bound
-//! checkpoint-monitor port with the field's write-ownership
-//! arbitration, and every fencing verdict the arbitration hands down
-//! carries the standing claim's registered endpoint. The ex-owner the
-//! verdict fences out therefore learns its successor's address from
-//! the field's own word — not an unauthenticated announce — and the
-//! monitor still proves the candidate serves this line *as its field
+//! every claim a controller asserts declares its bound monitor
+//! endpoint with the field's write-ownership arbitration, and every
+//! fencing verdict the arbitration hands down carries the standing
+//! claim's declared monitor. The ex-owner the verdict fences out
+//! therefore learns its successor's address from the field's own
+//! arbitration — not an unauthenticated announce — and the monitor
+//! still proves the candidate serves this line *as its field
 //! owner* (same generation, bounded lead, `source_owns_field`, and
 //! the keyed `line_proof` where a pair key stands) before a single
 //! tracking pull follows it.
@@ -28,7 +28,7 @@
 //! with no `--pair-token`, a foreign `claim_writer` fencing the owner,
 //! the rogue claim released, the sibling promoted through the orphaned
 //! window — and the ex-owner's served `sync` observed per scan as it
-//! resolves the field-attested endpoint and converges `tracking`,
+//! resolves the claim-declared monitor and converges `tracking`,
 //! promotable again rather than parked `unsynchronized`.
 
 use dcs_core::{IoDriver, IoError, JournalEvent, PointId, Role, StandbySync, Value};
@@ -81,20 +81,20 @@ fn spawn_unkeyed(model: &str, extra: &[String], dt: &str) -> (Spawned, Vec<Strin
 /// 2. A foreign `claim_writer` preempts the arbitration — the QA run's
 ///    `claim_writer(random)` — and the owner's first fenced write
 ///    demotes it in place. While the dead foreign token stands, the
-///    ex-owner's reclaim probes refuse, and the carried endpoint is
-///    `None`: a monitor-less tool's claim registers no successor —
+///    ex-owner's reclaim probes refuse, and the carried monitor is
+///    `None`: a monitor-less tool's claim declares no successor —
 ///    `unsynchronized` is the correct report for that window, since
 ///    the field names nothing to track.
 /// 3. The rogue claim releases — the QA run's hold-then-release — and
 ///    the sibling's promote takes the orphaned field: its conditional
-///    orphan grant claims under its token *with its monitor port
-///    registered*, so the standing claim now carries a successor
-///    endpoint.
+///    orphan grant claims under its token *with its monitor endpoint
+///    declared*, so the standing claim now names a successor's
+///    tracking surface.
 /// 4. The ex-owner's next probes read the fencing verdict the
-///    arbitration now answers with the successor's endpoint; the
-///    monitor verifies it — pulled checkpoint, same generation, the
-///    field-owning stamp — and adopts it as the tracking source. The
-///    served `sync` moves `unsynchronized` → `tracking` inside the
+///    arbitration now answers with the successor's declared monitor;
+///    the monitor verifies it — pulled checkpoint, same generation,
+///    the field-owning stamp — and adopts it as the tracking source.
+///    The served `sync` moves `unsynchronized` → `tracking` inside the
 ///    bound, and `promote` answers again: the pair's hot standby is
 ///    restored, matching the failover goal the finding cites.
 #[test]
@@ -127,7 +127,7 @@ fn unkeyed_fenced_demote_converges_on_the_field_attested_successor() {
 
     // The foreign preemption: a `claim_writer` under a token neither
     // controller generated takes the field's write arbitration
-    // unconditionally — registering no monitor, exactly like the QA
+    // unconditionally — declaring no monitor, exactly like the QA
     // run's plant-socket tool.
     field.claim_writer(FOREIGN).unwrap();
 
@@ -148,8 +148,8 @@ fn unkeyed_fenced_demote_converges_on_the_field_attested_successor() {
     );
 
     // While the dead foreign token stands the ex-owner's reclaim
-    // probes refuse — and the verdicts name no endpoint, because the
-    // rogue claim registered no monitor. `unsynchronized` is the
+    // probes refuse — and the verdicts name no monitor, because the
+    // rogue claim declared none. `unsynchronized` is the
     // correct report for this window: the field names nothing to
     // track, so there is nothing to converge on.
     for tick in 1..=2 {
@@ -170,7 +170,7 @@ fn unkeyed_fenced_demote_converges_on_the_field_attested_successor() {
     // sibling pulls the ex-owner's ownerless checkpoints instead —
     // `source_owns_field: false` surfaces the line as `orphaned`,
     // promotable — and its promote takes the field through the
-    // conditional orphan grant, registering its own monitor endpoint
+    // conditional orphan grant, declaring its own monitor endpoint
     // on the claim it raises.
     field.release_writer().unwrap();
     standby.advance(1).unwrap();
@@ -193,8 +193,8 @@ fn unkeyed_fenced_demote_converges_on_the_field_attested_successor() {
 
     // The defect's fix, observed on the served sync state over time:
     // every scan's claim probe now reads the fencing verdict naming
-    // the successor's field-registered endpoint, the monitor verifies
-    // it serves this line as field owner, and the demoted peer
+    // the successor's declared monitor, the monitor verifies it
+    // serves this line as field owner, and the demoted peer
     // converges `tracking` — where the defect build reported
     // `unsynchronized` for the rest of the session.
     let mut converged = false;
@@ -213,7 +213,7 @@ fn unkeyed_fenced_demote_converges_on_the_field_attested_successor() {
         }
         assert!(
             matches!(report.sync, Some(StandbySync::Unsynchronized)),
-            "tick {tick}: before the field-attested resolve the only \
+            "tick {tick}: before the field-arbitrated resolve the only \
              honest report is unsynchronized: {report:?}"
         );
     }
@@ -225,7 +225,7 @@ fn unkeyed_fenced_demote_converges_on_the_field_attested_successor() {
     // Promotable again — the redundancy the finding's parked
     // `not_converged` refusal silently degraded to none. The promote's
     // unconditional claim preempts the sibling, whose own fenced
-    // demotion then resolves this peer's field-registered endpoint
+    // demotion then resolves this peer's declared monitor
     // the same way: the pair settles back into one active plus a
     // tracking hot standby.
     let (status, body) = active.request("POST", "/promote", None).unwrap();

@@ -30,6 +30,7 @@ import os
 import platform
 import shutil
 import socket
+import stat
 import subprocess
 import time
 import urllib.request
@@ -160,6 +161,18 @@ DEFAULT_CONFIG = {
         'revised': 'loopback', 'foreign': 'loopback',
         'driven': 'loopback', 'plant': 'loopback',
         'interposer': 'bridge', 'forge': 'bridge'},
+    # The sink-isolation leg's declared impede lever (#999): the
+    # controller endpoints whose --state-file mount the runner may
+    # stall, each naming the staged-target kind. 'fifo' parks a
+    # reader-less FIFO at the sink's write-then-rename temporary
+    # sibling of state.json so the drain writer's next open() blocks
+    # inside the mount while the scan loop's captures pile into the
+    # bounded queue — the impeded mount the isolation contract must
+    # absorb — until restore attaches a host reader and the pending
+    # write completes. A run config that omits the map leaves the
+    # lever unavailable and the leg reports inconclusive rather than
+    # probing a mount it was never granted.
+    'state_file_mounts': {'active': 'fifo', 'standby': 'fifo'},
     'model_fixture': 'crates/dcs-demo/fixtures/pump_station.json',
     # The lane's own dynamics declaration: the shared fixture leaves
     # the inflow channel to scripted forcing, while the unattended rig
@@ -1060,6 +1073,175 @@ def cold_restart_controller(run_id, run_dir, name, timeline):
              + ('dropped' if existed else 'already absent') + ')')
 
 
+# The --state-file sink's write-then-rename temporary sibling
+# (dcs-monitor's write_state_file writes '<state>.tmp' beside the
+# state file, then renames it into place): the path the 'fifo' mount
+# lever stages its stall on. Blocking that open leaves state.json
+# itself untouched and stalls exactly the writer thread the
+# sink-isolation contract isolates behind its bounded queue.
+STATE_FILE_TMP = 'state.json.tmp'
+
+# The staged-target kinds _state_file_mounts declarations may name.
+STATE_FILE_LEVERS = ('fifo',)
+
+# The restore bounds: STATE_FILE_ATTACH_GRACE is how long the host
+# reader waits for a writer to pair a blocked open() before concluding
+# no capture is in flight on the staged node (a stalled drain's writer
+# attaches within one scan; a dead sink never does — the orphaned node
+# is unlinked so the mount frees), and STATE_FILE_BOUND is the bound on
+# a paired write completing and on an ordinary state.json returning.
+STATE_FILE_ATTACH_GRACE = 3
+STATE_FILE_BOUND = 15
+
+
+def _state_file_mounts(cfg):
+    """The run's declared per-endpoint --state-file impede mounts —
+    the 'throttled or stalled mount target the run config declares'
+    the sink-isolation leg's lever is built from.
+
+    The map names each controller endpoint's stall kind: the only
+    declared kind, 'fifo', stages a reader-less FIFO at the sink's
+    write-then-rename temporary path inside the controller's
+    runner-owned bind mount, so the drain writer blocks on the mount
+    while captures queue — never on the scan's lock. An absent or
+    empty map leaves the lever unavailable (the leg reports
+    inconclusive rather than probing a mount it was never granted);
+    an unknown endpoint or kind fails the launch loudly, same as a
+    duplicated owner token.
+    """
+    mounts = cfg.get('state_file_mounts') or {}
+    if not isinstance(mounts, dict):
+        raise RuntimeError('state_file_mounts must map endpoint keys '
+                           'to mount kinds')
+    bad = {key: kind for key, kind in mounts.items()
+           if key not in OWNER_TOKEN_ENDPOINTS
+           or kind not in STATE_FILE_LEVERS}
+    if bad:
+        raise RuntimeError('state_file_mounts entries must name a '
+                           'controller endpoint and a kind in '
+                           + json.dumps(list(STATE_FILE_LEVERS)) + ': '
+                           + json.dumps(bad, sort_keys=True))
+    return dict(mounts)
+
+
+def _is_fifo(path):
+    try:
+        return stat.S_ISFIFO(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
+def impede_state_file(run_id, run_dir, name, timeline, mounts):
+    """Stall `name`'s --state-file mount for the sink-isolation leg:
+    stage a reader-less FIFO at the sink's write-then-rename
+    temporary path inside the controller's runner-owned bind mount.
+
+    `name` is the scenario ctx's endpoint key ('active' is ctrl-a's
+    container and state dir, 'standby' ctrl-b's); `mounts` is the
+    run's validated _state_file_mounts map — an endpoint the config
+    never declared has no lever, and the action raises so the
+    scenario reports the mount lever unavailable rather than staging
+    an ungranted stall. With the FIFO standing, the drain writer's
+    next File::create on the temporary path blocks inside open()
+    until a reader pairs: captures keep queueing behind the bounded
+    handoff, the scan never waits, and publication.state_sink walks
+    healthy -> lagging. restore_state_file pairs the reader. A
+    capture's regular tmp already in flight clears on its own rename
+    before the FIFO stages; an in-place FIFO makes the call
+    idempotent. The FIFO is staged world-writable because the
+    containerized writer runs uid 10001.
+    """
+    if name not in mounts:
+        raise RuntimeError('the run config declares no state-file '
+                           'mount lever for endpoint ' + name)
+    container = _controller_container(run_id, name)
+    peer = container.rsplit('-', 1)[1]
+    tmp = _controller_dir(run_dir, peer) / STATE_FILE_TMP
+    timeline('state-file-impede', 'stall ' + str(tmp) + ' for '
+             + container + ' (' + mounts[name] + ')')
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            os.mkfifo(tmp)
+            break
+        except FileExistsError:
+            if _is_fifo(tmp):
+                break  # the stall is already staged
+            # A capture's write is in flight on a regular tmp: its
+            # rename clears the path — retry until it does.
+            if time.monotonic() > deadline:
+                raise RuntimeError('a regular ' + tmp.name
+                                   + ' never cleared for '
+                                   + container)
+            time.sleep(0.01)
+    os.chmod(tmp, 0o666)
+    timeline('state-file-impeded', container
+             + ' --state-file mount stalled')
+
+
+def restore_state_file(run_id, run_dir, name, timeline):
+    """Release the stall impede_state_file staged on `name`: attach a
+    host-side reader to the staged FIFO so the drain writer's pending
+    open() pairs, drain its bytes until the write's close+rename
+    carries the FIFO onto the state path, then wait until a capture's
+    regular temporary write has made state.json an ordinary file
+    again.
+
+    Holding the read end pairs every writer open on the node — even a
+    write that attached after the FIFO staged — so the mount heals
+    without touching container or file identity. A readerless node
+    whose grace lapses (a stalled drain's writer attaches within a
+    scan; only a dead sink never does) is unlinked so the mount frees
+    — the orphaned write, if any is still mid-open on the node, keeps
+    its pairing through our held read end. Raises when nothing was
+    staged or a bounded wait lapses.
+    """
+    container = _controller_container(run_id, name)
+    peer = container.rsplit('-', 1)[1]
+    directory = _controller_dir(run_dir, peer)
+    tmp = directory / STATE_FILE_TMP
+    if not _is_fifo(tmp):
+        raise RuntimeError('no staged state-file stall for '
+                           + container)
+    timeline('state-file-restore', 'release ' + str(tmp) + ' for '
+             + container)
+    fd = os.open(tmp, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        attached = False
+        bound = time.monotonic() + STATE_FILE_BOUND
+        grace = time.monotonic() + STATE_FILE_ATTACH_GRACE
+        while os.path.lexists(tmp):
+            try:
+                if os.read(fd, 1 << 16):
+                    attached = True
+            except BlockingIOError:
+                attached = True   # a writer holds the node open
+            if attached:
+                if time.monotonic() > bound:
+                    raise RuntimeError('the stalled state-file write '
+                                       'never completed for '
+                                       + container)
+            elif time.monotonic() > grace:
+                tmp.unlink(missing_ok=True)
+                break
+            else:
+                time.sleep(0.005)
+    finally:
+        os.close(fd)
+    # The renamed FIFO now answers as state.json until the next
+    # capture's regular temporary replaces it — the mount is restored
+    # once an ordinary file stands again.
+    state = directory / 'state.json'
+    bound = time.monotonic() + STATE_FILE_BOUND
+    while not (os.path.isfile(state) and not _is_fifo(state)):
+        if time.monotonic() > bound:
+            raise RuntimeError('state.json never returned to a '
+                               'regular file for ' + container)
+        time.sleep(0.01)
+    timeline('state-file-restored', container
+             + ' --state-file mount released')
+
+
 def stop_controller(run_id, name, timeline):
     """The stop half of the lifecycle action, alone: `docker stop` on
     one of the run's controller containers, held down until the scenario
@@ -1545,6 +1727,7 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
     run_id = record['run_id']
     names = {'active': 'a', 'standby': 'b', 'revised': 'c',
              'foreign': 'foreign', 'driven': 'd'}
+    mounts = _state_file_mounts(cfg)
     return {
         'active': 'http://127.0.0.1:' + str(cfg['active_port']),
         'standby': 'http://127.0.0.1:' + str(cfg['standby_port']),
@@ -1572,6 +1755,17 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
             run_id, name, timeline),
         'cold_restart_controller': lambda name: cold_restart_controller(
             run_id, run_dir, name, timeline),
+        # The sink-isolation leg's mount lever — the impede/restore
+        # pair on the endpoints the run config declares a stalled
+        # mount kind for. No declaration means no lever, and the leg
+        # reports inconclusive rather than probing a mount it was
+        # never granted.
+        'impede_state_file': (lambda name: impede_state_file(
+            run_id, run_dir, name, timeline, mounts))
+            if mounts else None,
+        'restore_state_file': (lambda name: restore_state_file(
+            run_id, run_dir, name, timeline))
+            if mounts else None,
         'stop_controller': lambda name: stop_controller(
             run_id, name, timeline),
         'start_controller': lambda name: start_controller(

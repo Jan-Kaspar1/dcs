@@ -80,18 +80,15 @@ struct WriterClaim {
     /// and read as `true` — an unmarked claim is treated as a
     /// controller's, the conservative verdict.
     controller: bool,
-    /// The checkpoint endpoint the claim's owner registered — the
-    /// claiming attachment's own connection source paired with the
-    /// `monitor` port its claim request declared, refreshed whenever
-    /// a claim of the standing owner registers one. The fencing
-    /// verdicts carry it so a fenced-out peer learns where the field's
-    /// owner serves this line's checkpoints through the field's own
-    /// arbitration — the registrant is by definition the attachment
-    /// the field serves — rather than the announced-hint channel an
-    /// unkeyed pair cannot authenticate. `None` where the claim's
-    /// owner declared no monitor port — a field tool, or a build
-    /// predating the field.
-    endpoint: Option<SocketAddr>,
+    /// The monitor endpoint the claim's owner declared — where this
+    /// owner serves the tracking surface a superseded peer re-joins
+    /// on. The field's arbitration is the only authority an unkeyed
+    /// pair can prove: every fencing verdict the claim produces
+    /// carries it, so a fenced-out peer learns the successor's
+    /// address from the same ruling that demoted it. `None` for
+    /// claims that declared none — tools, and attachments on a
+    /// protocol build predating the field.
+    monitor: Option<SocketAddr>,
 }
 
 impl WriterClaim {
@@ -151,10 +148,10 @@ fn grant_writer_claim(
     owner: u64,
     connection: u64,
     controller: bool,
-    endpoint: Option<SocketAddr>,
+    monitor: Option<SocketAddr>,
 ) -> PlantResponse {
     let mut writer = shared.writer.lock().unwrap();
-    grant_writer_claim_locked(&mut writer, owner, connection, controller, endpoint)
+    grant_writer_claim_locked(&mut writer, owner, connection, controller, monitor)
 }
 
 /// The locked half of [`grant_writer_claim`], also invoked from inside
@@ -163,15 +160,16 @@ fn grant_writer_claim(
 /// attachment stands behind the claim it reads as a controller claim,
 /// so a token a tool raised and a controller adopted still refuses a
 /// peer's conditional preemption while the controller holds it live.
-/// The registered checkpoint `endpoint` records the same way: the
-/// claim's verdicts carry the newest registration the standing owner
-/// asserted.
+/// A fresh `monitor` declaration likewise replaces the standing one —
+/// the owner's monitor rebinds with it — while an undeclared join
+/// keeps the declaration a controller attachment already made rather
+/// than letting a tool's claim erase where the owner serves.
 fn grant_writer_claim_locked(
     writer: &mut Option<WriterClaim>,
     owner: u64,
     connection: u64,
     controller: bool,
-    endpoint: Option<SocketAddr>,
+    monitor: Option<SocketAddr>,
 ) -> PlantResponse {
     let shared_claim = writer
         .as_ref()
@@ -180,7 +178,9 @@ fn grant_writer_claim_locked(
         Some(claim) if claim.owner == owner => {
             claim.holders.insert(connection);
             claim.controller |= controller;
-            claim.endpoint = endpoint.or(claim.endpoint);
+            if monitor.is_some() {
+                claim.monitor = monitor;
+            }
         }
         _ => {
             *writer = Some(WriterClaim {
@@ -188,7 +188,7 @@ fn grant_writer_claim_locked(
                 holders: HashSet::from([connection]),
                 yielded: false,
                 controller,
-                endpoint,
+                monitor,
             });
         }
     }
@@ -204,11 +204,6 @@ fn grant_writer_claim_locked(
 /// violates the message bound, or the server stops.
 fn serve_connection(shared: &Shared, stream: TcpStream, id: u64) {
     let _ = stream.set_nodelay(true);
-    // The attachment's own source address: a claim's registered
-    // monitor port pairs with it to name where the claim's owner
-    // serves checkpoints — the field-attested successor endpoint the
-    // fencing verdicts carry.
-    let source = stream.peer_addr().ok();
     let mut reader = BufReader::new(stream);
     loop {
         if shared.stopped() {
@@ -221,7 +216,7 @@ fn serve_connection(shared: &Shared, stream: TcpStream, id: u64) {
             Ok(None) | Err(_) => return,
         };
         let response = match serde_json::from_slice::<PlantRequest>(&line) {
-            Ok(request) => dispatch(shared, id, source, request),
+            Ok(request) => dispatch(shared, id, request),
             Err(error) => PlantResponse::Error {
                 error: PlantError::InvalidRequest {
                     detail: error.to_string(),
@@ -253,31 +248,16 @@ fn serve_connection(shared: &Shared, stream: TcpStream, id: u64) {
 /// all (a fresh or restarted server included) both are refused
 /// [`PlantError::Unclaimed`], so a restart never opens a window an
 /// unclaimed attachment can mutate through.
-fn dispatch(
-    shared: &Shared,
-    connection: u64,
-    source: Option<SocketAddr>,
-    request: PlantRequest,
-) -> PlantResponse {
+fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantResponse {
     let applied = |result: Result<(), IoError>| match result {
         Ok(()) => PlantResponse::Done,
         Err(error) => PlantResponse::Error {
             error: PlantError::Io {
                 error,
                 owner: None,
-                endpoint: None,
+                monitor: None,
             },
         },
-    };
-    // A claim request's registered checkpoint endpoint: the port the
-    // attachment declared its monitor listens on, paired with the
-    // connection's own source address — never a claimed address —
-    // exactly as a `?peer=` announce resolves to its connection's
-    // source.
-    let endpoint = |monitor: Option<u16>| {
-        monitor
-            .zip(source)
-            .map(|(port, source)| SocketAddr::new(source.ip(), port))
     };
     match request {
         PlantRequest::Read { point } => match shared.driver.read(point) {
@@ -286,7 +266,7 @@ fn dispatch(
                 error: PlantError::Io {
                     error,
                     owner: None,
-                    endpoint: None,
+                    monitor: None,
                 },
             },
         },
@@ -298,16 +278,17 @@ fn dispatch(
             let writer = shared.writer.lock().unwrap();
             match writer.as_ref() {
                 // The fencing verdict names the standing claim's
-                // owner: the superseded field owner's audit trail can
-                // attribute the preemption to the claimant's token,
-                // and the registered endpoint tells it where the
-                // owner serves this line's checkpoints.
+                // owner and the monitor it declared: the superseded
+                // field owner's audit trail can attribute the
+                // preemption to the claimant's token, and its tracking
+                // path can re-join on the address the field itself
+                // vouches for.
                 Some(claim) if !claim.holders.contains(&connection) => {
                     return PlantResponse::Error {
                         error: PlantError::Io {
                             error: IoError::Fenced(point),
                             owner: Some(claim.owner),
-                            endpoint: claim.endpoint,
+                            monitor: claim.monitor,
                         },
                     };
                 }
@@ -339,7 +320,7 @@ fn dispatch(
                         error: PlantError::Fenced {
                             detail: "another attachment owns field writes".to_string(),
                             owner: Some(claim.owner),
-                            endpoint: claim.endpoint,
+                            monitor: claim.monitor,
                         },
                     };
                 }
@@ -370,7 +351,7 @@ fn dispatch(
         } => {
             // The grant preempts unconditionally: the promoted standby's
             // claim must beat the old owner's, wherever it still lives.
-            grant_writer_claim(shared, owner, connection, controller, endpoint(monitor))
+            grant_writer_claim(shared, owner, connection, controller, monitor)
         }
         PlantRequest::ClaimWriterUnlessHeld { owner, monitor } => {
             // The startup and orphan grant: a launched controller or an
@@ -407,17 +388,11 @@ fn dispatch(
                                  claim"
                                 .to_string(),
                             owner: Some(claim.owner),
-                            endpoint: claim.endpoint,
+                            monitor: claim.monitor,
                         },
                     }
                 }
-                _ => grant_writer_claim_locked(
-                    &mut writer,
-                    owner,
-                    connection,
-                    true,
-                    endpoint(monitor),
-                ),
+                _ => grant_writer_claim_locked(&mut writer, owner, connection, true, monitor),
             }
         }
         PlantRequest::EnsureWriter {
@@ -444,7 +419,7 @@ fn dispatch(
                     error: PlantError::Fenced {
                         detail: "another attachment owns field writes".to_string(),
                         owner: Some(claim.owner),
-                        endpoint: claim.endpoint,
+                        monitor: claim.monitor,
                     },
                 },
                 Some(claim) => {
@@ -455,9 +430,13 @@ fn dispatch(
                     // A controller attachment asserting the standing
                     // owner upgrades the marker: a claim a controller
                     // stands behind reads as a controller claim even
-                    // where a tool raised it first.
+                    // where a tool raised it first. The monitor
+                    // declaration refreshes the same way: a re-armed
+                    // claim keeps naming where its owner serves.
                     claim.controller |= controller;
-                    claim.endpoint = endpoint(monitor).or(claim.endpoint);
+                    if monitor.is_some() {
+                        claim.monitor = monitor;
+                    }
                     if shared_claim {
                         PlantResponse::ClaimedShared { owner }
                     } else {
@@ -474,7 +453,7 @@ fn dispatch(
                         },
                         yielded: false,
                         controller,
-                        endpoint: endpoint(monitor),
+                        monitor,
                     });
                     PlantResponse::Done
                 }
@@ -522,7 +501,7 @@ fn dispatch(
                     error: PlantError::Fenced {
                         detail: "another attachment owns field writes".to_string(),
                         owner: Some(claim.owner),
-                        endpoint: claim.endpoint,
+                        monitor: claim.monitor,
                     },
                 },
                 None => PlantResponse::Error {
