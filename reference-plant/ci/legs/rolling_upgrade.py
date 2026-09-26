@@ -38,7 +38,10 @@ on the pinned release's `dcs-plant-server`. The run:
 - stops the demoted predecessor peer and relaunches it on the pinned
   binary the same way: resumed, rejoined `standby`, reconverged —
   both controllers now pinned, one `active` plus one `tracking`
-  standby, the field never unowned;
+  standby, the field never unowned — each relaunch rebinding the
+  peer's previous monitor address, a peer's deployment address
+  surviving its binary swap so the wiring the pair's members
+  recorded for it keeps resolving;
 - restores the pair's launch roles — the manifest's declared duty
   `active` and its standby `tracking`, both on the pinned release —
   and audits the durable record: each journal file's run boundaries
@@ -425,13 +428,17 @@ def resume_evidence(preamble, persisted, what, failures):
     return resumed
 
 
-def roll_peer(rig, attr, url_attr, binary, target, files, args, failures):
+def roll_peer(rig, attr, url_attr, binary, target, files, listen,
+              args, failures):
     """Relaunch a stopped rig peer on the pinned `binary` wired
     `--standby <target>` onto the same declared persistence files —
-    the one-process-at-a-time binary swap. A startup refusal
-    classifies: a named format refusal reading the predecessor's
-    artifacts is the recorded incompatibility; any other exit is a
-    leg failure. Returns the spawn preamble."""
+    the one-process-at-a-time binary swap. `listen` rebinds the peer's
+    previous monitor address: a peer's deployment address survives
+    its relaunch, so the wiring the pair's members recorded for it —
+    a sibling's configured `--standby` target — keeps resolving. A
+    startup refusal classifies: a named format refusal reading the
+    predecessor's artifacts is the recorded incompatibility; any
+    other exit is a leg failure. Returns the spawn preamble."""
     process, url, preamble = pair.spawn_peer(
         binary,
         args.model,
@@ -439,6 +446,7 @@ def roll_peer(rig, attr, url_attr, binary, target, files, args, failures):
         rig.plant_addr,
         target,
         files,
+        listen=listen,
         pair_token=pair.PAIR_TOKEN,
     )
     setattr(rig, attr, process)
@@ -707,8 +715,8 @@ def rolling_upgrade_pass(args, tamper):
             downtime.append({"tick": owner["tick"], "field": field})
         preamble = roll_peer(
             rig, "standby", "standby_url", args.controller,
-            duty_url.removeprefix("http://"), standby_files, args,
-            failures,
+            duty_url.removeprefix("http://"), standby_files,
+            standby_url.removeprefix("http://"), args, failures,
         )
         standby_url = rig.standby_url
         resumed = resume_evidence(
@@ -880,8 +888,8 @@ def rolling_upgrade_pass(args, tamper):
             downtime_duty.append({"tick": owner["tick"], "field": field})
         preamble_duty = roll_peer(
             rig, "duty", "duty_url", args.controller,
-            standby_url.removeprefix("http://"), duty_files, args,
-            failures,
+            standby_url.removeprefix("http://"), duty_files,
+            duty_url.removeprefix("http://"), args, failures,
         )
         duty_url = rig.duty_url
         resumed_duty = resume_evidence(
