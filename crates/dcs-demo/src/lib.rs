@@ -34,6 +34,14 @@
 //! and run through a documented command-and-fault scenario. This module's
 //! hand-rolled [`assemble`] predates that path and stays as the M1 example.
 //!
+//! The [`equivalence`] module carries the driven-cycle orchestration
+//! both equivalence runners share — the driven-`Monitor` bind and
+//! `Driven` wiring, the per-tick command-and-advance loop, receipt and
+//! journal collection, and the `sim-bus` overlay's bank
+//! bind/substitute/resolve pattern — so a runner supplies only its
+//! scenario content: fixture documents, the field program, operator
+//! actions, and the scenario pins.
+//!
 //! The [`two_kinds`] module carries the interim WW-FND-002 evidence: one
 //! logical plant bound once to `sim-scripted` and once to `sim-bus` — two
 //! registered driver kinds with different transport semantics — run through
@@ -49,6 +57,7 @@
 
 #![warn(missing_docs)]
 
+pub mod equivalence;
 pub mod showcase;
 pub mod station_kinds;
 pub mod two_kinds;
