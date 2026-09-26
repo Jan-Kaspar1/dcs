@@ -42,7 +42,9 @@ use dcs_core::{
     CarryoverReport, CommandOutcome, CommandReceipt, Divergence, EventRetention, JournalEntry,
     JournalEvent, PointId, Quality, TelemetrySnapshot, Tick, Value,
 };
-use dcs_runtime::{Executor, OrphanReport, ResolutionReport, RoleChange, SourceRestart};
+use dcs_runtime::{
+    ClaimObservation, Executor, OrphanReport, ResolutionReport, RoleChange, SourceRestart,
+};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::net::SocketAddr;
@@ -509,6 +511,23 @@ impl Recorder {
         claimant: Option<u64>,
     ) {
         self.push(tick, JournalEvent::FieldClaimLost { point, claimant });
+    }
+
+    /// Journals a foreign-claim observation — a conditional grant
+    /// probe (the orphan cycle's re-arm or the fencing-loss reclaim)
+    /// was refused while the field's arbitration named a different
+    /// owner standing — attributed to the tick the probe was refused
+    /// at, `claimant` carrying the observed owner token. One entry per
+    /// distinct claimant the run observes: a standing foreign claim
+    /// journals once, not once per refused probe.
+    pub(super) fn note_claim_observed(&mut self, observation: ClaimObservation) {
+        self.push(
+            observation.tick,
+            JournalEvent::FieldClaimObserved {
+                point: observation.point,
+                claimant: observation.claimant,
+            },
+        );
     }
 
     /// Journals an orphan detection — a tracking peer's applied

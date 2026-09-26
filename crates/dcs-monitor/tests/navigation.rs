@@ -403,7 +403,8 @@ fn attributed(entry: &JournalEntry, name: &str, points: &BTreeSet<PointId>) -> b
     match &entry.event {
         JournalEvent::QualityChanged { point, .. }
         | JournalEvent::PointChanged { point, .. }
-        | JournalEvent::FieldClaimLost { point, .. } => points.contains(point),
+        | JournalEvent::FieldClaimLost { point, .. }
+        | JournalEvent::FieldClaimObserved { point, .. } => points.contains(point),
         JournalEvent::CommandSettled { receipt } => {
             receipt.command.component() == Some(name)
                 || receipt

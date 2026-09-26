@@ -28,18 +28,18 @@ spans, in page.html 1-based lines:
   and its retried-until-receipted release loop, and the failed-poll
   stale mark — L1352–1441, L1474–1475, L1494–1495
 - `submitAck`'s press: the receipted write of true arming the release
-  on an accepted/applied outcome — L2990–3007
+  on an accepted/applied outcome — L2991–3008
 - `refreshTrends`' since cursor, run-marker restart check, gap note,
-  and the refetch-gated watermark / seq fallback — L3215–3264
+  and the refetch-gated watermark / seq fallback — L3217–3266
 - `journalKey`'s run-qualified merge identity and `refreshJournal`'s
   cursor, head and consecutive-pair gap notes, attribution re-mark,
   dedupe, run_boundary restart check, merge, the pending-submission
-  settle resolution, ordering, and bound — L3333–3442
+  settle resolution, ordering, and bound — L3335–3444
 - `isAbortError`'s abort/timeout split, `abandonedSubmission`'s
   indeterminate verdict and pending record, `sameSubmission`'s
   settle-to-submission match, `postCommand`'s bounded POST,
   `isNotActive`, and `submitCommand`'s active-peer routing with the
-  not_active re-poll and the abort-verdict ordering — L3728–3901
+  not_active re-poll and the abort-verdict ordering — L3742–3915
 """
 import json
 import unittest
@@ -176,85 +176,85 @@ PINS = [
     # receipted path and arming the release only on an accepted or
     # applied outcome, so a rejection never schedules a release and a
     # lost answer leaves the held-true audit to catch the latch.
-    (3007, 'async function submitAck(button) {'),
-    (3010, 'if (!meta || !meta.writable) return;'),
-    (3012, 'const answer = await submitCommand({ write_value: {'),
-    (3016, 'ackReleases.set(point, answer.outcome.accepted.apply_tick);'),
-    (3018, 'ackReleases.set(point, answer.outcome.applied.tick);'),
+    (3008, 'async function submitAck(button) {'),
+    (3011, 'if (!meta || !meta.writable) return;'),
+    (3013, 'const answer = await submitCommand({ write_value: {'),
+    (3017, 'ackReleases.set(point, answer.outcome.accepted.apply_tick);'),
+    (3019, 'ackReleases.set(point, answer.outcome.applied.tick);'),
     # refreshTrends: the common since cursor, the served run marker's
     # restart check, the served gap note, and the refetch-gated tick
     # watermark / seq fallback.
-    (3232, 'async function refreshTrends(base) {'),
-    (3238, 'const histories = await (await pollFetch(base + "/history?since=" + since)).json();'),
-    (3248, 'if (history.run !== undefined) {'),
-    (3249, 'if (state.run !== null && history.run !== state.run) {'),
-    (3250, 'noteRestart("the served history run marker advanced to run " +'),
-    (3253, 'state.run = history.run;'),
-    (3258, 'const first = history.samples.find(entry => entry.seq > state.lastSeq);'),
-    (3259, 'if (state.lastSeq > 0 && first && first.seq > state.lastSeq + 1) {'),
-    (3260, 'noteFeedGap("history", state.lastSeq + 1, first.seq - 1);'),
-    (3271, 'const refetch = state.lastSeq === 0;'),
-    (3272, 'const watermark = state.lastTick;'),
-    (3274, 'if (entry.seq <= state.lastSeq) continue;'),
-    (3275, 'state.lastSeq = entry.seq;'),
-    (3276, 'if (refetch && watermark !== null && entry.sample.tick <= watermark) {'),
-    (3279, 'state.samples.push(entry.sample);'),
-    (3281, 'state.lastTick = entry.sample.tick;'),
+    (3234, 'async function refreshTrends(base) {'),
+    (3240, 'const histories = await (await pollFetch(base + "/history?since=" + since)).json();'),
+    (3250, 'if (history.run !== undefined) {'),
+    (3251, 'if (state.run !== null && history.run !== state.run) {'),
+    (3252, 'noteRestart("the served history run marker advanced to run " +'),
+    (3255, 'state.run = history.run;'),
+    (3260, 'const first = history.samples.find(entry => entry.seq > state.lastSeq);'),
+    (3261, 'if (state.lastSeq > 0 && first && first.seq > state.lastSeq + 1) {'),
+    (3262, 'noteFeedGap("history", state.lastSeq + 1, first.seq - 1);'),
+    (3273, 'const refetch = state.lastSeq === 0;'),
+    (3274, 'const watermark = state.lastTick;'),
+    (3276, 'if (entry.seq <= state.lastSeq) continue;'),
+    (3277, 'state.lastSeq = entry.seq;'),
+    (3278, 'if (refetch && watermark !== null && entry.sample.tick <= watermark) {'),
+    (3281, 'state.samples.push(entry.sample);'),
+    (3283, 'state.lastTick = entry.sample.tick;'),
     # journalKey — the run-qualified merge identity — and
     # refreshJournal's served gap notes, cursor advance, the boundary's
     # attribution re-mark ahead of the dedupe, the merge itself, the
     # run_boundary restart observation, the abandoned-submission
     # settle resolution, and the pane's ordering/bound.
-    (3350, 'function journalKey(entry) {'),
-    (3351, 'return entry.run + " " + entry.tick + " " + JSON.stringify(entry.event);'),
-    (3361, 'const entries = await (await pollFetch(base + "/journal?since=" + journalSince)).json();'),
-    (3366, 'if (journalSince === 0) journalRun = 0;'),
-    (3376, 'noteFeedGap("journal", journalSince + 1, entries[0].seq - 1);'),
+    (3352, 'function journalKey(entry) {'),
+    (3353, 'return entry.run + " " + entry.tick + " " + JSON.stringify(entry.event);'),
+    (3363, 'const entries = await (await pollFetch(base + "/journal?since=" + journalSince)).json();'),
+    (3368, 'if (journalSince === 0) journalRun = 0;'),
+    (3378, 'noteFeedGap("journal", journalSince + 1, entries[0].seq - 1);'),
     # The consecutive-pair half of the journal gap check: a pinned
     # run_boundary ahead of the ring's evicted tail serves one answer
     # with an internal discontinuity, at any cursor including 0.
-    (3378, 'for (let i = 1; i < entries.length; i++) {'),
-    (3379, 'if (entries[i].seq > entries[i - 1].seq + 1) {'),
-    (3380, 'noteFeedGap("journal", entries[i - 1].seq + 1, entries[i].seq - 1);'),
-    (3384, 'journalSince = Math.max(journalSince, entry.seq);'),
-    (3390, 'journalRun = entry.event.run_boundary.run;'),
-    (3392, 'entry.run = journalRun;'),
-    (3393, 'const key = journalKey(entry);'),
-    (3394, 'if (journalSeen.has(key)) continue;'),
-    (3395, 'journalSeen.add(key);'),
-    (3396, 'journalEntries.push(entry);'),
-    (3402, 'if ("run_boundary" in entry.event) {'),
-    (3403, 'noteRestart("the journal recorded run " +'),
-    (3436, 'const abandoned = pendingCommands.findIndex(pending =>'),
-    (3437, 'sameSubmission(settled.receipt, pending));'),
-    (3439, 'const pending = pendingCommands.splice(abandoned, 1)[0];'),
-    (3450, 'journalEntries.sort((a, b) => a.tick - b.tick || a.seq - b.seq);'),
-    (3452, 'for (const entry of journalEntries.splice(0, journalEntries.length - JOURNAL_LIMIT)) {'),
-    (3453, 'journalSeen.delete(journalKey(entry));'),
+    (3380, 'for (let i = 1; i < entries.length; i++) {'),
+    (3381, 'if (entries[i].seq > entries[i - 1].seq + 1) {'),
+    (3382, 'noteFeedGap("journal", entries[i - 1].seq + 1, entries[i].seq - 1);'),
+    (3386, 'journalSince = Math.max(journalSince, entry.seq);'),
+    (3392, 'journalRun = entry.event.run_boundary.run;'),
+    (3394, 'entry.run = journalRun;'),
+    (3395, 'const key = journalKey(entry);'),
+    (3396, 'if (journalSeen.has(key)) continue;'),
+    (3397, 'journalSeen.add(key);'),
+    (3398, 'journalEntries.push(entry);'),
+    (3404, 'if ("run_boundary" in entry.event) {'),
+    (3405, 'noteRestart("the journal recorded run " +'),
+    (3438, 'const abandoned = pendingCommands.findIndex(pending =>'),
+    (3439, 'sameSubmission(settled.receipt, pending));'),
+    (3441, 'const pending = pendingCommands.splice(abandoned, 1)[0];'),
+    (3452, 'journalEntries.sort((a, b) => a.tick - b.tick || a.seq - b.seq);'),
+    (3454, 'for (const entry of journalEntries.splice(0, journalEntries.length - JOURNAL_LIMIT)) {'),
+    (3455, 'journalSeen.delete(journalKey(entry));'),
     # The indeterminate-outcome path — the abort split, the abandoned
     # submission's pending record and receipt-shaped answer, and the
     # settle match — then postCommand's bounded POST every command
     # rides, isNotActive's rejected-not_active shape, and
     # submitCommand's active-peer routing with the single re-poll/retry
     # the abort verdict precedes.
-    (3769, 'function isAbortError(error) {'),
-    (3771, '(error.name === "AbortError" || error.name === "TimeoutError");'),
-    (3800, 'function sameSubmission(receipt, pending) {'),
-    (3813, 'function abandonedSubmission(command, reason, error) {'),
-    (3816, 'outcome: { indeterminate: { detail: String(error) } },'),
-    (3824, 'pendingCommands.push({'),
-    (3852, 'async function postCommand(base, command, reason) {'),
-    (3863, 'signal: AbortSignal.timeout(POLL_MS),'),
-    (3868, 'function isNotActive(receipt) {'),
-    (3894, 'async function submitCommand(command, reason) {'),
-    (3908, 'answer = await postCommand(peers[target].base, command, reason);'),
-    (3910, 'if (isAbortError(error)) {'),
-    (3911, 'return abandonedSubmission(command, reason, error);'),
-    (3915, 'if (isNotActive(answer)) {'),
-    (3933, 'receipt.textContent = JSON.stringify(answer, null, 2);'),
+    (3783, 'function isAbortError(error) {'),
+    (3785, '(error.name === "AbortError" || error.name === "TimeoutError");'),
+    (3814, 'function sameSubmission(receipt, pending) {'),
+    (3827, 'function abandonedSubmission(command, reason, error) {'),
+    (3830, 'outcome: { indeterminate: { detail: String(error) } },'),
+    (3838, 'pendingCommands.push({'),
+    (3866, 'async function postCommand(base, command, reason) {'),
+    (3877, 'signal: AbortSignal.timeout(POLL_MS),'),
+    (3882, 'function isNotActive(receipt) {'),
+    (3908, 'async function submitCommand(command, reason) {'),
+    (3922, 'answer = await postCommand(peers[target].base, command, reason);'),
+    (3924, 'if (isAbortError(error)) {'),
+    (3925, 'return abandonedSubmission(command, reason, error);'),
+    (3929, 'if (isNotActive(answer)) {'),
+    (3947, 'receipt.textContent = JSON.stringify(answer, null, 2);'),
     # The cadence both tickers share.
-    (4065, 'setInterval(refreshOverview, POLL_MS);'),
-    (4282, 'setInterval(refresh, POLL_MS);'),
+    (4079, 'setInterval(refreshOverview, POLL_MS);'),
+    (4296, 'setInterval(refresh, POLL_MS);'),
 ]
 
 
@@ -277,7 +277,7 @@ def journal_key(entry):
 
 
 def describe_outcome(outcome):
-    """page.html:3603-3615 — the outcome's rendered verdict: applied
+    """page.html:3617-3629 — the outcome's rendered verdict: applied
     at tick / accepted for tick / rejected / the page-minted
     indeterminate an abort-abandoned submission answers with. (The
     rejected branch names its reason through describeReason on the
@@ -479,7 +479,7 @@ class PageReplica:
             for i in range(len(self.peers))
         ]
 
-    # --- the receipted command path: page.html:836-851, 3717-3890 ---
+    # --- the receipted command path: page.html:836-851, 3731-3904 ---
 
     def active_peer(self):
         # page.html:836-839 — the pair's unique settled-active peer's
@@ -501,14 +501,14 @@ class PageReplica:
 
     @staticmethod
     def is_abort_error(error):
-        # page.html:3724-3727 — the abort bound's two error names
+        # page.html:3738-3741 — the abort bound's two error names
         # (the replica's PollError carries the name in its text):
         # either means the wait ended, not provably the server's work.
         return str(error).startswith(('AbortError', 'TimeoutError'))
 
     @staticmethod
     def same_command(a, b):
-        # page.html:3742-3747 — two wire Commands name the same
+        # page.html:3756-3761 — two wire Commands name the same
         # operation when the same known variant carries structurally
         # equal fields; Python's dict equality already numbers
         # 1.0 == 1, the sameJson numeric-equivalence rule.
@@ -520,7 +520,7 @@ class PageReplica:
 
     @staticmethod
     def same_submission(receipt, pending):
-        # page.html:3755-3759 — the settled receipt answers an
+        # page.html:3769-3773 — the settled receipt answers an
         # abandoned submission when the command matches and the
         # declared actor and reason the receipt echoes agree, so
         # another console's identical command cannot claim the pending
@@ -531,7 +531,7 @@ class PageReplica:
                 and (receipt.get('reason') or None) == pending['reason'])
 
     def abandoned_submission(self, command, reason, error):
-        # page.html:3768-3788 — the receipt-shaped indeterminate answer
+        # page.html:3782-3802 — the receipt-shaped indeterminate answer
         # an abort-abandoned submission reports, the pending record the
         # journaled settle resolves, and the receipt pane's "outcome
         # unknown" notice — never "command failed". (The page's notice
@@ -556,7 +556,7 @@ class PageReplica:
         return answer
 
     def post_command(self, base, command, reason=None):
-        # page.html:3807-3821 — the attributed envelope when a reason
+        # page.html:3821-3835 — the attributed envelope when a reason
         # rides (the replica declares no operator identity), the POST
         # itself, and the same POLL_MS abort bound every poll read
         # rides: a hanging listener answers nothing and the bound
@@ -573,13 +573,13 @@ class PageReplica:
 
     @staticmethod
     def is_not_active(receipt):
-        # page.html:3823-3827 — the rejected receipt carrying the
+        # page.html:3837-3841 — the rejected receipt carrying the
         # not_active reason.
         rejected = ((receipt or {}).get('outcome') or {}).get('rejected')
         return bool(rejected) and 'not_active' in rejected.get('reason', {})
 
     def submit_command(self, command, reason=None):
-        # page.html:3849-3890 — active-peer routing, the roles re-poll
+        # page.html:3863-3904 — active-peer routing, the roles re-poll
         # while none reports, the one not_active re-poll/retry, the
         # receipt pane's rendered answer, and the answer itself (null
         # when nothing was sent). The abort bound firing answers the
@@ -620,7 +620,7 @@ class PageReplica:
         self.receipt = json.dumps(answer, indent=2)
         return answer
 
-    # --- the ack pulse's press half: page.html:2990-3007 ---
+    # --- the ack pulse's press half: page.html:2991-3008 ---
 
     def submit_ack(self, point):
         """The acknowledge press: an ordinary receipted write_value of
@@ -776,7 +776,7 @@ class PageReplica:
         }
         return self.feed_line
 
-    # --- the stream polls: page.html:3215-3264, 3343-3431 ---
+    # --- the stream polls: page.html:3217-3266, 3345-3433 ---
 
     def refresh_trends(self):
         states = list(self.trends.values())
@@ -823,7 +823,7 @@ class PageReplica:
                     state['lastTick'] = entry['sample']['tick']
 
     def refresh_journal(self):
-        # page.html:3343-3442 — the since-read, the head and
+        # page.html:3345-3444 — the since-read, the head and
         # consecutive-pair gap notes, the run-attributed merge loop,
         # the abandoned-submission settle resolution, and the pane's
         # tick-order bounded render set.
@@ -838,7 +838,7 @@ class PageReplica:
                 and entries[0]['seq'] > self.journal_since + 1):
             self.note_feed_gap('journal', self.journal_since + 1,
                                entries[0]['seq'] - 1)
-        # page.html:3342-3346 — the same discontinuity can sit wholly
+        # page.html:3344-3348 — the same discontinuity can sit wholly
         # inside one answer: a pinned run_boundary precedes the ring's
         # retained tail, so consecutive served seqs step over an
         # evicted stretch at any cursor, the whole re-read's 0 too.
@@ -867,7 +867,7 @@ class PageReplica:
                     + str(entry['event']['run_boundary']['run'])
                     + ' beginning')
             # The receipted contract's truth answering an abandoned
-            # submission (page.html:3403-3419): a settle matching a
+            # submission (page.html:3405-3421): a settle matching a
             # pending entry resolves the indeterminate verdict the
             # abort left — the receipt pane's notice replaced only
             # while that submission's notice still stands there.

@@ -565,6 +565,20 @@ impl Driver {
         }
     }
 
+    /// The standing-owner tokens the last refused conditional grant
+    /// probe — the orphan cycle's `ensure` or the fencing-loss
+    /// `reclaim` — named, one per refusing claim domain. The peer's
+    /// `field_claim_observed` journal record reads them immediately
+    /// after a probe answers `Ok(false)`, so the answer attributes the
+    /// refusal that just landed rather than a stale or anonymous one.
+    /// Empty where no refusal named a claimant.
+    fn refused_claimants(&self) -> Vec<u64> {
+        match self {
+            Self::Remote(remote) => remote.fenced_by().into_iter().collect(),
+            Self::Local(fanout) => fanout.refused_claimants(),
+        }
+    }
+
     /// The field-facing devices that cannot arbitrate a single writer —
     /// automatic failover is honest only when this is empty: a fenced
     /// old peer's writes must actually stop at the field. A `--remote`
@@ -1342,7 +1356,8 @@ fn main() -> ExitCode {
         .with_field_startup_claim(|| driver.claim_writer_unless_held(owner))
         .with_field_probe(|| driver.probe_field_claim())
         .with_field_claimant(|point| driver.fencing_claimant(point))
-        .with_field_reclaim(|| driver.reclaim_writer(owner));
+        .with_field_reclaim(|| driver.reclaim_writer(owner))
+        .with_claim_observer(|| driver.refused_claimants());
     let peer = match options.auto_promote {
         Some(budget) => peer.with_failover(budget),
         None => peer,
@@ -1528,6 +1543,12 @@ fn main() -> ExitCode {
                                 orphan.tick.0, orphan.aligned.0
                             );
                         }
+                        for observation in peer.take_claim_observations() {
+                            eprintln!(
+                                "standby: field write-ownership claim observed standing under foreign owner token {} at tick {} (point {:?})",
+                                observation.claimant, observation.tick.0, observation.point
+                            );
+                        }
                         for restart in peer.take_source_restarts() {
                             eprintln!(
                                 "standby: checkpoint stream regressed at tick {} — the source restarted or was replaced; resumed from its tick {} (was aligned to {:?})",
@@ -1579,6 +1600,12 @@ fn main() -> ExitCode {
                                     loss.tick.0, loss.point
                                 ),
                             }
+                        }
+                        for observation in peer.take_claim_observations() {
+                            eprintln!(
+                                "standby: field write-ownership claim observed standing under foreign owner token {} at tick {} (point {:?})",
+                                observation.claimant, observation.tick.0, observation.point
+                            );
                         }
                         scanned
                     },
@@ -1692,6 +1719,12 @@ fn main() -> ExitCode {
                                     loss.tick.0, loss.point
                                 ),
                             }
+                        }
+                        for observation in peer.take_claim_observations() {
+                            eprintln!(
+                                "field write-ownership claim observed standing under foreign owner token {} at tick {} (point {:?})",
+                                observation.claimant, observation.tick.0, observation.point
+                            );
                         }
                         for change in peer.take_role_changes() {
                             eprintln!(
