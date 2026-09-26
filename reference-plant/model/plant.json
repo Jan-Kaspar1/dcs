@@ -507,6 +507,17 @@
       "writable": true
     },
     {
+      "id": 1021,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true,
+      "requires_reason": true,
+      "journaled": true
+    },
+    {
       "id": 1023,
       "direction": "out",
       "value_type": "bool",
@@ -2084,6 +2095,14 @@
       "group": "alarms"
     },
     {
+      "id": 11021,
+      "name": "backup-active-shelve",
+      "source": 1021,
+      "unit": "",
+      "description": "Operator shelving request for the alarm",
+      "group": "alarms"
+    },
+    {
       "id": 11023,
       "name": "backup-active-alarm",
       "source": 1023,
@@ -3527,7 +3546,7 @@
           "int": 2
         },
         "max_shelve_ticks": {
-          "int": 0
+          "int": 6
         },
         "priority": {
           "int": 2
@@ -3556,6 +3575,10 @@
         },
         "out_of_service": {
           "direction": "out",
+          "value_type": "bool"
+        },
+        "shelve": {
+          "direction": "in",
           "value_type": "bool"
         },
         "shelved": {
@@ -5412,6 +5435,17 @@
         "port": {
           "component": 9,
           "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1021
+      },
+      "to": {
+        "port": {
+          "component": 9,
+          "name": "shelve"
         }
       }
     },

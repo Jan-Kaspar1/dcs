@@ -180,10 +180,13 @@
 #   DCS_UPGRADE_REV
 #                the earlier compatible revision the upgrade stage
 #                materializes the tree at before repinning to $DCS_REV
-#                (default: the previous release's recorded rev — the
-#                v0.2.0 commit — so the stage proves the v0.2.0 → v0.3.0
-#                crossing the manifest names; the workspace-side proof
-#                seeds its stand-in remote to serve it).
+#                (default: the v0.3.0-line commit below — the earliest
+#                revision this composition materializes under: the
+#                model's `requires_reason` marks emit only through the
+#                builder API the v0.3.0 line carries, so the v0.2.0
+#                recorded rev can no longer build or emit this tree;
+#                the workspace-side proof seeds its stand-in remote to
+#                serve it).
 #   DCS_UPGRADE  set to 0 to skip the upgrade stage — the stage's own
 #                repinned re-run uses this internally.
 #   DCS_TOOLS    a directory holding prebuilt `dcs-model`,
@@ -213,7 +216,7 @@ cd "$(dirname "$0")/.."
 
 DCS_REMOTE="${DCS_REMOTE:-https://github.com/Jan-Kaspar1/dcs.git}"
 DCS_REV="${DCS_REV:-v0.3.0}"
-DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-c2b5694d9fd6f6168b85c1dfc2e1542b369b3a3f}"
+DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-107479829658a580cba83b38fa279a989275c576}"
 DCS_TOOLS="${DCS_TOOLS:-}"
 DCS_RECORD_DIR="${DCS_RECORD_DIR:-}"
 TOOLS=""
