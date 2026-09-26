@@ -122,7 +122,8 @@ def scenario_attributed_switch(ctx):
                 'journal entries carry origin=failover and no '
                 'operator actor — reading distinguishably from any '
                 'operator request — and the pair\'s launch roles '
-                'return through a last attributed switch')
+                'return through a last attributed demotion and the '
+                'duty peer\'s resumed claim')
     try:
         subject = _keyed_subject(ctx)
         if subject is None:
@@ -297,6 +298,18 @@ def scenario_attributed_switch(ctx):
                                + str(owner) + ' — outside the '
                                'launched pair')
         peer = 'standby' if owner == 'active' else 'active'
+        # The contract's precondition is a settled AND converged pair:
+        # an attributed demote on the owner refuses 409
+        # no_tracking_source until the peer's tracking settles — and
+        # the failover leg this one orders behind ends at the
+        # promotion, not at the demoted peer's reconvergence.
+        if wait_for(lambda: tracking(subject[peer]),
+                    time.monotonic() + ATTRIBUTION_SETTLE,
+                    interval=ATTRIBUTION_POLL) is None:
+            return case.finish('failed', 'the non-owner peer '
+                               + peer + ' never settled tracking — '
+                               'the pair is not converged for an '
+                               'attributed switch')
 
         # ---- attributed half ----
         # First land ctrl-a on the field: whichever layout the suite
@@ -361,23 +374,41 @@ def scenario_attributed_switch(ctx):
                      'with no operator actor')
 
         # ---- restore ----
-        # The returned duty peer reconverges tracking off the
-        # promoted standby, then the attributed switch restores the
-        # launch roles.
+        # The promoted peer's demotion must run ahead of the
+        # restart: its claim is a live incumbent's, and a launched
+        # active restarting onto it exits FieldClaimFailed — the
+        # conditional startup grant's stale-image refusal — so the
+        # attributed demote first yields the field's claim, then the
+        # duty peer's warm resume takes the yielded claim as its
+        # launch role, and the demoted peer reconverges tracking on
+        # the resumed checkpoint stream.
+        status, body = control(base_b + '/demote',
+                               {'actor': ATTRIBUTION_ACTOR})
+        if status != 200:
+            return case.finish('failed', 'the restore demote on '
+                               'the promoted peer answered '
+                               + str(status) + ': '
+                               + json.dumps(body)[:300])
         try:
             start('active')
         except Exception as exc:
             return case.finish('inconclusive', 'the owner restart '
                                'never completed: ' + str(exc)[:300])
-        if wait_for(lambda: tracking(base_a),
+        if wait_for(lambda: report(base_a)
+                    if (report(base_a) or {}).get('role') == 'active'
+                    else None,
                     time.monotonic() + ATTRIBUTION_SETTLE,
                     interval=ATTRIBUTION_POLL) is None:
             return case.finish('failed', 'the returned duty peer '
-                               'never reconverged tracking on the '
-                               'promoted standby')
-        failure = attributed_switch('standby', 'active')
-        if failure:
-            return case.finish('failed', failure)
+                               'never reported active — the demoted '
+                               'peer\'s claim yield never freed its '
+                               'startup grant')
+        if wait_for(lambda: tracking(base_b),
+                    time.monotonic() + ATTRIBUTION_SETTLE,
+                    interval=ATTRIBUTION_POLL) is None:
+            return case.finish('failed', 'the demoted peer never '
+                               'reconverged tracking on the '
+                               'returned duty peer')
         settled = wait_for(
             lambda: {'a': report(base_a), 'b': report(base_b)}
             if (report(base_a) or {}).get('role') == 'active'

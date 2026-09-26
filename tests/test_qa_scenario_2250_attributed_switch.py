@@ -17,6 +17,8 @@ EXPECTED_CASES = frozenset({
     'AttributedSwitchTests.test_missing_actor_fails',
     'AttributedSwitchTests.test_failover_read_as_request_fails',
     'AttributedSwitchTests.test_failover_carrying_actor_fails',
+    'AttributedSwitchTests.test_restore_demote_refused_fails',
+    'AttributedSwitchTests.test_unconverged_entry_fails',
 })
 
 
@@ -32,8 +34,10 @@ class AttributedSwitchFeed:
     `origin: request` or carrying an operator actor."""
 
     def __init__(self, journal_files, switched=False, drop_actor=False,
-                 failover_origin='failover', failover_actor=None):
+                 failover_origin='failover', failover_actor=None,
+                 refuse_restore_demote=False, unconverged=None):
         self.journal_files = journal_files
+        self.unconverged = unconverged
         self.tick = 0
         self.role = {'a': 'standby' if switched else 'active',
                      'b': 'active' if switched else 'standby'}
@@ -43,6 +47,7 @@ class AttributedSwitchFeed:
         self.drop_actor = drop_actor
         self.failover_origin = failover_origin
         self.failover_actor = failover_actor
+        self.refuse_restore_demote = refuse_restore_demote
         self.seq = {'a': 1, 'b': 1}
         self.last_actor = {}
         self.peer_for = {'ctrl-a:1': 'a', 'ctrl-b:2': 'b'}
@@ -86,11 +91,17 @@ class AttributedSwitchFeed:
             self.a_down = True
 
     def start_controller(self, name):
-        """The returned duty peer: reconverged tracking on the
-        promoted standby."""
+        """The returned duty peer's warm resume: a launched active
+        whose startup claim meets the promoted peer's live claim
+        exits FieldClaimFailed — the conditional grant's
+        live-incumbent refusal — while the demotion's yielded claim
+        lets the same resume take the field."""
         if name == 'active':
+            if self.role['b'] in ('promoting', 'active'):
+                return      # the start ran; the refused startup
+                            # claim exited the process — still down
             self.a_down = False
-            self.role['a'] = 'standby'
+            self.role['a'] = 'active'
 
     def http_json(self, method, url, body=None, timeout=10):
         host = url.split('/')[2]
@@ -121,11 +132,15 @@ class AttributedSwitchFeed:
                         'promoting', 'active'))
                     self.role['b'] = 'active'
             report = {'role': self.role[peer], 'tick': self.tick}
-            if self.role[peer] == 'standby':
+            if self.role[peer] == 'standby' \
+                    and peer != self.unconverged:
                 report['sync'] = {'tracking': {'aligned': self.tick}}
             return 200, report
         if (method, route) == ('POST', '/demote'):
             if self.role[peer] != 'active':
+                self._refuse(url)
+            if self.refuse_restore_demote and peer == 'b' \
+                    and self.a_down:
                 self._refuse(url)
             self.last_actor[peer] = (body or {}).get('actor')
             self.role[peer] = 'demoting'
@@ -159,14 +174,17 @@ class AttributedSwitchTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def run_scenario(self, switched=False, drop_actor=False,
-                     failover_origin='failover', failover_actor=None):
+                     failover_origin='failover', failover_actor=None,
+                     refuse_restore_demote=False, unconverged=None):
         journals = {
             'active': str(self.evidence / 'journal-a.jsonl'),
             'standby': str(self.evidence / 'journal-b.jsonl')}
         self.feed = AttributedSwitchFeed(
             journals, switched=switched, drop_actor=drop_actor,
             failover_origin=failover_origin,
-            failover_actor=failover_actor)
+            failover_actor=failover_actor,
+            refuse_restore_demote=refuse_restore_demote,
+            unconverged=unconverged)
         ctx = {'active': 'http://ctrl-a:1',
                'standby': 'http://ctrl-b:2',
                'evidence_dir': str(self.evidence),
@@ -177,6 +195,9 @@ class AttributedSwitchTests(unittest.TestCase):
                'start_controller': self.feed.start_controller}
         with patch.object(scenarios, 'http_json', self.feed.http_json), \
                 patch.object(scenarios, 'ATTRIBUTION_POLL', 0.001), \
+                patch.object(scenarios, 'ATTRIBUTION_SETTLE',
+                             0.05 if unconverged
+                             else scenarios.ATTRIBUTION_SETTLE), \
                 patch.object(scenarios, 'POLL_INTERVAL', 0.001):
             return scenarios.scenario_attributed_switch(ctx)
 
@@ -213,6 +234,27 @@ class AttributedSwitchTests(unittest.TestCase):
         record = self.run_scenario(failover_actor='operator-9')
         self.assertEqual(record['outcome'], 'failed', record)
         self.assertIn('operator actor', record['detail'])
+        report.validate_scenario(record)
+
+    def test_restore_demote_refused_fails(self):
+        """A promoted peer that refuses the restore demote leaves its
+        live claim standing — the duty peer's resumed startup grant
+        would exit FieldClaimFailed against it, so the leg reports
+        the refused demotion rather than starting into it."""
+        record = self.run_scenario(refuse_restore_demote=True)
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('restore demote', record['detail'])
+        report.validate_scenario(record)
+
+    def test_unconverged_entry_fails(self):
+        """The leg's precondition is a converged pair, not merely a
+        settled one: the failover leg it orders behind ends at the
+        promotion, so a tracking peer that never converges must fail
+        the leg at its entry wait rather than demoting into the
+        monitor's no_tracking_source refusal."""
+        record = self.run_scenario(unconverged='b')
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('tracking', record['detail'])
         report.validate_scenario(record)
 
 
