@@ -17,7 +17,14 @@ matching the supervisor's rolling merge comparison in ``State.merge_flow``):
 - repairs and redispatches broken down by bounded cause class, joined from
   the work ledger's attributed ``repair``/``redispatch`` event rows
   (``merge-conflict``/``ci-failure``/``publish-error`` repairs and
-  ``worker-failure``/``quota-requeue`` redispatches);
+  ``worker-failure``/``quota-requeue`` redispatches), with repairs also
+  joined to each issue's managed area;
+- conflict attribution for decline analysis: the conflicted paths each
+  ``merge-conflict`` repair's ledger row recorded (ranked by incidence, an
+  ``unclassified`` bucket counting path-less rows) and a verdict naming
+  whether the window's conflict load concentrates on few paths or spreads,
+  plus the failing check names ``ci-failure`` repairs expose through their
+  ledger row or the job's terminal check record;
 - per-window flow attribution so a merge decline can be read as starvation,
   failure load, or exhausted supply: reserved dispatches (``reserved`` and
   ``retry-reserved`` rows), park-to-blocked transitions (``status:blocked``
@@ -84,6 +91,13 @@ LIMITATIONS = (
     "per-window dependency-blocked supply is not reconstructible: the work "
     "ledger records job transitions, not issue dependency or label history; "
     "the report-time backlog section carries the current split",
+    "conflict-path attribution covers only repairs whose ledger row carries "
+    "the conflicted paths git reported; older and unparseable rows count in "
+    "the unclassified bucket, and a concentrated/spread verdict reads only "
+    "the attributed share",
+    "failing-check attribution covers ci-failure repairs whose ledger row "
+    "or terminal jobs.error check record names the failed checks; other "
+    "ci-failure repairs count in the unclassified bucket",
 )
 
 DEFAULT_STATE_DB = "~/.local/share/dcs-agents/state/state.sqlite3"
@@ -179,16 +193,83 @@ def window_bounds(now, window_seconds):
     }
 
 
-def event_cause(event):
-    """The bounded cause class an attributed ledger row carries, or None."""
+def event_payload(event):
+    """The decoded payload dict a ledger row carries, or {}."""
     payload = event.get("payload") or {}
     if isinstance(payload, str):
         try:
             payload = json.loads(payload)
         except ValueError:
-            return None
-    cause = payload.get("cause") if isinstance(payload, dict) else None
+            return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def event_cause(event):
+    """The bounded cause class an attributed ledger row carries, or None."""
+    cause = event_payload(event).get("cause")
     return cause if isinstance(cause, str) and cause else None
+
+
+def _payload_names(event, key):
+    """A string-list detail field on a repair row's payload, or []."""
+    value = event_payload(event).get(key)
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [name for name in value if isinstance(name, str) and name]
+
+
+CHECK_RECORD_MARK = "as read-only diagnostics. "
+
+
+def job_check_names(job):
+    """Failing check names a job's recorded ci-failure error exposes.
+
+    The supervisor ends the ci-failure repair reason with the failed-check
+    dict serialized as JSON; a blocked job keeps that record in jobs.error.
+    Rows whose error carries no such record expose nothing — the caller
+    never fabricates names.
+    """
+    error = (job or {}).get("error") or ""
+    if CHECK_RECORD_MARK not in error:
+        return []
+    try:
+        record = json.loads(error.rsplit(CHECK_RECORD_MARK, 1)[1].strip())
+    except ValueError:
+        return []
+    if not isinstance(record, dict):
+        return []
+    return sorted(name for name in record if isinstance(name, str))
+
+
+def _ranked(counter, unclassified=0):
+    """Name->count dict ordered by incidence (count desc, name asc).
+
+    A positive ``unclassified`` appends the named bucket for rows that
+    carried no attributable detail; it is a coverage count, not a path or
+    check name.
+    """
+    ranked = dict(sorted(counter.items(), key=lambda kv: (-kv[1], kv[0])))
+    if unclassified:
+        ranked["unclassified"] = unclassified
+    return ranked
+
+
+def _conflict_load(repairs, paths):
+    """Whether a window's merge-conflict repairs concentrate on few paths."""
+    attributed = sum(paths.values())
+    if not repairs:
+        return "none"
+    if not attributed:
+        return "unattributed"
+    running = covering = 0
+    for count in sorted(paths.values(), reverse=True):
+        running += count
+        covering += 1
+        if running * 2 >= attributed:
+            break
+    return "concentrated" if covering <= 2 else "spread"
 
 
 def _resumes(event):
@@ -346,14 +427,41 @@ def window_report(commits, lo, hi, issues_by_number, jobs_by_issue, events=None)
     ledger_repair = ledger_redispatch = 0
     repairs_by_cause = Counter()
     redispatches_by_cause = Counter()
+    repairs_by_area = {}
+    conflict_paths = Counter()
+    conflict_repairs = conflict_pathless = 0
+    failing_checks = Counter()
+    checks_unattributed = 0
     for event in events or ():
         at = event.get("at")
         if not isinstance(at, (int, float)) or not lo <= at < hi:
             continue
-        counter = {"repair": repairs_by_cause,
-                   "redispatch": redispatches_by_cause}.get(event.get("kind"))
-        if counter is not None:
-            counter[event_cause(event) or "unclassified"] += 1
+        kind = event.get("kind")
+        if kind == "redispatch":
+            redispatches_by_cause[event_cause(event) or "unclassified"] += 1
+            continue
+        if kind != "repair":
+            continue
+        cause = event_cause(event) or "unclassified"
+        repairs_by_cause[cause] += 1
+        issue = issues_by_number.get(event.get("issue"))
+        area = (issue_area(issue) if issue else None) or "unresolved"
+        repairs_by_area.setdefault(area, Counter())[cause] += 1
+        if cause == "merge-conflict":
+            conflict_repairs += 1
+            paths = _payload_names(event, "paths")
+            if paths:
+                conflict_paths.update(paths)
+            else:
+                conflict_pathless += 1
+        elif cause == "ci-failure":
+            names = _payload_names(event, "checks")
+            if not names:
+                names = job_check_names(jobs_by_issue.get(event.get("issue")))
+            if names:
+                failing_checks.update(names)
+            else:
+                checks_unattributed += 1
     for commit in merges:
         issue_number = merged_issue(commit)
         issue = issues_by_number.get(issue_number) if issue_number else None
@@ -392,6 +500,12 @@ def window_report(commits, lo, hi, issues_by_number, jobs_by_issue, events=None)
             "ledger_redispatched": ledger_redispatch,
             "repairs_by_cause": dict(sorted(repairs_by_cause.items())),
             "redispatches_by_cause": dict(sorted(redispatches_by_cause.items())),
+            "repairs_by_area": {area: dict(sorted(causes.items()))
+                                for area, causes in sorted(repairs_by_area.items())},
+            "conflict_repairs": conflict_repairs,
+            "conflict_paths": _ranked(conflict_paths, conflict_pathless),
+            "conflict_load": _conflict_load(conflict_repairs, conflict_paths),
+            "failing_checks": _ranked(failing_checks, checks_unattributed),
         },
         "flow": flow_report(events, lo, hi, jobs_by_issue),
     }
@@ -514,6 +628,13 @@ def render_text(report):
                 m=flow["merged_and_closed"], sb=flow["still_blocked"]))
         lines.append("  park_causes: " + _causes_text(flow["park_causes"]))
         lines.append("  areas: " + (", ".join(f"{k}={v}" for k, v in w["areas"].items()) or "none"))
+        lines.append("  conflict_paths: " + _causes_text(repair["conflict_paths"])
+                     + " load=" + repair["conflict_load"])
+        lines.append("  failing_checks: " + _causes_text(repair["failing_checks"]))
+        lines.append("  repairs_by_area: " + (
+            "; ".join("%s[%s]" % (area, _causes_text(causes))
+                      for area, causes in repair["repairs_by_area"].items())
+            or "none"))
     decline = report["merge_decline_percent"]
     lines.append("merge decline: {}% (previous -> current)".format(decline))
     ledger = report["ledger"]

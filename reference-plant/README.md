@@ -538,8 +538,11 @@ and the redundant controller pair:
   validates yet describes a rig that cannot run, and the deploy
   stage refuses it `rig-mismatch`; a site running several pairs
   deploys one manifest per field and names the addresses across
-  them in the overview URL. A single-pair deployment omits the
-  section; this manifest does.
+  them in the overview URL. A single-pair deployment may omit the
+  section — the single-pair default — or declare its pair; this
+  manifest declares `station` over `ctrl-a`/`ctrl-b`, the pair
+  index entry a `?pair=` overview URL is generated from and the
+  membership the deploy stage's rig agreement exercises.
 
 The deployment maps directly onto the platform's documented run
 commands: `dcs-plant-server <model> --dynamics <doc> --listen <addr>`
@@ -563,11 +566,13 @@ compose config` (or an equivalent YAML parser) and asserts it agrees
 with the manifest on every field — release, images, mounts,
 fingerprint, listen addresses, pair wiring, the standby's
 `failover_budget` against its `--auto-promote` flag, and the
-optional `topology` section's declared pairs — a declared
+declared `topology` section's pairs — a declared
 budget with no flag, a flag with no declaration, a diverging value,
 the field placed on the duty entry, a pair member the manifest does
-not declare, a member two pairs share, a declared pair whose
-standby wiring does not close inside it, or a second field-owning
+not declare, a member two pairs share, a member whose standby edge
+leaves the declared pair, a pair carrying two standby declarations,
+a declared pair whose standby wiring does not close inside it, or a
+second field-owning
 duty controller over the manifest's one plant — the shape a second
 declared pair needs (decision 99) — each fail `rig-mismatch`, an
 unparsable file `rig-invalid`, a host with

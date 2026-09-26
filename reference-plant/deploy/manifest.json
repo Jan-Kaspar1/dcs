@@ -30,5 +30,16 @@
       "state_file": "/var/tmp/state.json",
       "journal_file": "/var/tmp/journal.jsonl"
     }
-  ]
+  ],
+  "topology": {
+    "pairs": [
+      {
+        "name": "station",
+        "members": [
+          "ctrl-a",
+          "ctrl-b"
+        ]
+      }
+    ]
+  }
 }
