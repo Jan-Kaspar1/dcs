@@ -1999,12 +1999,18 @@ impl<'d> Executor<'d> {
     /// A suffix whose base index
     /// sits past the adopted high-water — evictions the source never
     /// saw opening a gap the log cannot span — cannot be restored and
-    /// drops with the rest of the abandoned window.
+    /// drops with the rest of the abandoned window. Either way
+    /// `attempts` is the merged window's high-water mark — the count
+    /// of receipts the merged line ever minted — so it floors at the
+    /// adopted window's end plus the restored tail and never reports
+    /// the covered stretch as phantom evictions the way a document
+    /// whose counters claim less than its own window would.
     ///
     /// Inside the covered stretch the merge is durable-truth forward:
     /// where the adopted window carries a submission this run already
-    /// settled — as the same command — still `Accepted`, the run's own
-    /// terminal verdict stands. `Accepted` claims pending, never a
+    /// settled — the same submission record — still `Accepted`, the
+    /// run's own terminal verdict stands. `Accepted` claims pending,
+    /// never a
     /// settlement, so the document's view at that index is staler than
     /// the run's settled record — captured before the line's
     /// adjudication, or parked for it — and adopting it would regress
@@ -2058,12 +2064,17 @@ impl<'d> Executor<'d> {
         self.receipts.clone_from(&checkpoint.receipts);
         // Durable-truth forward inside the covered stretch: the adopted
         // window's still-`Accepted` view of a submission this run already
-        // settled — the same command at the same index — is its staler
-        // record, so the merge restores the run's terminal verdict
-        // rather than regressing the receipt and re-queueing a settle
-        // the line already made. The unreached suffix is unaffected —
-        // restored verbatim below — and a settled adopted entry or a
-        // command mismatch lands as the window carries it.
+        // settled — the same submission at the same index — is its
+        // staler record, so the merge restores the run's terminal
+        // verdict rather than regressing the receipt and re-queueing a
+        // settle the line already made. The same submission means the
+        // whole submission record: `actor` and `reason` ride a receipt
+        // unchanged from submission, so an identical command under a
+        // different attribution is a different admission at the index —
+        // the adopted entry stands as the line's own then, not a staler
+        // view of this run's verdict. The unreached suffix is
+        // unaffected — restored verbatim below — and a settled adopted
+        // entry or a record mismatch lands as the window carries it.
         for (position, receipt) in self.receipts.iter_mut().enumerate() {
             if !matches!(receipt.outcome, CommandOutcome::Accepted { .. }) {
                 continue;
@@ -2074,6 +2085,8 @@ impl<'d> Executor<'d> {
                 .and_then(|prior_position| prior.get(prior_position as usize))
                 .filter(|settled| {
                     settled.command == receipt.command
+                        && settled.actor == receipt.actor
+                        && settled.reason == receipt.reason
                         && !matches!(settled.outcome, CommandOutcome::Accepted { .. })
                 })
             {
@@ -2104,19 +2117,29 @@ impl<'d> Executor<'d> {
             .command_admission
             .high_water
             .max(self.pending_commands.len());
+        // The merged window's high-water mark — the submission index
+        // one past the last receipt the log holds — computed before
+        // the tail moves in: `attempts` floors at it below.
+        let merged_end = adopted_end + uncovered.len() as u64;
         if !uncovered.is_empty() {
             // The restored suffix lands after the queue rebuild on
             // purpose: its `Accepted` entries are suspended state the
             // tracked line has not adjudicated, not carried commands
-            // owed a boundary, so they must not re-queue. `attempts`
-            // rises to the window's true high-water — the submissions
-            // this log still holds — keeping `receipt_base` honest and
-            // the served checkpoint carrying them for a successor's
-            // carry.
-            self.command_admission.attempts = adopted_end + uncovered.len() as u64;
+            // owed a boundary, so they must not re-queue.
             self.receipts.extend(uncovered);
             self.trim_receipts();
         }
+        // `attempts` doubles as the merged window's high-water mark,
+        // so it can never report fewer receipts than the window the
+        // merge assembled: a document whose counters claim less than
+        // its own window covers — written before the admission
+        // counters existed, or stamped by a history that itself
+        // regressed — would read the covered stretch as phantom
+        // evictions and slide `receipt_base` back over indices whose
+        // receipts the log still carries. The window's own end — the
+        // count of receipts the merged line ever minted — is the floor
+        // the counter converges to, and never regresses below.
+        self.command_admission.attempts = self.command_admission.attempts.max(merged_end);
     }
 
     /// Re-asserts the settled force verdicts `receipts` carries, in
@@ -2217,6 +2240,12 @@ impl<'d> Executor<'d> {
         // carry half of the boundary.
         self.reassert_receipted_forces(&appended);
         self.command_admission = checkpoint.command_admission;
+        // The same floor `adopt_receipts` floors: `attempts` is the
+        // merged window's high-water mark, so it never reports fewer
+        // receipts than the appended window the carry assembled — a
+        // document whose counters claim less than its own window
+        // covers cannot revert the count below it.
+        self.command_admission.attempts = self.command_admission.attempts.max(checkpoint_end);
         // Bound the union before the adopted `Accepted` entries queue:
         // the trim may reach into the tail's own settled prefix, so the
         // surviving adopted entries start at `base_len - evicted`.
@@ -6476,6 +6505,51 @@ mod tests {
             CommandOutcome::Applied { tick: Tick(3) }
         );
         assert_eq!(driver_value(&standby_driver, 10), Value::Float(6.0));
+    }
+
+    /// The counter-floor half of QA finding
+    /// `suspended-command-absorbed-by-identical-carry-unaudited`:
+    /// `attempts` is the receipt window's high-water mark, so an
+    /// adopted document whose admission counters claim fewer
+    /// submissions than its own window covers — the zeroed default a
+    /// counter-less source's document deserializes to — must not
+    /// revert this run's count below the receipts the merged log
+    /// holds. Reporting less reads the covered stretch as phantom
+    /// evictions and slides `receipt_base` over indices whose receipts
+    /// the log still carries.
+    #[test]
+    fn an_adoption_never_regresses_attempts_below_the_merged_window() {
+        let active_driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut active = setpoint_rig(&active_driver);
+        active.submit_command(write_value(10, ValueKind::Float, Value::Float(1.0)));
+        active.submit_command(write_value(10, ValueKind::Float, Value::Float(2.0)));
+        active.scan();
+        let mut checkpoint = active.checkpoint();
+        // The document a counter-less source serves: the receipt
+        // window intact, the admission counters absent — serde's
+        // zeroed default for a section the capture predates.
+        checkpoint.command_admission = CommandAdmissionCounts::default();
+
+        let standby_driver = StubDriver::new(&[float(10), float(20), float(30)], &[]);
+        let mut standby = setpoint_rig(&standby_driver);
+        // The run minted a submission of its own — the count can never
+        // fall below the receipts it produced.
+        standby.submit_command(write_value(10, ValueKind::Float, Value::Float(3.0)));
+
+        standby.apply(&checkpoint).unwrap();
+        // `attempts` floors at the merged window's own end — never at
+        // the document's regressed claim, never below the run's minted
+        // count: the adopted window covers both submissions.
+        assert_eq!(standby.receipts().len(), 2);
+        assert_eq!(standby.receipt_base(), 0);
+        assert_eq!(standby.snapshot().command_queue.attempts, 2);
+
+        // The window's indices stay honest: the next admission numbers
+        // one past the high-water rather than colliding inside it.
+        standby.submit_command(write_value(10, ValueKind::Float, Value::Float(4.0)));
+        assert_eq!(standby.snapshot().command_queue.attempts, 3);
+        assert_eq!(standby.receipt_base(), 0);
+        assert_eq!(standby.receipts().len(), 3);
     }
 
     #[test]
