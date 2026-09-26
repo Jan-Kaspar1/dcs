@@ -2455,15 +2455,23 @@ impl<'d> Peer<'d> {
     /// [`Diverged`](StandbySync::Diverged) verdict stands through the
     /// miss: the peer's promotability-blocking truth — its staged
     /// outputs differ from the field — is unresolved until a same-position
-    /// comparison reads the field and matches, while the miss still
-    /// counts toward the failover budget and reports in
-    /// [`TrackReport::Missed`].
+    /// comparison reads the field and matches. A standing
+    /// [`Orphaned`](StandbySync::Orphaned) verdict stands the same way:
+    /// the miss proves this cycle produced no checkpoint, not that the
+    /// tracked line gained a field owner — letting it flicker the
+    /// verdict to `Degraded` would re-transition `Orphaned` on every
+    /// later apply and re-journal the one episode's
+    /// [`OrphanReport`] per pull. The miss still counts toward the
+    /// failover budget and reports in [`TrackReport::Missed`].
     pub fn note_transfer_failed(&mut self, detail: impl fmt::Display) {
         self.misses += 1;
         if self.failover.is_some_and(|budget| self.misses > budget) {
             self.converged = false;
         }
-        if !matches!(self.sync, StandbySync::Diverged { .. }) {
+        if !matches!(
+            self.sync,
+            StandbySync::Diverged { .. } | StandbySync::Orphaned { .. }
+        ) {
             self.sync = StandbySync::Degraded {
                 detail: detail.to_string(),
             };
@@ -5612,6 +5620,62 @@ mod tests {
         peer.apply(&next).unwrap();
         assert_eq!(peer.missed_transfers(), 2);
         assert!(peer.take_orphans().is_empty());
+    }
+
+    /// The QA finding `field-orphaned-journal-flood`: a peer pinned on
+    /// a non-advancing adopted source — the same frozen checkpoint
+    /// landing on every completed pull while the fetch worker's
+    /// in-flight cycles count produced-nothing misses between them —
+    /// journaled `field_orphaned` on every apply, an unbounded run of
+    /// identical entries. The miss is the cycle producing no
+    /// checkpoint, not evidence the tracked line gained a field owner,
+    /// so it cannot end the episode: a standing `Orphaned` verdict
+    /// rides the miss out the way a standing `Diverged` does, and the
+    /// episode's one transition journals once.
+    #[test]
+    fn a_missed_pull_does_not_end_the_orphan_episode() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate));
+
+        // The pinned source's document is frozen — an unadvanced tick —
+        // and reports no field owner, the static standby shape an
+        // adopted endpoint can serve indefinitely.
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(5);
+        let mut checkpoint = source.checkpoint();
+        checkpoint.source_owns_field = Some(false);
+        assert!(matches!(
+            peer.track_once(|| Ok(checkpoint.clone())),
+            TrackReport::Applied(_)
+        ));
+        assert_eq!(
+            peer.sync_state(),
+            &StandbySync::Orphaned { aligned: Tick(5) }
+        );
+        assert_eq!(peer.take_orphans().len(), 1);
+
+        // The pull cadence's in-flight cycles count misses between the
+        // completed pulls; neither the miss nor the re-landed identical
+        // document may re-journal the episode, and the reported verdict
+        // must not flicker to `degraded` on evidence-free cycles.
+        for _ in 0..8 {
+            assert!(matches!(
+                peer.track_once(|| Err("checkpoint pull still in flight".to_string())),
+                TrackReport::Missed { .. }
+            ));
+            assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
+            peer.scan();
+            assert!(matches!(
+                peer.track_once(|| Ok(checkpoint.clone())),
+                TrackReport::Applied(_)
+            ));
+        }
+        assert!(
+            peer.take_orphans().is_empty(),
+            "the one orphan episode journals once, not once per pull"
+        );
     }
 
     /// `Orphaned` is promotable on the same evidence `Tracking` stands
