@@ -152,7 +152,8 @@
 //!   nor feed the demoted peer
 //! - `GET /role` → `200` [`RoleReport`] — the instance's reported role
 //!   in a redundant pair (`active`, `standby`, or a transition state)
-//!   plus the standby's convergence — the pair-as-one-controller
+//!   plus the standby's convergence, the field's claim observation, and
+//!   the armed failover gate's evidence — the pair-as-one-controller
 //!   contract of the monitoring-under-redundancy decision
 //! - `POST /promote`, `POST /demote` → `200` [`RoleReport`] — the
 //!   switchover actions of the switchover-semantics decision: promotion

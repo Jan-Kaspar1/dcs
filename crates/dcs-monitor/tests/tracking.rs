@@ -8,8 +8,8 @@
 use dcs_core::{
     Command, CommandAvailability, CommandDecl, CommandOutcome, ComponentDescriptor, Direction,
     Divergence, EmittedEvent, EventDecl, EventField, EventFieldKind, EventRetention, EventValue,
-    IoDriver, IoError, JournalEvent, PointId, Quality, QualityReason, Role, Sample, StandbySync,
-    StateMap, SwitchError, SwitchOrigin, Tick, Value, ValueKind,
+    FailoverEvidence, IoDriver, IoError, JournalEvent, PointId, Quality, QualityReason, Role,
+    Sample, StandbySync, StateMap, SwitchError, SwitchOrigin, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorClient};
@@ -662,6 +662,83 @@ fn driven_track_cycle_reports_the_refused_self_promotion() {
     assert!(
         role_changes(&standby.standby.client).is_empty(),
         "a refused promotion journals no role change"
+    );
+}
+
+/// `GET /role`'s served shape on an armed standby: the `failover`
+/// field serializes the gate's evidence — the standing proof, the
+/// consecutive misses, and the armed budget bounding them — and an
+/// unarmed peer omits the key entirely, so reports written before the
+/// field existed re-serve byte-identical.
+#[test]
+fn role_report_serves_the_armed_peers_failover_evidence() {
+    let (standby, active) = DrivenStandby::start(Some(3));
+
+    // Converged and tracking: the armed accounting serves the standing
+    // proof with a clean miss count.
+    active.client.advance(3).unwrap();
+    standby.standby.client.advance(1).unwrap();
+    let (status, body) = standby
+        .standby
+        .client
+        .request("GET", "/role", None)
+        .unwrap();
+    assert_eq!(status, 200);
+    let served: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        served["failover"],
+        serde_json::json!({"converged": true, "misses": 0, "budget": 3}),
+        "the armed peer serves the gate's evidence: {body}"
+    );
+
+    // The same report is the POST /promote answer body — the switch
+    // response carries the armed accounting identically.
+    let promoted = standby.standby.client.promote().unwrap();
+    assert_eq!(promoted.role, Role::Promoting);
+    assert_eq!(
+        promoted.failover,
+        Some(FailoverEvidence {
+            converged: true,
+            misses: 0,
+            budget: 3,
+        })
+    );
+
+    // Mid-window on a second armed rig: the produced-nothing pull
+    // degrades the served verdict while the standing proof holds —
+    // "verdict degraded, proof stands, misses 1 of 3".
+    let (mid, mid_active) = DrivenStandby::start(Some(3));
+    mid_active.client.advance(1).unwrap();
+    mid.standby.client.advance(1).unwrap();
+    mid_active.stop();
+    mid.standby.client.advance(1).unwrap();
+    let (status, body) = mid.standby.client.request("GET", "/role", None).unwrap();
+    assert_eq!(status, 200);
+    let served: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        served["sync"].get("degraded").is_some(),
+        "the missed pull reports degraded: {body}"
+    );
+    assert_eq!(
+        served["failover"],
+        serde_json::json!({"converged": true, "misses": 1, "budget": 3}),
+        "the mid-window report keeps the standing proof's bound: {body}"
+    );
+
+    // An unarmed peer omits the key entirely: the bare proof flag would
+    // survive unbounded misses, so it never reaches the wire.
+    let (unarmed, _unarmed_active) = DrivenStandby::start(None);
+    unarmed.standby.client.advance(1).unwrap();
+    let (status, body) = unarmed
+        .standby
+        .client
+        .request("GET", "/role", None)
+        .unwrap();
+    assert_eq!(status, 200);
+    let served: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        served.get("failover").is_none(),
+        "an unarmed peer's report carries no failover accounting: {body}"
     );
 }
 
