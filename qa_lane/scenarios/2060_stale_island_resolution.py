@@ -391,18 +391,22 @@ def _island_pass(ctx, number, owner):
 
 
 def scenario_stale_island_resolution(ctx):
-    """Exercise decision 91's stale-island contract on the deployed
-    rig: launch the driven third controller tracking the field owner,
-    demote the owner so the demoted pair islands on each other, then
-    promote the driven peer — the islanded sibling's promote must
-    refuse field_claim_failed against the live incumbent claim, and
-    the islanded pair must re-resolve onto the real owner through the
-    propagated line_owner and the keyed owner-verify probes."""
+    """Exercise decision 91's stale-island contract on the run's
+    keyed pair: launch the driven third controller tracking the
+    field owner, demote the owner so the demoted pair islands on
+    each other, then promote the driven peer — the islanded
+    sibling's promote must refuse field_claim_failed against the
+    live incumbent claim, and the islanded pair must re-resolve onto
+    the real owner through the propagated line_owner and the keyed
+    owner-verify probes. The subject is the deployed pair while the
+    run config keys it, else the lane-staged keyed probe pair."""
     case = Case(
         'stale-island-resolution',
         'Demoted-pair island re-resolves onto the promoted third '
         'controller',
-        'with the deployed pair settled and the run keyed, launch the '
+        'with the keyed pair settled — the deployed pair, or the '
+        'lane-staged probe pair while the deployed pair runs '
+        'unkeyed — launch the '
         'driven third controller tracking the field owner, demote the '
         'owner so the demoted ex-owner and the sibling standby report '
         'the orphaned verdict tracking each other — the journaled '
@@ -420,6 +424,23 @@ def scenario_stale_island_resolution(ctx):
             return case.finish('inconclusive', 'the run context '
                                'carries only one endpoint — the pair '
                                'the island leg needs is absent')
+        # The keyed subject (#1058): the deployed pair while the run
+        # config keys it, else the lane-staged probe pair — an
+        # unkeyed deployment with no staged probe pair is
+        # inconclusive on capability, not on the contract.
+        subject = _keyed_subject(ctx)
+        if subject is None:
+            return case.finish('inconclusive', 'the deployed pair '
+                               'carries no --pair-token and no '
+                               'keyed probe pair is staged — the '
+                               'keyed announced-source and '
+                               'orphan-probe contract the leg '
+                               'exercises is off')
+        if subject is not ctx:
+            case.observe('exercised on the lane-staged keyed '
+                         'probe pair — the deployed pair runs '
+                         'unkeyed')
+            ctx = subject
         for action in ('start_driven', 'stop_driven'):
             if ctx.get(action) is None:
                 return case.finish('inconclusive', 'the run context '
@@ -430,11 +451,6 @@ def scenario_stale_island_resolution(ctx):
             return case.finish('inconclusive', 'the run context '
                                'carries no driven endpoint — the '
                                'third controller has no monitor')
-        if not ctx.get('pair_token'):
-            return case.finish('inconclusive', 'the run carries no '
-                               '--pair-token — the keyed '
-                               'announced-source and orphan-probe '
-                               'contract the leg exercises is off')
         for name in ('active', 'standby'):
             try:
                 _role(ctx, ctx[name])

@@ -31,6 +31,15 @@
  "model_fixture": "crates/dcs-demo/fixtures/pump_station.json",
  "dynamics_fixture": "qa_lane/fixtures/pump_station_dynamics.json",
  "state_file_mounts": {"active": "fifo", "standby": "fifo"},
+ "probe_pair": {
+  "pair_token": "dcs-qa-pair",
+  "active_port": 18085,
+  "standby_port": 18086,
+  "driven_port": 18087,
+  "plant_port": 9002,
+  "model_fixture": "crates/dcs-demo/fixtures/pump_station.json",
+  "dynamics_fixture": "qa_lane/fixtures/probe_dynamics.json"
+ },
  "git_dir": "/srv/dcs-hwtest/repo.git",
  "exploration_enabled": false,
  "exploration_devin": "/home/jan-kaspar/.local/bin/devin",

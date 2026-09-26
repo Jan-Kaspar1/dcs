@@ -28,6 +28,8 @@ EXPECTED_CASES = frozenset({
     'ForgedStandbyTests.test_unconverged_pair_reports_inconclusive',
     'ForgedStandbyTests.test_unreachable_pair_reports_inconclusive',
     'ForgedStandbyTests.test_unkeyed_run_reports_inconclusive',
+    'ForgedStandbyTests.'
+    'test_unkeyed_deployed_pair_runs_on_the_probe_pair',
     'ForgedStandbyTests.test_missing_forge_action_reports_inconclusive',
     'ForgedStandbyTests.test_host_placed_forge_reports_inconclusive',
     'ForgedStandbyTests.test_diverging_digests_report_nondeterministic',
@@ -679,6 +681,18 @@ class ForgedStandbyTests(unittest.TestCase):
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'inconclusive', record)
         self.assertIn('pair-token', record['detail'])
+        report.validate_scenario(record)
+
+    def test_unkeyed_deployed_pair_runs_on_the_probe_pair(self):
+        # The deployed pair carries no --pair-token; the lane-staged
+        # probe pair the ctx['probe'] subject names is keyed — the
+        # leg exercises the contract on it and reports a real
+        # verdict instead of a capability skip (#1058).
+        record = self.run_scenario(pair_token=None,
+                                   probe=self.ctx())
+        self.assertEqual(record['outcome'], 'passed', record)
+        self.assertIn('probe pair',
+                      ' '.join(record['observations']))
         report.validate_scenario(record)
 
     def test_missing_forge_action_reports_inconclusive(self):
