@@ -84,7 +84,7 @@ import pair
 # seamless, must each surface the named diagnostic — never a
 # silently unattributed pass.
 LEG = {
-    "order": 280,
+    "order": 290,
     "title": "the history run-marker leg",
     "passes": "history-run",
     "tampers": [
