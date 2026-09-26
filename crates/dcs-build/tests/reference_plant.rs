@@ -12,6 +12,9 @@
 //! `deploy-schema` emissions — and the released `dcs-plant-server`'s
 //! `--dynamics-schema` emission — byte-pinned to the release record's
 //! artifacts fetched through the stand-in remote at the pinned rev,
+//! the checked-in deployment manifest and dynamics document screened
+//! against their declared schema artifacts — a schema-violating
+//! doctored copy of each reporting `schema-mismatch` —
 //! `diff` legs over a doctored
 //! compatible revision and the identical document, and
 //! `summary`/`signal-index` recorded as run evidence — the
@@ -194,7 +197,8 @@
 //! and the negative cases prove the new stage names the template
 //! introduces: `stale-artifact`, `manifest-fingerprint-mismatch`,
 //! `scenario-failed`, `rig-mismatch`, `schema-drift`,
-//! `schema-mismatch`, `diff-mismatch`, `pair-failed`,
+//! `schema-mismatch`, `schema-mismatch-nondeterministic`,
+//! `diff-mismatch`, `pair-failed`,
 //! `negotiation-failed`, `refusal-failed`, `handover-failed`,
 //! `takeover-failed`,
 //! `peer-announce-failed`,
@@ -584,6 +588,18 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
     for line in [
         "record's artifacts byte-identically",
         "a drifted record artifact refused: schema-drift",
+        // The consumer-document screening legs ran and held: the
+        // checked-in manifest and dynamics documents conformed to
+        // their declared record artifacts, and each doctored
+        // schema-violating copy reported schema-mismatch.
+        "the deployment manifest conforms to the recorded schema artifact",
+        "the dynamics document conforms to the recorded schema artifact",
+        "manifest missing-required refused: schema-mismatch",
+        "manifest mistyped-field refused: schema-mismatch",
+        "manifest undeclared-field refused: schema-mismatch",
+        "dynamics missing-required refused: schema-mismatch",
+        "dynamics mistyped-field refused: schema-mismatch",
+        "dynamics undeclared-element refused: schema-mismatch",
         "diff over the doctored compatible revision",
         "changed signal 10010",
         "diff over the identical document",
