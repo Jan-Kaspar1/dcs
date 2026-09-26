@@ -25,3 +25,4 @@ dcs-core = { path = "../dcs-core" }
 # unused, so the default resolver/TLS features stay off.
 jsonschema = { version = "=0.55.0", default-features = false }
 serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
+sha2 = "=0.10.9"
