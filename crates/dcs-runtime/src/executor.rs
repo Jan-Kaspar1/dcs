@@ -21,7 +21,7 @@ use dcs_core::{
     Tick, Value, ValueKind,
 };
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 
 /// How the controller may use one mapped point.
@@ -871,6 +871,25 @@ pub struct Executor<'d> {
     /// through [`with_receipt_log_capacity`](Executor::with_receipt_log_capacity),
     /// not run state: checkpoints do not carry it.
     receipt_capacity: usize,
+    /// Absolute submission indices of the suspended commands a
+    /// state-file resume parked: entries restored `Accepted` from a
+    /// checkpoint whose `source_owns_field` stamp records that its
+    /// source did not hold the field at capture
+    /// ([`suspend_restored_commands`](Self::suspend_restored_commands)).
+    /// Those receipts were suspended for the surviving line's
+    /// adjudication — the same state a demotion's parked tail carries
+    /// — but unlike a same-process re-promotion this run cannot prove
+    /// what the line did with them while the process was gone, so a
+    /// re-taken field-owning boundary must not settle them on a guess:
+    /// [`requeue_suspended_commands`](Self::requeue_suspended_commands)
+    /// skips them rather than minting a second `Applied` a carried
+    /// copy's settled verdict would contradict. A covering checkpoint
+    /// adoption is the run observing the line again and dissolves the
+    /// set — [`adopt_receipts`](Self::adopt_receipts) clears it, the
+    /// merged log then adjudicating the indices like any suspended
+    /// entry's. Run-local bookkeeping: the checkpoint carries the
+    /// receipts themselves, never this mark.
+    restored_suspended: BTreeSet<u64>,
     /// The events components emitted during the most recent scan —
     /// drained per component after its `step`, in scan and emission
     /// order — awaiting the scan's recording. Cleared when the next
@@ -1058,6 +1077,7 @@ impl<'d> Executor<'d> {
             command_admission: CommandAdmissionCounts::default(),
             receipts: Vec::new(),
             receipt_capacity: DEFAULT_RECEIPT_LOG_CAPACITY,
+            restored_suspended: BTreeSet::new(),
             emitted: Vec::new(),
             command_verdicts: Vec::new(),
             forces: BTreeMap::new(),
@@ -1980,13 +2000,40 @@ impl<'d> Executor<'d> {
     /// sits past the adopted high-water — evictions the source never
     /// saw opening a gap the log cannot span — cannot be restored and
     /// drops with the rest of the abandoned window.
+    ///
+    /// Inside the covered stretch the merge is durable-truth forward:
+    /// where the adopted window carries a submission this run already
+    /// settled — as the same command — still `Accepted`, the run's own
+    /// terminal verdict stands. `Accepted` claims pending, never a
+    /// settlement, so the document's view at that index is staler than
+    /// the run's settled record — captured before the line's
+    /// adjudication, or parked for it — and adopting it would regress
+    /// the served receipt and re-queue a command the line may already
+    /// have applied: the resumed-stale-peer double-apply the
+    /// receipted-command contract refuses. A terminal-over-terminal
+    /// divergence adopts the document's — the tracked line's newest
+    /// word replacing this run's — and a command mismatch is the fork
+    /// [`Peer::unaccounted`](crate::Peer::unaccounted) convicts before
+    /// the apply ever reaches the merge.
     fn adopt_receipts(&mut self, checkpoint: &Checkpoint) {
+        // An adoption is the run observing the line again: whatever a
+        // state-file resume parked for the line's adjudication is
+        // adjudicated here — the merged log covers, passes by, or
+        // leaves unrestored each marked index like any suspended
+        // entry's — so the resume mark dissolves.
+        self.restored_suspended.clear();
         // The adopted window's end in the submission sequence — the
         // high-water a prior receipt's index measures against. Indices
         // at or beyond it extend the adopted log contiguously only
         // while the run's window reaches back to meet it: a prior base
         // above the mark leaves a gap no restoration can span.
         let adopted_end = checkpoint.receipt_base() + checkpoint.receipts.len() as u64;
+        // The log as it stands before the merge — both the unreached
+        // suffix computation below and the covered stretch's
+        // durable-truth check read it: a settled verdict here is the
+        // newest word this run holds on each covered index.
+        let prior_base = self.receipt_base();
+        let prior = self.receipts.clone();
         // The receipts this run holds past the adopted high-water —
         // submissions the checkpoint's source never observed at
         // capture. `uncovered` is the spanable suffix restored into
@@ -1996,19 +2043,43 @@ impl<'d> Executor<'d> {
         // whether or not its receipt survives the merge: a staler
         // image cannot silently re-stand a force the journal already
         // released, nor drop one it recorded standing.
-        let unreached: Vec<CommandReceipt> = if adopted_end >= self.receipt_base() {
-            let skip = (adopted_end - self.receipt_base()).min(self.receipts.len() as u64) as usize;
-            self.receipts[skip..].to_vec()
+        let unreached: Vec<CommandReceipt> = if adopted_end >= prior_base {
+            let skip = (adopted_end - prior_base).min(prior.len() as u64) as usize;
+            prior[skip..].to_vec()
         } else {
-            self.receipts.clone()
+            prior.clone()
         };
         self.reassert_receipted_forces(&unreached);
-        let uncovered: Vec<CommandReceipt> = if adopted_end >= self.receipt_base() {
+        let uncovered: Vec<CommandReceipt> = if adopted_end >= prior_base {
             unreached
         } else {
             Vec::new()
         };
         self.receipts.clone_from(&checkpoint.receipts);
+        // Durable-truth forward inside the covered stretch: the adopted
+        // window's still-`Accepted` view of a submission this run already
+        // settled — the same command at the same index — is its staler
+        // record, so the merge restores the run's terminal verdict
+        // rather than regressing the receipt and re-queueing a settle
+        // the line already made. The unreached suffix is unaffected —
+        // restored verbatim below — and a settled adopted entry or a
+        // command mismatch lands as the window carries it.
+        for (position, receipt) in self.receipts.iter_mut().enumerate() {
+            if !matches!(receipt.outcome, CommandOutcome::Accepted { .. }) {
+                continue;
+            }
+            let index = checkpoint.receipt_base() + position as u64;
+            if let Some(settled) = index
+                .checked_sub(prior_base)
+                .and_then(|prior_position| prior.get(prior_position as usize))
+                .filter(|settled| {
+                    settled.command == receipt.command
+                        && !matches!(settled.outcome, CommandOutcome::Accepted { .. })
+                })
+            {
+                *receipt = settled.clone();
+            }
+        }
         // The adopted log is re-trimmed to this run's own bound: a
         // checkpoint captured under a looser capacity cannot grow this
         // log past it, and the pending queue rebuilds over the trimmed
@@ -3067,6 +3138,51 @@ impl<'d> Executor<'d> {
         self.pending_commands.clear();
     }
 
+    /// The state-file resume's second half: after a checkpoint
+    /// [`apply`](Self::apply)/[`reinitialize`](Self::reinitialize)
+    /// restored this run's pending commands, parks every restored
+    /// still-`Accepted` receipt whose capture the checkpoint's own
+    /// `source_owns_field` stamp says was taken off the field —
+    /// `Some(false)`, a demoted or tracking source's document.
+    ///
+    /// A suspended receipt restored that way cannot distinguish
+    /// "never applied" from "the surviving line carried the admission
+    /// and already settled it": the pre-death demotion suspended the
+    /// receipt for exactly that adjudication, and the file holds no
+    /// record of what the line did during the process gap. Re-queued
+    /// at the resumed run's first field-owning boundary the command
+    /// would apply a second time — stamping its stale verdict over
+    /// whatever the line settled since and minting a second terminal
+    /// settlement for one submission. The marked entries therefore
+    /// stay suspended — `Accepted`, honestly un-adjudicated — through
+    /// [`requeue_suspended_commands`](Self::requeue_suspended_commands)
+    /// until a covering checkpoint adoption resolves their indices,
+    /// which [`adopt_receipts`](Self::adopt_receipts) clears the mark
+    /// for. A document carrying no ownership stamp — a bare
+    /// [`Executor::checkpoint`] — or one stamped `Some(true)` restores
+    /// its queue untouched: the owner's own `Accepted` receipts were
+    /// queued for its next boundary, and resuming that queue is the
+    /// restart-window contract the state file exists for.
+    ///
+    /// Call it once, right after the resume's adoption — the
+    /// controller's `--state-file` path does — so the mark covers
+    /// exactly the receipts the file restored.
+    pub fn suspend_restored_commands(&mut self, checkpoint: &Checkpoint) {
+        if checkpoint.source_owns_field != Some(false) {
+            return;
+        }
+        let base = self.receipt_base();
+        self.restored_suspended = self
+            .receipts
+            .iter()
+            .enumerate()
+            .filter(|(_, receipt)| matches!(receipt.outcome, CommandOutcome::Accepted { .. }))
+            .map(|(index, _)| base + index as u64)
+            .collect();
+        self.pending_commands
+            .retain(|position| !self.restored_suspended.contains(&(base + *position as u64)));
+    }
+
     /// Re-queues the run's suspended commands — every still-`Accepted`
     /// receipt the queue does not already carry — for the field-owning
     /// scan's boundary to settle. [`scan`](Executor::scan) runs it at
@@ -3086,12 +3202,27 @@ impl<'d> Executor<'d> {
     /// scan like a carried command — never parked `Accepted` against a
     /// depth-0 queue while the served checkpoint keeps offering it to
     /// a successor's deferred apply.
+    ///
+    /// The exception is the state-file resume's parked set: entries
+    /// [`suspend_restored_commands`](Self::suspend_restored_commands)
+    /// marked were restored suspended from a checkpoint whose source
+    /// did not own the field at capture, and this run never observed
+    /// the line that may already have adjudicated them — re-queueing
+    /// one here would mint a second `Applied` beside the carried
+    /// copy's settlement the successor's journal already holds. They
+    /// stay suspended — `Accepted`, honestly un-adjudicated — until a
+    /// covering adoption resolves their indices.
     fn requeue_suspended_commands(&mut self) {
+        let base = self.receipt_base();
+        self.restored_suspended.retain(|index| *index >= base);
         self.pending_commands = self
             .receipts
             .iter()
             .enumerate()
-            .filter(|(_, receipt)| matches!(receipt.outcome, CommandOutcome::Accepted { .. }))
+            .filter(|(index, receipt)| {
+                matches!(receipt.outcome, CommandOutcome::Accepted { .. })
+                    && !self.restored_suspended.contains(&(base + *index as u64))
+            })
             .map(|(index, _)| index)
             .collect();
         // Re-queued depth is real depth the same way a carried queue's
