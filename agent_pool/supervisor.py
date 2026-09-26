@@ -27,6 +27,20 @@ class AdmissionDenied(RuntimeError):
     """Inference admission was refused immediately before a launch."""
 
 
+CONFLICT_PATH = re.compile(r'^CONFLICT \([^)]*\): Merge conflict in (.+)$', re.M)
+
+
+def conflict_paths(*outputs):
+    """Conflicted paths git's failed-merge output reports, in first-seen order."""
+    paths = []
+    for text in outputs:
+        for match in CONFLICT_PATH.finditer(str(text or '')):
+            path = match.group(1).strip()
+            if path:
+                paths.append(path)
+    return list(dict.fromkeys(paths))
+
+
 class Supervisor:
     def __init__(self, config):
         self.config = config
@@ -378,7 +392,7 @@ Repair context: {repair}
         self.state.update_job(job['issue'], status='pr-open', pr=number, error=None)
         self.state.set('process:' + str(job['issue']), None)
 
-    def repair(self, job, issue, reason, cause):
+    def repair(self, job, issue, reason, cause, detail=None):
         if self.state.paused():
             return
         owner = 'job:' + str(job['issue'])
@@ -387,7 +401,7 @@ Repair context: {repair}
                                       self.state.capacity()):
             self.log(f"Repair for #{job['issue']} deferred: inference admission denied")
             return
-        if self.state.repair(job['issue'], cause):
+        if self.state.repair(job['issue'], cause, detail=detail):
             self.launch(self.state.job(job['issue']), issue, reason)
         else:
             self.admission.release(owner)
@@ -520,7 +534,8 @@ Repair context: {repair}
                     self.runtime.run_git(clone, 'merge', '--no-edit', 'origin/main')
                     self.runtime.run_git(clone, 'push', 'origin', job['branch'])
                 except subprocess.CalledProcessError as exc:
-                    self.repair(job, by_number[job['issue']], 'Resolve the existing merge conflict with origin/main. ' + str(exc.stdout) + str(exc.stderr), 'merge-conflict')
+                    paths = conflict_paths(exc.stdout, exc.stderr)
+                    self.repair(job, by_number[job['issue']], 'Resolve the existing merge conflict with origin/main. ' + str(exc.stdout) + str(exc.stderr), 'merge-conflict', detail={'paths': paths} if paths else None)
                 return
             if self.github.checks_pass(pr, self.config['required_checks']):
                 if self.github.merge(job['pr'], self.config['required_checks']):
@@ -530,7 +545,7 @@ Repair context: {repair}
             checks = self.github.check_states(pr['head']['sha'])
             failed = {name: checks[name] for name in self.config['required_checks'] if checks.get(name) in ('failure','timed_out','cancelled','action_required','skipped','neutral','stale')}
             if failed:
-                self.repair(job, by_number[job['issue']], 'CI failed. Inspect gh pr checks and gh run view --log-failed as read-only diagnostics. ' + json.dumps(failed), 'ci-failure')
+                self.repair(job, by_number[job['issue']], 'CI failed. Inspect gh pr checks and gh run view --log-failed as read-only diagnostics. ' + json.dumps(failed), 'ci-failure', detail={'checks': sorted(failed)})
                 return
 
     def review_stage(self, cfg=None):

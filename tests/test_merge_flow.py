@@ -202,6 +202,113 @@ class RepairCauseTests(unittest.TestCase):
         self.assertEqual(repair["redispatches_by_cause"], {})
 
 
+def repair_event(at, issue_number, cause, **detail):
+    payload = {"cause": cause}
+    payload.update(detail)
+    return event("repair", at, issue_number, payload=json.dumps(payload))
+
+
+class ConflictAttributionTests(unittest.TestCase):
+    """Per-window conflicted-path, area, and failing-check attribution."""
+
+    def test_conflict_paths_ranked_by_incidence_with_unclassified_bucket(self):
+        events = [
+            repair_event(NOW - 10, 1, "merge-conflict",
+                         paths=["docs/plan.md", "shared/x.py", "docs/y.md"]),
+            repair_event(NOW - 20, 2, "merge-conflict",
+                         paths=["docs/plan.md", "shared/x.py"]),
+            repair_event(NOW - 30, 3, "merge-conflict",
+                         paths=["docs/plan.md"]),
+            # A historical row without recorded paths buckets unclassified.
+            repair_event(NOW - 40, 4, "merge-conflict"),
+        ]
+        report = merge_flow.window_report([], NOW - WEEK, NOW, {}, {}, events)
+        repair = report["repair_incidence"]
+        self.assertEqual(repair["conflict_repairs"], 4)
+        self.assertEqual(repair["conflict_paths"], {
+            "docs/plan.md": 3, "shared/x.py": 2, "docs/y.md": 1,
+            "unclassified": 1})
+        self.assertEqual(list(repair["conflict_paths"]),
+                         ["docs/plan.md", "shared/x.py", "docs/y.md",
+                          "unclassified"])
+        self.assertEqual(repair["conflict_load"], "concentrated")
+
+    def test_conflict_load_spread_and_unattributed(self):
+        spread = [repair_event(NOW - 10 - i, i + 1, "merge-conflict",
+                               paths=[f"path/{letter}.py"])
+                  for i, letter in enumerate("abcdef")]
+        report = merge_flow.window_report([], NOW - WEEK, NOW, {}, {}, spread)
+        self.assertEqual(report["repair_incidence"]["conflict_load"], "spread")
+        bare = [repair_event(NOW - 10, 1, "merge-conflict"),
+                repair_event(NOW - 20, 2, "merge-conflict")]
+        report = merge_flow.window_report([], NOW - WEEK, NOW, {}, {}, bare)
+        repair = report["repair_incidence"]
+        self.assertEqual(repair["conflict_load"], "unattributed")
+        self.assertEqual(repair["conflict_paths"], {"unclassified": 2})
+        report = merge_flow.window_report([], NOW - WEEK, NOW, {}, {}, [])
+        repair = report["repair_incidence"]
+        self.assertEqual(repair["conflict_load"], "none")
+        self.assertEqual(repair["conflict_paths"], {})
+
+    def test_repairs_joined_to_issue_managed_area(self):
+        issues = {1: issue(1, area="delivery-platform", state="CLOSED"),
+                  2: issue(2, area="library", state="CLOSED")}
+        events = [
+            repair_event(NOW - 10, 1, "merge-conflict",
+                         paths=["docs/plan.md"]),
+            repair_event(NOW - 20, 1, "ci-failure", checks=["verify"]),
+            repair_event(NOW - 30, 2, "merge-conflict",
+                         paths=["crates/x/src/lib.rs"]),
+            repair_event(NOW - 40, 9, "publish-error"),
+        ]
+        report = merge_flow.window_report([], NOW - WEEK, NOW, issues, {},
+                                          events)
+        self.assertEqual(report["repair_incidence"]["repairs_by_area"], {
+            "delivery-platform": {"ci-failure": 1, "merge-conflict": 1},
+            "library": {"merge-conflict": 1},
+            "unresolved": {"publish-error": 1}})
+
+    def test_failing_checks_from_payload_and_terminal_check_record(self):
+        jobs = {
+            4: blocked_job(4, NOW - 40,
+                           "Repair limit exhausted: CI failed. Inspect gh pr "
+                           "checks and gh run view --log-failed as read-only "
+                           'diagnostics. {"verify": "failure"}'),
+            5: blocked_job(5, NOW - 50, "Repair limit exhausted: push "
+                           "rejected by remote"),
+        }
+        events = [
+            repair_event(NOW - 10, 1, "ci-failure", checks=["verify"]),
+            repair_event(NOW - 20, 2, "ci-failure",
+                         checks=["clippy", "verify"]),
+            repair_event(NOW - 30, 3, "ci-failure", checks=[]),
+            # No payload checks; the job's terminal check record exposes them.
+            repair_event(NOW - 40, 4, "ci-failure"),
+            # Neither the row nor the job record names checks.
+            repair_event(NOW - 50, 5, "ci-failure"),
+        ]
+        report = merge_flow.window_report([], NOW - WEEK, NOW, {}, jobs,
+                                          events)
+        self.assertEqual(report["repair_incidence"]["failing_checks"], {
+            "verify": 3, "clippy": 1, "unclassified": 2})
+
+    def test_attribution_deterministic_for_fixed_inputs(self):
+        issues = {1: issue(1, area="operations", state="CLOSED")}
+        jobs = {2: blocked_job(2, NOW - 20,
+                               "Repair limit exhausted: CI failed. Inspect "
+                               "gh pr checks and gh run view --log-failed as "
+                               "read-only diagnostics. {\"verify\": "
+                               "\"failure\"}")}
+        events = [
+            repair_event(NOW - 10, 1, "merge-conflict",
+                         paths=["docs/plan.md"]),
+            repair_event(NOW - 20, 2, "ci-failure"),
+        ]
+        args = ([], NOW - WEEK, NOW, issues, jobs, events)
+        self.assertEqual(merge_flow.window_report(*args),
+                         merge_flow.window_report(*args))
+
+
 def blocked_job(number, updated, error):
     return dict(job(number, NOW - 3 * WEEK, updated), status="blocked",
                 error=error)
