@@ -1161,7 +1161,10 @@ fn resume_state_file(
     if revised && checkpoint.model_fingerprint != executor.model_fingerprint() {
         return executor
             .reinitialize(&checkpoint)
-            .map(|report| Resume::Reinitialized(Box::new(report)))
+            .map(|report| {
+                executor.suspend_restored_commands(&checkpoint);
+                Resume::Reinitialized(Box::new(report))
+            })
             .map_err(|error| {
                 format!(
                     "cannot resume from state file {}: model-boundary carryover failed: {error}",
@@ -1172,6 +1175,15 @@ fn resume_state_file(
     executor
         .apply(&checkpoint)
         .map_err(|error| format!("cannot resume from state file {}: {error}", path.display()))?;
+    // The restart-window contract's failover half: a file captured
+    // while its run did not own the field restored its pending
+    // commands *suspended* — parked for the surviving line's
+    // adjudication — and this run cannot tell a never-applied
+    // admission from one the replacement already settled during the
+    // gap. `suspend_restored_commands` keeps them parked rather than
+    // letting the first field-owning scan mint a second settlement
+    // beside the carried copy's.
+    executor.suspend_restored_commands(&checkpoint);
     Ok(Resume::Applied)
 }
 
