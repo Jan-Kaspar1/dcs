@@ -35,13 +35,18 @@
 //! # The driven run
 //!
 //! [`run_scripted`] and [`run_bus`] run the identical scenario through
-//! the same externally paced machinery `dcs-controller --driven` uses:
-//! an unpaced [`Monitor`] armed with [`Driven`] wiring, advanced one
-//! scan per `POST /scan` request through [`MonitorClient`]. Each
-//! requested scan carries the plant step inside the request's boundary
-//! — and, on the bus variant, the field feed for the next scan — so
-//! the field side and the scan stay in lockstep and nothing reads a
-//! wall clock.
+//! the shared driven-mode orchestration [`equivalence`](crate::equivalence)
+//! carries — the same externally paced machinery
+//! `dcs-controller --driven` uses: an unpaced
+//! [`Monitor`](dcs_monitor::Monitor) armed with
+//! [`Driven`](dcs_monitor::Driven) wiring, advanced one scan per
+//! `POST /scan` request through
+//! [`MonitorClient`](dcs_monitor::MonitorClient). Each requested scan
+//! carries the plant step inside the request's boundary — and, on the
+//! bus variant, the field feed for the next scan — so the field side
+//! and the scan stay in lockstep and nothing reads a wall clock. This
+//! module supplies only the scenario content: the fixture documents,
+//! the field program, the operator actions, and the pins below.
 //!
 //! The single field program [`FIELD_PROGRAM`] is the scenario's input:
 //! `(tick, point, value)` entries naming the value a field `In` point
@@ -61,29 +66,27 @@
 //! # What equality means here
 //!
 //! The assertion compares what the control plane observed: per-scan
-//! [`TelemetrySnapshot`]s — every point's value, quality, and tick, the
-//! component diagnostics, descriptors, live parameters, force set, and
-//! the executor-collected I/O-health counters — and the transition
-//! journal's [`JournalEntry`] sequence. One snapshot field is
-//! legitimately kind-specific and normalized before comparison:
-//! `io_health.driver`, the driver's own volunteered transport
-//! diagnostics — the `sim-bus` link reports itself connected while the
-//! scripted backend has no transport to report. That is the same
-//! normalization `dcs-assembly`'s `sim-bus` test records: the executor's
-//! view is identical; each transport's health report is its own.
+//! [`TelemetrySnapshot`](dcs_core::TelemetrySnapshot)s — every point's
+//! value, quality, and tick, the component diagnostics, descriptors,
+//! live parameters, force set, and the executor-collected I/O-health
+//! counters — and the transition journal's
+//! [`JournalEntry`](dcs_core::JournalEntry) sequence. One snapshot
+//! field is legitimately kind-specific and normalized before
+//! comparison: `io_health.driver`, the driver's own volunteered
+//! transport diagnostics — the `sim-bus` link reports itself connected
+//! while the scripted backend has no transport to report. That is the
+//! same normalization `dcs-assembly`'s `sim-bus` test records: the
+//! executor's view is identical; each transport's health report is its
+//! own.
 
-use dcs_assembly::{AssemblyError, DriverRegistry, FanoutDriver, assemble, resolve_drivers};
-use dcs_core::{
-    Command, CommandReceipt, IoDriver, JournalEntry, PointHistory, PointId, TelemetrySnapshot,
-    Value, ValueKind,
-};
-use dcs_model::{LoadError, PlantModel};
-use dcs_monitor::{Driven, Monitor, MonitorClient};
-use dcs_runtime::Peer;
-use dcs_sim_bus::{BusDriver, BusServer, PointRegister, RegisterBank, RegisterDecl};
-use std::fmt;
-use std::io;
-use std::thread;
+use dcs_assembly::{DriverRegistry, resolve_drivers};
+use dcs_core::{Command, IoDriver, PointId, Value, ValueKind};
+use dcs_model::PlantModel;
+use dcs_sim_bus::{BusDriver, BusServer};
+
+use crate::equivalence::{self, BankDerivation, driven_run, field_bindings, with_served_bank};
+
+pub use crate::equivalence::{EquivalenceError as TwoKindsError, OperatorAction, VariantRun};
 
 /// The checked-in `sim-scripted` variant of the shared logical plant.
 pub const SCRIPTED_DOCUMENT: &str = include_str!("../fixtures/two_kinds_scripted.json");
@@ -100,8 +103,8 @@ pub const BUS_DOCUMENT: &str = include_str!("../fixtures/two_kinds_bus.json");
 pub const BUS_ADDRESS_PLACEHOLDER: &str = "__BUS_ADDR__";
 
 /// Simulated process time each scan advances — the `dt` passed to
-/// [`FanoutDriver::step`] and the period the pid's `dt` parameter is
-/// tuned for.
+/// [`FanoutDriver::step`](dcs_assembly::FanoutDriver::step) and the
+/// period the pid's `dt` parameter is tuned for.
 pub const SCAN_PERIOD: f64 = 0.1;
 
 /// The run's documented length in scans.
@@ -223,17 +226,6 @@ pub const FIELD_PROGRAM: &[FieldChange] = &[
     },
 ];
 
-/// One scripted operator action: `command` is submitted between scans
-/// `tick - 1` and `tick`, so it applies at scan `tick`'s head — the
-/// receipt's `Accepted { apply_tick: tick }`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct OperatorAction {
-    /// The scan tick the command applies at.
-    pub tick: u64,
-    /// The command submitted through `POST /command`.
-    pub command: Command,
-}
-
 /// The scenario's operator actions, in submission order — identical for
 /// both variants, so their settled receipts journal identically.
 pub fn actions() -> Vec<OperatorAction> {
@@ -299,214 +291,21 @@ pub fn actions() -> Vec<OperatorAction> {
     ]
 }
 
-/// Why loading, assembling, or running a two-kinds variant failed.
-#[derive(Debug)]
-pub enum TwoKindsError {
-    /// The model document failed [`PlantModel::load`].
-    Load(LoadError),
-    /// Device resolution, component construction, or wiring failed.
-    Assembly(AssemblyError),
-    /// A monitor request or server operation failed.
-    Io(io::Error),
-    /// The field side failed: the register bank, the field attachment,
-    /// or a feed write. The driven cycle's after-scan wiring reports
-    /// through the requesting `POST /scan`, surfacing here as [`Io`].
-    Field(String),
-}
-
-impl fmt::Display for TwoKindsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Load(error) => write!(f, "{error}"),
-            Self::Assembly(error) => write!(f, "{error}"),
-            Self::Io(error) => write!(f, "{error}"),
-            Self::Field(detail) => write!(f, "field side failed: {detail}"),
-        }
-    }
-}
-
-impl std::error::Error for TwoKindsError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Load(error) => Some(error),
-            Self::Assembly(error) => Some(error),
-            Self::Io(error) => Some(error),
-            Self::Field(_) => None,
-        }
-    }
-}
-
-impl From<LoadError> for TwoKindsError {
-    fn from(error: LoadError) -> Self {
-        Self::Load(error)
-    }
-}
-
-impl From<AssemblyError> for TwoKindsError {
-    fn from(error: AssemblyError) -> Self {
-        Self::Assembly(error)
-    }
-}
-
-impl From<io::Error> for TwoKindsError {
-    fn from(error: io::Error) -> Self {
-        Self::Io(error)
-    }
-}
-
-/// One finished driven run: what the control plane observed, the
-/// payloads the equivalence assertion compares.
-#[derive(Debug)]
-pub struct VariantRun {
-    /// The `POST /scan` response after each of [`TOTAL_SCANS`] scans —
-    /// the executor's per-scan snapshot.
-    pub snapshots: Vec<TelemetrySnapshot>,
-    /// The full transition journal after the run — `GET /journal`'s
-    /// payload.
-    pub journal: Vec<JournalEntry>,
-    /// The receipts the run's operator commands returned, in
-    /// submission order.
-    pub receipts: Vec<CommandReceipt>,
-    /// The bounded point-history rings after the run — `GET /history`'s
-    /// payload: every point's retained samples in `seq` order, the
-    /// durable record a lagging consumer reads back.
-    pub history: Vec<PointHistory>,
-}
-
-/// The value kind's neutral initial — the same `0`/`false`/`0.0` the
-/// driver bindings seed, matching the scripted bindings' initials so
-/// unwritten registers read identically.
-fn neutral(kind: ValueKind) -> Value {
-    match kind {
-        ValueKind::Bool => Value::Bool(false),
-        ValueKind::Int => Value::Int(0),
-        ValueKind::Float => Value::Float(0.0),
-    }
-}
-
-/// The register bank the bus variant's device serves: one register per
-/// declared channel, at the indices the model's `registers` parameter
-/// maps, initialized to the channels' neutral values.
-fn register_bank(model: &PlantModel) -> Result<RegisterBank, TwoKindsError> {
-    let device = model
-        .devices
-        .first()
-        .expect("the bus fixture declares device 1");
-    let registers = device
-        .parameters
-        .get("registers")
-        .and_then(|registers| registers.as_object())
-        .expect("the bus fixture declares a registers map");
-    let decls = device.channels.iter().map(|(name, channel)| {
-        let register = registers[name.as_str()]
-            .as_u64()
-            .expect("the bus fixture maps every channel to a register index");
-        RegisterDecl {
-            register: register as u16,
-            initial: neutral(channel.value_type),
-        }
-    });
-    RegisterBank::new(decls)
-        .map_err(|error| TwoKindsError::Field(format!("register bank rejected: {error}")))
-}
-
-/// The point → register bindings a field-side [`BusDriver`] feeds
-/// through, derived from the model's own channel→register map so the
-/// rig and the controller cannot disagree about the mapping.
-fn field_bindings(model: &PlantModel) -> Vec<PointRegister> {
-    let device = model
-        .devices
-        .first()
-        .expect("the bus fixture declares device 1");
-    let registers = device
-        .parameters
-        .get("registers")
-        .and_then(|registers| registers.as_object())
-        .expect("the bus fixture declares a registers map");
-    model
-        .io_points
-        .iter()
-        .filter_map(|point| {
-            let channel = point.channel.as_ref()?;
-            Some(PointRegister {
-                point: point.id,
-                register: registers[channel.name.as_str()].as_u64().unwrap() as u16,
-                kind: point.value_type,
-            })
-        })
-        .collect()
-}
-
-/// Runs the documented scenario against an assembled variant through
-/// the driven-mode machinery: an unpaced monitor whose `POST /scan`
-/// requests each run one scan plus the cycle's `after_scan` wiring —
-/// the plant step, then `feed` presenting the next scan's field inputs.
-/// `feed(1)` runs before the first request so scan 1 reads the
-/// program's first values.
-///
-/// Determinism: requests are serialized by the monitor's lock, the
-/// client waits for each response before issuing the next, and both
-/// driver kinds are tick-domain — identical request sequences produce
-/// identical runs.
-fn driven_run<'d>(
-    model: &PlantModel,
-    driver: &'d FanoutDriver,
-    feed: impl Fn(u64) -> Result<(), String> + Send + Sync + 'd,
-) -> Result<VariantRun, TwoKindsError> {
-    feed(1).map_err(TwoKindsError::Field)?;
-    let executor = assemble(model, &dcs_controller::registry(), driver)?;
-    let monitor = Monitor::bind(("127.0.0.1", 0), executor, model.signal_index())
-        .map_err(TwoKindsError::Io)?
-        .driven(Driven {
-            track: None,
-            after_scan: Some(Box::new(move |peer: &Peer<'d>| {
-                // The scan cycle's plant step — the same call the
-                // `--driven` controller installs — then the field's
-                // next presentation, still inside the request boundary.
-                driver
-                    .step(SCAN_PERIOD)
-                    .map_err(|error| format!("plant step failed: {error}"))?;
-                feed(peer.tick().0 + 1)
-            })),
-        });
-    let addr = monitor.local_addr();
-    thread::scope(|scope| {
-        scope.spawn(|| monitor.serve());
-        let client = MonitorClient::new(addr);
-        let actions = actions();
-        let result = (|| {
-            let mut snapshots = Vec::with_capacity(TOTAL_SCANS as usize);
-            let mut receipts = Vec::with_capacity(actions.len());
-            for tick in 1..=TOTAL_SCANS {
-                // Actions scheduled for this scan are submitted while
-                // the run sits between scans — the executor applies
-                // them at the coming scan's head.
-                for action in actions.iter().filter(|action| action.tick == tick) {
-                    receipts.push(client.command(&action.command)?);
-                }
-                snapshots.push(client.advance(1)?);
-            }
-            let journal = client.journal(0)?;
-            let history = client.history(&[], 0)?;
-            Ok(VariantRun {
-                snapshots,
-                journal,
-                receipts,
-                history,
-            })
-        })();
-        monitor.shutdown();
-        result
-    })
-}
-
 /// Runs the scenario on the `sim-scripted` variant: the fixture's
-/// declared script is the field side, so the feed is a no-op — the
-/// driven step alone advances playback.
+/// declared script is the field side, so each boundary is only the
+/// `FanoutDriver::step` the `--driven` wiring installs — the driven
+/// step alone advances playback.
 pub fn run_scripted() -> Result<VariantRun, TwoKindsError> {
-    let model = PlantModel::load(SCRIPTED_DOCUMENT)?;
-    let driver = resolve_drivers(&model, &DriverRegistry::standard())?.build()?;
-    driven_run(&model, &driver, |_| Ok(()))
+    let (model, driver) = equivalence::local_variant(SCRIPTED_DOCUMENT, None)?;
+    let driver = &driver;
+    driven_run(&model, driver, TOTAL_SCANS, &actions(), move |boundary| {
+        if boundary == 0 {
+            return Ok(());
+        }
+        driver
+            .step(SCAN_PERIOD)
+            .map_err(|error| format!("plant step failed: {error}"))
+    })
 }
 
 /// Binds a [`BusServer`] serving the bus fixture's declared register map
@@ -518,13 +317,12 @@ pub fn run_scripted() -> Result<VariantRun, TwoKindsError> {
 pub fn bus_variant() -> Result<(PlantModel, BusServer), TwoKindsError> {
     // The register map is model data: the bank, the controller's
     // bindings, and the field feed all derive from the one fixture.
-    let declared = PlantModel::load(BUS_DOCUMENT)?;
-    let bank = register_bank(&declared)?;
-    let server = BusServer::bind(("127.0.0.1", 0), bank).map_err(TwoKindsError::Io)?;
-    let addr = server.local_addr().map_err(TwoKindsError::Io)?;
-    let model =
-        PlantModel::load(&BUS_DOCUMENT.replace(BUS_ADDRESS_PLACEHOLDER, &addr.to_string()))?;
-    Ok((model, server))
+    equivalence::bus_variant(
+        BUS_DOCUMENT,
+        BUS_ADDRESS_PLACEHOLDER,
+        BankDerivation::Neutral,
+        None,
+    )
 }
 
 /// Runs the scenario on the `sim-bus` variant: a [`BusServer`] serves
@@ -535,23 +333,35 @@ pub fn bus_variant() -> Result<(PlantModel, BusServer), TwoKindsError> {
 /// No writer claim is taken in the run, so the device stays open to
 /// both attachments.
 pub fn run_bus() -> Result<VariantRun, TwoKindsError> {
-    let (model, server) = bus_variant()?;
-    thread::scope(|scope| {
-        scope.spawn(|| server.serve());
-        let result = (|| {
-            let driver = resolve_drivers(&model, &DriverRegistry::standard())?.build()?;
-            let field = BusDriver::connect(server.local_addr()?, &field_bindings(&model))?;
-            let feed = move |tick: u64| -> Result<(), String> {
-                for change in FIELD_PROGRAM.iter().filter(|change| change.tick == tick) {
+    with_served_bank(
+        BUS_DOCUMENT,
+        BUS_ADDRESS_PLACEHOLDER,
+        BankDerivation::Neutral,
+        None,
+        |model, addr| {
+            let driver = resolve_drivers(model, &DriverRegistry::standard())?.build()?;
+            let field = BusDriver::connect(addr, &field_bindings(model)?)?;
+            let driver = &driver;
+            let boundary = move |tick: u64| -> Result<(), String> {
+                // The scan cycle's plant step — the same call the
+                // `--driven` controller installs — then the field's
+                // next presentation, still inside the request boundary.
+                if tick > 0 {
+                    driver
+                        .step(SCAN_PERIOD)
+                        .map_err(|error| format!("plant step failed: {error}"))?;
+                }
+                for change in FIELD_PROGRAM
+                    .iter()
+                    .filter(|change| change.tick == tick + 1)
+                {
                     field.write(change.point, change.value).map_err(|error| {
                         format!("register feed for point {} failed: {error}", change.point.0)
                     })?;
                 }
                 Ok(())
             };
-            driven_run(&model, &driver, feed)
-        })();
-        server.shutdown();
-        result
-    })
+            driven_run(model, driver, TOTAL_SCANS, &actions(), boundary)
+        },
+    )
 }
