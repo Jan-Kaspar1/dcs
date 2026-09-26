@@ -98,7 +98,7 @@ import pair
 # past its declared budget must surface the named diagnostic on
 # the honest fresh stamp — never a silently unexercised contract.
 LEG = {
-    "order": 340,
+    "order": 350,
     "title": "the bare-point restamp leg",
     "passes": "bare-point-restamp-leg",
     "tools": {
