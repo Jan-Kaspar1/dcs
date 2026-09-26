@@ -87,7 +87,7 @@
       "schema": "pass",
       "merge": "fail",
       "class": "nonfinite-literal",
-      "note": "1e999 parses as a JSON number the schema accepts; the merge rejects the non-finite initial (NonFiniteInitial)."
+      "note": "1e999 is valid JSON grammar the schema accepts as a number; the document's serde reader rejects the out-of-range literal before validation runs."
     },
     {
       "file": "scripts/dyn/cases/pass-fail__float_point_id.json",

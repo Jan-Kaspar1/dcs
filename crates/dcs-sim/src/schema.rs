@@ -39,7 +39,10 @@
 //!   kind the end requires: `float` throughout except a `bool_flow`'s
 //!   gate `input` and a `threshold`'s contact `output`, which are
 //!   `bool` (`ElementPointKind`, `ElementGateKind`,
-//!   `ElementContactKind`);
+//!   `ElementContactKind`). The requirement attaches to each leg, so
+//!   an element whose input and output name one point — a self-point —
+//!   faces both legs' checks: only a variant whose legs agree, like a
+//!   lag on a single `float` point, can merge and run;
 //! - end direction: the point an element drives must be an `in` point
 //!   (`ElementOutputDirection`) — elements model field-side physics
 //!   answering commands, so driving an `out` point would rewrite the
@@ -50,8 +53,9 @@
 //! - driven-point uniqueness across differing elements
 //!   (`ConflictingDriver`);
 //! - finiteness: JSON spells no `NaN`/`inf` literal, but a magnitude
-//!   like `1e999` parses as a `number` the merge then rejects as
-//!   non-finite;
+//!   like `1e999` is valid grammar the schema accepts as a `number`
+//!   while the document's serde reader rejects the out-of-range
+//!   literal before validation runs;
 //! - the lexical integer/float distinction — JSON Schema compares
 //!   numbers mathematically, so `1.0` passes an integer field the serde
 //!   reader rejects, and an integer past `u64::MAX` passes a point field
