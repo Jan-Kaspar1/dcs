@@ -694,7 +694,7 @@ class PairRig:
 
 
 def launch_pair(args, manifest, tamper=None, auto_promote=None,
-                declared_binds=False):
+                declared_binds=False, controller=None):
     """Resolve the declared standby pair and launch it on the released
     tooling — the bring-up the pair-stage legs share: each
     controller's declared persistence instantiated under a
@@ -714,7 +714,10 @@ def launch_pair(args, manifest, tamper=None, auto_promote=None,
     when true, binds each controller's `--listen` on its declared
     listen's host with a runner-assigned port — the manifest's
     wildcard bind shape deployed, each verbatim bound address
-    recorded on the rig's `duty_bound`/`standby_bound`. Returns the
+    recorded on the rig's `duty_bound`/`standby_bound`. `controller`,
+    when given, is the controller binary both peers launch on instead
+    of `args.controller` — the leg launching the pair on another
+    revision's released binary passes it here. Returns the
     PairRig."""
     declared = (
         manifest_pair(manifest)
@@ -726,6 +729,7 @@ def launch_pair(args, manifest, tamper=None, auto_promote=None,
             "the manifest declares no standby pair — the pair rig has "
             "nothing to exercise"
         )
+    binary = controller or args.controller
     rig = PairRig(declared)
     try:
         rig.plant, rig.plant_addr = spawn_plant(
@@ -733,7 +737,7 @@ def launch_pair(args, manifest, tamper=None, auto_promote=None,
         )
         rig.plant_io = simulate.PlantClient(rig.plant_addr)
         rig.duty, rig.duty_url, rig.duty_preamble = spawn_peer(
-            args.controller,
+            binary,
             args.model,
             args.dt,
             rig.plant_addr,
@@ -757,7 +761,7 @@ def launch_pair(args, manifest, tamper=None, auto_promote=None,
         if tamper == "broken-peer-flag":
             target = closed_port()
         rig.standby, rig.standby_url, rig.standby_preamble = spawn_peer(
-            args.controller,
+            binary,
             args.model,
             args.dt,
             rig.plant_addr,

@@ -98,7 +98,7 @@ import simulate
 # must surface the named diagnostic on the plant's honest named
 # refusal — never a silently unrefused pass.
 LEG = {
-    "order": 310,
+    "order": 320,
     "title": "the nonfinite write and step refusal leg",
     "passes": "nonfinite-refusal-leg",
     "tools": {

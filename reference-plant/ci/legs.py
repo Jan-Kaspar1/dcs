@@ -24,6 +24,11 @@ prose and whose `LEG` literal carries its stage registration:
         "tools": {"ctl": "dcs-ctl"},     # optional — each entry passes
                                          # the leg `--<flag> <binary>`
                                          # resolved under --tools
+        "upgrade_tools": {               # optional — like "tools" but
+            "upgrade-controller":        # resolved under
+                "dcs-controller",        # --upgrade-tools, the recorded
+        },                               # upgrade-from revision's
+                                         # tooling directory
         "tampers": [                     # optional — the leg's doctored
                                          # cases, each a `--tamper`
                                          # choice the leg accepts
@@ -58,7 +63,8 @@ next.
 Usage:
 
     legs.py --plant-server PATH --controller PATH --model PATH \
-        --dynamics PATH --scenario PATH --manifest PATH --tools DIR
+        --dynamics PATH --scenario PATH --manifest PATH --tools DIR \
+        [--upgrade-tools DIR]
 """
 
 import argparse
@@ -117,13 +123,16 @@ def validate_leg(path, record):
             raise Invalid(f"{path}: LEG[{field!r}] must be a string")
     if "failed" in record and not isinstance(record["failed"], str):
         raise Invalid(f"{path}: LEG['failed'] must be a string")
-    if "tools" in record:
-        tools = record["tools"]
-        if not isinstance(tools, dict) or not all(
-            isinstance(flag, str) and isinstance(binary, str)
-            for flag, binary in tools.items()
-        ):
-            raise Invalid(f"{path}: LEG['tools'] must map flags to binaries")
+    for field in ("tools", "upgrade_tools"):
+        if field in record:
+            tools = record[field]
+            if not isinstance(tools, dict) or not all(
+                isinstance(flag, str) and isinstance(binary, str)
+                for flag, binary in tools.items()
+            ):
+                raise Invalid(
+                    f"{path}: LEG[{field!r}] must map flags to binaries"
+                )
     for tamper in record.get("tampers", []):
         if not isinstance(tamper, dict) or not all(
             isinstance(tamper.get(field), str)
@@ -190,6 +199,8 @@ def run_leg(args, leg, tamper=None):
     ]
     for flag, binary in leg.get("tools", {}).items():
         argv += ["--" + flag, os.path.join(args.tools, binary)]
+    for flag, binary in leg.get("upgrade_tools", {}).items():
+        argv += ["--" + flag, os.path.join(args.upgrade_tools, binary)]
     if tamper is not None:
         argv += ["--tamper", tamper]
     if tamper is None:
@@ -215,6 +226,12 @@ def main(argv=None):
         help="the directory holding the released tooling — the legs' "
         "declared tool flags resolve to executables under it",
     )
+    parser.add_argument(
+        "--upgrade-tools",
+        help="the directory holding the recorded upgrade-from "
+        "revision's tooling — the legs' declared upgrade_tools flags "
+        "resolve to executables under it",
+    )
     args = parser.parse_args(argv)
 
     legs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "legs")
@@ -233,6 +250,20 @@ def main(argv=None):
                 eprint(
                     f"{failed}: the release tooling ships no {binary} "
                     "binary"
+                )
+                return 1
+        for binary in leg.get("upgrade_tools", {}).values():
+            if args.upgrade_tools is None:
+                eprint(
+                    f"{failed}: {leg['title']} declares upgrade tooling "
+                    "but --upgrade-tools was not given"
+                )
+                return 1
+            binary_path = os.path.join(args.upgrade_tools, binary)
+            if not os.access(binary_path, os.X_OK):
+                eprint(
+                    f"{failed}: the upgrade-from tooling ships no "
+                    f"{binary} binary"
                 )
                 return 1
         first = run_leg(args, leg)

@@ -115,7 +115,7 @@ class Registration(unittest.TestCase):
         }
         record = discovered["nonfinite_refusal.py"]
         self.assertEqual(record["stem"], "nonfinite-refusal")
-        self.assertEqual(record["order"], 310)
+        self.assertEqual(record["order"], 320)
         # No "failed" override — the default <stem>-failed is the
         # issue's named diagnostic.
         self.assertNotIn("failed", record)
