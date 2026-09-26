@@ -10,9 +10,9 @@ landing in seq order in the manifest-declared durable journal file
 the rig's claim-observation scenario pins in-workspace, mirrored at
 the customer boundary).
 
-The claim-fencing leg (`ci/claim_fencing.py`) proves the standing
-claim's whole lifecycle against the consumer pair — fenced probes,
-the conditional-grant verbs, the rogue preempt's attributed
+The claim-reclaim leg (`ci/legs/claim_reclaim.py`) proves the
+standing claim's preempt-and-reclaim lifecycle against the consumer
+pair — the foreign `claim_writer` preempt, the attributed
 `field_claim_lost` and demote-in-place, and the released field's
 bound conditional reclaim. This leg stages the handover the recorded
 loss cannot see on its own: a claimant that took the claim between
@@ -97,7 +97,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.dirname(_HERE))
 
-import claim_fencing
+import claim_reclaim
 import failover
 import pair
 import simulate
@@ -111,7 +111,7 @@ import simulate
 # must surface the named diagnostic on the honest attributed
 # record rather than passing an unexercised contract.
 LEG = {
-    "order": 380,
+    "order": 390,
     "title": "the observed-claimant journal leg",
     "passes": "claim-observed",
     "tampers": [
@@ -139,11 +139,11 @@ class Inconclusive(Exception):
 
 # The claim tokens the leg's two foreign attachments assert — small
 # fixed tokens that cannot collide with a controller's per-process
-# minted token, distinct from the claim-fencing leg's probes so a
-# diagnostic never confuses the legs' claimants. The induction
-# token takes the preempt the recorded loss attributes; the
-# observed token takes the handover the demoted ex-owner only ever
-# meets through its refused probes.
+# minted token, distinct from the claim-reclaim leg's induction
+# token so a diagnostic never confuses the legs' claimants. The
+# induction token takes the preempt the recorded loss attributes;
+# the observed token takes the handover the demoted ex-owner only
+# ever meets through its refused probes.
 CLAIM_INDUCTION = 0xF021
 CLAIM_OBSERVED = 0xF022
 
@@ -207,14 +207,6 @@ def role_walk(entries):
     ]
 
 
-def verdict_owner(verdict):
-    """The owner token a fencing verdict attributes the standing
-    claim to — the `owner` field the plant's `fenced` and `io.fenced`
-    answers carry under the attribution contract — or None on an
-    unfenced answer or a build predating the field."""
-    return ((verdict or {}).get("error") or {}).get("owner")
-
-
 def claim_grant(client, token, what, evidence):
     """One unconditional `claim_writer` under `token` on the claim
     attachment — the preempt half of the leg's staging. `done` takes
@@ -253,14 +245,17 @@ def claim_observed_pass(args, tamper):
             "claim-observed leg has nothing to exercise"
         )
     digest_entries, evidence, failures = [], {}, []
-    rig = induction_io = observed_io = None
+    rig = verdict_io = induction_io = observed_io = None
     try:
         rig = pair.launch_pair(args, declared)
         duty_url, standby_url = rig.duty_url, rig.standby_url
         plant_io = rig.plant_io
         # The claim attachments the episode stages through — the
         # rig's own client stays read-only, so every claim belongs
-        # to these two connections' holds.
+        # to these two connections' holds. `verdict_io` runs the
+        # third-party mutation probes and never holds a claim — the
+        # staging discipline the claim-reclaim leg drives.
+        verdict_io = simulate.PlantClient(rig.plant_addr)
         induction_io = simulate.PlantClient(rig.plant_addr)
         with open(args.model) as handle:
             model = json.load(handle)
@@ -306,30 +301,30 @@ def claim_observed_pass(args, tamper):
             {"op": "ensure_writer", "owner": CLAIM_INDUCTION}
         )
         evidence["verbs"] = verbs
-        if claim_fencing.unsupported_verb(verbs):
+        if claim_reclaim.unsupported_verb(verbs):
             raise Inconclusive(
                 f"a foreign ensure_writer answered {verbs} — the "
                 "pinned release predates the claim lifecycle verbs "
                 "the observed-claimant contract rides on"
             )
-        if not claim_fencing.mutation_fenced(verbs):
+        if not claim_reclaim.mutation_fenced(verbs):
             failures.append(
                 "a foreign token's ensure_writer was not refused "
                 "fenced — the conditional grant preempted or joined "
                 f"a claim it must not reach: {verbs}"
             )
             raise Abort
-        if verdict_owner(verbs) is None:
+        if claim_reclaim.verdict_owner(verbs) is None:
             raise Inconclusive(
                 "the fencing verdict names no standing owner — the "
                 "pinned release predates the verdict attribution "
                 "the observed record's claimant reads: "
                 f"{verbs}"
             )
-        if verdict_owner(verbs) != owner_token:
+        if claim_reclaim.verdict_owner(verbs) != owner_token:
             failures.append(
                 "the fencing verdict attributes the standing claim "
-                f"to {verdict_owner(verbs)}, not the recorded owner "
+                f"to {claim_reclaim.verdict_owner(verbs)}, not the recorded owner "
                 f"token {owner_token:#x}: {verbs}"
             )
             raise Abort
@@ -348,17 +343,17 @@ def claim_observed_pass(args, tamper):
         # the claim-reclaim leg's rogue claim drives, held while the
         # superseded owner's first fenced write demotes it in place.
         claim_grant(induction_io, CLAIM_INDUCTION, "induction", evidence)
-        seized = claim_fencing.foreign_step_probe(rig.plant_addr)
+        seized = verdict_io.request({"op": "step", "dt": 0})
         evidence["seized"] = seized
-        if not claim_fencing.mutation_fenced(seized):
+        if not claim_reclaim.mutation_fenced(seized):
             failures.append(
                 "the induction claim's preempt did not fence the "
                 f"field — a foreign attachment's probe answered "
                 f"{seized}"
             )
             raise Abort
-        if verdict_owner(seized) != CLAIM_INDUCTION:
-            if verdict_owner(seized) is None:
+        if claim_reclaim.verdict_owner(seized) != CLAIM_INDUCTION:
+            if claim_reclaim.verdict_owner(seized) is None:
                 raise Inconclusive(
                     "the post-preemption fencing verdict names no "
                     "standing owner — the pinned release predates "
@@ -367,7 +362,7 @@ def claim_observed_pass(args, tamper):
                 )
             failures.append(
                 "the fencing verdict attributes the preempted claim "
-                f"to {verdict_owner(seized)}, not the induction "
+                f"to {claim_reclaim.verdict_owner(seized)}, not the induction "
                 f"token {CLAIM_INDUCTION:#x}: {seized}"
             )
             raise Abort
@@ -376,7 +371,7 @@ def claim_observed_pass(args, tamper):
                 "phase": "induction",
                 "claim": "granted",
                 "seized": failover.probe_kind(seized),
-                "seized_owner": verdict_owner(seized),
+                "seized_owner": claim_reclaim.verdict_owner(seized),
             }
         )
 
@@ -404,7 +399,7 @@ def claim_observed_pass(args, tamper):
             raise Abort
         roles = []
         settled = None
-        for _ in range(claim_fencing.WATCH_SCANS):
+        for _ in range(claim_reclaim.WATCH_SCANS):
             report = pair.get(
                 f"{duty_url}/role", "GET /role", failures
             )
@@ -499,19 +494,19 @@ def claim_observed_pass(args, tamper):
         # refused conditional probes.
         observed_io = simulate.PlantClient(rig.plant_addr)
         claim_grant(observed_io, CLAIM_OBSERVED, "observed", evidence)
-        seized2 = claim_fencing.foreign_step_probe(rig.plant_addr)
+        seized2 = verdict_io.request({"op": "step", "dt": 0})
         evidence["seized2"] = seized2
-        if not claim_fencing.mutation_fenced(seized2):
+        if not claim_reclaim.mutation_fenced(seized2):
             failures.append(
                 "the observed claim's handover did not fence the "
                 f"field — a foreign attachment's probe answered "
                 f"{seized2}"
             )
             raise Abort
-        if verdict_owner(seized2) != CLAIM_OBSERVED:
+        if claim_reclaim.verdict_owner(seized2) != CLAIM_OBSERVED:
             failures.append(
                 "the fencing verdict attributes the handed-over "
-                f"claim to {verdict_owner(seized2)}, not the "
+                f"claim to {claim_reclaim.verdict_owner(seized2)}, not the "
                 f"observed token {CLAIM_OBSERVED:#x}: {seized2}"
             )
             raise Abort
@@ -520,7 +515,7 @@ def claim_observed_pass(args, tamper):
                 "phase": "handover",
                 "claim": "granted",
                 "seized": failover.probe_kind(seized2),
-                "seized_owner": verdict_owner(seized2),
+                "seized_owner": claim_reclaim.verdict_owner(seized2),
             }
         )
 
@@ -668,7 +663,7 @@ def claim_observed_pass(args, tamper):
             raise Abort
         reclaim = []
         promoted = None
-        for _ in range(claim_fencing.RECONVERGE_SCANS):
+        for _ in range(claim_reclaim.RECONVERGE_SCANS):
             pair.scan(duty_url, failures)
             report = pair.get(
                 f"{duty_url}/role", "GET /role", failures
@@ -719,14 +714,14 @@ def claim_observed_pass(args, tamper):
                 f"GET /role answers {duty_role}"
             )
             raise Abort
-        if not claim_fencing.tracking(peer_role):
+        if not claim_reclaim.tracking(peer_role):
             failures.append(
                 "the tracking peer never reconverged after the "
                 f"reclaim — GET /role answers {peer_role}"
             )
             raise Abort
-        post_step = claim_fencing.foreign_step_probe(rig.plant_addr)
-        if not claim_fencing.mutation_fenced(post_step):
+        post_step = verdict_io.request({"op": "step", "dt": 0})
+        if not claim_reclaim.mutation_fenced(post_step):
             failures.append(
                 "the restored claim does not fence foreign "
                 f"probes: {post_step}"
@@ -932,7 +927,7 @@ def claim_observed_pass(args, tamper):
         # field claimed for a dead token — then close. The release
         # drops only the connection's own hold, so it never takes
         # the owner's claim down with it.
-        for client in (induction_io, observed_io):
+        for client in (verdict_io, induction_io, observed_io):
             if client is not None:
                 try:
                     client.request({"op": "release_writer"})

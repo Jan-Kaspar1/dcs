@@ -87,7 +87,7 @@ class Registration(unittest.TestCase):
         }
         record = discovered["claim_observed.py"]
         self.assertEqual(record["stem"], "claim-observed")
-        self.assertEqual(record["order"], 380)
+        self.assertEqual(record["order"], 390)
 
     def test_the_named_diagnostics_follow_the_stem_convention(self):
         # The issue names claim-observed-failed and
@@ -165,7 +165,13 @@ class Projections(unittest.TestCase):
             leg.role_walk(entries), [("active", "demoting", None)]
         )
 
-    def test_the_verdict_owner_reads_the_fencing_attribution(self):
+    def test_the_leg_reuses_the_claim_reclaim_staging(self):
+        # The issue pins the foreign-claim staging the claim-reclaim
+        # leg drives as the leg's staging source — the verdict
+        # classification, the attribution read, the verb-unsupported
+        # probe, the tracking check, and the driven-scan bounds all
+        # resolve through `claim_reclaim`, never a private copy.
+        claim_reclaim = leg.claim_reclaim
         verdict = {
             "result": "error",
             "error": {
@@ -174,13 +180,23 @@ class Projections(unittest.TestCase):
                 "owner": 4242,
             },
         }
-        self.assertEqual(leg.verdict_owner(verdict), 4242)
-        self.assertIsNone(leg.verdict_owner({"result": "done"}))
-        self.assertIsNone(leg.verdict_owner(None))
-        self.assertIsNone(
-            leg.verdict_owner(
-                {"result": "error", "error": {"kind": "unclaimed"}}
-            )
+        self.assertTrue(claim_reclaim.mutation_fenced(verdict))
+        self.assertEqual(claim_reclaim.verdict_owner(verdict), 4242)
+        self.assertFalse(claim_reclaim.unsupported_verb(verdict))
+        for helper in (
+            claim_reclaim.mutation_fenced,
+            claim_reclaim.verdict_owner,
+            claim_reclaim.unsupported_verb,
+            claim_reclaim.tracking,
+        ):
+            self.assertEqual(helper.__module__, "claim_reclaim")
+        self.assertGreater(claim_reclaim.WATCH_SCANS, 0)
+        self.assertGreater(claim_reclaim.RECONVERGE_SCANS, 0)
+        self.assertNotEqual(
+            leg.CLAIM_INDUCTION, claim_reclaim.FOREIGN_OWNER
+        )
+        self.assertNotEqual(
+            leg.CLAIM_OBSERVED, claim_reclaim.FOREIGN_OWNER
         )
 
 
