@@ -11,7 +11,8 @@
 //! `POST /scan`, plus any request still carrying a body the client
 //! owes (dropping its live reader drains the remainder, the same
 //! unbounded wait) — a heartbeat lane for the pair-liveness reads,
-//! `GET /checkpoint` and `GET /role`, a control lane for the bodiless
+//! `GET /health`, `GET /checkpoint`, and `GET /role`, a control lane
+//! for the bodiless
 //! switchover POSTs, `POST /promote` and `POST /demote`, and a
 //! serving lane for everything else. A client that stalls mid-body
 //! pins at most the command worker or the small submission pool, so
@@ -158,6 +159,13 @@
 //!   plus the standby's convergence, the field's claim observation, and
 //!   the armed failover gate's evidence — the pair-as-one-controller
 //!   contract of the monitoring-under-redundancy decision
+//! - `GET /health` → `200` [`HealthReport`] — the bounded liveness
+//!   answer the published image's `HEALTHCHECK` probes (the
+//!   container-health contract): the listener's own live declaration,
+//!   the instance's reported role, and the wall-clock age of the last
+//!   completed scan. It takes the heartbeat lane like `/checkpoint`
+//!   and `/role`, so the probe still answers while wedged consumers
+//!   starve the bulk reads
 //! - `POST /promote`, `POST /demote` → `200` [`RoleReport`] — the
 //!   switchover actions of the switchover-semantics decision: promotion
 //!   lifts the standby's write gate at the request's scan boundary,
@@ -529,7 +537,7 @@ pub use store::{Publication, PublicationGap, PublicationPage};
 
 use dcs_core::{
     CarryoverReport, Command, CommandError, CommandOutcome, CommandReceipt, JournalEntry,
-    JournalSinkHealth, PointHistory, PointId, PublicationHealth, ResourceView, RoleReport,
+    JournalSinkHealth, PointHistory, PointId, PublicationHealth, ResourceView, Role, RoleReport,
     SchemaView, StandbySync, StateSinkHealth, SwitchError, TelemetrySnapshot, Tick,
 };
 use dcs_model::SignalIndex;
@@ -603,6 +611,30 @@ pub struct SwitchRequest {
     /// unattributed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<String>,
+}
+
+/// The `GET /health` answer — the bounded liveness report the published
+/// image's `HEALTHCHECK` probes (the container-health contract): the
+/// listener's own liveness declaration, the instance's reported role,
+/// and the run's scan freshness. Bounded like the heartbeat lane's
+/// other reads — one shared-lock fetch, a fixed small body, no network
+/// wait — so the probe answers while wedged consumers starve the bulk
+/// reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthReport {
+    /// The process liveness declaration: `true` by construction — an
+    /// answer at all is the proof, and the field is the contract a
+    /// probe decodes rather than a port a connect alone attests.
+    pub live: bool,
+    /// The instance's reported redundancy role — the same verdict
+    /// `GET /role` serves: `active`, `standby`, or a transition state.
+    pub role: Role,
+    /// The run's current tick — the same domain `GET /role` reports.
+    pub tick: Tick,
+    /// Wall-clock milliseconds since the last completed scan — the
+    /// freshness `live` alone cannot attest: a wedged scan loop reads
+    /// as a growing age, a run that has not scanned yet as `null`.
+    pub last_scan_age_ms: Option<u64>,
 }
 
 /// The monitoring page served at `GET /` — see the crate docs.
@@ -691,11 +723,12 @@ const ANNOUNCED_VERIFY_RETRY: Duration = Duration::from_secs(4);
 /// control lane quarantines its actuation from.
 const SERVE_WORKERS: usize = 4;
 
-/// The worker count serving the heartbeat lane — `GET /checkpoint` and
-/// `GET /role`, the reads a redundant pair's liveness runs on: the
-/// standby's pull-per-scan-cycle heartbeat measures the active by the
-/// first, and the operator's failover verdict and the pair view read
-/// the second. Both handlers answer from the lock and the store alone
+/// The worker count serving the heartbeat lane — `GET /health`,
+/// `GET /checkpoint`, and `GET /role`, the reads a redundant pair's
+/// liveness runs on: the standby's pull-per-scan-cycle heartbeat
+/// measures the active by the second, the operator's failover verdict
+/// and the pair view read the third, and the container health check
+/// probes the first. Both handlers answer from the lock and the store alone
 /// — no network wait — so the only client-paced wait on the lane is
 /// the response write, and these answers are small: a write blocks
 /// only for a client that already left earlier pipelined responses
@@ -1034,6 +1067,12 @@ pub struct Monitor<'d> {
 struct Shared<'d> {
     peer: Peer<'d>,
     recorder: recorder::Recorder,
+    /// When the run's last scan completed — the wall-clock freshness
+    /// `GET /health` reports as `last_scan_age_ms`. `None` before the
+    /// first scan completes: the bind-time publication is a read model,
+    /// not a scan. Serve-side bookkeeping like the recorder's, inside
+    /// the lock because every scan already serializes here.
+    last_scan: Option<Instant>,
 }
 
 /// One announced-hint verification pass's bookkeeping — the hint set
@@ -1167,7 +1206,11 @@ impl<'d> Monitor<'d> {
         // moment the monitor exists.
         store.publish(peer.tick(), peer.snapshot(), peer.receipts());
         Ok(Self {
-            shared: Mutex::new(Shared { peer, recorder }),
+            shared: Mutex::new(Shared {
+                peer,
+                recorder,
+                last_scan: None,
+            }),
             store,
             signals,
             server: Server::http(addr).map_err(io::Error::other)?,
@@ -1381,8 +1424,9 @@ impl<'d> Monitor<'d> {
     /// way) go to the submission lane's [`SUBMIT_WORKERS`] workers,
     /// whatever their path: a stalled-body `GET /checkpoint` must not
     /// pin a heartbeat worker either, nor a bodied `POST /promote` a
-    /// control one. Bodiless pair-liveness reads — `GET /checkpoint`,
-    /// `GET /role` — go to the heartbeat lane's [`HEARTBEAT_WORKERS`]
+    /// control one. Bodiless pair-liveness reads — `GET /health`,
+    /// `GET /checkpoint`, `GET /role` — go to the heartbeat lane's
+    /// [`HEARTBEAT_WORKERS`]
     /// workers, and the bodiless switchover POSTs — `POST /promote`,
     /// `POST /demote` — to the control lane's [`CONTROL_WORKERS`];
     /// everything else goes to the serving lane's [`SERVE_WORKERS`].
@@ -1781,7 +1825,7 @@ impl<'d> Monitor<'d> {
     /// launched active with `NotActive`.
     pub fn activate(&self) -> Result<(), dcs_core::SwitchError> {
         let mut shared = self.shared.lock().unwrap();
-        let Shared { peer, recorder } = &mut *shared;
+        let Shared { peer, recorder, .. } = &mut *shared;
         peer.activate()?;
         for change in peer.take_role_changes() {
             recorder.note_role_change(&change);
@@ -1801,7 +1845,7 @@ impl<'d> Monitor<'d> {
     /// apply landed on.
     pub fn apply_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), ApplyError> {
         let mut shared = self.shared.lock().unwrap();
-        let Shared { peer, recorder } = &mut *shared;
+        let Shared { peer, recorder, .. } = &mut *shared;
         let result = peer.apply(checkpoint);
         for report in peer.take_divergences() {
             recorder.note_divergence(report.tick, report.mismatches);
@@ -1839,7 +1883,7 @@ impl<'d> Monitor<'d> {
     /// once per transition at the resumed tick.
     pub fn transfer_checkpoint(&self, checkpoint: &Checkpoint) -> Result<Transfer, ApplyError> {
         let mut shared = self.shared.lock().unwrap();
-        let Shared { peer, recorder } = &mut *shared;
+        let Shared { peer, recorder, .. } = &mut *shared;
         let result = peer.transfer(checkpoint);
         for report in peer.take_divergences() {
             recorder.note_divergence(report.tick, report.mismatches);
@@ -1958,7 +2002,7 @@ impl<'d> Monitor<'d> {
     /// /role` already serves; the scan cycle continues.
     pub fn self_promote(&self) -> Result<RoleReport, dcs_core::SwitchError> {
         let mut shared = self.shared.lock().unwrap();
-        let Shared { peer, recorder } = &mut *shared;
+        let Shared { peer, recorder, .. } = &mut *shared;
         peer.self_promote()?;
         for change in peer.take_role_changes() {
             recorder.note_role_change(&change);
@@ -2050,6 +2094,26 @@ impl<'d> Monitor<'d> {
                 json(200, &checkpoint)
             }
             (Method::Get, "/role") => json(200, &self.shared.lock().unwrap().peer.report()),
+            // The container health contract's probe — the bounded
+            // liveness answer: the listener's own declaration, the
+            // served role, and the wall-clock age of the last
+            // completed scan. One lock fetch like `/role`, on the
+            // heartbeat lane so the probe still answers while wedged
+            // consumers starve the bulk reads.
+            (Method::Get, "/health") => {
+                let shared = self.shared.lock().unwrap();
+                json(
+                    200,
+                    &HealthReport {
+                        live: true,
+                        role: shared.peer.role(),
+                        tick: shared.peer.tick(),
+                        last_scan_age_ms: shared
+                            .last_scan
+                            .map(|at| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX)),
+                    },
+                )
+            }
             (Method::Get, "/history") => match history_query(query) {
                 Ok((points, since)) => json(200, &self.store.history(&points, since)),
                 Err(message) => json(400, &message),
@@ -2093,7 +2157,7 @@ impl<'d> Monitor<'d> {
                     reason,
                 }) => {
                     let mut shared = self.shared.lock().unwrap();
-                    let Shared { peer, recorder } = &mut *shared;
+                    let Shared { peer, recorder, .. } = &mut *shared;
                     // Only the settled-active peer accepts commands: on a
                     // standby or mid-transition instance the write gate
                     // would keep the write from the field, so refuse with
@@ -2330,7 +2394,7 @@ impl<'d> Monitor<'d> {
             }
         };
         let mut shared = self.shared.lock().unwrap();
-        let Shared { peer, recorder } = &mut *shared;
+        let Shared { peer, recorder, .. } = &mut *shared;
         let result = if promote {
             if let Some(pulled) = pulled {
                 peer.final_sync(|| pulled);
@@ -2697,7 +2761,7 @@ impl<'d> Monitor<'d> {
             if shared.peer.owns_field() || self.pull_source().is_some() {
                 return None;
             }
-            let Shared { peer, recorder } = &mut *shared;
+            let Shared { peer, recorder, .. } = &mut *shared;
             recorder.note_tracking_source(peer.tick(), source);
             drop(shared);
             *self.adopted.lock().unwrap() = Some(source);
@@ -2788,7 +2852,7 @@ impl<'d> Monitor<'d> {
         if shared.peer.owns_field() || self.pull_source().is_some() {
             return None;
         }
-        let Shared { peer, recorder } = &mut *shared;
+        let Shared { peer, recorder, .. } = &mut *shared;
         recorder.note_tracking_source(peer.tick(), claimed);
         drop(shared);
         *self.adopted.lock().unwrap() = Some(claimed);
@@ -2948,9 +3012,10 @@ fn submission(request: &Request) -> bool {
 
 /// Whether the request is a pair-liveness read — [`Monitor::serve`]'s
 /// second routing step, after [`submission`]. `GET /checkpoint` is the
-/// heartbeat a tracking standby measures the active's liveness by and
+/// heartbeat a tracking standby measures the active's liveness by,
 /// `GET /role` is the verdict the pair view and a failover decision
-/// read; both answer from the shared lock or the store with no
+/// read, and `GET /health` is the container health check's probe; all
+/// three answer from the shared lock or the store with no
 /// network wait, so they take the dedicated heartbeat lane — the one
 /// pool a wedged response write on a bulk read can never pin. The
 /// query string is ignored (`/checkpoint?peer=` is the same pull).
@@ -2958,7 +3023,7 @@ fn pair_liveness(request: &Request) -> bool {
     request.method() == &Method::Get
         && matches!(
             request.url().split('?').next(),
-            Some("/checkpoint") | Some("/role")
+            Some("/health") | Some("/checkpoint") | Some("/role")
         )
 }
 
@@ -3193,7 +3258,7 @@ fn track_and_record(
     store: &Store,
     pull: impl FnOnce() -> Result<Checkpoint, String>,
 ) -> TrackReport {
-    let Shared { peer, recorder } = shared;
+    let Shared { peer, recorder, .. } = shared;
     let report = peer.track_once(pull);
     for divergence in peer.take_divergences() {
         recorder.note_divergence(divergence.tick, divergence.mismatches);
@@ -3244,7 +3309,7 @@ fn track_and_record(
 /// bounded store the read endpoints serve. The lock's hold ends at the
 /// swap — the consumer side never joins it.
 fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Tick {
-    let Shared { peer, recorder } = shared;
+    let Shared { peer, recorder, .. } = shared;
     let tick = peer.scan();
     let snapshot = recorder.record_scan(peer.executor(), tick);
     // A field write the plant fenced — the claim this owner held was
@@ -3266,6 +3331,11 @@ fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Tick {
         recorder.note_role_change(&change);
     }
     store.publish(tick, snapshot, peer.receipts());
+    // The scan's wall-clock completion stamp — `GET /health`'s
+    // `last_scan_age_ms` freshness. Set once the publication the scan
+    // produced is served, so the age the probe reports is the age of
+    // what consumers can already read.
+    shared.last_scan = Some(Instant::now());
     tick
 }
 
@@ -3947,6 +4017,13 @@ impl MonitorClient {
         self.get_json("/role")
     }
 
+    /// `GET /health`: the bounded liveness answer — the listener's live
+    /// declaration, the served role, and the last completed scan's
+    /// wall-clock age.
+    pub fn health(&self) -> io::Result<HealthReport> {
+        self.get_json("/health")
+    }
+
     /// `POST /promote`: lifts the standby's write gate at the request's
     /// scan boundary, returning the post-change [`RoleReport`]. A
     /// refusal — `not_converged`, `already_active` — surfaces as an
@@ -4318,6 +4395,50 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ScanRequest { scans: 2 }).unwrap(),
             "{\"scans\":2}"
+        );
+    }
+
+    #[test]
+    fn health_report_serde_roundtrip_and_shape() {
+        for report in [
+            HealthReport {
+                live: true,
+                role: Role::Active,
+                tick: Tick(7),
+                last_scan_age_ms: Some(12),
+            },
+            HealthReport {
+                live: true,
+                role: Role::Standby,
+                tick: Tick::ZERO,
+                last_scan_age_ms: None,
+            },
+        ] {
+            let json = serde_json::to_string(&report).unwrap();
+            assert_eq!(serde_json::from_str::<HealthReport>(&json).unwrap(), report);
+        }
+        // The pinned wire shape: liveness, the served role in the
+        // shared snake_case vocabulary, the run's tick, and the
+        // last-scan age — `null` before the first scan completes.
+        assert_eq!(
+            serde_json::to_string(&HealthReport {
+                live: true,
+                role: Role::Active,
+                tick: Tick(7),
+                last_scan_age_ms: Some(12),
+            })
+            .unwrap(),
+            r#"{"live":true,"role":"active","tick":7,"last_scan_age_ms":12}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&HealthReport {
+                live: true,
+                role: Role::Standby,
+                tick: Tick::ZERO,
+                last_scan_age_ms: None,
+            })
+            .unwrap(),
+            r#"{"live":true,"role":"standby","tick":0,"last_scan_age_ms":null}"#
         );
     }
 
