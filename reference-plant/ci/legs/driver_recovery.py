@@ -90,7 +90,7 @@ import simulate
 # honest first-exchange clearing — never a silently unexercised
 # contract.
 LEG = {
-    "order": 320,
+    "order": 330,
     "title": "the remote-driver recovery leg",
     "passes": "driver-recovery-leg",
     "tampers": [
