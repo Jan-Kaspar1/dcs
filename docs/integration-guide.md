@@ -614,7 +614,7 @@ A factory returns one of two `DeviceDriver` contributions:
   initial value). The fragment merges with every other `Sim` contribution
   and the synthesized internal points into one `SimDriver` backend, so a
   model can mix many `sim*` devices freely.
-- `DeviceDriver::Backend(DeviceBackend { io, step, claim, release, ensure, startup_claim, probe, reclaim, fenced_by, inspect, field_facing })` — a
+- `DeviceDriver::Backend(DeviceBackend { io, step, claim, release, ensure, startup_claim, probe, reclaim, fenced_by, declare_monitor, claimed_monitor, inspect, field_facing })` — a
   self-contained backend. `io` is the point-facing driver; `step` is an
   optional `StepHook` (`Fn(f64) -> Result<Tick, dcs_assembly::StepError>`)
   advancing the backend's simulated plant one `dt` per `FanoutDriver::step` —
@@ -694,6 +694,21 @@ A factory returns one of two `DeviceDriver` contributions:
   `RemoteDriver::fenced_by`; a kind whose fencing verdicts carry no
   owner identity leaves it `None` and the entry records `claimant:
   null`.
+  `declare_monitor` is an optional `DeclareMonitorHook`
+  (`Fn(SocketAddr)`) — the tracking-surface declaration the controller
+  runs once its monitor is bound: `FanoutDriver::declare_field_monitor`
+  forwards the bound address to every field-facing backend carrying
+  the hook, and the backend then stamps it on every write-ownership
+  claim it asserts. `claimed_monitor` is the matching read —
+  `Fn() -> Option<SocketAddr>` — answering the monitor endpoint the
+  standing claim declared as the field's fencing verdicts recorded it;
+  `FanoutDriver::claimed_monitor` surfaces the first field-facing
+  answer, and a demoted peer's tracking path uses it to re-join the
+  successor — the field's own arbitration is the only rendezvous an
+  unkeyed pair can prove (announced `?peer=` hints are unverifiable
+  without a pair key). `sim-tcp` installs both on the `RemoteDriver`'s
+  claim state; a kind whose claims carry no declared monitor leaves
+  them `None` and a demoted peer reports no claim-arbitrated source.
   `inspect` is an optional
   `Option<Arc<dyn Any + Send + Sync>>` typed handle the factory installs when
   the backend exposes more than the `IoDriver` surface — `sim-scripted`
@@ -882,6 +897,8 @@ fn memory_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         probe: None,
         reclaim: None,
         fenced_by: None,
+        declare_monitor: None,
+        claimed_monitor: None,
         inspect: None,
         field_facing: false,
     }))
@@ -1357,6 +1374,8 @@ fn demo_bus(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         probe: None,
         reclaim: None,
         fenced_by: None,
+        declare_monitor: None,
+        claimed_monitor: None,
         inspect: Some(inspect),
         field_facing: true,
     }))
