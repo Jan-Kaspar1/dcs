@@ -17,7 +17,7 @@ use dcs_sim::{
 };
 use dcs_sim_net::{ClaimGrant, PlantError, PlantResponse, PlantServer, RemoteDriver, RemoteError};
 use std::io::{self, BufRead, BufReader, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
 
@@ -2187,5 +2187,68 @@ fn a_fenced_write_carries_the_standing_claims_declared_monitor() {
         rogue.release_writer().unwrap();
         assert_eq!(owner.probe_writer().unwrap(), FieldClaim::Unclaimed);
         assert_eq!(owner.claimed_monitor(), None);
+    });
+}
+
+/// The wildcard-bind half of the declared-monitor contract — the QA
+/// finding `field-claimed-monitor-undialable-under-wildcard-bind`: the
+/// documented container deployment binds `--listen 0.0.0.0`, so the
+/// claimant declares its *bind* address, which every fenced peer dials
+/// as its own loopback, stranding the field-arbitrated rendezvous the
+/// declaration exists to serve. The server stores the claiming
+/// connection's proven source in the wildcard's place — the same
+/// substitute a `?peer=` wildcard announce gets — so the stored
+/// monitor is never unspecified, on every claim op that carries the
+/// declaration.
+#[test]
+fn a_wildcard_claim_monitor_is_stored_as_the_claim_connections_source() {
+    with_server(loopback_map(), |addr| {
+        let dialable = |port| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+        let intruder = RemoteDriver::connect(addr).unwrap();
+        let stored = |intruder: &RemoteDriver| {
+            assert_eq!(
+                intruder.write(PointId(20), Value::Float(1.0)),
+                Err(IoError::Fenced(PointId(20)))
+            );
+            let monitor = intruder.claimed_monitor().unwrap();
+            assert!(
+                !monitor.ip().is_unspecified(),
+                "the stored monitor must never be the undialable wildcard"
+            );
+            monitor
+        };
+
+        // `claim_writer` — the unconditional takeover a promotion runs.
+        let owner = RemoteDriver::connect(addr).unwrap().as_controller();
+        owner.set_claim_monitor(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 7741));
+        owner.claim_writer(1).unwrap();
+        assert_eq!(stored(&intruder), dialable(7741));
+        // The owner's disconnect leaves its claim standing dead — the
+        // conditional grant still preempts it.
+        drop(owner);
+
+        // `claim_writer_unless_held` — the startup/orphan takeover. An
+        // IPv6 wildcard normalizes the same way, onto the connection's
+        // IPv4 source.
+        let orphan = RemoteDriver::connect(addr).unwrap().as_controller();
+        orphan.set_claim_monitor(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 7742));
+        orphan.claim_writer_unless_held(2).unwrap();
+        assert_eq!(stored(&intruder), dialable(7742));
+        orphan.release_writer().unwrap();
+
+        // `ensure_writer` — the re-attach re-arm, which refreshes the
+        // claim's declaration.
+        let returning = RemoteDriver::connect(addr).unwrap().as_controller();
+        returning.set_claim_monitor(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 7743));
+        returning.ensure_writer(3).unwrap();
+        assert_eq!(stored(&intruder), dialable(7743));
+        returning.release_writer().unwrap();
+
+        // `ensure_writer`'s unbound probe shape — the demoted
+        // ex-owner's orphan-cycle re-arm — declares the same way.
+        let probe = RemoteDriver::connect(addr).unwrap().as_controller();
+        probe.set_claim_monitor(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 7744));
+        probe.ensure_writer_unbound(4).unwrap();
+        assert_eq!(stored(&intruder), dialable(7744));
     });
 }
