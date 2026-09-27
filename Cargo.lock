@@ -470,6 +470,8 @@ dependencies = [
  "dcs-core",
  "dcs-model",
  "dcs-runtime",
+ "dcs-sim",
+ "dcs-sim-net",
  "serde",
  "serde_json",
  "sha2",

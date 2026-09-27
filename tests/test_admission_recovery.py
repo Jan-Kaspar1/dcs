@@ -62,8 +62,10 @@ class ScopedRecoveryTests(unittest.TestCase):
                       repository=str(self.src), timeout_seconds=60, required_checks=['t'],
                       poll_seconds=60, models=['swe-2-high', 'opencode/union-alpha'],
                       model_caps={'swe-2-high': 2},
-                      scheduler={'cooldown_seconds': 30, 'quiet_seconds': 60})
+                      scheduler={'cooldown_seconds': 30, 'quiet_seconds': 60,
+                                 'quota_requeue_delay_seconds': 10})
         self.sup = Supervisor(config)
+        self.sup.clock = lambda: self.now[0]
         self.sup.admission.clock = lambda: self.now[0]
         self.sup.admission.jitter = lambda: 0
         self.sup.github = FakeGitHub([issue(1), issue(2)])
@@ -93,8 +95,10 @@ class ScopedRecoveryTests(unittest.TestCase):
         self.assertEqual(sup.state.job(1)['status'], 'working')
         self.assertEqual(sup.admission.summary()['groups']['swe-2-high']['mode'], 'probing')
 
-        # During swe's cooldown the retry migrates to a healthy group's worker
-        # instead of dying on the throttled model again; work is preserved.
+        # During swe's cooldown — once the armed quota delay has elapsed —
+        # the retry migrates to a healthy group's worker instead of dying on
+        # the throttled model again; work is preserved.
+        self.now[0] += 11
         sup.retries(sup.github.items)
         job2 = sup.state.job(2)
         self.assertEqual(job2['status'], 'working')

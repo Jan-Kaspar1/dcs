@@ -59,7 +59,13 @@
 //! lock (the disposable-consumer decision's read side), and the read
 //! endpoints serialize and write those published copies. A stalled,
 //! absent, or slow reader therefore cannot extend the lock's hold
-//! beyond the scan and the publication swap.
+//! beyond the scan and the publication swap. The small liveness reads
+//! follow the same rule rather than the lock: the control plane
+//! refreshes the store's published liveness mirror — `GET /role`'s
+//! report and the role, tick, and last-scan stamp `GET /health`
+//! derives — wherever either changes under the executor lock, so a
+//! scan wedged in field I/O cannot stall the very answer that exists
+//! to expose the wedge.
 //!
 //! All bodies are JSON and all protocol types are shared serde contracts:
 //!
@@ -158,14 +164,19 @@
 //!   in a redundant pair (`active`, `standby`, or a transition state)
 //!   plus the standby's convergence, the field's claim observation, and
 //!   the armed failover gate's evidence — the pair-as-one-controller
-//!   contract of the monitoring-under-redundancy decision
+//!   contract of the monitoring-under-redundancy decision. The report
+//!   is the store's published liveness mirror — refreshed wherever the
+//!   control-plane lock changes it — so the role poll cannot queue
+//!   behind a scan wedged in field I/O
 //! - `GET /health` → `200` [`HealthReport`] — the bounded liveness
 //!   answer the published image's `HEALTHCHECK` probes (the
 //!   container-health contract): the listener's own live declaration,
 //!   the instance's reported role, and the wall-clock age of the last
 //!   completed scan. It takes the heartbeat lane like `/checkpoint`
-//!   and `/role`, so the probe still answers while wedged consumers
-//!   starve the bulk reads
+//!   and `/role`, and answers from the published liveness mirror
+//!   rather than the executor lock, so the probe still answers while
+//!   wedged consumers starve the bulk reads and while a wedged scan
+//!   holds the lock the liveness fetch once waited on
 //! - `POST /promote`, `POST /demote` → `200` [`RoleReport`] — the
 //!   switchover actions of the switchover-semantics decision: promotion
 //!   lifts the standby's write gate at the request's scan boundary,
@@ -617,9 +628,11 @@ pub struct SwitchRequest {
 /// image's `HEALTHCHECK` probes (the container-health contract): the
 /// listener's own liveness declaration, the instance's reported role,
 /// and the run's scan freshness. Bounded like the heartbeat lane's
-/// other reads — one shared-lock fetch, a fixed small body, no network
-/// wait — so the probe answers while wedged consumers starve the bulk
-/// reads.
+/// other reads — one fetch of the store's published liveness mirror, a
+/// fixed small body, no network wait and no executor lock — so the
+/// probe answers while wedged consumers starve the bulk reads and
+/// while a scan wedged in field I/O holds the lock this fetch once
+/// took: the growing `last_scan_age_ms` is the wedge's report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthReport {
     /// The process liveness declaration: `true` by construction — an
@@ -743,7 +756,8 @@ const SERVE_WORKERS: usize = 4;
 /// liveness runs on: the standby's pull-per-scan-cycle heartbeat
 /// measures the active by the second, the operator's failover verdict
 /// and the pair view read the third, and the container health check
-/// probes the first. Both handlers answer from the lock and the store alone
+/// probes the first. `/health` and `/role` answer from the store's
+/// published liveness mirror and `/checkpoint` from the shared lock
 /// — no network wait — so the only client-paced wait on the lane is
 /// the response write, and these answers are small: a write blocks
 /// only for a client that already left earlier pipelined responses
@@ -918,15 +932,19 @@ impl std::fmt::Display for TrackTarget {
 /// See the crate docs for the endpoint contract and the two-lock split:
 /// `shared` serializes the control plane — scans, commands,
 /// checkpoints, role changes — while `store` holds the published read
-/// models and served rings every read endpoint copies out without
-/// touching it.
+/// models, served rings, and the liveness mirror every read endpoint
+/// copies out without touching it.
 pub struct Monitor<'d> {
     shared: Mutex<Shared<'d>>,
     /// The read side: the bounded publication store the read endpoints
     /// serve, owned outside the executor lock. A fetch clones an `Arc`
     /// or an owned copy and releases the store's own small lock before
     /// any serialization or socket I/O; each completed scan swaps a new
-    /// immutable [`Publication`] in.
+    /// immutable [`Publication`] in, and the control plane refreshes
+    /// the liveness mirror — `GET /role`'s report and `GET /health`'s
+    /// last-scan stamp — wherever the peer's report or the scan stamp
+    /// changes, so a wedged scan's hold on `shared` stalls neither the
+    /// bulk reads nor the liveness answer that reports it.
     store: Store,
     signals: SignalIndex,
     server: Server,
@@ -1101,16 +1119,12 @@ pub struct Monitor<'d> {
 /// The peer — executor plus redundancy role — and the history recorder,
 /// behind one lock so a scan never runs half-recorded and every
 /// mutation settles at a scan boundary. The publication store is
-/// deliberately outside it: reader work never joins this lock.
+/// deliberately outside it: reader work never joins this lock —
+/// `GET /health` and `GET /role` included, served from the liveness
+/// mirror the mutations below refresh while they hold it.
 struct Shared<'d> {
     peer: Peer<'d>,
     recorder: recorder::Recorder,
-    /// When the run's last scan completed — the wall-clock freshness
-    /// `GET /health` reports as `last_scan_age_ms`. `None` before the
-    /// first scan completes: the bind-time publication is a read model,
-    /// not a scan. Serve-side bookkeeping like the recorder's, inside
-    /// the lock because every scan already serializes here.
-    last_scan: Option<Instant>,
 }
 
 /// One announced-hint verification pass's bookkeeping — the hint set
@@ -1253,14 +1267,13 @@ impl<'d> Monitor<'d> {
         // The bind-time read model is the first publication — any
         // journal tail a configured file replayed rides its event
         // delta — so the read endpoints serve from the store from the
-        // moment the monitor exists.
+        // moment the monitor exists. The liveness mirror seeds beside
+        // it: `GET /health` and `GET /role` answer the starting report
+        // until the first scan's refresh.
         store.publish(peer.tick(), peer.snapshot(), peer.receipts());
+        store.sync_liveness(peer.report());
         Ok(Self {
-            shared: Mutex::new(Shared {
-                peer,
-                recorder,
-                last_scan: None,
-            }),
+            shared: Mutex::new(Shared { peer, recorder }),
             store,
             signals,
             server: Server::http(addr).map_err(io::Error::other)?,
@@ -1861,9 +1874,14 @@ impl<'d> Monitor<'d> {
     }
 
     /// The instance's reported redundancy role — what `GET /role`
-    /// serves — taken under the lock.
+    /// serves — the store's published liveness mirror as the control
+    /// plane last refreshed it, so the read cannot queue behind a scan
+    /// wedged in field I/O.
     pub fn role_report(&self) -> RoleReport {
-        self.shared.lock().unwrap().peer.report()
+        self.store
+            .liveness()
+            .expect("the bind seeds the liveness mirror")
+            .report
     }
 
     /// Whether the instance currently owns field writes — `active`, or
@@ -1896,6 +1914,7 @@ impl<'d> Monitor<'d> {
         for change in peer.take_role_changes() {
             recorder.note_role_change(&change);
         }
+        self.store.sync_liveness(peer.report());
         Ok(())
     }
 
@@ -1933,8 +1952,11 @@ impl<'d> Monitor<'d> {
         }
         // An adopted checkpoint carries the active's receipt log —
         // refresh the store's mirror so `GET /receipts` stays current
-        // before the next scan publishes.
+        // before the next scan publishes. The apply also moved the
+        // report — tick and convergence — so the liveness mirror
+        // refreshes beside it.
         self.store.sync_receipts(peer.receipts());
+        self.store.sync_liveness(peer.report());
         result
     }
 
@@ -1973,6 +1995,7 @@ impl<'d> Monitor<'d> {
             recorder.note_settled(None, receipt, peer.tick());
         }
         self.store.sync_receipts(peer.receipts());
+        self.store.sync_liveness(peer.report());
         result
     }
 
@@ -1994,11 +2017,9 @@ impl<'d> Monitor<'d> {
     /// nothing — an unreachable active or a refused request — and counts
     /// the heartbeat miss toward the failover budget.
     pub fn note_transfer_failed(&self, detail: impl std::fmt::Display) {
-        self.shared
-            .lock()
-            .unwrap()
-            .peer
-            .note_transfer_failed(detail);
+        let mut shared = self.shared.lock().unwrap();
+        shared.peer.note_transfer_failed(detail);
+        self.store.sync_liveness(shared.peer.report());
     }
 
     /// Runs the standby's per-scan tracking cycle — the paced loop's
@@ -2161,7 +2182,9 @@ impl<'d> Monitor<'d> {
         for change in peer.take_role_changes() {
             recorder.note_role_change(&change);
         }
-        Ok(peer.report())
+        let report = peer.report();
+        self.store.sync_liveness(report.clone());
+        Ok(report)
     }
 
     fn handle(&self, mut request: Request) {
@@ -2247,27 +2270,38 @@ impl<'d> Monitor<'d> {
                 }
                 json(200, &checkpoint)
             }
-            (Method::Get, "/role") => json(200, &self.shared.lock().unwrap().peer.report()),
+            // The liveness reads serve the store's published mirror —
+            // the control plane refreshes it under the executor lock
+            // wherever the report or the scan stamp changes — so a
+            // scan wedged in field I/O holds that lock without ever
+            // stalling the answer that reports the wedge.
+            (Method::Get, "/role") => match self.store.liveness() {
+                Some(liveness) => json(200, &liveness.report),
+                // Bind always seeds the mirror; a store without one
+                // can only mean the monitor was never bound.
+                None => json(503, "no liveness yet"),
+            },
             // The container health contract's probe — the bounded
             // liveness answer: the listener's own declaration, the
             // served role, and the wall-clock age of the last
-            // completed scan. One lock fetch like `/role`, on the
-            // heartbeat lane so the probe still answers while wedged
-            // consumers starve the bulk reads.
-            (Method::Get, "/health") => {
-                let shared = self.shared.lock().unwrap();
-                json(
+            // completed scan, all from the same published mirror —
+            // never the executor lock — so the probe still answers
+            // while wedged consumers starve the bulk reads and while
+            // the wedged scan it reports holds that lock.
+            (Method::Get, "/health") => match self.store.liveness() {
+                Some(liveness) => json(
                     200,
                     &HealthReport {
                         live: true,
-                        role: shared.peer.role(),
-                        tick: shared.peer.tick(),
-                        last_scan_age_ms: shared
+                        role: liveness.report.role,
+                        tick: liveness.report.tick,
+                        last_scan_age_ms: liveness
                             .last_scan
                             .map(|at| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX)),
                     },
-                )
-            }
+                ),
+                None => json(503, "no liveness yet"),
+            },
             (Method::Get, "/history") => match history_query(query) {
                 Ok((points, since)) => json(200, &self.store.history(&points, since)),
                 Err(message) => json(400, &message),
@@ -2574,6 +2608,7 @@ impl<'d> Monitor<'d> {
                     recorder.note_settled(None, receipt, peer.tick());
                 }
                 self.store.sync_receipts(peer.receipts());
+                self.store.sync_liveness(peer.report());
             }
             peer.promote_as(actor)
         } else if peer.owns_field() && self.tracking_target().is_none() {
@@ -2614,6 +2649,7 @@ impl<'d> Monitor<'d> {
                 for change in peer.take_role_changes() {
                     recorder.note_role_change(&change);
                 }
+                self.store.sync_liveness(peer.report());
                 json(200, &peer.report())
             }
             Err(error) => json(409, &error),
@@ -3187,8 +3223,9 @@ fn submission(request: &Request) -> bool {
 /// second routing step, after [`submission`]. `GET /checkpoint` is the
 /// heartbeat a tracking standby measures the active's liveness by,
 /// `GET /role` is the verdict the pair view and a failover decision
-/// read, and `GET /health` is the container health check's probe; all
-/// three answer from the shared lock or the store with no
+/// read, and `GET /health` is the container health check's probe;
+/// `/role` and `/health` answer from the store's published liveness
+/// mirror and `/checkpoint` from the shared lock, none of them on a
 /// network wait, so they take the dedicated heartbeat lane — the one
 /// pool a wedged response write on a bulk read can never pin. The
 /// query string is ignored (`/checkpoint?peer=` is the same pull).
@@ -3471,6 +3508,10 @@ fn track_and_record(
         recorder.note_settled(None, receipt, peer.tick());
     }
     store.sync_receipts(peer.receipts());
+    // The cycle's apply, miss accounting, or a self-promotion moved
+    // the report — the liveness mirror refreshes beside the receipt
+    // one so `GET /role` and `GET /health` serve it at once.
+    store.sync_liveness(peer.report());
     report
 }
 
@@ -3505,10 +3546,11 @@ fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Tick {
     }
     store.publish(tick, snapshot, peer.receipts());
     // The scan's wall-clock completion stamp — `GET /health`'s
-    // `last_scan_age_ms` freshness. Set once the publication the scan
-    // produced is served, so the age the probe reports is the age of
-    // what consumers can already read.
-    shared.last_scan = Some(Instant::now());
+    // `last_scan_age_ms` freshness — beside the post-scan report, into
+    // the liveness mirror the heartbeat lane serves. Set once the
+    // publication the scan produced is served, so the age the probe
+    // reports is the age of what consumers can already read.
+    store.note_scanned(peer.report(), Instant::now());
     tick
 }
 
@@ -4613,6 +4655,66 @@ mod tests {
             .unwrap(),
             r#"{"live":true,"role":"standby","tick":0,"last_scan_age_ms":null}"#
         );
+    }
+
+    /// A driver with no points — the liveness reads must never reach
+    /// field I/O anyway, so the empty map serves.
+    struct NoDriver;
+
+    impl dcs_core::IoDriver for NoDriver {
+        fn read(&self, point: PointId) -> Result<dcs_core::Sample, dcs_core::IoError> {
+            Err(dcs_core::IoError::UnknownPoint(point))
+        }
+
+        fn write(&self, point: PointId, _value: dcs_core::Value) -> Result<(), dcs_core::IoError> {
+            Err(dcs_core::IoError::UnknownPoint(point))
+        }
+    }
+
+    /// The `liveness-reads-stall-behind-wedged-field-io` contract at the
+    /// handler level: with the executor lock held — the shape a scan
+    /// wedged in field I/O takes — `GET /health` and `GET /role` still
+    /// answer, served from the store's published liveness mirror rather
+    /// than `shared`. A handler still taking `shared` would stall each
+    /// probe past the client's bound for as long as the lock stays held.
+    #[test]
+    fn liveness_reads_answer_without_the_executor_lock() {
+        let driver = &*Box::leak(Box::new(NoDriver));
+        let executor = Executor::new(driver, dcs_runtime::PointMap::new(), Vec::new()).unwrap();
+        let monitor = Monitor::bind(
+            "127.0.0.1:0",
+            executor,
+            SignalIndex {
+                points: Vec::new(),
+                components: Vec::new(),
+            },
+        )
+        .unwrap();
+        let monitor = Arc::new(monitor);
+        let serving = std::thread::spawn({
+            let monitor = monitor.clone();
+            move || monitor.serve()
+        });
+        let client = MonitorClient::with_timeout(monitor.local_addr(), Duration::from_secs(2));
+        // Probe once before locking so the assertions below measure the
+        // held-lock case, not listener startup.
+        client.health().expect("listener came up");
+
+        // The wedged scan's shape: the shared lock held for as long as
+        // the field I/O stalls — on the rig, the driver's whole
+        // field-I/O timeout per in-flight scan.
+        let wedged = monitor.shared.lock().unwrap();
+        let health = client
+            .health()
+            .expect("GET /health queued behind the executor lock");
+        assert!(health.live);
+        client
+            .role()
+            .expect("GET /role queued behind the executor lock");
+        drop(wedged);
+
+        monitor.shutdown();
+        serving.join().unwrap();
     }
 
     #[test]
