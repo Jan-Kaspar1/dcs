@@ -46,9 +46,9 @@ def scheduler(raw):
                 'quota_requeue_delay_seconds'):
         if key in sched and (not isinstance(sched[key], (int, float)) or sched[key] <= 0):
             raise ValueError('scheduler.' + key + ' must be a positive number')
-    if 'max_quota_requeues' in sched and (not isinstance(sched['max_quota_requeues'], int)
-                                        or sched['max_quota_requeues'] < 0):
-        raise ValueError('scheduler.max_quota_requeues must be an integer >= 0')
+    for key in ('max_quota_requeues', 'max_quota_requeue_resets'):
+        if key in sched and (not isinstance(sched[key], int) or sched[key] < 0):
+            raise ValueError('scheduler.' + key + ' must be an integer >= 0')
     return sched
 
 
