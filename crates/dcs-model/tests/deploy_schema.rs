@@ -98,10 +98,10 @@ fn recorded_release_deploy_schema_matches_the_emitted_output() {
     // Regenerate with `dcs-model deploy-schema >
     // docs/releases/<tag>/deploy-manifest.schema.json` whenever the
     // emitted schema legitimately changes — and update the record's
-    // published sha256 with it while the tag is pending. `v0.3.0`'s
-    // and `v0.4.0`'s tags are pending, so their artifacts and
-    // published sha256s are still pinned — identical, the emission
-    // having not moved since `v0.3.0`'s recorded commit.
+    // published sha256 with it while the tag is pending. `v0.3.0`'s,
+    // `v0.4.0`'s, and `v0.5.0`'s tags are pending, so their artifacts
+    // and published sha256s are still pinned — identical, the
+    // emission having not moved since `v0.3.0`'s recorded commit.
     let output = run_deploy_schema_subcommand();
     assert!(
         output.status.success(),
@@ -115,6 +115,10 @@ fn recorded_release_deploy_schema_matches_the_emitted_output() {
         ),
         (
             "docs/releases/v0.4.0/deploy-manifest.schema.json",
+            Some("b43dadc6cf3455cb26b20ab1656137e892f0609387b9dbedfc3291716afd1005"),
+        ),
+        (
+            "docs/releases/v0.5.0/deploy-manifest.schema.json",
             Some("b43dadc6cf3455cb26b20ab1656137e892f0609387b9dbedfc3291716afd1005"),
         ),
     ] {

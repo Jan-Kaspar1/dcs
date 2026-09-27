@@ -1,0 +1,1094 @@
+{
+  "$defs": {
+    "bool-value": {
+      "additionalProperties": false,
+      "properties": {
+        "bool": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "bool"
+      ],
+      "type": "object"
+    },
+    "channel-ref": {
+      "additionalProperties": false,
+      "properties": {
+        "device": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "device",
+        "name"
+      ],
+      "type": "object"
+    },
+    "component": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "latching-alarm",
+                  "bool-latching-alarm",
+                  "managed-latching-alarm",
+                  "managed-bool-latching-alarm"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "parameters": {
+                "properties": {
+                  "class": {
+                    "$ref": "#/$defs/nonneg-int-value"
+                  },
+                  "priority": {
+                    "$ref": "#/$defs/nonneg-int-value"
+                  },
+                  "response_ticks": {
+                    "$ref": "#/$defs/nonneg-int-value"
+                  }
+                },
+                "required": [
+                  "priority",
+                  "class",
+                  "response_ticks"
+                ]
+              },
+              "rationalization": {
+                "$ref": "#/$defs/rationalization"
+              }
+            },
+            "required": [
+              "rationalization"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "parameters": {
+          "additionalProperties": {
+            "$ref": "#/$defs/value"
+          },
+          "type": "object"
+        },
+        "ports": {
+          "additionalProperties": {
+            "$ref": "#/$defs/endpoint-shape"
+          },
+          "type": "object"
+        },
+        "rationalization": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/rationalization"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "parameters",
+        "ports"
+      ],
+      "type": "object"
+    },
+    "connection": {
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/endpoint"
+        },
+        "to": {
+          "$ref": "#/$defs/endpoint"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "type": "object"
+    },
+    "device": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "sim-tcp"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "address": {
+                    "type": "string"
+                  },
+                  "timeout_ms": {
+                    "$ref": "#/$defs/nonneg-int"
+                  }
+                },
+                "required": [
+                  "address"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "parameters"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "sim-bus"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "address": {
+                    "type": "string"
+                  },
+                  "registers": {
+                    "additionalProperties": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/register-index"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "initial": {
+                              "$ref": "#/$defs/value"
+                            },
+                            "register": {
+                              "$ref": "#/$defs/register-index"
+                            }
+                          },
+                          "required": [
+                            "register"
+                          ],
+                          "type": "object"
+                        }
+                      ]
+                    },
+                    "type": "object"
+                  },
+                  "timeout_ms": {
+                    "$ref": "#/$defs/nonneg-int"
+                  }
+                },
+                "required": [
+                  "address",
+                  "registers"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "parameters"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "sim-cyclic"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "address": {
+                    "type": "string"
+                  },
+                  "exchange_miss_threshold": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "stations": {
+                    "additionalProperties": {
+                      "additionalProperties": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/$defs/register-index"
+                          },
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "initial": {
+                                "$ref": "#/$defs/value"
+                              },
+                              "register": {
+                                "$ref": "#/$defs/register-index"
+                              }
+                            },
+                            "required": [
+                              "register"
+                            ],
+                            "type": "object"
+                          }
+                        ]
+                      },
+                      "minProperties": 1,
+                      "type": "object"
+                    },
+                    "minProperties": 1,
+                    "type": "object"
+                  },
+                  "timeout_ms": {
+                    "$ref": "#/$defs/nonneg-int"
+                  }
+                },
+                "required": [
+                  "address",
+                  "exchange_miss_threshold",
+                  "stations"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "parameters"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "sim-scripted"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "script": {
+                    "additionalProperties": {
+                      "items": {
+                        "$ref": "#/$defs/script-entry"
+                      },
+                      "type": "array"
+                    },
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "script"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "parameters"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "ethercat"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "hardware": {
+                "const": true
+              },
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "bus": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "exchange_miss_threshold": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "identity": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "product": {
+                        "$ref": "#/$defs/u32-int"
+                      },
+                      "revision": {
+                        "$ref": "#/$defs/u32-int"
+                      },
+                      "vendor": {
+                        "$ref": "#/$defs/u32-int"
+                      }
+                    },
+                    "required": [
+                      "vendor",
+                      "product",
+                      "revision"
+                    ],
+                    "type": "object"
+                  },
+                  "mapping": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "inputs": {
+                        "additionalProperties": {
+                          "$ref": "#/$defs/image-offset"
+                        },
+                        "type": "object"
+                      },
+                      "outputs": {
+                        "additionalProperties": {
+                          "$ref": "#/$defs/image-offset"
+                        },
+                        "type": "object"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "safe_outputs": {
+                    "additionalProperties": {
+                      "$ref": "#/$defs/value"
+                    },
+                    "type": "object"
+                  },
+                  "startup": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "on_mismatch": {
+                        "const": "fail"
+                      }
+                    },
+                    "required": [
+                      "on_mismatch"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "bus",
+                  "identity",
+                  "mapping",
+                  "exchange_miss_threshold",
+                  "startup"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "hardware",
+              "parameters"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "channels": {
+          "additionalProperties": {
+            "$ref": "#/$defs/endpoint-shape"
+          },
+          "type": "object"
+        },
+        "hardware": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "parameters": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "channels"
+      ],
+      "type": "object"
+    },
+    "direction": {
+      "enum": [
+        "in",
+        "out"
+      ]
+    },
+    "endpoint": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "point": {
+              "$ref": "#/$defs/id"
+            }
+          },
+          "required": [
+            "point"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "port": {
+              "$ref": "#/$defs/port-ref"
+            }
+          },
+          "required": [
+            "port"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "endpoint-shape": {
+      "additionalProperties": false,
+      "properties": {
+        "direction": {
+          "$ref": "#/$defs/direction"
+        },
+        "value_type": {
+          "$ref": "#/$defs/value-kind"
+        }
+      },
+      "required": [
+        "direction",
+        "value_type"
+      ],
+      "type": "object"
+    },
+    "float-value": {
+      "additionalProperties": false,
+      "properties": {
+        "float": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "float"
+      ],
+      "type": "object"
+    },
+    "id": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "image-offset": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "bit": {
+              "maximum": 7,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "byte": {
+              "$ref": "#/$defs/u32-int"
+            }
+          },
+          "required": [
+            "byte",
+            "bit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "bits": {
+              "enum": [
+                8,
+                16,
+                32,
+                64
+              ]
+            },
+            "byte": {
+              "$ref": "#/$defs/u32-int"
+            }
+          },
+          "required": [
+            "byte",
+            "bits"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "int-value": {
+      "additionalProperties": false,
+      "properties": {
+        "int": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "int"
+      ],
+      "type": "object"
+    },
+    "io-point": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "anyOf": [
+              {
+                "not": {
+                  "required": [
+                    "channel"
+                  ]
+                }
+              },
+              {
+                "properties": {
+                  "channel": {
+                    "type": "null"
+                  }
+                },
+                "required": [
+                  "channel"
+                ]
+              }
+            ]
+          },
+          "then": {
+            "properties": {
+              "initial": {
+                "$ref": "#/$defs/value"
+              }
+            },
+            "required": [
+              "initial"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "channel": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            },
+            "required": [
+              "channel"
+            ]
+          },
+          "then": {
+            "properties": {
+              "initial": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "writable": {
+                "const": true
+              }
+            },
+            "required": [
+              "writable"
+            ]
+          },
+          "then": {
+            "properties": {
+              "direction": {
+                "const": "in"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "requires_reason": {
+                "const": true
+              }
+            },
+            "required": [
+              "requires_reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "direction": {
+                "const": "in"
+              },
+              "writable": {
+                "const": true
+              }
+            },
+            "required": [
+              "writable"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stale_after_ticks": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "stale_after_ticks"
+            ]
+          },
+          "then": {
+            "properties": {
+              "channel": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "direction": {
+                "const": "in"
+              }
+            },
+            "required": [
+              "channel"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "journaled": {
+                "const": true
+              }
+            },
+            "required": [
+              "journaled"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value_type": {
+                "enum": [
+                  "bool",
+                  "int"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "initial": {
+                "type": "object"
+              },
+              "value_type": {
+                "const": "bool"
+              }
+            },
+            "required": [
+              "initial",
+              "value_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "initial": {
+                "$ref": "#/$defs/bool-value"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "initial": {
+                "type": "object"
+              },
+              "value_type": {
+                "const": "int"
+              }
+            },
+            "required": [
+              "initial",
+              "value_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "initial": {
+                "$ref": "#/$defs/int-value"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "initial": {
+                "type": "object"
+              },
+              "value_type": {
+                "const": "float"
+              }
+            },
+            "required": [
+              "initial",
+              "value_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "initial": {
+                "$ref": "#/$defs/float-value"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "channel": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/channel-ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "direction": {
+          "$ref": "#/$defs/direction"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "initial": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/value"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "journaled": {
+          "type": "boolean"
+        },
+        "requires_reason": {
+          "type": "boolean"
+        },
+        "stale_after_ticks": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/nonneg-int"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "value_type": {
+          "$ref": "#/$defs/value-kind"
+        },
+        "writable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "direction",
+        "value_type"
+      ],
+      "type": "object"
+    },
+    "nonneg-int": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "nonneg-int-value": {
+      "additionalProperties": false,
+      "properties": {
+        "int": {
+          "$ref": "#/$defs/nonneg-int"
+        }
+      },
+      "required": [
+        "int"
+      ],
+      "type": "object"
+    },
+    "port-ref": {
+      "additionalProperties": false,
+      "properties": {
+        "component": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "component",
+        "name"
+      ],
+      "type": "object"
+    },
+    "rationalization": {
+      "additionalProperties": false,
+      "properties": {
+        "consequence": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "reference": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "required_action": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "consequence",
+        "required_action",
+        "reference"
+      ],
+      "type": "object"
+    },
+    "register-index": {
+      "maximum": 65535,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "script-entry": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "quality": {
+                "enum": [
+                  "uncertain",
+                  "bad"
+                ]
+              }
+            },
+            "required": [
+              "quality"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "quality": {
+          "enum": [
+            "good",
+            "uncertain",
+            "bad"
+          ]
+        },
+        "reason": {
+          "enum": [
+            "unspecified",
+            "substituted",
+            "stale",
+            "out_of_range",
+            "communication_fault",
+            "device_fault",
+            "configuration_fault"
+          ]
+        },
+        "tick": {
+          "$ref": "#/$defs/nonneg-int"
+        },
+        "value": true
+      },
+      "required": [
+        "tick",
+        "value"
+      ],
+      "type": "object"
+    },
+    "signal": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "group": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/id"
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "source"
+      ],
+      "type": "object"
+    },
+    "u32-int": {
+      "maximum": 4294967295,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "value": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/bool-value"
+        },
+        {
+          "$ref": "#/$defs/int-value"
+        },
+        {
+          "$ref": "#/$defs/float-value"
+        }
+      ]
+    },
+    "value-kind": {
+      "enum": [
+        "bool",
+        "int",
+        "float"
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The versioned plant-model document: devices, logical io_points, signals, components, and connections. The schema covers structure, field types, and intra-element rules; cross-reference and wiring checks remain with the Rust validator (docs/architecture.md).",
+  "properties": {
+    "components": {
+      "items": {
+        "$ref": "#/$defs/component"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "connections": {
+      "items": {
+        "$ref": "#/$defs/connection"
+      },
+      "type": "array"
+    },
+    "devices": {
+      "items": {
+        "$ref": "#/$defs/device"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "io_points": {
+      "items": {
+        "$ref": "#/$defs/io-point"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "signals": {
+      "items": {
+        "$ref": "#/$defs/signal"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "version": {
+      "const": 1
+    }
+  },
+  "required": [
+    "version",
+    "devices",
+    "io_points",
+    "signals",
+    "components",
+    "connections"
+  ],
+  "title": "DCS plant model",
+  "type": "object"
+}
