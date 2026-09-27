@@ -264,6 +264,39 @@ Implementation order: second, after [daily architecture review](daily-architectu
   `qa_lane/deploy/README.md`; a `probe_pair: null` stages none
   and restores the absent-capability inconclusive.
 
+### Landed 2026-09-27 (stranded-standby re-join leg, #1059)
+
+- The stranded-standby re-join contract — decision 101 as #1042 and
+  #1045 implemented it, in service of WW-LCM-001 — is exercised on
+  the deployed pair by scenario leg
+  `2370_stranded_standby_no_resync` against the live reproduction of
+  finding `stranded-standby-no-resync`. With the pair settled the
+  leg issues `POST /promote` to the tracking standby while the field
+  owner is still alive — the involuntary-demote entry the finding
+  drives, no `POST /demote` first — and the promoted peer preempts
+  the field claim. The ex-owner is fenced, demotes in place, and
+  must re-join `tracking` inside the lane's tick bound rather than
+  wedge `unsynchronized`: on a keyed rig through the verified
+  announced or claimed-monitor source, on an unkeyed rig through the
+  claim's declared monitor where the declaration is routable. The
+  leg journals the contract's receipts — `field_claim_lost`
+  attributed to the promoted successor, the fencing verdict naming
+  the successor's declared monitor, and `tracking_source_adopted`
+  from the peer that owes it — and a second promote cycle in the
+  opposite direction proves the pair stays promotable both ways
+  before the launch layout is restored.
+- The #1045 monitor-less-foreign-claim window is staged where the
+  plant tool admits it: a held tool claim declaring no monitor
+  leaves the demoted peer `unsynchronized` only until a
+  controller-owned claim re-seats the field, and a raw `/step`
+  fencing probe confirms no improper source adoption while the
+  foreign claim stands. Named diagnostics are
+  `stranded-standby-no-resync-failed` and
+  `stranded-standby-no-resync-nondeterministic`; two passes produce
+  identical digests; a rig that is unreachable, that predates the
+  serve/plant seams the leg needs, or whose field census shows an
+  open claim reports inconclusive.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,
