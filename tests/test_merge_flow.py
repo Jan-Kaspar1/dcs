@@ -233,6 +233,47 @@ class ConflictAttributionTests(unittest.TestCase):
                           "unclassified"])
         self.assertEqual(repair["conflict_load"], "concentrated")
 
+    def test_pathless_repairs_count_distinctly_from_unclassified(self):
+        events = [
+            # A new row that recorded unrecoverable paths buckets pathless.
+            repair_event(NOW - 10, 1, "merge-conflict",
+                         paths=[], pathless=True),
+            # A historical row without recorded detail stays unclassified.
+            repair_event(NOW - 20, 2, "merge-conflict"),
+            repair_event(NOW - 30, 3, "merge-conflict",
+                         paths=["docs/plan.md"]),
+        ]
+        report = merge_flow.window_report([], NOW - WEEK, NOW, {}, {},
+                                          events)
+        repair = report["repair_incidence"]
+        self.assertEqual(repair["conflict_repairs"], 3)
+        self.assertEqual(repair["conflict_paths"], {
+            "docs/plan.md": 1, "pathless": 1, "unclassified": 1})
+        self.assertEqual(repair["conflict_load"], "concentrated")
+
+    def test_load_verdict_flips_once_paths_attribute(self):
+        pathless = [
+            repair_event(NOW - 10, 1, "merge-conflict",
+                         paths=[], pathless=True),
+            repair_event(NOW - 20, 2, "merge-conflict",
+                         paths=[], pathless=True),
+        ]
+        report = merge_flow.window_report([], NOW - WEEK, NOW, {}, {},
+                                          pathless)
+        repair = report["repair_incidence"]
+        self.assertEqual(repair["conflict_load"], "unattributed")
+        self.assertEqual(repair["conflict_paths"], {"pathless": 2})
+        attributed = pathless + [
+            repair_event(NOW - 30, 3, "merge-conflict",
+                         paths=["shared/x.py"]),
+        ]
+        report = merge_flow.window_report([], NOW - WEEK, NOW, {}, {},
+                                          attributed)
+        repair = report["repair_incidence"]
+        self.assertEqual(repair["conflict_load"], "concentrated")
+        self.assertEqual(repair["conflict_paths"],
+                         {"shared/x.py": 1, "pathless": 2})
+
     def test_conflict_load_spread_and_unattributed(self):
         spread = [repair_event(NOW - 10 - i, i + 1, "merge-conflict",
                                paths=[f"path/{letter}.py"])
