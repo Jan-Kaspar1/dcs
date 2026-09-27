@@ -429,12 +429,15 @@ own surface: the HMI alarm path is never presented as the safeguard.</p>
 // since-poll answering past the cursor's successor — the stretch the
 // bounded store evicted before the page read it — marks the feed
 // "publication gap"; a /snapshot re-serving the same publication's
-// seq and tick — a stall — marks it "stale publication". Both render
-// on the #feed-state line beside the view, distinct from the pair
-// section's unreachable-peer fault (a peer's reachability, not the
-// feed's delivery) and from a row's non-Good quality (process data,
-// not delivery), and each clears on the next in-sequence, fresh
-// publication.
+// seq and tick — a stall — marks it "stale publication". The two
+// since-reads carry notes of their own alongside: a history read still
+// catching its streams up — or a page that failed inside the bound —
+// names the backfill's remaining streams, a failed journal read names
+// its retry. All render on the #feed-state line beside the view,
+// distinct from the pair section's unreachable-peer fault (a peer's
+// reachability, not the feed's delivery) and from a row's non-Good
+// quality (process data, not delivery), and each clears on the next
+// in-sequence, fresh publication or landed read.
 //
 // Command audit identity (the command-path audit-identity decision):
 // ?operator=<name> configures the actor identity every command
@@ -562,15 +565,19 @@ const metaByPoint = new Map();
 // rationalization block. The index's components section is
 // serde-defaulted — an index served without it simply joins nothing.
 const componentsByName = new Map();
-// point id -> { samples: [Sample], lastSeq, lastTick, run } — the
-// series a trend draws. lastSeq is the since-cursor in the *current*
-// source's stream; lastTick is the merge watermark that keeps the
-// series continuous across a source switch's whole-stream re-read — an
-// incremental poll's seq cursor proves each entry new on its own, so a
-// point whose served stamps stop advancing the tick domain still
-// extends on each served change. run is the served envelope's process
-// lifetime marker — a change under a standing cursor means the seq
-// axis restarted with the source process.
+// point id -> { samples: [Sample], lastSeq, lastTick, run, caughtUp }
+// — the series a trend draws. lastSeq is the since-cursor in the
+// *current* source's stream; lastTick is the merge watermark that
+// keeps the series continuous across a source switch's whole-stream
+// re-read — an incremental poll's seq cursor proves each entry new on
+// its own, so a point whose served stamps stop advancing the tick
+// domain still extends on each served change. run is the served
+// envelope's process lifetime marker — a change under a standing
+// cursor means the seq axis restarted with the source process.
+// caughtUp marks whether the point's catch-up read has landed since
+// the cursor last reset — cold load, a source switch, a restart, or an
+// incremental answer that outgrew the poll bound — and gates the paged
+// backfill refreshTrends walks.
 const trends = new Map();
 // The retained journal window, oldest first.
 const journalEntries = [];
@@ -601,8 +608,12 @@ let journalRun = 0;
 // history run marker — so the page's stream cursors reset rather than
 // silently merging two lifetimes. null marks are a fresh,
 // in-sequence feed; a source switch resets the identity — each peer
-// numbers its own publications.
-const feed = { publication: null, gap: null, stale: null, restart: null };
+// numbers its own publications. history and journal are the two
+// since-reads' own stream notes: history names the paged backfill's
+// remaining point streams or the read's failure, journal a failed
+// journal read's retry — each clears when its read next lands.
+const feed = { publication: null, gap: null, stale: null, restart: null,
+  history: null, journal: null };
 // component name -> its served descriptor, rebuilt on every poll: the
 // parameter edit path reads declared kinds and ranges from it — the
 // descriptor is the page's authority for what a tunable accepts.
@@ -811,6 +822,7 @@ function switchSource(next) {
   for (const state of trends.values()) {
     state.lastSeq = 0;
     state.run = null;
+    state.caughtUp = false;
   }
   journalSince = 0;
   journalRun = 0;
@@ -821,6 +833,8 @@ function switchSource(next) {
   feed.gap = null;
   feed.stale = null;
   feed.restart = null;
+  feed.history = null;
+  feed.journal = null;
 }
 
 // The indices of the peers reporting settled "active" — the legitimate
@@ -1109,6 +1123,7 @@ function noteRestart(detail) {
   for (const state of trends.values()) {
     state.lastSeq = 0;
     state.run = null;
+    state.caughtUp = false;
     if (freshDomain) {
       state.samples = [];
       state.lastTick = null;
@@ -1152,11 +1167,14 @@ function renderFeed() {
         : "seq " + feed.stale.published + " at tick " + feed.stale.tick) +
       " re-served — values shown are last-known, not current");
   }
+  if (feed.history !== null) notices.push(feed.history);
+  if (feed.journal !== null) notices.push(feed.journal);
   line.hidden = notices.length === 0;
   line.className =
     feed.gap !== null || feed.restart !== null
       ? "gap"
-      : feed.stale !== null ? "stale" : "";
+      : feed.stale !== null || feed.history !== null ||
+        feed.journal !== null ? "stale" : "";
   line.textContent = notices.join("; ");
 }
 
@@ -1426,6 +1444,8 @@ async function refresh() {
     // the since-polls below note any evicted stretch they step over.
     feed.gap = null;
     feed.restart = null;
+    feed.history = null;
+    feed.journal = null;
     notePublication(snapshot);
     interfaceByName.clear();
     for (const entry of (schema && schema.interfaces) || []) {
@@ -3259,7 +3279,8 @@ function buildTrends() {
     "<svg id=\"trend-" + meta.point + "\" viewBox=\"0 0 320 90\" width=\"320\" height=\"90\"></svg>" +
     "</figure>").join("");
   for (const meta of index.points) {
-    trends.set(meta.point, { samples: [], lastSeq: 0, lastTick: null, run: null });
+    trends.set(meta.point, { samples: [], lastSeq: 0, lastTick: null,
+      run: null, caughtUp: false });
   }
 }
 
@@ -3268,13 +3289,100 @@ function buildTrends() {
 // is a safe common cursor; each point's own lastSeq still dedupes what
 // the fetch returns, and lastTick dedupes across a source switch — the
 // new peer's ring re-serves ticks already drawn, which are skipped.
+//
+// The read pages rather than issuing one `?since=` fetch: that answer
+// carries every retained sample the source holds — the whole ring
+// window, ~1024 samples per declared point — which a remote link may
+// never move inside the poll's abort bound, and the cursor advances
+// only on a completed read, so one un-fittable answer retries
+// identically every poll while the renders queued behind this call
+// starve. The catch-up instead walks the uncaught points in fixed
+// pages — each page's answer bounded by HISTORY_PAGE_POINTS rings —
+// sequentially, under HISTORY_BACKFILL_BUDGET_MS per poll: pages in
+// flight together would share the same link budget under their
+// separate aborts, and the budget keeps one poll's backfill from
+// starving the renders queued behind it. A landed page marks its
+// points caught-up and their cursors stand, so progress survives a
+// later page's failure; whatever is still pending resumes next poll,
+// and the feed line names the backfill while it lasts.
+const HISTORY_PAGE_POINTS = 4;
+const HISTORY_BACKFILL_BUDGET_MS = 800;
 async function refreshTrends(base) {
-  const states = [...trends.values()];
-  let since = 0;
-  if (states.length > 0 && states.every(state => state.lastSeq > 0)) {
-    since = Math.min(...states.map(state => state.lastSeq));
+  const pending = index.points.map(meta => meta.point).filter(point => {
+    const state = trends.get(point);
+    return state && !state.caughtUp;
+  });
+  try {
+    if (pending.length > 0) {
+      let at = 0;
+      let note = null;
+      const started = Date.now();
+      while (at < pending.length &&
+             Date.now() - started < HISTORY_BACKFILL_BUDGET_MS) {
+        const page = pending.slice(at, at + HISTORY_PAGE_POINTS);
+        const since = Math.min(
+          ...page.map(point => trends.get(point).lastSeq));
+        const query = page.map(point => "&point=" + point).join("");
+        try {
+          mergeHistories(await (await pollFetch(
+            base + "/history?since=" + since + query)).json());
+        } catch (error) {
+          // This page's answer did not fit the bound — its points stay
+          // pending and this poll's backfill stops here: the link
+          // budget the abort measured is spent either way, and the
+          // read resumes at the same page next poll.
+          note = "history backfill paused: " + error;
+          break;
+        }
+        for (const point of page) trends.get(point).caughtUp = true;
+        at += page.length;
+      }
+      // Counted from the flags, not the loop's walk: a merge observing
+      // a restart re-marks every stream uncaught mid-call.
+      const remaining = [...trends.values()]
+        .filter(state => !state.caughtUp).length;
+      feed.history = remaining === 0 ? null
+        : (note === null ? "history backfill: " : note + " — ") +
+          remaining + " point stream(s) still catching up";
+    } else {
+      // Every stream's cursor stands: one incremental read answers
+      // only what the rings appended since — small wherever the
+      // snapshot itself fits. A point whose ring was empty through its
+      // page keeps lastSeq 0; its next sample rides the shared tick
+      // domain ahead of every standing cursor, so the floor takes only
+      // the nonzero cursors rather than pinning since at 0 — which
+      // would re-serve the whole window every poll.
+      const cursors = [...trends.values()]
+        .map(state => state.lastSeq)
+        .filter(seq => seq > 0);
+      const since = cursors.length > 0 ? Math.min(...cursors) : 0;
+      try {
+        mergeHistories(await (await pollFetch(
+          base + "/history?since=" + since)).json());
+      } catch (error) {
+        // The incremental answer outgrew the bound too — the page
+        // lagged while the rings rolled — and the same un-fittable
+        // retry-forever shape results. Re-mark the streams uncaught so
+        // the next poll pages from each point's own cursor instead.
+        for (const state of trends.values()) state.caughtUp = false;
+        throw error;
+      }
+      feed.history = null;
+    }
+  } catch (error) {
+    const left = [...trends.values()]
+      .filter(state => !state.caughtUp).length;
+    feed.history = "history read failed: " + error + " — " + left +
+      " point stream(s) retry paged next poll";
   }
-  const histories = await (await pollFetch(base + "/history?since=" + since)).json();
+  for (const meta of index.points) drawTrend(meta);
+}
+
+// Merges one /history answer's point envelopes into the trend states —
+// the run-marker restart check, the served-gap note, and the
+// watermark/seq-fallback dedupe the backfill pages and the incremental
+// read share.
+function mergeHistories(histories) {
   for (const history of histories) {
     const state = trends.get(history.point);
     if (!state) continue;
@@ -3324,7 +3432,6 @@ async function refreshTrends(base) {
       state.samples.splice(0, state.samples.length - TREND_LIMIT);
     }
   }
-  for (const meta of index.points) drawTrend(meta);
 }
 
 // The inner SVG one point's retained series draws — the polyline plus
@@ -3395,9 +3502,20 @@ function journalKey(entry) {
 // Entries merge by attributed run, tick, and event identity, so a
 // whole-journal re-fetch after a source switch adds each transition
 // once: both peers journal the same run's events, and each journals
-// its own role changes.
+// its own role changes. A failed read degrades only this stream: the
+// cursor stands for next poll's retry and the renders queued behind
+// this call still run — the same isolation the paged history read
+// keeps.
 async function refreshJournal(base) {
-  const entries = await (await pollFetch(base + "/journal?since=" + journalSince)).json();
+  let entries;
+  try {
+    entries = await (await pollFetch(base + "/journal?since=" + journalSince)).json();
+  } catch (error) {
+    feed.journal = "journal read failed: " + error +
+      " — retrying from seq " + journalSince;
+    return;
+  }
+  feed.journal = null;
   // A whole re-read — the cursor at 0 on the first poll or after a
   // restart or source switch reset it — answers from the stream's
   // oldest retained lifetime, so the attribution walk starts over and
