@@ -21,14 +21,28 @@
 //! hint could ever carry, since only actually holding the claim puts
 //! a monitor under it — verifies the served checkpoint is this line's
 //! field-owning continuation, and adopts it into the journal.
+//!
+//! Same-host tests cannot see the defect the failed verification
+//! recorded: every same-stack dial of `0.0.0.0:<port>` resolves to
+//! loopback, where the wildcard-bound successor answers, so a fencing
+//! verdict naming the wildcard verbatim is wrong only where the peers
+//! cannot share a stack — the documented deployment, whose containers
+//! bind `0.0.0.0` behind a routed bridge. The namespace reproduction
+//! below runs the issue's own topology — each controller in a private
+//! network namespace, wildcard-bound, unkeyed, paced — so a verbatim
+//! `0.0.0.0` verdict would dial the demoted peer's own netns and
+//! refuse forever, exactly the `qax-20260927-005` evidence.
 
 use dcs_core::{JournalEvent, Role, StandbySync, SwitchError};
 use dcs_monitor::MonitorClient;
 use std::path::Path;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 mod support;
 
-use support::{CONTROLLER, Spawned, listening_on, spawn_logged, spawn_plant};
+use support::{CONTROLLER, Spawned, listening_on, spawn_logged, spawn_plant, workspace_binary};
 
 /// The shared plant's model — the QA rig's own pump station: the same
 /// checked-in document the lane's plant server and both controllers
@@ -209,5 +223,337 @@ fn a_remote_promotion_lets_the_demoted_peer_rejoin_tracking() {
         rejoined,
         "the second demoted peer must re-join tracking the same way: {:?}",
         pair.standby.role().unwrap().sync
+    );
+}
+
+/// The scenario's wall-clock bound: a stranded demoted peer stays
+/// `unsynchronized` forever — the finding's evidence logged 15 s and
+/// counting — so any grace this side of forever distinguishes
+/// reconvergence from the defect. Thirty seconds is several hundred
+/// 50 ms scan cycles of slack.
+const SCENARIO_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// The in-namespace driver: plumbs the topology the rig's docker
+/// bridge provides — the shared `dcs-plant-server` on the supervising
+/// namespace's bound address, each controller in a private namespace
+/// wired point-to-point through it — and walks the reproduction over
+/// HTTP, exiting nonzero with the last report on any violation. Paths
+/// arrive as argv — the controller and plant binaries, the model and
+/// dynamics fixtures, and the scratch directory the logs land in.
+const DRIVER: &str = r#"
+import json
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
+
+CTL, PLANT, MODEL, DYNAMICS, SCRATCH = sys.argv[1:6]
+
+# Each peer owns a point-to-point /30 with this supervising namespace —
+# the docker bridge's job in the shipped deployment. Peer A's monitor
+# listens on 10.10.0.2:8080 from the outside; peer B's on 10.10.1.2:8081.
+# The shared plant binds the supervising namespace's wildcard port —
+# each peer reaches the same listener through its own gateway address,
+# exactly like the rig's bridge-local dcs-plant-server.
+A = "http://10.10.0.2:8080"
+B = "http://10.10.1.2:8081"
+PLANT_A = "10.10.0.1:9001"
+PLANT_B = "10.10.1.1:9001"
+GRACE = 30.0
+
+
+def sh(*args):
+    subprocess.run(args, check=True)
+
+
+sh("ip", "link", "set", "lo", "up")
+with open("/proc/sys/net/ipv4/ip_forward", "w") as handle:
+    handle.write("1")
+
+logs = []
+holders = []
+peers = []
+
+# The field the pair arbitrates on — bound before the peers wire so
+# its claim surface answers on both gateway addresses.
+log = open(SCRATCH + "/plant.log", "w")
+logs.append(log)
+plant = subprocess.Popen(
+    [PLANT, MODEL, "--dynamics", DYNAMICS, "--listen", "0.0.0.0:9001"],
+    stdout=log, stderr=subprocess.STDOUT)
+
+
+def hold_ns():
+    # A placeholder holding a private network namespace: the peer's
+    # link must be plumbed before the controller starts — its --remote
+    # connect is fatal while the field is unreachable.
+    proc = subprocess.Popen(["unshare", "-n", "--", "sleep", "infinity"])
+    holders.append(proc)
+    return proc
+
+
+def wire(holder, link, ctrl_ip, peer_ip):
+    sh("ip", "link", "add", "v" + link, "type", "veth",
+       "peer", "name", "vp" + link, "netns", str(holder.pid))
+    sh("ip", "addr", "add", ctrl_ip + "/30", "dev", "v" + link)
+    sh("ip", "link", "set", "v" + link, "up")
+    for cmd in (
+            ("ip", "link", "set", "lo", "up"),
+            ("ip", "addr", "add", peer_ip + "/30", "dev", "vp" + link),
+            ("ip", "link", "set", "vp" + link, "up"),
+            ("ip", "route", "add", "default", "via", ctrl_ip)):
+        sh("nsenter", "-t", str(holder.pid), "-n", *cmd)
+
+
+def spawn_peer(tag, holder, *extra):
+    log = open(SCRATCH + "/" + tag + ".log", "w")
+    logs.append(log)
+    proc = subprocess.Popen(
+        ["nsenter", "-t", str(holder.pid), "-n", "--",
+         CTL, MODEL, "--scan-ms", "50", *extra],
+        stdout=log, stderr=subprocess.STDOUT)
+    peers.append(proc)
+    return proc
+
+
+def get(url):
+    with urllib.request.urlopen(url, timeout=3) as response:
+        return json.loads(response.read())
+
+
+def post(url):
+    request = urllib.request.Request(url, method="POST")
+    with urllib.request.urlopen(request, timeout=3) as response:
+        return json.loads(response.read())
+
+
+def tracking(report):
+    sync = report.get("sync")
+    return isinstance(sync, dict) and "tracking" in sync
+
+
+def await_tracking(url, who):
+    deadline = time.monotonic() + GRACE
+    report = None
+    while time.monotonic() < deadline:
+        try:
+            report = get(url + "/role")
+        except Exception:
+            report = None
+        if report is not None:
+            detail = json.dumps(report.get("sync"))
+            if "0.0.0.0" in detail or "[::]" in detail:
+                raise SystemExit(
+                    who + " tracks an unroutable source: " + detail)
+            if tracking(report):
+                return report
+        time.sleep(0.25)
+    raise SystemExit(who + " never reached tracking: " + repr(report))
+
+
+def claim_monitor(expect):
+    # The standing claim's declared monitor as a claim-state verdict
+    # reports it — the endpoint the field's arbitration hands every
+    # peer the claim supersedes. A fresh attachment's probe meets the
+    # fenced answer carrying it.
+    deadline = time.monotonic() + GRACE
+    seen = None
+    while time.monotonic() < deadline:
+        try:
+            sock = socket.create_connection(("10.10.0.1", 9001), 3)
+            try:
+                sock.sendall(b'{"op":"probe_writer"}\n')
+                data = b""
+                while b"\n" not in data:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+            finally:
+                sock.close()
+            error = (json.loads(data).get("error") or {})
+            seen = error.get("monitor")
+            if error.get("kind") == "fenced" and seen == expect:
+                return seen
+        except Exception:
+            pass
+        time.sleep(0.25)
+    raise SystemExit("the claim monitor never named " + repr(expect)
+                     + " (last verdict: " + repr(seen) + ")")
+
+
+def journal_payloads(url, kind):
+    return [entry["event"][kind]
+            for entry in get(url + "/journal?since=0")
+            if kind in entry.get("event", {})]
+
+
+a_ns = hold_ns()
+b_ns = hold_ns()
+time.sleep(0.5)
+wire(a_ns, "a", "10.10.0.1", "10.10.0.2")
+wire(b_ns, "b", "10.10.1.1", "10.10.1.2")
+try:
+    # The reproduction's launch shape: both controllers wildcard-bound —
+    # every documented container launch — on the shared field, and the
+    # pair unkeyed: no --pair-token, so no announced ?peer= hint can
+    # ever prove an endpoint.
+    spawn_peer("a", a_ns, "--listen", "0.0.0.0:8080",
+               "--remote", PLANT_A)
+    spawn_peer("b", b_ns, "--listen", "0.0.0.0:8081",
+               "--remote", PLANT_B, "--standby", "10.10.0.2:8080")
+
+    print("standby converged:", await_tracking(B, "the standby"),
+          flush=True)
+
+    # The reproduction: POST /promote on the converged standby while the
+    # active still owns the field — no demote boundary ever runs on the
+    # ex-owner, so the recovery is the involuntary fenced path's.
+    print("promote b:", post(B + "/promote"), flush=True)
+
+    # The verdict the ex-owner's fencing rode on must name the
+    # successor's dialable monitor — the defect stored the wildcard
+    # bind verbatim, which a foreign namespace dials as its own
+    # loopback.
+    monitor = claim_monitor("10.10.1.2:8081")
+    print("claim monitor:", monitor, flush=True)
+
+    # The defect's wedge: the ex-owner's next paced write is fenced and
+    # demotes it in place, and its paced tracking cycle must resolve
+    # the claim-declared monitor — on the failed fix this dial hit the
+    # peer's own loopback and it parked standby/unsynchronized for good.
+    report = await_tracking(A, "the demoted peer")
+    if report.get("role") != "standby":
+        raise SystemExit("the demoted peer is not standby: "
+                         + repr(report))
+    print("demoted peer reconverged:", report, flush=True)
+
+    if not journal_payloads(A, "field_claim_lost"):
+        raise SystemExit("the fencing loss never journaled")
+    adopted = [payload.get("source")
+               for payload in journal_payloads(A, "tracking_source_adopted")]
+    if "10.10.1.2:8081" not in adopted:
+        raise SystemExit("no adoption of the successor's routable "
+                         "monitor: " + repr(adopted))
+
+    # Redundancy restored means the reconverged ex-owner is promotable —
+    # the finding's 409 not_converged — and the peer the return switch
+    # fences re-joins on its claim-declared monitor the same way.
+    print("promote a:", post(A + "/promote"), flush=True)
+    monitor = claim_monitor("10.10.0.2:8080")
+    report = await_tracking(B, "the twice-demoted peer")
+    if report.get("role") != "standby":
+        raise SystemExit("the twice-demoted peer is not standby: "
+                         + repr(report))
+    print("restored:", report, flush=True)
+    print("DEMOTED-REJOIN-OK", flush=True)
+finally:
+    for proc in peers + holders + [plant]:
+        proc.kill()
+    for proc in peers + holders + [plant]:
+        proc.wait()
+    for log in logs:
+        log.close()
+"#;
+
+/// Whether `args` on `tool` runs at all — the capability probe for each
+/// piece of the namespace rig (`unshare`/`nsenter`/`ip`/`python3`),
+/// answering the missing piece's name for the skip message.
+fn runnable(tool: &str, args: &[&str]) -> bool {
+    Command::new(tool)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// The capability the rig needs that this environment lacks, if any.
+fn missing_capability() -> Option<String> {
+    for (tool, args) in [
+        ("python3", ["--version"].as_slice()),
+        ("ip", ["-Version"].as_slice()),
+        ("nsenter", ["--version"].as_slice()),
+    ] {
+        if !runnable(tool, args) {
+            return Some(format!("`{tool}` is not runnable"));
+        }
+    }
+    if !runnable("unshare", &["-Urn", "true"]) {
+        return Some("unprivileged user+network namespaces are refused".to_string());
+    }
+    None
+}
+
+/// The finding's reproduction on real network namespaces — the
+/// topology the failed verification ran, which no same-host rig can
+/// stand in for: each controller wildcard-bound in a private
+/// namespace, the shared `dcs-plant-server` bridged through the
+/// supervising one, the pair unkeyed and `--scan-ms` paced.
+/// `POST /promote` on the converged standby fences the field owner;
+/// the demoted peer must resolve the claim-declared monitor and reach
+/// `tracking` inside the grace — where a verdict naming the wildcard
+/// verbatim, the failed fix's output, dials the demoted peer's own
+/// netns and strands it `unsynchronized` forever. The return switch
+/// then proves redundancy held in both directions.
+///
+/// The test skips — reporting the missing capability — where
+/// unprivileged user namespaces are unavailable (`unshare -Urn`
+/// refused, or `ip`/`nsenter`/`python3` absent); the driven cover
+/// above keeps the contract asserted there. The QA lane re-verifies
+/// the merged fix on the rig.
+#[test]
+fn a_demoted_peer_rejoins_on_the_claim_monitor_across_namespaces() {
+    if let Some(missing) = missing_capability() {
+        eprintln!("skipping the network-namespace pair: {missing}");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!("dcs-demoted-rejoin-ns-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let driver = dir.join("driver.py");
+    std::fs::write(&driver, DRIVER).unwrap();
+    let output_log = dir.join("driver.log");
+
+    // The whole scenario lives inside one unprivileged user+network
+    // namespace: the driver plumbs the veth pairs and drives HTTP from
+    // the supervising namespace — the only side of the boundary the
+    // peers' addresses are reachable from.
+    let log = std::fs::File::create(&output_log).unwrap();
+    let mut child = Command::new("unshare")
+        .arg("-Urn")
+        .arg("python3")
+        .arg(&driver)
+        .arg(CONTROLLER)
+        .arg(workspace_binary("dcs-plant-server"))
+        .arg(STATION)
+        .arg(DYNAMICS)
+        .arg(&dir)
+        .stdin(Stdio::null())
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
+        .spawn()
+        .expect("cannot spawn unshare");
+
+    let deadline = Instant::now() + SCENARIO_TIMEOUT;
+    let status = loop {
+        match child.try_wait().unwrap() {
+            Some(status) => break status,
+            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let log = std::fs::read_to_string(&output_log).unwrap_or_default();
+                panic!("the namespace pair scenario timed out; driver log:\n{log}");
+            }
+        }
+    };
+    let log = std::fs::read_to_string(&output_log).unwrap_or_default();
+    assert!(
+        status.success() && log.contains("DEMOTED-REJOIN-OK"),
+        "the namespace pair scenario failed ({status}); driver log:\n{log}"
     );
 }
