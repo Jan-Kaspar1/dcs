@@ -12,7 +12,7 @@ use dcs_core::{
     Sample, StandbySync, StateMap, SwitchError, SwitchOrigin, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
-use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorClient};
+use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorClient, TrackTarget};
 use dcs_runtime::{
     Checkpoint, Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap,
     PointSpec, StepError, mint_generation,
@@ -3477,5 +3477,287 @@ fn a_driven_standby_stamps_an_adopted_held_value_at_the_apply_tick() {
         Some(Sample::good(Value::Bool(true), Tick(4))),
         "an unchanged held value adopts the captured stamp verbatim: \
          {converged:?}"
+    );
+}
+
+/// The QA finding `pinned-tracking-source-no-liveness-fallback`: the
+/// wedge-escape pins — `resolved` here — outrank the configured source
+/// by design, but on the reported build they outranked it forever:
+/// once the proven successor died, the pin could only be re-derived
+/// inside `resolve_tracking_source`, which ran only on successful
+/// orphaned applies — a dead source made every pull fail, so no orphan
+/// verdict ever arrived and the standby stranded on the corpse while
+/// its configured source served the line again. The learned pins now
+/// carry a liveness bound: consecutive produced-nothing pulls release
+/// the pin and re-run the owner probe inside the same cycle, so a live
+/// successor — the configured source healthy again included — re-earns
+/// the pulls on the probe's own verification instead of the peer
+/// stranding on a dead endpoint.
+#[test]
+fn a_dead_resolved_pin_releases_and_re_resolves_onto_the_live_line() {
+    // The configured source: the reproduction's ctrl-a, serving owner
+    // checkpoints for the whole test.
+    let a_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let a = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(executor(a_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    let a_addr = dialable(a.monitor.local_addr());
+
+    // The successor the reproduction's failover promoted: a sibling
+    // standby of a's that tracks it, then takes the field — its
+    // checkpoints claim ownership on this line's generation.
+    let c_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let c = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(c_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(a_addr),
+            after_scan: None,
+        }),
+    );
+    let c_addr = dialable(c.monitor.local_addr());
+
+    // The reproduction's ctrl-b: configured to track a, with the
+    // field's claim verdicts naming the successor's monitor — the
+    // declaration the resolution probe reads first.
+    let b_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let b = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(b_driver), None).with_claimed_monitor(move || Some(c_addr)),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(a_addr),
+            after_scan: None,
+        }),
+    );
+
+    a.client.advance(3).unwrap();
+    c.client.advance(1).unwrap();
+    b.client.advance(1).unwrap();
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "b converged on its configured source before the failover"
+    );
+
+    // The successor takes the field: its documents now claim
+    // ownership on this line's generation — the shape the
+    // orphan-resolution probe verifies.
+    assert_eq!(c.client.promote().unwrap().role, Role::Promoting);
+    c.client.advance(1).unwrap();
+
+    // Pin `resolved` the way the reproduction's failover did: the
+    // probe's claimed-declared candidate verifies as this line's
+    // owner, and the learned pin outranks the configured source from
+    // here on.
+    assert_eq!(b.monitor.resolve_tracking_source(), Some(c_addr));
+    assert_eq!(
+        b.monitor.verified_tracking_source(),
+        Some(TrackTarget::Addr(c_addr)),
+        "the resolved pin outranks the configured source"
+    );
+
+    // `docker stop c`: the resolved owner dies while the configured
+    // source stays healthy and active.
+    c.stop();
+
+    // Inside the miss bound the pin still stands — the bound absorbs
+    // a transient miss run — and the degraded detail names it,
+    // exactly the reproduction's `degraded: fetch from <dead>`.
+    b.client.advance(2).unwrap();
+    let report = b.client.role().unwrap();
+    match &report.sync {
+        Some(StandbySync::Degraded { detail }) => assert!(
+            detail.contains(&c_addr.to_string()),
+            "the miss window still names the dead pin: {detail}"
+        ),
+        _ => panic!("the dead pin still misses inside its bound: {report:?}"),
+    }
+    assert_eq!(
+        b.monitor.verified_tracking_source(),
+        Some(TrackTarget::Addr(c_addr)),
+        "a bounded miss run keeps the pin — only an unbounded one \
+         would have released it"
+    );
+
+    // Past the bound the pin releases and the same pass re-resolves:
+    // the configured source is live and owning — the reproduction's
+    // `docker restart a` shape — so the probe pins it, and the next
+    // pulls reconverge `tracking` instead of stranding `degraded` on
+    // the dead successor until the process restarts.
+    b.client.advance(6).unwrap();
+    assert_eq!(
+        b.monitor.verified_tracking_source(),
+        Some(TrackTarget::Addr(a_addr)),
+        "the released pin re-resolves onto the live configured source"
+    );
+    let report = b.client.role().unwrap();
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the standby tracks a live line again: {report:?}"
+    );
+}
+
+/// The adopted half of `pinned-tracking-source-no-liveness-fallback`:
+/// the field-arbitrated adoption — the monitor the standing claim
+/// declares, verified as this line's owner — stranded the same way the
+/// resolved pin did. The released slot falls back through the lazy
+/// verification paths: the same dead claimant stays unprobed inside
+/// its retry window while a changed declaration re-earns the pin on
+/// its own proof.
+#[test]
+fn a_dead_adopted_pin_releases_and_the_claimed_path_re_resolves() {
+    // The configured source: owner of the line for the whole test.
+    let a_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let a = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(executor(a_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    let a_addr = dialable(a.monitor.local_addr());
+
+    // The field-declared successor: a sibling standby of a's that
+    // tracks it, then takes the field — owner documents on this
+    // line's generation.
+    let c_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let c = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(c_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(a_addr),
+            after_scan: None,
+        }),
+    );
+    let c_addr = dialable(c.monitor.local_addr());
+
+    a.client.advance(3).unwrap();
+    c.client.advance(1).unwrap();
+    assert_eq!(c.client.promote().unwrap().role, Role::Promoting);
+    c.client.advance(1).unwrap();
+
+    // The reproduction's ctrl-a shape: a sourceless peer the field's
+    // claim verdicts alone can re-join — no configured slot, only the
+    // declared monitor endpoint.
+    let claimed: &'static Mutex<SocketAddr> = Box::leak(Box::new(Mutex::new(c_addr)));
+    let b_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let b = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(b_driver), None)
+                .with_claimed_monitor(move || Some(*claimed.lock().unwrap())),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: None,
+            after_scan: None,
+        }),
+    );
+    // The peer already rides this line's generation — the demoted
+    // run's carried state — so the declaration's owner document can
+    // verify.
+    b.monitor
+        .apply_checkpoint(&a.client.checkpoint().unwrap())
+        .unwrap();
+
+    // The field's verdict names c: the lazy adoption proves it as this
+    // line's owner and pins `adopted`, journaling the move.
+    assert_eq!(
+        b.monitor.verified_tracking_source(),
+        Some(TrackTarget::Addr(c_addr)),
+        "the claimed monitor adopts into the tracking pin"
+    );
+    b.client.advance(1).unwrap();
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "b tracks the adopted successor"
+    );
+
+    // `docker stop c`: the adopted owner dies; the stranded shape the
+    // finding reported identical to the resolved pin's.
+    c.stop();
+    b.client.advance(2).unwrap();
+    assert_eq!(
+        b.monitor.verified_tracking_source(),
+        Some(TrackTarget::Addr(c_addr)),
+        "a bounded miss run keeps the adopted pin"
+    );
+
+    // Past the bound the pin releases: no configured slot stands, so
+    // the pulls stop targeting the dead endpoint at all rather than
+    // fetching it forever.
+    b.client.advance(4).unwrap();
+    assert_eq!(
+        b.monitor.verified_tracking_source(),
+        None,
+        "the dead adopted pin released — no slot left to pull"
+    );
+
+    // The field's verdict later names a live owner — the
+    // reproduction's `a` reclaimed — and the lazy pass adopts it on
+    // its own proof: the pair reconverges without a restart.
+    *claimed.lock().unwrap() = a_addr;
+    b.client.advance(1).unwrap();
+    assert_eq!(
+        b.monitor.verified_tracking_source(),
+        Some(TrackTarget::Addr(a_addr)),
+        "the changed declaration re-earns the pin"
+    );
+    b.client.advance(1).unwrap();
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "b reconverges on the reclaimed owner: {:?}",
+        b.client.role().unwrap()
     );
 }
