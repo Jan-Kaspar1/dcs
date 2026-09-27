@@ -9,7 +9,7 @@ use dcs_core::{
 };
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap, PointSpec,
-    StepError, WriteGate,
+    StepError, TrackReport, WriteGate,
 };
 use dcs_sim::{
     BoolFlow, ChannelId, ChannelMap, Fault, FirstOrderLag, FlowSum, Integrator, Loopback,
@@ -1162,6 +1162,129 @@ fn the_conditional_startup_claim_refuses_a_live_incumbent_only() {
     });
 }
 
+/// The QA finding `yielded-claim-regrant-leaves-live-incumbent-preemptable`
+/// (#1123): `release_writer` with `keep_claim` marks the standing claim
+/// yielded — the deliberate hand-off a successor's conditional claim
+/// may preempt despite lingering holders. The same owner's re-grant —
+/// the orphan failover's conditional promote, a manual promote's
+/// unconditional claim, or a re-attaching attachment's bound
+/// `ensure_writer` — joined the holder set but left the mark standing,
+/// so every later different-owner `claim_writer_unless_held` preempted
+/// a *live* re-bound incumbent: the restarted demoted peer took the
+/// field back from the failover successor that had re-claimed it. A
+/// bound controller re-grant must end the hand-off: the claim reads
+/// unyielded again and refuses the conditional grant exactly like a
+/// claim that never yielded — while the hand-off a tool's hold or the
+/// unbound orphan probe touches stays yielded for the successor.
+#[test]
+fn a_yielded_claim_re_grant_restores_the_live_incumbent_refusal() {
+    with_server(loopback_map(), |addr| {
+        const OWNER: u64 = 7;
+        const SUCCESSOR: u64 = 9;
+
+        let owner = RemoteDriver::connect(addr).unwrap().as_controller();
+        let restart = RemoteDriver::connect(addr).unwrap().as_controller();
+        owner.claim_writer(OWNER).unwrap();
+        owner.write(PointId(20), Value::Float(1.0)).unwrap();
+        owner.step(0.1).unwrap();
+
+        // The conditional same-owner re-grant — the orphan failover
+        // promote's shape: the yielded claim's own owner re-claims,
+        // writes, and steps as the live incumbent, and a different
+        // owner's conditional grant is refused naming it. On the defect
+        // build the successor's claim answered DONE and the incumbent's
+        // next step was fenced.
+        owner.release_writer_keep_claim().unwrap();
+        assert_eq!(
+            owner.claim_writer_unless_held(OWNER).unwrap(),
+            ClaimGrant::Exclusive
+        );
+        owner.write(PointId(20), Value::Float(2.0)).unwrap();
+        owner.step(0.1).unwrap();
+        assert_eq!(
+            restart.claim_writer_unless_held(SUCCESSOR),
+            Err(RemoteError::Fenced),
+            "the re-granted incumbent must refuse a different owner's \
+             conditional claim"
+        );
+        assert_eq!(restart.fenced_by(), Some(OWNER));
+        assert_eq!(restart.step(0.1), Err(RemoteError::Fenced));
+
+        // The unconditional same-owner re-grant — a manual promote over
+        // one's own yielded claim — restores the same refusal.
+        owner.release_writer_keep_claim().unwrap();
+        owner.claim_writer(OWNER).unwrap();
+        assert_eq!(
+            restart.claim_writer_unless_held(SUCCESSOR),
+            Err(RemoteError::Fenced),
+            "the unconditionally re-granted incumbent must refuse \
+             the conditional claim"
+        );
+
+        // The bound `ensure_writer` re-join — the re-attaching
+        // attachment's shape — ends the hand-off identically, on the
+        // owner's own connection and on a fresh same-token attachment.
+        owner.release_writer_keep_claim().unwrap();
+        owner.ensure_writer(OWNER).unwrap();
+        assert_eq!(
+            restart.claim_writer_unless_held(SUCCESSOR),
+            Err(RemoteError::Fenced),
+            "the bound ensure re-grant must restore the refusal"
+        );
+        owner.release_writer_keep_claim().unwrap();
+        let reattach = RemoteDriver::connect(addr).unwrap().as_controller();
+        assert_eq!(
+            reattach.ensure_writer(OWNER).unwrap(),
+            ClaimGrant::Exclusive
+        );
+        assert_eq!(
+            restart.claim_writer_unless_held(SUCCESSOR),
+            Err(RemoteError::Fenced),
+            "a second attachment's bound re-join must restore the refusal"
+        );
+
+        // The re-grant still un-yields while a tool lingers on the
+        // yielded token: the re-bound controller owner is the live
+        // incumbent again despite the other hold.
+        reattach.release_writer_keep_claim().unwrap();
+        let lingerer = RemoteDriver::connect(addr).unwrap();
+        lingerer.ensure_writer(OWNER).unwrap();
+        assert_eq!(
+            owner.claim_writer_unless_held(OWNER).unwrap(),
+            ClaimGrant::Shared
+        );
+        assert_eq!(
+            restart.claim_writer_unless_held(SUCCESSOR),
+            Err(RemoteError::Fenced),
+            "a lingering tool hold must not keep the re-bound claim \
+             preemptable"
+        );
+
+        // The other half of the contract: only a controller's bound
+        // re-join ends the hand-off. The unbound orphan probe joins no
+        // holder, and a field tool's bound ensure is no incumbent —
+        // the yielded claim stays preemptable for the successor's
+        // conditional claim.
+        owner.release_writer_keep_claim().unwrap();
+        owner.ensure_writer_unbound(OWNER).unwrap();
+        let tool = RemoteDriver::connect(addr).unwrap();
+        tool.ensure_writer(OWNER).unwrap();
+        assert_eq!(
+            restart.claim_writer_unless_held(SUCCESSOR).unwrap(),
+            ClaimGrant::Exclusive,
+            "the yielded claim must stay preemptable until a live \
+             controller re-binds it"
+        );
+        // The successor now holds the live claim outright; the
+        // lingering tool hold fenced exactly like the yielded mark's
+        // preempted owner would have been.
+        assert_eq!(tool.step(0.1), Err(RemoteError::Fenced));
+        assert_eq!(owner.step(0.1), Err(RemoteError::Fenced));
+        restart.write(PointId(20), Value::Float(3.0)).unwrap();
+        restart.step(0.1).unwrap();
+    });
+}
+
 /// Polls `remote`'s link until the re-attach lands or `deadline`
 /// expires — the returned-plant half of every restart test.
 fn wait_for_reattach(remote: &RemoteDriver, deadline: Duration) {
@@ -1774,6 +1897,199 @@ fn an_orphaned_ex_owners_rearm_holds_no_live_holder_and_stays_preemptable() {
         assert_eq!(a_peer.role(), Role::Active);
         b_peer.track_once(|| Ok(a_peer.checkpoint()));
         assert!(matches!(b_peer.sync_state(), StandbySync::Tracking { .. }));
+    });
+}
+
+/// The QA finding `yielded-claim-regrant-leaves-live-incumbent-preemptable`
+/// (#1123) at the role-machine level — the reported end-to-end
+/// reproduction: an armed field owner is demoted under the keep-claim
+/// release, so its standing claim goes yielded; its orphan failover
+/// then re-promotes it over its *own* yielded claim — the same-owner
+/// conditional re-grant — and the peer it was demoted away from
+/// restarts as active. On the defect build the re-grant left the mark
+/// standing, so the restartee's startup `claim_writer_unless_held`
+/// preempted the failover successor's *live* claim and fenced it off
+/// the field mid-run: the stale-resume seizure the conditional grant
+/// exists to refuse. The re-grant must re-arm the live-incumbent
+/// refusal — the restartee's activation is refused and the successor
+/// keeps writing.
+///
+/// Two `Peer`s over `RemoteDriver` attachments play the redundant pair,
+/// wired the way `dcs-controller` wires the claim hooks, the tracking
+/// peer armed with the failover budget.
+#[test]
+fn an_orphan_failover_regrant_rearms_the_live_incumbent_refusal() {
+    with_server(loopback_map(), |addr| {
+        const OWNER_A: u64 = 7;
+        const OWNER_C: u64 = 9;
+        const FAILOVER_BUDGET: u32 = 2;
+
+        let point_map = || -> PointMap {
+            [
+                (PointId(10), Direction::In, ValueKind::Float),
+                (PointId(20), Direction::Out, ValueKind::Float),
+            ]
+            .into_iter()
+            .collect()
+        };
+        let component = || -> Box<dyn Component> {
+            Box::new(Accumulator {
+                input: PointId(10),
+                output: PointId(20),
+                total: 0.0,
+            })
+        };
+        // The claim hooks as `dcs-controller` wires them: startup and
+        // orphan promotion take the conditional grant, demotion
+        // releases with keep_claim, the orphan probe is the unbound
+        // ensure.
+        let conditional =
+            |remote: &RemoteDriver, owner: u64| match remote.claim_writer_unless_held(owner) {
+                Ok(_) => Ok(true),
+                Err(RemoteError::Fenced) => Ok(false),
+                Err(error) => Err(error.to_string()),
+            };
+
+        // a — the pair's launched field owner.
+        let a = RemoteDriver::connect(addr).unwrap().as_controller();
+        let a_gate = WriteGate::closed(&a);
+        let mut a_peer = Peer::active(
+            Executor::new(&a_gate, point_map(), vec![component()]).unwrap(),
+            Some(&a_gate),
+        )
+        .with_field_claim(|| {
+            a.claim_writer(OWNER_A)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .with_field_release(|| {
+            let _ = a.release_writer_keep_claim();
+        })
+        .with_field_ensure(|| match a.ensure_writer_unbound(OWNER_A) {
+            Ok(()) => Ok(true),
+            Err(RemoteError::Fenced) => Ok(false),
+            Err(error) => Err(error.to_string()),
+        })
+        .with_field_orphan_claim(|| conditional(&a, OWNER_A))
+        .with_field_startup_claim(|| conditional(&a, OWNER_A));
+        a_peer.activate().unwrap();
+        a_peer.scan();
+        assert_eq!(a_peer.role(), Role::Active);
+
+        // c — the failover-armed standby tracking a.
+        let c = RemoteDriver::connect(addr).unwrap().as_controller();
+        let c_gate = WriteGate::closed(&c);
+        let mut c_peer = Peer::standby(
+            Executor::new(&c_gate, point_map(), vec![component()]).unwrap(),
+            Some(&c_gate),
+        )
+        .with_field_claim(|| {
+            c.claim_writer(OWNER_C)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .with_field_release(|| {
+            let _ = c.release_writer_keep_claim();
+        })
+        .with_field_ensure(|| match c.ensure_writer_unbound(OWNER_C) {
+            Ok(()) => Ok(true),
+            Err(RemoteError::Fenced) => Ok(false),
+            Err(error) => Err(error.to_string()),
+        })
+        .with_field_orphan_claim(|| conditional(&c, OWNER_C))
+        .with_field_startup_claim(|| conditional(&c, OWNER_C))
+        .with_failover(FAILOVER_BUDGET);
+        c_peer.scan();
+        c_peer.track_once(|| Ok(a_peer.checkpoint()));
+        assert!(matches!(c_peer.sync_state(), StandbySync::Tracking { .. }));
+
+        // The reproduction's setup: c is the armed field owner — the
+        // documented switch moves the field to it — and a demotes to
+        // standby on its fenced write.
+        c_peer.promote().unwrap();
+        c_peer.scan();
+        assert_eq!(c_peer.role(), Role::Active);
+        a_peer.scan();
+        assert_eq!(a_peer.role(), Role::Demoting);
+        a_peer.scan();
+        assert_eq!(a_peer.role(), Role::Standby);
+
+        // POST /demote c: the keep-claim release marks the standing
+        // claim yielded under c's own token — the deliberate hand-off.
+        c_peer.demote().unwrap();
+        c_peer.scan();
+        assert_eq!(c_peer.role(), Role::Standby);
+
+        // The orphan failover: c tracks a's ownerless checkpoints —
+        // each orphaned apply counts the miss, the unbound ensure
+        // probe confirms the yielded claim still stands, and the
+        // budget-th apply self-promotes c over its own yielded claim,
+        // the same-owner conditional re-grant of the reproduction.
+        c_peer.scan();
+        let reports: Vec<_> = (0..FAILOVER_BUDGET)
+            .map(|_| c_peer.track_once(|| Ok(a_peer.checkpoint())))
+            .collect();
+        assert!(
+            matches!(reports.last(), Some(TrackReport::Promoted { .. })),
+            "the armed orphan's budget-th apply must self-promote: \
+             {reports:?}"
+        );
+        c_peer.scan();
+        assert_eq!(c_peer.role(), Role::Active);
+        // The re-granted owner is live again: its writes and steps
+        // land through its own attachment.
+        c.write(PointId(20), Value::Float(5.0)).unwrap();
+        c.step(0.1).unwrap();
+
+        // The reproduction's trigger: a restarts as active — a fresh
+        // active peer over a fresh attachment running the conditional
+        // startup claim under the demoted peer's token. The re-granted
+        // claim stands unyielded again, so the grant refuses instead
+        // of preempting the live failover successor — the
+        // stale-resume seizure the startup claim exists to refuse.
+        let a2 = RemoteDriver::connect(addr).unwrap().as_controller();
+        let a2_gate = WriteGate::closed(&a2);
+        let mut a2_peer = Peer::active(
+            Executor::new(&a2_gate, point_map(), vec![component()]).unwrap(),
+            Some(&a2_gate),
+        )
+        .with_field_claim(|| {
+            a2.claim_writer(OWNER_A)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .with_field_release(|| {
+            let _ = a2.release_writer_keep_claim();
+        })
+        .with_field_ensure(|| match a2.ensure_writer_unbound(OWNER_A) {
+            Ok(()) => Ok(true),
+            Err(RemoteError::Fenced) => Ok(false),
+            Err(error) => Err(error.to_string()),
+        })
+        .with_field_orphan_claim(|| conditional(&a2, OWNER_A))
+        .with_field_startup_claim(|| conditional(&a2, OWNER_A));
+        assert!(
+            matches!(
+                a2_peer.activate(),
+                Err(SwitchError::FieldClaimFailed { .. })
+            ),
+            "the restartee's startup claim must refuse the live \
+             re-granted incumbent"
+        );
+        // The refusal names the incumbent the field's arbitration
+        // holds — the failover successor's token, not a foreign
+        // claimant.
+        assert_eq!(a2.fenced_by(), Some(OWNER_C));
+        // And the successor's live claim was never preempted: it keeps
+        // writing and stepping through the restart attempt.
+        c.write(PointId(20), Value::Float(6.0)).unwrap();
+        c.step(0.1).unwrap();
+        c_peer.scan();
+        assert_eq!(c_peer.role(), Role::Active);
+        assert_eq!(c_peer.take_fencing_losses().len(), 0);
+        // The refused restartee holds no claim — its own mutations
+        // fence against the incumbent's standing claim.
+        assert_eq!(a2.step(0.1), Err(RemoteError::Fenced));
     });
 }
 

@@ -65,7 +65,12 @@ struct WriterClaim {
     /// releasing — keeps refusing the conditional grant while live
     /// holders stand: a live unyielded claim is the field's own proof
     /// an incumbent exists, and preempting it is the stale-image
-    /// takeover the conditional shape exists to refuse.
+    /// takeover the conditional shape exists to refuse. The mark also
+    /// clears where the hand-off ends: the same owner's
+    /// `claim_writer`/`claim_writer_unless_held`/`ensure_writer`
+    /// re-grant joining a live *controller* holder makes the claim a
+    /// live incumbent's again, not a still-yielded hand-off every later
+    /// conditional claimant could preempt.
     yielded: bool,
     /// Whether the claim's owner is a controller peer rather than a
     /// field tool — set at claim creation and upgraded whenever a
@@ -160,7 +165,13 @@ fn grant_writer_claim(
 /// attachment stands behind the claim it reads as a controller claim,
 /// so a token a tool raised and a controller adopted still refuses a
 /// peer's conditional preemption while the controller holds it live.
-/// A fresh `monitor` declaration likewise replaces the standing one —
+/// The same join clears the yield mark: a yielded claim whose owner
+/// re-binds a live controller holder is no longer deliberately handed
+/// off — the re-granted incumbent is exactly the live unyielded
+/// controller claim a different owner's conditional grant must
+/// refuse — while a tool's same-token join never made the claim a
+/// controller's incumbent and leaves the hand-off preemptable. A
+/// fresh `monitor` declaration likewise replaces the standing one —
 /// the owner's monitor rebinds with it — while an undeclared join
 /// keeps the declaration a controller attachment already made rather
 /// than letting a tool's claim erase where the owner serves.
@@ -178,6 +189,9 @@ fn grant_writer_claim_locked(
         Some(claim) if claim.owner == owner => {
             claim.holders.insert(connection);
             claim.controller |= controller;
+            if controller {
+                claim.yielded = false;
+            }
             if monitor.is_some() {
                 claim.monitor = monitor;
             }
@@ -432,8 +446,20 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
                     // stands behind reads as a controller claim even
                     // where a tool raised it first. The monitor
                     // declaration refreshes the same way: a re-armed
-                    // claim keeps naming where its owner serves.
+                    // claim keeps naming where its owner serves. And a
+                    // controller's bound re-join of a yielded claim
+                    // clears the yield mark the same way the claim
+                    // grants do — the owner stands behind the claim
+                    // live again, so the hand-off has ended and the
+                    // claim reads as the incumbent's unyielded hold.
+                    // The unbound probe joins no holder — it keeps the
+                    // yielded claim preemptable exactly as it must —
+                    // and a tool's hold is no incumbent either, so
+                    // neither un-yields the deliberate hand-off.
                     claim.controller |= controller;
+                    if rebind && controller {
+                        claim.yielded = false;
+                    }
                     if monitor.is_some() {
                         claim.monitor = monitor;
                     }
