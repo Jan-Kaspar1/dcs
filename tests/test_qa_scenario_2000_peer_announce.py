@@ -303,6 +303,10 @@ class PeerAnnounceTests(unittest.TestCase):
         self.assertEqual(
             order.index(
                 scenarios.scenario_suspended_alias_audit) + 1,
+            order.index(scenarios.scenario_resume_settle_once))
+        self.assertEqual(
+            order.index(
+                scenarios.scenario_resume_settle_once) + 1,
             order.index(scenarios.scenario_parameter_tune_carryover))
         self.assertIs(verify.case_function('peer-announce'),
                       scenarios.scenario_peer_announce)
