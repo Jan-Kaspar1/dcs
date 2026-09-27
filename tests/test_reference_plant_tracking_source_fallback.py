@@ -99,7 +99,7 @@ class Registration(unittest.TestCase):
         }
         record = discovered["tracking_source_fallback.py"]
         self.assertEqual(record["stem"], "tracking-source-fallback")
-        self.assertEqual(record["order"], 510)
+        self.assertEqual(record["order"], 520)
 
     def test_the_named_diagnostics_follow_the_issue(self):
         # The issue names source-fallback-failed — the declared

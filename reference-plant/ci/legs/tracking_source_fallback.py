@@ -98,7 +98,7 @@ import pair
 # bound closed — must surface the named diagnostic on the honest
 # fallback rather than passing an unexercised contract.
 LEG = {
-    "order": 510,
+    "order": 520,
     "title": "the tracking-source-fallback leg",
     "passes": "source-fallback-leg",
     "failed": "source-fallback-failed",
