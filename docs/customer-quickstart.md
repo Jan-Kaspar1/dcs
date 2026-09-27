@@ -2,7 +2,7 @@
 
 The entry point for engineering a customer plant is the
 **`reference-plant/` tree** in this repository — a complete,
-verbatim-publishable consumer repository pinning the v0.4.0 release
+verbatim-publishable consumer repository pinning the v0.5.0 release
 contract (`docs/release-contract.md`). Copy it into a new repository and
 it becomes your plant project: no platform checkout, no path
 dependencies, only the pinned release crates.
