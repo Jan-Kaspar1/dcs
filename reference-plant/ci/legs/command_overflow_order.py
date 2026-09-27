@@ -56,7 +56,7 @@ pair stands converged in driven mode. The run:
   the pair left in its launch roles, the field owner `active`, the
   standby `tracking`.
 
-The contract postdates the pinned v0.3.0 release: where the launched
+The contract postdates the release line's v0.3.0 cut: where the launched
 tooling predates the deferred-overflow re-entry, the flood's own
 evidence — a submission answering no receipted frame, receipts
 answering or minting out of submission order, a labeled receipt
