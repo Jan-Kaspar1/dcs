@@ -134,8 +134,10 @@ class State:
         Beyond the merge counts, each window carries the work ledger's
         measured detail through agent_pool.merge_flow's shared classifiers:
         ranked conflict paths with the concentrated/spread verdict, ranked
-        failing-check names for ci-failure repairs, and the bounded
-        park-cause counts behind status:blocked transitions.
+        failing-check names for ci-failure repairs, the bounded park-cause
+        counts behind status:blocked transitions, and the count of publish
+        merges resolved mechanically in-process (a separate ledger kind, so
+        they never inflate the agent-repair attribution).
         """
         now = time.time() if now is None else now
         bounds = window_bounds(now, window_seconds)
@@ -160,6 +162,7 @@ class State:
                 'repairs_by_cause': {w: attribution[w]['repairs_by_cause'] for w in bounds},
                 'redispatches_by_cause': {w: attribution[w]['redispatches_by_cause'] for w in bounds},
                 'conflict_repairs': {w: attribution[w]['conflict_repairs'] for w in bounds},
+                'mechanical_resolutions': {w: attribution[w]['mechanical_resolutions'] for w in bounds},
                 'conflict_paths': {w: attribution[w]['conflict_paths'] for w in bounds},
                 'conflict_load': {w: attribution[w]['conflict_load'] for w in bounds},
                 'failing_checks': {w: attribution[w]['failing_checks'] for w in bounds},
