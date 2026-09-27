@@ -755,6 +755,15 @@ echo "== deploy =="
 # diagnostics (rig-invalid, rig-unverifiable, rig-mismatch) on stderr.
 python3 ci/deploy_rig.py
 
+# The overview-URL generator's rig-resolution half — ci/overview_url.py
+# reads the manifest's declared topology and resolves each declared
+# member to the monitor endpoint the rig definition publishes, printing
+# the deployment's ?pair= overview URL (the pair stage's pair-overview
+# leg asserts the generated names and serving endpoints against the
+# launched pair). It reports its own `overview-url: …` diagnostics —
+# a declared member with no published endpoint fails by name.
+python3 ci/overview_url.py
+
 # The persistence fields' divergence cases, exercised against doctored
 # scratch copies so the checked-in pair stays pristine: each must
 # report rig-mismatch — a declared path missing its mount or flag, a
@@ -1180,7 +1189,8 @@ echo "== consumers =="
 for file in ci/alarm_rationalization.py ci/alarm_validation.py \
         ci/claim_fencing.py ci/consumers.py ci/ctl.py ci/deploy_rig.py \
         ci/dynamics_fingerprint.py ci/fingerprint.py ci/legs.py \
-        ci/managed_carryover.py ci/oos.py ci/power_trip.py \
+        ci/managed_carryover.py ci/oos.py ci/overview_url.py \
+        ci/power_trip.py \
         ci/restart.py ci/schema_conformance.py ci/simulate.py \
         ci/staging.py ci/legs/*.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
