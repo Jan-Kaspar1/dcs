@@ -68,7 +68,15 @@ pair through ctx['probe'] — the same ctx shape rebound to the probe
 pair's containers, published monitor ports, claim-token pins, and
 --pair-token — so the keyed legs exercise the contract for real
 instead of reporting inconclusive on the deployed pair's posture
-(#1058).
+(#1058). The keyed-announced-source leg binds that probe subject
+directly — the accepted finding's residual classes are pinned to the
+staged keyed pair, never the deployed one — and drives its own
+simulated plant and endpoints: the misordered promote's involuntary
+demote resolving a verified source under keying, the forged keyed
+endpoint's verify-path refusal, the captured line_proof's refusal
+once its nonce window rolled, and the honest
+announce-verify-pull lifecycle converging, degrading on the adopted
+endpoint's hostile restage, and re-promoting.
 
 The field-fault, backup-health, and unavailable-fallback cases
 inject and clear per-point faults on the shared simulated field

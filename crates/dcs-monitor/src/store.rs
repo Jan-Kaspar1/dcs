@@ -29,7 +29,11 @@
 //!   per-instance `events` beside the journal tail; and
 //! - the **receipt mirror** — the latest-value copy `GET /receipts`
 //!   answers, refreshed wherever the control-plane lock changes the
-//!   log so a between-scans submission stays immediately visible.
+//!   log so a between-scans submission stays immediately visible; and
+//! - the **liveness mirror** — `GET /role`'s report beside the last
+//!   completed scan's wall-clock stamp, refreshed wherever the
+//!   control-plane lock changes either so `GET /health` and `GET /role`
+//!   never queue behind a scan wedged in field I/O.
 //!
 //! Event and history appends are incremental — a journaled
 //! control-plane event between scans (a refused command, a role
@@ -50,11 +54,11 @@ use crate::drain::{DrainHealth, DrainShared, DrainState};
 use dcs_core::{
     CommandReceipt, EmittedEvent, EventRecord, EventRetention, HistorySample, JournalEntry,
     JournalEvent, JournalSinkHealth, JournalSinkState, PointHistory, PointId, PublicationHealth,
-    Sample, StateSinkHealth, StateSinkState, TelemetrySnapshot, Tick,
+    RoleReport, Sample, StateSinkHealth, StateSinkState, TelemetrySnapshot, Tick,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// One immutable post-scan read model — the unit the store publishes.
 ///
@@ -136,11 +140,38 @@ impl Ring {
     }
 }
 
+/// The published liveness copy `GET /health` and `GET /role` serve —
+/// the instance's [`RoleReport`] beside the last completed scan's
+/// wall-clock stamp.
+///
+/// The control plane refreshes it under the executor lock wherever
+/// either half changes — like the receipt mirror — because a scan
+/// wedged in field I/O holds that lock for the whole driver timeout:
+/// serving the mirror lets the liveness answer report the wedge
+/// (`last_scan_age_ms` keeps growing) instead of queueing behind it,
+/// which is the defect `liveness-reads-stall-behind-wedged-field-io`
+/// found in the shared-lock fetch this replaces.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Liveness {
+    /// `GET /role`'s answer — the peer's report as last refreshed;
+    /// `GET /health` derives its `role` and `tick` from it.
+    pub report: RoleReport,
+    /// The last completed scan's wall-clock stamp — the base
+    /// `GET /health` ages into `last_scan_age_ms`. `None` before the
+    /// first scan completes.
+    pub last_scan: Option<Instant>,
+}
+
 struct Inner {
     /// The newest publication — what the snapshot read endpoints
     /// serve. `None` only before the bind-time publication a
     /// [`Monitor`](crate::Monitor) always performs.
     latest: Option<Arc<Publication>>,
+    /// The published liveness copy the heartbeat lane's `GET /health`
+    /// and `GET /role` serve — refreshed wherever the control-plane
+    /// lock changes the report or the scan stamp, so a wedged scan's
+    /// hold never stalls the liveness read.
+    liveness: Option<Liveness>,
     /// The bounded retained window of recent publications, oldest
     /// first — what a seq-cursor read pages through.
     window: VecDeque<Arc<Publication>>,
@@ -304,6 +335,7 @@ impl Store {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 latest: None,
+                liveness: None,
                 window: VecDeque::new(),
                 rings: BTreeMap::new(),
                 journal: VecDeque::new(),
@@ -442,6 +474,39 @@ impl Store {
     /// `GET /receipts` answer stays current between scans.
     pub(crate) fn sync_receipts(&self, receipts: &[CommandReceipt]) {
         self.inner.lock().unwrap().receipts = Arc::new(receipts.to_vec());
+    }
+
+    /// Refreshes the liveness mirror's report half — `GET /role`'s
+    /// answer and the `role`/`tick` `GET /health` derives — called
+    /// wherever the control-plane lock changes the peer's report (a
+    /// scan, a role transition, an adopted checkpoint), so the
+    /// liveness reads serve it between scans the way `GET /receipts`
+    /// serves its mirror. The last-scan stamp carries over.
+    pub(crate) fn sync_liveness(&self, report: RoleReport) {
+        let mut inner = self.inner.lock().unwrap();
+        let last_scan = inner
+            .liveness
+            .as_ref()
+            .and_then(|liveness| liveness.last_scan);
+        inner.liveness = Some(Liveness { report, last_scan });
+    }
+
+    /// The completed-scan liveness refresh — the post-scan report
+    /// beside the scan's wall-clock completion stamp, the base
+    /// `GET /health` ages into `last_scan_age_ms`.
+    pub(crate) fn note_scanned(&self, report: RoleReport, at: Instant) {
+        self.inner.lock().unwrap().liveness = Some(Liveness {
+            report,
+            last_scan: Some(at),
+        });
+    }
+
+    /// The liveness mirror — the published copy `GET /health` and
+    /// `GET /role` serve, fetched like `/snapshot`'s publication:
+    /// the store's own small lock, never the executor's. `None` only
+    /// before the bind seeds the first report.
+    pub(crate) fn liveness(&self) -> Option<Liveness> {
+        self.inner.lock().unwrap().liveness.clone()
     }
 
     /// Materializes and publishes one immutable read model for a
