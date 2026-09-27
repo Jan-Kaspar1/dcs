@@ -127,7 +127,7 @@ import takeover
 # diagnostic on the honest applied record rather than passing an
 # unexercised contract.
 LEG = {
-    "order": 480,
+    "order": 490,
     "title": "the repromote-suspended-settle leg",
     "passes": "repromote-suspended-settle",
     "tampers": [
