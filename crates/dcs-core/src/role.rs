@@ -225,8 +225,14 @@ impl fmt::Display for FieldClaim {
 /// The served bundle answers why a `degraded` verdict inside a miss
 /// window still lets `self_promote` fire: `converged` is the standing
 /// proof — the last *applied* checkpoint verdict was promotable and the
-/// miss run has not exceeded `budget` — and `misses`/`budget` are the
-/// accounting bounding how stale that proof may be when the gate fires.
+/// run of evidence-free misses has not exceeded `budget` — and
+/// `misses`/`budget` are the accounting bounding how stale that proof
+/// may be when the gate fires. `converged` past `budget` is therefore a
+/// live reading, not a contradiction: every landed apply re-proves the
+/// run — an ownerless line's `orphaned` applies included — so an armed
+/// peer whose earlier attempt was refused keeps serving
+/// `converged: true` and `misses` climbing past `budget`, the gate
+/// staying armed for the retry the refusal's cause clearing needs.
 /// The three travel together by contract: a bare `converged` flag on an
 /// unarmed peer survives misses without limit, so the proof is served
 /// only with the armed budget it is read against — an absent `failover`
@@ -235,13 +241,19 @@ impl fmt::Display for FieldClaim {
 pub struct FailoverEvidence {
     /// The standing proof the self-promotion gate reads: the last
     /// applied checkpoint verdict was promotable — `tracking`,
-    /// `reinitialized`, or `orphaned` — and the consecutive-miss run
-    /// has not exceeded `budget`. `false` before any clean apply, after
-    /// a rejected or diverged apply, on demotion, and once the misses
-    /// pass the armed budget — the failover window closed.
+    /// `reinitialized`, or `orphaned` — and the run of evidence-free
+    /// misses since has not exceeded `budget`. `false` before any clean
+    /// apply, after a rejected or diverged apply, on demotion, and while
+    /// an evidence-free miss run has passed the armed budget — the
+    /// staleness bound — but a landed apply re-proves it: `true` beside
+    /// `misses > budget` is the armed gate still live after a refused
+    /// attempt, not the window having closed.
     pub converged: bool,
     /// Consecutive checkpoint pulls that produced no applied checkpoint
-    /// — the heartbeat miss count `budget` compares against.
+    /// — the heartbeat miss count `budget` compares against. A pull
+    /// whose produced checkpoint reports its serving run owns no field
+    /// writes counts the cycle's miss without lifting the count the way
+    /// an owner-serving apply does.
     pub misses: u32,
     /// The armed consecutive-miss budget — the miss count at which a
     /// still-proven peer self-promotes at its scan boundary, and the
