@@ -74,7 +74,7 @@ import pair
 # diagnostic — never a generated dead reference passing as the
 # deployment's overview URL.
 LEG = {
-    "order": 520,
+    "order": 530,
     "title": "the pair-overview URL leg",
     "passes": "pair-overview-leg",
     "tampers": [
