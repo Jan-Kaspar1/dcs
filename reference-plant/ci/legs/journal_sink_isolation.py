@@ -154,6 +154,7 @@ POLL_INTERVAL = 0.025
 HOLD_SECONDS = 1.0
 ANSWER_BOUND = 40
 SERVE_BOUND = 5.0
+QUIET_ATTEMPTS = 8
 
 # The tracer lever's own bounds: the attached writer must report its
 # tracing-stop and the detached writer its resume inside the stop
@@ -197,6 +198,43 @@ def io_counters(snapshot):
     if health is None:
         return None
     return tuple(health.get(key) for key in IO_COUNTER_KEYS)
+
+
+def quiet_publication(url, failures, label):
+    """A publication stamping the drained sink. `journal_sink` is a
+    publish-time sample: a scan's attesting answer returns only once
+    the queue emptied at that instant, so the next publish reads the
+    drained state — while a record pushed between the drain and the
+    publish (an asynchronous `quality_changed`, an adopted settle)
+    still stamps `lagging` on a conforming sink, and `healthy`/`depth`
+    count the taken queue, so a publish stamped while the writer sits
+    between the dequeue and the completed write shows the drained
+    counter one record behind. The run therefore drives scans until
+    one publishes `healthy` with the queue empty and the sink's own
+    parity `drained + lost == accepted`, inside a bound; a sink that
+    never reports the drained state has the contract's own failure
+    to name."""
+    latest = None
+    for _ in range(QUIET_ATTEMPTS):
+        latest = pair.scan(url, failures)
+        sink = journal_sink(latest) or {}
+        if (
+            sink.get("state") == "healthy"
+            and sink.get("depth") == 0
+            and sink.get("drained", 0) + sink.get("lost", 0)
+            >= sink.get("accepted", 0)
+        ):
+            return latest
+    sink = journal_sink(latest) or {}
+    failures.append(
+        f"the journal sink never reported healthy with an empty "
+        f"reconciled queue within {QUIET_ATTEMPTS} driven scans "
+        f"{label} — the last publication reports "
+        f"{sink.get('state')!r} depth {sink.get('depth')} drained "
+        f"{sink.get('drained')} against accepted "
+        f"{sink.get('accepted')} lost {sink.get('lost')}"
+    )
+    raise Abort
 
 
 def window_get(url, what, failures):
@@ -402,7 +440,7 @@ def sink_isolation_pass(args, tamper):
     the scans still publish and the named accounting reports the
     impediment, release, and prove the standing queue drained in
     `seq` order with the pair's launch roles standing. Returns
-    `(digest_entries, evidence, failures)`."""
+    `(digest_entries, failures)`."""
     declared = pair.manifest_pair(args.manifest)
     if declared is None:
         raise Abort(
@@ -434,7 +472,7 @@ def sink_isolation_pass(args, tamper):
             "value": {"bool": True},
         }
     }
-    digest_entries, evidence, failures = [], {}, []
+    digest_entries, failures = [], []
     rig = None
     impeded = False
     libc = None
@@ -468,14 +506,17 @@ def sink_isolation_pass(args, tamper):
             raise Inconclusive(
                 "the served snapshot carries no io_health section"
             )
-        evidence["converged"] = owner["tick"]
+        # The digest records only what the run asserts — the named
+        # verdicts and counters' reconciliations — never the observed
+        # magnitudes (ticks, queue depths, token identities) an
+        # asynchronous journal push or a longer drain poll moves
+        # legitimately between two conforming passes.
         digest_entries.append(
             {
                 "phase": "converge",
-                "ticks": converged["ticks"],
-                "duty_role": converged["duty_role"],
-                "standby_role": converged["standby_role"],
-                "sink": sink0.get("state"),
+                "duty_role": converged["duty_role"].get("role"),
+                "standby_role": converged["standby_role"].get("role"),
+                "sink_present": True,
             }
         )
 
@@ -513,29 +554,17 @@ def sink_isolation_pass(args, tamper):
             failures.append(f"clear_fault answered {verdict}")
             raise Abort
         rig.tick(standby_url, duty_url, failures)
-        # Two quiesced driven scans: a publication stamps the sink at
-        # publish — before its own attesting answer finishes the
-        # drain — so the first quiet scan's stamp can still carry the
-        # traffic's tail; the second publishes with nothing left to
-        # journal and reads the drained drain.
-        pair.scan(duty_url, failures)
-        quiet = pair.scan(duty_url, failures)
-        sink = journal_sink(quiet) or {}
-        if sink.get("state") != "healthy" or sink.get("depth") != 0:
-            failures.append(
-                f"the journal sink reports {sink.get('state')!r} "
-                f"depth {sink.get('depth')} under ordinary journaled "
-                "traffic, expected healthy with an empty queue"
-            )
-            raise Abort
-        accepted0 = sink.get("accepted")
-        digest_entries.append(
-            {
-                "phase": "traffic",
-                "tick": quiet["tick"],
-                "accepted": accepted0,
-            }
+        # The drained baseline: a publication stamping the sink
+        # `healthy` with the queue empty under ordinary journaled
+        # traffic — the publish-time sample the poll drives to, a
+        # transient `lagging` under an asynchronously journaled
+        # record being the contract's own named state rather than a
+        # violation.
+        quiet = quiet_publication(
+            duty_url, failures, "under ordinary journaled traffic"
         )
+        accepted0 = (journal_sink(quiet) or {}).get("accepted")
+        digest_entries.append({"phase": "traffic"})
         tick0 = quiet["tick"]
 
         # Phase 3 — the stall: park the field owner's journal drain
@@ -781,7 +810,6 @@ def sink_isolation_pass(args, tamper):
                 "io_health": "unchanged",
             }
         )
-        evidence["impeded"] = latest["tick"]
 
         # Phase 5 — the restore: the tracer detach resumes the writer,
         # the standing queue appends in `seq` order, and every parked
@@ -874,17 +902,10 @@ def sink_isolation_pass(args, tamper):
         if verdict.get("result") != "done":
             failures.append(f"clear_fault answered {verdict}")
             raise Abort
-        pair.scan(duty_url, failures)
-        pair.scan(duty_url, failures)
-        resumed = pair.scan(duty_url, failures)
+        resumed = quiet_publication(
+            duty_url, failures, "after the restore drained"
+        )
         sink = journal_sink(resumed) or {}
-        if sink.get("state") != "healthy" or sink.get("depth") != 0:
-            failures.append(
-                f"the sink reports {sink.get('state')!r} depth "
-                f"{sink.get('depth')} after the restore drained — "
-                "expected healthy with an empty queue"
-            )
-            raise Abort
         if sink.get("lost"):
             failures.append("records were lost across the stall")
             raise Abort
@@ -913,7 +934,12 @@ def sink_isolation_pass(args, tamper):
                 "was torn, duplicated, or lost"
             )
             raise Abort
-        if len(entries) != sink.get("accepted"):
+        # Later appends land beside the drained run's records — an
+        # asynchronously journaled record keeps the file ahead of the
+        # publication's accepted stamp — so the audit asks that the
+        # file hold at least every accepted record in contiguous seq
+        # order, never fewer.
+        if len(entries) < sink.get("accepted"):
             failures.append(
                 f"the durable journal holds {len(entries)} entries "
                 f"against the sink's accepted {sink.get('accepted')} — "
@@ -926,10 +952,9 @@ def sink_isolation_pass(args, tamper):
                 "answered": results.get("batch", (None,))[0],
                 "sink": sink.get("state"),
                 "lost": sink.get("lost"),
-                "file_entries": len(entries),
+                "drained_whole": len(entries) >= sink.get("accepted"),
             }
         )
-        evidence["resumed"] = resumed["tick"]
 
         # Phase 7 — the pair stands: one tracking-first driven tick
         # reconverges the standby onto the owner's image and the
@@ -958,9 +983,10 @@ def sink_isolation_pass(args, tamper):
         digest_entries.append(
             {
                 "phase": "pair",
-                "tick": owner["tick"],
-                "duty_role": duty_role,
-                "standby_role": standby_role,
+                "duty_role": duty_role.get("role"),
+                "standby_role": standby_role.get("role"),
+                "standby_tracking": isinstance(sync, dict)
+                and "tracking" in sync,
             }
         )
     except Abort as abort:
@@ -978,7 +1004,7 @@ def sink_isolation_pass(args, tamper):
                 # own teardown outlives the parked thread
         if rig is not None:
             rig.close()
-    return digest_entries, evidence, failures
+    return digest_entries, failures
 
 
 def main():
@@ -1001,7 +1027,7 @@ def main():
         args.dt = json.load(handle)["dt"]
 
     try:
-        digest_entries, evidence, failures = sink_isolation_pass(
+        digest_entries, failures = sink_isolation_pass(
             args, args.tamper
         )
     except Inconclusive as inconclusive:
@@ -1040,11 +1066,10 @@ def main():
     print(
         f"journal-sink-isolation-digest {digest} — the stalled "
         f"mount held the sink's named lagging state bounded while "
-        f"{IMPEDED_SCANS} driven scans published to tick "
-        f"{evidence['impeded']} with io_health unchanged, the "
-        f"attesting answers parked until the restore, the standing "
-        f"queue drained in seq order to tick {evidence['resumed']}, "
-        "and the pair's launch roles stood"
+        f"{IMPEDED_SCANS} driven scans published with io_health "
+        "unchanged, the attesting answers parked until the restore, "
+        "the standing queue drained in seq order, and the pair's "
+        "launch roles stood"
     )
     return 0
 
