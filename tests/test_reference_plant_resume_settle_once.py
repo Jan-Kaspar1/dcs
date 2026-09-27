@@ -117,7 +117,7 @@ class Registration(unittest.TestCase):
         }
         record = discovered["resume_settle_once.py"]
         self.assertEqual(record["stem"], "resume-settle-once")
-        self.assertEqual(record["order"], 430)
+        self.assertEqual(record["order"], 440)
 
     def test_the_named_diagnostics_follow_the_stem_convention(self):
         # The issue names resume-settle-once-failed and

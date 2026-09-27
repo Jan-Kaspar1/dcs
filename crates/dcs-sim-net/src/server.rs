@@ -92,7 +92,12 @@ struct WriterClaim {
     /// carries it, so a fenced-out peer learns the successor's
     /// address from the same ruling that demoted it. `None` for
     /// claims that declared none — tools, and attachments on a
-    /// protocol build predating the field.
+    /// protocol build predating the field. The stored address is
+    /// always dialable by construction: a wildcard-declared IP — the
+    /// bind address every `--listen 0.0.0.0` claimant would declare —
+    /// lands as the claiming connection's proven source instead
+    /// ([`dialable_monitor`]), so the verdict never names the
+    /// unservable `0.0.0.0` a peer would dial as its own loopback.
     monitor: Option<SocketAddr>,
 }
 
@@ -218,6 +223,11 @@ fn grant_writer_claim_locked(
 /// violates the message bound, or the server stops.
 fn serve_connection(shared: &Shared, stream: TcpStream, id: u64) {
     let _ = stream.set_nodelay(true);
+    // The connection's proven source address — the substitute a
+    // wildcard monitor declaration resolves to, so a `--listen
+    // 0.0.0.0`-bound claimant's claim never stores a rendezvous no
+    // fenced peer can dial.
+    let remote = stream.peer_addr().ok();
     let mut reader = BufReader::new(stream);
     loop {
         if shared.stopped() {
@@ -230,7 +240,7 @@ fn serve_connection(shared: &Shared, stream: TcpStream, id: u64) {
             Ok(None) | Err(_) => return,
         };
         let response = match serde_json::from_slice::<PlantRequest>(&line) {
-            Ok(request) => dispatch(shared, id, request),
+            Ok(request) => dispatch(shared, id, remote, request),
             Err(error) => PlantResponse::Error {
                 error: PlantError::InvalidRequest {
                     detail: error.to_string(),
@@ -244,6 +254,29 @@ fn serve_connection(shared: &Shared, stream: TcpStream, id: u64) {
         {
             return;
         }
+    }
+}
+
+/// The dialable form of a claim's declared monitor. A claimant bound
+/// to the wildcard — every `--listen 0.0.0.0` container, the
+/// documented deployment — declares its *bind* address, which each
+/// fenced peer would dial as its own loopback, stranding the
+/// field-arbitrated rendezvous the declaration exists to serve. The
+/// claiming connection's proven source is the substitute — the same
+/// resolution a `?peer=` wildcard announce gets on the monitor side —
+/// keeping the declared port, which is the claimant's own claim about
+/// where it serves. A routable declaration stands verbatim: unlike
+/// `?peer=`, the claim's monitor is not provably about this
+/// connection, so only the address that can never be dialed earns the
+/// substitute. `None` stays `None` — an undeclared claim still names
+/// no monitor — and a declaration whose source cannot be proven keeps
+/// what the claimant sent.
+fn dialable_monitor(monitor: Option<SocketAddr>, remote: Option<SocketAddr>) -> Option<SocketAddr> {
+    match (monitor, remote) {
+        (Some(declared), Some(remote)) if declared.ip().is_unspecified() => {
+            Some(SocketAddr::new(remote.ip(), declared.port()))
+        }
+        _ => monitor,
     }
 }
 
@@ -262,7 +295,12 @@ fn serve_connection(shared: &Shared, stream: TcpStream, id: u64) {
 /// all (a fresh or restarted server included) both are refused
 /// [`PlantError::Unclaimed`], so a restart never opens a window an
 /// unclaimed attachment can mutate through.
-fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantResponse {
+fn dispatch(
+    shared: &Shared,
+    connection: u64,
+    remote: Option<SocketAddr>,
+    request: PlantRequest,
+) -> PlantResponse {
     let applied = |result: Result<(), IoError>| match result {
         Ok(()) => PlantResponse::Done,
         Err(error) => PlantResponse::Error {
@@ -365,7 +403,13 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
         } => {
             // The grant preempts unconditionally: the promoted standby's
             // claim must beat the old owner's, wherever it still lives.
-            grant_writer_claim(shared, owner, connection, controller, monitor)
+            grant_writer_claim(
+                shared,
+                owner,
+                connection,
+                controller,
+                dialable_monitor(monitor, remote),
+            )
         }
         PlantRequest::ClaimWriterUnlessHeld { owner, monitor } => {
             // The startup and orphan grant: a launched controller or an
@@ -381,6 +425,7 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
             // applied, so the request is refused and the incumbent
             // keeps the field. A granted claim is always recorded as a
             // controller's — only a peer's takeover runs this grant.
+            let monitor = dialable_monitor(monitor, remote);
             let mut writer = shared.writer.lock().unwrap();
             match writer.as_ref() {
                 // The live-incumbent refusal: a different owner's
@@ -427,6 +472,7 @@ fn dispatch(shared: &Shared, connection: u64, request: PlantRequest) -> PlantRes
             // without the probing attachment becoming a live holder a
             // different owner's conditional claim would read as a live
             // incumbent.
+            let monitor = dialable_monitor(monitor, remote);
             let mut writer = shared.writer.lock().unwrap();
             match writer.as_mut() {
                 Some(claim) if claim.owner != owner => PlantResponse::Error {

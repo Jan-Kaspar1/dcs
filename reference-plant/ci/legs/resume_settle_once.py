@@ -124,7 +124,7 @@ import takeover
 # — must surface the named diagnostic on the honest parked record
 # rather than passing an unexercised contract.
 LEG = {
-    "order": 430,
+    "order": 440,
     "title": "the resume-settle-once leg",
     "passes": "resume-settle-once",
     "tampers": [
