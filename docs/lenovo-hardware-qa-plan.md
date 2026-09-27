@@ -359,6 +359,36 @@ Implementation order: second, after [daily architecture review](daily-architectu
   whose pair never settles, or whose pause lever cannot land
   reports inconclusive.
 
+### Landed 2026-09-27 (aborted bounded-command honest-verdict leg, #1191)
+
+- The aborted bounded-command honest-verdict contract — #1036's fix
+  of the WW-LCM-001 receipt-as-truth clause and the bounded
+  command-admission contract — is exercised on the deployed pair by
+  scenario leg `3360_command_abort_verdict`. The leg mirrors the
+  unit reproduction's transport stand-in on the real rig: the field
+  owner's single command worker pins on a stalled head — a
+  `POST /command` whose declared body arrives half-sent — so a
+  labeled writable-point submission lands buffered in the lane
+  while its client-side bound ends the wait unanswered, exactly the
+  `AbortSignal.timeout` abandon the page's `submitCommand` mints the
+  indeterminate verdict for. The mirrored post-facing report must
+  answer the honest "outcome unknown" — never `command failed` for
+  a submission whose fate stayed open — while the served
+  `/receipts`, the served `/journal`, and each peer's durable
+  `--journal-file` carry the admission's true terminal verdict
+  (applied or the named refusal), exactly one `command_settled`
+  stands for the admission across both peers, and the pair's launch
+  roles are restored.
+- Named diagnostics are `command-abort-verdict-failed` and
+  `command-abort-verdict-nondeterministic`, with the self-check's
+  `command-abort-verdict-unchecked`; two consecutive passes produce
+  identical digests; a run whose served page predates the
+  honest-verdict surface, whose pair never settles, or whose ctx
+  carries no journal-file paths reports inconclusive — and an
+  abort window that never staged (the pinned lane answering inside
+  the tightened bound) likewise reports inconclusive rather than a
+  verdict.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,
