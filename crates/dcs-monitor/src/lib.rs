@@ -3014,6 +3014,18 @@ impl<'d> Monitor<'d> {
         if claimed == self.local_addr() {
             return None;
         }
+        // A wildcard declaration is a bind address, not a dialable
+        // endpoint — every peer resolving it dials its own loopback
+        // (the QA finding `claimed-monitor-wildcard-undialable`). The
+        // field's arbitration is the one authority that can
+        // substitute — the claiming connection's proven source — so
+        // a verdict still naming the wildcard names no successor this
+        // side can recover; like an undeclared claim it earns no
+        // pull, and it spends no retry window so the first routable
+        // verdict verifies on the next pass.
+        if claimed.ip().is_unspecified() {
+            return None;
+        }
         {
             let last = self.claimed_verify.lock().unwrap();
             if let Some(last) = &*last
@@ -3085,7 +3097,11 @@ impl<'d> Monitor<'d> {
         // served it; then the tracked source itself — a standby may
         // simply not have propagated the stamp yet — then the recorded
         // announcers, any of which may already own the field.
-        if let Some(monitor) = claimed {
+        // A wildcard claim declaration earns no candidate at all:
+        // undialable like the verdict `adopt_claimed_source` refuses,
+        // and unlike the `line_owner` stamp it has no serving monitor
+        // whose proven source could substitute.
+        if let Some(monitor) = claimed.filter(|monitor| !monitor.ip().is_unspecified()) {
             candidates.push(monitor);
         }
         let tracked = self
