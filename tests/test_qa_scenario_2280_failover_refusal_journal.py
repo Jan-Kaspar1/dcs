@@ -21,6 +21,10 @@ EXPECTED_CASES = frozenset({
     'RefusalJournalTests.test_gate_promoted_fails',
     'RefusalJournalTests.test_role_walked_fails',
     'RefusalJournalTests.test_served_silent_fails',
+    'RefusalJournalTests.test_eligible_fire_parked_fails',
+    'RefusalJournalTests.test_eligible_fire_refuses_fails',
+    'RefusalJournalTests.test_eligible_promotion_unwalked_fails',
+    'RefusalJournalTests.test_eligible_fire_early_fails',
     'RefusalJournalTests.test_never_restores_fails',
     'RefusalJournalTests.test_misses_stalled_reports_'
     'nondeterministic',
@@ -31,6 +35,10 @@ EXPECTED_CASES = frozenset({
     'RefusalJournalTests.test_demote_refused_reports_'
     'nondeterministic',
     'RefusalJournalTests.test_promote_refused_reports_'
+    'nondeterministic',
+    'RefusalJournalTests.test_reconverge_lost_reports_'
+    'nondeterministic',
+    'RefusalJournalTests.test_fire_misses_stall_reports_'
     'nondeterministic',
     'RefusalJournalTests.test_diverging_digests_report_'
     'nondeterministic',
@@ -80,7 +88,10 @@ class RefusalJournalFeed:
     gate fires at the budget-th miss — refusing as not_converged
     while the proof stands voided, and journaling exactly one
     promotion_refused naming the cause and the fired count — and
-    closes for the episode once misses run past it. A requested
+    closes for the episode once misses run past it; once the peer
+    re-converges on the restarted owner, the second dead-source
+    climb fires the armed-and-eligible gate into the promotion the
+    durable trail carries beside the one refusal row. A requested
     promote is the unconditional-claim takeover (the incumbent's
     fencing-loss demotes it in place); a requested demote releases
     the claim and resets the tracking session; the runner-owned
@@ -145,6 +156,26 @@ class RefusalJournalFeed:
                                       # once the refusal exists
         self.never_restores = False   # the restarted owner never
                                       # re-takes the field
+        # The eligible-fire half's doctors — each arms on the
+        # refusal episode having already fired, so the voided window
+        # is staged identically.
+        self.fired_refusal = False    # internal: the voided window's
+                                      # refused fire already landed
+        self.proof_lapsed = False     # the peer's pulls re-track but
+                                      # the served proof never
+                                      # re-stands — the eligible
+                                      # window never opens
+        self.late_stall = False       # the second dead-source
+                                      # climb's misses never count
+        self.early_fire = False       # the eligible gate lifts
+                                      # below the declared budget
+        self.fire_parks = False       # the armed-and-eligible gate
+                                      # never lifts at all
+        self.fire_refuses = False     # the eligible fire refuses
+                                      # again instead of promoting
+        self.fire_walk_silent = False # the eligible promotion's
+                                      # transition never reaches
+                                      # the durable trail
 
     # ---- the served surface --------------------------------------
 
@@ -159,6 +190,12 @@ class RefusalJournalFeed:
                  'event': {kind: body}}
         if not (self.served_silent and kind == 'promotion_refused'):
             self.served[peer].append(entry)
+        if self.fire_walk_silent and peer == 'b' \
+                and kind == 'role_changed' and self.fired_refusal:
+            # The eligible promotion's transition reaches the
+            # served tail but never the durable file — the same
+            # silence the finding named, one window later.
+            return
         path = self.journal_a if peer == 'a' else self.journal_b
         with path.open('a') as handle:
             handle.write(json.dumps({'entry': entry}) + '\n')
@@ -202,6 +239,7 @@ class RefusalJournalFeed:
         """The armed gate's fired-but-refused attempt at the miss
         boundary — the durable record it owes: one promotion_refused
         naming the voided convergence proof and the fired count."""
+        self.fired_refusal = True
         body = {'error': {'not_converged': {
                     'sync': {'degraded': {
                         'detail': 'checkpoint pull refused'}}}},
@@ -225,7 +263,9 @@ class RefusalJournalFeed:
         the budget, the standing proof goes stale once misses run
         past it — and the armed gate reads the miss run, firing at
         the boundary exactly while the proof is still voided."""
-        if not self.stall_misses:
+        if not self.stall_misses \
+                and not (self.late_stall and self.fired_refusal
+                         and self.misses[peer] < self.budget):
             self.misses[peer] += 1
         if self.sync[peer] != 'diverged':
             self.sync[peer] = 'degraded'
@@ -233,12 +273,23 @@ class RefusalJournalFeed:
             self.converged[peer] = False
         if self.role[peer] != 'standby' or not self.armed[peer]:
             return
-        due = self.misses[peer] >= self.budget and (
-            self.misses[peer] == self.budget
+        threshold = 40 if self.early_fire and self.fired_refusal \
+            else self.budget
+        due = self.misses[peer] >= threshold and (
+            self.misses[peer] == threshold
             or self.converged[peer])
         if not due:
             return
+        if self.fire_parks and self.fired_refusal:
+            # The armed-and-eligible gate never lifts — the refused
+            # episode latched the boundary closed.
+            return
         if self.converged[peer] or self.gate_promotes:
+            if self.fire_refuses and self.fired_refusal:
+                # The eligible fire refuses again where the
+                # standing proof makes it a promotion.
+                self._refused_fire(peer)
+                return
             # The unconditional-claim takeover: a proof-backed fire
             # — or the doctored voided one — lifts the gate.
             old = self.claim
@@ -269,9 +320,14 @@ class RefusalJournalFeed:
         self._pace(source)
         if self.role[source] == 'active':
             self.misses[peer] = 0
-            self.converged[peer] = True
             self.sync[peer] = 'tracking'
             self.aligned[peer] = self.tick[source]
+            # The re-tracking peer whose served convergence proof
+            # never re-stands: the eligible window's staging reads
+            # the lapsed flag and never opens — while the launch
+            # layout's tracking verdict still restores.
+            self.converged[peer] = not (
+                self.proof_lapsed and self.fired_refusal)
 
     def _scan(self, peer):
         """One completed scan: role transitions settle at the
@@ -388,7 +444,9 @@ class RefusalJournalTests(unittest.TestCase):
     proof, the miss climb firing the gate at the declared budget,
     exactly one promotion_refused naming not_converged and the
     fired count on both journal surfaces, no ownership transition
-    beside it, and the restarted owner re-taking the field — each
+    beside it, the re-stood proof's second dead-source climb
+    lifting the gate into the journaled promotion, and the
+    restarted owner re-taking the field — each
     doctored contract breach reports
     failover-refusal-journal-failed, each instability reports
     failover-refusal-journal-nondeterministic, and an unreachable,
@@ -460,6 +518,7 @@ class RefusalJournalTests(unittest.TestCase):
             {'armed': 'declared', 'switch': 'armed-owner',
              'void': 'dead-source', 'window': 'boundary',
              'gate': 'parked', 'row': 'one-named',
+             'proof': 're-stood', 'fire': 'promoted',
              'roles': 'restored'})
         first = passes[0]['record']
         # The voided window: every served row read standby while the
@@ -483,6 +542,25 @@ class RefusalJournalTests(unittest.TestCase):
         self.assertEqual(first['served_refusals'],
                          first['durable_refusals'])
         self.assertEqual(first['role_walks'], [])
+        # The eligible-fire half: the restarted owner re-stood the
+        # peer's proof, the second silence's miss run reached the
+        # same declared budget, and the armed gate lifted into the
+        # promotion the durable trail carries — beside the
+        # still-single refusal row.
+        self.assertTrue(first['reconverged'])
+        fire = first['fire_window']
+        self.assertTrue(fire)
+        for row in fire[:-1]:
+            self.assertEqual(row['role'], 'standby', row)
+        self.assertIn(fire[-1]['role'], ('promoting', 'active'))
+        self.assertGreaterEqual(
+            max(row['misses'] for row in fire
+                if isinstance(row['misses'], int)), 120)
+        self.assertTrue(first['fire_promoted'])
+        self.assertIn('active',
+                      [walk['to'] for walk in first['fire_walks']])
+        self.assertEqual(first['final_refusals'],
+                         first['durable_refusals'])
         self.assertTrue(first['restored'])
         report.validate_scenario(record)
 
@@ -559,6 +637,54 @@ class RefusalJournalTests(unittest.TestCase):
         self.assertIn('served', record['detail'])
         report.validate_scenario(record)
 
+    def test_eligible_fire_parked_fails(self):
+        # The armed-and-eligible gate that never lifts on a
+        # standing proof is the availability miss the second half
+        # pins — the refused episode must not latch the boundary
+        # closed.
+        self.feed.fire_parks = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'failover-refusal-journal-failed'), record['detail'])
+        self.assertIn('never lifted', record['detail'])
+        report.validate_scenario(record)
+
+    def test_eligible_fire_refuses_fails(self):
+        # A second promotion_refused where the standing proof makes
+        # the fire a promotion breaks the bounded record — and the
+        # peer never promotes.
+        self.feed.fire_refuses = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'failover-refusal-journal-failed'), record['detail'])
+        self.assertIn('promotion_refused', record['detail'])
+        report.validate_scenario(record)
+
+    def test_eligible_promotion_unwalked_fails(self):
+        # The promotion the served role reports but the durable
+        # trail never carries is the same silence the finding
+        # named, one window later.
+        self.feed.fire_walk_silent = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'failover-refusal-journal-failed'), record['detail'])
+        self.assertIn('transition', record['detail'])
+        report.validate_scenario(record)
+
+    def test_eligible_fire_early_fails(self):
+        # A gate that lifts below the declared budget
+        # mis-attributes the boundary the refusal row named.
+        self.feed.early_fire = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'failover-refusal-journal-failed'), record['detail'])
+        self.assertIn('budget', record['detail'])
+        report.validate_scenario(record)
+
     def test_never_restores_fails(self):
         self.feed.never_restores = True
         record = self.run_scenario()
@@ -619,6 +745,31 @@ class RefusalJournalTests(unittest.TestCase):
             'failover-refusal-journal-nondeterministic'),
             record['detail'])
         self.assertIn('/promote', record['detail'])
+        report.validate_scenario(record)
+
+    def test_reconverge_lost_reports_nondeterministic(self):
+        # The peer re-tracks on the restarted owner but the served
+        # convergence proof never re-stands — the eligible window
+        # never opens, and the launch layout still restores.
+        self.feed.proof_lapsed = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'failover-refusal-journal-nondeterministic'),
+            record['detail'])
+        self.assertIn('convergence proof', record['detail'])
+        report.validate_scenario(record)
+
+    def test_fire_misses_stall_reports_nondeterministic(self):
+        # The second dead-source climb's misses never count — the
+        # eligible fire never came due inside the window.
+        self.feed.late_stall = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertTrue(record['detail'].startswith(
+            'failover-refusal-journal-nondeterministic'),
+            record['detail'])
+        self.assertIn('budget', record['detail'])
         report.validate_scenario(record)
 
     def test_diverging_digests_report_nondeterministic(self):
