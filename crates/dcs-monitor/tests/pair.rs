@@ -960,6 +960,26 @@ fn an_armed_standbys_miss_window_surfaces_the_failover_accounting() {
     standby.stop();
 }
 
+/// The QA header finding
+/// (`monitor-header-names-nonactive-source-as-active-peer`): the
+/// status line's "active peer" label may name only a peer whose own
+/// role report says settled active — through the failover gap the
+/// serving fallback is titled by the role its report carries, never
+/// "active" above its own standby row.
+#[test]
+fn the_status_line_labels_the_source_by_its_reported_role() {
+    let page = dcs_monitor::PAGE;
+    for needle in [
+        "function sourcePeerNote()",
+        "sourcePeerNote()",
+        "\" — active peer \"",
+        "\" — serving peer \"",
+        "state.report.role",
+    ] {
+        assert!(page.contains(needle), "page lacks {needle}");
+    }
+}
+
 #[test]
 fn page_carries_the_pair_view_and_answers_cross_origin_role_reads() {
     let active = PeerRig::start(Role::Active);
