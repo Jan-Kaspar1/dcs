@@ -53,6 +53,7 @@ class Supervisor:
         self.models = config.get('models') or ['swe-2-high']
         self.model_caps = config.get('model_caps') or {}
         self.admission = Admission(self.state, config)
+        self.clock = time.time
         self.stopping = False
 
     def model_for(self, worker):
@@ -132,7 +133,8 @@ Repair context: {repair}
         rec = {'branch': job.get('branch'), 'clone': job.get('clone'), 'head': None,
                'basis': 'unknown', 'work': None, 'detail': '', 'phase': 'captured',
                'attempts': previous.get('attempts', 0),
-               'quota_requeues': previous.get('quota_requeues', 0), 'updated': time.time()}
+               'quota_requeues': previous.get('quota_requeues', 0),
+               'requeue': previous.get('requeue'), 'updated': time.time()}
         try:
             if not rec['branch']:
                 rec.update(basis='no-branch', work=False,
@@ -336,7 +338,11 @@ Repair context: {repair}
         cause = self.state.get('retry:' + str(number))
         if cause not in REDISPATCH_CAUSES:
             cause = 'worker-failure'
-        if not self.state.retry(number, cause):
+        detail = None
+        if cause == 'quota-requeue' and rec.get('requeue'):
+            detail = {'delay': {'source': rec['requeue'].get('source'),
+                                'seconds': rec['requeue'].get('seconds')}}
+        if not self.state.retry(number, cause, detail=detail):
             self.admission.release(owner)
             self.state.update_job(number, error='Retry rejected: repair budget exhausted')
             return False
@@ -345,7 +351,7 @@ Repair context: {repair}
         except Exception as exc:
             self.log('Retry #' + str(number) + ': launch after recovery failed - ' + str(exc))
             return False
-        rec.update(phase='done', target_clone=str(target))
+        rec.update(phase='done', target_clone=str(target), requeue=None)
         self.state.set('recovery:' + str(number), rec)
         self.state.set('retry:' + str(number), False)
         outcome = 'restored preserved work' if rec['work'] else 'fresh start'
@@ -439,6 +445,20 @@ Repair context: {repair}
             return False
         return True
 
+    def unmerged_paths(self, clone):
+        """Worktree paths still unmerged after a failed merge, or [].
+
+        ``conflict_paths`` only sees git's 'Merge conflict in' lines;
+        modify/delete, rename, and progress-hint output shapes name none,
+        so the worktree is the attribution source of last resort. A probe
+        failure loses only the repair's path detail, never the repair.
+        """
+        try:
+            out = self.runtime.run_git(clone, 'diff', '--name-only', '--diff-filter=U')
+        except Exception:
+            return []
+        return [line.strip() for line in str(out or '').splitlines() if line.strip()]
+
     def repair(self, job, issue, reason, cause, detail=None):
         if self.state.paused():
             return
@@ -454,12 +474,18 @@ Repair context: {repair}
             self.admission.release(owner)
             self.block(job, 'Repair limit exhausted: ' + reason)
 
-    def requeue_quota(self, job, category):
+    def requeue_quota(self, job, category, retry_after=None):
         """Arm one bounded retry for a quota-killed invocation.
 
         The retry flag is consumed when recovery relaunches, so one failed
         invocation can never spend more than one requeue; repeated quota
-        deaths are bounded by scheduler.max_quota_requeues.
+        deaths are bounded by scheduler.max_quota_requeues. The armed retry
+        waits a bounded delay before it may dispatch — the provider's
+        retry-after where the receipt carried one, else the configured
+        scheduler.quota_requeue_delay_seconds — so the redispatch lands
+        past the quota window's reset instead of dying at once and burning
+        the bounded budget. The recovery record carries the schedule; the
+        redispatch ledger row records which delay applied.
         """
         number = job['issue']
         rec = self.state.get('recovery:' + str(number)) or {}
@@ -467,11 +493,16 @@ Repair context: {repair}
         if used >= self.admission.max_quota_requeues:
             self.log(f"#{number} quota requeue budget exhausted ({used}); leaving blocked")
             return
+        source = 'retry-after' if retry_after is not None else 'default'
+        delay = retry_after if retry_after is not None else self.admission.quota_requeue_delay
         rec['quota_requeues'] = used + 1
+        rec['requeue'] = {'not_before': self.clock() + delay,
+                          'source': source, 'seconds': delay}
         self.state.set('recovery:' + str(number), rec)
         self.state.set('retry:' + str(number), 'quota-requeue')
         self.log(f"#{number} requeued after {category} failure "
-                 f"({used + 1}/{self.admission.max_quota_requeues})")
+                 f"({used + 1}/{self.admission.max_quota_requeues}); "
+                 f"retry in {delay}s ({source})")
 
     def reconcile_workers(self, issues):
         by_number = {i['number']: i for i in issues}
@@ -506,7 +537,7 @@ Repair context: {repair}
                     # fresh one instead of failing on --resume/--session again.
                     self.state.update_job(job['issue'], session=None)
                 if category in ('rate', 'endpoint'):
-                    self.requeue_quota(job, category)
+                    self.requeue_quota(job, category, retry_after)
                 elif category in ('auth', 'credits'):
                     self.state.set('last_error', 'Local agent ' + category + ' failure; '
                                    'resolve it and run: dcs-agents admission reset <group>')
@@ -579,11 +610,18 @@ Repair context: {repair}
             if not self.github.includes_main(pr['head']['sha'], base):
                 try:
                     self.runtime.run_git(clone, 'merge', '--no-edit', 'origin/main')
-                    self.runtime.run_git(clone, 'push', 'origin', job['branch'])
                 except subprocess.CalledProcessError as exc:
                     paths = conflict_paths(exc.stdout, exc.stderr)
+                    if not paths:
+                        paths = self.unmerged_paths(clone)
                     if not self.resolve_publish_merge(clone, paths, job):
-                        self.repair(job, by_number[job['issue']], 'Resolve the existing merge conflict with origin/main. ' + str(exc.stdout) + str(exc.stderr), 'merge-conflict', detail={'paths': paths} if paths else None)
+                        detail = {'paths': paths} if paths else {'paths': [], 'pathless': True}
+                        self.repair(job, by_number[job['issue']], 'Resolve the existing merge conflict with origin/main. ' + str(exc.stdout) + str(exc.stderr), 'merge-conflict', detail=detail)
+                    return
+                try:
+                    self.runtime.run_git(clone, 'push', 'origin', job['branch'])
+                except subprocess.CalledProcessError as exc:
+                    self.repair(job, by_number[job['issue']], 'git push failed after a clean merge with origin/main. ' + str(exc.stdout) + str(exc.stderr), 'publish-error')
                 return
             if self.github.checks_pass(pr, self.config['required_checks']):
                 if self.github.merge(job['pr'], self.config['required_checks']):
@@ -1103,8 +1141,10 @@ Repair context: {repair}
         if self.state.paused():
             return
         by_number = {i['number']: i for i in issues}
+        now = self.clock()
         for job in self.state.jobs(('blocked',)):
-            if not self.state.get('retry:' + str(job['issue'])) or job['issue'] not in by_number:
+            flag = self.state.get('retry:' + str(job['issue']))
+            if not flag or job['issue'] not in by_number:
                 continue
             active = self.state.jobs(('working', 'pr-open'))
             if self.slots_used(active) >= self.state.capacity():
@@ -1112,6 +1152,9 @@ Repair context: {repair}
             rec = self.state.get('recovery:' + str(job['issue']))
             if rec is None:
                 rec = self.capture_recovery(job)
+            requeue = rec.get('requeue') or {}
+            if flag == 'quota-requeue' and now < requeue.get('not_before', 0):
+                continue
             self.recover_job(job, rec, active, by_number[job['issue']])
 
     def dispatch(self, issues):

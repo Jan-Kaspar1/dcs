@@ -42,7 +42,8 @@ def scheduler(raw):
                 raise ValueError('scheduler group ' + name + ' needs ceiling >= initial')
             if not isinstance(group.get('external_slots', 0), int) or group.get('external_slots', 0) < 0:
                 raise ValueError('scheduler group ' + name + ' needs external_slots >= 0')
-    for key in ('quiet_seconds', 'cooldown_seconds', 'max_cooldown_seconds'):
+    for key in ('quiet_seconds', 'cooldown_seconds', 'max_cooldown_seconds',
+                'quota_requeue_delay_seconds'):
         if key in sched and (not isinstance(sched[key], (int, float)) or sched[key] <= 0):
             raise ValueError('scheduler.' + key + ' must be a positive number')
     if 'max_quota_requeues' in sched and (not isinstance(sched['max_quota_requeues'], int)

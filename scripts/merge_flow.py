@@ -22,11 +22,14 @@ matching the supervisor's rolling merge comparison in ``State.merge_flow``):
   — publish merges completed in-process on recorded regenerable paths —
   counted separately so they never inflate the agent-repair counts;
 - conflict attribution for decline analysis: the conflicted paths each
-  ``merge-conflict`` repair's ledger row recorded (ranked by incidence, an
-  ``unclassified`` bucket counting path-less rows) and a verdict naming
-  whether the window's conflict load concentrates on few paths or spreads,
-  plus the failing check names ``ci-failure`` repairs expose through their
-  ledger row or the job's terminal check record;
+  ``merge-conflict`` repair's ledger row recorded — parsed from git's
+  failed-merge output or captured from the worktree's unmerged paths when
+  the output named none — ranked by incidence, a ``pathless`` bucket
+  counting rows that recorded unrecoverable paths and an ``unclassified``
+  bucket for rows predating recorded detail; a verdict names whether the
+  window's conflict load concentrates on few paths or spreads, plus the
+  failing check names ``ci-failure`` repairs expose through their ledger
+  row or the job's terminal check record;
 - per-window flow attribution so a merge decline can be read as starvation,
   failure load, or exhausted supply: reserved dispatches (``reserved`` and
   ``retry-reserved`` rows), park-to-blocked transitions (``status:blocked``
@@ -83,10 +86,12 @@ LIMITATIONS = (
     "per-window dependency-blocked supply is not reconstructible: the work "
     "ledger records job transitions, not issue dependency or label history; "
     "the report-time backlog section carries the current split",
-    "conflict-path attribution covers only repairs whose ledger row carries "
-    "the conflicted paths git reported; older and unparseable rows count in "
-    "the unclassified bucket, and a concentrated/spread verdict reads only "
-    "the attributed share",
+    "conflict-path attribution covers repairs whose ledger row carries "
+    "the conflicted paths — parsed from the failed-merge output or "
+    "captured from the worktree's unmerged paths; rows that recorded "
+    "unrecoverable paths count in the pathless bucket, rows predating "
+    "recorded detail in unclassified, and a concentrated/spread verdict "
+    "reads only the attributed share",
     "failing-check attribution covers ci-failure repairs whose ledger row "
     "or terminal jobs.error check record names the failed checks; other "
     "ci-failure repairs count in the unclassified bucket",

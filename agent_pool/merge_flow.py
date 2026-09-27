@@ -101,16 +101,19 @@ def job_check_names(job):
     return sorted(name for name in record if isinstance(name, str))
 
 
-def _ranked(counter, unclassified=0):
+def _ranked(counter, **buckets):
     """Name->count dict ordered by incidence (count desc, name asc).
 
-    A positive ``unclassified`` appends the named bucket for rows that
-    carried no attributable detail; it is a coverage count, not a path or
-    check name.
+    Positive ``buckets`` entries append named coverage buckets after the
+    ranked names for rows that carried no attributable detail —
+    ``unclassified`` for rows without recorded detail, ``pathless`` for
+    merge-conflict rows that recorded unrecoverable paths. They are
+    coverage counts, not path or check names.
     """
     ranked = dict(sorted(counter.items(), key=lambda kv: (-kv[1], kv[0])))
-    if unclassified:
-        ranked["unclassified"] = unclassified
+    for name, count in buckets.items():
+        if count:
+            ranked[name] = count
     return ranked
 
 
@@ -135,8 +138,9 @@ def repair_attribution(events, lo, hi, issues_by_number, jobs_by_issue):
 
     Counts ``repair`` and ``redispatch`` rows by their bounded cause class,
     joins repairs to each issue's managed area, ranks the conflicted paths
-    ``merge-conflict`` rows recorded (an ``unclassified`` bucket counts
-    path-less rows) with the concentrated/spread verdict, and ranks the
+    ``merge-conflict`` rows recorded (a ``pathless`` bucket counts rows
+    that recorded unrecoverable paths, ``unclassified`` rows that predate
+    recorded detail) with the concentrated/spread verdict, and ranks the
     failing check names ``ci-failure`` rows expose through their payload or
     the job's terminal check record. ``mechanical-resolution`` rows —
     publish merges completed in-process without a repair dispatch — are
@@ -147,7 +151,7 @@ def repair_attribution(events, lo, hi, issues_by_number, jobs_by_issue):
     redispatches_by_cause = Counter()
     repairs_by_area = {}
     conflict_paths = Counter()
-    conflict_repairs = conflict_pathless = 0
+    conflict_repairs = conflict_pathless = conflict_unclassified = 0
     mechanical_resolutions = 0
     failing_checks = Counter()
     checks_unattributed = 0
@@ -174,8 +178,10 @@ def repair_attribution(events, lo, hi, issues_by_number, jobs_by_issue):
             paths = _payload_names(event, "paths")
             if paths:
                 conflict_paths.update(paths)
-            else:
+            elif event_payload(event).get("pathless"):
                 conflict_pathless += 1
+            else:
+                conflict_unclassified += 1
         elif cause == "ci-failure":
             names = _payload_names(event, "checks")
             if not names:
@@ -191,9 +197,10 @@ def repair_attribution(events, lo, hi, issues_by_number, jobs_by_issue):
                             for area, causes in sorted(repairs_by_area.items())},
         "conflict_repairs": conflict_repairs,
         "mechanical_resolutions": mechanical_resolutions,
-        "conflict_paths": _ranked(conflict_paths, conflict_pathless),
+        "conflict_paths": _ranked(conflict_paths, pathless=conflict_pathless,
+                                unclassified=conflict_unclassified),
         "conflict_load": _conflict_load(conflict_repairs, conflict_paths),
-        "failing_checks": _ranked(failing_checks, checks_unattributed),
+        "failing_checks": _ranked(failing_checks, unclassified=checks_unattributed),
     }
 
 
