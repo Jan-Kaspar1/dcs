@@ -402,6 +402,40 @@ class PlantActionTests(unittest.TestCase):
                     lambda event, detail=None: events.append(event))
         self.assertEqual(events, ['plant-start'])
 
+    def test_pause_and_unpause_recorded_on_timeline(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            timeline = lambda event, detail=None: events.append(
+                (event, detail))
+            runner.pause_plant('qa-1', timeline)
+            runner.unpause_plant('qa-1', timeline)
+        self.assertEqual(
+            calls, [('pause', 'dcs-hw-qa-1-plant'),
+                    ('unpause', 'dcs-hw-qa-1-plant')])
+        self.assertEqual([event for event, _ in events],
+                         ['plant-pause', 'plant-paused',
+                          'plant-unpause', 'plant-unpaused'])
+
+    def test_failed_pause_raises_after_recording_the_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'pause' and check:
+                raise RuntimeError('docker pause failed: no such')
+            return Result('')
+
+        with patch.object(runner, 'docker', raising):
+            with self.assertRaises(RuntimeError):
+                runner.pause_plant(
+                    'qa-1',
+                    lambda event, detail=None: events.append(event))
+        self.assertEqual(events, ['plant-pause'])
+
     def test_scenario_ctx_carries_plant_actions_and_address(self):
         calls, events = [], []
 

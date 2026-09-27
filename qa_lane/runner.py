@@ -1468,6 +1468,34 @@ def start_plant(run_id, timeline, pair='deployed'):
     timeline('plant-started', container + ' running')
 
 
+def pause_plant(run_id, timeline, pair='deployed'):
+    """The wedged-field half of the bounded-liveness leg:
+    `docker pause` freezes the run's plant container in place — the
+    controllers' remote-driver sockets stay open, every request the
+    scan loop issues just goes unanswered, and each blocked scan only
+    completes when its field timeout fires. Unlike `docker stop` this
+    holds the connection rather than severing it, so it reproduces the
+    docker-pause-shaped wedge the liveness regression models without
+    the fencing reconnect the link-loss leg stages. `pair` selects
+    which pair's plant — 'deployed' or the probe pair's. A docker
+    failure raises so the calling scenario reports the pause never
+    landed."""
+    container = 'dcs-hw-' + run_id + '-' + PAIRS[pair]['plant']
+    timeline('plant-pause', 'docker pause ' + container)
+    docker('pause', container, timeout=30)
+    timeline('plant-paused', container + ' paused')
+
+
+def unpause_plant(run_id, timeline, pair='deployed'):
+    """The recovery half: `docker unpause` resumes the frozen plant
+    process — the held sockets drain, the wedged scans complete, and
+    the field owner keeps its claim since the plant never stopped."""
+    container = 'dcs-hw-' + run_id + '-' + PAIRS[pair]['plant']
+    timeline('plant-unpause', 'docker unpause ' + container)
+    docker('unpause', container, timeout=30)
+    timeline('plant-unpaused', container + ' running')
+
+
 def plant_ctl(run_id, port, *args, pair='deployed'):
     """The scenario-callable plant-tool invocation: `docker exec` runs
     the shipped `dcs-plant-ctl` inside the run's plant container
@@ -1978,6 +2006,11 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         'failover_misses': cfg['failover_misses'],
         'stop_plant': lambda: stop_plant(run_id, timeline),
         'start_plant': lambda: start_plant(run_id, timeline),
+        # The wedged-field levers — docker pause/unpause freeze the
+        # plant container in place so the remote driver's open socket
+        # just stops answering, the bounded-liveness leg's wedge.
+        'pause_plant': lambda: pause_plant(run_id, timeline),
+        'unpause_plant': lambda: unpause_plant(run_id, timeline),
         # The shipped dcs-plant-ctl inside the plant container — the
         # lane's seam for every plant op the tool's subcommands cover.
         'plant_ctl': lambda *args: plant_ctl(
@@ -2080,6 +2113,10 @@ def _probe_ctx(ctx, cfg, record, src, run_dir, probe, mounts,
                                          pair='probe'),
         'start_plant': lambda: start_plant(run_id, timeline,
                                            pair='probe'),
+        'pause_plant': lambda: pause_plant(run_id, timeline,
+                                           pair='probe'),
+        'unpause_plant': lambda: unpause_plant(run_id, timeline,
+                                               pair='probe'),
         'plant_ctl': lambda *args: plant_ctl(
             run_id, probe['plant_port'], *args, pair='probe'),
         'start_revised': None,
