@@ -65,7 +65,7 @@ not scanning it. The run:
 - restores the pair's launch roles — the manifest-declared duty
   controller `active`, its standby `tracking`.
 
-The contract postdates the pinned v0.3.0 release: where the launched
+The contract postdates the release line's v0.3.0 cut: where the launched
 tooling predates it the run's own evidence is the pre-contract shape
 — a checkpoint carrying no receipt window or admission counters, a
 receipt dropping its declared `actor`/`reason`, a refused preemption,

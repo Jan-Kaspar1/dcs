@@ -184,21 +184,19 @@
 #                workspace-side proof substitutes a file:// stand-in and
 #                rewrites this repository's Cargo.toml to match.
 #   DCS_REV      the pinned revision (default: the release tag this
-#                repository's manifest records — v0.3.0, resolving to
+#                repository's manifest records — v0.4.0, resolving to
 #                the recorded commit whose tooling serves the interface
 #                registry, declared commands and their live availability
 #                verdicts, and routed emitted events the surface stage
-#                proves).
+#                proves, beside the pair and receipt contracts the legs
+#                exercise).
 #   DCS_UPGRADE_REV
 #                the earlier compatible revision the upgrade stage
 #                materializes the tree at before repinning to $DCS_REV
-#                (default: the v0.3.0-line commit below — the earliest
-#                revision this composition materializes under: the
-#                model's `requires_reason` marks emit only through the
-#                builder API the v0.3.0 line carries, so the v0.2.0
-#                recorded rev can no longer build or emit this tree;
-#                the workspace-side proof seeds its stand-in remote to
-#                serve it).
+#                (default: the previous release's recorded rev — the
+#                v0.3.0 commit — so the stage proves the v0.3.0 → v0.4.0
+#                crossing the manifest names; the workspace-side proof
+#                seeds its stand-in remote to serve it).
 #   DCS_UPGRADE  set to 0 to skip the upgrade stage — the stage's own
 #                repinned re-run uses this internally.
 #   DCS_TOOLS    a directory holding prebuilt `dcs-model`,
@@ -227,8 +225,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DCS_REMOTE="${DCS_REMOTE:-https://github.com/Jan-Kaspar1/dcs.git}"
-DCS_REV="${DCS_REV:-v0.3.0}"
-DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-107479829658a580cba83b38fa279a989275c576}"
+DCS_REV="${DCS_REV:-v0.4.0}"
+DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-a5cb43317f100fc80d9697b9d059c35d3f48479e}"
 DCS_TOOLS="${DCS_TOOLS:-}"
 DCS_RECORD_DIR="${DCS_RECORD_DIR:-}"
 TOOLS=""
