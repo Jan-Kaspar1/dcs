@@ -297,6 +297,42 @@ Implementation order: second, after [daily architecture review](daily-architectu
   serve/plant seams the leg needs, or whose field census shows an
   open claim reports inconclusive.
 
+### Landed 2026-09-27 (keyed announced-source lifecycle residual leg, #1074)
+
+- The accepted finding `keyed-announced-source-untested`'s mapped
+  issue had never been emitted — scenario 2050's keyed halves cover
+  the forged receipt-window and planted-internal refusals and the
+  honest keyed adoption, but four announced-source lifecycle classes
+  stayed unexercised. Scenario leg `2150_keyed_announced_source`
+  stages them on the lane-staged keyed probe pair's own simulated
+  plant and endpoints — never the deployed pair, keyed or not: the
+  misordered `POST /promote` preempts the probe field's claim, and
+  the superseded owner — the peer with no configured source —
+  demotes in place, journals the attributed `field_claim_lost`,
+  resolves a verified source under keying, journals one
+  `tracking_source_adopted` naming the promoted peer's monitor, and
+  re-joins `tracking` inside the lane's tick bound. With the
+  announced-only window open (the tracking peer stopped, the owner
+  warm-restarted — the persisted checkpoint generation survives, so
+  a captured document still claims this line), `POST /demote`
+  refuses `no_tracking_source` for the keyed endpoint serving the
+  receipt-window-forked document and for the replayed checkpoint —
+  the keyed peer's own `?prove=` answer captured under the leg's
+  nonce and staged verbatim on a tokenless endpoint, so only the
+  proof's rolled nonce window can convict it. The keyed endpoint
+  serving the honest standby-shaped document then completes the
+  lifecycle — announce, signed verify pull, journaled adoption,
+  standing pulls converging the demoted peer — and the adopted
+  endpoint's hostile restage, a signed document planting an
+  internal `In` sample, convicts on the pull path `degraded`
+  without the planted value landing before the honest restage
+  restores convergence and the peer re-promotes. Named diagnostics
+  are `keyed-announced-source-failed`,
+  `keyed-announced-source-nondeterministic`, and the self-check's
+  `keyed-announced-source-unchecked`; two passes produce identical
+  digests, and a run with no keyed probe pair staged reports
+  inconclusive rather than touching the deployed pair.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,
