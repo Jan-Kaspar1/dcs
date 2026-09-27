@@ -134,6 +134,8 @@ Repair context: {repair}
                'basis': 'unknown', 'work': None, 'detail': '', 'phase': 'captured',
                'attempts': previous.get('attempts', 0),
                'quota_requeues': previous.get('quota_requeues', 0),
+               'quota_requeue_resets': previous.get('quota_requeue_resets', 0),
+               'quota_episode': previous.get('quota_episode'),
                'requeue': previous.get('requeue'), 'updated': time.time()}
         try:
             if not rec['branch']:
@@ -351,7 +353,8 @@ Repair context: {repair}
         except Exception as exc:
             self.log('Retry #' + str(number) + ': launch after recovery failed - ' + str(exc))
             return False
-        rec.update(phase='done', target_clone=str(target), requeue=None)
+        rec.update(phase='done', target_clone=str(target), requeue=None,
+                   quota_episode=None)
         self.state.set('recovery:' + str(number), rec)
         self.state.set('retry:' + str(number), False)
         outcome = 'restored preserved work' if rec['work'] else 'fresh start'
@@ -486,12 +489,34 @@ Repair context: {repair}
         past the quota window's reset instead of dying at once and burning
         the bounded budget. The recovery record carries the schedule; the
         redispatch ledger row records which delay applied.
+
+        The bound scopes to one congestion episode, not the issue's whole
+        lifetime: a 'rate'/'endpoint' kill is a provider-congestion signal,
+        so a spent budget during a live episode holds the park until the
+        covering group has been quiet (quiet_episode_rearm re-arms it with a
+        fresh episode budget) instead of converting a congestion wave into
+        permanent work loss. Quiet-window resets are bounded per issue by
+        scheduler.max_quota_requeue_resets, and a job that spends its budget
+        while no covering group reports a live episode — or after the reset
+        bound — keeps the recorded permanent park.
         """
         number = job['issue']
         rec = self.state.get('recovery:' + str(number)) or {}
         used = rec.get('quota_requeues', 0)
         if used >= self.admission.max_quota_requeues:
-            self.log(f"#{number} quota requeue budget exhausted ({used}); leaving blocked")
+            resets = rec.get('quota_requeue_resets', 0)
+            episode = self.congested_groups(job)
+            if resets >= self.admission.max_quota_requeue_resets:
+                self.log(f"#{number} quota requeue budget exhausted ({used}) after "
+                         f"{resets} quiet-window resets; leaving blocked")
+                return
+            if not episode:
+                self.log(f"#{number} quota requeue budget exhausted ({used}); leaving blocked")
+                return
+            rec['quota_episode'] = {'since': self.clock(), 'groups': episode}
+            self.state.set('recovery:' + str(number), rec)
+            self.log(f"#{number} quota requeue budget exhausted ({used}); "
+                     f"holding for congestion quiet on {', '.join(episode)}")
             return
         source = 'retry-after' if retry_after is not None else 'default'
         delay = retry_after if retry_after is not None else self.admission.quota_requeue_delay
@@ -503,6 +528,61 @@ Repair context: {repair}
         self.log(f"#{number} requeued after {category} failure "
                  f"({used + 1}/{self.admission.max_quota_requeues}); "
                  f"retry in {delay}s ({source})")
+
+    def congested_groups(self, job):
+        """Covering quota groups still inside a live congestion episode.
+
+        A 'probing' group is mid-lifecycle — cooling down or reopening
+        through its single probe — so its episode can still quiet. A
+        'blocked' group names an auth/credit stop no quiet window resolves,
+        and a 'normal' group reports no congestion at all; neither holds
+        open a quiet window for a spent requeue budget.
+        """
+        groups = self.admission.summary()['groups']
+        return [name for name in self.admission.group_names(self.model_for(job['worker']))
+                if groups.get(name, {}).get('mode') == 'probing']
+
+    def quiet_episode_rearm(self, job, rec, now):
+        """Re-arm one retry once a spent quota episode's groups have gone quiet.
+
+        requeue_quota leaves a 'quota_episode' hold on the recovery record
+        when the episode budget is spent while a covering group is still
+        congested; the park then only waits. A held group is quiet once it
+        reports normal mode with no pending cooldown and scheduler
+        .quiet_seconds elapsed since its congestion window last restarted —
+        the same quiet window that governs adaptive target growth. Once
+        every held group is quiet the episode is over: the retry is re-armed
+        with a fresh episode budget and a 'quiet-window' delay source so the
+        redispatch ledger row names what gated it. The per-issue reset bound
+        (scheduler.max_quota_requeue_resets) is spent in requeue_quota where
+        the exhaustion is recorded, never while the hold waits.
+        """
+        pending = (rec or {}).get('quota_episode')
+        if not pending:
+            return None
+        groups = self.admission.summary()['groups']
+        for name in pending['groups']:
+            group = groups.get(name)
+            if group is None:
+                continue
+            if group['mode'] != 'normal':
+                return None
+            if group['cooldown_until'] is not None and now < group['cooldown_until']:
+                return None
+            if now - (group['window_start'] or 0) < self.admission.quiet:
+                return None
+        number = job['issue']
+        resets = rec.get('quota_requeue_resets', 0) + 1
+        rec.update(quota_episode=None, quota_requeues=0,
+                   quota_requeue_resets=resets,
+                   requeue={'not_before': now, 'source': 'quiet-window',
+                            'seconds': self.admission.quiet})
+        self.state.set('recovery:' + str(number), rec)
+        self.state.set('retry:' + str(number), 'quota-requeue')
+        self.log(f"#{number} congestion quiet on {', '.join(pending['groups'])}; "
+                 f"re-armed with a fresh quota requeue budget "
+                 f"(quiet-window reset {resets}/{self.admission.max_quota_requeue_resets})")
+        return 'quota-requeue'
 
     def reconcile_workers(self, issues):
         by_number = {i['number']: i for i in issues}
@@ -1143,13 +1223,19 @@ Repair context: {repair}
         by_number = {i['number']: i for i in issues}
         now = self.clock()
         for job in self.state.jobs(('blocked',)):
-            flag = self.state.get('retry:' + str(job['issue']))
-            if not flag or job['issue'] not in by_number:
+            if job['issue'] not in by_number:
                 continue
+            flag = self.state.get('retry:' + str(job['issue']))
+            rec = self.state.get('recovery:' + str(job['issue']))
+            if not flag:
+                # A job parked on a spent quota-requeue episode may re-arm
+                # once its covering congestion window has quieted.
+                flag = self.quiet_episode_rearm(job, rec, now)
+                if not flag:
+                    continue
             active = self.state.jobs(('working', 'pr-open'))
             if self.slots_used(active) >= self.state.capacity():
                 continue
-            rec = self.state.get('recovery:' + str(job['issue']))
             if rec is None:
                 rec = self.capture_recovery(job)
             requeue = rec.get('requeue') or {}
