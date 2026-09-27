@@ -541,8 +541,9 @@ and the redundant controller pair:
   them in the overview URL. A single-pair deployment may omit the
   section — the single-pair default — or declare its pair; this
   manifest declares `station` over `ctrl-a`/`ctrl-b`, the pair
-  index entry a `?pair=` overview URL is generated from and the
-  membership the deploy stage's rig agreement exercises.
+  index entry a `?pair=` overview URL is generated from — by
+  `ci/overview_url.py`, documented below — and the membership the
+  deploy stage's rig agreement exercises.
 
 The deployment maps directly onto the platform's documented run
 commands: `dcs-plant-server <model> --dynamics <doc> --listen <addr>`
@@ -594,6 +595,31 @@ other as `?peer=`:
 ```
 http://localhost:8080/?peer=localhost:8081
 ```
+
+The overview page's `?pair=` form needs no hand-transcription either:
+the manifest's declared `topology` section is the pair index the URL
+is generated from — the platform's decision-47 mechanism — and
+`ci/overview_url.py` is that generator:
+
+```sh
+python3 ci/overview_url.py
+# http://localhost:8080/?pair=station=localhost:8080,localhost:8081
+```
+
+It reads the manifest's declared pairs and resolves each member to
+the monitor endpoint the rig definition publishes — the `ports`
+offering carrying the member's declared listen port — dialed through
+`--host` (default `localhost`); `--member <name>=<host:port>`
+resolves a member explicitly (the multi-host shape, each member
+dialed at its own host) and `--origin <host:port>` names the monitor
+serving the page (default the first resolved member). A manifest
+without `topology` derives the pair from its standby wiring, emitted
+unnamed; a lone-controller manifest derives a one-member pair. The
+pair stage's `pair-overview` leg (`ci/legs/pair_overview.py`)
+asserts the generated query names exactly the declared pairs and
+that every generated member endpoint answers `GET /role` as a
+serving monitor — a topology naming a member with no serving
+endpoint failing the leg by name.
 
 The declared `failover_budget` rides ctrl-b's `--auto-promote` flag:
 with ctrl-a dead — stopped, crashed, or partitioned — the tracking
