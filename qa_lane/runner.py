@@ -1579,6 +1579,34 @@ def unpause_plant(run_id, timeline, pair='deployed'):
     timeline('plant-unpaused', container + ' running')
 
 
+def pause_controller(run_id, name, timeline, pair='deployed'):
+    """The frozen-source induction the orphan-episode leg drives:
+    `docker pause` freezes one of the run's controller containers in
+    place — its monitor socket stays bound, so a tracking peer's
+    checkpoint fetch to it stalls in flight until the pull's own
+    timeout drops it, producing the fetch-worker's
+    produced-nothing misses rather than the refused-connection
+    shape `docker stop` would stage. `name` is the scenario ctx's
+    endpoint key ('active'/'standby', pair-selected like the other
+    lifecycle actions). Recorded on the run's action timeline; a
+    docker failure raises so the calling scenario reports the
+    freeze never landed."""
+    container = _controller_container(run_id, name, pair)
+    timeline('controller-pause', 'docker pause ' + container)
+    docker('pause', container, timeout=30)
+    timeline('controller-paused', container + ' paused')
+
+
+def unpause_controller(run_id, name, timeline, pair='deployed'):
+    """The matching thaw: `docker unpause` resumes the frozen
+    controller process — the stalled checkpoint fetches complete
+    with the held document and the peer's pulls land again."""
+    container = _controller_container(run_id, name, pair)
+    timeline('controller-unpause', 'docker unpause ' + container)
+    docker('unpause', container, timeout=30)
+    timeline('controller-unpaused', container + ' running')
+
+
 def plant_ctl(run_id, port, *args, pair='deployed'):
     """The scenario-callable plant-tool invocation: `docker exec` runs
     the shipped `dcs-plant-ctl` inside the run's plant container
@@ -2203,6 +2231,13 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
             run_id, name, timeline),
         'start_controller': lambda name: start_controller(
             run_id, name, timeline),
+        # The frozen-source induction — docker pause/unpause on a
+        # controller container, the orphan-episode leg's lever for
+        # produced-nothing checkpoint-pull misses.
+        'pause_controller': lambda name: pause_controller(
+            run_id, name, timeline),
+        'unpause_controller': lambda name: unpause_controller(
+            run_id, name, timeline),
         'failover_misses': cfg['failover_misses'],
         'stop_plant': lambda: stop_plant(run_id, timeline),
         'start_plant': lambda: start_plant(run_id, timeline),
@@ -2319,6 +2354,10 @@ def _probe_ctx(ctx, cfg, record, src, run_dir, probe, mounts,
         'stop_controller': lambda name: stop_controller(
             run_id, name, timeline, pair='probe'),
         'start_controller': lambda name: start_controller(
+            run_id, name, timeline, pair='probe'),
+        'pause_controller': lambda name: pause_controller(
+            run_id, name, timeline, pair='probe'),
+        'unpause_controller': lambda name: unpause_controller(
             run_id, name, timeline, pair='probe'),
         'stop_plant': lambda: stop_plant(run_id, timeline,
                                          pair='probe'),

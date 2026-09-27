@@ -218,8 +218,10 @@
 //! - `POST /scan`, body [`ScanRequest`] → runs that many scans → `200`
 //!   [`TelemetrySnapshot`] taken after the last one; a failing
 //!   [`Driven::after_scan`] hook → `500`; refused with `409` on a paced
-//!   monitor before the body is even read (see below), and the same
-//!   `413` bound [`MAX_REQUEST_BODY`] gives `/command`
+//!   monitor before the body is even read (see below), `400` for a
+//!   `scans` past the per-request bound [`MAX_SCANS_PER_REQUEST`] —
+//!   every accepted batch is a bounded, terminating unit of work —
+//!   and the same `413` bound [`MAX_REQUEST_BODY`] gives `/command`
 //! - `GET /` (also `/index.html`) → `200` `text/html` — the monitoring
 //!   page described below
 //!
@@ -513,7 +515,11 @@
 //! commands applied at the scan boundary. Paced scans run through the
 //! same mutex and are recorded exactly like endpoint-driven ones, so
 //! every endpoint — snapshot, receipts, history, journal — tracks the
-//! paced run.
+//! paced run. The driven contract's other half is that a request
+//! terminates: `scans` is bounded by [`MAX_SCANS_PER_REQUEST`], so a
+//! batch is a bounded unit of work inside its request — never an
+//! uncancellable run that outlives the client asking for it, and a
+//! submission worker's pin on any one request stays bounded too.
 //!
 //! An externally paced run that still needs the loop's per-scan wiring —
 //! a tracking standby's checkpoint pull, and the plant step a
@@ -567,9 +573,13 @@ use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 /// Request body of `POST /scan`: how many scans the executor should run.
+/// The request is one bounded unit of work — a `scans` past the
+/// monitor's declared per-request bound is refused rather than
+/// starting a batch the run cannot terminate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanRequest {
-    /// The number of scans to run.
+    /// The number of scans to run — at most the monitor's declared
+    /// per-request bound, or the request is refused.
     pub scans: u64,
 }
 
@@ -843,6 +853,25 @@ const LANE_QUEUE_DEPTH: usize = 64;
 /// byte is read, and the read itself is `take`-bounded so a chunked or
 /// understated body cannot grow the buffer past the cap either.
 const MAX_REQUEST_BODY: u64 = 64 * 1024;
+
+/// The bound on the scans one `POST /scan` request may ask for — the
+/// unbounded-batch fix (#1203). The externally paced contract is that
+/// the run is exactly as deterministic as the requests driving it,
+/// which requires every request to terminate: a `scans` past the bound
+/// is refused `400` before the first scan, and an accepted batch is a
+/// bounded unit of work whose per-scan costs are themselves bounded —
+/// the tracking pull under [`CHECKPOINT_PULL_TIMEOUT`], the hinted and
+/// claimed source verifies under the same per-pull bound, the
+/// `after_scan` step the driving caller installed — so it always ends
+/// inside its own request. A client gone mid-batch can hold its
+/// submission worker only for the bounded remainder: tiny_http hands
+/// the request no socket state to poll, so the bound is the
+/// cancellation — the batch below any plausible request is the
+/// batch that always terminates. The bound stays far past every
+/// driven batch the contract's own legs pace (a handful of scans per
+/// request): a caller wanting a longer advance issues the further
+/// requests, each its own bounded, answered unit.
+const MAX_SCANS_PER_REQUEST: u64 = 256;
 
 /// Runs once after each completed requested scan, receiving the peer —
 /// the plant step the driving request paces the run to (its field
@@ -2421,6 +2450,22 @@ impl<'d> Monitor<'d> {
             // skips a read the response never used.
             (Method::Post, "/scan") if self.paced => json(409, SCAN_REFUSED_WHEN_PACED),
             (Method::Post, "/scan") => match read_json::<ScanRequest>(&mut request) {
+                // A batch past the declared bound is refused before
+                // the first scan: an accepted batch is a bounded unit
+                // of work inside its request — a request that cannot
+                // end would hand one client the run's whole timeline
+                // and pin its submission worker for as long as it
+                // cared to. The refused request runs nothing; the
+                // caller's larger advance composes of bounded
+                // requests.
+                Ok(body) if body.scans > MAX_SCANS_PER_REQUEST => json(
+                    400,
+                    &format!(
+                        "refused: scans {} exceeds the per-request bound of \
+                         {MAX_SCANS_PER_REQUEST}",
+                        body.scans
+                    ),
+                ),
                 Ok(body) => {
                     let mut failure = None;
                     // The last state-file checkpoint the batch pushed —
@@ -4414,7 +4459,10 @@ impl MonitorClient {
     }
 
     /// `POST /scan`: runs `scans` scans, returning the snapshot taken
-    /// after the last one.
+    /// after the last one. A `scans` past the monitor's declared
+    /// per-request bound surfaces as an error carrying the `400`
+    /// refusal naming the bound — a longer advance composes of
+    /// bounded requests.
     pub fn advance(&self, scans: u64) -> io::Result<TelemetrySnapshot> {
         self.post_json("/scan", &ScanRequest { scans })
     }
