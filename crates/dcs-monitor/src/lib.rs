@@ -2870,10 +2870,14 @@ impl<'d> Monitor<'d> {
     /// pulls one checkpoint from the named owner and accepts it only
     /// when it verifiably serves this line *as its field owner* — on
     /// a keyed run, with the pull's `line_proof` — before re-targeting
-    /// the resolved slot; a candidate that cannot prove ownership
-    /// clears any prior resolution rather than pinning a guess.
-    /// Returns the tracking target after resolution, or `None` when
-    /// the line named no routable owner and nothing resolves.
+    /// the pulls through the `resolved` slot and journaling the
+    /// adoption exactly like the announced- and claimed-source pins:
+    /// the resolved slot outranks the configured source they and it
+    /// share, so the durable audit records where the orphaned peer
+    /// moved its pulls. A candidate that cannot prove ownership clears
+    /// any prior resolution rather than pinning a guess. Returns the
+    /// tracking target after resolution, or `None` when the line named
+    /// no routable owner and nothing resolves.
     pub fn resolve_tracking_source(&self) -> Option<SocketAddr> {
         let (own, claimed) = {
             let shared = self.shared.lock().unwrap();
@@ -2945,6 +2949,21 @@ impl<'d> Monitor<'d> {
                 Err(_) => continue,
             };
             if verify_owner_checkpoint(&pulled, &own).is_ok() && self.proven(&pulled, nonce) {
+                // Pin only while the peer still owns no field — a
+                // promotion landing mid-probe already answered where
+                // the pulls go — and journal the re-target exactly
+                // like the announced- and claimed-source adoptions:
+                // the resolved pin carries the same pull-target
+                // authority, outranking the configured tracking
+                // source, so the durable audit records where the
+                // orphaned peer moved its pulls.
+                let mut shared = self.shared.lock().unwrap();
+                if shared.peer.owns_field() {
+                    return None;
+                }
+                let Shared { peer, recorder, .. } = &mut *shared;
+                recorder.note_tracking_source(peer.tick(), candidate);
+                drop(shared);
                 *self.resolved.lock().unwrap() = Some(candidate);
                 return Some(candidate);
             }
