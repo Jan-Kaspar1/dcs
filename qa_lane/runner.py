@@ -1243,6 +1243,89 @@ def cold_restart_controller(run_id, run_dir, name, timeline,
              + ('dropped' if existed else 'already absent') + ')')
 
 
+def relaunch_controller(cfg, record, run_dir, model, name, timeline,
+                        track=None, pair='deployed'):
+    """The scenario-callable flag-doctoring relaunch: `docker rm -f`
+    on the pair member's container, then a fresh `docker run`
+    rebuilding the launch from the run config — same image, model and
+    state/journal mounts, published monitor port, owner-token pin,
+    failover budget, and pair token — with the tracking-source
+    argument optionally doctored. Where `docker start` can only rerun
+    the command the container was created with, this lever rewrites
+    it: `track` becomes `--peer track` on the launched active — the
+    argument through which a field owner names the peer it tracks if
+    demoted, the "--standby name" an owning run carries — and
+    replaces `--standby`'s target on the launched standby. track=None
+    recreates the launch command unchanged: the restore half of a
+    doctored pass, since no start can un-apply a flag a recreate
+    added.
+
+    `name` is the scenario ctx's endpoint key ('active' is ctrl-a,
+    'standby' ctrl-b on the deployed pair; the probe pair's ctx maps
+    the same keys onto probe-a/probe-b), whichever role each
+    currently reports. The recreated container keeps the run's
+    managed and run labels so teardown reconciles it, the same
+    runner-owned state/journal directory so the process resumes its
+    persisted run, and --restart no. An unresolvable `track` name is
+    the standby-dns-resume leg's induction: the tracking source
+    degrades to pull misses per the deferred-resolution contract —
+    never a startup error. The remove tolerates an already-absent
+    container so a relaunch interrupted mid-flight can be re-driven;
+    the run half still raises on a docker failure so the calling
+    scenario reports the relaunch never completed. Both halves are
+    recorded on the run's action timeline.
+    """
+    run_id, sha = record['run_id'], record['attempted_sha']
+    prefix = 'dcs-hw-' + run_id
+    peers = PAIRS[pair]['peers']
+    if name not in peers:
+        raise RuntimeError('relaunch_controller expects an endpoint '
+                           'key, got ' + repr(name))
+    peer = peers[name]
+    container = prefix + '-' + peer
+    tokens = _plant_owner_tokens(cfg)
+    token = _pair_token(cfg, pair)
+    remote = _pair_plant_remote(cfg, pair, prefix)
+    monitor_port = PAIR_MONITOR_PORTS[name]
+    command = ['/model/plant.json',
+               '--remote', remote,
+               '--owner-token',
+               str(tokens[_pair_owner_key(pair, name)])]
+    if name == 'standby':
+        command += ['--standby',
+                    track if track is not None else
+                    prefix + '-' + peers['active'] + ':'
+                    + str(PAIR_MONITOR_PORTS['active']),
+                    '--auto-promote', str(cfg['failover_misses'])]
+    elif track is not None:
+        command += ['--peer', track]
+    command += ['--scan-ms', '100',
+                '--listen', '0.0.0.0:' + str(monitor_port),
+                '--state-file', CONTAINER_STATE_FILE,
+                '--journal-file', CONTAINER_JOURNAL_FILE]
+    if token:
+        command += ['--pair-token', str(token)]
+    flag = '' if track is None else (
+        ('--peer ' if name == 'active' else '--standby ') + track)
+    timeline('controller-relaunch', 'docker rm -f ' + container
+             + ('; launch ' + flag if flag
+                else '; launch flags restored'))
+    removed = docker('rm', '-f', container, check=False, timeout=90)
+    docker(*_docker_run_args(cfg, run_id, container),
+           '--network', 'dcs-hwtest-' + run_id,
+           '-p', '127.0.0.1:' + str(_pair_host_port(cfg, pair, name))
+           + ':' + str(monitor_port),
+           '-v', str(model) + ':/model/plant.json:ro',
+           '-v', str(_controller_dir(run_dir, peer))
+           + ':' + CONTAINER_RUN_DIR,
+           IMAGE_PREFIX + 'controller:' + sha,
+           *command)
+    timeline('controller-relaunched', container + ' running'
+             + (' with ' + flag if flag else ' with its launch flags')
+             + ('' if removed.returncode == 0
+                else ' (previous container already absent)'))
+
+
 # The --state-file sink's write-then-rename temporary sibling
 # (dcs-monitor's write_state_file writes '<state>.tmp' beside the
 # state file, then renames it into place): the path the 'fifo' mount
@@ -1942,7 +2025,7 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
     endpoint, the run config's pinned plant-writer owner token per
     endpoint key — the pair's and every third peer's — the run's
     evidence dir and deadline, the runner-owned
-    controller restart/cold-restart, plant stop/start,
+    controller restart/cold-restart/relaunch, plant stop/start,
     model-revision, foreign-peer launch/teardown, driven-peer
     launch/teardown, and forged-checkpoint-endpoint
     launch/teardown actions, the run's shared --pair-token the
@@ -1988,6 +2071,16 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
             run_id, name, timeline),
         'cold_restart_controller': lambda name: cold_restart_controller(
             run_id, run_dir, name, timeline),
+        # The flag-doctoring relaunch — docker rm + a recreated launch
+        # with `track` naming the member's tracking-source argument
+        # (--peer on the launched active, --standby on the launched
+        # standby); track=None restores the launch command. The
+        # standby-dns-resume leg's seam: a plain docker start could
+        # never stage the doctored name.
+        'relaunch_controller': lambda name, track=None:
+            relaunch_controller(
+                cfg, record, run_dir, src / cfg['model_fixture'], name,
+                timeline, track),
         # The sink-isolation leg's mount lever — the impede/restore
         # pair on the endpoints the run config declares a stalled
         # mount kind for. No declaration means no lever, and the leg
@@ -2099,6 +2192,10 @@ def _probe_ctx(ctx, cfg, record, src, run_dir, probe, mounts,
         'cold_restart_controller': lambda name:
             cold_restart_controller(run_id, run_dir, name, timeline,
                                     pair='probe'),
+        'relaunch_controller': lambda name, track=None:
+            relaunch_controller(
+                cfg, record, run_dir, src / probe['model_fixture'],
+                name, timeline, track, pair='probe'),
         'impede_state_file': (lambda name: impede_state_file(
             run_id, run_dir, name, timeline, mounts, pair='probe'))
             if probe_mounts else None,

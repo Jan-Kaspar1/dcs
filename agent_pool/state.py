@@ -276,7 +276,7 @@ class State:
                 for key in ('recovery:' + str(issue), 'retry:' + str(issue)):
                     self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)', (key, 'null'))
 
-    def retry(self, issue, cause):
+    def retry(self, issue, cause, detail=None):
         """Explicit operator retry. Keeps prior branch/clone recorded until replacement."""
         if cause not in REDISPATCH_CAUSES:
             raise ValueError('Invalid redispatch cause')
@@ -288,10 +288,13 @@ class State:
                     attempt = self.db.execute('SELECT attempt FROM jobs WHERE issue=?', (issue,)).fetchone()[0]
                     self.db.execute('INSERT INTO work_events(kind,issue,attempt,at,payload) VALUES(?,?,?,?,?)',
                                     ('retry-reserved', issue, attempt, now, '{}'))
+                    payload = {'cause': cause}
+                    if detail:
+                        payload.update(detail)
                     self.db.execute('INSERT OR IGNORE INTO work_events(kind,issue,attempt,at,source_key,payload) VALUES(?,?,?,?,?,?)',
                                     ('redispatch', issue, attempt, now,
                                      'redispatch:%s:%s' % (issue, attempt),
-                                     json.dumps({'cause': cause})))
+                                     json.dumps(payload, sort_keys=True)))
                 return bool(cursor.rowcount)
         except sqlite3.IntegrityError:
             return False

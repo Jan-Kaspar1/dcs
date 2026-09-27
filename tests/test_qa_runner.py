@@ -347,6 +347,239 @@ class LifecycleActionTests(unittest.TestCase):
         self.assertEqual(events, ['controller-start'])
 
 
+class RelaunchActionTests(unittest.TestCase):
+    """The scenario-callable flag-doctoring relaunch: `docker rm -f`
+    on the pair member's container, then a fresh `docker run`
+    rebuilding the launch from the run config — same mounts, labels,
+    published port, owner-token pin, failover budget, and pair token —
+    with the tracking-source argument optionally doctored: `--peer`
+    on the launched active (the --standby name an owning run
+    carries), `--standby`'s target on the launched standby."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        for name in ('a', 'b', 'probe-a', 'probe-b'):
+            (self.run_dir / 'controllers' / name).mkdir(parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+        self.model = self.src / self.cfg['model_fixture']
+        self.model.parent.mkdir(parents=True, exist_ok=True)
+        self.model.write_text('{}')
+        self.record = {'run_id': 'qa-1', 'attempted_sha': SHA_A}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _relaunch(self, name='active', track=None, pair='deployed',
+                  docker=None, events=None):
+        calls = []
+        if docker is None:
+            def docker(*args, timeout=120, check=True):
+                calls.append(args)
+                return Result('')
+        seen = events if events is not None else []
+        with patch.object(runner, 'docker', docker):
+            runner.relaunch_controller(
+                self.cfg, self.record, self.run_dir, self.model, name,
+                lambda event, detail=None: seen.append((event, detail)),
+                track, pair)
+        return calls, seen
+
+    def _launch(self, calls, container):
+        return next(c for c in calls
+                    if c[0] == 'run' and container in c)
+
+    def test_rm_then_run_rebuilds_the_active_command(self):
+        calls, events = self._relaunch()
+        self.assertEqual(calls[0], ('rm', '-f', 'dcs-hw-qa-1-a'))
+        launch = self._launch(calls, 'dcs-hw-qa-1-a')
+        self.assertEqual([event for event, _ in events],
+                         ['controller-relaunch',
+                          'controller-relaunched'])
+        self.assertIn('docker rm -f dcs-hw-qa-1-a', events[0][1])
+        # The launch command rebuilt from the run config — the same
+        # command _start_rig launched ctrl-a with, flag-for-flag.
+        index = launch.index('/model/plant.json')
+        self.assertEqual(
+            launch[index:],
+            ('/model/plant.json',
+             '--remote', 'dcs-hw-qa-1-plant:9001',
+             '--owner-token',
+             str(self.cfg['plant_owner_tokens']['active']),
+             '--scan-ms', '100', '--listen', '0.0.0.0:8080',
+             '--state-file', runner.CONTAINER_STATE_FILE,
+             '--journal-file', runner.CONTAINER_JOURNAL_FILE,
+             '--pair-token', self.cfg['pair_token']))
+        self.assertNotIn('--peer', launch)
+        self.assertNotIn('--standby', launch)
+        self.assertNotIn('--auto-promote', launch)
+
+    def test_active_relaunch_keeps_mounts_port_labels_and_network(self):
+        calls, _ = self._relaunch()
+        launch = self._launch(calls, 'dcs-hw-qa-1-a')
+        self.assertIn('--network', launch)
+        self.assertIn('dcs-hwtest-qa-1', launch)
+        self.assertIn('127.0.0.1:18080:8080', launch)
+        self.assertIn(str(self.model) + ':/model/plant.json:ro',
+                      launch)
+        directory = self.run_dir / 'controllers' / 'a'
+        self.assertIn(str(directory) + ':'
+                      + runner.CONTAINER_RUN_DIR, launch)
+        self.assertIn('--restart', launch)
+        self.assertIn('no', launch)
+        labels = [launch[i + 1]
+                  for i, arg in enumerate(launch) if arg == '--label']
+        self.assertIn(runner.MANAGED_LABEL + '=1', labels)
+        self.assertIn(runner.RUN_LABEL + '=qa-1', labels)
+        self.assertIn('dcs-hwtest/controller:' + SHA_A, launch)
+
+    def test_doctored_track_becomes_peer_on_the_active(self):
+        calls, events = self._relaunch(
+            track='dcs-peer-down.invalid:8080')
+        launch = self._launch(calls, 'dcs-hw-qa-1-a')
+        index = launch.index('--peer')
+        self.assertEqual(launch[index + 1],
+                         'dcs-peer-down.invalid:8080')
+        self.assertNotIn('--standby', launch)
+        self.assertNotIn('--auto-promote', launch)
+        self.assertIn('--peer dcs-peer-down.invalid:8080',
+                      events[0][1])
+
+    def test_standby_relaunch_replaces_its_standby_target(self):
+        calls, _ = self._relaunch(name='standby',
+                                  track='dcs-peer-down.invalid:8080')
+        self.assertEqual(calls[0], ('rm', '-f', 'dcs-hw-qa-1-b'))
+        launch = self._launch(calls, 'dcs-hw-qa-1-b')
+        index = launch.index('--standby')
+        self.assertEqual(launch[index + 1],
+                         'dcs-peer-down.invalid:8080')
+        index = launch.index('--auto-promote')
+        self.assertEqual(launch[index + 1],
+                         str(self.cfg['failover_misses']))
+        self.assertNotIn('--peer', launch)
+        self.assertIn('127.0.0.1:18081:8081', launch)
+        self.assertIn(str(self.cfg['plant_owner_tokens']['standby']),
+                      launch)
+
+    def test_standby_relaunch_restores_its_launch_target(self):
+        calls, _ = self._relaunch(name='standby')
+        launch = self._launch(calls, 'dcs-hw-qa-1-b')
+        index = launch.index('--standby')
+        self.assertEqual(launch[index + 1], 'dcs-hw-qa-1-a:8080')
+
+    def test_absent_remove_is_tolerated_and_noted(self):
+        recorded = []
+
+        def docker(*args, timeout=120, check=True):
+            recorded.append(args)
+            if args[0] == 'rm':
+                return Result('', returncode=1)
+            return Result('')
+
+        calls, events = self._relaunch(docker=docker)
+        calls = recorded
+        self.assertEqual(calls[0], ('rm', '-f', 'dcs-hw-qa-1-a'))
+        self.assertTrue(any(c[0] == 'run' for c in calls))
+        self.assertIn('already absent', events[1][1])
+
+    def test_failed_run_raises_after_recording_the_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'run' and check:
+                raise RuntimeError('docker run failed: exit 125')
+            return Result('')
+
+        with self.assertRaises(RuntimeError):
+            self._relaunch(docker=raising, events=events)
+        self.assertEqual([event for event, _ in events],
+                         ['controller-relaunch'])
+
+    def test_unknown_endpoint_rejected(self):
+        with self.assertRaises(RuntimeError):
+            self._relaunch(name='driven')
+
+    def test_probe_pair_maps_probe_containers_and_tokens(self):
+        probe = self.cfg['probe_pair']
+        calls, _ = self._relaunch(name='active', pair='probe',
+                                  track='dcs-peer-down.invalid:8080')
+        self.assertEqual(calls[0], ('rm', '-f', 'dcs-hw-qa-1-probe-a'))
+        launch = self._launch(calls, 'dcs-hw-qa-1-probe-a')
+        index = launch.index('--peer')
+        self.assertEqual(launch[index + 1],
+                         'dcs-peer-down.invalid:8080')
+        index = launch.index('--remote')
+        self.assertEqual(launch[index + 1],
+                         'dcs-hw-qa-1-probe-plant:'
+                         + str(probe['plant_port']))
+        index = launch.index('--owner-token')
+        self.assertEqual(launch[index + 1],
+                         str(self.cfg['plant_owner_tokens']
+                            ['probe_active']))
+        index = launch.index('--pair-token')
+        self.assertEqual(launch[index + 1], str(probe['pair_token']))
+        self.assertIn('127.0.0.1:' + str(probe['active_port'])
+                      + ':8080', launch)
+        directory = self.run_dir / 'controllers' / 'probe-a'
+        self.assertIn(str(directory) + ':'
+                      + runner.CONTAINER_RUN_DIR, launch)
+
+    def test_probe_standby_relaunch_restores_probe_target(self):
+        calls, _ = self._relaunch(name='standby', pair='probe')
+        launch = self._launch(calls, 'dcs-hw-qa-1-probe-b')
+        index = launch.index('--standby')
+        self.assertEqual(launch[index + 1], 'dcs-hw-qa-1-probe-a:8080')
+        self.assertIn('127.0.0.1:'
+                      + str(self.cfg['probe_pair']['standby_port'])
+                      + ':8081', launch)
+
+    def test_scenario_ctx_carries_the_relaunch_action(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            ctx = runner._scenario_ctx(
+                self.cfg, self.record, self.src, self.run_dir,
+                self.run_dir / 'evidence', 0,
+                lambda event, detail=None: events.append(event))
+            ctx['relaunch_controller']('standby',
+                                       'dcs-peer-down.invalid:8080')
+            ctx['relaunch_controller']('standby')
+        self.assertEqual(calls[0], ('rm', '-f', 'dcs-hw-qa-1-b'))
+        doctored = self._launch(calls, 'dcs-hw-qa-1-b')
+        index = doctored.index('--standby')
+        self.assertEqual(doctored[index + 1],
+                         'dcs-peer-down.invalid:8080')
+        restored = [c for c in calls if c[0] == 'run'
+                    and 'dcs-hw-qa-1-b' in c][-1]
+        index = restored.index('--standby')
+        self.assertEqual(restored[index + 1], 'dcs-hw-qa-1-a:8080')
+        self.assertIn('controller-relaunch', events)
+        self.assertIn('controller-relaunched', events)
+
+    def test_probe_ctx_carries_the_relaunch_action(self):
+        calls = []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            ctx = runner._scenario_ctx(
+                self.cfg, self.record, self.src, self.run_dir,
+                self.run_dir / 'evidence', 0,
+                lambda e, d=None: None)
+            ctx['probe']['relaunch_controller'](
+                'active', 'dcs-peer-down.invalid:8080')
+        self.assertEqual(calls[0], ('rm', '-f', 'dcs-hw-qa-1-probe-a'))
+        launch = self._launch(calls, 'dcs-hw-qa-1-probe-a')
+        self.assertIn('--peer', launch)
+
+
 class PlantActionTests(unittest.TestCase):
     """The scenario-callable plant stop/start: the run's shared-plant
     container cycled mid-run, each half recorded on the run's action
