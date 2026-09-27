@@ -102,7 +102,7 @@ import tracking_source_fallback
 # must surface the named diagnostic on the honest attributed record
 # rather than passing an unexercised contract.
 LEG = {
-    "order": 530,
+    "order": 540,
     "title": "the orphan-retarget-journal leg",
     "passes": "retarget-journal-leg",
     "failed": "retarget-journal-failed",

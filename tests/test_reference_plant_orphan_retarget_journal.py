@@ -88,7 +88,7 @@ class Registration(unittest.TestCase):
         }
         record = discovered["orphan_retarget_journal.py"]
         self.assertEqual(record["stem"], "orphan-retarget-journal")
-        self.assertEqual(record["order"], 530)
+        self.assertEqual(record["order"], 540)
 
     def test_the_named_diagnostics_follow_the_issue(self):
         # The issue names retarget-journal-failed — the declared
