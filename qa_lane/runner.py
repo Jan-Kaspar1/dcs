@@ -1598,6 +1598,113 @@ def plant_ctl(run_id, port, *args, pair='deployed'):
                   check=False, timeout=60)
 
 
+# The staged-document admission probe's serve-gate bind grace: a
+# refused document exits inside the merge — well under a second —
+# while an admitted one binds its listener and stays up; the grace
+# separates 'refused' from 'serving' without trusting a timeout.
+DYNAMICS_BIND_GRACE = 10
+
+
+def admit_dynamics(cfg, record, run_dir, model, name, document,
+                   timeline):
+    """The scenario-callable doctored-dynamics admission probe — the
+    dynamics-admission leg's per-run variant seam: stage `document`
+    (the dynamics declaration list, as JSON text or a Python object)
+    inside the bounded run dir, then drive the run's plant image
+    through the two admission gates the malformed-dynamics contract
+    guards, each in a labeled scratch container mounting the staged
+    file read-only beside the run's model:
+
+    - 'check': the released `dcs-plant-server --check-dynamics`
+      preflight — a one-shot `docker run --rm` exiting with the merge
+      verdict, never serving;
+    - 'serve': a detached `--dynamics` plant load on the same staged
+      document — polled for the bind grace: a refused document exits
+      inside the merge while an admitted one binds its listener and
+      stays up, so 'running' past the grace is the accepted verdict.
+
+    Returns {'document': str(staged), 'check': {...}, 'serve': {...}}
+    with each gate's exit code and captured output — the leg names the
+    refusal; a docker failure on either launch raises so the leg
+    reports the probe never ran rather than reading an empty answer.
+    Both launches are recorded on the run's action timeline.
+    """
+    run_id, sha = record['run_id'], record['attempted_sha']
+    if not isinstance(document, str):
+        document = json.dumps(document)
+    safe = ''.join(c if c.isalnum() or c == '-' else '-'
+                   for c in str(name).lower())
+    directory = Path(run_dir) / 'dynamics-probes'
+    directory.mkdir(parents=True, exist_ok=True)
+    staged = directory / (safe + '.json')
+    staged.write_text(document)
+    result = {'name': safe, 'document': str(staged)}
+    # The preflight gate — the released --check-dynamics surface:
+    # the same merge-and-validate the serving load applies, reported
+    # as 'check ok' plus an element census or one 'dynamics element N
+    # (driving point P)' line per refused element.
+    timeline('dynamics-admit-check',
+             'preflight ' + staged.name + ' (' + safe + ')')
+    proc = docker('run', '--rm',
+                  '--label', MANAGED_LABEL + '=1',
+                  '--label', RUN_LABEL + '=' + run_id,
+                  '--cpus', cfg['rig_cpus'],
+                  '--memory', cfg['rig_memory'],
+                  '--memory-swap', cfg['rig_memory'],
+                  '--pids-limit', str(cfg['rig_pids']),
+                  '--network', 'none',
+                  '-v', str(model) + ':/model/plant.json:ro',
+                  '-v', str(staged) + ':/model/dynamics.json:ro',
+                  IMAGE_PREFIX + 'plant:' + sha,
+                  '/model/plant.json',
+                  '--check-dynamics', '/model/dynamics.json',
+                  check=False, timeout=120)
+    result['check'] = {'exit': proc.returncode,
+                       'stdout': proc.stdout,
+                       'stderr': proc.stderr}
+    # The serving-load gate — a spawned plant carrying the staged
+    # document: detached, networkless, and polled across the bind
+    # grace. A refused document exits inside the merge; an admitted
+    # one binds its loopback listener and stays up — 'listening on'
+    # in the logs and Running=true are the accepted verdict. The
+    # container is bounded either way and removed after capture.
+    container = 'dcs-hw-' + run_id + '-dyn-' + safe
+    timeline('dynamics-admit-serve',
+             'docker run -d ' + container
+             + ' mounting ' + staged.name)
+    docker('rm', '-f', container, check=False, timeout=60)
+    docker(*_docker_run_args(cfg, run_id, container),
+           '--network', 'none',
+           '-v', str(model) + ':/model/plant.json:ro',
+           '-v', str(staged) + ':/model/dynamics.json:ro',
+           IMAGE_PREFIX + 'plant:' + sha,
+           '/model/plant.json', '--dynamics', '/model/dynamics.json',
+           '--listen', '127.0.0.1:0')
+    deadline = time.monotonic() + DYNAMICS_BIND_GRACE
+    running = True
+    while running and time.monotonic() < deadline:
+        probe = docker('inspect', '-f', '{{.State.Running}}',
+                       container, check=False)
+        running = probe.stdout.strip() == 'true'
+        if running:
+            time.sleep(0.25)
+    logs = docker('logs', container, check=False)
+    probe = docker('inspect', '-f', '{{.State.ExitCode}}',
+                   container, check=False)
+    try:
+        exit_code = int(probe.stdout.strip())
+    except ValueError:
+        exit_code = None
+    docker('rm', '-f', container, check=False, timeout=60)
+    timeline('dynamics-admitted', container + ' '
+             + ('still serving past the bind grace'
+                if running else 'exited ' + str(exit_code)))
+    result['serve'] = {'running': running, 'exit': exit_code,
+                       'logs': (logs.stdout or '')
+                       + (logs.stderr or '')}
+    return result
+
+
 def _revised_peer_role(cfg):
     """The run's third controller's served RoleReport, or None when
     its monitor is unreachable — the relaunch guard's read of whether
@@ -2108,6 +2215,13 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         # lane's seam for every plant op the tool's subcommands cover.
         'plant_ctl': lambda *args: plant_ctl(
             run_id, cfg['plant_port'], *args),
+        # The doctored-dynamics admission lever — a scenario stages a
+        # document by name and gets each admission gate's verdict
+        # back; see admit_dynamics for the seam's shape.
+        'admit_dynamics': lambda name, document:
+            admit_dynamics(cfg, record, run_dir,
+                           src / cfg['model_fixture'], name, document,
+                           timeline),
         'start_revised': lambda name, incompatible=False:
             start_revised_controller(
                 cfg, record, run_dir, src / cfg['model_fixture'],
@@ -2216,6 +2330,12 @@ def _probe_ctx(ctx, cfg, record, src, run_dir, probe, mounts,
                                                pair='probe'),
         'plant_ctl': lambda *args: plant_ctl(
             run_id, probe['plant_port'], *args, pair='probe'),
+        # The doctored-dynamics admission lever, bound to the probe
+        # pair's own model fixture.
+        'admit_dynamics': lambda name, document:
+            admit_dynamics(cfg, record, run_dir,
+                           src / probe['model_fixture'], name,
+                           document, timeline),
         'start_revised': None,
         'start_foreign': None,
         'stop_foreign': None,
