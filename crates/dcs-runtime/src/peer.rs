@@ -5787,6 +5787,46 @@ mod tests {
         assert!(peer.take_role_changes().is_empty());
     }
 
+    /// The durable-trace half of a fired-but-refused gate: the armed
+    /// boundary attempt the voided convergence proof turns back
+    /// queues exactly one journal-bound [`PromotionRefusal`] naming
+    /// the refusal cause and the miss count it fired at, so the
+    /// durable record reads "fired and refused" rather than staying
+    /// silent the way an unarmed peer's journal does; and the
+    /// still-closed window's further evidence-free misses queue no
+    /// more — the refusal trail stays bounded, not one row per miss.
+    #[test]
+    fn a_refused_self_promotion_queues_one_named_refusal() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate)).with_failover(2);
+
+        // Evidence-free misses reach the armed budget with no
+        // convergence proof ever standing — the voided-gate window
+        // in miniature: the budget-th miss fires the gate and the
+        // attempt comes back refused.
+        peer.track_once(|| Err("a".to_string()));
+        let report = peer.track_once(|| Err("b".to_string()));
+        assert!(matches!(report, TrackReport::PromotionRefused { .. }));
+        assert_eq!(
+            peer.take_promotion_refusals(),
+            vec![PromotionRefusal {
+                tick: peer.tick(),
+                misses: 2,
+                error: SwitchError::NotConverged {
+                    sync: StandbySync::Degraded { detail: "b".into() },
+                },
+            }]
+        );
+
+        // Past the voided boundary the window stays closed for this
+        // episode — a further evidence-free miss is a miss, not
+        // another refusal record.
+        let report = peer.track_once(|| Err("c".to_string()));
+        assert!(matches!(report, TrackReport::Missed { .. }));
+        assert!(peer.take_promotion_refusals().is_empty());
+    }
+
     /// A field-owning peer runs no pull and no failover check — the
     /// cycle is the reported no-op.
     #[test]
