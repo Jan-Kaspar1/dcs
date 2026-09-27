@@ -3507,6 +3507,13 @@ fn track_and_record(
     for restart in peer.take_source_restarts() {
         recorder.note_source_restart(restart);
     }
+    // A self-promotion the boundary refused — a live incumbent's
+    // standing claim, a transient claim ask, a voided proof — leaves
+    // no role change of its own, so the journal takes it here, one
+    // entry per distinct refusal cause the streak produced.
+    for refusal in peer.take_promotion_refusals() {
+        recorder.note_promotion_refused(refusal);
+    }
     for change in peer.take_role_changes() {
         recorder.note_role_change(&change);
     }

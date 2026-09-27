@@ -17,6 +17,8 @@ use dcs_runtime::{
     Checkpoint, Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap,
     PointSpec, StepError, mint_generation,
 };
+use dcs_sim::{ChannelId, ChannelMap, PointBinding, SimDriver};
+use dcs_sim_net::{PlantServer, RemoteDriver, RemoteError};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
@@ -555,6 +557,29 @@ fn keyed(monitor: Monitor<'static>, key: Option<u64>) -> Monitor<'static> {
     }
 }
 
+/// One sim-net point binding for `point` — the channel-map shape the
+/// shared plant's arbitration test rigs use.
+fn plant_binding(point: u64, direction: Direction, initial: Value) -> PointBinding {
+    PointBinding {
+        point: PointId(point),
+        channel: ChannelId {
+            device: 1,
+            name: format!("ch{point}"),
+        },
+        direction,
+        initial,
+    }
+}
+
+/// The shared-plant channel map the field-arbitration rig serves —
+/// the same three points the executor fixture drives.
+fn plant_map() -> ChannelMap {
+    ChannelMap::new()
+        .with_point(plant_binding(10, Direction::In, Value::Float(3.0)))
+        .with_point(plant_binding(20, Direction::Out, Value::Float(0.0)))
+        .with_point(plant_binding(30, Direction::Out, Value::Float(0.0)))
+}
+
 /// The journaled role transitions, in order.
 fn role_changes(client: &MonitorClient) -> Vec<JournalEvent> {
     client
@@ -739,6 +764,208 @@ fn role_report_serves_the_armed_peers_failover_evidence() {
     assert!(
         served.get("failover").is_none(),
         "an unarmed peer's report carries no failover accounting: {body}"
+    );
+}
+
+/// The QA finding `failover-refused-once-window-closed-forever` on the
+/// driven path against the real field arbitration: an armed standby
+/// tracking an ownerless line — the reproduction's `c` on `b`'s
+/// `source_owns_field: false` checkpoints — whose budget-th
+/// self-promotion the live incumbent's claim correctly refuses must
+/// keep the gate armed while fresh orphaned checkpoints keep landing,
+/// each due cycle retrying the conditional claim, so when the
+/// incumbent dies and the claim stands dead-owned a later retry
+/// preempts it and promotes. On the reported build the misses
+/// climbing past the budget voided the gate outright — `c` stranded
+/// `standby` beside the dead-owned field until `POST /promote` — and
+/// the refused attempt left no journal record.
+#[test]
+fn a_refused_armed_self_promotion_retries_once_the_incumbent_dies() {
+    const INCUMBENT: u64 = 0x1165_000a;
+    const TAKEOVER: u64 = 0x1165_000c;
+
+    // The shared field: the incumbent's controller attachment claims
+    // it at launch — the reproduction's live `a` — so a peer's
+    // conditional takeover asks the same arbitration that refused it
+    // there, `RemoteError::Fenced` while the claim stands.
+    let plant = PlantServer::bind("127.0.0.1:0", SimDriver::new(plant_map()).unwrap()).unwrap();
+    let plant_addr = plant.local_addr().unwrap();
+    thread::spawn(move || plant.serve());
+    let incumbent = RemoteDriver::connect(plant_addr).unwrap().as_controller();
+    incumbent.claim_writer(INCUMBENT).unwrap();
+
+    // The ownerless line `b` serves: a standby peer's checkpoints
+    // stamp `source_owns_field: false`, so every landed pull on `c` is
+    // an orphaned apply — the counted miss that is also the fresh
+    // convergence proof the stranded gate must keep reading.
+    let b_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let b = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(b_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    let b_addr = dialable(b.monitor.local_addr());
+
+    // The armed peer `c` — the reproduction's `--standby b
+    // --auto-promote N`: a failover budget of two, a driven pull off
+    // `b`, and the conditional claim the orphaned promotion runs
+    // against the field's own arbitration.
+    let c_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let c_field: &'static RemoteDriver = Box::leak(Box::new(
+        RemoteDriver::connect(plant_addr).unwrap().as_controller(),
+    ));
+    let c = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(c_driver), None)
+                .with_failover(2)
+                .with_field_orphan_claim(|| match c_field.claim_writer_unless_held(TAKEOVER) {
+                    Ok(_) => Ok(true),
+                    Err(RemoteError::Fenced) => Ok(false),
+                    Err(error) => Err(error.to_string()),
+                }),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(b_addr),
+            after_scan: None,
+        }),
+    );
+
+    // One orphaned apply under budget — the counted miss that proves
+    // a peer serves but no field owner does.
+    b.client.advance(1).unwrap();
+    c.client.advance(1).unwrap();
+    let report = c.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert!(
+        matches!(report.sync, Some(StandbySync::Orphaned { .. })),
+        "the ownerless line reports orphaned: {report:?}"
+    );
+    assert_eq!(
+        report.failover,
+        Some(FailoverEvidence {
+            converged: true,
+            misses: 1,
+            budget: 2,
+        })
+    );
+
+    // The budget-th orphaned pull fires the conditional claim — the
+    // live incumbent's refusal is the correct verdict at fire time —
+    // and the attempt journals, the durable record the reported build
+    // left only on stderr.
+    b.client.advance(1).unwrap();
+    c.client.advance(1).unwrap();
+    let report = c.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert_eq!(
+        report.failover,
+        Some(FailoverEvidence {
+            converged: true,
+            misses: 2,
+            budget: 2,
+        })
+    );
+    let journal = c.client.journal(0).unwrap();
+    let refusals: Vec<_> = journal
+        .iter()
+        .filter(|entry| matches!(entry.event, JournalEvent::PromotionRefused { .. }))
+        .collect();
+    assert_eq!(refusals.len(), 1, "the refused attempt must journal");
+    assert!(
+        matches!(
+            refusals[0].event,
+            JournalEvent::PromotionRefused {
+                error: SwitchError::FieldClaimFailed { .. },
+                misses: 2,
+            }
+        ),
+        "the journal names the claim refusal and the misses it fired at: {:?}",
+        refusals[0].event
+    );
+
+    // The stranded window: orphaned applies keep landing, the misses
+    // climb past the budget — but each apply re-proves the run, so
+    // the served proof stays live and the gate armed where the
+    // reported build served `converged: false` forever.
+    for _ in 0..3 {
+        b.client.advance(1).unwrap();
+        c.client.advance(1).unwrap();
+    }
+    let report = c.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert_eq!(
+        report.failover,
+        Some(FailoverEvidence {
+            converged: true,
+            misses: 5,
+            budget: 2,
+        }),
+        "the armed peer keeps serving a live proof past the budget: {report:?}"
+    );
+    assert_eq!(
+        c.client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .filter(|entry| matches!(entry.event, JournalEvent::PromotionRefused { .. }))
+            .count(),
+        1,
+        "a standing refusal cause journals once, not once per retried scan"
+    );
+
+    // The incumbent dies: its connection's end drops its hold, the
+    // claim standing dead-owned — the preemptable state the retry was
+    // kept armed for.
+    drop(incumbent);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let promoted = loop {
+        b.client.advance(1).unwrap();
+        c.client.advance(1).unwrap();
+        let report = c.client.role().unwrap();
+        if report.role == Role::Active {
+            break report;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the armed peer must promote once the claim frees: {report:?}"
+        );
+    };
+    assert_eq!(promoted.role, Role::Active);
+    assert_eq!(promoted.sync, None);
+
+    // The takeover journals the failover origin — the automatic
+    // recovery the stranded pair needed an operator's `POST /promote`
+    // for on the reported build.
+    assert_eq!(
+        role_changes(&c.client),
+        vec![
+            JournalEvent::RoleChanged {
+                from: Role::Standby,
+                to: Role::Promoting,
+                origin: Some(SwitchOrigin::Failover),
+                actor: None,
+            },
+            JournalEvent::RoleChanged {
+                from: Role::Promoting,
+                to: Role::Active,
+                origin: Some(SwitchOrigin::Failover),
+                actor: None,
+            },
+        ]
     );
 }
 
