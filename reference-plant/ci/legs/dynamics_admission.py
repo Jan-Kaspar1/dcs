@@ -91,7 +91,7 @@ import takeover
 # admission must surface the named diagnostic rather than passing an
 # unexercised contract.
 LEG = {
-    "order": 470,
+    "order": 480,
     "title": "the dynamics-admission refusal leg",
     "passes": "dynamics-admission-leg",
     "tampers": [
