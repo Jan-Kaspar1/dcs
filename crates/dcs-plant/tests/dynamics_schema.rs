@@ -61,35 +61,49 @@ fn recorded_release_dynamics_schema_matches_the_emitted_output() {
     // --dynamics-schema`'s output — `v0.1.0` and `v0.2.0`'s recorded
     // commits predate the dynamics-document schema emission (#870).
     // The same convention as the plant-model schema pin in
-    // `dcs-model`'s `tests/schema.rs`: the checked-in file must stay
-    // byte-identical to the emitted output, and while the tag is
-    // pending its sha256 must equal the digest
-    // `docs/releases/v0.3.0/record.md` publishes. Regenerate with
-    // `dcs-plant-server --dynamics-schema >
+    // `dcs-model`'s `tests/schema.rs`: a checked-in file must stay
+    // byte-identical to the emitted output, and `Some` asserts its
+    // sha256 equals the digest its record publishes while the tag is
+    // pending. Regenerate with `dcs-plant-server --dynamics-schema >
     // docs/releases/<tag>/dynamics.schema.json` whenever the emitted
     // schema legitimately changes — and update the record's published
-    // sha256 with it while the tag is pending.
+    // sha256 with it while the tag is pending. `v0.3.0`'s and
+    // `v0.4.0`'s tags are pending, so their artifacts and published
+    // sha256s are still pinned — identical, the emission having not
+    // moved since `v0.3.0`'s recorded commit.
     let output = run_dynamics_schema();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let path = "docs/releases/v0.3.0/dynamics.schema.json";
-    let recorded = std::fs::read(workspace_root().join(path)).unwrap_or_else(|error| {
-        panic!("the release record's dynamics schema file {path} must exist: {error}")
-    });
-    assert_eq!(
-        recorded, output.stdout,
-        "{path} drifted from `dcs-plant-server --dynamics-schema`'s emitted output — \
-         regenerate the record file"
-    );
-    assert_eq!(
-        sha256_hex(&recorded),
-        "98fb4a4298c5974b8ab0adf1374cd6d53b0c2cfbd2e24a31c874090235b46f02",
-        "{path}'s sha256 drifted from the digest its record publishes — \
-         regenerate the record file and update record.md"
-    );
+    for (path, recorded_sha256) in [
+        (
+            "docs/releases/v0.3.0/dynamics.schema.json",
+            Some("98fb4a4298c5974b8ab0adf1374cd6d53b0c2cfbd2e24a31c874090235b46f02"),
+        ),
+        (
+            "docs/releases/v0.4.0/dynamics.schema.json",
+            Some("98fb4a4298c5974b8ab0adf1374cd6d53b0c2cfbd2e24a31c874090235b46f02"),
+        ),
+    ] {
+        let recorded = std::fs::read(workspace_root().join(path)).unwrap_or_else(|error| {
+            panic!("the release record's dynamics schema file {path} must exist: {error}")
+        });
+        assert_eq!(
+            recorded, output.stdout,
+            "{path} drifted from `dcs-plant-server --dynamics-schema`'s emitted output — \
+             regenerate the record file"
+        );
+        if let Some(expected) = recorded_sha256 {
+            assert_eq!(
+                sha256_hex(&recorded),
+                expected,
+                "{path}'s sha256 drifted from the digest its record publishes — \
+                 regenerate the record file and update record.md"
+            );
+        }
+    }
 }
 
 #[test]
