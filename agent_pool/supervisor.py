@@ -439,6 +439,20 @@ Repair context: {repair}
             return False
         return True
 
+    def unmerged_paths(self, clone):
+        """Worktree paths still unmerged after a failed merge, or [].
+
+        ``conflict_paths`` only sees git's 'Merge conflict in' lines;
+        modify/delete, rename, and progress-hint output shapes name none,
+        so the worktree is the attribution source of last resort. A probe
+        failure loses only the repair's path detail, never the repair.
+        """
+        try:
+            out = self.runtime.run_git(clone, 'diff', '--name-only', '--diff-filter=U')
+        except Exception:
+            return []
+        return [line.strip() for line in str(out or '').splitlines() if line.strip()]
+
     def repair(self, job, issue, reason, cause, detail=None):
         if self.state.paused():
             return
@@ -579,11 +593,18 @@ Repair context: {repair}
             if not self.github.includes_main(pr['head']['sha'], base):
                 try:
                     self.runtime.run_git(clone, 'merge', '--no-edit', 'origin/main')
-                    self.runtime.run_git(clone, 'push', 'origin', job['branch'])
                 except subprocess.CalledProcessError as exc:
                     paths = conflict_paths(exc.stdout, exc.stderr)
+                    if not paths:
+                        paths = self.unmerged_paths(clone)
                     if not self.resolve_publish_merge(clone, paths, job):
-                        self.repair(job, by_number[job['issue']], 'Resolve the existing merge conflict with origin/main. ' + str(exc.stdout) + str(exc.stderr), 'merge-conflict', detail={'paths': paths} if paths else None)
+                        detail = {'paths': paths} if paths else {'paths': [], 'pathless': True}
+                        self.repair(job, by_number[job['issue']], 'Resolve the existing merge conflict with origin/main. ' + str(exc.stdout) + str(exc.stderr), 'merge-conflict', detail=detail)
+                    return
+                try:
+                    self.runtime.run_git(clone, 'push', 'origin', job['branch'])
+                except subprocess.CalledProcessError as exc:
+                    self.repair(job, by_number[job['issue']], 'git push failed after a clean merge with origin/main. ' + str(exc.stdout) + str(exc.stderr), 'publish-error')
                 return
             if self.github.checks_pass(pr, self.config['required_checks']):
                 if self.github.merge(job['pr'], self.config['required_checks']):
