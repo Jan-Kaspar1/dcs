@@ -94,7 +94,7 @@ import pair
 # the durable record stays silent must surface the named
 # diagnostic — never a silently unexercised contract.
 LEG = {
-    "order": 540,
+    "order": 550,
     "title": "the failover-refusal-journal leg",
     "passes": "refusal-journal-leg",
     "tampers": [

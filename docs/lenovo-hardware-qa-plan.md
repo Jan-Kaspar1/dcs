@@ -425,6 +425,40 @@ Implementation order: second, after [daily architecture review](daily-architectu
   pair never settles reports inconclusive; the pair leaves on its
   launch roles.
 
+### Landed 2026-09-27 (failover-refusal journal leg, #1146/#1158)
+
+- The fired-but-refused automatic-promotion durable-trail
+  contract — WW-FND-004's named-evidence journal clause and
+  WW-LCM-001's availability audit — is exercised on the deployed
+  rig by scenario leg `2280_failover_refusal_journal`: with the
+  launched pair settled, the leg promotes the armed standby over
+  the field (the incumbent's fencing-loss demotes it in place),
+  stops the launched owner's container, and demotes the armed peer
+  onto its configured — now dead — tracking source, so the
+  produced-nothing misses reach the declared budget with the
+  convergence proof already voided. The served role must read
+  standby through the climb and the hold past it, the durable
+  `--journal-file` and the served `/journal` tail must each hold
+  exactly one `promotion_refused` entry naming the `not_converged`
+  cause and the fired miss count — the row that distinguishes a
+  refused fire from a never-armed peer — and no ownership
+  transition may journal beside it. The pass's second half then
+  proves the refusal did not latch the gate closed: the restarted
+  owner re-claims the field and re-stands the peer's proof, the
+  owner is stopped again, and the armed-and-eligible fire at the
+  same budget must promote the peer — served role and journaled
+  transition — beside the still-single refusal row; a parked gate,
+  a fire below the named boundary, an unjournaled promotion, or a
+  relapsing second refusal row are each named contract misses.
+- Named diagnostics are `failover-refusal-journal-failed` and
+  `failover-refusal-journal-nondeterministic`, with the
+  self-check's `failover-refusal-journal-unchecked`; two passes
+  produce identical digests; a run carrying one endpoint, no
+  controller stop/start actions, no armed failover evidence, or no
+  standby journal file — or a pair that never settles its launch
+  layout — reports inconclusive; the pair leaves on its launch
+  roles.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,

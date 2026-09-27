@@ -137,6 +137,51 @@ class ScopedRecoveryTests(unittest.TestCase):
         self.assertEqual(sup.runtime.spawned[-1]['model'], 'swe-2-high')
         self.assertEqual(sup.admission.summary()['groups']['swe-2-high']['mode'], 'probing')
 
+    def test_quota_episode_rearms_after_group_quiet_window(self):
+        """A spent episode budget re-arms once its covering group is quiet."""
+        sup = self.sup
+        sup.admission.max_quota_requeues = 1
+        sup.dispatch(sup.github.items)
+        # job2 on swe dies to a rate limit and spends the 1-deep budget's
+        # only requeue; it re-dispatches onto the union group.
+        sup.reconcile_workers(sup.github.items)
+        self.assertEqual(sup.state.get('retry:2'), 'quota-requeue')
+        self.now[0] += 11
+        sup.retries(sup.github.items)
+        self.assertEqual(sup.state.job(2)['status'], 'working')
+        self.assertEqual(sup.runtime.spawned[-1]['model'], 'opencode/union-alpha')
+        # The migrated invocation dies to a rate limit too: the episode
+        # budget is spent while union's congestion episode is still live, so
+        # the park only holds — no flag armed, but a recorded quiet hold.
+        sup.reconcile_workers(sup.github.items)
+        self.assertEqual(sup.state.job(2)['status'], 'blocked')
+        self.assertFalse(sup.state.get('retry:2'))
+        rec = sup.state.get('recovery:2')
+        self.assertEqual(rec['quota_episode']['groups'], ['opencode/union-alpha'])
+        self.assertEqual(rec['quota_requeues'], 1)
+        # Neither elapsed time nor further passes re-arm while the group
+        # still reports its congestion lifecycle.
+        self.now[0] += 120
+        sup.retries(sup.github.items)
+        self.assertEqual(sup.state.job(2)['status'], 'blocked')
+        self.assertEqual(len(sup.runtime.spawned), 3)
+        # Once the group is back to normal and its window has stayed quiet
+        # for quiet_seconds, the hold re-arms with a fresh episode budget.
+        sup.admission.reset('opencode/union-alpha')
+        self.now[0] += 61
+        sup.retries(sup.github.items)
+        self.assertEqual(sup.state.job(2)['status'], 'working')
+        self.assertEqual(len(sup.runtime.spawned), 4)
+        rec = sup.state.get('recovery:2')
+        self.assertEqual(rec['quota_requeues'], 0)
+        self.assertEqual(rec['quota_requeue_resets'], 1)
+        self.assertFalse(rec.get('quota_episode'))
+        redispatches = [json.loads(e['payload']) for e in sup.state.events(2)
+                        if e['kind'] == 'redispatch']
+        self.assertEqual(redispatches[0]['cause'], 'quota-requeue')
+        self.assertEqual(redispatches[0]['delay'],
+                         {'source': 'quiet-window', 'seconds': 60})
+
     def test_auth_failure_blocks_group_until_operator_reset(self):
         sup = self.sup
         sup.dispatch(sup.github.items)
