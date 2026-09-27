@@ -1559,9 +1559,7 @@ impl<'d> Peer<'d> {
     /// stale and closes the window.
     pub fn failover_due(&self) -> bool {
         match self.failover {
-            Some(budget) if self.misses >= budget => {
-                self.misses == budget || self.converged
-            }
+            Some(budget) if self.misses >= budget => self.misses == budget || self.converged,
             _ => false,
         }
     }
@@ -2598,7 +2596,14 @@ impl<'d> Peer<'d> {
                 // Staged evidence belongs to the old alignment — the
                 // divergence check does not pair against a crossing.
                 self.staged = None;
-                self.converged = !self.failover.is_some_and(|budget| self.misses > budget);
+                // `Reinitialized` is the promotable verdict the crossing
+                // earns — the landed apply is fresh convergence
+                // evidence, so the proof re-stands exactly as the
+                // `Orphaned` apply's does in `apply`: an ownerless
+                // line's carries are not staleness, and only an
+                // evidence-free miss run past the budget voids it (see
+                // `note_transfer_failed`).
+                self.converged = true;
                 Ok(report)
             }
             Err(error) => {
@@ -6452,6 +6457,270 @@ mod tests {
                 actor: None,
             }]
         );
+    }
+
+    /// The QA finding `failover-refused-once-window-closed-forever`:
+    /// an armed peer orphaned on an ownerless line whose budget-th
+    /// self-promotion a live incumbent's standing claim correctly
+    /// refuses must keep the gate armed for the rest of the episode —
+    /// every landed orphaned apply re-proves convergence, so the
+    /// misses climbing past the budget keep `failover_due` live and
+    /// each due cycle retries the claim — and when the incumbent dies
+    /// and its claim stands dead-owned, a later due cycle's retry
+    /// preempts it and promotes. On the reported build the budget-th
+    /// miss was the only boundary: the next apply's `misses > budget`
+    /// voided the proof outright, the peer stranded `standby` beside
+    /// the dead-owned field until an operator's promote.
+    #[test]
+    fn a_refused_armed_failover_retries_until_the_claim_frees() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        // The incumbent's claim on the shared field: `true` while a
+        // live controller holds it — the conditional grant's refusal
+        // — `false` once it dies, the claim standing dead-owned.
+        let incumbent_alive = AtomicBool::new(true);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_failover(2)
+            .with_field_orphan_claim(|| Ok(!incumbent_alive.load(Ordering::Relaxed)));
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        let orphaned_pull = |source: &mut Executor<'_>| {
+            source.run(1);
+            let mut checkpoint = source.checkpoint();
+            checkpoint.source_owns_field = Some(false);
+            checkpoint
+        };
+
+        // The first orphaned apply: the counted miss under budget.
+        let checkpoint = orphaned_pull(&mut source);
+        assert_eq!(
+            peer.track_once(|| Ok(checkpoint)),
+            TrackReport::Applied(Transfer::Applied)
+        );
+        assert_eq!(peer.missed_transfers(), 1);
+        assert!(!peer.failover_due());
+
+        // The budget-th miss fires the conditional claim — the live
+        // incumbent's refusal is the correct verdict at fire time and
+        // journals the attempt.
+        let checkpoint = orphaned_pull(&mut source);
+        match peer.track_once(|| Ok(checkpoint)) {
+            TrackReport::PromotionRefused { error, .. } => {
+                assert!(matches!(error, SwitchError::FieldClaimFailed { .. }));
+            }
+            other => panic!("a live incumbent must refuse the failover, got {other:?}"),
+        }
+        let refusals = peer.take_promotion_refusals();
+        assert_eq!(refusals.len(), 1, "the refused attempt must journal");
+        assert_eq!(refusals[0].misses, 2);
+        assert!(matches!(
+            refusals[0].error,
+            SwitchError::FieldClaimFailed { .. }
+        ));
+        assert_eq!(peer.role(), Role::Standby);
+        assert!(!gate.is_open());
+
+        // The strand the repro hit: orphaned applies keep landing, the
+        // misses climb past the budget — but every apply re-proves the
+        // run, so the gate stays armed and each due cycle retries the
+        // still-held claim rather than voiding for the episode.
+        for expected_misses in 3..=5_u32 {
+            let checkpoint = orphaned_pull(&mut source);
+            match peer.track_once(|| Ok(checkpoint)) {
+                TrackReport::PromotionRefused { error, .. } => {
+                    assert!(matches!(error, SwitchError::FieldClaimFailed { .. }));
+                }
+                other => panic!("the armed gate must keep retrying, got {other:?}"),
+            }
+            assert_eq!(peer.missed_transfers(), expected_misses);
+            assert!(
+                peer.failover_due(),
+                "the gate must stay armed while applies re-prove it"
+            );
+        }
+        assert!(
+            peer.take_promotion_refusals().is_empty(),
+            "a standing refusal cause journals once, not once per retried cycle"
+        );
+        assert_eq!(
+            peer.report().failover,
+            Some(FailoverEvidence {
+                converged: true,
+                misses: 5,
+                budget: 2,
+            }),
+            "the served proof stays live past the budget the repro voided at"
+        );
+
+        // The incumbent dies — the claim stands dead-owned, which the
+        // conditional grant preempts: the next due cycle's retry is
+        // the automatic recovery the stranded pair needed an operator
+        // for.
+        incumbent_alive.store(false, Ordering::Relaxed);
+        let checkpoint = orphaned_pull(&mut source);
+        match peer.track_once(|| Ok(checkpoint)) {
+            TrackReport::Promoted { report, .. } => {
+                assert_eq!(report.role, Role::Promoting);
+            }
+            other => panic!("the freed claim must promote the peer, got {other:?}"),
+        }
+        assert!(gate.is_open());
+        peer.scan();
+        assert_eq!(peer.role(), Role::Active);
+        for change in peer.take_role_changes() {
+            assert_eq!(change.origin, SwitchOrigin::Failover);
+            assert_eq!(change.actor, None);
+        }
+    }
+
+    /// The dedup contract: a continuous refused streak queues one
+    /// [`PromotionRefusal`] per *distinct* cause — a retried scan
+    /// naming the same refusal queues nothing — and an outcome that
+    /// is not a refused self-promotion ends the streak, so the same
+    /// cause in a later episode journals fresh.
+    #[test]
+    fn a_refused_streak_journals_each_distinct_cause_once() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        // The claim's scripted answers across the episode: the live
+        // incumbent's refusal, then a transient ask — a distinct cause
+        // the streak journals separately — then, after a field-owning
+        // checkpoint ends the streak, the same incumbent refusal
+        // journaling as the new episode it is, and the grant.
+        let script: Mutex<Vec<Result<bool, String>>> = Mutex::new(vec![
+            Ok(false),
+            Err("plant unreachable".to_string()),
+            Ok(false),
+            Ok(true),
+        ]);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_failover(2)
+            .with_field_orphan_claim(|| {
+                let mut script = script.lock().unwrap();
+                if script.is_empty() {
+                    Ok(true)
+                } else {
+                    script.remove(0)
+                }
+            });
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        let pull = |source: &mut Executor<'_>, owns: bool| {
+            source.run(1);
+            let mut checkpoint = source.checkpoint();
+            checkpoint.source_owns_field = Some(owns);
+            checkpoint
+        };
+
+        // Miss one under budget, then the two distinct refusals.
+        let checkpoint = pull(&mut source, false);
+        peer.track_once(|| Ok(checkpoint));
+        let checkpoint = pull(&mut source, false);
+        assert!(matches!(
+            peer.track_once(|| Ok(checkpoint)),
+            TrackReport::PromotionRefused { .. }
+        ));
+        let checkpoint = pull(&mut source, false);
+        assert!(matches!(
+            peer.track_once(|| Ok(checkpoint)),
+            TrackReport::PromotionRefused { .. }
+        ));
+        let refusals = peer.take_promotion_refusals();
+        assert_eq!(refusals.len(), 2);
+        assert_eq!(refusals[0].misses, 2);
+        assert_eq!(refusals[1].misses, 3);
+        assert!(
+            refusals[0].error != refusals[1].error,
+            "each distinct refusal cause journals its own entry"
+        );
+
+        // A landed owner-serving checkpoint is a non-refusal outcome:
+        // the streak ends and the miss count resets.
+        let checkpoint = pull(&mut source, true);
+        assert_eq!(
+            peer.track_once(|| Ok(checkpoint)),
+            TrackReport::Applied(Transfer::Applied)
+        );
+        assert_eq!(peer.missed_transfers(), 0);
+
+        // The line going ownerless again re-arms the climb: the same
+        // incumbent refusal journals fresh — a new episode, not a
+        // dedup repeat — and the grant promotes.
+        let checkpoint = pull(&mut source, false);
+        peer.track_once(|| Ok(checkpoint));
+        let checkpoint = pull(&mut source, false);
+        assert!(matches!(
+            peer.track_once(|| Ok(checkpoint)),
+            TrackReport::PromotionRefused { .. }
+        ));
+        let refusals = peer.take_promotion_refusals();
+        assert_eq!(refusals.len(), 1, "the new episode journals fresh");
+        assert_eq!(refusals[0].misses, 2);
+
+        let checkpoint = pull(&mut source, false);
+        assert!(matches!(
+            peer.track_once(|| Ok(checkpoint)),
+            TrackReport::Promoted { .. }
+        ));
+        assert!(gate.is_open());
+    }
+
+    /// The staleness bound the armed retry keeps: a run of
+    /// evidence-free misses — pulls that produced no checkpoint at
+    /// all — past the budget still voids the convergence proof and
+    /// closes the gate. The void is only as permanent as the silence
+    /// producing it: the next landed apply — an `Orphaned` one on an
+    /// ownerless line included — re-proves the run and re-arms it.
+    #[test]
+    fn an_evidence_free_run_past_budget_closes_the_gate_until_an_apply_reproves() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_failover(2)
+            .with_field_orphan_claim(|| Ok(true));
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(3);
+        peer.apply(&source.checkpoint()).unwrap();
+
+        // Three produced-nothing pulls — the third carries the miss
+        // run past the budget and voids the proof: the window closes
+        // on staleness, the gate reporting rather than promoting.
+        peer.note_transfer_failed("a");
+        peer.note_transfer_failed("b");
+        peer.note_transfer_failed("c");
+        assert!(!peer.failover_due());
+        assert_eq!(
+            peer.report().failover,
+            Some(FailoverEvidence {
+                converged: false,
+                misses: 3,
+                budget: 2,
+            })
+        );
+        assert!(matches!(
+            peer.self_promote(),
+            Err(SwitchError::NotConverged {
+                sync: StandbySync::Degraded { .. }
+            })
+        ));
+
+        // The source returns ownerless: the landed orphaned apply is
+        // fresh evidence — the proof re-stands — and the armed gate
+        // fires at the same due cycle rather than staying stranded.
+        source.run(1);
+        let mut orphaned = source.checkpoint();
+        orphaned.source_owns_field = Some(false);
+        match peer.track_once(|| Ok(orphaned)) {
+            TrackReport::Promoted { report, .. } => {
+                assert_eq!(report.role, Role::Promoting);
+            }
+            other => panic!("the re-proved gate must fire, got {other:?}"),
+        }
+        assert!(gate.is_open());
     }
 
     /// The declared-command emitter the command/event redundancy tests
