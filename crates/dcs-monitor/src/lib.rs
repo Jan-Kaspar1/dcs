@@ -706,6 +706,21 @@ const MAX_ANNOUNCED: usize = 8;
 /// a bounded window.
 const ANNOUNCED_VERIFY_RETRY: Duration = Duration::from_secs(4);
 
+/// How many consecutive produced-nothing pulls a learned tracking pin
+/// — the orphan probe's `resolved` owner or the verified `adopted`
+/// source — absorbs before the pull path releases it: the
+/// wedge-escape slots outrank the configured source only while they
+/// answer, and a pin that stops answering must not become the wedge
+/// it was pinned to escape. At the bound the pin clears and
+/// [`Monitor::resolve_tracking_source`] re-probes inside the same
+/// cycle, so a live successor — a healthy configured source
+/// included — earns the pin back on the probe's own verification
+/// while a dead one drops the pulls onto the declared slot, which the
+/// tracking contract already retries without a bound. A produced
+/// checkpoint resets the run: the endpoint answered, so the pin
+/// stands.
+const PIN_MISS_BUDGET: u32 = 4;
+
 /// The worker count [`Monitor::serve`] dispatches the serving lane
 /// across — every request that cannot hold a worker on a client-paced
 /// wait and is neither a pair-liveness read nor a switchover action:
@@ -1019,8 +1034,11 @@ pub struct Monitor<'d> {
     /// until a keyed announced-only demotion verifies one; a
     /// configured
     /// source always outranks it, and the next announced-only demotion
-    /// re-proves and re-pins. Outside `shared`: request-path
-    /// bookkeeping like `announced`.
+    /// re-proves and re-pins. The pin carries the learned-source
+    /// liveness bound: [`PIN_MISS_BUDGET`] consecutive
+    /// produced-nothing pulls against it release it back to the
+    /// resolution paths a fresh probe can re-earn. Outside `shared`:
+    /// request-path bookkeeping like `announced`.
     adopted: Mutex<Option<SocketAddr>>,
     /// The tracking source the orphan-resolution probe verified — an
     /// endpoint that served this run's line *as its field owner* while
@@ -1034,9 +1052,29 @@ pub struct Monitor<'d> {
     /// owner instead of orphaned-tracking each other forever. `None`
     /// until a probe verifies one; cleared when the line reports an
     /// owner again — either the peer itself promoted, or a candidate
-    /// refused the line and `resolved` falls back to the softer slots.
-    /// Outside `shared`: request-path bookkeeping like `announced`.
+    /// refused the line and `resolved` falls back to the softer slots —
+    /// and released on [`PIN_MISS_BUDGET`] consecutive produced-nothing
+    /// pulls against it, the same re-resolution pass running then and
+    /// there so a live successor keeps the pin on its own proof while a
+    /// dead one cannot strand the peer. Outside `shared`: request-path
+    /// bookkeeping like `announced`.
     resolved: Mutex<Option<SocketAddr>>,
+    /// The tracking target the last resolved pull was aimed at — the
+    /// answer [`verified_tracking_source`](Self::verified_tracking_source)
+    /// returned most recently, recorded so a produced-nothing pull in
+    /// [`track_cycle`](Self::track_cycle) can attribute its miss to the
+    /// slot that named it: only a learned pin (`resolved`/`adopted`)
+    /// carries the [`PIN_MISS_BUDGET`] liveness bound; a configured
+    /// source is retried without one. Outside `shared`: pull-path
+    /// bookkeeping like `resolved`.
+    pulling: Mutex<Option<TrackTarget>>,
+    /// The consecutive produced-nothing pulls the current learned pin
+    /// has absorbed — [`PinMiss`], keyed by the pinned address so a
+    /// re-pin onto a different successor restarts the run, and `None`
+    /// after any produced checkpoint: the endpoint answered, so the
+    /// pin stands. Outside `shared`: pull-path bookkeeping like
+    /// `pulling`.
+    pin_misses: Mutex<Option<PinMiss>>,
     /// The owner address the last pulled checkpoint propagated — its
     /// `line_owner` stamp: the serving run's own address when it owns
     /// the field, the recorded owner's onward when it does not —
@@ -1096,6 +1134,18 @@ struct ClaimedVerify {
     monitor: SocketAddr,
     /// When the pass ran.
     at: Instant,
+}
+
+/// One learned tracking pin's liveness run — the pinned monitor
+/// endpoint and the consecutive produced-nothing pulls it has
+/// absorbed. Reaching [`PIN_MISS_BUDGET`] releases the pin: a pull
+/// aimed at a different address starts a fresh run, and any produced
+/// checkpoint clears it — the endpoint answered, so the pin stands.
+struct PinMiss {
+    /// The pinned endpoint the misses accrued against.
+    source: SocketAddr,
+    /// The consecutive produced-nothing pulls so far.
+    misses: u32,
 }
 
 impl<'d> Monitor<'d> {
@@ -1223,6 +1273,8 @@ impl<'d> Monitor<'d> {
             claimed_verify: Mutex::new(None),
             adopted: Mutex::new(None),
             resolved: Mutex::new(None),
+            pulling: Mutex::new(None),
+            pin_misses: Mutex::new(None),
             line_owner: Mutex::new(None),
             pair_key: None,
         })
@@ -1362,7 +1414,12 @@ impl<'d> Monitor<'d> {
     /// claims — the serving side cannot tell the puller's monitor
     /// port from any other same-IP port the connection claims — so no
     /// pull ever follows one until the demote verify's scrutiny
-    /// proves it and pins it into `adopted`.
+    /// proves it and pins it into `adopted`. The learned pins this
+    /// answers — `resolved` and `adopted` — hold their rank only
+    /// while they answer: [`PIN_MISS_BUDGET`] consecutive
+    /// produced-nothing pulls against one releases it back through
+    /// [`track_cycle`](Self::track_cycle), so a dead pin cannot
+    /// shadow a healthy configured slot forever.
     fn pull_source(&self) -> Option<TrackTarget> {
         self.resolved
             .lock()
@@ -1392,10 +1449,19 @@ impl<'d> Monitor<'d> {
     /// ([`adopt_claimed_source`](Self::adopt_claimed_source)): the
     /// monitor endpoint the field's standing claim declares, the
     /// only address the pair's arbitration itself can vouch for.
+    ///
+    /// The answer is also recorded as the pull the tracking cycle is
+    /// about to run — [`pulling`](Self::pulling) — so a
+    /// produced-nothing result attributes its miss to the slot that
+    /// named it and the learned pins' [`PIN_MISS_BUDGET`] liveness
+    /// bound can release a dead one.
     pub fn verified_tracking_source(&self) -> Option<TrackTarget> {
-        self.pull_source()
+        let source = self
+            .pull_source()
             .or_else(|| self.adopt_announced_source().map(TrackTarget::Addr))
-            .or_else(|| self.adopt_claimed_source().map(TrackTarget::Addr))
+            .or_else(|| self.adopt_claimed_source().map(TrackTarget::Addr));
+        *self.pulling.lock().unwrap() = source.clone();
+        source
     }
 
     /// The address the listener is bound to.
@@ -1964,6 +2030,19 @@ impl<'d> Monitor<'d> {
     /// the pulls onto it: a demoted peer pinned onto a sibling standby
     /// reconverges on the real owner instead of orphaned-tracking the
     /// island forever.
+    ///
+    /// A produced-nothing pull counts against the learned pin it
+    /// targeted — `resolved`/`adopted`, whichever
+    /// [`verified_tracking_source`](Self::verified_tracking_source)
+    /// named — and at [`PIN_MISS_BUDGET`] consecutive misses the pin
+    /// releases and the same re-resolution probe runs inside this
+    /// cycle ([`note_pull_missed`](Self::note_pull_missed)): a live
+    /// successor, a healthy configured source included, re-earns the
+    /// pulls on the probe's own verification while a dead pin drops
+    /// them back onto the declared slot instead of stranding the peer
+    /// on a dead endpoint the orphan path could never reach. A
+    /// produced checkpoint resets the run — the endpoint answered, so
+    /// the pin stands.
     pub fn track_cycle(&self, pull: impl FnOnce() -> Result<Checkpoint, String>) -> TrackReport {
         if self.shared.lock().unwrap().peer.owns_field() {
             return TrackReport::OwnsField;
@@ -1971,6 +2050,9 @@ impl<'d> Monitor<'d> {
         let pulled = pull();
         if let Ok(checkpoint) = &pulled {
             *self.line_owner.lock().unwrap() = checkpoint.line_owner;
+            *self.pin_misses.lock().unwrap() = None;
+        } else {
+            self.note_pull_missed();
         }
         let report = track_and_record(&mut self.shared.lock().unwrap(), &self.store, move || {
             pulled
@@ -1984,6 +2066,78 @@ impl<'d> Monitor<'d> {
             self.resolve_tracking_source();
         }
         report
+    }
+
+    /// Counts one produced-nothing pull against the learned pin the
+    /// pull was aimed at — the liveness bound the `resolved`/`adopted`
+    /// slots carry: they outrank the configured source by the
+    /// wedge-escape design, but only while they answer. The target the
+    /// last [`verified_tracking_source`](Self::verified_tracking_source)
+    /// recorded decides the attribution: a miss against the configured
+    /// slot counts nothing here — the declared source's own contract
+    /// already retries it without a bound — and a pull aimed at no
+    /// standing pin counts nothing either.
+    ///
+    /// At [`PIN_MISS_BUDGET`] consecutive misses the pin releases and
+    /// [`resolve_tracking_source`](Self::resolve_tracking_source) runs
+    /// inside the same cycle — the orphan probe is the only
+    /// re-resolution the tracking path owns, and with the pin dead it
+    /// is also the only pass that can tell a merely-unreachable line
+    /// from a moved one: a live successor — including the configured
+    /// source healthy again — earns `resolved` back on the probe's own
+    /// verification, so the pin keeps meaning "the proven endpoint",
+    /// while a dead one cannot strand the peer the way an unbounded
+    /// pin did. The released `adopted` slot falls through to the lazy
+    /// verification paths on the next cycle, which re-prove a
+    /// candidate rather than re-trusting the dead one. Runs outside
+    /// `shared` under the probe's own per-candidate bound.
+    fn note_pull_missed(&self) {
+        let pulled = self.pulling.lock().unwrap().clone();
+        let Some(TrackTarget::Addr(addr)) = pulled else {
+            return;
+        };
+        let pinned = *self.resolved.lock().unwrap() == Some(addr)
+            || *self.adopted.lock().unwrap() == Some(addr);
+        if !pinned {
+            // The miss was aimed at the configured slot — or at an
+            // announced-contract source the verify paths handed out,
+            // which carries its own bounded re-probe bookkeeping.
+            return;
+        }
+        let release = {
+            let mut run = self.pin_misses.lock().unwrap();
+            let misses = match &mut *run {
+                Some(run) if run.source == addr => {
+                    run.misses += 1;
+                    run.misses
+                }
+                _ => {
+                    *run = Some(PinMiss {
+                        source: addr,
+                        misses: 1,
+                    });
+                    1
+                }
+            };
+            if misses >= PIN_MISS_BUDGET {
+                *run = None;
+                true
+            } else {
+                false
+            }
+        };
+        if release {
+            // Every slot pinned to the dead address inherits the
+            // verdict — the miss run measured the endpoint, not the
+            // slot that named it.
+            if *self.resolved.lock().unwrap() == Some(addr) {
+                *self.resolved.lock().unwrap() = None;
+            }
+            if *self.adopted.lock().unwrap() == Some(addr) {
+                *self.adopted.lock().unwrap() = None;
+            }
+            self.resolve_tracking_source();
+        }
     }
 
     /// Whether the heartbeat's consecutive failed pulls have reached the
@@ -2870,10 +3024,14 @@ impl<'d> Monitor<'d> {
     /// pulls one checkpoint from the named owner and accepts it only
     /// when it verifiably serves this line *as its field owner* — on
     /// a keyed run, with the pull's `line_proof` — before re-targeting
-    /// the resolved slot; a candidate that cannot prove ownership
-    /// clears any prior resolution rather than pinning a guess.
-    /// Returns the tracking target after resolution, or `None` when
-    /// the line named no routable owner and nothing resolves.
+    /// the pulls through the `resolved` slot and journaling the
+    /// adoption exactly like the announced- and claimed-source pins:
+    /// the resolved slot outranks the configured source they and it
+    /// share, so the durable audit records where the orphaned peer
+    /// moved its pulls. A candidate that cannot prove ownership clears
+    /// any prior resolution rather than pinning a guess. Returns the
+    /// tracking target after resolution, or `None` when the line named
+    /// no routable owner and nothing resolves.
     pub fn resolve_tracking_source(&self) -> Option<SocketAddr> {
         let (own, claimed) = {
             let shared = self.shared.lock().unwrap();
@@ -2945,6 +3103,21 @@ impl<'d> Monitor<'d> {
                 Err(_) => continue,
             };
             if verify_owner_checkpoint(&pulled, &own).is_ok() && self.proven(&pulled, nonce) {
+                // Pin only while the peer still owns no field — a
+                // promotion landing mid-probe already answered where
+                // the pulls go — and journal the re-target exactly
+                // like the announced- and claimed-source adoptions:
+                // the resolved pin carries the same pull-target
+                // authority, outranking the configured tracking
+                // source, so the durable audit records where the
+                // orphaned peer moved its pulls.
+                let mut shared = self.shared.lock().unwrap();
+                if shared.peer.owns_field() {
+                    return None;
+                }
+                let Shared { peer, recorder, .. } = &mut *shared;
+                recorder.note_tracking_source(peer.tick(), candidate);
+                drop(shared);
                 *self.resolved.lock().unwrap() = Some(candidate);
                 return Some(candidate);
             }
