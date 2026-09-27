@@ -878,24 +878,28 @@ pub struct Driven<'d> {
 /// standby pulls checkpoints from: the `--standby`/`--peer`/`track`
 /// target a deployment names.
 ///
-/// A configured source is not necessarily an address. A peer name that
-/// does not resolve — the stopped container's name gone from DNS, the
-/// routine mid-failover condition a redundant pair exists for — stays a
-/// [`Name`](Self::Name): every pull the tracking path makes against it
-/// resolves the name fresh, and an unresolvable name produces the same
-/// failed pull an unreachable endpoint does — a counted tracking miss,
-/// never a startup failure. When the peer returns under the name the
-/// next pull resolves it and tracking resumes, so a member restarted
-/// mid-failover rejoins without reconfiguration.
+/// A configured source is a name, not an address: the deployment
+/// declares `host:port` and every pull the tracking path makes against
+/// it resolves the name fresh — the peer restarting onto a new address
+/// under the same name is the routine redundant-pair condition (a
+/// container recreate, a rescheduled pod), and only per-pull
+/// resolution follows it. A name that does not answer — the stopped
+/// container's name gone from DNS, the mid-failover condition the pair
+/// exists for — produces the same failed pull an unreachable endpoint
+/// does: a counted tracking miss, never a startup failure. When the
+/// name answers again the next pull resolves it and tracking resumes,
+/// so a member restarted mid-failover rejoins without reconfiguration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TrackTarget {
     /// A resolved monitor address — the shape every learned or proven
     /// source (a verified announced adoption, a probe-resolved owner,
-    /// the field-declared successor) takes.
+    /// the field-declared successor) takes, and the shape a caller
+    /// already holding a concrete address configures.
     Addr(SocketAddr),
-    /// A configured `host:port` that did not resolve when the source
-    /// was installed. Resolution is deferred to the pull itself; until
-    /// the name answers, the target is the same miss an unreachable
+    /// A configured `host:port`. Resolution is deferred to the pull
+    /// itself — each pull resolves the name anew, so an address move
+    /// under it is followed rather than pinned stale; while the name
+    /// does not answer, the target is the same miss an unreachable
     /// endpoint is.
     Name(String),
 }
@@ -972,11 +976,13 @@ pub struct Monitor<'d> {
     /// `POST /promote` runs one final pull against it before the gate
     /// lifts ([`Peer::final_sync`]), so a command the active admitted up
     /// to the promote request is carried into the promoted run. A
-    /// configured source that is still a [`TrackTarget::Name`] resolves
-    /// per pull: the peer's name being gone from DNS while it is down
-    /// is the routine redundancy condition, not a misconfiguration, so
-    /// the unresolved target degrades as the same pull misses an
-    /// unreachable endpoint produces until the name answers.
+    /// configured source is a [`TrackTarget::Name`] resolved per pull:
+    /// the peer's name being gone from DNS while it is down is the
+    /// routine redundancy condition, not a misconfiguration, and the
+    /// peer's address moving under the name — the routine recreate
+    /// condition — is followed by the same per-pull resolution, so the
+    /// target degrades as the same pull misses an unreachable endpoint
+    /// produces until the name answers where the peer now lives.
     standby_source: Option<TrackTarget>,
     /// The monitor address a tracking peer announced through its
     /// `GET /checkpoint?peer=` pulls — the follow-peer half of the
@@ -1296,7 +1302,12 @@ impl<'d> Monitor<'d> {
     /// Arms `POST /scan` with `driven` wiring and returns the monitor —
     /// see [`Driven`]. Meaningful only on an unpaced monitor: a paced
     /// one refuses `POST /scan`, so the wiring never runs. The `track`
-    /// address also becomes the promotion-boundary pull's source.
+    /// address also becomes the promotion-boundary pull's source. A
+    /// driven peer whose tracking source is declared by *name* — the
+    /// `host:port` a `--standby`/`--peer` argument carries — installs
+    /// it through [`with_standby_target`](Self::with_standby_target)
+    /// instead, so each pull resolves the name anew rather than
+    /// pinning the address it resolved to once.
     pub fn driven(mut self, driven: Driven<'d>) -> Self {
         self.standby_source = driven.track.map(TrackTarget::Addr);
         self.driven = driven;
@@ -1313,12 +1324,13 @@ impl<'d> Monitor<'d> {
     }
 
     /// As [`with_standby_source`](Self::with_standby_source) for a
-    /// configured target that may still be a [`TrackTarget::Name`]: a
-    /// peer whose configured address did not resolve at startup is the
-    /// routine mid-failover condition — a stopped member's name leaves
-    /// DNS — so the name stays the declared tracking source and every
-    /// pull re-resolves it, reporting as the same tracking misses an
-    /// unreachable endpoint produces until the name answers.
+    /// configured target declared as a [`TrackTarget::Name`] — the
+    /// shape a `host:port` argument takes: every pull re-resolves the
+    /// name, so the peer's address moving under it — the routine
+    /// recreate or reschedule condition — is followed without
+    /// reconfiguration, and a name that does not answer reports as the
+    /// same tracking misses an unreachable endpoint produces until the
+    /// peer returns under it.
     pub fn with_standby_target(mut self, target: TrackTarget) -> Self {
         self.standby_source = Some(target);
         self
