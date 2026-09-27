@@ -183,8 +183,11 @@ pub enum PlantRequest {
     /// [`ClaimWriterUnlessHeld`](Self::ClaimWriterUnlessHeld) can still
     /// tell the claim is ownerless — without ever becoming a live
     /// holder a different owner's conditional claim would read as a
-    /// live incumbent. Requests from builds predating the flag carry
-    /// none and bind as they always did.
+    /// live incumbent. For the same reason the probe also leaves a
+    /// yielded claim yielded: only a controller's bound re-join —
+    /// `rebind` landing this attachment in the holder set — ends the
+    /// hand-off and clears the mark. Requests from builds predating
+    /// the flag carry none and bind as they always did.
     ///
     /// `controller` carries the same marker [`ClaimWriter`]'s does: a
     /// claim this grant raises for a controller's token is recorded as
@@ -219,11 +222,18 @@ pub enum PlantRequest {
     /// [`ClaimWriterUnlessHeld`](Self::ClaimWriterUnlessHeld) still
     /// preempts it despite other attachments — a mutation tool's —
     /// holding the yielded token live, while a *live incumbent's*
-    /// unyielded claim keeps refusing it. A release from an attachment
-    /// holding nothing changes nothing either way: an empty holder set
-    /// is the dead-owner state the claim exists to fence, not a
-    /// hand-back. Requests from builds predating the flag carry none
-    /// and release fully, as they always did.
+    /// unyielded claim keeps refusing it. The yield mark ends where the
+    /// hand-off does: the same owner re-granting itself and re-joining
+    /// a live *controller* holder — a bound [`ClaimWriter`](
+    /// Self::ClaimWriter)/[`ClaimWriterUnlessHeld`](
+    /// Self::ClaimWriterUnlessHeld), or a controller's bound
+    /// [`EnsureWriter`](Self::EnsureWriter) — clears it, so a
+    /// re-incumbented owner is never left preemptable by every later
+    /// conditional claim. A release from an attachment holding nothing
+    /// changes nothing either way: an empty holder set is the
+    /// dead-owner state the claim exists to fence, not a hand-back.
+    /// Requests from builds predating the flag carry none and release
+    /// fully, as they always did.
     ReleaseWriter {
         /// Leave the claim standing, marked yielded, instead of
         /// releasing it when the holder set empties.
