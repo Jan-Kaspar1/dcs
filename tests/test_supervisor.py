@@ -495,6 +495,164 @@ class SupervisorTests(unittest.TestCase):
         s.retries(self.github.items)
         self.assertEqual(s.state.job(1)['status'],'blocked')
 
+    def spend_episode_once(self, s):
+        """Dispatch, spend the 1-deep episode budget, and re-dispatch."""
+        s.dispatch(self.github.items)
+        self.runtime.pool_root=Path(self.config['pool_root'])
+        self.kill_worker('Reached free model rate limit')
+        rec = self.recoverable()
+        s.admission.reset('swe-2-high')
+        rec['requeue']['not_before'] = time.time() - 1
+        s.state.set('recovery:1', rec)
+        s.retries(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'working')
+
+    def test_quota_episode_rearms_after_congestion_quiets(self):
+        s=self.supervisor
+        s.admission.max_quota_requeues = 1
+        self.spend_episode_once(s)
+        # The next quota death spends the episode budget; the covering
+        # group's live congestion episode holds a quiet window open instead
+        # of parking the issue forever.
+        self.kill_worker('Reached free model rate limit')
+        self.assertEqual(s.state.job(1)['status'],'blocked')
+        self.assertFalse(s.state.get('retry:1'))
+        rec = s.state.get('recovery:1')
+        self.assertEqual(rec['quota_episode']['groups'],['swe-2-high'])
+        self.assertEqual(rec['quota_requeues'],1)
+        log_text = (Path(self.config['state_root'])/'supervisor.log').read_text()
+        self.assertIn('holding for congestion quiet on swe-2-high',log_text)
+        # While the group still probes, the hold does not re-arm.
+        s.retries(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'blocked')
+        # Once the group reports a quiet window, the hold re-arms one retry
+        # with a fresh episode budget.
+        s.admission.reset('swe-2-high')
+        s.admission.quiet = 0
+        self.recoverable()
+        s.retries(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'working')
+        rec = s.state.get('recovery:1')
+        self.assertEqual(rec['quota_requeues'],0)
+        self.assertEqual(rec['quota_requeue_resets'],1)
+        self.assertFalse(rec.get('quota_episode'))
+        redispatches = [json.loads(e['payload']) for e in s.state.events(1)
+                        if e['kind'] == 'redispatch']
+        self.assertEqual(redispatches[0]['cause'],'quota-requeue')
+        self.assertEqual(redispatches[0]['delay'],
+                         {'source':'quiet-window','seconds':0})
+        self.assertEqual(redispatches[1]['delay']['source'],'default')
+        # The fresh episode budget re-arms normally on the next quota death.
+        self.kill_worker('Reached free model rate limit')
+        self.assertEqual(s.state.get('retry:1'),'quota-requeue')
+
+    def test_quota_episode_reset_bound_leaves_permanent_park(self):
+        s=self.supervisor
+        s.admission.max_quota_requeues = 1
+        s.admission.max_quota_requeue_resets = 1
+        s.admission.quiet = 0
+        self.spend_episode_once(s)
+        # The first spent episode quiets and re-arms through its one reset.
+        self.kill_worker('Reached free model rate limit')
+        s.admission.reset('swe-2-high')
+        self.recoverable()
+        s.retries(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'working')
+        # The fresh episode budget arms and spends once more; the next spent
+        # episode exceeds the reset bound: permanent park, exhaustion logged.
+        self.kill_worker('Reached free model rate limit')
+        self.assertEqual(s.state.get('retry:1'),'quota-requeue')
+        rec = self.recoverable()
+        s.admission.reset('swe-2-high')
+        rec['requeue']['not_before'] = time.time() - 1
+        s.state.set('recovery:1', rec)
+        s.retries(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'working')
+        self.kill_worker('Reached free model rate limit')
+        self.assertEqual(s.state.job(1)['status'],'blocked')
+        self.assertFalse(s.state.get('retry:1'))
+        log_text = (Path(self.config['state_root'])/'supervisor.log').read_text()
+        self.assertIn('quota requeue budget exhausted (1) after '
+                      '1 quiet-window resets',log_text)
+        s.admission.reset('swe-2-high')
+        self.recoverable()
+        s.retries(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'blocked')
+
+    def test_quota_exhaustion_without_live_episode_stays_parked(self):
+        s=self.supervisor
+        s.admission.max_quota_requeues = 1
+        self.spend_episode_once(s)
+        # An auth/credit stop on the covering group is not a congestion
+        # episode: no quiet window applies to the spent budget.
+        s.admission.finish('external', {'model':'swe-2-high'}, 'auth')
+        self.assertEqual(s.admission.summary()['groups']['swe-2-high']['mode'],
+                         'blocked')
+        self.kill_worker('Reached free model rate limit')
+        self.assertEqual(s.state.job(1)['status'],'blocked')
+        self.assertFalse(s.state.get('retry:1'))
+        rec = s.state.get('recovery:1')
+        self.assertFalse(rec.get('quota_episode'))
+        log_text = (Path(self.config['state_root'])/'supervisor.log').read_text()
+        self.assertIn('quota requeue budget exhausted (1); leaving blocked',
+                      log_text)
+        # The manual operator retry path still un-parks the job.
+        s.admission.reset('swe-2-high')
+        self.recoverable()
+        s.state.set('retry:1', True)
+        s.retries(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'working')
+
+    def test_quota_episode_state_survives_supervisor_restart(self):
+        s=self.supervisor
+        s.admission.max_quota_requeues = 1
+        s.dispatch(self.github.items)
+        self.runtime.pool_root=Path(self.config['pool_root'])
+        self.kill_worker('Reached free model rate limit')
+        # The armed retry flag and the requeue schedule are durable state.
+        restarted=Supervisor(self.config)
+        restarted.github=self.github
+        restarted.runtime=self.runtime
+        try:
+            self.assertEqual(restarted.state.get('retry:1'),'quota-requeue')
+            rec = restarted.state.get('recovery:1')
+            self.assertEqual(rec['requeue']['source'],'default')
+            self.assertEqual(rec['quota_requeues'],1)
+        finally:
+            restarted.state.close()
+        rec = self.recoverable()
+        s.admission.reset('swe-2-high')
+        rec['requeue']['not_before'] = time.time() - 1
+        s.state.set('recovery:1', rec)
+        s.retries(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'working')
+        # The spent-episode hold is durable too: a restarted supervisor sees
+        # the same pending quiet window and re-arms it once it quiets.
+        self.kill_worker('Reached free model rate limit')
+        rec = s.state.get('recovery:1')
+        self.assertEqual(rec['quota_episode']['groups'],['swe-2-high'])
+        restarted=Supervisor(self.config)
+        restarted.github=self.github
+        restarted.runtime=self.runtime
+        try:
+            rec = restarted.state.get('recovery:1')
+            self.assertEqual(rec['quota_episode']['groups'],['swe-2-high'])
+            self.assertEqual(rec['quota_requeues'],1)
+            self.assertEqual(rec['quota_requeue_resets'],0)
+            self.assertFalse(restarted.state.get('retry:1'))
+            restarted.admission.reset('swe-2-high')
+            restarted.admission.quiet = 0
+            rec.update(work=False, phase='captured')
+            restarted.state.set('recovery:1', rec)
+            restarted.retries(self.github.items)
+            self.assertEqual(restarted.state.job(1)['status'],'working')
+            redispatches = [json.loads(e['payload'])
+                            for e in restarted.state.events(1)
+                            if e['kind'] == 'redispatch']
+            self.assertEqual(redispatches[0]['delay']['source'],'quiet-window')
+        finally:
+            restarted.state.close()
+
     def test_non_quota_receipt_arms_no_delayed_retry(self):
         s=self.supervisor
         s.dispatch(self.github.items)
