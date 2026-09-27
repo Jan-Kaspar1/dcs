@@ -67,10 +67,10 @@ fn recorded_release_dynamics_schema_matches_the_emitted_output() {
     // pending. Regenerate with `dcs-plant-server --dynamics-schema >
     // docs/releases/<tag>/dynamics.schema.json` whenever the emitted
     // schema legitimately changes — and update the record's published
-    // sha256 with it while the tag is pending. `v0.3.0`'s and
-    // `v0.4.0`'s tags are pending, so their artifacts and published
-    // sha256s are still pinned — identical, the emission having not
-    // moved since `v0.3.0`'s recorded commit.
+    // sha256 with it while the tag is pending. `v0.3.0`'s, `v0.4.0`'s,
+    // and `v0.5.0`'s tags are pending, so their artifacts and
+    // published sha256s are still pinned — identical, the emission
+    // having not moved since `v0.3.0`'s recorded commit.
     let output = run_dynamics_schema();
     assert!(
         output.status.success(),
@@ -84,6 +84,10 @@ fn recorded_release_dynamics_schema_matches_the_emitted_output() {
         ),
         (
             "docs/releases/v0.4.0/dynamics.schema.json",
+            Some("98fb4a4298c5974b8ab0adf1374cd6d53b0c2cfbd2e24a31c874090235b46f02"),
+        ),
+        (
+            "docs/releases/v0.5.0/dynamics.schema.json",
             Some("98fb4a4298c5974b8ab0adf1374cd6d53b0c2cfbd2e24a31c874090235b46f02"),
         ),
     ] {
