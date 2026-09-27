@@ -27,6 +27,8 @@ spans, in page.html 1-based lines:
 - `refresh()`'s feed ordering, the ack pulse's held-true arming audit
   and its retried-until-receipted release loop, and the failed-poll
   stale mark — L1421–1572
+- `sourcePeerNote` — the status line's role-aware source label —
+  L4465–4481, and its refresh() call site — L1458–1461
 - `submitAck`'s press: the receipted write of true arming the release
   on an accepted/applied outcome — L3062–3073
 - `refreshTrends`' paged catch-up — the `?point=`-bounded pages under
@@ -161,6 +163,10 @@ PINS = [
     (1447, 'feed.history = null;'),
     (1448, 'feed.journal = null;'),
     (1449, 'notePublication(snapshot);'),
+    # The status line's source note — its role-aware label lives in
+    # sourcePeerNote (pinned at the end below): "active peer" only on
+    # the source's own settled-active report.
+    (1458, 'const peerNote = sourcePeerNote();'),
     # The ack pulse's release half: a snapshot serving a writable `ack`
     # input held true arms its release at this tick — the serving scan
     # already observed the level, so an acknowledge write that applied
@@ -311,6 +317,17 @@ PINS = [
     # The cadence both tickers share.
     (4245, 'setInterval(refreshOverview, POLL_MS);'),
     (4462, 'setInterval(refresh, POLL_MS);'),
+    # The status line's source note — the QA header finding: "active
+    # peer" only while the source's own latest role report says
+    # settled active; the failover-gap fallback names the serving peer
+    # with the role it reports, and an unreported role carries no
+    # claim.
+    (4473, 'function sourcePeerNote() {'),
+    (4474, 'if (peers.length < 2) return "";'),
+    (4476, 'const role = state.error === null && state.report !== null'),
+    (4478, 'if (role === "active") return " — active peer " + peers[source].name;'),
+    (4479, 'return " — serving peer " + peers[source].name +'),
+    (4480, '(role === null ? "" : " (" + role + ")");'),
 ]
 
 
@@ -564,6 +581,25 @@ class PageReplica:
             else ('serving' if i == self.source else 'reachable')
             for i in range(len(self.peers))
         ]
+
+    def source_peer_note(self):
+        # page.html:4465-4481 — the status line's source note:
+        # "active peer" only while the source's own latest role report
+        # says settled active; through the failover gap the
+        # selectSource fallback names the serving peer with the role
+        # it reports, and a peer whose role poll failed or never
+        # answered carries no role claim at all.
+        if len(self.peers) < 2:
+            return ''
+        state = self.peer_state[self.source]
+        role = (state['report'].get('role')
+                if state['error'] is None
+                and state['report'] is not None
+                else None)
+        if role == 'active':
+            return ' — active peer ' + self.peers[self.source]['name']
+        return (' — serving peer ' + self.peers[self.source]['name']
+                + ('' if role is None else ' (%s)' % role))
 
     # --- the receipted command path: page.html:841-858, 3813-3997 ---
 
@@ -1106,7 +1142,8 @@ class PageReplica:
             # starve them — the defect the paged read and the per-stream
             # notes fix.
             self.renders += ['alarms', 'protection', 'equipment']
-            self.status = 'tick %s — polled' % snapshot['tick']
+            self.status = 'tick %s%s — polled' % (
+                snapshot['tick'], self.source_peer_note())
         except PollError as error:
             if (self.feed['stale'] is None
                     and self.feed['publication'] is not None):
@@ -2436,6 +2473,98 @@ class PagedHistoryBackfill(unittest.TestCase):
                             for state in page.trends.values()))
         self.assertEqual(3, page.trends[1]['lastSeq'])
         self.assertTrue(page.feed_line['hidden'])
+
+
+class SourcePeerNoteRole(unittest.TestCase):
+    """monitor-header-names-nonactive-source-as-active-peer: through
+    the failover gap — the owner dead, the successor still standby —
+    the selectSource fallback holds the view on a reachable standby,
+    and the status line titled it "active peer" above its own standby
+    row and the no-active-peer fault. The note must name the serving
+    peer with the role its report actually carries."""
+
+    def rig(self):
+        transport = StubTransport()
+        return PageReplica(transport, peers=('', 'http://b'),
+                           points=(1,)), transport
+
+    @staticmethod
+    def script_poll(transport, tick, published):
+        transport.script('/schema', [Response({})])
+        transport.script('/resources', [Response({})])
+        transport.script('/snapshot', [Response(snapshot(tick, published))])
+        transport.script('/history', [Response([])])
+        transport.script('/journal', [Response([])])
+
+    def test_both_standby_names_the_serving_peer_not_active(self):
+        # The reproduction's staged pair: the owner stopped and the
+        # successor still standby — both role answers report standby,
+        # the fallback holds the view on the first reachable peer,
+        # and the defect's header named it "active peer" above its
+        # own standby row.
+        page, transport = self.rig()
+        transport.script('/role', [
+            Response({'role': 'standby', 'tick': 1, 'sync': None}),
+            Response({'role': 'standby', 'tick': 1, 'sync': None}),
+            Response({'role': 'standby', 'tick': 2, 'sync': None}),
+            Response({'role': 'active', 'tick': 2, 'sync': None}),
+        ])
+        transport.script('/schema', [Response({})] * 2)
+        transport.script('/resources', [Response({})] * 2)
+        transport.script('/snapshot', [Response(snapshot(1, 1)),
+                                       Response(snapshot(2, 2))])
+        transport.script('/history', [Response([])] * 2)
+        transport.script('/journal', [Response([])] * 2)
+
+        page.refresh()
+        self.assertNotIn('active peer', page.status,
+                         'the header named a standby peer "active": %r'
+                         % page.status)
+        self.assertIn('serving peer origin (standby)', page.status)
+        self.assertEqual('serving', page.peer_rows[0])
+
+        # The self-correction the evidence recorded: once the
+        # successor settles active the note names it active again.
+        page.refresh()
+        self.assertEqual(1, page.source)
+        self.assertIn('active peer http://b', page.status)
+
+    def test_unreachable_owner_and_standby_source_names_the_role(self):
+        # The evidence's exact shape: a's listener dead, b reporting
+        # standby and still serving the view — the header named the
+        # standby "active peer" while its own row reported standby.
+        page, transport = self.rig()
+        transport.script('/role', [
+            HANG,
+            Response({'role': 'standby', 'tick': 1, 'sync': None}),
+        ])
+        self.script_poll(transport, 1, 1)
+
+        page.refresh()
+        self.assertEqual(1, page.source)
+        self.assertNotIn('active peer', page.status,
+                         'the header named a standby peer "active": %r'
+                         % page.status)
+        self.assertIn('serving peer http://b (standby)', page.status)
+        self.assertEqual('unreachable', page.peer_rows[0])
+        self.assertEqual('serving', page.peer_rows[1])
+
+    def test_promoting_source_names_its_transition_role(self):
+        # The mid-transition half of the same window: the successor
+        # owns the field and reports "promoting" — the source legit —
+        # but settled-active it is not; the note names the transition
+        # role rather than calling it active.
+        page, transport = self.rig()
+        transport.script('/role', [
+            HANG,
+            Response({'role': 'promoting', 'tick': 1, 'sync': None}),
+        ])
+        self.script_poll(transport, 1, 1)
+
+        page.refresh()
+        self.assertEqual(1, page.source)
+        self.assertNotIn('active peer', page.status)
+        self.assertIn('serving peer http://b (promoting)', page.status)
 
 
 if __name__ == '__main__':

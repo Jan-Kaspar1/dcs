@@ -1455,7 +1455,7 @@ async function refresh() {
     for (const entry of (resources && resources.components) || []) {
       resourcesByName.set(entry.name, entry);
     }
-    const peerNote = peers.length > 1 ? " — active peer " + peers[source].name : "";
+    const peerNote = sourcePeerNote();
     document.getElementById("status").textContent =
       "tick " + snapshot.tick + peerNote + " — polled " +
       new Date().toLocaleTimeString();
@@ -4460,6 +4460,24 @@ async function init() {
   });
   refresh();
   setInterval(refresh, POLL_MS);
+}
+
+// The status line's source note: "active peer" only while the
+// source's own latest role report says settled active — the same
+// report its pair-table row draws. Through the failover gap the
+// selectSource fallback holds the view on a peer reporting standby or
+// promoting, and titling it "active" contradicts that row and the
+// no-active-peer fault standing beside it, so the note names the
+// serving peer with the role it reports. A peer whose role poll
+// failed or never answered carries no role claim at all.
+function sourcePeerNote() {
+  if (peers.length < 2) return "";
+  const state = peerState[source];
+  const role = state.error === null && state.report !== null
+    ? state.report.role : null;
+  if (role === "active") return " — active peer " + peers[source].name;
+  return " — serving peer " + peers[source].name +
+    (role === null ? "" : " (" + role + ")");
 }
 
 init().catch(error => {
