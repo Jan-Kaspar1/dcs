@@ -115,7 +115,7 @@ import stranded_rejoin
 # the honest verdict — must surface the named diagnostic rather
 # than pass an unexercised retry contract.
 LEG = {
-    "order": 540,
+    "order": 560,
     "title": "the failover refuse-retry leg",
     "passes": "failover-retry-leg",
     "failed": "failover-retry-failed",

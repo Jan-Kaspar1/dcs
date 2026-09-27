@@ -41,15 +41,28 @@ RUNS_AFTER = frozenset({'scenario_failover_proof_report'})
 # promotion_refused rows on both journal surfaces, requires the row
 # to name not_converged and the fired miss count, and requires the
 # durable trail free of ownership transitions through the window.
-# The launched owner's restart re-claims the released field and the
-# launch layout restores for the cases behind. Named diagnostics
+#
+# The refusal is only half the contract the journal owes: a gate
+# whose refused attempt latched it closed would read the same
+# silence as a healthy one in this window. So the pass's second
+# half re-stands the proof the refusal voided — the launched
+# owner's restart re-claims the released field, the peer's pulls
+# re-converge it — then silences the owner again: this dead source
+# is an eligible fire, the budget-th miss arriving while the
+# convergence proof still stands, and the armed gate must lift the
+# peer into the promotion its durable trail carries beside the one
+# refusal row. A second promotion_refused where the standing proof
+# makes the fire a promotion is a relapse the bounded record does
+# not allow; a parked gate is the availability miss the whole
+# clause exists to name. The documented demote-then-start order
+# restores the launch layout for the cases behind. Named diagnostics
 # failover-refusal-journal-failed for a contract miss —
 # failover-refusal-journal-nondeterministic when two passes disagree
 # or the rig answers with instability instead of a verdict: a
 # starved watch, misses that never reach the budget, a dropped
-# served-journal read, a refused staging call — and
-# failover-refusal-journal-unchecked when the self-check's planted
-# negatives slip the leg's own audits.
+# served-journal read, a refused staging call, a proof that never
+# re-stands — and failover-refusal-journal-unchecked when the
+# self-check's planted negatives slip the leg's own audits.
 
 REFUSAL_SETTLE = 45    # bound on each switch/demote/restore settle
 REFUSAL_WINDOW = 60    # bound on the voided-gate climb — the declared
@@ -80,6 +93,17 @@ def _armed_row(ctx, name):
             'converged': failover.get('converged'),
             'misses': failover.get('misses'),
             'budget': failover.get('budget')}
+
+
+def _eligible_row(ctx):
+    """The armed peer's watch row while its convergence proof
+    stands — the promotable posture the eligible-fire window is
+    staged on. None while the peer has not re-stood it."""
+    row = _armed_row(ctx, 'standby')
+    if row is None or row.get('role') != 'standby' \
+            or row.get('converged') is not True:
+        return None
+    return row
 
 
 def _refused_rows(ctx, name, floor):
@@ -133,10 +157,13 @@ def _judge_window(record, note):
     durable-trace contract clauses — the voided gate that must stay
     parked, the one promotion_refused entry the window owes on both
     surfaces, the named cause and fired count it carries, the absent
-    role transition, the restored launch roles — and DIAG_NONDET
+    role transition, the armed-and-eligible fire that must still
+    promote — journaled, on the named boundary, beside no second
+    refusal row — the restored launch roles — and DIAG_NONDET
     tags the instability the contract does not answer for: a starved
     watch, misses that never reach the declared budget, a dropped
-    served-journal read, a refused staging call. An aborted stage
+    served-journal read, a refused staging call, a proof that never
+    re-stands. An aborted stage
     ends the audit where the pass ended — the later keys it never
     wrote are not clauses."""
     def failed(key, detail):
@@ -233,6 +260,70 @@ def _judge_window(record, note):
                'refused self-promotion queues no role transition, '
                'so a promotion row here is a move the gate never '
                'legitimately made')
+    if 'reconverged' in record:
+        if not record['reconverged']:
+            nondet('reconverged', 'the restarted owner never '
+                   're-stood the armed peer\'s convergence proof '
+                   '— the eligible-fire window the leg audits '
+                   'second never opened')
+        else:
+            fire_rows = record.get('fire_window')
+            if not fire_rows:
+                nondet('fire-watch', 'the eligible-fire watch '
+                       'collected no served rows — the audit '
+                       'had nothing to read')
+            else:
+                fired = next(
+                    (row for row in fire_rows
+                     if row.get('role') != 'standby'), None)
+                peak = max(
+                    (row.get('misses') for row in fire_rows
+                     if isinstance(row.get('misses'), int)
+                     and not isinstance(row.get('misses'), bool)),
+                    default=None)
+                if fired is None \
+                        and (peak is None or peak < budget):
+                    nondet('fire-boundary', 'the eligible '
+                           'window\'s misses peaked at '
+                           + json.dumps(peak) + ' below the '
+                           'declared budget ' + str(budget)
+                           + ' — the second fire never came due')
+                else:
+                    fmisses = (fired or {}).get('misses')
+                    if isinstance(fmisses, int) \
+                            and not isinstance(fmisses, bool) \
+                            and fmisses < budget:
+                        failed('fire-early', 'the eligible gate '
+                               'fired at misses=' + str(fmisses)
+                               + ' below the declared budget '
+                               + str(budget) + ' — the boundary '
+                               'the refusal row named is not the '
+                               'one the promotion fired on')
+                    if not record.get('fire_promoted'):
+                        failed('fire-parked', 'the armed peer\'s '
+                               'misses reached the budget with '
+                               'the convergence proof standing '
+                               'and the gate never lifted — the '
+                               'later armed-and-eligible fire '
+                               'the refused attempt must not '
+                               'preclude never promoted: '
+                               + json.dumps(fire_rows[-1])[:200])
+                    elif 'fire_walks' in record \
+                            and not record['fire_walks']:
+                        failed('fire-unwalked', 'the eligible '
+                               'promotion journaled no ownership '
+                               'transition — the durable trail '
+                               'that names the refusal owes the '
+                               'later takeover its row')
+            final = record.get('final_refusals')
+            if final is not None and len(final) != 1:
+                failed('refusal-relapse', 'the durable trail '
+                       'holds ' + json.dumps(len(final))
+                       + ' promotion_refused entries after the '
+                       'eligible window — the bounded record the '
+                       'refused fire owes grew a second row '
+                       'where the standing proof makes the fire '
+                       'a promotion')
     if not record.get('restored'):
         failed('restored', 'the pair never settled back to its '
                'launch layout — the launched owner active, the '
@@ -254,7 +345,13 @@ def _refusal_digest(violations):
         'gate': 'parked' if clean('promoted', 'role-walk')
             else 'moved',
         'row': 'one-named'
-            if clean('refusal-row', 'served') else 'absent',
+            if clean('refusal-row', 'served', 'refusal-relapse')
+            else 'absent',
+        'proof': 're-stood' if clean('reconverged') else 'lapsed',
+        'fire': 'promoted'
+            if clean('fire-watch', 'fire-boundary', 'fire-early',
+                     'fire-parked', 'fire-unwalked')
+            else 'unproven',
         'roles': 'restored' if clean('restored') else 'unrestored'}
 
 
@@ -275,6 +372,13 @@ def _refusal_self_check():
             return [{'role': 'standby', 'converged': False,
                      'misses': m, 'budget': 120}
                     for m in (60, 90, 119, 120, 124, 130)]
+        def fire_rows():
+            rows = [{'role': 'standby', 'converged': True,
+                     'misses': m, 'budget': 120}
+                    for m in (60, 90, 119)]
+            rows.append({'role': 'promoting', 'converged': True,
+                         'misses': 120, 'budget': 120})
+            return rows
         refusal = {'error': {'not_converged': {
                        'sync': {'degraded': {
                            'detail': 'pull refused'}}}},
@@ -290,6 +394,13 @@ def _refusal_self_check():
                 'durable_refusals': [refusal],
                 'served_refusals': [dict(refusal)],
                 'role_walks': [],
+                'reconverged': True,
+                'fire_window': fire_rows(),
+                'fire_promoted': True,
+                'fire_walks': [
+                    {'from': 'standby', 'to': 'promoting'},
+                    {'from': 'promoting', 'to': 'active'}],
+                'final_refusals': [dict(refusal)],
                 'restored': True}
 
     def expect(name, mutate, diagnostic=DIAG_FAILED):
@@ -331,6 +442,26 @@ def _refusal_self_check():
     expect('role-walked', lambda record:
            record.update({'role_walks': [
                {'from': 'standby', 'to': 'promoting'}]}))
+    # The armed-and-eligible fire that stays parked on a standing
+    # proof is the availability miss the second half pins.
+    expect('fire-parked', lambda record: (
+        [row.update({'role': 'standby'})
+         for row in record['fire_window']],
+        record.update({'fire_promoted': None})))
+    # A promotion the served role reports but the durable trail
+    # never carries is the same silence the finding named, one
+    # window later.
+    expect('fire-unwalked', lambda record:
+           record.update({'fire_walks': []}))
+    # A second refusal row where the standing proof makes the fire
+    # a promotion breaks the bounded record.
+    expect('refusal-relapse', lambda record:
+           record.update({'final_refusals':
+                          record['final_refusals'] * 2}))
+    # A gate that fires below the named boundary mis-attributes the
+    # contract both halves share.
+    expect('fire-early', lambda record:
+           record['fire_window'][3].update({'misses': 40}))
     # The instability the contract does not answer for must report
     # nondeterministic, not failed: a starved watch, misses that
     # never reach the budget, a dropped served read, refused
@@ -351,6 +482,16 @@ def _refusal_self_check():
                                       'body': 'not_converged'},
                           'owns': None}),
            DIAG_NONDET)
+    # The second half's instability: the proof that never re-stands,
+    # the starved eligible watch, the climb that stalls below the
+    # boundary.
+    expect('reconverge-lost', lambda record:
+           record.update({'reconverged': None}), DIAG_NONDET)
+    expect('fire-watch-starved', lambda record:
+           record.update({'fire_window': []}), DIAG_NONDET)
+    expect('fire-boundary-stalled', lambda record: [
+        row.update({'role': 'standby', 'misses': 40})
+        for row in record['fire_window']], DIAG_NONDET)
     return slipped
 
 
@@ -358,12 +499,16 @@ def _refusal_pass(ctx, number):
     """One voided-gate pass: promote the armed peer over the field,
     stop the launched owner, demote the armed peer onto its dead
     configured source, watch the produced-nothing misses climb to
-    the declared budget and hold past the boundary, then audit the
+    the declared budget and hold past the boundary, and audit the
     durable and served promotion_refused rows and the absent role
-    walk before restarting the stopped peer and restoring the
-    launch layout. Returns (record, evidence): the record is what
-    the judge replays; an aborted stage simply leaves its later
-    keys absent for the judge to name."""
+    walk. Then the eligible-fire half: restart the owner so the
+    peer's pulls re-stand the convergence proof, stop it again so
+    the budget-th miss arrives with the proof standing, and audit
+    the promotion the armed gate owes — served role and journaled
+    transition — beside the still-bounded refusal row, before the
+    launch layout restores. Returns (record, evidence): the record
+    is what the judge replays; an aborted stage simply leaves its
+    later keys absent for the judge to name."""
     record = {}
     evidence = {'pass': number}
 
@@ -393,10 +538,8 @@ def _refusal_pass(ctx, number):
     if promoted is None or not record.get('owns'):
         return record, evidence
 
-    stopped = False
     try:
         ctx['stop_controller']('active')
-        stopped = True
 
         # Void the proof under the armed gate: the demote lands the
         # peer back on its configured tracking source — the stopped
@@ -448,21 +591,56 @@ def _refusal_pass(ctx, number):
             ctx, 'standby', gate_served)
         record['role_walks'] = _role_walks(
             ctx, 'standby', gate_floor)
-    finally:
-        if stopped:
-            try:
-                ctx['start_controller']('active')
-            except Exception:
-                pass
 
-    # The launched owner's restart boots an active-role peer whose
-    # startup claim re-takes the released field; the armed peer's
-    # next landed apply re-proves its convergence back to tracking.
-    record['restored'] = wait_for(
-        lambda: (_pair_active(ctx) == 'active' or None)
-        and _tracking_standby(ctx, 'standby'),
-        time.monotonic() + REFUSAL_SETTLE * 2,
-        interval=REFUSAL_POLL)
+        # The armed-and-eligible fire the refused attempt must not
+        # preclude: the owner's restart re-claims the released field
+        # and the peer's pulls re-stand the convergence proof, so
+        # the owner's second silence is a dead field owner with the
+        # proof standing — the budget-th miss from here fires the
+        # gate into the promotion the durable trail must carry
+        # beside the one refusal row.
+        ctx['start_controller']('active')
+        record['reconverged'] = wait_for(
+            lambda: (_pair_active(ctx) == 'active' or None)
+            and _eligible_row(ctx),
+            time.monotonic() + REFUSAL_SETTLE * 2,
+            interval=REFUSAL_POLL)
+        if not record['reconverged']:
+            return record, evidence
+
+        fire_floor = len(_journal_entries(
+            ctx['journal_files']['standby']))
+        ctx['stop_controller']('active')
+        fire = []
+        deadline = time.monotonic() + REFUSAL_WINDOW
+        while time.monotonic() < deadline:
+            row = _armed_row(ctx, 'standby')
+            if row is not None:
+                fire.append(row)
+                if row.get('role') != 'standby':
+                    break
+            time.sleep(REFUSAL_POLL)
+        record['fire_window'] = fire
+        record['fire_promoted'] = wait_for(
+            lambda: (_try_role(ctx, ctx['standby']) or {})
+                    .get('role') == 'active' or None,
+            time.monotonic() + REFUSAL_SETTLE,
+            interval=REFUSAL_POLL)
+        record['fire_walks'] = _role_walks(
+            ctx, 'standby', fire_floor)
+        record['final_refusals'] = _refused_rows(
+            ctx, 'standby', gate_floor)
+    finally:
+        # The launched owner is stopped and the armed peer may own
+        # the field — the documented demote-then-start order frees
+        # the claim before the owner's container comes back; the
+        # launch-layout verdict is audited wherever the pass ended.
+        _restore_refusal_layout(ctx)
+        record['restored'] = wait_for(
+            lambda: (_pair_active(ctx) == 'active' or None)
+            and _tracking_standby(ctx, 'standby'),
+            time.monotonic() + REFUSAL_SETTLE * 2,
+            interval=REFUSAL_POLL)
     return record, evidence
 
 
@@ -521,7 +699,10 @@ def scenario_failover_refusal_journal(ctx):
     and the refused attempt must journal exactly one
     promotion_refused naming the not_converged cause and the fired
     miss count on both the durable file and the served tail, beside
-    no role transition, the pair restored to its launch layout."""
+    no role transition; then the owner restarts to re-stand the
+    proof and dies again, so a later armed-and-eligible fire must
+    still promote — journaled, on the named boundary — the pair
+    restored to its launch layout."""
     case = Case(
         'failover-refusal-journal',
         'A fired-but-refused failover journals its named refusal',
@@ -536,8 +717,13 @@ def scenario_failover_refusal_journal(ctx):
         '/journal tail must each hold exactly one '
         'promotion_refused entry naming the not_converged cause '
         'and the fired miss count, no ownership transition may '
-        'journal beside it, the restarted owner re-claims the '
-        'released field, and two passes produce identical digests')
+        'journal beside it; the restarted owner then re-claims '
+        'the field and re-stands the peer\'s proof, the owner '
+        'dies again, and the armed-and-eligible fire at the '
+        'budget must promote the peer — served and journaled — '
+        'beside the still-single refusal row, the pair restored '
+        'to its launch layout, and two passes produce identical '
+        'digests')
     try:
         if ctx.get('active') is None or ctx.get('standby') is None:
             return case.finish('inconclusive', 'the run context '
