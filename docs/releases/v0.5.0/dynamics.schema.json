@@ -1,0 +1,297 @@
+{
+  "$defs": {
+    "bool-flow": {
+      "additionalProperties": false,
+      "properties": {
+        "initial": {
+          "$ref": "#/$defs/number"
+        },
+        "input": {
+          "$ref": "#/$defs/id"
+        },
+        "off_rate": {
+          "$ref": "#/$defs/number"
+        },
+        "on_rate": {
+          "$ref": "#/$defs/number"
+        },
+        "output": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "input",
+        "output",
+        "on_rate",
+        "off_rate",
+        "initial"
+      ],
+      "type": "object"
+    },
+    "dead-time": {
+      "additionalProperties": false,
+      "properties": {
+        "delay": {
+          "$ref": "#/$defs/positive"
+        },
+        "initial": {
+          "$ref": "#/$defs/number"
+        },
+        "input": {
+          "$ref": "#/$defs/id"
+        },
+        "output": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "input",
+        "output",
+        "delay",
+        "initial"
+      ],
+      "type": "object"
+    },
+    "element": {
+      "additionalProperties": false,
+      "maxProperties": 1,
+      "minProperties": 1,
+      "properties": {
+        "bool_flow": {
+          "$ref": "#/$defs/bool-flow"
+        },
+        "dead_time": {
+          "$ref": "#/$defs/dead-time"
+        },
+        "first_order_lag": {
+          "$ref": "#/$defs/first-order-lag"
+        },
+        "flow_sum": {
+          "$ref": "#/$defs/flow-sum"
+        },
+        "integrator": {
+          "$ref": "#/$defs/integrator"
+        },
+        "noise": {
+          "$ref": "#/$defs/noise"
+        },
+        "scaled_flow": {
+          "$ref": "#/$defs/scaled-flow"
+        },
+        "second_order_lag": {
+          "$ref": "#/$defs/second-order-lag"
+        },
+        "threshold": {
+          "$ref": "#/$defs/threshold"
+        }
+      },
+      "type": "object"
+    },
+    "first-order-lag": {
+      "additionalProperties": false,
+      "properties": {
+        "initial": {
+          "$ref": "#/$defs/number"
+        },
+        "input": {
+          "$ref": "#/$defs/id"
+        },
+        "output": {
+          "$ref": "#/$defs/id"
+        },
+        "time_constant": {
+          "$ref": "#/$defs/positive"
+        }
+      },
+      "required": [
+        "input",
+        "output",
+        "time_constant",
+        "initial"
+      ],
+      "type": "object"
+    },
+    "flow-sum": {
+      "additionalProperties": false,
+      "properties": {
+        "bias": {
+          "$ref": "#/$defs/number"
+        },
+        "initial": {
+          "$ref": "#/$defs/number"
+        },
+        "inputs": {
+          "items": {
+            "$ref": "#/$defs/id"
+          },
+          "type": "array"
+        },
+        "output": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "inputs",
+        "output",
+        "initial"
+      ],
+      "type": "object"
+    },
+    "id": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "integrator": {
+      "additionalProperties": false,
+      "properties": {
+        "initial": {
+          "$ref": "#/$defs/number"
+        },
+        "input": {
+          "$ref": "#/$defs/id"
+        },
+        "output": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "input",
+        "output",
+        "initial"
+      ],
+      "type": "object"
+    },
+    "noise": {
+      "additionalProperties": false,
+      "properties": {
+        "amplitude": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "initial": {
+          "$ref": "#/$defs/number"
+        },
+        "input": {
+          "$ref": "#/$defs/id"
+        },
+        "output": {
+          "$ref": "#/$defs/id"
+        },
+        "seed": {
+          "$ref": "#/$defs/seed"
+        }
+      },
+      "required": [
+        "input",
+        "output",
+        "amplitude",
+        "seed",
+        "initial"
+      ],
+      "type": "object"
+    },
+    "nonnegative": {
+      "minimum": 0,
+      "type": "number"
+    },
+    "number": {
+      "type": "number"
+    },
+    "positive": {
+      "exclusiveMinimum": 0,
+      "type": "number"
+    },
+    "scaled-flow": {
+      "additionalProperties": false,
+      "properties": {
+        "gain": {
+          "$ref": "#/$defs/number"
+        },
+        "initial": {
+          "$ref": "#/$defs/number"
+        },
+        "input": {
+          "$ref": "#/$defs/id"
+        },
+        "output": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "input",
+        "output",
+        "gain",
+        "initial"
+      ],
+      "type": "object"
+    },
+    "second-order-lag": {
+      "additionalProperties": false,
+      "properties": {
+        "damping_ratio": {
+          "$ref": "#/$defs/positive"
+        },
+        "initial": {
+          "$ref": "#/$defs/number"
+        },
+        "input": {
+          "$ref": "#/$defs/id"
+        },
+        "output": {
+          "$ref": "#/$defs/id"
+        },
+        "time_constant": {
+          "$ref": "#/$defs/positive"
+        }
+      },
+      "required": [
+        "input",
+        "output",
+        "time_constant",
+        "damping_ratio",
+        "initial"
+      ],
+      "type": "object"
+    },
+    "seed": {
+      "maximum": 18446744073709551615,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "threshold": {
+      "additionalProperties": false,
+      "properties": {
+        "initial": {
+          "type": "boolean"
+        },
+        "input": {
+          "$ref": "#/$defs/id"
+        },
+        "off": {
+          "$ref": "#/$defs/number"
+        },
+        "on": {
+          "$ref": "#/$defs/number"
+        },
+        "output": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "input",
+        "output",
+        "on",
+        "off",
+        "initial"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The plant-side dynamics declaration list dcs-plant-server --dynamics/--check-dynamics and dcs-sim-bus-device --dynamics merge: one externally tagged object per ProcessElement, its single key the snake_case element name. The schema covers element structure, field types, and the numeric bounds it can express; point-binding and merge-time consistency checks remain with ChannelMap::validate (docs/architecture.md).",
+  "items": {
+    "$ref": "#/$defs/element"
+  },
+  "title": "DCS dynamics document",
+  "type": "array",
+  "uniqueItems": true
+}
