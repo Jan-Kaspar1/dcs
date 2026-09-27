@@ -304,9 +304,16 @@ class PeerAnnounceTests(unittest.TestCase):
             order.index(
                 scenarios.scenario_suspended_alias_audit) + 1,
             order.index(scenarios.scenario_resume_settle_once))
+        # The standby-dns-resume leg shares the launch-layout window
+        # — the doctored-relaunch audit runs between
+        # resume-settle-once and the tune case's switch.
         self.assertEqual(
             order.index(
                 scenarios.scenario_resume_settle_once) + 1,
+            order.index(scenarios.scenario_standby_dns_resume))
+        self.assertEqual(
+            order.index(
+                scenarios.scenario_standby_dns_resume) + 1,
             order.index(scenarios.scenario_parameter_tune_carryover))
         self.assertIs(verify.case_function('peer-announce'),
                       scenarios.scenario_peer_announce)
