@@ -129,7 +129,10 @@ pub enum PlantRequest {
         /// field-arbitrated owner where no announced hint could ever
         /// prove itself. `None` — the default on requests predating
         /// the field, and every non-controller claim — leaves the
-        /// verdicts naming no monitor.
+        /// verdicts naming no monitor. A wildcard IP declares the
+        /// claimant's bind address, which no peer can dial, so the
+        /// server stores the claiming connection's proven source IP
+        /// with the declared port in its place.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         monitor: Option<SocketAddr>,
     },
