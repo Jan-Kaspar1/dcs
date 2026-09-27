@@ -14,6 +14,7 @@ from .github import GitHub, GitHubError
 from .runtime import Runtime
 from . import areas
 from . import findings as findings_lane
+from . import merge_resolution
 from . import planning
 from . import scheduling
 from . import review as review_lane
@@ -392,6 +393,52 @@ Repair context: {repair}
         self.state.update_job(job['issue'], status='pr-open', pr=number, error=None)
         self.state.set('process:' + str(job['issue']), None)
 
+    def resolve_mechanical(self, clone, paths, job):
+        """Complete a failed publish merge in-process on recorded paths.
+
+        Returns the resolved {path: resolver-name} map, or None when any
+        conflicted path lacks a registered resolver or resolution fails —
+        the caller then falls through to the bounded merge-conflict repair
+        with the merge still in progress, exactly as an untouched failed
+        merge leaves it. A successful resolution appends a
+        'mechanical-resolution' work-ledger row naming the resolvers and
+        paths so the merge-flow attribution stays separate from repairs.
+        """
+        resolvers = merge_resolution.resolvers_for(paths)
+        if resolvers is None:
+            return None
+        try:
+            for path, resolver in resolvers.items():
+                resolver.resolve(clone)
+            self.runtime.run_git(clone, 'add', '--', *paths)
+            unmerged = self.runtime.run_git(clone, 'diff', '--name-only', '--diff-filter=U')
+            if unmerged:
+                raise RuntimeError('unmerged paths remain: ' + unmerged)
+            self.runtime.run_git(clone, 'commit', '--no-edit')
+            head = self.runtime.run_git(clone, 'rev-parse', 'HEAD')
+        except Exception as exc:
+            self.log(f"#{job['issue']} mechanical merge resolution failed "
+                     f"({str(exc)[:300]}); falling back to merge-conflict repair")
+            return None
+        resolved = {path: resolver.name for path, resolver in resolvers.items()}
+        self.state.record_event(merge_resolution.MECHANICAL_RESOLUTION_KIND,
+                                issue=job['issue'], attempt=job['attempt'],
+                                payload={'resolvers': resolved, 'paths': sorted(resolved)},
+                                source_key='mechanical-resolution:%s:%s' % (job['issue'], head))
+        self.log(f"#{job['issue']} publish merge resolved mechanically: {resolved}; merge commit {head[:12]}")
+        return resolved
+
+    def resolve_publish_merge(self, clone, paths, job):
+        """Resolve a failed publish merge mechanically and push, or return False."""
+        if not paths or not self.resolve_mechanical(clone, paths, job):
+            return False
+        try:
+            self.runtime.run_git(clone, 'push', 'origin', job['branch'])
+        except subprocess.CalledProcessError as exc:
+            self.log(f"#{job['issue']} push after mechanical resolution failed: {str(exc)[:300]}")
+            return False
+        return True
+
     def repair(self, job, issue, reason, cause, detail=None):
         if self.state.paused():
             return
@@ -535,7 +582,8 @@ Repair context: {repair}
                     self.runtime.run_git(clone, 'push', 'origin', job['branch'])
                 except subprocess.CalledProcessError as exc:
                     paths = conflict_paths(exc.stdout, exc.stderr)
-                    self.repair(job, by_number[job['issue']], 'Resolve the existing merge conflict with origin/main. ' + str(exc.stdout) + str(exc.stderr), 'merge-conflict', detail={'paths': paths} if paths else None)
+                    if not self.resolve_publish_merge(clone, paths, job):
+                        self.repair(job, by_number[job['issue']], 'Resolve the existing merge conflict with origin/main. ' + str(exc.stdout) + str(exc.stderr), 'merge-conflict', detail={'paths': paths} if paths else None)
                 return
             if self.github.checks_pass(pr, self.config['required_checks']):
                 if self.github.merge(job['pr'], self.config['required_checks']):
