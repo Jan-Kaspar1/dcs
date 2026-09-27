@@ -43,7 +43,8 @@ use dcs_core::{
     JournalEvent, PointId, Quality, TelemetrySnapshot, Tick, Value,
 };
 use dcs_runtime::{
-    ClaimObservation, Executor, OrphanReport, ResolutionReport, RoleChange, SourceRestart,
+    ClaimObservation, Executor, OrphanReport, PromotionRefusal, ResolutionReport, RoleChange,
+    SourceRestart,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
@@ -540,6 +541,24 @@ impl Recorder {
             orphan.tick,
             JournalEvent::FieldOrphaned {
                 aligned: orphan.aligned,
+            },
+        );
+    }
+
+    /// Journals a refused armed self-promotion — the failover gate
+    /// fired at the miss boundary and the field's arbitration or the
+    /// convergence proof refused the attempt — attributed to the run
+    /// tick the attempt ran at. The refusal leaves no role transition
+    /// of its own, so this entry is what makes the episode durable;
+    /// the peer queues one per distinct refusal cause a continuous
+    /// refused streak produces, a retrying gate not journaling the
+    /// standing refusal once per scan.
+    pub(super) fn note_promotion_refused(&mut self, refusal: PromotionRefusal) {
+        self.push(
+            refusal.tick,
+            JournalEvent::PromotionRefused {
+                error: refusal.error,
+                misses: refusal.misses,
             },
         );
     }

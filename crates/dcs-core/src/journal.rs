@@ -15,7 +15,7 @@
 use crate::carryover::CarryoverReport;
 use crate::command::CommandReceipt;
 use crate::interface::EventRetention;
-use crate::role::{Divergence, Role, SwitchOrigin};
+use crate::role::{Divergence, Role, SwitchError, SwitchOrigin};
 use crate::signal::{PointId, Quality, Tick, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -141,6 +141,25 @@ pub enum JournalEvent {
         /// entries journaled before the field existed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         actor: Option<String>,
+    },
+    /// An armed peer's automatic-failover self-promotion at the miss
+    /// boundary was refused — the durable record of an attempt that
+    /// queues no [`RoleChanged`](Self::RoleChanged) of its own: `error`
+    /// carries the named refusal — a live incumbent's still-held field
+    /// claim, a claim the field could not be asked about, or a
+    /// convergence proof the attempt found voided — and `misses` the
+    /// heartbeat-miss count the gate fired at. The refusal does not
+    /// disarm the gate: while the convergence proof stands each later
+    /// due cycle retries, so one entry journals per distinct refusal
+    /// cause a continuous refused streak produces rather than one per
+    /// retried scan. The entry's `tick` is the refused attempt's run
+    /// tick.
+    PromotionRefused {
+        /// The named refusal the self-promotion returned.
+        error: SwitchError,
+        /// The consecutive-miss count the armed gate fired at — at or
+        /// past the armed budget.
+        misses: u32,
     },
     /// A tracking peer's staged field outputs were found to mismatch the
     /// field's actual values at the tick this entry is attributed to —

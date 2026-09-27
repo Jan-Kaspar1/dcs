@@ -1656,6 +1656,12 @@ fn main() -> ExitCode {
                                 restart.was_aligned.map(|tick| tick.0)
                             );
                         }
+                        for refusal in peer.take_promotion_refusals() {
+                            eprintln!(
+                                "standby: armed self-promotion refused at tick {} (misses {}) — {}; the gate stays armed while convergence stands",
+                                refusal.tick.0, refusal.misses, refusal.error
+                            );
+                        }
                         for change in peer.take_role_changes() {
                             eprintln!(
                                 "standby: role {} -> {} at tick {}",

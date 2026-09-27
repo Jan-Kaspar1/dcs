@@ -46,11 +46,19 @@
 //! configured budget, and [`self_promote`](Peer::self_promote) then
 //! promotes at the scan boundary exactly like a manual request — but
 //! only while the convergence proof still stands: the last applied
-//! verdict was `Tracking` and the misses have not exceeded the budget.
-//! An unconverged or over-budget peer reports its named sync state
-//! instead of promoting. A self-promotion's queued [`RoleChange`]s
+//! verdict was `Tracking`. The budget-th miss is always the boundary —
+//! the attempt reports its named refusal rather than promoting on a
+//! voided proof — and past it the boundary stays open exactly while the
+//! proof keeps being re-proven: each landed apply is fresh convergence
+//! evidence, so a correctly-refused or transient attempt cannot disarm
+//! the gate for the rest of the episode — while an evidence-free miss
+//! run past the budget voids the proof for staleness and the peer
+//! reports its named sync state instead of promoting. A self-promotion's
+//! queued [`RoleChange`]s
 //! carry the `failover` origin rather than a request's — the journaled
-//! distinction between an automatic takeover and a requested switch.
+//! distinction between an automatic takeover and a requested switch —
+//! and a refused attempt queues one [`PromotionRefusal`] per distinct
+//! refusal cause a refused streak produces.
 //!
 //! A tracking caller runs the whole cycle once per scan through
 //! [`track_once`](Peer::track_once) — the owns-field gate, the pull,
@@ -263,11 +271,13 @@ pub struct Peer<'d> {
     /// rejected: the active served, so it is alive.
     misses: u32,
     /// Whether the convergence proof a self-promotion relies on still
-    /// stands: the last applied verdict was `Tracking` (not diverged,
-    /// not rejected) and the miss count has not exceeded the failover
+    /// stands: the last applied verdict was promotable — `Tracking`,
+    /// `Reinitialized`, or `Orphaned`, each landed apply re-proving it —
+    /// and the run of evidence-free misses has not exceeded the failover
     /// budget. Kept distinct from `sync`, which degrades on the first
     /// miss — the documented rule is that a tracking peer may promote
-    /// itself *within* the budget.
+    /// itself *within* the budget, and while fresh applies keep landing
+    /// the proof does not go stale at all.
     converged: bool,
     /// The consecutive-miss budget arming automatic failover — `None`
     /// keeps the peer manual-promotion-only.
@@ -327,6 +337,18 @@ pub struct Peer<'d> {
     /// Orphan detections not yet consumed for journaling — one
     /// [`OrphanReport`] per transition into [`StandbySync::Orphaned`].
     pending_orphans: Vec<OrphanReport>,
+    /// Refused armed self-promotions not yet consumed for journaling —
+    /// one [`PromotionRefusal`] per distinct refusal cause a continuous
+    /// refused streak produces, so a gate left armed and retrying does
+    /// not journal the attempt once per scan.
+    pending_refusals: Vec<PromotionRefusal>,
+    /// The standing refused streak's last journaled cause — the dedup
+    /// `pending_refusals` reads: a refused attempt naming the same
+    /// error queues nothing further, and any tracking outcome that is
+    /// not a refused self-promotion — a landed apply, a plain miss,
+    /// the granted promotion — ends the streak, so the next refusal
+    /// episode journals fresh.
+    open_refusal: Option<SwitchError>,
     /// Whether this peer rolls a revised model into production — armed
     /// by [`with_revision`](Peer::with_revision): a pulled checkpoint
     /// whose fingerprint differs from this run's crosses the model
@@ -706,6 +728,25 @@ pub struct OrphanReport {
     pub aligned: Tick,
 }
 
+/// An armed peer's failover self-promotion at the miss boundary was
+/// refused — the durable record of the attempt the gate made: the run
+/// tick it ran at, the consecutive-miss count it fired on, and the
+/// named refusal. One report queues per distinct refusal cause a
+/// continuous refused streak produces — the gate stays armed and keeps
+/// retrying while the convergence proof stands, so a standing refusal
+/// journals once rather than once per scan — and the next outcome that
+/// is not a refused self-promotion ends the streak.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromotionRefusal {
+    /// The run tick the refused attempt is attributed to.
+    pub tick: Tick,
+    /// The consecutive-miss count the armed gate fired at — at or past
+    /// the armed budget.
+    pub misses: u32,
+    /// The named refusal the self-promotion returned.
+    pub error: SwitchError,
+}
+
 /// The tracked checkpoint stream regressed across a generation
 /// boundary — the tick it served fell below the run's last alignment
 /// (or, before any alignment stood, below the run's own tick) while
@@ -906,7 +947,11 @@ pub enum TrackReport {
     },
     /// The miss run reached the failover budget but self-promotion was
     /// refused — `error` names why; the peer keeps reporting the sync
-    /// state the refusal carried.
+    /// state the refusal carried. The refusal does not close the armed
+    /// gate: while the convergence proof stands the boundary stays live
+    /// and the next due cycle retries, and the episode queues one
+    /// [`PromotionRefusal`] per distinct refusal cause the streak
+    /// produces for the journal.
     PromotionRefused {
         /// What the failed pull reported — the `Degraded` detail.
         detail: String,
@@ -952,6 +997,8 @@ impl<'d> Peer<'d> {
             startup_claim: None,
             orphan_claim: None,
             pending_orphans: Vec::new(),
+            pending_refusals: Vec::new(),
+            open_refusal: None,
             revision: false,
             pending_reinits: Vec::new(),
             attribution: SwitchAttribution {
@@ -1247,6 +1294,8 @@ impl<'d> Peer<'d> {
             startup_claim: None,
             orphan_claim: None,
             pending_orphans: Vec::new(),
+            pending_refusals: Vec::new(),
+            open_refusal: None,
             revision: false,
             pending_reinits: Vec::new(),
             attribution: SwitchAttribution {
@@ -1456,19 +1505,23 @@ impl<'d> Peer<'d> {
     /// the checkpoint-pull heartbeat's consecutive misses have reached
     /// the configured [`with_failover`](Self::with_failover) budget and
     /// the convergence proof still stands — the last applied verdict
-    /// was `Tracking` or `Reinitialized` and the misses have not
-    /// exceeded the budget —
+    /// was `Tracking`, `Reinitialized`, or `Orphaned` —
     /// lifts the gate at this boundary exactly as a manual promotion
     /// would, reporting `promoting`.
     ///
     /// Anything else is the named [`SwitchError::NotConverged`]
     /// carrying the reported sync state: an unconverged standby reports
     /// rather than promotes, a single transient miss has not reached
-    /// the budget, and an over-budget miss run has voided the
-    /// convergence the promotion would rely on. Callers check
+    /// the budget, and an over-budget evidence-free miss run has voided
+    /// the convergence the promotion would rely on. Callers check
     /// [`failover_due`](Self::failover_due) once per scan cycle and
-    /// invoke this only then — the boundary at which a self-promotion
-    /// lands is the budget-th miss's scan.
+    /// invoke this only then — and the boundary stays live while the
+    /// proof does: a refused attempt does not close it, because every
+    /// landed apply re-proves convergence. A correctly-refused attempt
+    /// — a live incumbent still holding the field's claim — therefore
+    /// retries on the next due cycle instead of disarming armed
+    /// failover for the rest of the episode, and promotes the cycle the
+    /// refusal cause clears.
     ///
     /// A self-promotion's queued [`RoleChange`]s carry
     /// `origin: failover` and no actor — the journaled distinction from
@@ -1496,11 +1549,21 @@ impl<'d> Peer<'d> {
     /// Whether the heartbeat's consecutive failed pulls have reached the
     /// configured failover budget — the scan boundary at which a
     /// still-converged standby may [`self_promote`](Self::self_promote).
-    /// `false` without a configured budget; misses beyond the budget do
-    /// not re-arm — the failover window closed with the convergence
-    /// proof.
+    /// `false` without a configured budget. The boundary arrives at the
+    /// budget-th miss unconditionally — the attempt itself reports a
+    /// voided proof — and stays past it exactly while the convergence
+    /// proof stands: each landed apply re-proves it, so an armed peer
+    /// whose earlier attempt was refused keeps the gate while fresh
+    /// checkpoints keep landing, and only an evidence-free miss run
+    /// past the budget — a genuinely stopped source — lets the proof go
+    /// stale and closes the window.
     pub fn failover_due(&self) -> bool {
-        self.failover.is_some_and(|budget| self.misses == budget)
+        match self.failover {
+            Some(budget) if self.misses >= budget => {
+                self.misses == budget || self.converged
+            }
+            _ => false,
+        }
     }
 
     /// Consecutive checkpoint pulls that produced no applied checkpoint
@@ -1594,6 +1657,7 @@ impl<'d> Peer<'d> {
         self.staged = None;
         self.misses = 0;
         self.converged = false;
+        self.open_refusal = None;
         self.attribution = attribution;
         self.change(self.executor.tick(), Role::Demoting);
         Ok(())
@@ -1888,9 +1952,6 @@ impl<'d> Peer<'d> {
                 // can never resolve.
                 if checkpoint.source_owns_field == Some(false) {
                     self.staged = None;
-                    if self.failover.is_some_and(|budget| self.misses > budget) {
-                        self.converged = false;
-                    }
                     if !matches!(self.sync, StandbySync::Orphaned { .. }) {
                         self.pending_orphans.push(OrphanReport {
                             tick: landed,
@@ -1900,7 +1961,17 @@ impl<'d> Peer<'d> {
                     self.sync = StandbySync::Orphaned {
                         aligned: checkpoint.tick,
                     };
-                    self.converged = !self.failover.is_some_and(|budget| self.misses > budget);
+                    // `Orphaned` is the promotable verdict — the run it
+                    // would resume is the same proven-converged one —
+                    // so the landed apply is fresh convergence evidence
+                    // and the proof re-stands: the line's ownerless
+                    // state is not staleness, and while ownerless
+                    // checkpoints keep arriving the armed failover
+                    // window stays open for the retry a refused
+                    // attempt needs. Only an evidence-free miss run
+                    // past the budget — a genuinely stopped source —
+                    // voids it (see `note_transfer_failed`).
+                    self.converged = true;
                     return Ok(());
                 }
                 // The field evidence this apply carries: a comparison
@@ -2543,9 +2614,13 @@ impl<'d> Peer<'d> {
     /// Marks the tracking peer [`Degraded`](StandbySync::Degraded)
     /// after a transfer failure that produced no checkpoint at all — an
     /// unreachable active or a refused request — and counts the
-    /// heartbeat miss toward the failover budget. Misses beyond the
-    /// budget void the convergence proof a self-promotion would rely
-    /// on: the failover window closes with it.
+    /// heartbeat miss toward the failover budget. A run of these
+    /// evidence-free misses past the budget is the staleness bound —
+    /// the convergence proof a self-promotion would rely on voids and
+    /// the failover window closes with it. The void is only as
+    /// permanent as the silence producing it: the next landed apply
+    /// re-proves the run — an `Orphaned` apply on an ownerless line
+    /// included — and the proof stands again.
     ///
     /// A produced-nothing pull carries no field evidence, so a standing
     /// [`Diverged`](StandbySync::Diverged) verdict stands through the
@@ -2620,8 +2695,20 @@ impl<'d> Peer<'d> {
     /// orphan self-promotes at this boundary — the tracked line's
     /// serving run owns nothing, which is precisely the dead-owner
     /// condition failover exists for.
+    ///
+    /// A self-promotion the field's arbitration refuses — a live
+    /// incumbent still holding the claim, or a transient ask — does not
+    /// close the gate it fired at: the boundary stays live while the
+    /// convergence proof stands, each later due cycle retries the
+    /// claim, and the peer promotes the cycle the refusal cause clears.
+    /// The episode still journals — one [`PromotionRefusal`] queues per
+    /// distinct refusal cause a continuous refused streak produces (see
+    /// [`take_promotion_refusals`](Self::take_promotion_refusals)) — so
+    /// the durable record names the attempt a retrying gate makes
+    /// without journaling it once per scan.
     pub fn track_once(&mut self, pull: impl FnOnce() -> Result<Checkpoint, String>) -> TrackReport {
         if self.owns_field() {
+            self.open_refusal = None;
             return TrackReport::OwnsField;
         }
         let detail = match pull() {
@@ -2645,32 +2732,70 @@ impl<'d> Peer<'d> {
                                 let detail = "the tracked line's serving run owns no field writes"
                                     .to_string();
                                 return match self.self_promote() {
-                                    Ok(()) => TrackReport::Promoted {
-                                        detail,
-                                        report: self.report(),
-                                    },
-                                    Err(error) => TrackReport::PromotionRefused { detail, error },
+                                    Ok(()) => {
+                                        self.open_refusal = None;
+                                        TrackReport::Promoted {
+                                            detail,
+                                            report: self.report(),
+                                        }
+                                    }
+                                    Err(error) => {
+                                        self.note_promotion_refused(&error);
+                                        TrackReport::PromotionRefused { detail, error }
+                                    }
                                 };
                             }
                         }
+                        self.open_refusal = None;
                         TrackReport::Applied(transfer)
                     }
-                    Err(error) => TrackReport::Refused(error),
+                    Err(error) => {
+                        self.open_refusal = None;
+                        TrackReport::Refused(error)
+                    }
                 };
             }
             Err(detail) => detail,
         };
         self.note_transfer_failed(&detail);
         if !self.failover_due() {
+            self.open_refusal = None;
             return TrackReport::Missed { detail };
         }
         match self.self_promote() {
-            Ok(()) => TrackReport::Promoted {
-                detail,
-                report: self.report(),
-            },
-            Err(error) => TrackReport::PromotionRefused { detail, error },
+            Ok(()) => {
+                self.open_refusal = None;
+                TrackReport::Promoted {
+                    detail,
+                    report: self.report(),
+                }
+            }
+            Err(error) => {
+                self.note_promotion_refused(&error);
+                TrackReport::PromotionRefused { detail, error }
+            }
         }
+    }
+
+    /// Queues one [`PromotionRefusal`] for the journal per distinct
+    /// refusal cause the standing refused streak has produced — a retry
+    /// naming the same error as the last journaled attempt queues
+    /// nothing, so an armed gate retrying a standing refusal does not
+    /// journal the attempt once per scan. The streak's `open_refusal`
+    /// record is what the dedup reads; `track_once` clears it on any
+    /// outcome that is not a refused self-promotion, so a refusal after
+    /// the gate's proof lapsed and re-stood journals as its own
+    /// episode.
+    fn note_promotion_refused(&mut self, error: &SwitchError) {
+        if self.open_refusal.as_ref() == Some(error) {
+            return;
+        }
+        self.pending_refusals.push(PromotionRefusal {
+            tick: self.tick(),
+            misses: self.misses,
+            error: error.clone(),
+        });
+        self.open_refusal = Some(error.clone());
     }
 
     /// The orphan cycle's conditional re-arm — run while the tracked
@@ -3018,6 +3143,16 @@ impl<'d> Peer<'d> {
     /// monitoring layer records them into.
     pub fn take_orphans(&mut self) -> Vec<OrphanReport> {
         std::mem::take(&mut self.pending_orphans)
+    }
+
+    /// Drains refused armed self-promotions queued since the last call —
+    /// one [`PromotionRefusal`] per distinct refusal cause a continuous
+    /// refused streak produced — for the transition journal the
+    /// monitoring layer records them into: a refused attempt leaves no
+    /// [`RoleChange`] of its own, so this queue is what makes the
+    /// episode durable.
+    pub fn take_promotion_refusals(&mut self) -> Vec<PromotionRefusal> {
+        std::mem::take(&mut self.pending_refusals)
     }
 
     /// Drains pending-command settlements queued since the last call —
