@@ -18,7 +18,9 @@ matching the supervisor's rolling merge comparison in ``State.merge_flow``):
   the work ledger's attributed ``repair``/``redispatch`` event rows
   (``merge-conflict``/``ci-failure``/``publish-error`` repairs and
   ``worker-failure``/``quota-requeue`` redispatches), with repairs also
-  joined to each issue's managed area;
+  joined to each issue's managed area, and ``mechanical-resolution`` rows
+  — publish merges completed in-process on recorded regenerable paths —
+  counted separately so they never inflate the agent-repair counts;
 - conflict attribution for decline analysis: the conflicted paths each
   ``merge-conflict`` repair's ledger row recorded (ranked by incidence, an
   ``unclassified`` bucket counting path-less rows) and a verdict naming
@@ -313,7 +315,7 @@ def render_text(report):
             "{name}: merges={merges} identity(resolved={ir} unresolved={iu}) "
             "lead_h(count={lc} p50={p50} p90={p90} max={mx}) "
             "repairs(wip={wip} main_integrations={mi} repeated_work={rw} "
-            "ledger_repairs={lr} redispatched={rd}) "
+            "ledger_repairs={lr} redispatched={rd} mechanical={mech}) "
             "repair_causes[{rc}] redispatch_causes[{dc}]".format(
                 name=name, merges=w["merges"],
                 ir=w["identity"]["resolved"], iu=w["identity"]["unresolved"],
@@ -322,6 +324,7 @@ def render_text(report):
                 mi=repair["merges_with_main_integration"],
                 rw=repair["merges_with_repeated_work_commits"],
                 lr=repair["ledger_repairs"], rd=repair["ledger_redispatched"],
+                mech=repair["mechanical_resolutions"],
                 rc=_causes_text(repair["repairs_by_cause"]),
                 dc=_causes_text(repair["redispatches_by_cause"])))
         flow = w["flow"]
