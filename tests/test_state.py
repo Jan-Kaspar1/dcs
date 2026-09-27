@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from agent_pool.state import State
+from scripts import merge_flow
 
 
 class StateTests(unittest.TestCase):
@@ -88,6 +89,69 @@ class StateTests(unittest.TestCase):
         self.assertEqual(flow['repairs_by_cause']['current'], {'merge-conflict': 1})
         self.assertEqual(flow['redispatches_by_cause']['current'], {'worker-failure': 1})
         self.assertEqual(flow['repairs_by_cause']['previous'], {})
+
+    def test_merge_flow_ranks_conflict_paths_with_shared_verdict(self):
+        for number in range(1, 4):
+            self.state.reserve(number, f'worker-{number}', 'a')
+        self.state.repair(1, 'merge-conflict',
+                          detail={'paths': ['docs/plan.md', 'crates/x.rs']})
+        self.state.repair(2, 'merge-conflict', detail={'paths': ['docs/plan.md']})
+        self.state.repair(3, 'merge-conflict')
+        flow = self.state.merge_flow()
+        self.assertEqual(flow['conflict_repairs']['current'], 3)
+        self.assertEqual(flow['conflict_paths']['current'],
+                         {'docs/plan.md': 2, 'crates/x.rs': 1, 'unclassified': 1})
+        self.assertEqual(flow['conflict_load']['current'], 'concentrated')
+        self.assertEqual(flow['conflict_paths']['previous'], {})
+        self.assertEqual(flow['conflict_load']['previous'], 'none')
+
+    def test_merge_flow_conflict_load_spread_and_unattributed(self):
+        for number in range(1, 6):
+            self.state.reserve(number, f'worker-{number}', 'a')
+            self.state.repair(number, 'merge-conflict',
+                              detail={'paths': [f'crates/c{number}.rs']})
+        flow = self.state.merge_flow()
+        self.assertEqual(flow['conflict_paths']['current'],
+                         {f'crates/c{number}.rs': 1 for number in range(1, 6)})
+        self.assertEqual(flow['conflict_load']['current'], 'spread')
+        with tempfile.TemporaryDirectory() as tmp:
+            other = State(Path(tmp) / 'state.db')
+            try:
+                for number in (1, 2):
+                    other.reserve(number, f'worker-{number}', 'a')
+                    other.repair(number, 'merge-conflict')
+                flow = other.merge_flow()
+            finally:
+                other.close()
+        self.assertEqual(flow['conflict_paths']['current'], {'unclassified': 2})
+        self.assertEqual(flow['conflict_load']['current'], 'unattributed')
+
+    def test_merge_flow_names_failing_checks_from_payload_or_job_record(self):
+        self.state.reserve(1, 'one', 'a')
+        self.state.repair(1, 'ci-failure', detail={'checks': ['verify', 'clippy']})
+        self.state.reserve(2, 'two', 'a')
+        self.state.repair(2, 'ci-failure')
+        self.state.update_job(2, status='blocked',
+                              error='Repair limit exhausted: CI failed. Inspect gh pr '
+                                    'checks and gh run view --log-failed as read-only '
+                                    'diagnostics. {"verify": "failure"}')
+        self.state.reserve(3, 'three', 'a')
+        self.state.repair(3, 'ci-failure')
+        flow = self.state.merge_flow()
+        self.assertEqual(flow['failing_checks']['current'],
+                         {'verify': 2, 'clippy': 1, 'unclassified': 1})
+
+    def test_merge_flow_parks_classify_into_shared_vocabulary(self):
+        self.state.reserve(1, 'one', 'a')
+        self.state.update_job(1, status='blocked',
+                              error='Local agent failed: {"status": "timeout", "exit_code": -15}')
+        flow = self.state.merge_flow()
+        self.assertEqual(set(flow['park_causes']['current']), set(merge_flow.PARK_CAUSES))
+        self.assertEqual(flow['parked']['current'], 1)
+        self.assertEqual(flow['park_causes']['current']['timeout'], 1)
+        self.assertEqual(flow['parked']['previous'], 0)
+        self.assertEqual(flow['park_causes']['previous'],
+                         {cause: 0 for cause in merge_flow.PARK_CAUSES})
 
     def test_ramp_and_restart(self):
         for number in range(1,16):

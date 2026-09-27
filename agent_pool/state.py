@@ -4,6 +4,8 @@ import sqlite3
 import time
 from pathlib import Path
 
+from .merge_flow import flow_report, repair_attribution, window_bounds
+
 
 MIGRATIONS = [
     # 1: daily architecture review lane
@@ -127,33 +129,42 @@ class State:
         return [dict(row) for row in self.db.execute(sql, args)]
 
     def merge_flow(self, now=None, window_seconds=7 * 86400):
-        """Compare completed merges in adjacent rolling windows."""
+        """Compare completed merges in adjacent rolling windows.
+
+        Beyond the merge counts, each window carries the work ledger's
+        measured detail through agent_pool.merge_flow's shared classifiers:
+        ranked conflict paths with the concentrated/spread verdict, ranked
+        failing-check names for ci-failure repairs, and the bounded
+        park-cause counts behind status:blocked transitions.
+        """
         now = time.time() if now is None else now
-        boundary = now - window_seconds
-        previous = boundary - window_seconds
+        bounds = window_bounds(now, window_seconds)
         rows = self.db.execute(
             "SELECT updated FROM jobs WHERE status='done' AND updated>=?",
-            (previous,)).fetchall()
-        current_count = sum(row['updated'] >= boundary for row in rows)
+            (bounds['previous'][0],)).fetchall()
+        current_count = sum(row['updated'] >= bounds['current'][0] for row in rows)
         prior_count = len(rows) - current_count
         decline_percent = round(100 * (prior_count - current_count) / prior_count, 1) if prior_count else None
-        causes = {'repair': {'previous': {}, 'current': {}},
-                  'redispatch': {'previous': {}, 'current': {}}}
-        for row in self.db.execute(
-                "SELECT kind,at,payload FROM work_events "
-                "WHERE kind IN ('repair','redispatch') AND at>=?", (previous,)):
-            bucket = causes[row['kind']]['current' if row['at'] >= boundary else 'previous']
-            try:
-                cause = json.loads(row['payload']).get('cause')
-            except (ValueError, AttributeError):
-                cause = None
-            cause = cause if isinstance(cause, str) and cause else 'unclassified'
-            bucket[cause] = bucket.get(cause, 0) + 1
+        events = [dict(row) for row in self.db.execute(
+            "SELECT kind,issue,attempt,at,payload FROM work_events")]
+        jobs_by_issue = {row['issue']: dict(row) for row in self.db.execute(
+            "SELECT issue,status,error,updated FROM jobs")}
+        attribution = {}
+        flow = {}
+        for name, (lo, hi) in bounds.items():
+            attribution[name] = repair_attribution(events, lo, hi, {}, jobs_by_issue)
+            flow[name] = flow_report(events, lo, hi, jobs_by_issue)
         return {'window_days': round(window_seconds / 86400, 2),
                 'current_merges': current_count, 'previous_merges': prior_count,
                 'decline_percent': decline_percent,
-                'repairs_by_cause': causes['repair'],
-                'redispatches_by_cause': causes['redispatch']}
+                'repairs_by_cause': {w: attribution[w]['repairs_by_cause'] for w in bounds},
+                'redispatches_by_cause': {w: attribution[w]['redispatches_by_cause'] for w in bounds},
+                'conflict_repairs': {w: attribution[w]['conflict_repairs'] for w in bounds},
+                'conflict_paths': {w: attribution[w]['conflict_paths'] for w in bounds},
+                'conflict_load': {w: attribution[w]['conflict_load'] for w in bounds},
+                'failing_checks': {w: attribution[w]['failing_checks'] for w in bounds},
+                'parked': {w: flow[w]['parked'] for w in bounds},
+                'park_causes': {w: flow[w]['park_causes'] for w in bounds}}
 
     def paused(self):
         return bool(self.get('paused', False) or self.get('integrity_error'))
