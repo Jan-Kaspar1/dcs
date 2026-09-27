@@ -333,6 +333,32 @@ Implementation order: second, after [daily architecture review](daily-architectu
   digests, and a run with no keyed probe pair staged reports
   inconclusive rather than touching the deployed pair.
 
+### Landed 2026-09-27 (bounded liveness-report leg, #1160)
+
+- The bounded liveness contract — #991's `GET /health` answer feeding
+  the container `HEALTHCHECK`, and the #1147 fix keeping `/health`
+  and `/role` on the liveness mirror while a scan wedged in field
+  I/O holds the executor lock — is exercised on the deployed pair by
+  scenario leg `3675_bounded_liveness` against WW-OPS-003's
+  field-confidence clause. The runner's new
+  `pause_plant`/`unpause_plant` actions — `docker pause` on the
+  run's plant container, handed to the scenario ctx beside the
+  stop/start levers — stage the wedge the liveness regression
+  names: the remote driver's socket stays open but unanswered, so
+  each peer's in-flight scan parks inside its field timeout with no
+  fencing reconnect and no role move. Through the ~4 s hold both
+  peers' `/health` and `/role` must answer inside the declared 1 s
+  bound while `/health`'s `last_scan_age_ms` grows past the wedge
+  floor, and the published-copy reads `/snapshot` and `/journal`
+  stay at baseline latency; the unpause must re-stamp the scan age
+  to cadence freshness with the pair's launch roles restored.
+- Named diagnostics are `bounded-liveness-failed` and
+  `bounded-liveness-nondeterministic`, with the self-check's
+  `bounded-liveness-unchecked`; two passes produce identical
+  digests; a run whose monitors predate the `/health` contract,
+  whose pair never settles, or whose pause lever cannot land
+  reports inconclusive.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,

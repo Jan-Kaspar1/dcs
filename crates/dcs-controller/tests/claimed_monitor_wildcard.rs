@@ -33,8 +33,20 @@
 //! server normalizes to the claim connection's source — here
 //! loopback, where both resolve, so the assertion lands on the
 //! *stored* address rather than the dial succeeding).
+//!
+//! The follow-on finding `claimed-monitor-wildcard-undialable`
+//! (run `qax-20260927-005`, rig `lenovo`) caught the same wedge on
+//! the plain pair's own switchover: both controllers launched on
+//! `--listen 0.0.0.0`, `POST /promote` on the standby, and the
+//! ex-owner's fencing verdict naming the successor's wildcard bind
+//! address verbatim — which the demoted peer dials as its own
+//! loopback, so `adopt_claimed_source` never lands and the peer
+//! parks `standby`/`unsynchronized` while the pair's redundancy
+//! silently ends. The second reproduction drives that shape end to
+//! end, and the resolution side is doubly closed: the server never
+//! stores the wildcard, and the monitor never dials one.
 
-use dcs_core::{JournalEvent, Role, StandbySync};
+use dcs_core::{FieldClaim, JournalEvent, Role, StandbySync};
 use dcs_monitor::MonitorClient;
 use dcs_sim_net::RemoteDriver;
 use std::net::SocketAddr;
@@ -238,4 +250,97 @@ fn a_routable_claimed_monitor_rendezvous_converges_the_stranded_peers() {
 #[test]
 fn a_wildcard_claimed_monitor_is_normalized_to_the_claim_connections_source() {
     reproduction("0.0.0.0:0");
+}
+
+/// The `claimed-monitor-wildcard-undialable` reproduction on the
+/// plain pair: both controllers bound to the wildcard — the shipped
+/// rig's own launch — `POST /promote` on the converged standby, and
+/// the superseded owner fenced-demoted in place. Under the defect
+/// the fencing verdict named `0.0.0.0:<port>` verbatim, which the
+/// demoted peer dialed as its own loopback, so it parked
+/// `standby`/`unsynchronized` forever. Under the fix the verdict
+/// names the claim connection's proven source, the demoted peer
+/// adopts it, and the pair retains failover redundancy — the ex-owner
+/// answers `promote` again.
+#[test]
+fn a_wildcard_pair_switchover_rejoins_the_demoted_peer() {
+    let plant = spawn_plant(Path::new(STATION), Path::new(DYNAMICS));
+    let remote = ["--remote".to_string(), plant.addr.to_string()];
+    let a_process = spawn_unkeyed(STATION, &remote, "0.0.0.0:0", DT);
+    let a_addr = reachable(a_process.addr);
+    let mut b_args = remote.to_vec();
+    b_args.extend(["--standby".to_string(), a_addr.to_string()]);
+    let b_process = spawn_unkeyed(STATION, &b_args, "0.0.0.0:0", DT);
+    let b_addr = reachable(b_process.addr);
+    let a = MonitorClient::new(a_addr);
+    let b = MonitorClient::new(b_addr);
+    let field = RemoteDriver::connect(plant.addr).unwrap();
+
+    // The healthy precondition: the wildcard-bound standby converges
+    // on the wildcard-bound active through its reachable address.
+    let mut converged = false;
+    for _ in 0..CONVERGE_BOUND {
+        b.advance(1).unwrap();
+        a.advance(1).unwrap();
+        if tracking(&b) {
+            converged = true;
+            break;
+        }
+    }
+    assert!(converged, "the wildcard-bound standby never converged");
+
+    // The takeover: `POST /promote` on the standby — the fenced-write
+    // demotion of the ex-owner runs with no demote-request boundary,
+    // so the tracking-source recovery is the involuntary path's.
+    assert_eq!(b.promote().unwrap().role, Role::Promoting);
+    a.advance(1).unwrap();
+    b.advance(1).unwrap();
+    a.advance(1).unwrap();
+    assert_eq!(a.role().unwrap().role, Role::Standby);
+    assert!(
+        a.journal(0)
+            .unwrap()
+            .iter()
+            .any(|entry| matches!(entry.event, JournalEvent::FieldClaimLost { .. })),
+        "the fencing preemption must journal on the demoted peer"
+    );
+
+    // The verdict the demotion rode on: the field's standing claim
+    // must name the promoted peer's dialable monitor — never the
+    // `0.0.0.0` bind address the defect served verbatim.
+    assert_eq!(field.probe_writer().unwrap(), FieldClaim::Held);
+    let stored = field.claimed_monitor().unwrap();
+    assert!(
+        !stored.ip().is_unspecified(),
+        "the claim monitor must never be the undialable wildcard \
+         {stored} — the defect's verbatim declaration"
+    );
+    assert_eq!(stored, b_addr);
+
+    // The defect's wedge, now closed: the demoted ex-owner resolves
+    // the claim-declared monitor and reconverges `tracking` inside
+    // the bound — promotable again, so the pair retains redundancy.
+    let mut rejoined = false;
+    for _ in 0..REJOIN_TICKS {
+        a.advance(1).unwrap();
+        b.advance(1).unwrap();
+        if tracking(&a) {
+            rejoined = true;
+            break;
+        }
+    }
+    assert!(
+        rejoined,
+        "the demoted ex-owner must re-join tracking — the defect left \
+         it unsynchronized on the undialable wildcard: {:?}",
+        a.role().unwrap().sync
+    );
+    assert!(
+        a.journal(0).unwrap().iter().any(|entry| matches!(
+            entry.event,
+            JournalEvent::TrackingSourceAdopted { source } if source == b_addr
+        )),
+        "the demoted peer must journal the adoption naming the \
+         routable monitor {b_addr}"
+    );
 }

@@ -4096,3 +4096,87 @@ fn a_dead_adopted_pin_releases_and_the_claimed_path_re_resolves() {
         b.client.role().unwrap()
     );
 }
+
+/// The `claimed-monitor-wildcard-undialable` consumer half: a fencing
+/// verdict still naming the wildcard — the verbatim declaration a
+/// pre-#1135 plant server stored — is a bind address, not an
+/// endpoint. On this in-process rig dialing `0.0.0.0:<port>` reaches
+/// the owner through the *demoted peer's own loopback*, exactly the
+/// netns trap the finding measured: the pull would verify and pin an
+/// undialable wildcard into `adopted`. The verdict must earn no pull
+/// — `adopt_claimed_source` and `resolve_tracking_source` both refuse
+/// it — and it must spend no retry window, so the corrected routable
+/// verdict verifies on the very next pass.
+#[test]
+fn a_wildcard_claimed_monitor_earns_no_pull() {
+    // The field owner — its owner document is what the verbatim
+    // wildcard dial reaches through loopback on the same port.
+    let a_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let a = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(executor(a_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    let a_addr = dialable(a.monitor.local_addr());
+
+    // The defect's verdict: the claimant's `0.0.0.0` bind declaration
+    // at the owner's port — on this rig a verbatim dial connects to a
+    // through loopback and would adopt the undialable address.
+    let claimed: &'static Mutex<SocketAddr> = Box::leak(Box::new(Mutex::new(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        a_addr.port(),
+    ))));
+    let b_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let b = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(b_driver), None)
+                .with_claimed_monitor(move || Some(*claimed.lock().unwrap())),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: None,
+            after_scan: None,
+        }),
+    );
+    // The peer already rides this line's generation — the demoted
+    // run's carried state — so a served owner document would verify.
+    b.monitor
+        .apply_checkpoint(&a.client.checkpoint().unwrap())
+        .unwrap();
+
+    // The wildcard declaration earns no pull anywhere: no adoption
+    // pin and no orphan-probe candidate — under the defect both
+    // dialed it and pinned `0.0.0.0:<port>` itself.
+    assert_eq!(
+        b.monitor.verified_tracking_source(),
+        None,
+        "the undialable wildcard declaration must never adopt"
+    );
+    assert_eq!(
+        b.monitor.resolve_tracking_source(),
+        None,
+        "the undialable wildcard declaration must never resolve"
+    );
+
+    // The routable correction verifies on the very next pass — a
+    // wildcard verdict spends none of the claim's retry window.
+    *claimed.lock().unwrap() = a_addr;
+    assert_eq!(
+        b.monitor.verified_tracking_source(),
+        Some(TrackTarget::Addr(a_addr)),
+        "the routable declaration adopts immediately after the wildcard"
+    );
+}

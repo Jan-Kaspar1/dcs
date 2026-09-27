@@ -248,7 +248,7 @@ class SupervisorTests(unittest.TestCase):
         def run_git(cwd, *args):
             if args and args[0] == 'merge':
                 raise subprocess.CalledProcessError(1, 'merge', '', 'conflict')
-            return 'base'
+            return ''
         self.runtime.run_git.side_effect=run_git
         s.integrate(self.github.items)
         self.assertEqual(s.state.job(1)['repairs'],1)
@@ -277,7 +277,70 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(payloads[0]['paths'],
                          ['docs/plan.md', 'agent_pool/state.py'])
 
-    def test_merge_conflict_repair_without_parseable_output_keeps_cause_only(self):
+    def test_merge_conflict_repair_falls_back_to_worktree_unmerged_paths(self):
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        s.reconcile_workers(self.github.items)
+        self.github.includes_main=lambda head, base: False
+        out = ("Auto-merging docs/plan.md\n"
+               "Automatic merge failed; fix conflicts and then commit the result.\n")
+        def run_git(cwd, *args):
+            if args and args[0] == 'merge':
+                raise subprocess.CalledProcessError(1, 'merge', out, 'error: conflict')
+            if args[:3] == ('diff', '--name-only', '--diff-filter=U'):
+                return 'docs/plan.md\nagent_pool/state.py'
+            return 'base'
+        self.runtime.run_git.side_effect=run_git
+        s.integrate(self.github.items)
+        self.assertEqual(s.state.job(1)['repairs'],1)
+        payloads = [json.loads(e['payload']) for e in s.state.events(1)
+                    if e['kind'] == 'repair']
+        self.assertEqual(payloads[0]['cause'], 'merge-conflict')
+        self.assertEqual(payloads[0]['paths'],
+                         ['docs/plan.md', 'agent_pool/state.py'])
+        report = s.state.merge_flow(now=time.time() + 60)
+        self.assertEqual(report['conflict_paths']['current'],
+                         {'docs/plan.md': 1, 'agent_pool/state.py': 1})
+        self.assertEqual(report['conflict_load']['current'], 'concentrated')
+
+    def test_modify_delete_conflict_attributes_via_unmerged_paths(self):
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        s.reconcile_workers(self.github.items)
+        self.github.includes_main=lambda head, base: False
+        out = ("CONFLICT (modify/delete): docs/old.md deleted in HEAD and "
+               "modified in abc1234.  Version abc1234 of docs/old.md left "
+               "in tree.\nAutomatic merge failed; fix conflicts and then "
+               "commit the result.\n")
+        def run_git(cwd, *args):
+            if args and args[0] == 'merge':
+                raise subprocess.CalledProcessError(1, 'merge', out, '')
+            if args[:3] == ('diff', '--name-only', '--diff-filter=U'):
+                return 'docs/old.md'
+            return 'base'
+        self.runtime.run_git.side_effect=run_git
+        s.integrate(self.github.items)
+        payloads = [json.loads(e['payload']) for e in s.state.events(1)
+                    if e['kind'] == 'repair']
+        self.assertEqual(payloads[0]['cause'], 'merge-conflict')
+        self.assertEqual(payloads[0]['paths'], ['docs/old.md'])
+
+    def test_push_failure_after_clean_merge_is_publish_error(self):
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        s.reconcile_workers(self.github.items)
+        self.github.includes_main=lambda head, base: False
+        def run_git(cwd, *args):
+            if args and args[0] == 'push':
+                raise subprocess.CalledProcessError(1, 'push', '', 'remote rejected')
+            return 'base'
+        self.runtime.run_git.side_effect=run_git
+        s.integrate(self.github.items)
+        events = self.attributed_events(1)
+        self.assertIn(('repair','publish-error'), events)
+        self.assertNotIn(('repair','merge-conflict'), events)
+
+    def test_merge_conflict_repair_with_unrecoverable_paths_records_pathless(self):
         s=self.supervisor
         s.dispatch(self.github.items)
         s.reconcile_workers(self.github.items)
@@ -285,12 +348,16 @@ class SupervisorTests(unittest.TestCase):
         def run_git(cwd, *args):
             if args and args[0] == 'merge':
                 raise subprocess.CalledProcessError(1, 'merge', None, None)
-            return 'base'
+            return ''
         self.runtime.run_git.side_effect=run_git
         s.integrate(self.github.items)
         payloads = [json.loads(e['payload']) for e in s.state.events(1)
                     if e['kind'] == 'repair']
-        self.assertEqual(payloads[0], {'cause': 'merge-conflict'})
+        self.assertEqual(payloads[0], {'cause': 'merge-conflict', 'paths': [],
+                                       'pathless': True})
+        report = s.state.merge_flow(now=time.time() + 60)
+        self.assertEqual(report['conflict_paths']['current'], {'pathless': 1})
+        self.assertEqual(report['conflict_load']['current'], 'unattributed')
 
     def test_clean_cause_repair_records_no_paths(self):
         s=self.supervisor
