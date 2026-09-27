@@ -30,6 +30,12 @@ _WORKER_FAILURE_MARKERS = ("local agent failed", "agent reported a blocker",
 
 CHECK_RECORD_MARK = "as read-only diagnostics. "
 
+# Ledger event kind recorded when a publish merge is completed in-process
+# on mechanically resolvable paths — the no-repair counterpart of a
+# 'repair' row with cause 'merge-conflict'. The separate kind is what lets
+# the attribution separate mechanical resolutions from agent repairs.
+MECHANICAL_RESOLUTION_KIND = "mechanical-resolution"
+
 
 def window_bounds(now, window_seconds):
     """Named adjacent windows: previous=[now-2w, now-w), current=[now-w, now)."""
@@ -132,13 +138,17 @@ def repair_attribution(events, lo, hi, issues_by_number, jobs_by_issue):
     ``merge-conflict`` rows recorded (an ``unclassified`` bucket counts
     path-less rows) with the concentrated/spread verdict, and ranks the
     failing check names ``ci-failure`` rows expose through their payload or
-    the job's terminal check record.
+    the job's terminal check record. ``mechanical-resolution`` rows —
+    publish merges completed in-process without a repair dispatch — are
+    counted separately so a falling merge-conflict repair count can be
+    read against them.
     """
     repairs_by_cause = Counter()
     redispatches_by_cause = Counter()
     repairs_by_area = {}
     conflict_paths = Counter()
     conflict_repairs = conflict_pathless = 0
+    mechanical_resolutions = 0
     failing_checks = Counter()
     checks_unattributed = 0
     for event in events or ():
@@ -148,6 +158,9 @@ def repair_attribution(events, lo, hi, issues_by_number, jobs_by_issue):
         kind = event.get("kind")
         if kind == "redispatch":
             redispatches_by_cause[event_cause(event) or "unclassified"] += 1
+            continue
+        if kind == MECHANICAL_RESOLUTION_KIND:
+            mechanical_resolutions += 1
             continue
         if kind != "repair":
             continue
@@ -177,6 +190,7 @@ def repair_attribution(events, lo, hi, issues_by_number, jobs_by_issue):
         "repairs_by_area": {area: dict(sorted(causes.items()))
                             for area, causes in sorted(repairs_by_area.items())},
         "conflict_repairs": conflict_repairs,
+        "mechanical_resolutions": mechanical_resolutions,
         "conflict_paths": _ranked(conflict_paths, conflict_pathless),
         "conflict_load": _conflict_load(conflict_repairs, conflict_paths),
         "failing_checks": _ranked(failing_checks, checks_unattributed),
