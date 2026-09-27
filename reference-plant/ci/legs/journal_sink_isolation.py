@@ -113,7 +113,7 @@ import simulate
 # the scan must surface the named diagnostic — never a silently
 # unexercised contract.
 LEG = {
-    "order": 400,
+    "order": 410,
     "title": "the journal sink-isolation leg",
     "passes": "journal-sink-isolation",
     "tampers": [
