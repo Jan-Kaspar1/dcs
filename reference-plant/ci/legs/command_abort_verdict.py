@@ -89,7 +89,7 @@ import simulate
 # verdict vocabulary — must surface the named diagnostic, never a
 # silently unexercised contract.
 LEG = {
-    "order": 460,
+    "order": 470,
     "title": "the command-abort-verdict leg",
     "passes": "command-abort-verdict",
     "tampers": [
