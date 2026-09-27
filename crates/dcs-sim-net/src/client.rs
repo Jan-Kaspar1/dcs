@@ -706,7 +706,9 @@ impl RemoteDriver {
     /// released claim keeps fencing the field for the token — never
     /// leaving the field open to a foreign grab — while the probe
     /// itself never becomes a live holder a different owner's
-    /// conditional claim would read as a live incumbent. Refused
+    /// conditional claim would read as a live incumbent — and joining
+    /// no holder, it likewise leaves a yielded claim yielded for the
+    /// successor the mark was handed to. Refused
     /// [`RemoteError::Fenced`] while a different owner stands, exactly
     /// like `ensure_writer`.
     pub fn ensure_writer_unbound(&self, owner: u64) -> Result<(), RemoteError> {
@@ -762,8 +764,13 @@ impl RemoteDriver {
     /// other attachments still hold its token, where a *live
     /// incumbent's* unyielded claim refuses it — the arbitration that
     /// keeps an islanded orphaned peer's promotion from preempting a
-    /// real field owner. The recorded token is forgotten either way, so
-    /// a later re-attach does not re-assert the yielded claim.
+    /// real field owner. The mark stands only until the hand-off does:
+    /// the same owner re-granting itself into a live *controller* hold
+    /// — a bound `claim_writer`, `claim_writer_unless_held`, or
+    /// `ensure_writer` — clears it, so a re-incumbented owner reads as
+    /// the live unyielded claim the conditional grant refuses. The
+    /// recorded token is forgotten either way, so a later re-attach
+    /// does not re-assert the yielded claim.
     pub fn release_writer_keep_claim(&self) -> Result<(), RemoteError> {
         self.connection.lock().unwrap().owner = None;
         match self.request(&PlantRequest::ReleaseWriter { keep_claim: true })? {
