@@ -90,7 +90,7 @@ class Registration(unittest.TestCase):
         }
         record = discovered["stranded_rejoin.py"]
         self.assertEqual(record["stem"], "stranded-rejoin")
-        self.assertEqual(record["order"], 410)
+        self.assertEqual(record["order"], 420)
 
     def test_the_named_diagnostics_follow_the_stem_convention(self):
         # The issue names stranded-rejoin-failed and

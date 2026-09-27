@@ -94,7 +94,7 @@ import simulate
 # must surface the named diagnostic on the honest re-join rather
 # than passing an unexercised contract.
 LEG = {
-    "order": 410,
+    "order": 420,
     "title": "the stranded-standby re-join leg",
     "passes": "stranded-rejoin-leg",
     "tampers": [
