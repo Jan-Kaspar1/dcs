@@ -1,5 +1,6 @@
-//! The QA finding `unkeyed-fenced-demote-parks-unsynchronized` (#1045):
-//! on the unkeyed pair — the QA rig's own default launch — a foreign
+//! The QA finding `unkeyed-fenced-demote-parks-unsynchronized` (#1045,
+//! re-verified under #1167): on the unkeyed pair — the QA rig's own
+//! default launch — a foreign
 //! `claim_writer` fenced the field's owner mid-run, and the demoted
 //! ex-owner reported `sync=unsynchronized` for the rest of the session
 //! while its sibling served perfectly good field-owning checkpoints.
@@ -30,15 +31,41 @@
 //! window — and the ex-owner's served `sync` observed per scan as it
 //! resolves the claim-declared monitor and converges `tracking`,
 //! promotable again rather than parked `unsynchronized`.
+//!
+//! The first verification of this fix caught the surviving half the
+//! routable-bind leg could not see: the QA rig launches every
+//! controller `--listen 0.0.0.0:<port>` — the documented container
+//! deployment — so the successor's claim declared its wildcard *bind*
+//! address, which the demoted peer dialed as its own loopback and
+//! parked `unsynchronized` on anyway (the
+//! `claimed-monitor-wildcard-undialable` finding, #1135/#1166). The
+//! reproduction therefore runs twice: bound routable and bound to the
+//! wildcard, where the field's arbitration must never store the
+//! wildcard verbatim — the stored monitor normalizes to the claim
+//! connection's proven source — and the demoted peer converges either
+//! way. A third leg drives the unscripted resolution: ticked while
+//! the field stands unclaimed, the demoted ex-owner's own reclaim
+//! probe re-arms its token and re-takes the field — the other way a
+//! released rogue claim closes, leaving the pair's hot standby
+//! attached rather than parked.
+//!
+//! What stays intended behavior, answered for the record: while a
+//! *monitor-less* claim stands — a tool's, or a foreign attachment's
+//! — `unsynchronized` is the honest report, since the field names no
+//! endpoint to track and the announced contract can prove nothing on
+//! an unkeyed run. Permanent `unsynchronized` is intended only there
+//! and while the standing claim's declared monitor cannot prove this
+//! line's ownership; every other shape must converge.
 
 use dcs_core::{IoDriver, IoError, JournalEvent, PointId, Role, StandbySync, Value};
 use dcs_monitor::MonitorClient;
 use dcs_sim_net::RemoteDriver;
+use std::net::SocketAddr;
 use std::path::Path;
 
 mod support;
 
-use support::{CONTROLLER, Spawned, listening_on, spawn_logged, spawn_plant};
+use support::{CONTROLLER, Spawned, listening_on, reachable, spawn_logged, spawn_plant};
 
 /// The shared plant's model — the QA rig's own pump station.
 const STATION: &str = concat!(
@@ -62,19 +89,27 @@ const CONVERGE_BOUND: u64 = 12;
 const FOREIGN: u64 = 0xF0_21_61_6E;
 
 /// An unkeyed `dcs-controller` — the QA rig's default launch the
-/// finding reproduced against. The shared harness helpers inject
-/// `--pair-token` unless the caller declares one, so the unkeyed pair
-/// spawns directly, exactly as `demote_replay.rs`'s unkeyed legs do.
-fn spawn_unkeyed(model: &str, extra: &[String], dt: &str) -> (Spawned, Vec<String>) {
+/// finding reproduced against — bound on `listen`, so the run can
+/// take the rig's own wildcard bind shape. The shared harness helpers
+/// inject `--pair-token` unless the caller declares one, so the
+/// unkeyed pair spawns directly, exactly as `demote_replay.rs`'s
+/// unkeyed legs do.
+fn spawn_unkeyed(model: &str, extra: &[String], listen: &str, dt: &str) -> Spawned {
     let mut args = vec![model.to_string()];
     args.extend(extra.iter().cloned());
-    for arg in ["--listen", "127.0.0.1:0", "--driven", "--dt", dt] {
+    for arg in ["--listen", listen, "--driven", "--dt", dt] {
         args.push(arg.to_string());
     }
-    spawn_logged(Path::new(CONTROLLER), &args, listening_on)
+    spawn_logged(Path::new(CONTROLLER), &args, listening_on).0
 }
 
-/// The defect's reproduction, end to end on the unkeyed pair:
+/// The defect's reproduction, end to end on the unkeyed pair, with
+/// both controllers bound on `listen` — routable `127.0.0.1:0`, or
+/// the wildcard `0.0.0.0:0` every container launch the QA rig runs
+/// binds. Returns the monitor endpoint the field's standing claim
+/// declared once the successor owned it, plus the sibling's dialable
+/// address — equal under the fix whether the sibling declared a
+/// routable listener or the wildcard the server normalizes.
 ///
 /// 1. The launched active claims the field; the `--standby` peer
 ///    converges `tracking` on it.
@@ -97,16 +132,17 @@ fn spawn_unkeyed(model: &str, extra: &[String], dt: &str) -> (Spawned, Vec<Strin
 ///    The served `sync` moves `unsynchronized` → `tracking` inside the
 ///    bound, and `promote` answers again: the pair's hot standby is
 ///    restored, matching the failover goal the finding cites.
-#[test]
-fn unkeyed_fenced_demote_converges_on_the_field_attested_successor() {
+fn reproduction(listen: &str) -> (SocketAddr, SocketAddr) {
     let plant = spawn_plant(Path::new(STATION), Path::new(DYNAMICS));
     let remote = ["--remote".to_string(), plant.addr.to_string()];
-    let (active_process, _preamble) = spawn_unkeyed(STATION, &remote, DT);
+    let active_process = spawn_unkeyed(STATION, &remote, listen, DT);
+    let active_addr = reachable(active_process.addr);
     let mut standby_args = remote.to_vec();
-    standby_args.extend(["--standby".to_string(), active_process.addr.to_string()]);
-    let (standby_process, _standby_preamble) = spawn_unkeyed(STATION, &standby_args, DT);
-    let active = MonitorClient::new(active_process.addr);
-    let standby = MonitorClient::new(standby_process.addr);
+    standby_args.extend(["--standby".to_string(), active_addr.to_string()]);
+    let standby_process = spawn_unkeyed(STATION, &standby_args, listen, DT);
+    let standby_addr = reachable(standby_process.addr);
+    let active = MonitorClient::new(active_addr);
+    let standby = MonitorClient::new(standby_addr);
     let field = RemoteDriver::connect(plant.addr).unwrap();
 
     // Converge the standby on the launched active — the pair's
@@ -191,6 +227,32 @@ fn unkeyed_fenced_demote_converges_on_the_field_attested_successor() {
         "the promoted peer must settle active on its field-owning scan"
     );
 
+    // What the field's arbitration now names as the successor: every
+    // claim-state verdict carries the standing claim's declared
+    // monitor. Under the verification-failure defect this was the
+    // sibling's wildcard *bind* address verbatim — `0.0.0.0:<port>`,
+    // which every peer dials as its own loopback — so the stored
+    // monitor must be the claim connection's proven source instead,
+    // the same substitute a `?peer=` wildcard announce resolves to.
+    assert_eq!(
+        field.probe_writer().unwrap(),
+        dcs_core::FieldClaim::Held,
+        "the promoted sibling must hold the field"
+    );
+    let stored = field.claimed_monitor().unwrap();
+    assert!(
+        !stored.ip().is_unspecified(),
+        "the stored claim monitor must never be the undialable \
+         wildcard {stored} — the verdict the defect's re-verification \
+         parked on"
+    );
+    assert_eq!(
+        stored, standby_addr,
+        "the claim must declare the successor's dialable monitor \
+         {standby_addr} — verbatim or normalized from the wildcard \
+         bind, the rendezvous the demoted peer dials"
+    );
+
     // The defect's fix, observed on the served sync state over time:
     // every scan's claim probe now reads the fencing verdict naming
     // the successor's declared monitor, the monitor verifies it
@@ -220,6 +282,14 @@ fn unkeyed_fenced_demote_converges_on_the_field_attested_successor() {
     assert!(
         converged,
         "the demoted peer never resolved the successor the field named"
+    );
+    assert!(
+        active.journal(0).unwrap().iter().any(|entry| matches!(
+            entry.event,
+            JournalEvent::TrackingSourceAdopted { source } if source == standby_addr
+        )),
+        "the demoted peer must journal the successor's adoption \
+         naming the routable monitor {standby_addr}"
     );
 
     // Promotable again — the redundancy the finding's parked
@@ -261,5 +331,140 @@ fn unkeyed_fenced_demote_converges_on_the_field_attested_successor() {
             Err(IoError::Fenced(_))
         ),
         "the foreign claim must stay superseded by the promotion's own"
+    );
+
+    (stored, standby_addr)
+}
+
+/// The defect's reproduction on routable binds — the positive
+/// control: every declaration is dialable verbatim, so the demoted
+/// ex-owner resolves the claim-declared successor and the pair keeps
+/// its hot standby.
+#[test]
+fn unkeyed_fenced_demote_converges_on_the_field_attested_successor() {
+    reproduction("127.0.0.1:0");
+}
+
+/// The shape the fix's first verification actually parked on: both
+/// controllers bound to the wildcard — the rig's and every documented
+/// container launch's `--listen 0.0.0.0:<port>` — so the successor's
+/// claim declares its bind address, which a verbatim-storing field
+/// hands every fenced peer as its own loopback. Under the fix the
+/// stored monitor is the claim connection's proven source — routable,
+/// equal to the sibling's reachable address — and the demoted peer
+/// adopts it: `unsynchronized` only ever reports the window where the
+/// field named nothing to track, never the parked end-state the
+/// defect left.
+#[test]
+fn unkeyed_fenced_demote_on_wildcard_binds_converges_on_the_normalized_successor() {
+    let (stored, standby_addr) = reproduction("0.0.0.0:0");
+    assert_eq!(
+        stored, standby_addr,
+        "a wildcard declaration must store the claim connection's \
+         proven source — the normalization the verification-failure \
+         verdict never applied"
+    );
+}
+
+/// The unscripted resolution the driven promote leg suppresses on
+/// purpose: the rogue claim released and the field standing
+/// unclaimed, the demoted ex-owner's next scan probes its reclaim —
+/// the bound conditional grant — and re-takes the field under its own
+/// token, settling `active` again while the sibling holds `tracking`.
+/// `unsynchronized` is a transient report here too — the parked
+/// `standby`/`unsynchronized` the defect left has no resolution it
+/// can survive: the released field is either re-armed by the ex-owner
+/// or claimed by a successor whose declared monitor the demoted peer
+/// adopts.
+#[test]
+fn unkeyed_fenced_demote_reclaims_the_released_field() {
+    let plant = spawn_plant(Path::new(STATION), Path::new(DYNAMICS));
+    let remote = ["--remote".to_string(), plant.addr.to_string()];
+    let active_process = spawn_unkeyed(STATION, &remote, "0.0.0.0:0", DT);
+    let active_addr = reachable(active_process.addr);
+    let mut standby_args = remote.to_vec();
+    standby_args.extend(["--standby".to_string(), active_addr.to_string()]);
+    let standby_process = spawn_unkeyed(STATION, &standby_args, "0.0.0.0:0", DT);
+    let standby_addr = reachable(standby_process.addr);
+    let active = MonitorClient::new(active_addr);
+    let standby = MonitorClient::new(standby_addr);
+    let field = RemoteDriver::connect(plant.addr).unwrap();
+
+    // The healthy precondition: the standby converges on the launched
+    // active.
+    let mut converged = false;
+    for _ in 0..CONVERGE_BOUND {
+        standby.advance(1).unwrap();
+        active.advance(1).unwrap();
+        if matches!(
+            standby.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ) {
+            converged = true;
+            break;
+        }
+    }
+    assert!(converged, "the standby never converged on the active");
+
+    // The reproduction's own fencing: the rogue claim preempts, the
+    // owner demotes in place, the claim releases — and the demoted
+    // peer is ticked straight through the unclaimed window the other
+    // leg holds it out of.
+    field.claim_writer(FOREIGN).unwrap();
+    active.advance(1).unwrap();
+    assert!(
+        matches!(active.role().unwrap().role, Role::Demoting | Role::Standby),
+        "a fenced write must demote the superseded owner in place"
+    );
+    field.release_writer().unwrap();
+
+    // The released field re-arms under the ex-owner's token on its
+    // next scans: the reclaim probe's bound conditional grant lands,
+    // the gate re-opens `promoting`, and the field-owning scan settles
+    // `active` — the resolved shape the QA run's parked
+    // `standby`/`unsynchronized` never reached on the defect build.
+    let mut reclaimed = false;
+    for tick in 1..=CONVERGE_BOUND {
+        active.advance(1).unwrap();
+        let report = active.role().unwrap();
+        assert!(
+            matches!(report.role, Role::Standby | Role::Promoting | Role::Active),
+            "tick {tick}: the demoted peer may only walk back toward \
+             active: {report:?}"
+        );
+        if report.role == Role::Active {
+            reclaimed = true;
+            break;
+        }
+    }
+    assert!(
+        reclaimed,
+        "the demoted peer's reclaim never re-armed its released claim"
+    );
+    assert!(
+        matches!(field.probe_writer().unwrap(), dcs_core::FieldClaim::Held),
+        "the reclaimed peer must hold the field again"
+    );
+
+    // The pair's redundancy out the other side: the sibling — never
+    // fenced, never re-launched — keeps pulling the re-owned line and
+    // settles back into `tracking`, the hot standby the finding's
+    // parked peer could no longer be.
+    let mut reconverged = false;
+    for _ in 0..CONVERGE_BOUND {
+        standby.advance(1).unwrap();
+        active.advance(1).unwrap();
+        if matches!(
+            standby.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ) {
+            reconverged = true;
+            break;
+        }
+    }
+    assert!(
+        reconverged,
+        "the sibling must keep tracking the re-owned line: {:?}",
+        standby.role().unwrap().sync
     );
 }
