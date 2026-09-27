@@ -1,139 +1,169 @@
-"""failover-proof — the redundant pair's served standing proof, from the
-field edge.
+#!/usr/bin/env python3
+"""The failover-proof leg for the reference plant — the consumer-side
+proof that the armed standby's served standing proof and heartbeat
+miss accounting outlast a checkpoint-source outage and bound its
+self-promotion to the declared budget's scan boundary (WW-ENG-003,
+WW-LCM-001).
 
-Issue #1035, the consumer-boundary exercise of the failover gate's
-standing proof and miss accounting (issue #1029 serves it, QA carries
-`qa-scenario-failover-proof-report` as the platform-facing scenario):
-the standby's `GET /role` report must expose the evidence
-`Peer::self_promote` reads — `converged` the standing promotion proof,
-`misses` the consecutive checkpoint-pull count it bounds — so a
-consumer can watch the gate's math outrun an outage instead of
-watching the role flip. The contract, from the consumer side:
+The consumer-boundary mirror of `qa-scenario-failover-proof-report`,
+the platform-side acceptance of the served failover gate's evidence
+(`role-report-failover-proof`, #1029) — exercised against the
+manifest-declared pair through released artifacts and HTTP only. The
+failover leg (`ci/legs/failover.py`) proves the unattended switch
+itself; this leg proves the gate's evidence is *served* — the
+`GET /role` report's `failover` bundle carrying `converged` (the
+standing promotion proof the self-promotion gate reads), `misses`
+(the consecutive checkpoint-pull count it is bounded by), and
+`budget` (the armed declaration the count is read against) — so a
+consumer watches the gate's math outrun an outage instead of watching
+the role flip. The contract, from the consumer side:
 
-* An armed tracking peer's report carries `failover` —
+- an armed tracking peer's report carries `failover` —
   `{converged, misses, budget}`; an unarmed peer's report carries no
-  `failover` key.
-* With the pair converged under the armed budget, a severed
-  checkpoint source degrades the standby's sync while the standing
-  proof reports each miss — `misses` k of `budget` N — on reports
-  that keep `role: "standby"` through the window.
-* The report at the boundary precedes self-promotion: the final
+  `failover` key, the standing proof served only beside the armed
+  budget it is read against;
+- a severed checkpoint source degrades the standby's sync while the
+  standing proof reports each miss — `misses` *k* of `budget` *N* —
+  on reports that keep `role: "standby"` through the window;
+- the report at the boundary precedes self-promotion: the final
   in-window report answers `misses: N-1`, the budget-th miss's scan
   boundary settles the peer `active`, and the promoted report still
   serves the accounting the promotion consumed —
-  `{converged: true, misses: N, budget: N}`.
-* Restoring the checkpoint source reconverges the pair: the
+  `{converged: true, misses: N, budget: N}`;
+- restoring the checkpoint source reconverges the pair: the
   respawned duty peer returns `tracking` off the promoted peer's
-  checkpoints (its unarmed report serving no `failover` key), the
+  checkpoints — its unarmed report serving no `failover` key — the
   documented `POST /demote`/`POST /promote` switch restores the
   launch roles, and the re-stood standby's proof reads a zeroed miss
   run again.
 
-The leg binds the manifest's declared redundant pair and declared
-`failover_budget`, launches the released monitor binary in `--driven`
-scan mode under the leg's `--run-dir` evidence area, converges the
-standby over `pair.tick` handover ticks, then exercises the
-degraded-window contract through the released `GET /role` contract:
+The leg binds the manifest's declared redundant pair and the standby's
+declared `failover_budget`, launches the released tooling through the
+shared pair rig with the standby armed at that budget, converges it
+over `pair.tick` tracking-first driven ticks, then exercises the
+degraded-window contract through `GET /role`:
 
-1.  `role(contract_url, failures)` on the converged standby records
-    the armed baseline — `failover` `{converged: true, misses: 0,
-    budget: N}`; the field owner's report carries no `failover` key
-    (an unarmed peer serves none). A release whose standby report has
-    no `failover` key at all predates the served-field contract and
-    is inconclusive.
+1.  the converged reports record the armed baseline — the standby's
+    `failover` `{converged: true, misses: 0, budget: N}` beside the
+    field owner's absent field. A standby report carrying no
+    `failover` key at all is the pinned release predating the
+    served-field contract — inconclusive, never a failure;
 2.  `pair.stop(rig.duty)` — the stop lever — severs the standby's
-    checkpoint source. Driven scans advance the miss run; after each,
-    `GET /role` must answer `role: "standby"` with a degraded sync
-    and `failover: {converged: true, misses: k, budget: N}` for k =
-    1..N-1 — the standing proof and miss accounting outlasting the
-    outage, no report inside the window moving the role early.
-3.  The scan that takes the miss run to the declared budget is the
-    promotion's own boundary: `GET /role` afterward answers
-    `role: "active"` at the declared tick with the consumed
-    accounting `misses: N` still served — the last standby report
-    (tick T-1, `misses: N-1`) preceding the promoted report
-    (tick T, `misses: N`) exactly as `failover_due` reads the gate.
+    checkpoint source. Each driven scan advances the miss run one
+    count, and `GET /role` must keep answering `role: "standby"`
+    under a `degraded` sync with `failover` reporting `misses` *k* of
+    *N* for k = 1..N-1 — the standing proof and its miss accounting
+    outlasting the outage, no in-window report moving the role early;
+3.  the scan that takes the miss run to the declared budget is the
+    promotion's own boundary: `GET /role` answers `role: "active"`
+    at the expected tick with the consumed accounting `misses: N`
+    still served — the last standby report (tick T-1, `misses: N-1`)
+    immediately preceding the promoted report (tick T, `misses: N`)
+    exactly as `failover_due` reads the gate;
 4.  `pair.spawn_peer` restores the source: the respawned duty peer
-    resumes on its recorded durable state and driven tracking-first
-    pair ticks reconverge it `tracking` off the promoted peer's
-    checkpoints. `rig.switch` performs the documented demote/promote
-    handover, restoring the launch roles — the original duty `active`
-    again, the original standby `tracking` with the standing proof
-    re-stood at `misses: 0` of N.
+    resumes on its declared listen address and recorded durable
+    state, and driven tracking-first pair ticks reconverge it
+    `tracking` off the promoted peer's checkpoints — its unarmed
+    report serving no `failover` key;
+5.  `rig.switch` performs the documented demote/promote handover,
+    restoring the launch roles — the original duty `active` again,
+    the original standby `tracking` with the standing proof re-stood
+    at `misses: 0` of N.
 
 Everything the leg asserts is consumer-observable: monitor HTTP and
-the rig-owned evidence it launches under `--run-dir`. The leg never
-imports or builds against the platform tree; `ci/check.sh`'s boundary
-lint greps the leg sources for checkout paths, and the rig's
-`digest_entries` are what the pair-run test replays verbatim twice.
+the rig-owned persistence the respawn reopens. The leg never imports
+or builds against the platform tree; `ci/check.sh`'s boundary lint
+greps the leg sources for checkout paths, and the two digest-identical
+passes the check runs replay the digested reports verbatim.
 
-Tamper `stripped-proof` doctors the degraded-window expectations —
-the window's reports are checked *absent* `failover`, as if the
-standing proof and miss accounting were never served. Any honest
-run's served field is reported against the doctored wording; a
-release too old to serve the field gives the doctored case nothing
-to check and fails the self-check rather than passing silently.
+Tamper `stripped-proof` doctors the degraded-window expectation — the
+window's reports are checked *absent* `failover`, as if the standing
+proof and miss accounting were never served. Any honest run's served
+field is reported against the doctored wording; a release too old to
+serve the field gives the doctored case nothing to check and fails
+the self-check rather than passing silently.
 
-Since the field itself is the contract, the leg is *inconclusive*
-when the pinned release predates it — the converged standby's report
-carrying no `failover` key — rather than asserting the served bundle
-a release predating #1029 cannot answer.
+Usage:
 
-Exit 1 with the leg's named failure (`failover-proof-failed` in the
-release contract) when any contract assertion fails; inconclusive —
-with exit 0 and a `failover-proof-digest inconclusive` line — names
-what the run could not observe. Two clean passes must emit the same
-digest.
+    failover_proof.py --plant-server PATH --controller PATH \
+        --model model/plant.json --dynamics model/dynamics.json \
+        --scenario ci/scenario.json --manifest deploy/manifest.json
+
+On success one `failover-proof-digest <sha256>` line prints — the
+check runs two passes and compares them
+(`failover-proof-nondeterministic`). A contract violation reports
+`failover-proof: …` lines on stderr and exits 1 — the check's
+`failover-proof-failed`. A converged standby report carrying no
+`failover` field is the pinned release predating the contract —
+inconclusive, not a failure. `--tamper stripped-proof` doctors the
+leg's degraded-window expectation, so the leg proves its
+standing-proof assertion fires rather than passing an unexercised
+contract.
 """
 
 import argparse
 import hashlib
 import json
-import shutil
+import os
 import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
 
 import pair
 
 
-class Abort(Exception):
-    pass
-
-
-class Inconclusive(Exception):
-    pass
-
-
+# The leg's stage registration — ci/legs.py reads this literal
+# (parsing, never importing the module) to order the leg, run its
+# two digest-identical passes, and exercise its doctored case.
+# The doctored case: a leg checking the degraded window stripped of
+# its served failover evidence must surface the named diagnostic on
+# the honest served proof — never a silently unexercised contract.
 LEG = {
     "order": 400,
-    "title": "redundant pair — served failover standing proof and miss accounting",
-    "passes": "failover-proof",
+    "title": "the failover-proof leg",
+    "passes": "failover-proof-leg",
     "tampers": [
         {
-            "case": "stripped-proof",
+            "name": "stripped-proof",
+            "passed": "a stripped-proof case passed the failover-proof leg",
+            "missed": "the stripped-proof case did not report its named diagnostic",
             "evidence": [
                 "the doctored expectation wanted the degraded window "
                 "stripped of its failover evidence"
             ],
-        }
+        },
     ],
 }
 
+def eprint(*args):
+    print(*args, file=sys.stderr)
 
-CONVERGE_TICKS = 4
+
+Abort = pair.Abort
+
+
+class Inconclusive(Exception):
+    """The pinned release predates the served-field contract the leg
+    exercises — the run classifies inconclusive, never a product
+    failure."""
+
+
+# The driven tick bound the respawned duty peer reconverges inside —
+# the tracker's first pull applies the promoted owner's checkpoint, so
+# the bound only covers startup margin.
 TRACK_BOUND = 8
 
 
 def tracking(report):
     """`role: "standby"` with `sync.tracking` populated."""
+    sync = report.get("sync")
     return (
         report.get("role") == "standby"
-        and isinstance(report.get("sync"), dict)
-        and "tracking" in report["sync"]
+        and isinstance(sync, dict)
+        and "tracking" in sync
     )
-
-
-def eprint(message):
-    print(f"failover-proof: {message}", file=sys.stderr)
 
 
 def role(url, failures):
@@ -141,28 +171,11 @@ def role(url, failures):
     return pair.get(f"{url}/role", "GET /role", failures)
 
 
-def arm_common():
-    ap = argparse.ArgumentParser(prog="failover-proof")
-    ap.add_argument("--controller", required=True)
-    ap.add_argument("--manifest", required=True)
-    ap.add_argument("--model", required=True)
-    ap.add_argument("--plant", required=True)
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--dt", type=float, default=0.05)
-    ap.add_argument("--tamper", choices=["stripped-proof"], default=None)
-    ap.add_argument(
-        "--run-dir",
-        help="launch the pair under this existing directory instead of "
-        "a private temp directory",
-    )
-    return ap
-
-
 def check_failover_evidence(report, budget, failures, where):
     """The report's `failover` bundle must be the armed standing proof
-    — `converged`, `misses`, `budget` all integers/bool the contract
-    serves. Returns the validated bundle; a present-but-malformed or
-    mismatched bundle fails by name."""
+    — `converged` a bool, `misses` a non-negative count, `budget` the
+    armed declaration, no keys beside. Returns the validated bundle; a
+    malformed bundle fails by name and unwinds."""
     served = report.get("failover")
     if not isinstance(served, dict):
         failures.append(
@@ -196,72 +209,59 @@ def check_failover_evidence(report, budget, failures, where):
     return served
 
 
-def failover_proof_pass(args, tamper=None):
-    """The exercised phase, shared by the real run and the doctored
-    negative. Returns `(digest_entries, evidence, failures)`; raises
-    `Abort` for setup failures and `Inconclusive` when the pinned
-    release cannot exercise the contract."""
-    failures = []
-    manifest = pair.load_manifest(args.manifest)
-    declared = manifest.get("failover_budget")
+def failover_proof_pass(args, tamper):
+    """The exercised run: converge the armed declared pair, sever the
+    standby's checkpoint source, assert the served standing proof and
+    miss accounting across the degraded window and at the promotion's
+    boundary, restore the source, and restore the launch roles.
+    Returns `(digest_entries, evidence, failures)`; raises
+    `Inconclusive` where the pinned release cannot answer the
+    contract."""
+    declared = pair.manifest_pair(args.manifest)
     if declared is None:
         raise Abort(
-            "the scenario manifest declares no failover_budget — the "
-            "pair-leg contract carries the armed budget"
+            "the manifest declares no standby pair — the "
+            "failover-proof leg has nothing to exercise"
         )
+    _manifest, duty_decl, standby_decl = declared
+    armed = standby_decl.get("failover_budget")
     if (
-        not isinstance(declared, int)
-        or isinstance(declared, bool)
-        or declared < 1
+        not isinstance(armed, int)
+        or isinstance(armed, bool)
+        or armed < 1
     ):
         raise Abort(
-            f"the scenario manifest declares failover_budget "
-            f"{declared!r} — the budget is a positive miss count"
+            "the manifest's standby declares no positive "
+            "failover_budget — the deployed pair's armed heartbeat "
+            "is absent"
         )
-    budget = declared
-    pair_decl = manifest["pair"]
-    launch_dir = args.run_dir
-    if launch_dir is None:
-        launch_dir = pair.fresh_dir(args.out, "failover-proof")
-    evidence = {"budget": budget}
-    rig = pair.launch_pair(
-        args.controller,
-        args.model,
-        args.dt,
-        pair_decl,
-        failures,
-        auto_promote=budget,
-        run_dir=launch_dir,
-    )
+    budget = armed
+    digest_entries, evidence, failures = [], {"budget": budget}, []
+    rig = None
     try:
-        # Phase 1 — converge: driven tracking-first ticks until the
-        # standby tracks the field owner.
-        rig.converge(CONVERGE_TICKS)
-        duty_url, standby_url = rig.urls
-        duty_decl, standby_decl = rig.decls
-        duty_role = role(duty_url, failures)
-        standby_role = role(standby_url, failures)
-        if not tracking(standby_role):
-            failures.append(
-                "the standby did not report tracking at convergence — "
-                f"GET /role answers {standby_role}"
-            )
-            raise Abort
-        evidence["converged"] = rig.tick_count
-        digest_entries = [
+        rig = pair.launch_pair(args, declared, auto_promote=budget)
+        duty_url, standby_url = rig.duty_url, rig.standby_url
+
+        # Phase 1 — convergence and the armed baseline: driven
+        # tracking-first ticks until the standby tracks the field
+        # owner, then the reports the contract keys on. The converged
+        # standby's report must carry the standing proof with a zeroed
+        # miss run; the unarmed field owner's report carries no
+        # `failover` key. No `failover` key at all is the pre-contract
+        # release — inconclusive.
+        converged = rig.converge(failures)
+        duty_role = converged["duty_role"]
+        standby_role = converged["standby_role"]
+        severed_at = standby_role["tick"]
+        evidence["converged"] = severed_at
+        digest_entries.append(
             {
                 "phase": "converge",
-                "ticks": rig.tracked_ticks,
+                "ticks": converged["ticks"],
                 "duty_role": duty_role,
                 "standby_role": standby_role,
             }
-        ]
-
-        # Phase 2 — the armed baseline: the converged standby's report
-        # carries the standing proof with a zeroed miss run; the
-        # unarmed field owner's report carries no `failover` key. No
-        # `failover` key at all is the pre-contract release —
-        # inconclusive.
+        )
         baseline = standby_role.get("failover")
         if baseline is None:
             raise Inconclusive(
@@ -269,15 +269,16 @@ def failover_proof_pass(args, tamper=None):
                 "field — the pinned release predates the served "
                 "standing-proof contract the leg exercises"
             )
-        baseline = check_failover_evidence(
+        check_failover_evidence(
             standby_role, budget, failures, "the armed baseline"
         )
-        if baseline != {"converged": True, "misses": 0, "budget": budget}:
+        want = {"converged": True, "misses": 0, "budget": budget}
+        if baseline != want:
             failures.append(
-                "the armed baseline reports failover "
-                f"{baseline} — a tracking standby's standing proof "
-                f"reads `converged: true` with the miss run zeroed, "
-                f"`budget` the armed {budget}"
+                f"the armed baseline reports failover {baseline} — a "
+                "tracking standby's standing proof reads `converged: "
+                f"true` with the miss run zeroed, `budget` the armed "
+                f"{budget}"
             )
             raise Abort
         if "failover" in duty_role:
@@ -295,23 +296,22 @@ def failover_proof_pass(args, tamper=None):
             }
         )
 
-        # Phase 3 — the degraded window: the stop lever severs the
+        # Phase 2 — the degraded window: the stop lever severs the
         # standby's checkpoint source; driven scans advance the miss
-        # run one per scan, the served standing proof reporting
+        # run one count per scan, the served standing proof reporting
         # `misses` k of N on `role: "standby"` reports that keep a
-        # degraded sync. The doctored negative checks the window
-        # stripped — any served field is reported against the
-        # doctored wording.
+        # degraded sync at the scan's own tick. The doctored negative
+        # checks the window stripped — any served field is reported
+        # against the doctored wording.
         pair.stop(rig.duty)
         rig.duty = None
-        severed_at = rig.tick_count
         evidence["severed_at"] = severed_at
         misses = []
         for miss in range(1, budget):
-            rig.scan(standby_url)
+            pair.scan(standby_url, failures)
             report = role(standby_url, failures)
-            served = report.get("failover")
             if tamper == "stripped-proof":
+                served = report.get("failover")
                 if served is not None:
                     failures.append(
                         f"miss {miss}'s degraded report carries the "
@@ -330,22 +330,26 @@ def failover_proof_pass(args, tamper=None):
                         "standby until the armed budget's boundary"
                     )
                     raise Abort
-                if (
-                    not isinstance(report.get("sync"), dict)
-                    or "degraded" not in report["sync"]
-                ):
+                sync = report.get("sync")
+                if not (isinstance(sync, dict) and "degraded" in sync):
                     failures.append(
-                        f"miss {miss}'s report carries sync "
-                        f"{report.get('sync')} — a severed tracking "
-                        "pull degrades the standby's sync variant "
-                        "while the role holds standby"
+                        f"miss {miss}'s report carries sync {sync} — "
+                        "a severed tracking pull degrades the "
+                        "standby's sync variant while the role holds "
+                        "standby"
+                    )
+                    raise Abort
+                if report.get("tick") != severed_at + miss:
+                    failures.append(
+                        f"miss {miss}'s report stands at tick "
+                        f"{report.get('tick')} — each driven scan "
+                        f"advances the run one tick, expected "
+                        f"{severed_at + miss} off the severance at "
+                        f"{severed_at}"
                     )
                     raise Abort
                 served = check_failover_evidence(
-                    report,
-                    budget,
-                    failures,
-                    f"miss {miss}'s report",
+                    report, budget, failures, f"miss {miss}'s report"
                 )
                 want = {
                     "converged": True,
@@ -356,18 +360,18 @@ def failover_proof_pass(args, tamper=None):
                     failures.append(
                         f"miss {miss}'s report serves failover "
                         f"{served} — the standing proof reports "
-                        f"`converged: true` with miss accounting "
+                        "`converged: true` with miss accounting "
                         f"{want['misses']} of {budget}"
                     )
                     raise Abort
             misses.append(
                 {
                     "miss": miss,
-                    "tick": report["tick"],
+                    "tick": report.get("tick"),
                     "failover": served,
                 }
             )
-        evidence["miss_run"] = [m["miss"] for m in misses]
+        evidence["miss_run"] = [entry["miss"] for entry in misses]
         digest_entries.append(
             {
                 "phase": "miss-run",
@@ -376,33 +380,34 @@ def failover_proof_pass(args, tamper=None):
             }
         )
 
-        # Phase 4 — the boundary: the scan that takes the miss run to
+        # Phase 3 — the boundary: the scan that takes the miss run to
         # the declared budget is the promotion's own scan boundary —
         # the last in-window report (tick T-1, `misses: N-1`)
-        # preceding the promoted report (tick T, `misses: N` still
-        # served) exactly as the gate reads it.
-        promoted_tick = rig.scan(standby_url)
+        # immediately preceding the promoted report (tick T, the
+        # consumed `misses: N` still served) exactly as
+        # `failover_due` reads the gate.
+        pair.scan(standby_url, failures)
         promoted = role(standby_url, failures)
         if promoted.get("role") != "active":
             failures.append(
                 f"the armed {budget}-miss window ended without "
-                f"self-promotion — GET /role answers {promoted} at "
-                f"tick {promoted_tick}"
+                f"self-promotion — GET /role answers {promoted}"
             )
             raise Abort
-        if promoted_tick != severed_at + budget:
+        promotion_tick = promoted.get("tick")
+        if promotion_tick != severed_at + budget:
             failures.append(
-                f"self-promotion landed at tick {promoted_tick} — "
+                f"self-promotion landed at tick {promotion_tick} — "
                 f"the declared {budget}-miss window from tick "
                 f"{severed_at} bounds the promotion at tick "
                 f"{severed_at + budget}"
             )
             raise Abort
-        if misses and misses[-1]["tick"] != promoted_tick - 1:
+        if misses and misses[-1]["tick"] != promotion_tick - 1:
             failures.append(
                 "the standing proof's last in-window report at tick "
                 f"{misses[-1]['tick']} does not immediately precede "
-                f"the promoted report at tick {promoted_tick} — the "
+                f"the promoted report at tick {promotion_tick} — the "
                 "report at the boundary precedes self-promotion"
             )
             raise Abort
@@ -425,44 +430,53 @@ def failover_proof_pass(args, tamper=None):
             boundary_failover = served
         else:
             boundary_failover = promoted.get("failover")
-        evidence["promoted"] = promoted_tick
+        evidence["promoted"] = promotion_tick
         digest_entries.append(
             {
                 "phase": "boundary",
                 "promoted": {
-                    "tick": promoted_tick,
+                    "tick": promotion_tick,
                     "role": promoted["role"],
                     "failover": boundary_failover,
                 },
             }
         )
 
-        # Phase 5 — restore: the source's respawn resumes the duty
-        # peer on its recorded durable state; driven tracking-first
-        # pair ticks reconverge it `tracking` off the promoted peer's
-        # checkpoints — its unarmed report serving no `failover` key.
-        standby_addr = standby_url.removeprefix("http://")
-        duty_addr = duty_url.removeprefix("http://")
+        # Phase 4 — restore: the source's respawn on its declared
+        # listen address resumes the duty peer on its recorded
+        # durable state; driven tracking-first pair ticks reconverge
+        # it `tracking` off the promoted peer's checkpoints — its
+        # unarmed report serving no `failover` key.
+        duty_listen = duty_url.removeprefix("http://")
         rig.duty, resumed_url, preamble = pair.spawn_peer(
             args.controller,
             args.model,
             args.dt,
             rig.plant_addr,
-            standby_addr,
+            standby_url.removeprefix("http://"),
             rig.duty_files,
-            listen=duty_addr,
+            listen=duty_listen,
             pair_token=pair.PAIR_TOKEN,
         )
+        rig.duty_url = resumed_url or rig.duty_url
         if resumed_url is None:
-            raise Abort(
+            failures.append(
                 "the respawned duty controller "
                 f"{duty_decl['name']} exited at startup: "
                 f"{'; '.join(preamble) or 'no diagnostic'}"
             )
+            raise Abort
         resumed = []
         duty_report = None
         for _ in range(TRACK_BOUND):
-            _tracked, owner = rig.tick(duty_url, standby_url, failures)
+            _tracked, owner = rig.tick(
+                duty_url,
+                standby_url,
+                failures,
+                diverged="the respawned duty peer's image diverged "
+                "from the promoted owner's at tick {tick} — the "
+                "restore's pulls never realigned the pair",
+            )
             resumed.append(owner["tick"])
             report = role(duty_url, failures)
             if tracking(report):
@@ -496,19 +510,35 @@ def failover_proof_pass(args, tamper=None):
             }
         )
 
-        # Phase 6 — the launch arrangement again: the documented
+        # Phase 5 — the launch arrangement again: the documented
         # demote/promote switch restores the launch roles — the
-        # original duty active, the original standby tracking with
-        # the standing proof re-stood at a zeroed miss run.
-        restored = rig.switch(standby_url, duty_url, failures)
+        # reconverged duty peer active, the originally armed standby
+        # tracking with the standing proof re-stood at a zeroed miss
+        # run beside the unarmed owner's absent field.
+        restored = rig.switch(
+            standby_url,
+            duty_url,
+            failures,
+            demote_what="the promoted peer",
+            promote_what="the reconverged duty peer",
+            audit_receipts=True,
+        )
         if restored["promoted_role"].get("role") != "active":
             failures.append(
-                "the documented switch back left the respawned duty "
-                f"peer reporting {restored['promoted_role']} — the "
-                "launch arrangement's field owner is active"
+                "the documented switch back left the reconverged "
+                f"duty peer reporting {restored['promoted_role']} — "
+                "the launch arrangement's field owner is active"
             )
             raise Abort
-        if restored["demoted_role"].get("role") != "standby":
+        if "failover" in restored["promoted_role"]:
+            failures.append(
+                "the unarmed restored owner's report serves failover "
+                f"{restored['promoted_role']['failover']} — an absent "
+                "field is the unarmed-peer contract, never a stood "
+                "proof"
+            )
+            raise Abort
+        if not tracking(restored["demoted_role"]):
             failures.append(
                 "the documented switch back left the promoted peer "
                 f"reporting {restored['demoted_role']} — the launch "
@@ -535,24 +565,41 @@ def failover_proof_pass(args, tamper=None):
                 "ticks": restored["ticks"],
                 "demoted_role": restored["demoted_role"],
                 "promoted_role": restored["promoted_role"],
+                "receipts": restored["receipts"],
                 "transitions": restored["transitions"],
             }
         )
         return digest_entries, evidence, failures
-    except Abort as abort:
-        failures.extend(str(arg) for arg in abort.args)
     except Inconclusive:
         raise
+    except Abort as abort:
+        failures.extend(str(arg) for arg in abort.args)
     except Exception as error:
         failures.append(f"the run raised {error!r}")
     finally:
-        rig.close()
+        if rig is not None:
+            rig.close()
     return digest_entries, evidence, failures
 
 
 def main():
-    ap = arm_common()
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--plant-server", required=True)
+    parser.add_argument("--controller", required=True)
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--dynamics", required=True)
+    parser.add_argument("--scenario", required=True)
+    parser.add_argument("--manifest", required=True)
+    parser.add_argument(
+        "--tamper",
+        choices=["stripped-proof"],
+        help="doctor the leg's degraded-window expectation — the pass "
+        "must fail naming the served standing proof",
+    )
+    args = parser.parse_args()
+
+    with open(args.scenario) as handle:
+        args.dt = json.load(handle)["dt"]
 
     try:
         digest_entries, evidence, failures = failover_proof_pass(
@@ -561,25 +608,27 @@ def main():
     except Inconclusive as inconclusive:
         if args.tamper is not None:
             eprint(
-                "the doctored expectation wanted the degraded window "
-                "stripped of its failover evidence — an inconclusive "
-                "run offers the doctored case no evidence"
+                "failover-proof: the doctored expectation wanted the "
+                "degraded window stripped of its failover evidence — "
+                "an inconclusive run offers the doctored case no "
+                "evidence"
             )
             return 1
-        eprint(f"inconclusive — {inconclusive}")
-        print(f"failover-proof-digest inconclusive — {inconclusive}")
+        eprint(f"failover-proof: inconclusive — {inconclusive}")
+        print(f"failover-proof-inconclusive — {inconclusive}")
         return 0
     except Abort as abort:
         for line in abort.args:
-            eprint(line)
+            eprint(f"failover-proof: {line}")
         return 1
     for failure in failures:
-        eprint(failure)
+        eprint(f"failover-proof: {failure}")
     if args.tamper is not None:
         if not failures:
             eprint(
-                f"the {args.tamper} case passed silently — the leg "
-                "never noticed the doctored expectation"
+                f"failover-proof: the {args.tamper} case passed "
+                "silently — the leg never noticed the doctored "
+                "expectation"
             )
         return 1
     if failures:
@@ -591,10 +640,11 @@ def main():
         f"failover-proof-digest {digest} — tracking by tick "
         f"{evidence['converged']}, the standing proof reported "
         f"misses {evidence['miss_run']} of {evidence['budget']} "
-        f"through the degraded window, self-promoted at tick "
-        f"{evidence['promoted']} on the reported boundary, "
-        f"reconverged tracking by tick {evidence['reconverged']}, "
-        f"launch roles restored at tick {evidence['restored_at']}"
+        "through the degraded window, self-promoted at tick "
+        f"{evidence['promoted']} on the reported boundary, the "
+        "respawned duty reconverged tracking by tick "
+        f"{evidence['reconverged']}, launch roles restored at tick "
+        f"{evidence['restored_at']}"
     )
     return 0
 
