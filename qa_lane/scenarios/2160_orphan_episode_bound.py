@@ -41,9 +41,12 @@ RUNS_AFTER = frozenset({'scenario_keyed_announced_source'})
 # exactly one more entry journals: the bound is per-episode, not
 # per-run. The pair's launch roles restore. Named diagnostics
 # orphan-episode-bound-failed for a contract miss,
-# orphan-episode-bound-nondeterministic when two passes disagree,
-# and orphan-episode-bound-unchecked when the self-check's planted
-# negatives slip the leg's own audits.
+# orphan-episode-bound-nondeterministic when two passes disagree or
+# the rig answers with instability instead of a verdict — a starved
+# watch, the armed failover firing inside the calibrated window, a
+# dropped served-journal read, a control-plane refusal that leaves
+# the staging short — and orphan-episode-bound-unchecked when the
+# self-check's planted negatives slip the leg's own audits.
 
 ORPHAN_SETTLE = 45     # bound on each switch/reconverge/restore
 ORPHAN_FORM = 25       # bound on the island's orphaned verdicts —
@@ -138,140 +141,223 @@ def _served_events(ctx, name, floor, kind):
 
 def _judge_episode(record, note):
     """Audit one pass's record — replayable, so the self-check can
-    hand it planted negatives. `note(key, detail)` records each
-    contract clause the record violates."""
+    hand it planted negatives. `note(key, diagnostic, detail)`
+    records each clause the record violates: DIAG_FAILED tags the
+    orphan-episode contract clauses — the verdict that must not
+    flicker, the miss accounting that must advance, the one entry
+    per episode, the episode end and its genuinely-new successor,
+    the restored launch roles — and DIAG_NONDET tags the instability
+    the contract does not answer for: a starved watch, the armed
+    failover firing inside the calibrated window, a dropped served
+    read, a refused control-plane call that leaves the staging
+    short, an alternation that never landed a completed pull. An
+    aborted stage ends the audit where the pass ended — the later
+    keys it never wrote are not clauses."""
+    def failed(key, detail):
+        note(key, DIAG_FAILED, detail)
+
+    def nondet(key, detail):
+        note(key, DIAG_NONDET, detail)
+
     budget = record.get('budget')
-    if not isinstance(budget, int) or isinstance(budget, bool) \
+    if budget is None:
+        nondet('armed', 'the tracking peer\'s first read dropped — '
+               'the failover evidence the leg audits was never '
+               'observed')
+    elif not isinstance(budget, int) or isinstance(budget, bool) \
             or budget <= 0:
-        note('armed', 'the tracking peer serves no armed failover '
-             'evidence — the miss accounting the leg audits is off: '
-             + json.dumps(budget))
+        failed('armed', 'the tracking peer serves no armed failover '
+               'evidence — the miss accounting the leg audits is '
+               'off: ' + json.dumps(budget))
     demote = record.get('demote') or {}
     if demote.get('status') != 200:
-        note('demote', 'the island-inducing POST /demote answered '
-             + str(demote.get('status')) + ' '
-             + json.dumps(demote.get('body'))[:160])
+        nondet('demote', 'the island-inducing POST /demote answered '
+               + str(demote.get('status')) + ' '
+               + json.dumps(demote.get('body'))[:160] + ' — the '
+               'staging never opened an episode')
+        return
     adoptions = record.get('adoptions')
     if not isinstance(adoptions, list) or len(adoptions) != 1 \
             or not str((adoptions[0] or {}).get('source', '')) \
             .endswith(':' + str(PAIR_PORTS['standby'])):
-        note('adoption', 'the demotion journaled '
-             + json.dumps(adoptions)[:200] + ' instead of one '
-             'tracking-source adoption naming the sibling standby '
-             'on :' + str(PAIR_PORTS['standby']))
+        nondet('adoption', 'the demotion journaled '
+               + json.dumps(adoptions)[:200] + ' instead of one '
+               'tracking-source adoption naming the sibling standby '
+               'on :' + str(PAIR_PORTS['standby']))
     if not isinstance(record.get('island'), dict):
-        note('island', 'the demoted pair never reported the orphaned '
-             'verdict on each other — the island never formed')
+        failed('island', 'the demoted pair never reported the '
+               'orphaned verdict on each other — the island never '
+               'formed')
+        return
     if not record.get('first_orphan'):
-        note('orphan-journal', 'the peer reported orphaned but its '
-             'first field_orphaned entry never journaled — the '
-             'transition evidence the episode owes is absent')
+        failed('orphan-journal', 'the peer reported orphaned but '
+               'its first field_orphaned entry never journaled — '
+               'the transition evidence the episode owes is absent')
+        return
     window = record.get('window') or []
     rows = [row for phase in window for row in (phase.get('rows')
                                                 or [])]
+    fired = next((row for row in rows
+                  if row.get('role') != 'standby'), None)
     if not rows:
-        note('watch', 'the held-episode watch collected no served '
-             'rows — the verdict audit never observed the peer')
+        nondet('watch', 'the held-episode watch collected no served '
+               'rows — the starved monitor gave the audit nothing '
+               'to read')
     else:
+        if fired is not None:
+            nondet('failover', 'the pinned peer reported '
+                   + json.dumps(fired)[:200] + ' inside the held '
+                   'episode — the armed failover boundary was '
+                   'reached inside the calibrated window and the '
+                   'peer promoted out from under the episode')
+        # The pinned-posture audits run on the peer's standby rows —
+        # once the failover fires, the episode the leg pinned is
+        # legitimately over and its verdict evidence ends there.
+        standing = [row for row in rows
+                    if row.get('role') == 'standby']
         flickered = next(
-            (row for row in rows
-             if row.get('role') != 'standby'
-             or row.get('sync') != 'orphaned'), None)
+            (row for row in standing
+             if row.get('sync') != 'orphaned'), None)
         if flickered is not None:
-            note('verdict', 'the orphaned peer reported '
-                 + json.dumps(flickered)[:200] + ' inside the held '
-                 'episode — the standing verdict flickered off '
-                 'orphaned')
-        misses = [row.get('misses') for row in rows]
-        if any(not isinstance(m, int) or isinstance(m, bool)
-               for m in misses):
-            note('misses', 'the peer serves no armed failover miss '
-                 'count through the held episode')
-        elif misses[-1] <= misses[0] \
-                or any(cur < prev for prev, cur
-                       in zip(misses, misses[1:])):
-            note('misses', 'the failover miss accounting did not '
-                 'advance monotonically across the held window: '
-                 + json.dumps(misses[:14])[:200])
-        else:
-            flat = next(
-                (phase for phase in window
-                 if phase.get('phase') == 'miss'
-                 and len(phase.get('rows') or []) >= 2
-                 and phase['rows'][-1].get('misses')
-                 <= phase['rows'][0].get('misses')), None)
-            if flat is not None:
-                note('misses', 'a frozen-source window produced no '
-                     'counted misses — the evidence-free cycles '
-                     'never reached the failover budget')
-        aligned_first = next(
-            (row.get('aligned') for row in rows
-             if isinstance(row.get('aligned'), int)
-             and not isinstance(row.get('aligned'), bool)), None)
-        pull_aligned = [
-            row.get('aligned')
-            for phase in window if phase.get('phase') == 'pull'
-            for row in (phase.get('rows') or [])
-            if isinstance(row.get('aligned'), int)
-            and not isinstance(row.get('aligned'), bool)]
-        if aligned_first is None or not pull_aligned \
-                or max(pull_aligned) <= aligned_first:
-            note('pulls', 'no completed ownerless pull landed during '
-                 'the held window — the episode bound was exercised '
-                 'on misses alone')
-    for key in ('durable_orphans', 'served_orphans'):
-        if record.get(key) != 1:
-            note('orphans', key + ' holds ' + json.dumps(record.get(key))
-                 + ' field_orphaned entries for the held episode '
-                 'instead of exactly one — the bound is per-episode')
+            failed('verdict', 'the orphaned peer reported '
+                   + json.dumps(flickered)[:200] + ' inside the held '
+                   'episode — the standing verdict flickered off '
+                   'orphaned')
+        misses = [row.get('misses') for row in standing]
+        if len(standing) >= 2:
+            if any(not isinstance(m, int) or isinstance(m, bool)
+                   for m in misses):
+                failed('misses', 'the peer serves no armed failover '
+                       'miss count through the held episode')
+            elif misses[-1] <= misses[0] \
+                    or any(cur < prev for prev, cur
+                           in zip(misses, misses[1:])):
+                failed('misses', 'the failover miss accounting did '
+                       'not advance monotonically across the held '
+                       'window: ' + json.dumps(misses[:14])[:200])
+            else:
+                flat = next(
+                    (phase_rows for phase in window
+                     for phase_rows in [phase.get('rows') or []]
+                     if phase.get('phase') == 'miss'
+                     and len([row for row in phase_rows
+                              if row.get('role') == 'standby']) >= 2
+                     and [row for row in phase_rows
+                          if row.get('role') == 'standby'][-1]
+                     .get('misses')
+                     <= [row for row in phase_rows
+                         if row.get('role') == 'standby'][0]
+                     .get('misses')), None)
+                if flat is not None:
+                    failed('misses', 'a frozen-source window '
+                           'produced no counted misses — the '
+                           'evidence-free cycles never reached the '
+                           'failover budget')
+            aligned_first = next(
+                (row.get('aligned') for row in standing
+                 if isinstance(row.get('aligned'), int)
+                 and not isinstance(row.get('aligned'), bool)),
+                None)
+            pull_aligned = [
+                row.get('aligned')
+                for phase in window if phase.get('phase') == 'pull'
+                for row in (phase.get('rows') or [])
+                if row.get('role') == 'standby'
+                and isinstance(row.get('aligned'), int)
+                and not isinstance(row.get('aligned'), bool)]
+            if aligned_first is None or not pull_aligned \
+                    or max(pull_aligned) <= aligned_first:
+                nondet('pulls', 'no completed ownerless pull '
+                       'landed during the held window — the '
+                       'freeze/thaw alternation never staged the '
+                       'missed-pull window the bound is exercised '
+                       'across')
+    if record.get('durable_orphans') != 1:
+        failed('orphans', 'durable_orphans holds '
+               + json.dumps(record.get('durable_orphans'))
+               + ' field_orphaned entries for the held episode '
+               'instead of exactly one — the bound is per-episode')
+    served = record.get('served_orphans')
+    if served is None:
+        nondet('orphans-served', 'the served-journal read dropped '
+               'inside the held episode — the tail count never '
+               'landed')
+    elif served != 1:
+        failed('orphans', 'served_orphans holds '
+               + json.dumps(served) + ' field_orphaned entries for '
+               'the held episode instead of exactly one — the '
+               'bound is per-episode')
+    if fired is not None:
+        # The episode ended on the armed failover's own promotion,
+        # not the leg's staged apply — the remaining stages are the
+        # script the pass could no longer run, not clauses.
+        return
     promote = record.get('promote') or {}
     if promote.get('status') != 200:
-        note('promote', 'the episode-ending POST /promote answered '
-             + str(promote.get('status')) + ' '
-             + json.dumps(promote.get('body'))[:160])
+        nondet('promote', 'the episode-ending POST /promote '
+               'answered ' + str(promote.get('status')) + ' '
+               + json.dumps(promote.get('body'))[:160] + ' — the '
+               'non-orphaned apply never landed')
+        return
     ended = record.get('ended')
     if not isinstance(ended, dict) \
             or 'tracking' not in (ended.get('sync') or {}):
-        note('ended', 'the peer never left orphaned on the '
-             'non-orphaned apply — the episode never ended: '
-             + json.dumps(ended)[:160])
+        failed('ended', 'the peer never left orphaned on the '
+               'non-orphaned apply — the episode never ended: '
+               + json.dumps(ended)[:160])
+        return
     redemote = record.get('redemote') or {}
     if redemote.get('status') != 200:
-        note('redemote', 'the episode-reopening POST /demote '
-             'answered ' + str(redemote.get('status')) + ' '
-             + json.dumps(redemote.get('body'))[:160])
-    if not isinstance(record.get('reorphaned'), dict):
-        note('reorphan', 'the peer never re-orphaned — the second '
-             'episode never began')
-    for key in ('durable_orphans_2', 'served_orphans_2'):
-        if record.get(key) != 2:
-            note('orphans_2', key + ' holds '
-                 + json.dumps(record.get(key)) + ' field_orphaned '
-                 'entries after the second episode began instead of '
-                 'exactly two — a genuinely new episode owes its '
-                 'own entry')
+        nondet('redemote', 'the episode-reopening POST /demote '
+               'answered ' + str(redemote.get('status')) + ' '
+               + json.dumps(redemote.get('body'))[:160] + ' — the '
+               'second episode never staged')
+    elif not isinstance(record.get('reorphaned'), dict):
+        failed('reorphan', 'the peer never re-orphaned — the '
+               'second episode never began')
+    else:
+        if record.get('durable_orphans_2') != 2:
+            failed('orphans_2', 'durable_orphans_2 holds '
+                   + json.dumps(record.get('durable_orphans_2'))
+                   + ' field_orphaned entries after the second '
+                   'episode began instead of exactly two — a '
+                   'genuinely new episode owes its own entry')
+        served = record.get('served_orphans_2')
+        if served is None:
+            nondet('orphans-served-2', 'the served-journal read '
+                   'dropped after the second episode began — the '
+                   'tail count never landed')
+        elif served != 2:
+            failed('orphans_2', 'served_orphans_2 holds '
+                   + json.dumps(served) + ' field_orphaned entries '
+                   'after the second episode began instead of '
+                   'exactly two — a genuinely new episode owes its '
+                   'own entry')
     if not record.get('restored'):
-        note('restored', 'the pair never settled back to its launch '
-             'roles')
+        failed('restored', 'the pair never settled back to its '
+               'launch roles')
 
 
 def _digest(violations):
     """The pass's normalized verdict record — identical across clean
-    passes; each field is the clean value only while no violation
-    names its clause."""
+    passes; each field is the clean value only while no violation —
+    contract or instability — names its clause."""
     def clean(*keys):
         return not any(key in violations for key in keys)
     return {
         'adopted': 'sibling' if clean('demote', 'adoption') else 'none',
         'island': 'formed' if clean('island') else 'absent',
         'episode': 'one-entry'
-            if clean('orphan-journal', 'orphans') else 'flooded',
-        'verdict': 'held' if clean('verdict', 'watch') else 'flickered',
+            if clean('orphan-journal', 'orphans', 'orphans-served')
+            else 'flooded',
+        'verdict': 'held' if clean('verdict', 'watch', 'failover')
+            else 'flickered',
         'misses': 'advanced' if clean('armed', 'misses') else 'stalled',
         'pulls': 'landed' if clean('pulls') else 'none',
         'ended': 'tracking' if clean('promote', 'ended') else 'orphaned',
         'episode_two': 'second-entry'
-            if clean('redemote', 'reorphan', 'orphans_2') else 'absent',
+            if clean('redemote', 'reorphan', 'orphans_2',
+                     'orphans-served-2') else 'absent',
         'roles': 'restored' if clean('restored') else 'unrestored'}
 
 
@@ -318,13 +404,14 @@ def _self_check():
                 'restored': {'role': 'standby',
                              'sync': {'tracking': {'aligned': 240}}}}
 
-    def expect(name, mutate):
+    def expect(name, mutate, diagnostic=DIAG_FAILED):
         record = clean_record()
         mutate(record)
         found = {}
         _judge_episode(
-            record, lambda key, detail: found.setdefault(key, detail))
-        if not found:
+            record,
+            lambda key, diag, detail: found.setdefault(key, diag))
+        if diagnostic not in found.values():
             slipped.append(name)
 
     # The doctored negative the issue names first: a second
@@ -339,16 +426,31 @@ def _self_check():
     expect('misses-stalled', lambda record: [
         row.update({'misses': 7})
         for phase in record['window'] for row in phase['rows']])
-    # No completed pull landed — the bound sat on misses alone.
-    expect('pulls-silent', lambda record: [
-        row.update({'aligned': 100})
-        for phase in record['window'] for row in phase['rows']])
     # The non-orphaned apply never ended the episode.
     expect('episode-unended', lambda record:
            record.update({'ended': None}))
     # The second episode journaled nothing new.
     expect('second-episode-silent', lambda record: record.update(
         {'durable_orphans_2': 1, 'served_orphans_2': 1}))
+    # The instability the contract does not answer for must report
+    # nondeterministic, not failed: a starved watch, the failover
+    # firing inside the window, a dropped served read, a refused
+    # control-plane call, an alternation that landed no pull.
+    expect('watch-starved', lambda record:
+           record.update({'window': []}), DIAG_NONDET)
+    expect('failover-fired', lambda record:
+           record['window'][0]['rows'][1].update(
+               {'role': 'promoting'}), DIAG_NONDET)
+    expect('served-read-dropped', lambda record:
+           record.update({'served_orphans': None}), DIAG_NONDET)
+    expect('pulls-never-landed', lambda record: [
+        row.update({'aligned': 100})
+        for phase in record['window'] for row in phase['rows']],
+        DIAG_NONDET)
+    expect('demote-refused', lambda record:
+           record.update({'demote': {'status': 409, 'body':
+                                     'no_tracking_source'}}),
+           DIAG_NONDET)
     return slipped
 
 
@@ -641,8 +743,8 @@ def scenario_orphan_episode_bound(ctx):
             for number in (1, 2):
                 violations = {}
 
-                def note(key, detail):
-                    violations.setdefault(key, (DIAG_FAILED, detail))
+                def note(key, diagnostic, detail):
+                    violations.setdefault(key, (diagnostic, detail))
 
                 record, evidence = _episode_pass(
                     ctx, number, owner, peer)
@@ -666,8 +768,12 @@ def scenario_orphan_episode_bound(ctx):
                               'episode end and re-orphan, the '
                               'restore, and the normalized digest')
                 if violations:
+                    name = DIAG_FAILED if any(
+                        diagnostic == DIAG_FAILED
+                        for diagnostic, _ in violations.values()) \
+                        else DIAG_NONDET
                     return case.finish(
-                        'failed', DIAG_FAILED + ': ' + '; '.join(
+                        'failed', name + ': ' + '; '.join(
                             detail for _, detail in
                             list(violations.values())[:4]))
                 digests.append(digest)
