@@ -71,7 +71,7 @@ which it stops. The run:
   records. The launch roles — the manifest-declared duty controller
   `active`, its standby `tracking` — are the run's own end state.
 
-The contract postdates the pinned v0.3.0 release: where the
+The contract postdates the release line's v0.3.0 cut: where the
 launched tooling predates it the run's own evidence is the
 pre-contract shape — a checkpoint carrying no receipt window,
 admission counters, or ownership stamp, a receipt dropping its
