@@ -1,6 +1,7 @@
 import json
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
@@ -86,6 +87,23 @@ class SupervisorTests(unittest.TestCase):
         return [(e['kind'], json.loads(e['payload']).get('cause'))
                 for e in self.supervisor.state.events(number)
                 if e['kind'] in ('repair', 'redispatch')]
+
+    def kill_worker(self, tail_text, number=1):
+        """Finish `number`'s invocation on a nonzero receipt carrying `tail_text`."""
+        self.runtime.poll.return_value = {'exit_code': 1}
+        log = Path(self.tmp.name) / 'invocation.log'
+        log.write_text(tail_text)
+        record = self.supervisor.state.get('process:' + str(number))
+        record['log'] = str(log)
+        self.supervisor.state.set('process:' + str(number), record)
+        self.supervisor.reconcile_workers(self.github.items)
+
+    def recoverable(self, number=1):
+        """Make the recorded recovery state dispatchable, keeping its requeue."""
+        rec = self.supervisor.state.get('recovery:' + str(number))
+        rec.update(work=False, phase='captured')
+        self.supervisor.state.set('recovery:' + str(number), rec)
+        return rec
 
     def test_research_issue_worker_prompt_defines_research_role(self):
         research_issue = issue(group='docs/research')
@@ -335,6 +353,89 @@ class SupervisorTests(unittest.TestCase):
                                    'work':False,'phase':'captured'})
         s.retries(self.github.items)
         self.assertIn(('redispatch','quota-requeue'), self.attributed_events(1))
+
+    def test_quota_requeue_does_not_dispatch_before_delay(self):
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        self.kill_worker('Reached free model rate limit')
+        self.assertEqual(s.state.job(1)['status'],'blocked')
+        self.assertEqual(s.state.get('retry:1'),'quota-requeue')
+        rec = s.state.get('recovery:1')
+        requeue = rec['requeue']
+        self.assertEqual(requeue['source'],'default')
+        self.assertEqual(requeue['seconds'],s.admission.quota_requeue_delay)
+        self.assertGreaterEqual(requeue['not_before'],
+                                time.time() + requeue['seconds'] - 5)
+        self.runtime.pool_root=Path(self.config['pool_root'])
+        rec = self.recoverable()
+        s.admission.reset('swe-2-high')
+        s.retries(self.github.items)
+        # The armed retry holds until the recorded delay has elapsed.
+        self.assertEqual(s.state.job(1)['status'],'blocked')
+        self.assertNotIn(('redispatch','quota-requeue'), self.attributed_events(1))
+        rec['requeue']['not_before'] = time.time() - 1
+        s.state.set('recovery:1', rec)
+        s.retries(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'working')
+        redispatches = [json.loads(e['payload']) for e in s.state.events(1)
+                        if e['kind'] == 'redispatch']
+        self.assertEqual(redispatches[0]['cause'],'quota-requeue')
+        self.assertEqual(redispatches[0]['delay'],
+                         {'source':'default','seconds':s.admission.quota_requeue_delay})
+
+    def test_quota_requeue_retry_after_from_receipt(self):
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        self.kill_worker('Rate limit exceeded. Retry after 120 seconds.')
+        self.assertEqual(s.state.get('retry:1'),'quota-requeue')
+        rec = s.state.get('recovery:1')
+        requeue = rec['requeue']
+        self.assertEqual(requeue['source'],'retry-after')
+        self.assertEqual(requeue['seconds'],120)
+        self.assertAlmostEqual(requeue['not_before'],time.time() + 120,delta=5)
+        self.runtime.pool_root=Path(self.config['pool_root'])
+        rec = self.recoverable()
+        s.admission.reset('swe-2-high')
+        s.retries(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'blocked')
+        rec['requeue']['not_before'] = time.time() - 1
+        s.state.set('recovery:1', rec)
+        s.retries(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'working')
+        redispatches = [json.loads(e['payload']) for e in s.state.events(1)
+                        if e['kind'] == 'redispatch']
+        self.assertEqual(redispatches[0]['delay'],
+                         {'source':'retry-after','seconds':120})
+
+    def test_quota_requeue_budget_exhaustion_still_parks(self):
+        s=self.supervisor
+        s.admission.max_quota_requeues = 1
+        s.dispatch(self.github.items)
+        self.kill_worker('Reached free model rate limit')
+        self.runtime.pool_root=Path(self.config['pool_root'])
+        rec = self.recoverable()
+        s.admission.reset('swe-2-high')
+        rec['requeue']['not_before'] = time.time() - 1
+        s.state.set('recovery:1', rec)
+        s.retries(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'working')
+        # The next quota death spends no further requeue: the bound parks it.
+        self.kill_worker('Reached free model rate limit')
+        self.assertEqual(s.state.job(1)['status'],'blocked')
+        self.assertFalse(s.state.get('retry:1'))
+        log_text = (Path(self.config['state_root'])/'supervisor.log').read_text()
+        self.assertIn('quota requeue budget exhausted (1)',log_text)
+        s.retries(self.github.items)
+        self.assertEqual(s.state.job(1)['status'],'blocked')
+
+    def test_non_quota_receipt_arms_no_delayed_retry(self):
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        self.kill_worker('process exited unexpectedly')
+        self.assertEqual(s.state.job(1)['status'],'blocked')
+        self.assertFalse(s.state.get('retry:1'))
+        rec = s.state.get('recovery:1') or {}
+        self.assertFalse(rec.get('requeue'))
 
     def test_missing_checks_do_not_merge_or_repair(self):
         s=self.supervisor

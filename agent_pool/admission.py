@@ -82,6 +82,7 @@ class Admission:
         self.cooldown = sched.get('cooldown_seconds', 600)
         self.max_cooldown = sched.get('max_cooldown_seconds', 7200)
         self.max_quota_requeues = sched.get('max_quota_requeues', 4)
+        self.quota_requeue_delay = sched.get('quota_requeue_delay_seconds', 900)
         self.groups = sched.get('groups') or self._derive_groups(config)
 
     @staticmethod
