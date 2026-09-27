@@ -775,11 +775,14 @@ controller scan.
   --standby ADDR  run as a standby: pull the active's checkpoints from
                   its monitoring address ADDR and apply one per scan;
                   combines with --listen, whose POST /promote is the
-                  switchover action. A target that does not resolve —
-                  the peer down with its name, the routine mid-failover
-                  condition — degrades tracking as pull misses the
-                  name's later answer reconverges; it is never a
-                  startup error
+                  switchover action. The declared host:port re-resolves
+                  on every pull, so a peer restarted onto a new address
+                  under the same name is followed without
+                  reconfiguration — and a target that does not resolve,
+                  the peer down with its name in the routine
+                  mid-failover condition, degrades tracking as pull
+                  misses the name's later answer reconverges; it is
+                  never a startup error
   --peer ADDR     run as the active, but name the peer's monitoring
                   address this instance tracks if it is later demoted
                   — so a demoted active reconverges and stays
@@ -1106,27 +1109,28 @@ fn resolve(addr: &str) -> Result<SocketAddr, String> {
         .ok_or_else(|| format!("{addr:?} resolves to no address"))
 }
 
-/// The tracking source a configured peer name becomes at startup:
-/// resolved, the [`TrackTarget::Addr`] every pull dials; unresolvable —
-/// the configured peer's name gone from DNS while it is down, the
-/// routine mid-failover condition a redundant pair exists for — a
-/// [`TrackTarget::Name`] the pulls keep retrying. A name that does not
-/// resolve is a degraded tracking source, never a startup failure: the
-/// run boots, its tracking reports the same pull misses an unreachable
-/// peer produces, and the name answering later resumes tracking
-/// without a restart. `--remote` is deliberately not handled this way:
-/// the field attachment is the run's primary interface, not a
-/// secondary one.
+/// The tracking source a configured peer name stays for the run's
+/// life: the [`TrackTarget::Name`] every pull re-resolves. Resolving
+/// it once here — to an address the pulls then pin — is the stale-pin
+/// defect `standby-track-source-stale-ip-pin` records: a peer
+/// restarted onto a new address under the same name keeps answering
+/// while the pinned pull dials the old one forever, degrading the
+/// standby and, armed, manufacturing a failover against the live
+/// owner. The declared name re-resolves per pull instead, so the
+/// peer's address moves — the routine container-recreate or reschedule
+/// condition a redundant pair exists for — are followed without
+/// reconfiguration. The startup probe only reports: a name that does
+/// not resolve is a degraded tracking source, never a startup failure,
+/// and it answers again on its own cadence. `--remote` is deliberately
+/// not handled this way: the field attachment is the run's primary
+/// interface, not a secondary one.
 fn track_target(addr: &str) -> TrackTarget {
-    match resolve(addr) {
-        Ok(addr) => TrackTarget::Addr(addr),
-        Err(error) => {
-            eprintln!(
-                "warning: {error}; the tracking source degrades to pull misses until it resolves"
-            );
-            TrackTarget::Name(addr.to_string())
-        }
+    if let Err(error) = resolve(addr) {
+        eprintln!(
+            "warning: {error}; the tracking source degrades to pull misses until it resolves"
+        );
     }
+    TrackTarget::Name(addr.to_string())
 }
 
 /// What a `--state-file` resume did with an existing checkpoint — the
@@ -1477,10 +1481,10 @@ fn main() -> ExitCode {
     // requests, tick by tick, without a wall clock.
     if options.driven {
         let addr = options.listen.as_deref().unwrap();
-        // The configured tracking source: resolved, the address every
-        // scan's pull dials; unresolvable, the name the pulls keep
-        // retrying — a peer down mid-failover is the routine condition
-        // this instance tracks, not a startup fault.
+        // The configured tracking source: the declared name every
+        // scan's pull re-resolves — a peer down mid-failover, or
+        // restarted onto a new address under its name, is the routine
+        // condition this instance tracks, not a startup fault.
         let track = options
             .standby
             .as_deref()
@@ -1500,10 +1504,7 @@ fn main() -> ExitCode {
         // only provable rendezvous back into tracking.
         driver.set_claim_monitor(monitor.local_addr());
         let monitor = monitor.driven(Driven {
-            track: match &track {
-                Some(TrackTarget::Addr(addr)) => Some(*addr),
-                _ => None,
-            },
+            track: None,
             after_scan: Some(Box::new(|peer: &Peer<'_>| {
                 // The scan cycle's plant step; the configured state
                 // file's capture+queue follows inside the same lock
@@ -1512,12 +1513,13 @@ fn main() -> ExitCode {
                 driver.step(dt, peer.owns_field())
             })),
         });
-        // A configured source still waiting on DNS stays the declared
-        // tracking source as the name each pull re-resolves — the
-        // same configured source `track` is, in its unresolved shape.
+        // A configured source stays the declared name each pull
+        // re-resolves — the peer's address moving under it, the
+        // routine recreate condition, is followed by the same
+        // per-pull resolution an unresolved name already got.
         let monitor = match track {
-            Some(target @ TrackTarget::Name(_)) => monitor.with_standby_target(target),
-            _ => monitor,
+            Some(target) => monitor.with_standby_target(target),
+            None => monitor,
         };
         // The armed-resume crossing's report joins the durable record
         // behind the run-boundary marker the bind journaled.
@@ -1550,11 +1552,11 @@ fn main() -> ExitCode {
         // Standby operation: one checkpoint pull per scan cycle while the
         // peer does not own the field. A failed fetch or a rejected
         // checkpoint degrades the standby — named and recoverable —
-        // while the next good transfer reconverges it. A target that
-        // does not resolve — the configured peer's name down with it,
-        // the routine mid-failover condition — degrades the same way:
-        // the name stays the tracking source and each pull re-resolves
-        // it, a counting miss until the peer answers again.
+        // while the next good transfer reconverges it. A target whose
+        // name does not answer — the configured peer's name down with
+        // it, the routine mid-failover condition — degrades the same
+        // way: the name stays the tracking source and each pull
+        // re-resolves it, a counting miss until the peer answers again.
         let target = track_target(active_addr);
         match &options.listen {
             Some(addr) => {
@@ -1747,10 +1749,10 @@ fn main() -> ExitCode {
                 // A --peer launched active names its tracking source up
                 // front — where this instance pulls checkpoints if it is
                 // demoted — ahead of anything a tracking peer announces
-                // through its pulls. A target that does not resolve —
-                // the peer down with its name, the routine mid-failover
-                // condition — stays the declared source as a name the
-                // pulls retry, never a startup fault.
+                // through its pulls. A target whose name does not answer
+                // — the peer down with its name, the routine
+                // mid-failover condition — stays the declared source as
+                // a name the pulls retry, never a startup fault.
                 let monitor = match &options.peer {
                     Some(peer) => monitor.with_standby_target(track_target(peer)),
                     None => monitor,
@@ -1875,10 +1877,12 @@ fn main() -> ExitCode {
 /// hints leaves the peer pulling nothing rather than following one.
 /// The puller follows the resolved source, respawning when it
 /// changes, and announces this monitor's own address on every pull so
-/// the serving peer learns where to track back. A configured source
-/// still waiting on DNS pulls as the name it is — the fetch worker
-/// resolves it per attempt, so the unresolved target's cycles count as
-/// the same misses an unreachable peer's do. A
+/// the serving peer learns where to track back. A configured source is
+/// a name the fetch worker resolves per attempt — the peer's address
+/// moving under it, and a name still waiting on DNS, both follow the
+/// same path: the unresolved cycles count as the same misses an
+/// unreachable peer's do, and the next successful resolution tracks
+/// again without a respawn. A
 /// field-owning cycle's [`Monitor::track_cycle`] short-circuits before
 /// the pull, so the puller's fetch thread idles until a demotion.
 fn tracked_cycle(
@@ -1910,8 +1914,8 @@ fn tracked_cycle(
 /// the [`TrackReport`] `Peer::track_once` returned describes — a refused
 /// checkpoint, a produced-nothing pull counted as a heartbeat miss, or
 /// the failover self-promotion the miss budget triggered (and its named
-/// refusal). `source` is the pulled peer's tracking target — an address,
-/// or the configured name the pull is still waiting on DNS for.
+/// refusal). `source` is the pulled peer's tracking target — a learned
+/// or proven address, or the configured name each pull resolves anew.
 fn report_tracking(report: &TrackReport, source: &TrackTarget) {
     match report {
         TrackReport::OwnsField | TrackReport::Applied(_) => {}
