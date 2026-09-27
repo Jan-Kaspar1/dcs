@@ -550,9 +550,15 @@ class LagStagingTests(unittest.TestCase):
             order.index(scenarios.scenario_standby_loss))
         # The standby-loss, demote-settle, demote-carry, and
         # repromote-suspended-settle legs share the same restored
-        # window and still run ahead of the tune case's a->b switch.
+        # window and still run ahead of the tune case's a->b switch —
+        # the quiesced-standby settle leg runs between standby-loss
+        # and demote-settle in that same launch-layout window.
         self.assertEqual(
             order.index(scenarios.scenario_standby_loss) + 1,
+            order.index(scenarios.scenario_quiesced_standby_settle))
+        self.assertEqual(
+            order.index(scenarios.scenario_quiesced_standby_settle)
+            + 1,
             order.index(scenarios.scenario_demote_settle_uniqueness))
         self.assertEqual(
             order.index(scenarios.scenario_demote_settle_uniqueness)
