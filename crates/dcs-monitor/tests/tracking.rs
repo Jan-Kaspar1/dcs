@@ -2033,6 +2033,114 @@ fn a_probe_observed_foreign_claim_journals_once_beside_the_reclaim() {
     );
 }
 
+/// The QA finding `orphan-resolve-pull-target-switch-unjournaled`
+/// (#1137): a standby orphaned on a configured source serving
+/// ownerless checkpoints — a sibling standby propagating the line's
+/// real owner — re-targets its pulls through the orphan-resolution
+/// probe's `resolved` pin, the same pull-target authority the
+/// announced- and claimed-source adoptions carry. The re-target used
+/// to land unjournaled — `field_orphaned` bracketed the switch and
+/// nothing attributed when or where the pulls moved — so the resolved
+/// pin now journals `tracking_source_adopted` naming the verified
+/// owner, exactly like the adopted-path contract.
+#[test]
+fn an_orphaned_peers_resolved_pull_source_journals_the_adoption() {
+    // The third peer: the line's field owner — its served document
+    // stamps its own monitor address as `line_owner`.
+    let owner = lonely_owner(None);
+    owner.client.advance(3).unwrap();
+
+    // The configured source: a sibling standby tracking the owner —
+    // it serves ownerless checkpoints that propagate the owner's
+    // `line_owner` stamp onward.
+    let middle_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let middle = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(middle_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(dialable(owner.monitor.local_addr())),
+            after_scan: None,
+        }),
+    );
+    middle.client.advance(2).unwrap();
+    let served = middle.client.checkpoint().unwrap();
+    assert_eq!(served.source_owns_field, Some(false));
+    assert_eq!(
+        served.line_owner,
+        Some(dialable(owner.monitor.local_addr())),
+        "the sibling's served document propagates the line's owner"
+    );
+
+    // The orphaned standby configured onto the sibling: its pull
+    // applies an ownerless checkpoint — the `orphaned` verdict — and
+    // the orphan-resolution probe follows the propagated owner name,
+    // re-targeting the pulls through the `resolved` slot.
+    let orphan_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let orphan = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(orphan_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(dialable(middle.monitor.local_addr())),
+            after_scan: None,
+        }),
+    );
+    orphan.client.advance(1).unwrap();
+    let report = orphan.client.role().unwrap();
+    assert!(
+        matches!(report.sync, Some(StandbySync::Orphaned { .. })),
+        "the standby orphans on the ownerless configured source: {report:?}"
+    );
+
+    // The probe's re-target journals the adoption naming the verified
+    // owner — the same record the announced- and claimed-source pins
+    // produce for the identical pull-target change.
+    let owner_addr = dialable(owner.monitor.local_addr());
+    assert_eq!(
+        orphan.monitor.tracking_source(),
+        Some(owner_addr),
+        "the resolved pin outranks the configured source"
+    );
+    assert!(
+        orphan
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .any(|entry| matches!(
+                entry.event,
+                JournalEvent::TrackingSourceAdopted { source } if source == owner_addr
+            )),
+        "the resolved pin must journal the pull-source switch: {:?}",
+        orphan.client.journal(0).unwrap()
+    );
+
+    // And the re-targeted pull lands: the next cycle tracks the real
+    // owner's field-owning document rather than orphaned-tracking the
+    // sibling's island.
+    orphan.client.advance(1).unwrap();
+    let report = orphan.client.role().unwrap();
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the re-targeted pull reaches the field owner: {report:?}"
+    );
+}
+
 /// A lone field owner fixture for the announced-demotion tests —
 /// the reproduction's unconfigured instance: no `--standby`, no
 /// `--peer`, and `key` installing the `--pair-token` secret when set.
