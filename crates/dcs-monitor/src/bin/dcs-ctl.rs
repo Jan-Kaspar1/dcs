@@ -142,7 +142,9 @@ operator commands:
   promote [--actor <name>]    promote a converged standby to active
   demote [--actor <name>]     demote the field-owning peer to standby
   scan <n>                    run <n> scans; only a driven, unpaced
-                              instance accepts — a paced one refuses
+                              instance accepts — a paced one refuses,
+                              and a batch past the served per-request
+                              bound is refused
 
 actor: --actor <name> declares the identity the submission carries: a
 command's receipt and journaled CommandSettled entry, a switch's
