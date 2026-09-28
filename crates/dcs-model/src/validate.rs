@@ -166,6 +166,15 @@ pub enum ValidationError {
         /// The offending point.
         point: PointId,
     },
+    /// A point's `record` duty declares `every_ticks: 0`. A zero
+    /// cadence would record every scan — reproducing the full-rate
+    /// stream the durable-history decision keeps volatile — so the
+    /// declared duty names a positive interval or does not declare
+    /// one.
+    RecordZeroCadence {
+        /// The offending point.
+        point: PointId,
+    },
     /// A point's value type disagrees with its bound channel's value type.
     ChannelTypeMismatch {
         /// The offending point.
@@ -310,6 +319,11 @@ impl fmt::Display for ValidationError {
             Self::RequiresReasonNotWritable { point } => write!(
                 f,
                 "io point {} declares requires_reason but is not a writable in point",
+                point.0
+            ),
+            Self::RecordZeroCadence { point } => write!(
+                f,
+                "io point {} declares a recording duty with every_ticks 0",
                 point.0
             ),
             Self::ChannelTypeMismatch {
@@ -560,6 +574,13 @@ impl PlantModel {
             // `writable` — the flag is a dead declaration.
             if point.requires_reason && (point.direction == Direction::Out || !point.writable) {
                 errors.push(ValidationError::RequiresReasonNotWritable { point: point.id });
+            }
+            // `record` interacts with the durable-history rule: the
+            // duty names a positive cadence, since a zero `every_ticks`
+            // would record the full-rate stream the decision keeps
+            // volatile — a dead declaration on any point.
+            if point.record.is_some_and(|duty| duty.every_ticks == 0) {
+                errors.push(ValidationError::RecordZeroCadence { point: point.id });
             }
             let Some(reference) = &point.channel else {
                 // An internal point's initial value is its whole declared

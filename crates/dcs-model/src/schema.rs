@@ -30,6 +30,9 @@
 //! - the journaled-flag rule: `journaled: true` may mark a `bool`/`int`
 //!   point only — the durable journal records discrete state transitions,
 //!   so a `float` point's per-scan stream is rejected from it;
+//! - the recording-duty rule: a non-null `record` names an `every_ticks`
+//!   of at least `1` — a zero cadence would record the full-rate stream
+//!   the durable-history decision keeps volatile;
 //! - the standard registry's known device-kind parameter shapes (decision
 //!   29): `sim-tcp` requires `address` and allows `timeout_ms`, `sim-bus`
 //!   additionally requires the `registers` map, `sim-cyclic` requires the
@@ -125,6 +128,17 @@ const SCHEMA_SOURCE: &str = r##"{
     "direction": { "enum": ["in", "out"] },
     "value-kind": { "enum": ["bool", "int", "float"] },
     "nonneg-int": { "type": "integer", "minimum": 0 },
+    "recording-duty": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["every_ticks"],
+      "properties": {
+        "every_ticks": { "type": "integer", "minimum": 1 },
+        "retain_days": {
+          "anyOf": [{ "$ref": "#/$defs/nonneg-int" }, { "type": "null" }]
+        }
+      }
+    },
     "u32-int": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
     "register-index": { "type": "integer", "minimum": 0, "maximum": 65535 },
     "image-offset": {
@@ -497,7 +511,10 @@ const SCHEMA_SOURCE: &str = r##"{
         "stale_after_ticks": {
           "anyOf": [{ "$ref": "#/$defs/nonneg-int" }, { "type": "null" }]
         },
-        "journaled": { "type": "boolean" }
+        "journaled": { "type": "boolean" },
+        "record": {
+          "anyOf": [{ "$ref": "#/$defs/recording-duty" }, { "type": "null" }]
+        }
       },
       "allOf": [
         {

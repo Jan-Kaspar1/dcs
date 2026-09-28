@@ -247,6 +247,7 @@ fn stale_executor(driver: &'static StubDriver) -> Executor<'static> {
                 requires_reason: false,
                 stale_after_ticks: Some(STALE_BUDGET),
                 journaled: false,
+                record_every_ticks: None,
             },
         )
         .with_point(PointId(20), Direction::Out, ValueKind::Float)

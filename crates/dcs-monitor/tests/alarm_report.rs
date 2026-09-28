@@ -131,6 +131,7 @@ fn journaled_out() -> PointSpec {
         requires_reason: false,
         stale_after_ticks: None,
         journaled: true,
+        record_every_ticks: None,
     }
 }
 

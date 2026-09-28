@@ -1740,11 +1740,13 @@ mod tests {
             RunBoundary {
                 run: 1,
                 start_tick: Tick(0),
+                anchor: None,
                 first_seq: 1,
             },
             RunBoundary {
                 run: 2,
                 start_tick: Tick(0),
+                anchor: None,
                 first_seq: 2,
             },
         ];

@@ -18,7 +18,7 @@ use dcs_core::{
     ComponentDiagnostics, ComponentParameters, CyclicIoDriver, Direction, DroppedElement,
     EmittedEvent, ForcedPoint, IoDriver, IoError, IoFault, IoHealth, ModelFingerprint, PointId,
     PointTelemetry, Quality, QualityReason, RevertedParameter, Sample, StateMap, TelemetrySnapshot,
-    Tick, Value, ValueKind,
+    Tick, TickAnchor, Value, ValueKind,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -72,6 +72,16 @@ pub struct PointSpec {
     /// entry at the producing scan's tick; undeclared points journal no
     /// value transitions.
     pub journaled: bool,
+    /// The point's declared durable recording cadence — the `record`
+    /// duty a model `io_point` declaration carries through assembly.
+    /// `Some(every)` asks the monitor's recorder to land the point's
+    /// post-scan image sample in the durable history file whenever the
+    /// scan tick has advanced at least `every` ticks past its last
+    /// recorded sample; `None` leaves the point to the volatile ring.
+    /// The executor itself never reads the field — recording is the
+    /// recorder's post-scan duty — so the map carries it for the
+    /// monitor to consult.
+    pub record_every_ticks: Option<u64>,
 }
 
 /// The executor's point map: which logical points exist, whether the
@@ -111,6 +121,7 @@ impl PointMap {
                 requires_reason: false,
                 stale_after_ticks: None,
                 journaled: false,
+                record_every_ticks: None,
             },
         );
         self
@@ -147,6 +158,7 @@ impl PointMap {
                 requires_reason: false,
                 stale_after_ticks: None,
                 journaled: false,
+                record_every_ticks: None,
             },
         );
         self
@@ -172,6 +184,7 @@ impl PointMap {
                 requires_reason: false,
                 stale_after_ticks: None,
                 journaled: false,
+                record_every_ticks: None,
             },
         );
         self
@@ -200,6 +213,7 @@ impl PointMap {
                 requires_reason: false,
                 stale_after_ticks: None,
                 journaled: false,
+                record_every_ticks: None,
             },
         );
         self
@@ -952,6 +966,17 @@ pub struct Executor<'d> {
     /// one. `None` while the run was never given one — the unminted
     /// test/legacy shape — or when the last adoption carried none.
     generation: Option<u64>,
+    /// The tick domain's civil-time anchor — the wall-clock instant of
+    /// the domain's origin tick the pacing layer mints through
+    /// [`with_anchor`](Self::with_anchor) and every checkpoint stamps.
+    /// `apply`, `restore`, and `reinitialize` adopt the checkpoint's
+    /// exactly as they adopt the generation: the anchor maps the
+    /// domain, not the process, so a resumed or tracked run keeps the
+    /// origin's instant rather than minting its own. `None` while the
+    /// run was never given one — a driven or unminted domain, whose
+    /// artifacts stay byte-identical under an unchanged script — or
+    /// when the last adoption carried none.
+    anchor: Option<TickAnchor>,
     /// The run tick: the executor's own scan counter and the run's
     /// journal, history, and receipt attribution domain — distinct from
     /// the driver-served plant tick and a tracked stream's source tick.
@@ -1092,6 +1117,7 @@ impl<'d> Executor<'d> {
             boundary_undo: Vec::new(),
             model_fingerprint: None,
             generation: None,
+            anchor: None,
             tick: Tick::ZERO,
         })
     }
@@ -1128,6 +1154,32 @@ impl<'d> Executor<'d> {
     pub fn with_generation(mut self, generation: u64) -> Self {
         self.generation = Some(generation);
         self
+    }
+
+    /// Records this run's tick-domain anchor — the wall-clock instant
+    /// of the domain's origin tick every [`checkpoint`](Executor::checkpoint)
+    /// stamps.
+    ///
+    /// The pacing layer mints it when the domain begins: the anchor is
+    /// the durable-history decision's tick-to-civil mapping, supplied
+    /// per domain, never derived inside the run — like the generation,
+    /// it stays out of `Executor::new` so a driven or unminted domain
+    /// keeps its checkpoints byte-identical under an unchanged script.
+    /// A later [`apply`](Executor::apply), [`restore`](Executor::restore),
+    /// or [`reinitialize`](Executor::reinitialize) adopts the
+    /// checkpoint's anchor instead: the anchor maps the domain, not
+    /// the process, so a resumed run or a tracking peer keeps the
+    /// origin's instant rather than minting its own.
+    pub fn with_anchor(mut self, anchor: TickAnchor) -> Self {
+        self.anchor = Some(anchor);
+        self
+    }
+
+    /// The tick domain's civil-time anchor — the value
+    /// [`with_anchor`](Self::with_anchor) recorded or the last adoption
+    /// carried; `None` while the domain is unanchored.
+    pub fn anchor(&self) -> Option<TickAnchor> {
+        self.anchor
     }
 
     /// The generation this run's checkpoint stream belongs to — the
@@ -1714,6 +1766,7 @@ impl<'d> Executor<'d> {
             format_version: CHECKPOINT_FORMAT_VERSION,
             model_fingerprint: self.model_fingerprint,
             generation: self.generation,
+            anchor: self.anchor,
             tick: self.tick,
             components: self
                 .components
@@ -1808,8 +1861,11 @@ impl<'d> Executor<'d> {
         // The restored run joins the checkpointed line's generation —
         // a `--state-file` resume continues the same tick domain, so the
         // checkpoints it serves carry the line's identity, not a fresh
-        // one.
+        // one. The domain's civil-time anchor adopts with it: the anchor
+        // maps the domain, not the process, so the resumed run keeps the
+        // origin's instant rather than minting its own.
         executor.generation = checkpoint.generation;
+        executor.anchor = checkpoint.anchor;
         executor.image.borrow_mut().extend(
             checkpoint
                 .outputs
@@ -1901,8 +1957,13 @@ impl<'d> Executor<'d> {
         // The run joins the checkpointed line's generation: from this
         // adoption on, the checkpoints this executor serves name the
         // line's tick-domain identity, so a peer tracking it can tell
-        // the line's continuation from a new generation's stream.
+        // the line's continuation from a new generation's stream. The
+        // domain's anchor adopts with it — a tracked source's cold
+        // restart carries its own new domain and anchor, and the peer
+        // maps its records under the domain it joined, not the one it
+        // left.
         self.generation = checkpoint.generation;
+        self.anchor = checkpoint.anchor;
         let mut image = self.image.borrow_mut();
         // The output image becomes exactly the checkpoint's: drop stale
         // `Out` samples so a value from the standby's own earlier scans
@@ -2443,8 +2504,10 @@ impl<'d> Executor<'d> {
         self.tick = checkpoint.tick;
         // The crossing keeps the tracked line's generation: the revised
         // run continues the checkpoint stream's tick domain, so the
-        // checkpoints it serves still name the line they came from.
+        // checkpoints it serves still name the line they came from —
+        // and keep that domain's civil-time anchor.
         self.generation = checkpoint.generation;
+        self.anchor = checkpoint.anchor;
         self.emitted.clear();
         self.command_verdicts.clear();
         self.fenced_write = None;
@@ -4255,6 +4318,7 @@ mod tests {
                 requires_reason: false,
                 stale_after_ticks: Some(budget),
                 journaled: false,
+                record_every_ticks: None,
             },
         )
     }
@@ -4677,6 +4741,7 @@ mod tests {
                 requires_reason: false,
                 stale_after_ticks: Some(2),
                 journaled: false,
+                record_every_ticks: None,
             },
         );
         let mut executor = Executor::new(
@@ -4995,6 +5060,7 @@ mod tests {
                     requires_reason: true,
                     stale_after_ticks: None,
                     journaled: false,
+                    record_every_ticks: None,
                 },
             )
             .with_point(PointId(20), Direction::Out, ValueKind::Float)
@@ -8353,6 +8419,7 @@ mod tests {
             format_version: CHECKPOINT_FORMAT_VERSION,
             model_fingerprint: Some(ModelFingerprint::of(b"model-a")),
             generation: None,
+            anchor: None,
             tick: Tick(50),
             components: [
                 ("a".to_string(), StateMap::new()),
@@ -8531,6 +8598,7 @@ mod tests {
             format_version: CHECKPOINT_FORMAT_VERSION,
             model_fingerprint: Some(ModelFingerprint::of(b"model-a")),
             generation: None,
+            anchor: None,
             tick: Tick(50),
             components: [("loop".to_string(), state)].into_iter().collect(),
             driver: None,

@@ -255,8 +255,9 @@ fn recorded_release_schema_matches_the_emitted_output() {
     // has legitimately moved past since the cut — `v0.2.0`'s with the
     // `requires_reason` io_point field (#908). `v0.3.0`'s, `v0.4.0`'s,
     // and `v0.5.0`'s tags are pending, so their artifacts and
-    // published sha256s are still pinned — identical, the emission
-    // having not moved since `v0.3.0`'s recorded commit.
+    // published sha256s track the current emission — identical across
+    // the three records, the emission having moved once with #907's
+    // `record` io_point field.
     let output = run_schema_subcommand();
     assert!(
         output.status.success(),
@@ -271,15 +272,15 @@ fn recorded_release_schema_matches_the_emitted_output() {
         ("docs/releases/v0.2.0/plant-model.schema.json", None),
         (
             "docs/releases/v0.3.0/plant-model.schema.json",
-            Some("b5dc56f7306bb4ad7f791ff05075401a871bebc0f5dc9babba52ad2c57252600"),
+            Some("04c5a0c8fb1bff547f5d5f289936a945e6883970fed6fa7c63b2f291420133c5"),
         ),
         (
             "docs/releases/v0.4.0/plant-model.schema.json",
-            Some("b5dc56f7306bb4ad7f791ff05075401a871bebc0f5dc9babba52ad2c57252600"),
+            Some("04c5a0c8fb1bff547f5d5f289936a945e6883970fed6fa7c63b2f291420133c5"),
         ),
         (
             "docs/releases/v0.5.0/plant-model.schema.json",
-            Some("b5dc56f7306bb4ad7f791ff05075401a871bebc0f5dc9babba52ad2c57252600"),
+            Some("04c5a0c8fb1bff547f5d5f289936a945e6883970fed6fa7c63b2f291420133c5"),
         ),
     ] {
         let recorded = std::fs::read(workspace_root().join(path)).unwrap_or_else(|error| {

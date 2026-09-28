@@ -52,9 +52,10 @@
 
 use crate::drain::{DrainHealth, DrainShared, DrainState};
 use dcs_core::{
-    CommandReceipt, EmittedEvent, EventRecord, EventRetention, HistorySample, JournalEntry,
-    JournalEvent, JournalSinkHealth, JournalSinkState, PointHistory, PointId, PublicationHealth,
-    RoleReport, Sample, StateSinkHealth, StateSinkState, TelemetrySnapshot, Tick,
+    CommandReceipt, DurableEntry, DurableEvent, EmittedEvent, EventRecord, EventRetention,
+    HistorySample, HistorySinkHealth, HistorySinkState, JournalEntry, JournalEvent,
+    JournalSinkHealth, JournalSinkState, PointHistory, PointId, PublicationHealth, RoleReport,
+    Sample, StateSinkHealth, StateSinkState, TelemetrySnapshot, Tick,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -188,6 +189,18 @@ struct Inner {
     /// count is bounded by the process lifetimes the journal records —
     /// one per run — not by `journal_capacity`.
     boundaries: VecDeque<JournalEntry>,
+    /// Served durable-history entries, oldest first — the bounded
+    /// window over the configured history file's declared-duty record:
+    /// the `seq`s continue the file's numbering, so a retained
+    /// eviction reads to a since-cursor consumer as a numbering gap.
+    durable: VecDeque<DurableEntry>,
+    /// The `run_boundary` and `domain` entries the durable tail's
+    /// bound evicted — the pinning rule the durable record applies:
+    /// the markers are the only record a consumer has that a new
+    /// process lifetime or a mid-run tick domain began, so they
+    /// outlive ordinary sample volume. Bounded by the lifetimes and
+    /// adoptions the file records, not by `durable_capacity`.
+    durable_boundaries: VecDeque<DurableEntry>,
     /// The bounded event-history ring: `History`-retained emission
     /// records, oldest first — the diagnostic stream the resource
     /// view's `events` joins beside the journal tail.
@@ -239,6 +252,8 @@ struct Inner {
     history_capacity: usize,
     /// Journal retention bound.
     journal_capacity: usize,
+    /// Durable-history served-window retention bound.
+    durable_capacity: usize,
     /// Event-history retention bound — the `History`-retained ring's.
     event_history_capacity: usize,
     /// The durable journal sink's drain counters — `Some` when a
@@ -259,6 +274,16 @@ struct Inner {
     /// write drains off it, so a stalled sink reports `lagging` here
     /// instead of lengthening a scan.
     state_sink: Option<Arc<DrainShared>>,
+    /// The durable history-file sink's drain counters — `Some` when a
+    /// history file is configured: each publish stamps the standing
+    /// backpressure health into the snapshot's
+    /// `publication.history_sink` section, the same shape the journal
+    /// sink's carries — the durable-history decision's non-
+    /// interference rule: the recording point hands records to the
+    /// bounded queue and never waits on the writer, so a stalled or
+    /// failing sink reads here as `lagging`/`failed`, never as a
+    /// lengthened scan.
+    history_sink: Option<Arc<DrainShared>>,
 }
 
 /// Evicts `ring` down to `capacity` oldest-first, migrating each
@@ -274,6 +299,28 @@ fn evict_journal(
     while ring.len() > capacity {
         let evicted = ring.pop_front().unwrap();
         if matches!(evicted.event, JournalEvent::RunBoundary { .. }) {
+            pinned.push_back(evicted);
+        }
+    }
+}
+
+/// Evicts `ring` down to `capacity` oldest-first, migrating each
+/// evicted `run_boundary`/`domain` marker into `pinned` instead of
+/// dropping it — the durable record's pinning rule, the journal's
+/// shape over the two marker kinds the durable stream carries. Every
+/// migrated entry precedes `ring`'s front in `seq`, so `pinned`
+/// stays `seq`-ordered and entirely older than the ring.
+fn evict_durable(
+    ring: &mut VecDeque<DurableEntry>,
+    pinned: &mut VecDeque<DurableEntry>,
+    capacity: usize,
+) {
+    while ring.len() > capacity {
+        let evicted = ring.pop_front().unwrap();
+        if matches!(
+            evicted.event,
+            DurableEvent::RunBoundary { .. } | DurableEvent::Domain { .. }
+        ) {
             pinned.push_back(evicted);
         }
     }
@@ -328,6 +375,7 @@ impl Store {
     pub(crate) fn new(
         history_capacity: usize,
         journal_capacity: usize,
+        durable_capacity: usize,
         window_capacity: usize,
         event_history_capacity: usize,
         run: u64,
@@ -340,6 +388,8 @@ impl Store {
                 rings: BTreeMap::new(),
                 journal: VecDeque::new(),
                 boundaries: VecDeque::new(),
+                durable: VecDeque::new(),
+                durable_boundaries: VecDeque::new(),
                 event_history: VecDeque::new(),
                 latest_events: BTreeMap::new(),
                 pending_events: VecDeque::new(),
@@ -355,9 +405,11 @@ impl Store {
                 window_capacity,
                 history_capacity,
                 journal_capacity,
+                durable_capacity,
                 event_history_capacity,
                 journal_sink: None,
                 state_sink: None,
+                history_sink: None,
             })),
         }
     }
@@ -376,6 +428,15 @@ impl Store {
     /// into the snapshot's `publication` section.
     pub(crate) fn set_state_sink(&self, sink: Arc<DrainShared>) {
         self.inner.lock().unwrap().state_sink = Some(sink);
+    }
+
+    /// Points the store at the durable history-file sink's drain
+    /// counters — set by the recorder when a `history_file` is
+    /// configured, before the bind-time publication, so every publish
+    /// stamps the sink's standing health into the snapshot's
+    /// `publication` section.
+    pub(crate) fn set_history_sink(&self, sink: Arc<DrainShared>) {
+        self.inner.lock().unwrap().history_sink = Some(sink);
     }
 
     /// Appends `point`'s fresh scan sample to its served ring and to
@@ -427,6 +488,25 @@ impl Store {
             &mut inner.pending_journal,
             &mut inner.pending_boundaries,
             inner.journal_capacity,
+        );
+    }
+
+    /// Appends one durable-history entry to the served tail — the
+    /// recorder minted it on the file's `seq` axis, so it rides in
+    /// `seq` order. The tail evicts oldest-first past the bound,
+    /// except a `run_boundary`/`domain` marker never drops: eviction
+    /// migrates it to the pinned stream the serve merges back in
+    /// `seq` order. No publication delta rides along — the durable
+    /// stream's seam is the file plus its since-cursor read, not the
+    /// publication window.
+    pub(crate) fn push_durable(&self, entry: DurableEntry) {
+        let mut guard = self.inner.lock().unwrap();
+        let inner = &mut *guard;
+        inner.durable.push_back(entry);
+        evict_durable(
+            &mut inner.durable,
+            &mut inner.durable_boundaries,
+            inner.durable_capacity,
         );
     }
 
@@ -538,6 +618,7 @@ impl Store {
             window: inner.window_capacity as u64,
             journal_sink: inner.journal_sink_health(),
             state_sink: inner.state_sink_health(),
+            history_sink: inner.history_sink_health(),
         });
         let run = inner.run;
         let publication = Arc::new(Publication {
@@ -635,6 +716,23 @@ impl Store {
             .collect()
     }
 
+    /// Retained durable-history entries with a `seq` above `since`,
+    /// oldest first — the pinned `run_boundary`/`domain` markers ahead
+    /// of the tail, the same shape the journal serve answers. Every
+    /// pinned `seq` precedes the tail's front, so the concatenation
+    /// stays in `seq` order and an evicted stretch still reads as a
+    /// numbering gap.
+    pub(crate) fn durable(&self, since: u64) -> Vec<DurableEntry> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .durable_boundaries
+            .iter()
+            .chain(inner.durable.iter())
+            .filter(|entry| entry.seq > since)
+            .cloned()
+            .collect()
+    }
+
     /// The current receipt-log mirror — `GET /receipts`' answer.
     pub(crate) fn receipts(&self) -> Arc<Vec<CommandReceipt>> {
         self.inner.lock().unwrap().receipts.clone()
@@ -685,6 +783,7 @@ impl Store {
             window: inner.window_capacity as u64,
             journal_sink: inner.journal_sink_health(),
             state_sink: inner.state_sink_health(),
+            history_sink: inner.history_sink_health(),
         }
     }
 
@@ -703,6 +802,24 @@ impl Store {
     /// the executor lock.
     pub(crate) fn wait_journal_drained(&self, timeout: Duration) -> Option<JournalSinkHealth> {
         let probe = self.inner.lock().unwrap().journal_sink.clone();
+        probe.map(|shared| shared.wait_drained(timeout).into())
+    }
+
+    /// The history sink's live drain report — `None` when no history
+    /// file is configured.
+    pub(crate) fn history_sink_health(&self) -> Option<HistorySinkHealth> {
+        self.inner.lock().unwrap().history_sink_health()
+    }
+
+    /// Waits — at most `timeout` — for the history sink's writer to
+    /// have appended or accounted every queued record, returning the
+    /// standing health either way: `drained + lost == accepted` says
+    /// the durable file caught up. `None` when no history file is
+    /// configured. The wait rides the caller's thread alone — a
+    /// durability-attesting answer or a test's settle point, never
+    /// the executor lock.
+    pub(crate) fn wait_history_drained(&self, timeout: Duration) -> Option<HistorySinkHealth> {
+        let probe = self.inner.lock().unwrap().history_sink.clone();
         probe.map(|shared| shared.wait_drained(timeout).into())
     }
 
@@ -741,6 +858,14 @@ impl Inner {
             .as_ref()
             .map(|shared| shared.health().into())
     }
+
+    /// The history sink's standing health for the publication stamp —
+    /// read under the inner lock from the drain's lock-free counters.
+    fn history_sink_health(&self) -> Option<HistorySinkHealth> {
+        self.history_sink
+            .as_ref()
+            .map(|shared| shared.health().into())
+    }
 }
 
 impl From<DrainHealth> for JournalSinkHealth {
@@ -768,6 +893,24 @@ impl From<DrainHealth> for StateSinkHealth {
                 DrainState::Healthy => StateSinkState::Healthy,
                 DrainState::Lagging => StateSinkState::Lagging,
                 DrainState::Failed => StateSinkState::Failed,
+            },
+            accepted: health.accepted,
+            drained: health.drained,
+            lost: health.lost,
+            depth: health.depth,
+            high_water: health.high_water,
+            capacity: health.capacity,
+        }
+    }
+}
+
+impl From<DrainHealth> for HistorySinkHealth {
+    fn from(health: DrainHealth) -> Self {
+        Self {
+            state: match health.state {
+                DrainState::Healthy => HistorySinkState::Healthy,
+                DrainState::Lagging => HistorySinkState::Lagging,
+                DrainState::Failed => HistorySinkState::Failed,
             },
             accepted: health.accepted,
             drained: health.drained,
@@ -817,7 +960,7 @@ mod tests {
     fn history_emissions_evict_oldest_first_at_the_bound() {
         // A two-slot ring keeps the newest records; the never-reused
         // seqs show the evicted stretch as a numbering gap.
-        let store = Store::new(0, 0, 4, 2, 1);
+        let store = Store::new(0, 0, 0, 4, 2, 1);
         for n in 1..=4 {
             store.push_event_history(emission("em", "shift", n), Tick(n as u64));
         }
@@ -843,7 +986,7 @@ mod tests {
         // Each newer emission supersedes the identity's standing
         // record; a second identity sits beside it. The standing
         // record carries the superseding emission's seq and tick.
-        let store = Store::new(0, 0, 4, 8, 1);
+        let store = Store::new(0, 0, 0, 4, 8, 1);
         for n in 1..=3 {
             store.push_latest_event(emission("em", "beat", n), Tick(n as u64));
         }
@@ -869,7 +1012,7 @@ mod tests {
     fn routed_emissions_ride_the_publication_delta() {
         // Every routed emission — both classes — appends to the event
         // delta the next publication drains, in routed order.
-        let store = Store::new(0, 0, 4, 8, 1);
+        let store = Store::new(0, 0, 0, 4, 8, 1);
         store.push_event_history(emission("em", "shift", 1), Tick(1));
         store.push_latest_event(emission("em", "beat", 1), Tick(1));
         let publication = store.publish(Tick(1), snapshot(Tick(1)), &[]);

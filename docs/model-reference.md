@@ -59,9 +59,10 @@ release contract in `docs/release-contract.md` (decisions 79–81).
 - **Optional fields** extend the version-1 schema without a version bump
   (decision 3): a document predating a field loads with the field unset,
   and an unset field serializes back without the key. `hardware` and
-  `parameters` on a device, `channel`/`initial`/`writable`/`journaled` on
-  an io_point, and `unit`/`description`/`group` on a signal all follow
-  this convention.
+  `parameters` on a device,
+  `channel`/`initial`/`writable`/`journaled`/`record` on an io_point,
+  and `unit`/`description`/`group` on a signal all follow this
+  convention.
 - The parser ignores keys it does not know, so tool-added annotation
   keys load harmlessly; they are not part of the contract and the
   canonical model document — what `PlantModel::fingerprint` hashes —
@@ -151,6 +152,7 @@ carried by the controller's scan image — decision 14).
 | `writable` | bool | Optional; unset means not writable. Valid on `in` points only — `writable` on an `out` point is `ValidationError::WritableOut`. |
 | `stale_after_ticks` | u64 | Optional; unset means no freshness check. Valid on field-bound `in` points only — on an `out` point it is `ValidationError::StaleOut`, on a channel-less internal point `StaleInternal`. A field-bound `in` point that leaves it unset is lint `field_input_without_freshness_budget`. |
 | `journaled` | bool | Optional; unset means the point's value transitions stay out of the durable journal. Valid on `bool`/`int` points of either direction — `journaled` on a `float` point is `ValidationError::JournaledFloat`. |
+| `record` | `{"every_ticks": u64, "retain_days": u64?}` | Optional; unset means the point contributes only to the volatile history ring. Declares the point's durable recording duty (decision 102): the monitor's recorder samples its post-scan image into the durable history file every `every_ticks` run ticks. `every_ticks: 0` is `ValidationError::RecordZeroCadence` — a zero cadence would record the full-rate stream the durable record exists to avoid. `retain_days` declares the span the downstream records system must hold; deployment-sizing data the controller never enforces. Valid on any point. |
 
 ### Internal points
 
@@ -336,6 +338,51 @@ convention: `step_completed` (`history`) the per-step operational
 record, `sequence_completed` (`journal`) the durable run-level
 boundary, `progress` (`latest`) the superseding standing-position
 publication.
+
+### `record` and the durable process history
+
+`record` declares a point's durable *recording duty* — the
+durable-history decision's one narrowing of the volatile-ring rule
+(decision 102, narrowing decision 36). Every point's samples already
+land in the bounded per-point history ring; that ring is a volatile
+diagnostic window a restart erases. A point declaring
+`{"record": {"every_ticks": N}}` additionally lands its post-scan image
+sample in the monitor's durable history file (`--history-file`) once
+every `N` run ticks — the faithful, quality-stamped, honestly-gapped
+capture a compliance series needs: the per-filter turbidity record, the
+daily disinfection/CT record, interval energy data (`WW-REP-001`'s
+retention clauses).
+
+The declaration is deliberately opt-in and cadenced:
+
+- any point may carry it — a field measurement's stream or an internal
+  computed value alike, either direction, any value kind;
+- `every_ticks` is the recording cadence in run ticks — a sample lands
+  whenever the scan tick has advanced at least that far past the
+  point's last recorded sample; `0` is rejected
+  (`RecordZeroCadence`), since recording every scan would duplicate
+  the full-rate stream the durable record exists to avoid;
+- `retain_days` is the declared retention span the downstream records
+  system must hold — deployment-sizing data the durable file's
+  rotation and archival are engineered against, never a bound the
+  controller enforces: the multi-year regulatory term belongs to the
+  historian/report layer the file feeds.
+
+Recording happens at the recorder's post-scan point — never mid-scan,
+never in the executor — and the file append drains on a bounded queue
+off the monitor lock, so a slow or stalled sink reads as the
+publication's `history_sink` health state (`lagging`, then `failed`)
+and a queue-full or failed append is fatal at the recorded point
+rather than a silent gap or a lengthened scan. The durable stream's
+served window (`GET /history/durable`) is capacity-bounded like every
+retained stream: `seq`s are never reused, eviction reads as a
+numbering gap, and `run_boundary`/`domain` markers are pinned so
+process lifetimes and tick-domain crossings stay attributable under
+retention. A `--state-file` resume keeps appending in the restored
+tick domain and continues the cadence intervals the file already
+paced out; each tick domain's declared civil-time anchor stamps the
+file's boundary markers so exported records self-describe their
+tick-to-civil mapping.
 
 ## `signals`
 

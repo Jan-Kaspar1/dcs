@@ -36,11 +36,13 @@
 //! rebuilding it per request.
 
 use crate::drain::Drain;
+use crate::history_file::{HistoryFile, HistoryRecord};
 use crate::journal_file::{JournalFile, JournalRecord};
 use crate::store::Store;
 use dcs_core::{
-    CarryoverReport, CommandOutcome, CommandReceipt, Divergence, EventRetention, JournalEntry,
-    JournalEvent, PointId, Quality, TelemetrySnapshot, Tick, Value,
+    CarryoverReport, CommandOutcome, CommandReceipt, Divergence, DurableEntry, DurableEvent,
+    EventRetention, JournalEntry, JournalEvent, PointId, Quality, TelemetrySnapshot, Tick,
+    TickAnchor, Value,
 };
 use dcs_runtime::{
     ClaimObservation, Executor, OrphanReport, PromotionRefusal, ResolutionReport, RoleChange,
@@ -105,6 +107,38 @@ pub struct MonitorConfig {
     /// well above the command queue's, at the served journal's own
     /// default.
     pub journal_drain_capacity: usize,
+    /// When set, every durable-history entry is also appended to this
+    /// line-delimited JSON file — the durable-history decision's
+    /// monitor-local store: the declared-`record` points' post-scan
+    /// samples captured at their declared cadence, the run-boundary
+    /// markers separating process lifetimes, and the mid-lifetime
+    /// `domain` seams a checkpoint adoption opens. Startup replays the
+    /// file into the bounded served window and continues `seq`
+    /// numbering where it left off, so `GET /history/durable` answers
+    /// continuously across a restart; a file that cannot be replayed
+    /// fails the bind naming the file and the offending record, and a
+    /// missing file is a cold start. The sink is single-writer under
+    /// the same exclusive advisory lock the journal file takes. The
+    /// append itself drains on a dedicated writer off the executor
+    /// lock — the journal-append isolation the durable record
+    /// extends — bounded by `history_drain_capacity`.
+    pub history_file: Option<PathBuf>,
+    /// Entries retained in the durable-history served window;
+    /// `0` retains none. `run_boundary` and `domain` markers are
+    /// exempt under the same pinning rule the journal applies: an
+    /// evicted one migrates to a pinned stream the served answer still
+    /// merges in, since the markers are the only record a consumer
+    /// has that a new process lifetime or tick domain began.
+    pub durable_capacity: usize,
+    /// The bound on durable records queued for the file sink's writer
+    /// — the durable-history decision's declared bound, the journal's
+    /// rule extended to the sibling file. The recording point never
+    /// waits on the sink: a push finding the queue full — the writer
+    /// stalled or slower than the run's recording rate — fails
+    /// fatally at that push naming the file, rather than lengthening
+    /// a scan or silently dropping an entry. The bound sits at the
+    /// served journal's own default.
+    pub history_drain_capacity: usize,
     /// When set, the run's transferable checkpoint persists to this
     /// path at its documented boundaries — every completed scan
     /// cycle's close and every accepted command's admission — the
@@ -143,6 +177,9 @@ impl Default for MonitorConfig {
             publication_capacity: 16,
             journal_file: None,
             journal_drain_capacity: 1024,
+            history_file: None,
+            durable_capacity: 1024,
+            history_drain_capacity: 1024,
             state_file: None,
             state_drain_capacity: crate::state_file::DEFAULT_STATE_DRAIN_CAPACITY,
         }
@@ -250,6 +287,33 @@ pub(super) struct Recorder {
     /// the executor lock. Dropping the recorder drains and joins the
     /// writer, so a graceful shutdown's file is complete.
     sink: Option<Drain<JournalRecord>>,
+    /// The durable history-file sink's drain, when a path is
+    /// configured — every durable entry queues to its writer under the
+    /// same isolation the journal's takes. `None` without a
+    /// configured file: the durable stream is the file's served
+    /// window, so an unconfigured run records nothing durable.
+    history_sink: Option<Drain<HistoryRecord>>,
+    /// The `seq` the next durable-history entry takes — continued
+    /// from the replayed file's numbering across restarts, never
+    /// reused, so bounded eviction reads as a numbering gap.
+    history_next_seq: u64,
+    /// The last run tick each declared-`record` point's durable
+    /// samples were attributed to — the cadence bookkeeping the
+    /// recording point diffs against; absent until the point's first
+    /// durable record, which the standing census's `from: None`-like
+    /// first observation covers. A run resuming its own tick domain —
+    /// `--state-file`, the anchor matching — adopts the replayed
+    /// file's baselines so the interval the file already paced out
+    /// continues across the restart rather than re-recording the
+    /// census; a new or foreign domain starts empty, and a mid-run
+    /// domain adoption clears it.
+    history_last_ticks: BTreeMap<PointId, Tick>,
+    /// The tick domain's declared civil-time anchor the run records
+    /// under — handed at bind for the durable files' boundary stamp
+    /// and tracked each scan: a checkpoint adoption's new anchor — or
+    /// an unanchored landing — records the mid-lifetime `domain` seam
+    /// the mapping on either side attributes to.
+    anchor: Option<TickAnchor>,
 }
 
 impl Recorder {
@@ -267,14 +331,34 @@ impl Recorder {
     /// process lifetime. The same run ordinal stamps every served
     /// history envelope, so a `GET /history` consumer detects the seam
     /// even while its `since` cursor still filters the restarted seq
-    /// axis's samples out.
-    pub(super) fn new(config: MonitorConfig, tick: Tick) -> io::Result<Self> {
+    /// axis's samples out. `anchor` is the run's tick domain's declared
+    /// civil-time anchor — `None` on an unanchored domain — stamped
+    /// into both durable files' run-boundary markers and tracked each
+    /// scan for the durable stream's mid-lifetime `domain` seam.
+    pub(super) fn new(
+        config: MonitorConfig,
+        tick: Tick,
+        anchor: Option<TickAnchor>,
+    ) -> io::Result<Self> {
         let (sink, replay) = match &config.journal_file {
             Some(path) => {
-                let (file, replay) = JournalFile::open(path, config.journal_capacity, tick)?;
+                let (file, replay) =
+                    JournalFile::open(path, config.journal_capacity, tick, anchor)?;
                 (Some(file.into_drain(config.journal_drain_capacity)), replay)
             }
             None => (None, crate::journal_file::Replay::default()),
+        };
+        // The durable process-history file — the declared-duty sample
+        // record — opens in the same pattern: replay into the bounded
+        // served window, continue `seq` numbering, stamp this run's
+        // boundary marker with the domain's anchor.
+        let (history_sink, durable_replay) = match &config.history_file {
+            Some(path) => {
+                let (file, replay) =
+                    HistoryFile::open(path, config.durable_capacity, tick, anchor)?;
+                (Some(file.into_drain(config.history_drain_capacity)), replay)
+            }
+            None => (None, crate::history_file::HistoryReplay::default()),
         };
         // This run's lifetime ordinal — the same count the run-boundary
         // marker names — stamps every served `PointHistory` envelope, so
@@ -284,6 +368,7 @@ impl Recorder {
         let store = Store::new(
             config.history_capacity,
             config.journal_capacity,
+            config.durable_capacity,
             config.publication_capacity,
             config.event_history_capacity,
             replay.runs + 1,
@@ -295,6 +380,9 @@ impl Recorder {
         if let Some(sink) = &sink {
             store.set_journal_sink(sink.shared());
         }
+        if let Some(sink) = &history_sink {
+            store.set_history_sink(sink.shared());
+        }
         // The replay seeds the ring in `seq` order: boundary markers
         // the file's retained tail already aged out push first, so the
         // store's pinning stream picks them up the same way live
@@ -302,6 +390,26 @@ impl Recorder {
         for entry in replay.boundaries.into_iter().chain(replay.entries) {
             store.push_journal(entry);
         }
+        for entry in durable_replay
+            .boundaries
+            .into_iter()
+            .chain(durable_replay.entries)
+        {
+            store.push_durable(entry);
+        }
+        // A run resuming its own tick domain — the state-file resume,
+        // where the file's last recorded anchor is this run's own —
+        // adopts the replayed cadence baselines so a point inside its
+        // interval across the restart records nothing until the
+        // interval the file already paced out expires. Every other
+        // bind — a cold start, a foreign domain's file — starts the
+        // census fresh: the old domain's ticks mean nothing under a
+        // new one.
+        let durable_baselines = if tick > Tick::ZERO && durable_replay.anchor == anchor {
+            durable_replay.last_ticks
+        } else {
+            BTreeMap::new()
+        };
         let mut recorder = Self {
             store,
             next_seq: replay.next_seq,
@@ -322,6 +430,10 @@ impl Recorder {
             step_counts: Vec::new(),
             last_pushed: None,
             sink,
+            history_sink,
+            history_next_seq: durable_replay.next_seq,
+            history_last_ticks: durable_baselines,
+            anchor,
         };
         // A file that already records earlier lifetimes makes this run
         // a restart: its boundary journals as an ordinary entry — the
@@ -335,6 +447,20 @@ impl Recorder {
                 JournalEvent::RunBoundary {
                     run: replay.runs + 1,
                 },
+            );
+        }
+        // The same restart marker enters the durable stream as its
+        // own `run_boundary` entry — the file marker's served form —
+        // carrying the domain's anchor so a `GET /history/durable`
+        // consumer attributes the samples on either side of the seam
+        // to their process lifetime and tick domain.
+        if durable_replay.runs > 0 {
+            recorder.push_durable(
+                DurableEvent::RunBoundary {
+                    run: durable_replay.runs + 1,
+                    anchor,
+                },
+                tick,
             );
         }
         Ok(recorder)
@@ -802,6 +928,17 @@ impl Recorder {
             }
         }
 
+        // The declared-`record` points' durable capture — the
+        // durable-history decision's store, at the same post-scan
+        // point: each declared point whose cadence interval elapsed
+        // since its last attributed run tick records its post-scan
+        // image sample at the scan's tick — the faithful,
+        // quality-stamped capture its declared duty names. The
+        // tick-domain check inside runs first, so a checkpoint
+        // adoption's new domain lands its `domain` seam before the
+        // first samples it attributes.
+        self.record_durable(executor, point_map, &snapshot, scan_tick);
+
         // The kind-declared events the scan's components emitted — the
         // executor drained each after its `step` — route here in
         // emission order at the producing scan's tick. Retention is the
@@ -864,12 +1001,120 @@ impl Recorder {
         snapshot
     }
 
+    /// Records one scan's durable-duty samples — the durable-history
+    /// decision's store, at the documented post-scan point. Each
+    /// declared-`record` point whose cadence interval elapsed since
+    /// its last attributed run tick captures its post-scan image
+    /// sample at the scan's tick — the cadence rides run ticks, not
+    /// sample stamps, so the field's own staleness never schedules the
+    /// record and a stale sample still lands its declared quality.
+    /// No-op without a configured history file: the durable stream is
+    /// the file's served window, so an unconfigured run records
+    /// nothing.
+    ///
+    /// The tick-domain check runs first: an anchor the executor
+    /// reports that differs from the run's standing mark — a
+    /// checkpoint adoption carrying the tracked line's newer domain —
+    /// records the `domain` seam carrying the adopted anchor before
+    /// the first samples attributed to it, and clears the cadence
+    /// baselines: the old domain's ticks mean nothing under the new
+    /// one, so the adoption's first scan re-records the standing
+    /// census exactly as a cold run's first scan does.
+    fn record_durable(
+        &mut self,
+        executor: &Executor<'_>,
+        point_map: &dcs_runtime::PointMap,
+        snapshot: &TelemetrySnapshot,
+        scan_tick: Tick,
+    ) {
+        if self.history_sink.is_none() {
+            return;
+        }
+        let anchor = executor.anchor();
+        if anchor != self.anchor {
+            self.anchor = anchor;
+            self.history_last_ticks.clear();
+            self.push_durable(DurableEvent::Domain { anchor }, scan_tick);
+        }
+        for telemetry in &snapshot.points {
+            let Some(sample) = telemetry.sample else {
+                continue;
+            };
+            let Some(cadence) = point_map
+                .get(telemetry.point)
+                .and_then(|spec| spec.record_every_ticks)
+            else {
+                continue;
+            };
+            let due = match self.history_last_ticks.get(&telemetry.point) {
+                // The first observation records — the standing census
+                // a new domain or cold run opens its durable record
+                // with.
+                None => true,
+                Some(&last) => scan_tick.0.saturating_sub(last.0) >= cadence,
+            };
+            if !due {
+                continue;
+            }
+            self.history_last_ticks.insert(telemetry.point, scan_tick);
+            self.push_durable(
+                DurableEvent::Sampled {
+                    point: telemetry.point,
+                    sample,
+                },
+                scan_tick,
+            );
+        }
+    }
+
+    /// Appends one durable-history entry — queued to the configured
+    /// file sink's writer first, then the store's served window. The
+    /// handoff never waits on the file: the drain's bounded queue
+    /// either takes the record or refuses it, and a refusal is fatal —
+    /// the run dies naming the file at this push rather than running
+    /// on while its durable record silently stops or lengthening the
+    /// scan behind a stalled sink — the durable-history decision
+    /// applying decision 36's fatal rule to the sibling file. A sink
+    /// write that failed on the writer turns every later push into
+    /// the same fatal refusal naming the error, so the run fails at
+    /// the recorded point instead of claiming entries the file never
+    /// took; the partial record a crash can leave is what the next
+    /// startup's replay rejects by name. The entry's `seq` continues
+    /// the file's axis — never reused, so served-window eviction
+    /// reads as a numbering gap.
+    fn push_durable(&mut self, event: DurableEvent, tick: Tick) {
+        let entry = DurableEntry {
+            seq: self.history_next_seq,
+            tick,
+            event,
+        };
+        if let Some(sink) = &mut self.history_sink
+            && let Err(error) = sink.push(HistoryRecord::Entry(Box::new(entry.clone())))
+        {
+            let seq = match &error.record {
+                HistoryRecord::Entry(entry) => entry.seq,
+                HistoryRecord::RunBoundary { .. } => self.history_next_seq,
+            };
+            panic!("{error} — refused durable history seq {seq}");
+        }
+        self.history_next_seq += 1;
+        self.store.push_durable(entry);
+    }
+
     /// Retained journal entries with a `seq` above `since`, oldest first
     /// — the store's served ring. Test-only: the served `GET /journal`
     /// answer reads the store directly.
     #[cfg(test)]
     pub(super) fn journal(&self, since: u64) -> Vec<JournalEntry> {
         self.store.journal(since)
+    }
+
+    /// Retained durable-history entries with a `seq` above `since`,
+    /// oldest first — the store's served window. Test-only: the
+    /// served `GET /history/durable` answer reads the store directly.
+    #[cfg(test)]
+    pub(super) fn durable(&self, since: u64) -> Vec<DurableEntry> {
+        self.store.durable(since)
     }
 
     /// Test seam: swap in a constructed drain — the stalled and
@@ -879,6 +1124,15 @@ impl Recorder {
     pub(super) fn with_sink(&mut self, sink: Drain<JournalRecord>) {
         self.store.set_journal_sink(sink.shared());
         self.sink = Some(sink);
+    }
+
+    /// Test seam: swap in a constructed durable-history drain — the
+    /// stalled and failing-sink coverage drives the writer through
+    /// closures a real file cannot produce deterministically.
+    #[cfg(test)]
+    pub(super) fn with_history_sink(&mut self, sink: Drain<HistoryRecord>) {
+        self.store.set_history_sink(sink.shared());
+        self.history_sink = Some(sink);
     }
 
     /// The sink's live drain report — test-only; the served surface
@@ -893,6 +1147,16 @@ impl Recorder {
     #[cfg(test)]
     pub(super) fn flush_sink(&self) {
         if let Some(sink) = &self.sink {
+            sink.shared()
+                .wait_drained(std::time::Duration::from_secs(30));
+        }
+    }
+
+    /// Waits the history sink's writer out — test-only; the served
+    /// surface waits through the store's `wait_history_drained`.
+    #[cfg(test)]
+    pub(super) fn flush_history_sink(&self) {
+        if let Some(sink) = &self.history_sink {
             sink.shared()
                 .wait_drained(std::time::Duration::from_secs(30));
         }

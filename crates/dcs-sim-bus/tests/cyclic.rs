@@ -654,6 +654,7 @@ fn point_map() -> PointMap {
                 requires_reason: false,
                 stale_after_ticks: Some(1),
                 journaled: false,
+                record_every_ticks: None,
             },
         )
         .with_writable_point(PointId(11), Direction::In, ValueKind::Float)

@@ -535,6 +535,7 @@
 
 pub mod alarm_report;
 mod drain;
+mod history_file;
 mod journal_file;
 mod pair;
 mod recorder;
@@ -543,6 +544,7 @@ mod state_file;
 mod store;
 
 use crate::store::Store;
+pub use history_file::{HistoryBoundary, HistoryData, read_history_file};
 pub use journal_file::{JournalData, RunBoundary, read_journal_file};
 pub use pair::{
     CONVERGENCE_GRACE, PAIR_FAULT_KINDS_VERSION, PairClient, PairError, PairFaultKind, PairHealth,
@@ -553,9 +555,10 @@ pub use state_file::{DEFAULT_STATE_DRAIN_CAPACITY, StateSink};
 pub use store::{Publication, PublicationGap, PublicationPage};
 
 use dcs_core::{
-    CarryoverReport, Command, CommandError, CommandOutcome, CommandReceipt, JournalEntry,
-    JournalSinkHealth, PointHistory, PointId, PublicationHealth, ResourceView, Role, RoleReport,
-    SchemaView, StandbySync, StateSinkHealth, SwitchError, TelemetrySnapshot, Tick,
+    CarryoverReport, Command, CommandError, CommandOutcome, CommandReceipt, DurableEntry,
+    HistorySinkHealth, JournalEntry, JournalSinkHealth, PointHistory, PointId, PublicationHealth,
+    ResourceView, Role, RoleReport, SchemaView, StandbySync, StateSinkHealth, SwitchError,
+    TelemetrySnapshot, Tick,
 };
 use dcs_model::SignalIndex;
 use dcs_runtime::{
@@ -1290,7 +1293,7 @@ impl<'d> Monitor<'d> {
             .state_file
             .as_ref()
             .map(|path| StateSink::new(path, config.state_drain_capacity));
-        let mut recorder = recorder::Recorder::new(config, peer.tick())?;
+        let mut recorder = recorder::Recorder::new(config, peer.tick(), peer.executor().anchor())?;
         // A `--state-file`-restored executor already carries the run's
         // state — the receipt log and the restored image are this run's
         // own record continuing, not new events to journal.
@@ -1832,6 +1835,28 @@ impl<'d> Monitor<'d> {
         self.store.wait_journal_drained(timeout)
     }
 
+    /// The durable history-file sink's live drain report — the named
+    /// backpressure state the durable-history decision stamps into
+    /// every publication's `history_sink` section: `healthy` while the
+    /// writer keeps up, `lagging` while records wait in its bounded
+    /// queue, `failed` after a sink write error — with `lost`
+    /// accounting the queued records the file never took. `None` when
+    /// no history file is configured.
+    pub fn history_sink_health(&self) -> Option<HistorySinkHealth> {
+        self.store.history_sink_health()
+    }
+
+    /// Waits — at most `timeout` — for the history sink's writer to
+    /// have appended or accounted every queued record, and returns
+    /// the standing health either way: `drained + lost == accepted`
+    /// says the durable file caught up. `None` when no history file
+    /// is configured. The wait rides the caller's thread alone — the
+    /// graceful-shutdown and durability-attestation flush, never the
+    /// executor lock.
+    pub fn flush_history_sink(&self, timeout: Duration) -> Option<HistorySinkHealth> {
+        self.store.wait_history_drained(timeout)
+    }
+
     /// The `--state-file` sink's live drain report — the named
     /// backpressure state the persist-isolation fix (#982) stamps into
     /// every publication's `state_sink` section: `healthy` while the
@@ -2243,6 +2268,13 @@ impl<'d> Monitor<'d> {
         // bound answers degraded — its pushes are already fatal.
         let attests_durable =
             method == Method::Post || (method == Method::Get && path == "/journal");
+        // The history file's drain is the same kind of off-lock sink:
+        // a durable-history read that attests "the durable record
+        // caught up through the last recorded scan" waits the standing
+        // queue out on this worker first, the same shape the journal
+        // read's wait takes. A sink stalled past the bound answers
+        // degraded — its pushes are already fatal.
+        let attests_history = method == Method::Get && path == "/history/durable";
         // The state-file ordinal an accepted `POST /command` pushed —
         // the `200` answers only after the durable file has caught up
         // through it, so a restart between admission and the applying
@@ -2349,6 +2381,31 @@ impl<'d> Monitor<'d> {
             },
             (Method::Get, "/journal") => match journal_query(query) {
                 Ok(since) => json(200, &self.store.journal(since)),
+                Err(message) => json(400, &message),
+            },
+            // The durable process-history stream — the declared-duty
+            // record's served window: entries the configured history
+            // file recorded, `seq`-cursor read like the journal's,
+            // `point` filtering to one declared point's series. The
+            // pinned run-boundary and domain markers answer ahead of
+            // the tail, so lifetimes and tick-domain seams stay
+            // attributable under retention eviction; an evicted
+            // stretch reads as a numbering gap.
+            (Method::Get, "/history/durable") => match history_query(query) {
+                Ok((points, since)) => json(
+                    200,
+                    &self
+                        .store
+                        .durable(since)
+                        .into_iter()
+                        .filter(|entry| match &entry.event {
+                            dcs_core::DurableEvent::Sampled { point, .. } => {
+                                points.is_empty() || points.contains(point)
+                            }
+                            _ => true,
+                        })
+                        .collect::<Vec<DurableEntry>>(),
+                ),
                 Err(message) => json(400, &message),
             },
             // The schema and resource views derive from the published
@@ -2567,6 +2624,9 @@ impl<'d> Monitor<'d> {
         }
         if attests_durable {
             self.store.wait_journal_drained(JOURNAL_DRAIN_WAIT);
+        }
+        if attests_history {
+            self.store.wait_history_drained(JOURNAL_DRAIN_WAIT);
         }
         // A dropped client connection makes respond fail; the request is
         // already handled, so the error is ignored.
@@ -4389,6 +4449,21 @@ impl MonitorClient {
         self.get_json(&format!("/journal?since={since}"))
     }
 
+    /// `GET /history/durable`: the retained durable-history entries
+    /// with a `seq` above `since` (`0` fetches everything retained),
+    /// `point` filtering `sampled` records to the declared points —
+    /// `None` serves every declared-duty point. The pinned
+    /// `run_boundary`/`domain` markers answer ahead of the bounded
+    /// tail regardless of the filter, and an evicted stretch reads as
+    /// a numbering gap on the `seq` axis.
+    pub fn durable_history(&self, points: &[PointId], since: u64) -> io::Result<Vec<DurableEntry>> {
+        let mut path = format!("/history/durable?since={since}");
+        for point in points {
+            path.push_str(&format!("&point={}", point.0));
+        }
+        self.get_json(&path)
+    }
+
     /// `GET /schema`: the served block-interface registry — every
     /// component instance's `BlockInterface`, stamped with the
     /// publication it was derived from.
@@ -4875,6 +4950,7 @@ mod tests {
             format_version: dcs_runtime::CHECKPOINT_FORMAT_VERSION,
             model_fingerprint: Some(dcs_core::ModelFingerprint(7)),
             generation: Some(11),
+            anchor: None,
             tick: Tick(100),
             components: Default::default(),
             driver: None,
@@ -5008,6 +5084,7 @@ mod tests {
             format_version: dcs_runtime::CHECKPOINT_FORMAT_VERSION,
             model_fingerprint: Some(dcs_core::ModelFingerprint(7)),
             generation: Some(11),
+            anchor: None,
             tick: Tick(100),
             components: Default::default(),
             driver: None,
