@@ -410,6 +410,7 @@ class RelaunchActionTests(unittest.TestCase):
              '--scan-ms', '100', '--listen', '0.0.0.0:8080',
              '--state-file', runner.CONTAINER_STATE_FILE,
              '--journal-file', runner.CONTAINER_JOURNAL_FILE,
+             '--history-file', runner.CONTAINER_HISTORY_FILE,
              '--pair-token', self.cfg['pair_token']))
         self.assertNotIn('--peer', launch)
         self.assertNotIn('--standby', launch)
@@ -745,6 +746,8 @@ class RigStateFileTests(unittest.TestCase):
             self.assertIn(runner.CONTAINER_STATE_FILE, launch)
             self.assertIn('--journal-file', launch)
             self.assertIn(runner.CONTAINER_JOURNAL_FILE, launch)
+            self.assertIn('--history-file', launch)
+            self.assertIn(runner.CONTAINER_HISTORY_FILE, launch)
 
     def test_standby_launch_arms_the_failover_budget(self):
         # The declared freshness budget presents inside the writer-loss
@@ -793,6 +796,8 @@ class RigStateFileTests(unittest.TestCase):
         for path in ctx['state_files'].values():
             self.assertTrue(Path(path).is_relative_to(self.run_dir))
         for path in ctx['journal_files'].values():
+            self.assertTrue(Path(path).is_relative_to(self.run_dir))
+        for path in ctx['history_files'].values():
             self.assertTrue(Path(path).is_relative_to(self.run_dir))
         self.assertEqual(calls[0][0], 'stop')
         self.assertEqual(calls[1], ('start', 'dcs-hw-qa-1-a'))
@@ -1369,6 +1374,7 @@ class ModelRevisionActionTests(unittest.TestCase):
                       + ':8082', launch)
         self.assertIn(runner.CONTAINER_STATE_FILE, launch)
         self.assertIn(runner.CONTAINER_JOURNAL_FILE, launch)
+        self.assertIn(runner.CONTAINER_HISTORY_FILE, launch)
         document = str(self.run_dir / 'model-revised.json')
         self.assertIn(document + ':/model/revised.json:ro', launch)
         self.assertIn('/model/revised.json', launch)
@@ -1494,7 +1500,7 @@ class ModelRevisionActionTests(unittest.TestCase):
 
         directory = self.run_dir / 'controllers' / 'c'
         directory.mkdir(parents=True)
-        for artifact in ('state.json', 'journal.jsonl'):
+        for artifact in ('state.json', 'journal.jsonl', 'history.jsonl'):
             (directory / artifact).write_text('stale')
         with patch.object(runner, 'docker', fake_docker), \
                 patch.object(runner, '_revised_peer_role',
@@ -1510,7 +1516,7 @@ class ModelRevisionActionTests(unittest.TestCase):
         self.assertIn('model-revision-replace', events)
         # The runner-owned artifacts reset with the container so the
         # new lifetime starts cold.
-        for artifact in ('state.json', 'journal.jsonl'):
+        for artifact in ('state.json', 'journal.jsonl', 'history.jsonl'):
             self.assertFalse((directory / artifact).exists())
 
     def test_relaunch_refuses_a_field_owning_third(self):
@@ -1672,6 +1678,7 @@ class NegotiationActionTests(unittest.TestCase):
                       + ':8082', launch)
         self.assertIn(runner.CONTAINER_STATE_FILE, launch)
         self.assertIn(runner.CONTAINER_JOURNAL_FILE, launch)
+        self.assertIn(runner.CONTAINER_HISTORY_FILE, launch)
         document = str(self.run_dir / 'model-foreign.json')
         self.assertIn(document + ':/model/foreign.json:ro', launch)
         self.assertIn('/model/foreign.json', launch)
@@ -1840,6 +1847,7 @@ class DrivenActionTests(unittest.TestCase):
                       + ':8082', launch)
         self.assertIn(runner.CONTAINER_STATE_FILE, launch)
         self.assertIn(runner.CONTAINER_JOURNAL_FILE, launch)
+        self.assertIn(runner.CONTAINER_HISTORY_FILE, launch)
         self.assertIn(str(self.model) + ':/model/plant.json:ro', launch)
         self.assertIn(str(self.run_dir / 'controllers' / 'd')
                       + ':' + runner.CONTAINER_RUN_DIR, launch)
@@ -2448,6 +2456,8 @@ class ProbePairTests(unittest.TestCase):
                 self.assertTrue(Path(probe['journal_files'][key])
                                 .is_relative_to(self.run_dir), key)
                 self.assertTrue(Path(probe['state_files'][key])
+                                .is_relative_to(self.run_dir), key)
+                self.assertTrue(Path(probe['history_files'][key])
                                 .is_relative_to(self.run_dir), key)
             # The lifecycle actions take the probe containers.
             probe['restart_controller']('standby')
