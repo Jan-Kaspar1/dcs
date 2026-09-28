@@ -58,9 +58,12 @@ episode needs no wall clock:
 - asserts through both peers' serving monitors and durable
   journals: the re-promoted peer journals no `field_claim_lost`
   and no `origin: "fenced"` demotion through the restartee
-  window, the restartee's durable journal gains no run records,
-  and a foreign `claim_writer_unless_held` probe answers fenced
-  naming the re-granted incumbent;
+  window, the restartee's durable journal gains no run records
+  past the fenced start's recorded stand-down evidence — the
+  observed incumbent's claim attribution and the
+  `active -> standby` stand-down — and a foreign
+  `claim_writer_unless_held` probe answers fenced naming the
+  re-granted incumbent;
 - restores the pair's launch roles: the ex-owner rejoins as
   `--standby` — the documented remedy the refusal names —
   reconverges to `tracking`, and the documented switch seats it
@@ -787,12 +790,23 @@ def yielded_claim_rearm_pass(args, tamper):
             if kind == "entry"
             and "run_boundary" not in record.get("event", {})
         ]
-        if restartee_entries:
+        # The fenced start's own recorded evidence — the refused
+        # claim's observed incumbent and the active -> standby
+        # stand-down — is the launch's journaled verdict, not the
+        # field seizure the refusal exists to stop; only records
+        # past it mean the claim reached farther than it allows.
+        restartee_overreach = [
+            record for record in restartee_entries
+            if "field_claim_observed" not in record.get("event", {})
+            and (record.get("event", {}).get("role_changed", {})
+                 .get("to") != "standby")
+        ]
+        if restartee_overreach:
             failures.append(
                 "the restartee's durable journal gained run "
                 "records through the fenced start — its claim "
                 f"reached farther than the refusal allows: "
-                f"{restartee_entries[:2]}"
+                f"{restartee_overreach[:2]}"
             )
         if failures:
             raise Abort
@@ -801,7 +815,7 @@ def yielded_claim_rearm_pass(args, tamper):
                 "phase": "audit",
                 "armed_losses": len(armed_losses),
                 "armed_walk": armed_walk,
-                "restartee_entries": len(restartee_entries),
+                "restartee_entries": len(restartee_overreach),
             }
         )
 

@@ -328,11 +328,16 @@ pub enum SwitchOrigin {
     Failover,
     /// The peer's own protective demotion — the field fenced this run's
     /// write, meaning the claim it held was preempted — never an
-    /// operator request, and never carrying an actor.
+    /// operator request, and never carrying an actor. A launched
+    /// active's stand-down journals the same origin: the field's
+    /// arbitration — a refused startup claim, or a claim that produced
+    /// no answer — is what the run stands down on.
     Fenced,
     /// The peer's own reclaim promotion — the conditional re-claim
     /// probe granted a previously preempted claim back — never an
-    /// operator request, and never carrying an actor.
+    /// operator request, and never carrying an actor. The deferred
+    /// startup grant's landing takes the same shape: the field's
+    /// conditional ask finally answered `granted`.
     Reclaim,
 }
 
