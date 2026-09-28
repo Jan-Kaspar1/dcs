@@ -3,9 +3,13 @@
 Real-git fixtures: a staged clone whose branch conflicts with origin/main
 on a lockfile-shaped path completes the merge in-process — Cargo.lock is
 regenerated from the merged manifests, the merge commit lands, and the
-branch pushes — without repair() being invoked. A conflict including a
-non-registered path, or a lockfile that can no longer be regenerated,
-falls through to the bounded merge-conflict repair unchanged.
+branch pushes — without repair() being invoked. The same holds for a
+docs/release-contract.md conflict where both sides only append keyed
+diagnostic rows to the tail table — the union lands deduplicated in
+deterministic key order. A conflict including a non-registered path, a
+lockfile that can no longer be regenerated, a same-key row with divergent
+text, or a hunk outside a table region falls through to the bounded
+merge-conflict repair unchanged.
 """
 import json
 import tempfile
@@ -52,6 +56,26 @@ version = 4
 name = "w"
 version = "{version}"
 '''
+
+# A miniature of docs/release-contract.md's diagnostics tail table: keyed
+# `| `name` | meaning |` rows under a header, prose on both sides so a
+# non-table hunk and surrounding-structure preservation are testable.
+PROSE = 'Prose explaining the contract.'
+CONTRACT = '''# Release contract
+
+{prose}
+
+| Diagnostic | Meaning |
+|---|---|
+| `base-failed` | {base} |
+{rows}
+Trailer paragraph.
+'''
+
+
+def contract_rows(*names):
+    return ''.join(f'| `{name}` | {name} diagnostic text. |\n'
+                   for name in names)
 
 
 class FakeGitHub:
@@ -118,6 +142,7 @@ class MechanicalResolutionTests(unittest.TestCase):
         self.git(self.source, 'config', 'user.name', 'Test')
         self.write_package(self.source, version='0.1.0', license='MIT')
         (self.source / 'notes.txt').write_text('base\n')
+        self.write_contract(self.source)
         self.git(self.source, 'add', '-A')
         self.git(self.source, 'commit', '-m', 'initial')
         self.config = dict(state_root=str(self.root / 'state'),
@@ -145,6 +170,13 @@ class MechanicalResolutionTests(unittest.TestCase):
         (directory / 'Cargo.toml').write_text(
             MANIFEST.format(version=version, license=license, extra=extra))
         (directory / 'Cargo.lock').write_text(LOCKFILE.format(version=version))
+
+    def write_contract(self, directory, rows='', prose=PROSE,
+                       base='The base leg did not hold.'):
+        directory = Path(directory)
+        (directory / 'docs').mkdir(exist_ok=True)
+        (directory / 'docs' / 'release-contract.md').write_text(
+            CONTRACT.format(prose=prose, base=base, rows=rows))
 
     def repair_events(self, kind=None):
         rows = [e for e in self.sup.state.events(1)
@@ -184,6 +216,48 @@ class MechanicalResolutionTests(unittest.TestCase):
             (self.source / 'notes.txt').write_text(notes)
         self.git(self.source, 'add', '-A')
         self.git(self.source, 'commit', '-m', 'main advance')
+
+    def stage_docs_clone(self, notes=None, **contract):
+        """Dispatch, commit branch-side release-contract edits, publish."""
+        self.sup.dispatch(self.gh.items)
+        job = self.sup.state.job(1)
+        self.assertEqual(job['status'], 'working')
+        clone = Path(job['clone'])
+        self.git(clone, 'config', 'user.email', 'test@example.com')
+        self.git(clone, 'config', 'user.name', 'Test')
+        self.write_contract(clone, **contract)
+        if notes is not None:
+            (clone / 'notes.txt').write_text(notes)
+        self.git(clone, 'add', '-A')
+        self.git(clone, 'commit', '-m', 'branch work')
+        self.sup.publish(self.sup.state.job(1), self.gh.items[0])
+        self.assertEqual(self.sup.state.job(1)['status'], 'pr-open')
+        return clone
+
+    def advance_main_docs(self, notes=None, **contract):
+        """Main's own release-contract edit, conflicting on the same region."""
+        self.write_contract(self.source, **contract)
+        if notes is not None:
+            (self.source / 'notes.txt').write_text(notes)
+        self.git(self.source, 'add', '-A')
+        self.git(self.source, 'commit', '-m', 'main advance')
+
+    def assert_repair_fallback(self, clone, paths):
+        """The merge stays in progress and the bounded repair is dispatched."""
+        job = self.sup.state.job(1)
+        self.assertEqual(job['repairs'], 1)
+        self.assertEqual(job['status'], 'working')
+        self.assertEqual(len(self.runtime.spawned), 2)
+        repairs = self.repair_events('repair')
+        self.assertEqual(len(repairs), 1)
+        self.assertEqual(repairs[0]['payload']['cause'], 'merge-conflict')
+        self.assertCountEqual(repairs[0]['payload']['paths'], paths)
+        self.assertEqual(self.repair_events('mechanical-resolution'), [])
+        self.assertIn('Resolve the existing merge conflict',
+                      self.runtime.spawned[-1]['prompt'])
+        self.assertTrue((clone / '.git' / 'MERGE_HEAD').exists())
+        self.assertIn('<<<<<<<',
+                      (clone / 'docs' / 'release-contract.md').read_text())
 
     def test_lockfile_only_conflict_merges_without_repair(self):
         clone = self.stage_clone()
@@ -249,6 +323,83 @@ class MechanicalResolutionTests(unittest.TestCase):
         # The merge is left in progress for the repair worker; no bad
         # lockfile was committed.
         self.assertTrue((clone / '.git' / 'MERGE_HEAD').exists())
+
+    def test_contract_tail_append_merges_without_repair(self):
+        shared = '| `shared-failed` | Both legs appended this row. |\n'
+        clone = self.stage_docs_clone(
+            rows='| `branch-failed` | Branch leg did not hold. |\n'
+                 '| `branch-nondeterministic` | Branch digests differed. |\n'
+                 + shared)
+        self.advance_main_docs(
+            rows='| `alpha-failed` | Alpha leg did not hold. |\n'
+                 '| `alpha-nondeterministic` | Alpha digests differed. |\n'
+                 + shared)
+        with patch.object(self.sup, 'repair') as repair:
+            self.sup.integrate(self.gh.items)
+        repair.assert_not_called()
+        job = self.sup.state.job(1)
+        self.assertEqual(job['repairs'], 0)
+        self.assertEqual(job['status'], 'pr-open')
+        self.assertEqual(len(self.runtime.spawned), 1)
+        parents = self.git(clone, 'rev-list', '--parents', '-n', '1', 'HEAD')
+        self.assertEqual(len(parents.split()), 3)
+        # The merge commit pushed: the remote branch tip is the clone's HEAD.
+        self.assertEqual(self.git(self.source, 'rev-parse', 'codex/issue-1-1'),
+                         self.git(clone, 'rev-parse', 'HEAD'))
+        resolved = (clone / 'docs' / 'release-contract.md').read_text()
+        self.assertNotIn('<<<<<<<', resolved)
+        self.assertIn('| `base-failed` | The base leg did not hold. |',
+                      resolved)
+        self.assertIn('Trailer paragraph.', resolved)
+        # Union in deterministic key order — interleaved, not side-concatenated —
+        # and the identically appended row lands exactly once.
+        expected = ['alpha-failed', 'alpha-nondeterministic',
+                    'branch-failed', 'branch-nondeterministic',
+                    'shared-failed']
+        positions = [resolved.index('| `%s` |' % name) for name in expected]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(resolved.count('`shared-failed`'), 1)
+        self.assertEqual(self.git(clone, 'status', '--porcelain'), '')
+        self.assertEqual(self.repair_events('repair'), [])
+        rows = self.repair_events('mechanical-resolution')
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['issue'], 1)
+        self.assertEqual(rows[0]['payload']['resolvers'],
+                         {'docs/release-contract.md':
+                          'release-contract-union'})
+        self.assertEqual(rows[0]['payload']['paths'],
+                         ['docs/release-contract.md'])
+
+    def test_contract_same_key_divergent_falls_through(self):
+        clone = self.stage_docs_clone(
+            rows='| `dup-failed` | Branch meaning. |\n')
+        self.advance_main_docs(
+            rows='| `dup-failed` | Main meaning. |\n')
+        self.sup.integrate(self.gh.items)
+        self.assert_repair_fallback(clone, ['docs/release-contract.md'])
+
+    def test_contract_conflict_outside_table_falls_through(self):
+        clone = self.stage_docs_clone(prose='Branch prose.')
+        self.advance_main_docs(prose='Main prose.')
+        self.sup.integrate(self.gh.items)
+        self.assert_repair_fallback(clone, ['docs/release-contract.md'])
+
+    def test_contract_modified_row_falls_through(self):
+        clone = self.stage_docs_clone(
+            rows=contract_rows('branch-failed'))
+        self.advance_main_docs(base='Changed on main.',
+                               rows=contract_rows('alpha-failed'))
+        self.sup.integrate(self.gh.items)
+        self.assert_repair_fallback(clone, ['docs/release-contract.md'])
+
+    def test_contract_plus_unregistered_path_falls_through(self):
+        clone = self.stage_docs_clone(rows=contract_rows('branch-failed'),
+                                      notes='branch\n')
+        self.advance_main_docs(rows=contract_rows('alpha-failed'),
+                               notes='main\n')
+        self.sup.integrate(self.gh.items)
+        self.assert_repair_fallback(
+            clone, ['docs/release-contract.md', 'notes.txt'])
 
 
 if __name__ == '__main__':
