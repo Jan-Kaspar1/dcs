@@ -427,6 +427,47 @@ impl RemoteDriver {
         })
     }
 
+    /// As [`connect_with_timeout`](Self::connect_with_timeout) without
+    /// the eager attach: the driver assembles in the link-down state a
+    /// severed link already reports — every access answering
+    /// `Disconnected` while the endpoint stays silent — and the first
+    /// request attaches, the failed re-attach backing off the same
+    /// [`REATTACH_INTERVAL`](Self::REATTACH_INTERVAL) a mid-run loss
+    /// does. `addr` still resolves here, so a malformed or
+    /// unresolvable address fails at construction exactly as the eager
+    /// connect's does.
+    ///
+    /// The born-active startup-failure contract launches behind this
+    /// shape: a controller whose plant cannot be reached at boot must
+    /// not die inside driver assembly — it stands pending, served and
+    /// journaled, and the first answering contact completes what the
+    /// boot could not. Tooling and tests that want the connect-time
+    /// verdict keep the eager constructors.
+    pub fn connect_deferred<A: ToSocketAddrs>(addr: A, timeout: Duration) -> std::io::Result<Self> {
+        let addresses: Vec<SocketAddr> = addr.to_socket_addrs()?.collect();
+        if addresses.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "the plant server address resolves to nothing",
+            ));
+        }
+        Ok(Self {
+            addresses,
+            timeout,
+            connection: Mutex::new(Connection {
+                stream: None,
+                owner: None,
+                // `Instant::now()` — the first request attaches without
+                // waiting out an interval that never ran.
+                retry_at: Instant::now(),
+                last_error: None,
+                fenced_by: None,
+                claim_monitor: None,
+            }),
+            controller: false,
+        })
+    }
+
     /// Marks this attachment a controller's — the redundant pair's
     /// shape rather than plant tooling's. Every write-ownership claim
     /// it asserts or re-arms records the controller marker on the

@@ -316,14 +316,17 @@
 use dcs_assembly::{DriverRegistry, FanoutDriver, StepError, assemble, resolve_drivers};
 use dcs_controller::registry;
 use dcs_core::{
-    CarryoverReport, FieldClaim, IoDriver, PointId, TelemetrySnapshot, Tick, TickAnchor,
+    CarryoverReport, FieldClaim, IoDriver, PointId, SwitchError, TelemetrySnapshot, Tick,
+    TickAnchor,
 };
 use dcs_model::PlantModel;
 use dcs_monitor::{
     CheckpointPuller, DEFAULT_STATE_DRAIN_CAPACITY, Driven, Monitor, MonitorConfig, StateSink,
     TrackTarget,
 };
-use dcs_runtime::{Checkpoint, Executor, Peer, TrackReport, WriteGate, mint_generation};
+use dcs_runtime::{
+    Activation, Checkpoint, Executor, Peer, TrackReport, WriteGate, mint_generation,
+};
 use dcs_sim_net::{ClaimGrant, RemoteDriver, RemoteError};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -653,6 +656,52 @@ fn degrade_step(stepped: Result<(), StepError>) -> Result<(), String> {
 fn report_claim(driver: &Driver, owner: u64) {
     if driver.has_shared_field() {
         eprintln!("field write-ownership claim held under owner token {owner}");
+    }
+}
+
+/// The launched active's startup activation answer under the
+/// born-active startup-failure contract — the disposition every
+/// activation site applies identically. `Ok(())` means the run
+/// continues: `Granted` owns the field, its claim line logged;
+/// `Pending` stands unpaired behind the served standby surface while
+/// the deferred conditional grant retries on each answered field
+/// contact; `Refused` against a declared `--peer` already stands
+/// rejoined as the pair's standby — the field's own verdict keeps
+/// this run honest instead of leaving it an unpaired active. `Err`
+/// carries the launch failure: an undeclared refusal — no pair was
+/// declared to rejoin — a not-launched-active defect, or the
+/// unconditional claim's own failure on a field kind without the
+/// live-holder query.
+fn settle_activation(
+    activation: Result<Activation, SwitchError>,
+    driver: &Driver,
+    owner: u64,
+    declared_peer: bool,
+) -> Result<(), String> {
+    match activation {
+        Ok(Activation::Granted) => {
+            report_claim(driver, owner);
+            Ok(())
+        }
+        Ok(Activation::Pending { detail }) => {
+            eprintln!(
+                "startup: field write-ownership claim produced no verdict ({detail}) — \
+                 the run stands pending: role standby, unsynchronized, write-quiesced, \
+                 while the conditional startup grant retries on each answered field contact"
+            );
+            Ok(())
+        }
+        Ok(Activation::Refused { error }) if declared_peer => {
+            eprintln!(
+                "startup: {error} — the declared pair keeps this run: it stands \
+                 rejoined as standby, tracking the configured --peer"
+            );
+            Ok(())
+        }
+        Ok(Activation::Refused { error }) => Err(format!(
+            "{error} — no --peer was declared, so there is no pair to rejoin"
+        )),
+        Err(error) => Err(format!("{error}")),
     }
 }
 
@@ -1323,12 +1372,19 @@ fn main() -> ExitCode {
                 Ok(addr) => addr,
                 Err(error) => return fail(error),
             };
-            match RemoteDriver::connect(addr) {
+            // The transport half of the attach defers: an unreachable
+            // plant is the born-active contract's unreachable-field
+            // class — the driver assembles link-down and the startup
+            // claim's ask decides the run's disposition, rather than
+            // the attach killing the launch here.
+            let remote = RemoteDriver::connect_deferred(addr, RemoteDriver::DEFAULT_TIMEOUT)
                 // A controller's field attachment claims as a
                 // controller: its write-ownership claims record the
                 // marker a peer's conditional takeover refuses to
                 // preempt while they stand live.
-                Ok(remote) => Driver::Remote(remote.as_controller()),
+                .map(|remote| remote.as_controller());
+            match remote {
+                Ok(remote) => Driver::Remote(remote),
                 Err(error) => {
                     return fail(format!("cannot connect to plant at {addr}: {error}"));
                 }
@@ -1574,14 +1630,18 @@ fn main() -> ExitCode {
         // replayed, the monitor bound), so a starter that cannot serve
         // never lands a claim on the field's standing owner. The grant
         // preempts a dead owner's claim but refuses a live incumbent's,
-        // and a refused grant is a named startup failure, not an unfenced
-        // run: the incumbent's receipted state is never silently
-        // reverted by a stale restart.
+        // and every ask it answers settles under the born-active
+        // contract: the grant owns the field, an inconclusive ask
+        // stands pending and retries, and a refusal rejoins the
+        // declared pair or exits — the incumbent's receipted state is
+        // never silently reverted by a stale restart.
         if options.standby.is_none() {
-            if let Err(error) = monitor.activate() {
-                return fail(format!("{error}"));
+            let activation = monitor.activate();
+            if let Err(error) =
+                settle_activation(activation, &driver, owner, options.peer.is_some())
+            {
+                return fail(error);
             }
-            report_claim(&driver, owner);
         }
         eprintln!("listening on {}", monitor.local_addr());
         monitor.serve();
@@ -1809,13 +1869,16 @@ fn main() -> ExitCode {
                 // the monitor bound, and the tracking source resolved
                 // or deferred, so a startup that failed earlier left
                 // no stale claim fencing the field's standing owner.
-                // The grant preempts a dead owner's claim but refuses
-                // a live incumbent's — a refused grant is a named
-                // startup failure, not an unfenced run.
-                if let Err(error) = monitor.activate() {
-                    return fail(format!("{error}"));
+                // Every ask it answers settles under the born-active
+                // contract — the grant owns the field, an inconclusive
+                // ask stands pending and retries, a refusal rejoins
+                // the declared pair or exits.
+                let activation = monitor.activate();
+                if let Err(error) =
+                    settle_activation(activation, &driver, owner, options.peer.is_some())
+                {
+                    return fail(error);
                 }
-                report_claim(&driver, owner);
                 // Announce the bound address — with a port of 0 this is the
                 // only way to learn where the monitor listens. Stderr keeps
                 // stdout a pure snapshot stream.
@@ -1840,13 +1903,18 @@ fn main() -> ExitCode {
                 // conditional-grant sequence the monitored paths defer
                 // to their last startup step: nothing fallible stands
                 // between here and the scan loop, so the claim runs
-                // only now that startup can no longer abort — and a
-                // live incumbent's claim refuses it rather than being
-                // preempted by a stale restart.
-                if let Err(error) = peer.activate() {
-                    return fail(format!("{error}"));
+                // only now that startup can no longer abort. Every ask
+                // it answers settles under the born-active contract —
+                // the grant owns the field, an inconclusive ask stands
+                // pending and retries, a refusal exits: no monitor is
+                // served to rejoin a pair through, and `--peer`
+                // requires `--listen`, so none was declared.
+                let activation = peer.activate();
+                if let Err(error) =
+                    settle_activation(activation, &driver, owner, options.peer.is_some())
+                {
+                    return fail(error);
                 }
-                report_claim(&driver, owner);
                 // The RefCell lets the two loop closures share the peer;
                 // the loop is single-threaded, so the borrows never
                 // overlap. No monitor means no *operator* demotion

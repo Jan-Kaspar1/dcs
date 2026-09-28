@@ -62,9 +62,16 @@ use std::time::Duration;
 ///   timeout in milliseconds, defaulting to
 ///   [`RemoteDriver::DEFAULT_TIMEOUT`].
 ///
-/// Any other parameter is rejected. The factory connects eagerly — an
-/// unreachable endpoint or a server that does not serve a declared
-/// point is an assembly failure, not a mid-scan surprise.
+/// Any other parameter is rejected. The factory splits its connect
+/// into the static half — addressing and parameters, validated here —
+/// and the transport half: the socket attach assembles in the
+/// link-down state [`RemoteDriver`] already serves, per the
+/// born-active startup-failure contract, so an unreachable plant no
+/// longer fails driver assembly. A reachable plant still runs its
+/// declared-point probe eagerly — a server that does not serve a
+/// declared point stays an assembly failure — while an unreachable
+/// one defers the same probe to the startup claim's first answered
+/// contact, so a wrong-model plant is never claimed either way.
 pub const SIM_TCP_KIND: &str = "sim-tcp";
 
 /// The scripted simulated device kind: a [`ScriptedDriver`] whose `In`
@@ -708,7 +715,13 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
             }
         }
     };
-    let remote = RemoteDriver::connect_with_timeout(addresses.as_slice(), timeout)
+    // The transport half of the connect defers per the born-active
+    // startup contract: the driver assembles in the link-down state it
+    // already serves mid-run, so an unreachable plant is the pending
+    // startup class rather than an assembly failure. Addressing
+    // already resolved above — the static half stays eager, and a
+    // name that does not resolve still fails the launch here.
+    let remote = RemoteDriver::connect_deferred(addresses.as_slice(), timeout)
         .map_err(|error| {
             DeviceError::backend(format!(
                 "cannot connect to plant server at {address:?}: {error}"
@@ -722,23 +735,46 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         .as_controller();
     // Probe every declared point: the remote plant must serve it, with
     // the value kind the model declares — a plant configured for a
-    // different model fails here, at assembly, not mid-scan.
+    // different model fails here, at assembly, not mid-scan. The
+    // startup contract defers only the transport: a plant that cannot
+    // answer at all returns `Disconnected`/`Timeout` on every probe,
+    // so the correspondence check moves to the startup claim's first
+    // answered contact — the `deferred` list the claim ask re-runs
+    // until it passes — while a plant that answers but serves a
+    // different model stays an assembly failure.
+    let mut deferred: Vec<(PointId, ValueKind)> = Vec::new();
     for point in &spec.points {
-        let sample = remote.read(point.point).map_err(|error| {
-            DeviceError::backend(format!(
-                "plant server at {address:?} does not serve io point {}: {error}",
-                point.point.0
-            ))
-        })?;
-        if sample.value.kind() != point.kind {
-            return Err(DeviceError::backend(format!(
-                "plant server at {address:?} serves io point {} as {:?}, model declares {:?}",
-                point.point.0,
-                sample.value.kind(),
-                point.kind
-            )));
+        match remote.read(point.point) {
+            Ok(sample) if sample.value.kind() == point.kind => {}
+            Ok(sample) => {
+                return Err(DeviceError::backend(format!(
+                    "plant server at {address:?} serves io point {} as {:?}, model declares {:?}",
+                    point.point.0,
+                    sample.value.kind(),
+                    point.kind
+                )));
+            }
+            Err(IoError::Disconnected(_) | IoError::Timeout(_)) => {
+                deferred = spec
+                    .points
+                    .iter()
+                    .map(|point| (point.point, point.kind))
+                    .collect();
+                break;
+            }
+            Err(error) => {
+                return Err(DeviceError::backend(format!(
+                    "plant server at {address:?} does not serve io point {}: {error}",
+                    point.point.0
+                )));
+            }
         }
     }
+    // The outstanding correspondence probes the claim ask re-runs on
+    // each retry until every declared point answers with the declared
+    // kind — empty when the eager pass already ran, so a connected
+    // plant's claim asks never re-probe.
+    let deferred = Arc::new(Mutex::new(deferred));
     let remote = Arc::new(remote);
     let stepping = Arc::clone(&remote);
     let claiming = Arc::clone(&remote);
@@ -805,8 +841,44 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         // conditional `claim_writer_unless_held` grant — a launched
         // controller takes the field from a dead owner's standing
         // claim but never from a live incumbent, whose newer state a
-        // stale restart would silently roll back.
+        // stale restart would silently roll back. The born-active
+        // contract retries the ask from the pending run on each
+        // answered field contact; an assembly that found the plant
+        // down left its declared-point correspondence probe outstanding
+        // here, run ahead of the grant ask until it passes, so a plant
+        // that answers serving a different model never lets the claim
+        // land — the probe's own detail is the pending run's evidence.
         startup_claim: Some(Arc::new(move |owner| {
+            {
+                let mut deferred = deferred.lock().unwrap();
+                if !deferred.is_empty() {
+                    for &(point, kind) in deferred.iter() {
+                        match starting.read(point) {
+                            Ok(sample) if sample.value.kind() == kind => {}
+                            Ok(sample) => {
+                                return Err(StepError::Backend {
+                                    backend: format!("device {device}"),
+                                    detail: format!(
+                                        "deferred assembly probe: the plant serves io point {} as {:?}, the model declares {:?}",
+                                        point.0,
+                                        sample.value.kind(),
+                                        kind
+                                    ),
+                                });
+                            }
+                            Err(error) => {
+                                return Err(StepError::Backend {
+                                    backend: format!("device {device}"),
+                                    detail: format!(
+                                        "deferred assembly probe: the plant does not serve io point {point:?}: {error}"
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    deferred.clear();
+                }
+            }
             match starting.claim_writer_unless_held(owner) {
                 Ok(_) => Ok(true),
                 Err(RemoteError::Fenced) => Ok(false),
@@ -1791,19 +1863,32 @@ impl FanoutDriver {
     /// backends without a startup hook — kinds whose arbitration cannot
     /// distinguish live holders — fall back to the unconditional
     /// [`DeviceBackend::claim`] hook exactly as `claim_field_writer`
-    /// runs it.
+    /// runs it. A refused backend's fencing verdict lands in
+    /// [`refused_claimants`](Self::refused_claimants) exactly as the
+    /// orphan probe's does — the launched run's `field_claim_observed`
+    /// record attributes the incumbent its startup claim met.
     pub fn claim_field_writer_unless_held(&self, owner: u64) -> Result<bool, StepError> {
         let mut held = true;
+        let mut refused = Vec::new();
         for backend in &self.backends {
             if !backend.field_facing {
                 continue;
             }
             if let Some(startup_claim) = &backend.startup_claim {
-                held &= startup_claim(owner)?;
+                match startup_claim(owner)? {
+                    true => {}
+                    false => {
+                        held = false;
+                        if let Some(fenced_by) = &backend.fenced_by {
+                            refused.extend(fenced_by());
+                        }
+                    }
+                }
             } else if let Some(claim) = &backend.claim {
                 claim(owner)?;
             }
         }
+        *self.refusals.lock().unwrap() = refused;
         Ok(held)
     }
 
