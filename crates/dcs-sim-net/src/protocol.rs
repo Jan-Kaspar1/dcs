@@ -560,6 +560,14 @@ mod tests {
                 controller: true,
                 monitor: None,
             },
+            PlantRequest::ReclaimWriter {
+                owner: 46,
+                monitor: Some("127.0.0.1:4190".parse().unwrap()),
+            },
+            PlantRequest::ReclaimWriter {
+                owner: 47,
+                monitor: None,
+            },
             PlantRequest::ReleaseWriter { keep_claim: false },
             PlantRequest::ReleaseWriter { keep_claim: true },
             PlantRequest::ProbeWriter,
@@ -629,6 +637,25 @@ mod tests {
             })
             .unwrap(),
             r#"{"op":"ensure_writer","owner":43,"rebind":true,"controller":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PlantRequest::ReclaimWriter {
+                owner: 46,
+                monitor: None,
+            })
+            .unwrap(),
+            r#"{"op":"reclaim_writer","owner":46}"#
+        );
+        // The re-grant declaring its monitor carries it on the wire:
+        // the peers its claim supersedes find the successor's tracking
+        // surface there.
+        assert_eq!(
+            serde_json::to_string(&PlantRequest::ReclaimWriter {
+                owner: 46,
+                monitor: Some("127.0.0.1:4190".parse().unwrap()),
+            })
+            .unwrap(),
+            r#"{"op":"reclaim_writer","owner":46,"monitor":"127.0.0.1:4190"}"#
         );
         assert_eq!(
             serde_json::to_string(&PlantRequest::ReleaseWriter { keep_claim: false }).unwrap(),

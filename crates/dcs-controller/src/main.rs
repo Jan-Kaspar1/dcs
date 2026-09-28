@@ -527,19 +527,21 @@ impl Driver {
     /// The fencing-loss counterpart of [`ensure_writer`](Self::ensure_writer)
     /// — the *bound* conditional re-grant a fencing-demoted ex-owner
     /// probes each scan while its loss mark stands: takes the field's
-    /// write-ownership under `owner` where the field stands unclaimed
-    /// or already names the token — `Ok(true)` — answering `Ok(false)`
-    /// while a different owner stands, so a still-held preemptor's
-    /// claim keeps the field until it releases and the probe never
-    /// preempts. Unlike the orphan cycle's unbound probe the grant
-    /// joins this instance's attachments to the claim's holders — the
-    /// gate the reclaim re-lifts must pass the arbitration it re-took.
-    /// A purely local simulated model has no shared field to claim and
-    /// answers `Ok(true)` vacuously; a fan-out with no reclaim-capable
+    /// write-ownership under `owner` where the field stands unclaimed,
+    /// already names the token, or stands under a different owner's
+    /// holderless claim — `Ok(true)` — answering `Ok(false)` only
+    /// while a different owner's claim has live holders, so a
+    /// still-held preemptor's claim keeps the field until it releases
+    /// and the probe never preempts a live attachment. Unlike the
+    /// orphan cycle's unbound probe the grant joins this instance's
+    /// attachments to the claim's holders — the gate the reclaim
+    /// re-lifts must pass the arbitration it re-took. A purely local
+    /// simulated model has no shared field to claim and answers
+    /// `Ok(true)` vacuously; a fan-out with no reclaim-capable
     /// field backend answers `Ok(false)` — nothing probed.
     fn reclaim_writer(&self, owner: u64) -> Result<bool, String> {
         match self {
-            Self::Remote(remote) => match remote.ensure_writer(owner) {
+            Self::Remote(remote) => match remote.reclaim_writer(owner) {
                 Ok(ClaimGrant::Exclusive) => Ok(true),
                 Ok(ClaimGrant::Shared) => {
                     eprintln!(
