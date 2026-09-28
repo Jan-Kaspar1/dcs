@@ -722,14 +722,15 @@ const MAX_ANNOUNCED_AHEAD: u64 = 32;
 /// a handful of peers.
 const MAX_ANNOUNCED: usize = 8;
 
-/// How long the tracking path waits before re-probing an announced
-/// hint set a verify pass already refused — the involuntary path's
-/// re-probe bound: a peer demoted mid-run with only unproven hints
-/// re-verifies when the set changes — a new announce lands or the
-/// order shifts — or once this much wall time has passed, so a dead
-/// or hostile set cannot stall every scan cycle on a bounded pull
-/// burst while a hint that recovers still earns a fresh probe inside
-/// a bounded window.
+/// How long the tracking path waits before re-probing endpoints a
+/// verify pass already refused — the re-probe bound shared by the
+/// involuntary path's announced hint set, the claim's declared
+/// monitor, and the orphan-resolution probe's candidate set: a peer
+/// demoted mid-run with only unproven hints re-verifies when the set
+/// changes — a new announce lands or the order shifts — or once this
+/// much wall time has passed, so a dead or hostile set cannot stall
+/// every scan cycle on a bounded pull burst while an endpoint that
+/// recovers still earns a fresh probe inside a bounded window.
 const ANNOUNCED_VERIFY_RETRY: Duration = Duration::from_secs(4);
 
 /// How many consecutive produced-nothing pulls a learned tracking pin
@@ -1075,6 +1076,24 @@ pub struct Monitor<'d> {
     /// a dead announced hint falls back within. Outside `shared`:
     /// request-path bookkeeping like `announced_verify`.
     claimed_verify: Mutex<Option<ClaimedVerify>>,
+    /// The last orphan-resolution probe pass's bookkeeping — the
+    /// candidate set probed, in probe order, and the wall-clock time
+    /// the pass ran. `track_cycle` runs the probe on every orphaned
+    /// apply, so an unrecorded failure would re-dial every dead
+    /// candidate — the standing claim's declared monitor first — once
+    /// per scan, one [`CHECKPOINT_PULL_TIMEOUT`] each: the paced
+    /// cadence collapses under the burst while a foreign claim stands
+    /// (the QA finding
+    /// `orphan-resolution-dead-claimed-monitor-stalls-scan`). A failed
+    /// pass is remembered here so the next cycle's resolution
+    /// re-probes only a changed set — a fresh claim declaration, a
+    /// moved owner stamp, a new announcer — or the same one after
+    /// [`ANNOUNCED_VERIFY_RETRY`] elapses, the same bound a dead
+    /// declared monitor falls back within on the claimed path. A pass
+    /// that resolves a candidate clears the record: the set proved an
+    /// owner. Outside `shared`: pull-path bookkeeping like
+    /// `claimed_verify`.
+    resolve_verify: Mutex<Option<ResolveVerify>>,
     /// The tracking source a verified announced demotion pinned — the
     /// endpoint `POST /demote` proved serves this run's continuation
     /// under the pair's key and journaled as the adopted source. The
@@ -1184,6 +1203,19 @@ struct AnnouncedVerify {
 struct ClaimedVerify {
     /// The declared monitor endpoint the pass pulled.
     monitor: SocketAddr,
+    /// When the pass ran.
+    at: Instant,
+}
+
+/// One orphan-resolution probe pass's bookkeeping — the candidate set
+/// probed, in probe order, and the wall-clock time the pass ran. The
+/// tracking path re-probes only a changed set or one whose pass aged
+/// past [`ANNOUNCED_VERIFY_RETRY`], so a dead claimed monitor or
+/// announced hint costs one bounded pull per window rather than one
+/// per scan.
+struct ResolveVerify {
+    /// The candidate set the pass probed, in probe order.
+    candidates: Vec<SocketAddr>,
     /// When the pass ran.
     at: Instant,
 }
@@ -1322,6 +1354,7 @@ impl<'d> Monitor<'d> {
             announced: Mutex::new(VecDeque::new()),
             announced_verify: Mutex::new(None),
             claimed_verify: Mutex::new(None),
+            resolve_verify: Mutex::new(None),
             adopted: Mutex::new(None),
             resolved: Mutex::new(None),
             pulling: Mutex::new(None),
@@ -3197,6 +3230,16 @@ impl<'d> Monitor<'d> {
     /// any prior resolution rather than pinning a guess. Returns the
     /// tracking target after resolution, or `None` when the line named
     /// no routable owner and nothing resolves.
+    ///
+    /// The probe runs on the scan thread once per orphaned apply, so a
+    /// pass that proves nothing is remembered in `resolve_verify`: a
+    /// later cycle re-probes only when the candidate set changed or
+    /// [`ANNOUNCED_VERIFY_RETRY`] elapsed — the same bound
+    /// [`adopt_claimed_source`](Self::adopt_claimed_source) applies to
+    /// a dead declared endpoint — so a foreign claim's undialable
+    /// declared monitor costs one bounded pull burst per window rather
+    /// than one per scan (the QA finding
+    /// `orphan-resolution-dead-claimed-monitor-stalls-scan`).
     pub fn resolve_tracking_source(&self) -> Option<SocketAddr> {
         let (own, claimed) = {
             let shared = self.shared.lock().unwrap();
@@ -3260,8 +3303,25 @@ impl<'d> Monitor<'d> {
         };
         extra.retain(|hint| !candidates.contains(hint) && Some(*hint) != tracked_addr);
         candidates.extend(extra);
+        // A candidate set a probe pass already refused earns a fresh
+        // pass only when the set changed — a fresh claim declaration,
+        // a moved owner stamp, a new or reordered announcer — or once
+        // [`ANNOUNCED_VERIFY_RETRY`] ages the record out: every
+        // candidate's bounded pull is paid once per window rather than
+        // once per orphaned scan. The recorded pass already cleared
+        // `resolved`, and this probe is its only writer, so the cached
+        // verdict still carries the line's no-owner answer.
+        {
+            let last = self.resolve_verify.lock().unwrap();
+            if let Some(last) = &*last
+                && last.candidates == candidates
+                && last.at.elapsed() < ANNOUNCED_VERIFY_RETRY
+            {
+                return None;
+            }
+        }
         let nonce = self.pair_key.map(|_| mint_generation());
-        for candidate in candidates {
+        for &candidate in &candidates {
             if candidate == self.local_addr() {
                 continue;
             }
@@ -3287,10 +3347,18 @@ impl<'d> Monitor<'d> {
                 let Shared { peer, recorder, .. } = &mut *shared;
                 recorder.note_tracking_source(peer.tick(), candidate);
                 drop(shared);
+                // The set proved an owner — the failure record no
+                // longer describes it, so a later orphaned cycle on
+                // the same candidates probes fresh.
+                *self.resolve_verify.lock().unwrap() = None;
                 *self.resolved.lock().unwrap() = Some(candidate);
                 return Some(candidate);
             }
         }
+        *self.resolve_verify.lock().unwrap() = Some(ResolveVerify {
+            candidates,
+            at: Instant::now(),
+        });
         *self.resolved.lock().unwrap() = None;
         None
     }
