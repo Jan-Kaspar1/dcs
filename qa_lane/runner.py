@@ -25,6 +25,8 @@ runtime stage keeps the debian:bookworm-slim + uid 10001 + entrypoint
 contract. CI image pinning does not exist yet; this is the documented
 build choice until it does.
 """
+import ctypes
+import ctypes.util
 import json
 import os
 import platform
@@ -960,6 +962,11 @@ def _docker_run_args(cfg, run_id, name):
 CONTAINER_RUN_DIR = '/var/lib/dcs-run'
 CONTAINER_STATE_FILE = CONTAINER_RUN_DIR + '/state.json'
 CONTAINER_JOURNAL_FILE = CONTAINER_RUN_DIR + '/journal.jsonl'
+# Decision 102's durable process-history store: --history-file joins
+# the mount like the journal's, on the same per-controller directory
+# — the declared-duty sample record a restart replays, inspectable
+# host-side for the durable-history leg's file audit.
+CONTAINER_HISTORY_FILE = CONTAINER_RUN_DIR + '/history.jsonl'
 
 # The endpoint keys whose controllers the runner launches — the pair
 # `_start_rig` brings up, the three scenario-action peers, and the
@@ -1165,9 +1172,10 @@ def _endpoint_placement(cfg):
 
 def _controller_dir(run_dir, name):
     """The run-dir state directory bind-mounted into controller `name`'s
-    container ('a'/'b'): its --state-file checkpoint and --journal-file
-    audit record live here so a container restart resumes the same run
-    and the files stay inside the bounded run directory."""
+    container ('a'/'b'): its --state-file checkpoint, --journal-file
+    audit record, and --history-file durable store live here so a
+    container restart resumes the same run and the files stay inside
+    the bounded run directory."""
     return Path(run_dir) / 'controllers' / name
 
 
@@ -1302,7 +1310,8 @@ def relaunch_controller(cfg, record, run_dir, model, name, timeline,
     command += ['--scan-ms', '100',
                 '--listen', '0.0.0.0:' + str(monitor_port),
                 '--state-file', CONTAINER_STATE_FILE,
-                '--journal-file', CONTAINER_JOURNAL_FILE]
+                '--journal-file', CONTAINER_JOURNAL_FILE,
+                '--history-file', CONTAINER_HISTORY_FILE]
     if token:
         command += ['--pair-token', str(token)]
     flag = '' if track is None else (
@@ -1592,6 +1601,135 @@ def restore_state_file(run_id, run_dir, name, timeline,
         time.sleep(0.01)
     timeline('state-file-restored', container
              + ' --state-file mount released')
+
+
+# The sink-stall lever the append-mode sinks take where the state
+# file's mount trick cannot reach them: a --journal-file or
+# --history-file writer opens its path once at bind and appends
+# through the held descriptor, so no staged node can ever park a
+# mid-run write — the reference plant's journal sink-isolation leg
+# parks the drain writer thread itself instead, and the deployed rig
+# reaches the same threads through the container's host pid and the
+# /proc task surface. `dcs-drain` is every sink writer's comm: the
+# legs tell the journal, state-file, and history writers apart by
+# observable effect — which sink's depth grows while a candidate
+# stands parked — so the lever hands back the candidate set, never a
+# verdict.
+PTRACE_ATTACH = 16
+PTRACE_DETACH = 17
+DRAIN_WRITER_COMM = 'dcs-drain'
+# Bounds on the lever's own moves: an attached writer reports its
+# tracing-stop and a detached one its resume inside this window.
+DRAIN_STOP_BOUND = 5
+
+
+def _tracer():
+    """The ptrace surface the drain-stall lever needs — libc loaded
+    lazily so the module imports clean where the call is unavailable.
+    Raises OSError/AttributeError when ctypes or ptrace cannot be
+    bound; the ctx gate turns that into the lever's absence."""
+    libc = ctypes.CDLL(ctypes.util.find_library('c') or 'libc.so.6',
+                       use_errno=True)
+    libc.ptrace.restype = ctypes.c_long
+    libc.ptrace.argtypes = [ctypes.c_int, ctypes.c_int,
+                            ctypes.c_void_p, ctypes.c_void_p]
+    return libc
+
+
+def _ptrace(libc, request, tid):
+    """One ptrace call against thread `tid`, raising OSError on the
+    kernel's refusal — an undumpable or foreign-uid task surfaces here
+    as EPERM, the lever-absent condition the leg reports inconclusive."""
+    if libc.ptrace(request, tid, None, None) == -1:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def _thread_state(tid):
+    """The thread's one-letter state from /proc/<tid>/stat — 't' is
+    the tracing-stop an attached writer reports."""
+    with open('/proc/' + str(tid) + '/stat') as handle:
+        return handle.read().rsplit(')', 1)[1].split()[0]
+
+
+def drain_writers(run_id, name, pair='deployed'):
+    """The host tids of the named controller container's `dcs-drain`
+    writer threads — the sink-stall lever's park candidates, in spawn
+    order. `name` is the scenario ctx's endpoint key on pair `pair`,
+    resolved to its container like the lifecycle actions'."""
+    container = _controller_container(run_id, name, pair)
+    result = docker('inspect', '--format', '{{.State.Pid}}', container)
+    pid = int(result.stdout.strip())
+    tids = []
+    for entry in os.listdir('/proc/' + str(pid) + '/task'):
+        try:
+            with open('/proc/' + str(pid) + '/task/' + entry
+                      + '/comm') as handle:
+                comm = handle.read().strip()
+        except (OSError, ValueError):
+            continue
+        if comm == DRAIN_WRITER_COMM:
+            tids.append(int(entry))
+    return sorted(tids)
+
+
+def park_drain_writer(tid):
+    """Attach drain-writer thread `tid` through ptrace and wait for
+    its tracing-stop — the writer parked inside its sink operation,
+    the stalled-sink contract the bounded queue owes. Raises OSError
+    on a refused attach and RuntimeError when the stop never reports;
+    the parking leg treats both as the lever being absent, not a rig
+    defect."""
+    libc = _tracer()
+    _ptrace(libc, PTRACE_ATTACH, tid)
+    deadline = time.monotonic() + DRAIN_STOP_BOUND
+    while time.monotonic() < deadline:
+        try:
+            if _thread_state(tid) == 't':
+                return
+        except OSError:
+            break
+        time.sleep(0.01)
+    try:
+        _ptrace(libc, PTRACE_DETACH, tid)
+    except OSError:
+        pass
+    raise RuntimeError('the attached drain writer ' + str(tid)
+                       + ' never reported tracing-stop')
+
+
+def release_drain_writer(tid):
+    """Detach a parked drain writer — the stall's restore: the writer
+    resumes its drain and the standing queue appends in push order.
+    A gone thread — the container died under the stall — is already
+    released."""
+    libc = _tracer()
+    _ptrace(libc, PTRACE_DETACH, tid)
+    deadline = time.monotonic() + DRAIN_STOP_BOUND
+    while time.monotonic() < deadline:
+        try:
+            if _thread_state(tid) != 't':
+                return
+        except OSError:
+            return
+        time.sleep(0.01)
+    raise RuntimeError('the detached drain writer ' + str(tid)
+                       + ' never resumed')
+
+
+def _drain_stall_lever():
+    """The scenario ctx's drain-stall lever triple — (drain_writers,
+    park, release) — or None where the runner admits no tracer: no
+    /proc task surface, no bindable ptrace, or a smoke attach refused.
+    The leg reports inconclusive on the absent lever rather than
+    probing threads it was never granted."""
+    if not os.path.isdir('/proc'):
+        return None
+    try:
+        _tracer()
+    except (OSError, AttributeError, ImportError):
+        return None
+    return (drain_writers, park_drain_writer, release_drain_writer)
 
 
 def stop_controller(run_id, name, timeline, pair='deployed'):
@@ -1918,7 +2056,8 @@ def start_revised_controller(cfg, record, run_dir, model, active,
                  + ')')
         docker('rm', '-f', container, timeout=60)
         directory.mkdir(parents=True, exist_ok=True)
-        for artifact in ('state.json', 'journal.jsonl'):
+        for artifact in ('state.json', 'journal.jsonl',
+                         'history.jsonl'):
             (directory / artifact).unlink(missing_ok=True)
     directory.mkdir(parents=True, exist_ok=True)
     directory.chmod(0o777)
@@ -1947,6 +2086,7 @@ def start_revised_controller(cfg, record, run_dir, model, active,
            '--scan-ms', '100', '--listen', '0.0.0.0:8082',
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE,
+           '--history-file', CONTAINER_HISTORY_FILE,
            # The roll demotes the field owner toward this peer's
            # announced address — under the keyed announced-source
            # contract only a peer carrying the pair's token can sign
@@ -2014,7 +2154,8 @@ def start_foreign_controller(cfg, record, run_dir, model, active,
            '--standby', standby,
            '--scan-ms', '100', '--listen', '0.0.0.0:8082',
            '--state-file', CONTAINER_STATE_FILE,
-           '--journal-file', CONTAINER_JOURNAL_FILE)
+           '--journal-file', CONTAINER_JOURNAL_FILE,
+           '--history-file', CONTAINER_HISTORY_FILE)
     timeline('negotiation-up', container
              + ' running a foreign-fingerprint model')
     return dict(info, container=container)
@@ -2099,6 +2240,7 @@ def start_driven_controller(cfg, record, run_dir, model, active,
            + str(DRIVEN_MONITOR_PORT),
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE,
+           '--history-file', CONTAINER_HISTORY_FILE,
            # The stale-island leg promotes this peer onto the field
            # and the islanded pair's orphan-resolution probes pull
            # its checkpoint with ?prove= — under the keyed contract
@@ -2262,9 +2404,12 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
     tool's docker-exec invocation, the run config's recorded endpoint
     placements and the
     run's rig bridge name — the placement rule a scenario attachment
-    follows when it needs an endpoint a rig peer must dial — and the
+    follows when it needs an endpoint a rig peer must dial — the
+    drain-stall tracer lever the durable-history leg's parked-writer
+    induction drives (None where the runner admits no tracer) — and the
     host-side
-    per-controller state/journal files the restart and model-revision
+    per-controller state/journal/history files the restart and
+    model-revision
     scenarios read — and, under 'probe', the same ctx shape
     re-pointed at the lane-staged keyed probe pair so the keyed
     announced-source legs can name it their subject while the
@@ -2273,6 +2418,7 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
     names = {'active': 'a', 'standby': 'b', 'revised': 'c',
              'foreign': 'foreign', 'driven': 'd'}
     mounts = _state_file_mounts(cfg)
+    lever = _drain_stall_lever()
     ctx = {
         'active': 'http://127.0.0.1:' + str(cfg['active_port']),
         'standby': 'http://127.0.0.1:' + str(cfg['standby_port']),
@@ -2395,6 +2541,18 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         'journal_files': {key: str(_controller_dir(run_dir, peer)
                                    / 'journal.jsonl')
                           for key, peer in names.items()},
+        'history_files': {key: str(_controller_dir(run_dir, peer)
+                                   / 'history.jsonl')
+                          for key, peer in names.items()},
+        # The drain-stall lever — the durable-history leg's parked-
+        # writer induction: the container's `dcs-drain` tids, and the
+        # tracer park/release pair. None where the runner admits no
+        # tracer; the leg reports inconclusive rather than probing
+        # threads it was never granted.
+        'drain_writers': (lambda name: drain_writers(run_id, name))
+                         if lever else None,
+        'park_drain_writer': lever[1] if lever else None,
+        'release_drain_writer': lever[2] if lever else None,
         'dcs_ctl': str(_dcs_ctl_path(cfg)),
     }
     probe = _probe_pair(cfg)
@@ -2510,6 +2668,16 @@ def _probe_ctx(ctx, cfg, record, src, run_dir, probe, mounts,
         'journal_files': {key: str(_controller_dir(run_dir, peer)
                                    / 'journal.jsonl')
                           for key, peer in probe_names.items()},
+        'history_files': {key: str(_controller_dir(run_dir, peer)
+                                   / 'history.jsonl')
+                          for key, peer in probe_names.items()},
+        # The tracer park/release pair is tid-addressed — pair-agnostic;
+        # only the tid listing binds the probe pair's containers.
+        'drain_writers': (lambda name: drain_writers(
+            run_id, name, pair='probe'))
+                         if ctx.get('park_drain_writer') else None,
+        'park_drain_writer': ctx.get('park_drain_writer'),
+        'release_drain_writer': ctx.get('release_drain_writer'),
     })
     return subject
 
@@ -2625,6 +2793,7 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            '--scan-ms', '100', '--listen', '0.0.0.0:8080',
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE,
+           '--history-file', CONTAINER_HISTORY_FILE,
            *pair_flags)
     docker(*_docker_run_args(cfg, run_id, prefix + '-b'),
            '--network', net,
@@ -2641,6 +2810,7 @@ def _start_rig(cfg, record, src, run_dir, timeline):
            '--scan-ms', '100', '--listen', '0.0.0.0:8081',
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE,
+           '--history-file', CONTAINER_HISTORY_FILE,
            *pair_flags)
     timeline('rig-up', 'plant + controller pair on ' + net
              + ' (owner tokens active=' + str(tokens['active'])
@@ -2716,6 +2886,7 @@ def _start_probe_pair(cfg, record, src, run_dir, net, probe,
            '--scan-ms', '100', '--listen', '0.0.0.0:8080',
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE,
+           '--history-file', CONTAINER_HISTORY_FILE,
            '--pair-token', token)
     docker(*_docker_run_args(cfg, run_id, prefix + '-probe-b'),
            '--network', net,
@@ -2732,6 +2903,7 @@ def _start_probe_pair(cfg, record, src, run_dir, net, probe,
            '--scan-ms', '100', '--listen', '0.0.0.0:8081',
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE,
+           '--history-file', CONTAINER_HISTORY_FILE,
            '--pair-token', token)
     timeline('probe-rig-up', 'probe plant + keyed probe pair on '
              + net + ' (owner tokens probe_active='
