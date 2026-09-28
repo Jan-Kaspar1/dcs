@@ -8,8 +8,8 @@ use dcs_core::{
     Quality, QualityReason, Role, Sample, StandbySync, SwitchError, Tick, Value, ValueKind,
 };
 use dcs_runtime::{
-    Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap, PointSpec,
-    StepError, TrackReport, WriteGate,
+    Activation, Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap,
+    PointSpec, StepError, TrackReport, WriteGate,
 };
 use dcs_sim::{
     BoolFlow, ChannelId, ChannelMap, Fault, FirstOrderLag, FlowSum, Integrator, Loopback,
@@ -2072,11 +2072,17 @@ fn an_orphan_failover_regrant_rearms_the_live_incumbent_refusal() {
         assert!(
             matches!(
                 a2_peer.activate(),
-                Err(SwitchError::FieldClaimFailed { .. })
+                Ok(Activation::Refused {
+                    error: SwitchError::FieldClaimFailed { .. }
+                })
             ),
             "the restartee's startup claim must refuse the live \
              re-granted incumbent"
         );
+        // The born-active contract settles the refused launch onto the
+        // pair's standby surface rather than failing or leaving an
+        // unpaired active.
+        assert_eq!(a2_peer.role(), Role::Standby);
         // The refusal names the incumbent the field's arbitration
         // holds — the failover successor's token, not a foreign
         // claimant.

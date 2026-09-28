@@ -1969,19 +1969,30 @@ impl<'d> Monitor<'d> {
     /// standing owner. Where the conditional startup grant is installed
     /// the claim preempts a dead owner's standing claim but refuses a
     /// *live* incumbent's, so a stale restart cannot silently roll back
-    /// state the incumbent receipted. The refusal is the peer's own
-    /// [`SwitchError`](dcs_core::SwitchError): a claim the field refuses
-    /// fails the start with `FieldClaimFailed`, and a peer that is not a
-    /// launched active with `NotActive`.
-    pub fn activate(&self) -> Result<(), dcs_core::SwitchError> {
+    /// state the incumbent receipted.
+    ///
+    /// The answer is the startup's settled [`Activation`], with the
+    /// stand-down a refusal or an inconclusive ask already run inside
+    /// the peer — `Granted` owns the field, `Pending` waits on the
+    /// deferred grant behind the served standby surface, `Refused`
+    /// carries the `FieldClaimFailed` the caller's disposition decides
+    /// (rejoin a declared pair, or exit undeclared), and the refusal's
+    /// observed claimant plus the settled role transition journal here
+    /// before the caller learns them. `Err` is the launch-defect half —
+    /// a peer that is not a launched active, or the unconditional
+    /// claim's own failure — still fatal.
+    pub fn activate(&self) -> Result<dcs_runtime::Activation, dcs_core::SwitchError> {
         let mut shared = self.shared.lock().unwrap();
         let Shared { peer, recorder, .. } = &mut *shared;
-        peer.activate()?;
+        let activation = peer.activate()?;
+        for observation in peer.take_claim_observations() {
+            recorder.note_claim_observed(observation);
+        }
         for change in peer.take_role_changes() {
             recorder.note_role_change(&change);
         }
         self.store.sync_liveness(peer.report());
-        Ok(())
+        Ok(activation)
     }
 
     /// Applies a checkpoint pulled from the active peer — the standby's
