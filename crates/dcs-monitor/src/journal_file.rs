@@ -25,12 +25,16 @@
 //!
 //! One [`JournalRecord`] per line:
 //!
-//! - `{"run_boundary":{"run":N,"tick":T}}` — a process-lifetime
-//!   boundary, appended once at startup before the run's first entry.
+//! - `{"run_boundary":{"run":N,"tick":T,"anchor":A}}` — a
+//!   process-lifetime boundary, appended once at startup before the
+//!   run's first entry.
 //!   `run` counts the file's lifetimes from 1; `tick` is the tick the
 //!   run starts at — `0` on a cold start, the restored tick when the
 //!   run resumes through `--state-file`, so the marker records the tick
-//!   domain the following entries belong to. A restart's marker also
+//!   domain the following entries belong to. `anchor` stamps the
+//!   domain's declared civil-time anchor — the durable-history
+//!   decision's self-describing tick-to-civil mapping — absent when
+//!   the domain is unanchored. A restart's marker also
 //!   journals once as a `run_boundary` entry — the marker's served
 //!   form — so a `GET /journal` consumer attributes entries to a
 //!   process lifetime the same way the file's readers do.
@@ -87,8 +91,9 @@ pub struct JournalData {
 }
 
 /// One run-boundary marker's report-relevant data: which lifetime
-/// began, the tick its run started at, and the `seq` the run's first
-/// entry takes — the attribution an entry's run comes from.
+/// began, the tick its run started at, the tick domain's declared
+/// civil-time anchor, and the `seq` the run's first entry takes —
+/// the attribution an entry's run comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunBoundary {
     /// Which lifetime begins — the file counts runs from 1.
@@ -96,6 +101,9 @@ pub struct RunBoundary {
     /// The tick the run started at: `0` on a cold start, the restored
     /// tick under `--state-file`.
     pub start_tick: Tick,
+    /// The run's tick domain's declared civil-time anchor — `None`
+    /// on an unanchored domain or a marker a pre-anchor build wrote.
+    pub anchor: Option<dcs_core::TickAnchor>,
     /// The `seq` the run's first entry takes.
     pub first_seq: u64,
 }
@@ -148,10 +156,11 @@ pub fn read_journal_file(path: &Path) -> io::Result<JournalData> {
                 next_seq = entry.seq + 1;
                 data.entries.push(*entry);
             }
-            JournalRecord::RunBoundary { run, tick } => {
+            JournalRecord::RunBoundary { run, tick, anchor } => {
                 data.boundaries.push(RunBoundary {
                     run,
                     start_tick: tick,
+                    anchor,
                     first_seq: next_seq,
                 });
             }
@@ -176,6 +185,12 @@ pub(super) enum JournalRecord {
         /// The tick the run starts at — `0` cold, the restored tick
         /// under `--state-file`.
         tick: Tick,
+        /// The run's tick domain's declared civil-time anchor — the
+        /// durable-history decision's stamp making the durable files
+        /// self-describing. Absent on an unanchored domain and on
+        /// markers a pre-anchor build wrote.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor: Option<dcs_core::TickAnchor>,
     },
 }
 
@@ -251,8 +266,14 @@ impl JournalFile {
     /// run's boundary marker is appended; a missing file is a cold
     /// start, created holding `run` 1's marker. `tick` is the tick this
     /// run starts at — the restored tick for a `--state-file` resume,
-    /// `0` cold.
-    pub(super) fn open(path: &Path, capacity: usize, tick: Tick) -> io::Result<(Self, Replay)> {
+    /// `0` cold — and `anchor` the run's tick domain's declared
+    /// civil-time anchor, `None` on an unanchored domain.
+    pub(super) fn open(
+        path: &Path,
+        capacity: usize,
+        tick: Tick,
+        anchor: Option<dcs_core::TickAnchor>,
+    ) -> io::Result<(Self, Replay)> {
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -286,6 +307,7 @@ impl JournalFile {
         sink.write(&JournalRecord::RunBoundary {
             run: replay.runs + 1,
             tick,
+            anchor,
         })?;
         Ok((sink, replay))
     }
@@ -446,7 +468,7 @@ mod tests {
 
         // First lifetime: two journaled entries land in the file behind
         // the run-1 boundary marker.
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         recorder.note_settled(None, receipt(10, 1), Tick(1));
         recorder.note_settled(None, receipt(11, 2), Tick(2));
         // The sink's writer appends off the recording point — wait
@@ -457,7 +479,8 @@ mod tests {
             vec![
                 JournalRecord::RunBoundary {
                     run: 1,
-                    tick: Tick::ZERO
+                    tick: Tick::ZERO,
+                    anchor: None
                 },
                 JournalRecord::Entry(Box::new(JournalEntry {
                     seq: 1,
@@ -481,7 +504,7 @@ mod tests {
         // seqs, the boundary marker separates the runs in the file —
         // and journals once as the restart's served boundary entry —
         // and new entries continue the numbering.
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         assert_eq!(
             recorder
                 .journal(0)
@@ -521,7 +544,8 @@ mod tests {
             file[3],
             JournalRecord::RunBoundary {
                 run: 2,
-                tick: Tick::ZERO
+                tick: Tick::ZERO,
+                anchor: None
             }
         );
         assert_eq!(
@@ -545,7 +569,7 @@ mod tests {
         // First lifetime: a first-observation transition and a follow-up
         // land in the file as ordinary entries — the variant needs no
         // special file handling.
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         recorder.push(
             Tick(1),
             dcs_core::JournalEvent::PointChanged {
@@ -567,7 +591,7 @@ mod tests {
         // Second lifetime: the `point_changed` entries replay with
         // their seqs behind the restart's served boundary entry, and
         // the next entry continues the numbering.
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         assert_eq!(
             recorder
                 .journal(0)
@@ -610,7 +634,7 @@ mod tests {
         // The replayed entries carry no attribution — `None`, never a
         // request origin the record cannot prove — and the open's own
         // `run_boundary` marker lands after them.
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         let entries = recorder.journal(0);
         assert_eq!(
             entries,
@@ -655,7 +679,7 @@ mod tests {
             },
         );
         drop(recorder);
-        let recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         assert!(
             recorder.journal(0).iter().any(|entry| {
                 entry.event
@@ -677,7 +701,7 @@ mod tests {
         let dir = scratch("tail");
         let path = dir.join("journal.jsonl");
 
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 2), Tick::ZERO).unwrap();
+        let mut recorder = crate::recorder::Recorder::new(config(&path, 2), Tick::ZERO, None).unwrap();
         for index in 0..3_u64 {
             recorder.note_settled(None, receipt(10, index + 1), Tick(index + 1));
         }
@@ -688,7 +712,7 @@ mod tests {
         // tick is recorded in the boundary marker — the --state-file
         // resume case. The restart's served boundary entry takes the
         // next `seq` and evicts the oldest retained entry.
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 2), Tick(40)).unwrap();
+        let mut recorder = crate::recorder::Recorder::new(config(&path, 2), Tick(40), None).unwrap();
         assert_eq!(
             recorder
                 .journal(0)
@@ -704,7 +728,8 @@ mod tests {
             records(&path)[4],
             JournalRecord::RunBoundary {
                 run: 2,
-                tick: Tick(40)
+                tick: Tick(40),
+                anchor: None
             }
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -715,7 +740,7 @@ mod tests {
         let dir = scratch("corrupt");
         let path = dir.join("journal.jsonl");
 
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         recorder.note_settled(None, receipt(10, 1), Tick(1));
         drop(recorder);
 
@@ -729,7 +754,7 @@ mod tests {
             body.push_str(bad);
             body.push('\n');
             std::fs::write(&path, body).unwrap();
-            let error = match crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO) {
+            let error = match crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None) {
                 Ok(_) => panic!("a corrupt journal file must fail startup"),
                 Err(error) => error,
             };
@@ -744,7 +769,7 @@ mod tests {
 
         // The repaired file replays fine — the failures named the
         // record, not the file itself.
-        crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -755,14 +780,14 @@ mod tests {
 
         // The first writer binds and journals, holding the file's
         // writer lock for its lifetime.
-        let mut first = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let mut first = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         first.note_settled(None, receipt(10, 1), Tick(1));
 
         // The misconfiguration — a second writer on the same path —
         // fails its bind naming the file and the live-holder conflict
         // rather than interleaving duplicate seqs from its own replay
         // point into the record.
-        let error = match crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO) {
+        let error = match crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None) {
             Ok(_) => panic!("a second live writer on one journal file must fail its bind"),
             Err(error) => error,
         };
@@ -776,7 +801,7 @@ mod tests {
         // across the run boundary.
         first.note_settled(None, receipt(11, 2), Tick(2));
         drop(first);
-        let mut second = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let mut second = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         second.note_settled(None, receipt(12, 3), Tick(3));
         assert_eq!(second.journal(0).last().unwrap().seq, 4);
         second.flush_sink();
@@ -796,13 +821,14 @@ mod tests {
     fn a_missing_file_is_a_cold_start() {
         let dir = scratch("cold");
         let path = dir.join("journal.jsonl");
-        let recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         assert!(recorder.journal(0).is_empty());
         assert_eq!(
             records(&path),
             vec![JournalRecord::RunBoundary {
                 run: 1,
-                tick: Tick::ZERO
+                tick: Tick::ZERO,
+                anchor: None
             }]
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -813,7 +839,7 @@ mod tests {
         let dir = scratch("unsunk");
         let path = dir.join("journal.jsonl");
         let mut recorder =
-            crate::recorder::Recorder::new(MonitorConfig::default(), Tick::ZERO).unwrap();
+            crate::recorder::Recorder::new(MonitorConfig::default(), Tick::ZERO, None).unwrap();
         recorder.note_settled(None, receipt(10, 1), Tick(1));
         assert_eq!(recorder.journal(0).len(), 1);
         assert!(!path.exists());
@@ -847,7 +873,7 @@ mod tests {
 
         let dir = scratch("stalled-sink");
         let path = dir.join("journal.jsonl");
-        let (mut file, _replay) = JournalFile::open(&path, 8, Tick::ZERO).unwrap();
+        let (mut file, _replay) = JournalFile::open(&path, 8, Tick::ZERO, None).unwrap();
         // The writer parks inside every append until the gate opens —
         // a stalled share's stand-in — and `entered` lets the test
         // wait for the writer to be mid-write before filling the
@@ -869,7 +895,7 @@ mod tests {
             }
         });
         let mut recorder =
-            crate::recorder::Recorder::new(MonitorConfig::default(), Tick::ZERO).unwrap();
+            crate::recorder::Recorder::new(MonitorConfig::default(), Tick::ZERO, None).unwrap();
         recorder.with_sink(drain);
         let event = |n: u64| dcs_core::JournalEvent::PointChanged {
             point: PointId(10),
@@ -955,7 +981,7 @@ mod tests {
 
         let dir = scratch("failing-sink");
         let path = dir.join("journal.jsonl");
-        let (mut file, _replay) = JournalFile::open(&path, 8, Tick::ZERO).unwrap();
+        let (mut file, _replay) = JournalFile::open(&path, 8, Tick::ZERO, None).unwrap();
         // The sink's second write fails — the error before the byte,
         // so no torn record is possible.
         let writes = Arc::new(AtomicU64::new(0));
@@ -975,7 +1001,7 @@ mod tests {
             },
         );
         let mut recorder =
-            crate::recorder::Recorder::new(MonitorConfig::default(), Tick::ZERO).unwrap();
+            crate::recorder::Recorder::new(MonitorConfig::default(), Tick::ZERO, None).unwrap();
         recorder.with_sink(drain);
         let event = |n: u64| dcs_core::JournalEvent::PointChanged {
             point: PointId(10),
@@ -1046,7 +1072,7 @@ mod tests {
     fn first_observed_quality_entries_roundtrip() {
         let dir = scratch("quality");
         let path = dir.join("journal.jsonl");
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         recorder.push(
             Tick(1),
             dcs_core::JournalEvent::QualityChanged {
@@ -1056,7 +1082,7 @@ mod tests {
             },
         );
         drop(recorder);
-        let recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         assert_eq!(
             recorder.journal(0),
             vec![

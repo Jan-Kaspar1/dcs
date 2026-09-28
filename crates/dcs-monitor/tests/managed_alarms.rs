@@ -133,6 +133,7 @@ fn journaled_out() -> PointSpec {
         requires_reason: false,
         stale_after_ticks: None,
         journaled: true,
+        record_every_ticks: None,
     }
 }
 
@@ -147,6 +148,7 @@ fn journaled_in() -> PointSpec {
         requires_reason: false,
         stale_after_ticks: None,
         journaled: true,
+        record_every_ticks: None,
     }
 }
 
@@ -229,6 +231,7 @@ fn with_monitor<T>(body: impl FnOnce(&StubDriver, &MonitorClient) -> T) -> T {
                 requires_reason: true,
                 stale_after_ticks: None,
                 journaled: false,
+                record_every_ticks: None,
             },
         )
         .with_writable_internal(OOS1_IN, Direction::In, ValueKind::Bool, Value::Bool(false))

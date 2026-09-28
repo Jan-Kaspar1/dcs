@@ -202,6 +202,17 @@ pub struct PublicationHealth {
     /// serialized before the section existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_sink: Option<StateSinkHealth>,
+    /// The `--history-file` durable process-history sink's drain
+    /// report when the monitor appends declared-duty samples to a file
+    /// — `None` (absent on the wire) without one. The append rides the
+    /// recorder's post-scan point; the file write drains on the sink's
+    /// own writer off the executor lock: `lagging` reports records
+    /// still queued, `failed` a sink write that is already failing the
+    /// run at its next push — the durable-history decision extending
+    /// decision 36's append rule to the sibling file. Absent from
+    /// snapshots serialized before the section existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_sink: Option<HistorySinkHealth>,
 }
 
 /// The named health state of the durable journal sink's drain — the
@@ -314,6 +325,61 @@ pub struct StateSinkHealth {
     /// The deepest the queue has run.
     pub high_water: u64,
     /// The queue's configured bound — a checkpoint capture finding it
+    /// full fails the run fatally at the push.
+    pub capacity: u64,
+}
+
+/// The named health state of the durable process-history sink's drain
+/// — the backpressure report the durable-history decision requires of
+/// the sibling file. The queue's bound is declared in `capacity`: a
+/// sink behind the run's recording rate reports `Lagging`, and a sink
+/// write that failed reports `Failed` — the run dies at its next
+/// recorded sample naming the file, the fatal-on-append rule decision
+/// 36 recorded for the journal extended to declared-duty history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistorySinkState {
+    /// The writer is keeping up — no record waits in the drain queue.
+    Healthy,
+    /// Records wait for the writer — the sink is behind the run's
+    /// recording rate. A lag that fills `capacity` is fatal at the
+    /// next recorded sample rather than silently dropping one.
+    Lagging,
+    /// A sink write failed — the run is failing fatally at the
+    /// recorded point; `lost` accounts the accepted records the file
+    /// never took.
+    Failed,
+}
+
+/// The durable process-history sink's drain accounting — the overload
+/// surface beside the journal sink's, stamped into the snapshot's
+/// `publication` section as of each publish and readable live through
+/// the monitor.
+///
+/// The queue sits between the recorder's post-scan point and the
+/// writer thread that appends records to the file in `seq` order:
+/// `accepted` counts every record handed over, `drained` the ones the
+/// file durably took, and `lost` the ones a failed writer consumed
+/// without appending — the honest loss accounting for a recorded
+/// sample the file never held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistorySinkHealth {
+    /// The sink's standing state.
+    pub state: HistorySinkState,
+    /// History records handed to the drain queue since bind.
+    pub accepted: u64,
+    /// Records the writer has appended — `accepted` minus `lost`
+    /// minus the in-flight and queued remainder.
+    pub drained: u64,
+    /// Records the queue admitted but the sink never appended —
+    /// nonzero only after a writer failure: the loss the durable file
+    /// cannot carry, counted rather than hidden.
+    pub lost: u64,
+    /// Records waiting in the queue now — what `lagging` reports on.
+    pub depth: u64,
+    /// The deepest the queue has run.
+    pub high_water: u64,
+    /// The queue's configured bound — a recorded sample finding it
     /// full fails the run fatally at the push.
     pub capacity: u64,
 }
@@ -658,6 +724,7 @@ mod tests {
                 window: 8,
                 journal_sink: None,
                 state_sink: None,
+                history_sink: None,
             }),
         };
         let json = serde_json::to_string(&snapshot).unwrap();

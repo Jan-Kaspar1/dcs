@@ -509,6 +509,7 @@ fn stale_map() -> PointMap {
                 requires_reason: false,
                 stale_after_ticks: Some(2),
                 journaled: false,
+                record_every_ticks: None,
             },
         )
         .with_point(PointId(20), Direction::Out, ValueKind::Float)
@@ -618,6 +619,7 @@ fn journaled_map() -> PointMap {
                 requires_reason: false,
                 stale_after_ticks: None,
                 journaled: true,
+                record_every_ticks: None,
             },
         )
         .with_spec(
@@ -630,6 +632,7 @@ fn journaled_map() -> PointMap {
                 requires_reason: false,
                 stale_after_ticks: None,
                 journaled: true,
+                record_every_ticks: None,
             },
         )
         .with_point(PointId(40), Direction::In, ValueKind::Bool)

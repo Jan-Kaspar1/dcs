@@ -315,7 +315,7 @@
 
 use dcs_assembly::{DriverRegistry, FanoutDriver, StepError, assemble, resolve_drivers};
 use dcs_controller::registry;
-use dcs_core::{CarryoverReport, FieldClaim, IoDriver, PointId, TelemetrySnapshot, Tick};
+use dcs_core::{CarryoverReport, FieldClaim, IoDriver, PointId, TelemetrySnapshot, Tick, TickAnchor};
 use dcs_model::PlantModel;
 use dcs_monitor::{
     CheckpointPuller, DEFAULT_STATE_DRAIN_CAPACITY, Driven, Monitor, MonitorConfig, StateSink,
@@ -721,6 +721,12 @@ struct Options {
     /// restart. Requires `--listen`: the journal's recorder lives in
     /// the monitor.
     journal_file: Option<PathBuf>,
+    /// Persist the durable process history to this append-only file
+    /// and replay it at startup — the declared-`record` points'
+    /// samples, run-boundary markers, and tick-domain seams surviving
+    /// a restart. Requires `--listen`: the durable store's recorder
+    /// lives in the monitor.
+    history_file: Option<PathBuf>,
     /// Pin this instance's field-ownership token instead of generating
     /// a fresh per-process one — so an external attachment can claim
     /// under the same token and share the owner's field access (a test
@@ -749,6 +755,7 @@ Usage: dcs-controller <model-file> [--check] [--ticks N] [--scan-ms MS]
                       [--auto-promote N] [--owner-token N] [--revised]
                       [--pair-token TOKEN]
                       [--state-file PATH] [--journal-file PATH]
+                      [--history-file PATH]
 
 Loads and validates the plant model, resolves its devices through the
 driver registry (local `sim*` and remote `sim-tcp` kinds), and runs the
@@ -893,6 +900,7 @@ impl Options {
         let mut revised = false;
         let mut state_file = None;
         let mut journal_file = None;
+        let mut history_file = None;
         let mut owner_token = None;
         let mut pair_token = None;
         let mut args = args;
@@ -941,6 +949,9 @@ impl Options {
                 "--journal-file" => {
                     journal_file = Some(PathBuf::from(value("--journal-file")?));
                 }
+                "--history-file" => {
+                    history_file = Some(PathBuf::from(value("--history-file")?));
+                }
                 "--owner-token" => {
                     owner_token = Some(
                         value("--owner-token")?
@@ -979,6 +990,7 @@ impl Options {
                 ("--revised", revised),
                 ("--state-file", state_file.is_some()),
                 ("--journal-file", journal_file.is_some()),
+                ("--history-file", history_file.is_some()),
                 ("--owner-token", owner_token.is_some()),
                 ("--pair-token", pair_token.is_some()),
             ] {
@@ -1055,6 +1067,12 @@ impl Options {
                     .to_string(),
             );
         }
+        if history_file.is_some() && listen.is_none() {
+            return Err(
+                "--history-file requires --listen: the durable history store lives in the monitor"
+                    .to_string(),
+            );
+        }
         if pair_token.is_some() && listen.is_none() {
             return Err(
                 "--pair-token requires --listen: the line proofs it keys live on the monitor"
@@ -1076,6 +1094,7 @@ impl Options {
             revised,
             state_file,
             journal_file,
+            history_file,
             owner_token,
             pair_token,
         })
@@ -1399,6 +1418,24 @@ fn main() -> ExitCode {
         }
     }
 
+    // The tick domain's civil-time anchor — the durable-history
+    // decision's declared tick-to-civil mapping: a paced run's own
+    // pacing mints it at the domain's origin tick, so every durable
+    // record maps `anchor + tick * period` at the export seam without
+    // a clock ever entering a component or the step logic. A
+    // --state-file resume already carries the domain's anchor through
+    // the checkpoint, and a tracking peer adopts the tracked line's —
+    // the durable stream's `domain` seam records the crossing. Driven
+    // and unpaced runs mint nothing: their artifacts stay
+    // byte-identical under an unchanged script.
+    if options.scan_ms.is_some() && executor.tick() == Tick::ZERO && executor.anchor().is_none() {
+        let epoch_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
+        executor = executor.with_anchor(TickAnchor { epoch_ms });
+    }
+
     // The role machine: a --standby instance tracks its active's
     // checkpoints gate-closed until promoted; anything else owns the
     // field from the start. The field's write-ownership claim is taken
@@ -1469,6 +1506,7 @@ fn main() -> ExitCode {
     // never hold the lock on the file's I/O.
     let monitor_config = || MonitorConfig {
         journal_file: options.journal_file.clone(),
+        history_file: options.history_file.clone(),
         state_file: options.state_file.clone(),
         ..MonitorConfig::default()
     };

@@ -58,7 +58,7 @@ pub use descriptor::{
     PortDescriptor, PortRole,
 };
 pub use fingerprint::ModelFingerprint;
-pub use history::{HistorySample, PointHistory};
+pub use history::{DurableEntry, DurableEvent, HistorySample, PointHistory, TickAnchor};
 pub use interface::{
     AdaptedCommand, AdaptedEvent, BlockInterface, CommandArgument, CommandAvailability,
     CommandSpec, ConfigCapability, ConfigProperty, EventEmission, EventField, EventFieldKind,
@@ -84,6 +84,7 @@ pub use signal::{
 pub use state::{StateError, StateMap};
 pub use telemetry::{
     CommandQueueDiagnostics, CommandVerdict, ComponentCommands, ComponentDiagnostics,
-    ComponentParameters, ForcedPoint, IoFault, IoHealth, JournalSinkHealth, JournalSinkState,
-    PointTelemetry, PublicationHealth, StateSinkHealth, StateSinkState, TelemetrySnapshot,
+    ComponentParameters, ForcedPoint, HistorySinkHealth, HistorySinkState, IoFault, IoHealth,
+    JournalSinkHealth, JournalSinkState, PointTelemetry, PublicationHealth, StateSinkHealth,
+    StateSinkState, TelemetrySnapshot,
 };

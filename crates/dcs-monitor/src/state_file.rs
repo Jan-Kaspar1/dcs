@@ -199,6 +199,7 @@ mod tests {
             format_version: dcs_runtime::CHECKPOINT_FORMAT_VERSION,
             model_fingerprint: None,
             generation: None,
+            anchor: None,
             tick: Tick(tick),
             components: Default::default(),
             driver: None,

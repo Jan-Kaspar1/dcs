@@ -46,7 +46,8 @@
 
 use crate::executor::WiringError;
 use dcs_core::{
-    CommandReceipt, ModelFingerprint, PointId, Sample, StateError, StateMap, Tick, Value, ValueKind,
+    CommandReceipt, ModelFingerprint, PointId, Sample, StateError, StateMap, Tick, TickAnchor,
+    Value, ValueKind,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -152,6 +153,17 @@ pub struct Checkpoint {
     /// involving one journals the restart exactly as it always did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<u64>,
+    /// The tick domain's civil-time anchor — the wall-clock instant of
+    /// the domain's origin tick the pacing layer minted when the
+    /// domain began. The anchor maps the domain, not the process: a
+    /// `--state-file` resume restores the domain and keeps its anchor,
+    /// a tracking peer adopts the tracked line's with each applied
+    /// checkpoint, and a cold start begins a new domain and anchor.
+    /// `None` on checkpoints a pre-anchor build wrote or an unanchored
+    /// run captured — a driven or unminted domain — whose records stay
+    /// byte-identical under an unchanged script.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<TickAnchor>,
     /// The capturing run's run tick at capture; the restored executor
     /// resumes numbering from here. A tracking peer reads it as a source
     /// tick — the tracked stream's own counter — and lands it at

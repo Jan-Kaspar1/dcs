@@ -791,6 +791,7 @@ fn budgeted_map(point: u64, budget: u64) -> PointMap {
                 requires_reason: false,
                 stale_after_ticks: Some(budget),
                 journaled: false,
+                record_every_ticks: None,
             },
         )
         .with_point(PointId(20), Direction::Out, ValueKind::Float)
