@@ -214,6 +214,39 @@ pub enum PlantRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         monitor: Option<SocketAddr>,
     },
+    /// The fencing-loss counterpart of the bound
+    /// [`EnsureWriter`](Self::EnsureWriter) — the conditional re-grant
+    /// a fencing-demoted controller probes while its loss mark stands:
+    /// takes the claim for `owner` while the field is unclaimed, the
+    /// standing claim already names `owner`, or the standing claim's
+    /// holder set is empty — the dead-owner or orphan-placeholder
+    /// shape, whose owner is gone or never bound, so the re-grant
+    /// preempts no live attachment — and is refused
+    /// [`PlantError::Fenced`] while a *different* owner's claim has
+    /// live holders. The refusal ignores the controller marker a
+    /// [`ClaimWriterUnlessHeld`](Self::ClaimWriterUnlessHeld) consults:
+    /// a still-held claim keeps the field until it releases whether a
+    /// controller or a tool holds it — the never-preempts-a-live-holder
+    /// rule the reclaim shares with the bound ensure — while a
+    /// holderless claim protects no one and refusing it wedges the
+    /// redundant pair it was raised to fence: two successive
+    /// ex-owners' unbound probes each leave a holderless claim
+    /// standing, and a reclaim that refused them could never land.
+    /// A granted request binds `owner` to this connection exactly as
+    /// `claim_writer` does — including the
+    /// [`PlantResponse::ClaimedShared`] flag when the token is already
+    /// held by another live attachment — and the claim it lands is
+    /// always recorded as a controller's.
+    ReclaimWriter {
+        /// The ownership token the claim asserts.
+        owner: u64,
+        /// The claimant's monitor endpoint — the same
+        /// [`ClaimWriter`](Self::ClaimWriter) declaration: a granted
+        /// reclaim re-seats the field's owner, so the verdicts it later
+        /// produces name this monitor to the peers it supersedes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<SocketAddr>,
+    },
     /// Drop this connection's hold on the write claim. `keep_claim:
     /// false` — the deliberate hand-back a mutation tool performs —
     /// releases the claim itself when the release empties the holder
@@ -319,8 +352,10 @@ pub enum PlantResponse {
     /// [`PlantRequest::ClearFault`], [`PlantRequest::ReleaseWriter`],
     /// and the claim requests: the request applied.
     Done,
-    /// Answer to a granted [`PlantRequest::ClaimWriter`] or
-    /// [`PlantRequest::EnsureWriter`] whose `owner` token another live
+    /// Answer to a granted [`PlantRequest::ClaimWriter`],
+    /// [`PlantRequest::ClaimWriterUnlessHeld`],
+    /// [`PlantRequest::EnsureWriter`], or
+    /// [`PlantRequest::ReclaimWriter`] whose `owner` token another live
     /// attachment already holds. The grant stands — one field owner's
     /// several attachments claim the same token by design — but the
     /// sharing is flagged because the token alone cannot distinguish

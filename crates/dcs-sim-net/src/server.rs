@@ -531,6 +531,39 @@ fn dispatch(
                 }
             }
         }
+        PlantRequest::ReclaimWriter { owner, monitor } => {
+            // The fencing-loss re-grant: a fencing-demoted ex-owner
+            // takes the field's write-ownership back where it stands
+            // unclaimed or already names its token — and also where a
+            // *different* owner's claim stands holderless. The
+            // holderless shapes are the dead owner `claim_writer`'s
+            // never-release rule leaves and the orphan placeholder an
+            // unbound `ensure_writer` probe raises; neither has a live
+            // attachment behind it, so preempting either abandons no
+            // live incumbent — while refusing it wedges the pair the
+            // claim was raised to fence. A different owner's claim
+            // with live holders still refuses — held controller claim
+            // or held tool claim alike, the reclaim's own rule, stricter
+            // than `claim_writer_unless_held`'s: a still-held claim
+            // keeps the field until it releases. The grant binds this
+            // connection so the re-lifted gate's writes pass the claim
+            // it re-took, and the landed claim is always a
+            // controller's.
+            let monitor = dialable_monitor(monitor, remote);
+            let mut writer = shared.writer.lock().unwrap();
+            match writer.as_ref() {
+                Some(claim) if claim.owner != owner && !claim.holders.is_empty() => {
+                    PlantResponse::Error {
+                        error: PlantError::Fenced {
+                            detail: "another attachment holds field writes".to_string(),
+                            owner: Some(claim.owner),
+                            monitor: claim.monitor,
+                        },
+                    }
+                }
+                _ => grant_writer_claim_locked(&mut writer, owner, connection, true, monitor),
+            }
+        }
         PlantRequest::ReleaseWriter { keep_claim } => {
             // The deliberate hand-back: this connection leaves the
             // holder set, and the last hold out releases the claim —
