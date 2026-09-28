@@ -306,6 +306,21 @@ pub enum JournalEvent {
         /// The adopted tracking source's monitor address.
         source: SocketAddr,
     },
+    /// A tracking-source resolution probed an endpoint and refused the
+    /// document it served — the field-arbitrated claimed monitor, an
+    /// orphan-resolution `line_owner`, or a verified announced hint —
+    /// so the strand a refused source would otherwise leave is durable
+    /// audit rather than silence: the entry names the endpoint and the
+    /// named verification refusal. One entry journals per distinct
+    /// (source, reason) signature per tracking epoch — the dedup set
+    /// clears when a source adoption lands, so a persistent refusal
+    /// neither floods the journal nor vanishes from it.
+    TrackingSourceRefused {
+        /// The endpoint whose served checkpoint was refused.
+        source: SocketAddr,
+        /// The named refusal the served document earned.
+        detail: String,
+    },
     /// A new process lifetime began — the served form of the journal
     /// file's run-boundary marker. A monitor bound over a journal file
     /// that already records earlier lifetimes journals it once at

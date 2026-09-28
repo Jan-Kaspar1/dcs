@@ -1831,8 +1831,12 @@ fn run_verification(tag: &str) -> Outcome {
             // and named host.
             for journal in &mut journals {
                 for entry in journal {
-                    if let JournalEvent::TrackingSourceAdopted { source } = &mut entry.event {
-                        source.set_port(0);
+                    match &mut entry.event {
+                        JournalEvent::TrackingSourceAdopted { source }
+                        | JournalEvent::TrackingSourceRefused { source, .. } => {
+                            source.set_port(0);
+                        }
+                        _ => {}
                     }
                 }
             }

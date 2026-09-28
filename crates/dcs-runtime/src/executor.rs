@@ -981,6 +981,19 @@ pub struct Executor<'d> {
     /// journal, history, and receipt attribution domain — distinct from
     /// the driver-served plant tick and a tracked stream's source tick.
     tick: Tick,
+    /// The run tick's lead over the tracked line's origin tick domain —
+    /// the count of run ticks this run numbered beyond the stream
+    /// position its `generation` began at. Minted zero on a fresh run
+    /// and adopted on every checkpoint application as
+    /// `tick - stream_tick`: a tracking peer's paced clock keeps
+    /// counting through each source outage it survives while the
+    /// pulled stream stands still, so the lead accrues and survives
+    /// promotion — the run that took the field still numbers the
+    /// ticks it minted waiting. Captures stamp it as
+    /// [`Checkpoint::stream_tick`], so the line's stream position —
+    /// not any one run's numbering — stays the comparable currency
+    /// line-membership checks are written in.
+    stream_lead: u64,
 }
 
 impl<'d> Executor<'d> {
@@ -1119,6 +1132,7 @@ impl<'d> Executor<'d> {
             generation: None,
             anchor: None,
             tick: Tick::ZERO,
+            stream_lead: 0,
         })
     }
 
@@ -1768,6 +1782,12 @@ impl<'d> Executor<'d> {
             generation: self.generation,
             anchor: self.anchor,
             tick: self.tick,
+            // The run tick rendered back into the line's origin domain:
+            // absent while the run carries no lead, so a lead-free
+            // capture's stream position is its `tick` — the only
+            // position a run without the declared lead can claim.
+            stream_tick: (self.stream_lead > 0)
+                .then_some(Tick(self.tick.0.saturating_sub(self.stream_lead))),
             components: self
                 .components
                 .iter()
@@ -1858,6 +1878,7 @@ impl<'d> Executor<'d> {
         }
 
         executor.tick = checkpoint.tick;
+        executor.adopt_stream_lead(checkpoint);
         // The restored run joins the checkpointed line's generation —
         // a `--state-file` resume continues the same tick domain, so the
         // checkpoints it serves carry the line's identity, not a fresh
@@ -1954,6 +1975,7 @@ impl<'d> Executor<'d> {
         }
 
         self.tick = checkpoint.tick;
+        self.adopt_stream_lead(checkpoint);
         // The run joins the checkpointed line's generation: from this
         // adoption on, the checkpoints this executor serves name the
         // line's tick-domain identity, so a peer tracking it can tell
@@ -2207,6 +2229,22 @@ impl<'d> Executor<'d> {
         // count of receipts the merged line ever minted — is the floor
         // the counter converges to, and never regresses below.
         self.command_admission.attempts = self.command_admission.attempts.max(merged_end);
+    }
+
+    /// Adopts the document's declared stream lead — the run tick's
+    /// distance over the tracked line's origin domain — so this run's
+    /// captures locate their [`Checkpoint::stream_tick`] honestly.
+    /// Runs right after `tick` resumes from `checkpoint.tick`: the
+    /// declared lead applies under the adopted tick, so a run that
+    /// landed the pull at a later local tick carries its own offset
+    /// as lead, and a document declaring none — a lead-free or
+    /// pre-field capture — adopts a lead of zero, its `tick` being
+    /// the only stream position it can claim.
+    fn adopt_stream_lead(&mut self, checkpoint: &Checkpoint) {
+        self.stream_lead = checkpoint
+            .tick
+            .0
+            .saturating_sub(checkpoint.stream_tick.unwrap_or(checkpoint.tick).0);
     }
 
     /// Re-asserts the settled force verdicts `receipts` carries, in
@@ -2502,6 +2540,7 @@ impl<'d> Executor<'d> {
         }
         self.forces.clone_from(&checkpoint.forces);
         self.tick = checkpoint.tick;
+        self.adopt_stream_lead(checkpoint);
         // The crossing keeps the tracked line's generation: the revised
         // run continues the checkpoint stream's tick domain, so the
         // checkpoints it serves still name the line they came from —
@@ -8421,6 +8460,7 @@ mod tests {
             generation: None,
             anchor: None,
             tick: Tick(50),
+            stream_tick: None,
             components: [
                 ("a".to_string(), StateMap::new()),
                 ("gone".to_string(), StateMap::new()),
@@ -8600,6 +8640,7 @@ mod tests {
             generation: None,
             anchor: None,
             tick: Tick(50),
+            stream_tick: None,
             components: [("loop".to_string(), state)].into_iter().collect(),
             driver: None,
             outputs: BTreeMap::new(),

@@ -4181,3 +4181,170 @@ fn a_wildcard_claimed_monitor_earns_no_pull() {
         "the routable declaration adopts immediately after the wildcard"
     );
 }
+
+/// The QA finding
+/// `tracking-verify-own-tick-ahead-bound-permanent-strand` (#1269): a
+/// tracking standby's paced run clock keeps counting through a source
+/// outage while the pulled stream stands still, so it accrues a
+/// permanent lead over the line's stream position — and the promotion
+/// carries the lead: the run that takes the field still numbers the
+/// ticks it minted waiting. On the defective build the demoted
+/// ex-owner's claimed-source verification compared the successor's
+/// *run* tick against the probing run's own — own ticks are not
+/// synchronized to the line — and refused every pull `Ahead`,
+/// stranding the ex-owner `standby`/`unsynchronized` forever with a
+/// silent journal. The bound now compares each document's declared
+/// stream position — `Checkpoint::stream_tick` — so the
+/// field-arbitrated rejoin verifies inside one pass and journals the
+/// adoption.
+#[test]
+fn a_demoted_ex_owner_rejoins_a_successor_carrying_the_outage_lead() {
+    // The reproduction's ctrl-a: the launched field owner with no
+    // configured tracking source, driven over a fencing front so the
+    // successor's claim preempts its writes mid-run — no `POST
+    // /demote` boundary ever runs — and carrying the field's claim
+    // verdicts the claimed-monitor adoption reads. The verdict names
+    // a's own monitor while its claim stands.
+    let fencing = FencingDriver::start();
+    let claimed: &'static Mutex<SocketAddr> = Box::leak(Box::new(Mutex::new(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        0,
+    ))));
+    let a = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(
+                fenced_executor(fencing).with_generation(mint_generation()),
+                None,
+            )
+            .with_claimed_monitor(move || Some(*claimed.lock().unwrap())),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: None,
+            after_scan: None,
+        }),
+    );
+    let a_addr = dialable(a.monitor.local_addr());
+    *claimed.lock().unwrap() = a_addr;
+
+    // The reproduction's ctrl-b: a standby tracking a through the
+    // relay, so the outage is a cut stream — unanswered pulls — while
+    // the standby keeps pacing.
+    let relay = Relay::serve(a_addr);
+    let b_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let b = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(b_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(relay.addr),
+            after_scan: None,
+        }),
+    );
+    let b_addr = dialable(b.monitor.local_addr());
+
+    a.client.advance(3).unwrap();
+    b.client.advance(1).unwrap();
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby converged on the line before the outage"
+    );
+
+    // The bounded source outage: the stream cuts while a's served
+    // document freezes — the reproduction's stopped active — and b
+    // keeps pacing past MAX_ANNOUNCED_AHEAD ticks of missed pulls.
+    relay.partition(true);
+    b.client.advance(40).unwrap();
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Degraded { .. })
+        ),
+        "the cut stream degrades the tracker: {:?}",
+        b.client.role().unwrap()
+    );
+
+    // The source returns — the reproduction's restarted active — and
+    // b reconverges on its frozen document, minting the outage as a
+    // permanent lead of its run tick over the line's stream position.
+    relay.partition(false);
+    b.client.advance(1).unwrap();
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby reconverges on the resumed source: {:?}",
+        b.client.role().unwrap()
+    );
+    let led = b.client.checkpoint().unwrap();
+    assert!(
+        led.stream_tick
+            .is_some_and(|stream| led.tick.0 > stream.0 + 32),
+        "the survivor's run tick leads the line's stream position past \
+         the old bound: {led:?}"
+    );
+
+    // The routine promote: b claims the field — the arbitration's
+    // fencing verdict preempts a's writes and names b's monitor — and
+    // settles the field owner.
+    assert_eq!(b.client.promote().unwrap().role, Role::Promoting);
+    fencing.preempt();
+    *claimed.lock().unwrap() = b_addr;
+    b.client.advance(1).unwrap();
+    assert_eq!(b.client.role().unwrap().role, Role::Active);
+
+    // The trigger the defect wedged on verbatim: the promoted
+    // successor's served run tick sits more than MAX_ANNOUNCED_AHEAD
+    // past the ex-owner's own — while its declared stream position
+    // honestly locates the line.
+    let own = a.client.checkpoint().unwrap();
+    let successor = b.client.checkpoint().unwrap();
+    assert!(
+        successor.tick.0 > own.tick.0 + 32,
+        "the successor's run tick carries the outage lead past the old \
+         bound — the refusal the defect made permanent: \
+         {successor:?} vs {own:?}"
+    );
+    assert!(
+        successor
+            .stream_tick
+            .is_some_and(|stream| stream.0 <= own.tick.0 + 32),
+        "the declared stream position still proves the line: {successor:?}"
+    );
+
+    // a's next field-owning scan fences: `field_claim_lost` demotes it
+    // in place, and the first sourceless scan resolves the field's
+    // declared monitor — proving the successor's document on its
+    // stream position, where the defective build refused it `Ahead`
+    // forever — then pins, journals, and pulls it.
+    a.client.advance(2).unwrap();
+    let report = a.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted ex-owner reconverges on the promoted successor \
+         instead of stranding unsynchronized: {report:?}"
+    );
+    assert_eq!(a.monitor.tracking_source(), Some(b_addr));
+    assert!(
+        a.client.journal(0).unwrap().iter().any(|entry| matches!(
+            entry.event,
+            JournalEvent::TrackingSourceAdopted { source } if source == b_addr
+        )),
+        "the field-arbitrated adoption journals on the demoted peer: {:?}",
+        a.client.journal(0).unwrap()
+    );
+}

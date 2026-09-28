@@ -169,6 +169,25 @@ pub struct Checkpoint {
     /// tick — the tracked stream's own counter — and lands it at
     /// `tick + tick_offset` in its own run domain.
     pub tick: Tick,
+    /// The position the captured [`tick`](Self::tick) occupies in the
+    /// tracked line's origin tick domain — the domain the line's
+    /// `generation` began in — stamped when the serving run's numbering
+    /// leads that stream position. A tracking peer's paced clock keeps
+    /// counting through every source outage it survives while the
+    /// pulled stream stands still, so its run tick accrues a permanent
+    /// lead over the line — a lead that survives promotion: the run
+    /// that took the field still numbers the ticks it minted waiting.
+    /// Without this stamp, a demoted peer comparing the successor's
+    /// document against its own numbering cannot tell that honest
+    /// lead — same generation, same fingerprint, same line — from a
+    /// foreign stream forging this line's identity at a far-ahead
+    /// tick, and the line-membership bound strands the legitimate
+    /// rejoin. `Some` only while the lead exists; `None` — every
+    /// checkpoint a lead-free or pre-field build captured — means the
+    /// captured `tick` *is* the stream position, the only answer a
+    /// run without the declared lead can honestly give.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_tick: Option<Tick>,
     /// Each component's captured state, keyed by the component's
     /// [`name`](crate::Component::name) — its identity within the run.
     /// Every registered component has an entry, possibly an empty map, so
