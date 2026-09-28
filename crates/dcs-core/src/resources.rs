@@ -49,7 +49,7 @@ pub struct SchemaView {
     /// snapshot's `publication` section reports as `published` for the
     /// same read model.
     pub publication: u64,
-    /// The publication's scan tick.
+    /// The publication's run tick.
     pub tick: Tick,
     /// One interface per served component instance, in scan order.
     #[serde(default)]
@@ -84,7 +84,7 @@ pub struct ComponentInterface {
 pub struct ResourceView {
     /// The publication sequence the values were read from.
     pub publication: u64,
-    /// The publication's scan tick.
+    /// The publication's run tick.
     pub tick: Tick,
     /// One entry per component instance, in scan order.
     #[serde(default)]
@@ -150,7 +150,7 @@ pub struct ResourceEvent {
     /// stream, so a bounded store's eviction reads as a numbering
     /// gap.
     pub seq: u64,
-    /// The tick the event is attributed to — the producing scan's.
+    /// The run tick the event is attributed to — the producing scan's.
     pub tick: Tick,
     /// The store the entry was recorded under — the declared
     /// [`EventRetention`] class of a kind-declared emission, or

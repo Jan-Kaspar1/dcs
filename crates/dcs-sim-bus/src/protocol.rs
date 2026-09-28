@@ -269,13 +269,15 @@ pub enum BusResponse {
     /// [`BusRequest::InjectQuality`] stamped it), and the device tick
     /// that stamped it.
     Sample {
-        /// The stored sample.
+        /// The stored sample — its tick is a plant tick, the simulated
+        /// device's own step counter.
         sample: Sample,
     },
     /// Answer to [`BusRequest::WriteRegister`]: the write applied,
     /// reporting the tick the stored sample was stamped with.
     Written {
-        /// The device tick at the moment of the write.
+        /// The device tick at the moment of the write — a plant tick,
+        /// not a run tick of any client.
         tick: Tick,
     },
     /// Answer to [`BusRequest::ListRegisters`]: every register's
@@ -286,7 +288,8 @@ pub enum BusResponse {
     },
     /// Answer to [`BusRequest::Step`]: the bank's new tick.
     Stepped {
-        /// The tick the step advanced to.
+        /// The plant tick the step advanced to — the simulated device's
+        /// own step counter, not a run tick of any client.
         tick: Tick,
     },
     /// Answer to [`BusRequest::Exchange`]: the input image the
