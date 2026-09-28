@@ -468,7 +468,8 @@ mod tests {
 
         // First lifetime: two journaled entries land in the file behind
         // the run-1 boundary marker.
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
+        let mut recorder =
+            crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         recorder.note_settled(None, receipt(10, 1), Tick(1));
         recorder.note_settled(None, receipt(11, 2), Tick(2));
         // The sink's writer appends off the recording point — wait
@@ -504,7 +505,8 @@ mod tests {
         // seqs, the boundary marker separates the runs in the file —
         // and journals once as the restart's served boundary entry —
         // and new entries continue the numbering.
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
+        let mut recorder =
+            crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         assert_eq!(
             recorder
                 .journal(0)
@@ -569,7 +571,8 @@ mod tests {
         // First lifetime: a first-observation transition and a follow-up
         // land in the file as ordinary entries — the variant needs no
         // special file handling.
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
+        let mut recorder =
+            crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         recorder.push(
             Tick(1),
             dcs_core::JournalEvent::PointChanged {
@@ -591,7 +594,8 @@ mod tests {
         // Second lifetime: the `point_changed` entries replay with
         // their seqs behind the restart's served boundary entry, and
         // the next entry continues the numbering.
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
+        let mut recorder =
+            crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         assert_eq!(
             recorder
                 .journal(0)
@@ -634,7 +638,8 @@ mod tests {
         // The replayed entries carry no attribution — `None`, never a
         // request origin the record cannot prove — and the open's own
         // `run_boundary` marker lands after them.
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
+        let mut recorder =
+            crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         let entries = recorder.journal(0);
         assert_eq!(
             entries,
@@ -701,7 +706,8 @@ mod tests {
         let dir = scratch("tail");
         let path = dir.join("journal.jsonl");
 
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 2), Tick::ZERO, None).unwrap();
+        let mut recorder =
+            crate::recorder::Recorder::new(config(&path, 2), Tick::ZERO, None).unwrap();
         for index in 0..3_u64 {
             recorder.note_settled(None, receipt(10, index + 1), Tick(index + 1));
         }
@@ -712,7 +718,8 @@ mod tests {
         // tick is recorded in the boundary marker — the --state-file
         // resume case. The restart's served boundary entry takes the
         // next `seq` and evicts the oldest retained entry.
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 2), Tick(40), None).unwrap();
+        let mut recorder =
+            crate::recorder::Recorder::new(config(&path, 2), Tick(40), None).unwrap();
         assert_eq!(
             recorder
                 .journal(0)
@@ -740,7 +747,8 @@ mod tests {
         let dir = scratch("corrupt");
         let path = dir.join("journal.jsonl");
 
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
+        let mut recorder =
+            crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         recorder.note_settled(None, receipt(10, 1), Tick(1));
         drop(recorder);
 
@@ -801,7 +809,8 @@ mod tests {
         // across the run boundary.
         first.note_settled(None, receipt(11, 2), Tick(2));
         drop(first);
-        let mut second = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
+        let mut second =
+            crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         second.note_settled(None, receipt(12, 3), Tick(3));
         assert_eq!(second.journal(0).last().unwrap().seq, 4);
         second.flush_sink();
@@ -1072,7 +1081,8 @@ mod tests {
     fn first_observed_quality_entries_roundtrip() {
         let dir = scratch("quality");
         let path = dir.join("journal.jsonl");
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
+        let mut recorder =
+            crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         recorder.push(
             Tick(1),
             dcs_core::JournalEvent::QualityChanged {

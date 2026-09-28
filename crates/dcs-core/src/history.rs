@@ -69,10 +69,11 @@ pub struct PointHistory {
 /// the domain's anchor, and a tracking peer adopts the tracked
 /// line's through checkpoint state rather than minting its own. The
 /// anchor is how the platform's durable samples and journal events
-/// map onto civil time at the export seam — `anchor + (tick - origin)
-/// * period` — without a clock ever entering a component or the
-/// executor's step logic. A driven run mints no anchor and its
-/// artifacts stay byte-identical under an unchanged script.
+/// map onto civil time at the export seam —
+/// `anchor + (tick - origin) * period` — without a clock ever
+/// entering a component or the executor's step logic. A driven run
+/// mints no anchor and its artifacts stay byte-identical under an
+/// unchanged script.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TickAnchor {
     /// Milliseconds since the Unix epoch at the domain's origin tick.

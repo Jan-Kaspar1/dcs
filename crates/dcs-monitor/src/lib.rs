@@ -4456,11 +4456,7 @@ impl MonitorClient {
     /// `run_boundary`/`domain` markers answer ahead of the bounded
     /// tail regardless of the filter, and an evicted stretch reads as
     /// a numbering gap on the `seq` axis.
-    pub fn durable_history(
-        &self,
-        points: &[PointId],
-        since: u64,
-    ) -> io::Result<Vec<DurableEntry>> {
+    pub fn durable_history(&self, points: &[PointId], since: u64) -> io::Result<Vec<DurableEntry>> {
         let mut path = format!("/history/durable?since={since}");
         for point in points {
             path.push_str(&format!("&point={}", point.0));

@@ -438,9 +438,7 @@ mod tests {
     use super::*;
     use crate::drain::Drain;
     use crate::recorder::{MonitorConfig, Recorder};
-    use dcs_core::{
-        Direction, IoDriver, IoError, Sample, Value, ValueKind,
-    };
+    use dcs_core::{Direction, IoDriver, IoError, Sample, Value, ValueKind};
     use dcs_runtime::{Executor, PointMap, PointSpec};
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -464,10 +462,10 @@ mod tests {
         }
 
         fn set(&self, point: PointId, value: Value) {
-            self.points.lock().unwrap().insert(
-                point,
-                Sample::good(value, Tick::ZERO),
-            );
+            self.points
+                .lock()
+                .unwrap()
+                .insert(point, Sample::good(value, Tick::ZERO));
         }
     }
 
@@ -492,8 +490,7 @@ mod tests {
     /// A scratch directory per test and process — tests run in
     /// parallel.
     fn scratch(test: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("dcs-history-{test}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dcs-history-{test}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -564,8 +561,7 @@ mod tests {
         // first observation lands the standing census, then every
         // second scan. The executor carries the domain's anchor — the
         // recorder's bind anchor — so no `domain` seam fires.
-        let mut recorder =
-            Recorder::new(config(&path, 8), Tick::ZERO, Some(anchor)).unwrap();
+        let mut recorder = Recorder::new(config(&path, 8), Tick::ZERO, Some(anchor)).unwrap();
         let mut executor = declared_executor(&driver, Some(2)).with_anchor(anchor);
         for n in 0..5_u64 {
             driver.set(PointId(10), Value::Float(n as f64));
@@ -612,8 +608,7 @@ mod tests {
         // served run_boundary entry taking the next seq — then the
         // replayed entries serve ahead of the new run's, numbering
         // continuing across the restart.
-        let mut recorder =
-            Recorder::new(config(&path, 8), Tick::ZERO, Some(anchor)).unwrap();
+        let mut recorder = Recorder::new(config(&path, 8), Tick::ZERO, Some(anchor)).unwrap();
         // The restart's cold domain re-censuses: baselines belong to
         // the old tick domain, so the first scan records again.
         let mut executor = declared_executor(&driver, Some(2)).with_anchor(anchor);
@@ -685,7 +680,13 @@ mod tests {
         let entries = served(&recorder, 0);
         assert_eq!(
             entries[0],
-            (11, DurableEvent::RunBoundary { run: 2, anchor: None }),
+            (
+                11,
+                DurableEvent::RunBoundary {
+                    run: 2,
+                    anchor: None
+                }
+            ),
             "the pinned marker answers ahead of the retained tail"
         );
         assert_eq!(
@@ -759,8 +760,7 @@ mod tests {
         // Run 1 records at tick 1 of an 8-cadence — the standing
         // census — then runs to tick 6: the file's last attribution
         // is 1, the next record due at 9.
-        let mut recorder =
-            Recorder::new(config(&path, 8), Tick::ZERO, Some(anchor)).unwrap();
+        let mut recorder = Recorder::new(config(&path, 8), Tick::ZERO, Some(anchor)).unwrap();
         let mut executor = declared_executor(&driver, Some(8)).with_anchor(anchor);
         for _ in 0..6 {
             scan(&mut recorder, &mut executor);
@@ -856,7 +856,11 @@ mod tests {
             },
         };
         let line = serde_json::to_string(&HistoryRecord::Entry(Box::new(entry))).unwrap();
-        std::fs::write(&path, std::fs::read_to_string(&path).unwrap() + &line + "\n").unwrap();
+        std::fs::write(
+            &path,
+            std::fs::read_to_string(&path).unwrap() + &line + "\n",
+        )
+        .unwrap();
         let error = Recorder::new(config(&path, 8), Tick::ZERO, None)
             .err()
             .expect("a rewound seq must fail the replay");
@@ -891,8 +895,8 @@ mod tests {
     #[test]
     fn a_stalled_sink_reports_lagging_and_refuses_fatally_without_waiting() {
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Condvar;
+        use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::{Duration, Instant};
 
         let dir = scratch("stalled-sink");
@@ -919,8 +923,7 @@ mod tests {
                 file.write(record)
             }
         });
-        let mut recorder =
-            Recorder::new(MonitorConfig::default(), Tick::ZERO, None).unwrap();
+        let mut recorder = Recorder::new(MonitorConfig::default(), Tick::ZERO, None).unwrap();
         recorder.with_history_sink(drain);
         let mut executor = declared_executor(&driver, Some(1));
 
@@ -940,11 +943,7 @@ mod tests {
         scan(&mut recorder, &mut executor);
         scan(&mut recorder, &mut executor);
         assert_eq!(
-            recorder
-                .store()
-                .history_sink_health()
-                .unwrap()
-                .state,
+            recorder.store().history_sink_health().unwrap().state,
             dcs_core::HistorySinkState::Lagging,
             "the sink's lag is the named health state while the queue holds records"
         );
@@ -962,7 +961,10 @@ mod tests {
         let message = panic_message(panic.expect_err("a full drain queue must refuse the push"));
         assert!(message.contains("history file"), "{message}");
         assert!(message.contains(path.to_str().unwrap()), "{message}");
-        assert!(message.contains("refused durable history seq 4"), "{message}");
+        assert!(
+            message.contains("refused durable history seq 4"),
+            "{message}"
+        );
 
         // Releasing the sink drains the standing queue in order: the
         // file holds the three recorded entries behind the boundary
@@ -1017,8 +1019,7 @@ mod tests {
                 file.write(record)
             },
         );
-        let mut recorder =
-            Recorder::new(MonitorConfig::default(), Tick::ZERO, None).unwrap();
+        let mut recorder = Recorder::new(MonitorConfig::default(), Tick::ZERO, None).unwrap();
         recorder.with_history_sink(drain);
         let mut executor = declared_executor(&driver, Some(1));
 
@@ -1051,7 +1052,10 @@ mod tests {
         let message =
             panic_message(panic.expect_err("a failed sink must refuse the next recorded append"));
         assert!(message.contains(path.to_str().unwrap()), "{message}");
-        assert!(message.contains("refused durable history seq 3"), "{message}");
+        assert!(
+            message.contains("refused durable history seq 3"),
+            "{message}"
+        );
 
         // The failed record counts as lost, not silently dropped; the
         // file ends at the last durably appended entry.

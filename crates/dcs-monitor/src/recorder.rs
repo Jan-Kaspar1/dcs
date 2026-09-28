@@ -342,7 +342,8 @@ impl Recorder {
     ) -> io::Result<Self> {
         let (sink, replay) = match &config.journal_file {
             Some(path) => {
-                let (file, replay) = JournalFile::open(path, config.journal_capacity, tick, anchor)?;
+                let (file, replay) =
+                    JournalFile::open(path, config.journal_capacity, tick, anchor)?;
                 (Some(file.into_drain(config.journal_drain_capacity)), replay)
             }
             None => (None, crate::journal_file::Replay::default()),
@@ -936,7 +937,7 @@ impl Recorder {
         // tick-domain check inside runs first, so a checkpoint
         // adoption's new domain lands its `domain` seam before the
         // first samples it attributes.
-        self.record_durable(executor, &point_map, &snapshot, scan_tick);
+        self.record_durable(executor, point_map, &snapshot, scan_tick);
 
         // The kind-declared events the scan's components emitted — the
         // executor drained each after its `step` — route here in
@@ -1087,14 +1088,14 @@ impl Recorder {
             tick,
             event,
         };
-        if let Some(sink) = &mut self.history_sink {
-            if let Err(error) = sink.push(HistoryRecord::Entry(Box::new(entry.clone()))) {
-                let seq = match &error.record {
-                    HistoryRecord::Entry(entry) => entry.seq,
-                    HistoryRecord::RunBoundary { .. } => self.history_next_seq,
-                };
-                panic!("{error} — refused durable history seq {seq}");
-            }
+        if let Some(sink) = &mut self.history_sink
+            && let Err(error) = sink.push(HistoryRecord::Entry(Box::new(entry.clone())))
+        {
+            let seq = match &error.record {
+                HistoryRecord::Entry(entry) => entry.seq,
+                HistoryRecord::RunBoundary { .. } => self.history_next_seq,
+            };
+            panic!("{error} — refused durable history seq {seq}");
         }
         self.history_next_seq += 1;
         self.store.push_durable(entry);
