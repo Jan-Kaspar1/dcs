@@ -459,6 +459,42 @@ Implementation order: second, after [daily architecture review](daily-architectu
   layout — reports inconclusive; the pair leaves on its launch
   roles.
 
+### Landed 2026-09-28 (quiesced-standby settle leg, #1195)
+
+- The quiesced-standby no-phantom-settle contract — the #689 fix
+  serving WW-LCM-001's receipt-as-truth clause and the write gate's
+  quiescence rule — is exercised on the deployed rig by scenario
+  leg `1750_quiesced_standby_settle`. A tracking standby's quiesced
+  scan must never settle an adopted pending command on its gated
+  image: the defect applied the adopted receipt on the staged
+  image, minted a phantom settled verdict that journaled before
+  any real boundary, and was never re-executed on the live line.
+  Staging a standby that holds an adopted still-pending receipt
+  takes the run's driven third controller — a paced standby's
+  pending window is one apply boundary wide and unobservable, so
+  the leg submits a receipted writable-point command on the field
+  owner just past its scan boundary and drives one scan on the
+  driven peer so its checkpoint pull lands inside the pending
+  window. While the carried receipt stands `accepted` the audit
+  reads the quiesced standby's serving monitor and durable
+  `--journal-file`: no terminal verdict in `/receipts`, no
+  `command_settled` in either journal, the gated image unchanged.
+  The leg then promotes the standby and asserts the carried
+  command resolves exactly once at the true boundary on every
+  peer — the adopted record carrying the line's applied verdict
+  and apply tick verbatim, never a fresh local mint — and restores
+  the launch roles.
+- Named diagnostics are `quiesced-settle-failed` and
+  `quiesced-settle-nondeterministic`, with the self-check's
+  `quiesced-settle-unchecked` covering the planted phantom settle
+  and the planted missing boundary resolution; two consecutive
+  passes produce identical digests; a run whose served surfaces
+  predate the receipt-attribution and checkpoint-window contract,
+  whose ctx carries no driven-controller seam or journal files,
+  whose pair never settles tracking, or whose staging never lands
+  a pull inside the pending window reports inconclusive; the pair
+  leaves on its launch roles.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,
