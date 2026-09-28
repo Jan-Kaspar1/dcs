@@ -1326,6 +1326,100 @@ def relaunch_controller(cfg, record, run_dir, model, name, timeline,
                 else ' (previous container already absent)'))
 
 
+def _container_bridge_address(container):
+    """The container's current rig-bridge IPv4 — docker inspect over
+    the single network every run container joins. Raises on a missing
+    container or an empty answer so the calling scenario reports the
+    probe never completed rather than staging against a blank
+    address."""
+    result = docker('inspect', '--format',
+                    '{{range .NetworkSettings.Networks}}'
+                    '{{.IPAddress}}{{end}}', container, timeout=30)
+    address = result.stdout.strip()
+    if not address:
+        raise RuntimeError('no bridge address on ' + container)
+    return address
+
+
+def _address_placeholder(run_id, pair):
+    """The address-move placeholder's container name — one per pair,
+    launched with the run's managed and run labels so teardown
+    reconciles it even when a pass aborts before
+    release_address_placeholder runs."""
+    return 'dcs-hw-' + run_id + ('-placeholder' if pair == 'deployed'
+                                 else '-probe-placeholder')
+
+
+def move_controller_address(cfg, record, run_dir, model, name,
+                            timeline, pair='deployed'):
+    """The scenario-callable address-move staging — the
+    track-source-rediscovery leg's reproduction of the
+    standby-track-source-stale-ip-pin finding's deployment shape:
+    remove the pair member's container, hold its freed bridge
+    address with a placeholder container on the rig network, and
+    recreate the controller with its launch flags so IPAM assigns a
+    different bridge address while the container name — the peer's
+    configured DNS tracking source — resolves onward.
+
+    `name` is the scenario ctx's endpoint key ('active' is ctrl-a's
+    container, 'standby' ctrl-b's on the deployed pair; the probe
+    pair's ctx maps the same keys onto probe-a/probe-b). The
+    placeholder is a sleeping container pinned to the freed address
+    through `--ip`, carrying the run's managed and run labels; the
+    recreate rides relaunch_controller so the launch command is
+    byte-identical (flags restored, not doctored). A recreate
+    failure removes the placeholder again so an aborted move leaves
+    no held address behind. Returns the recorded staging evidence
+    {'container', 'placeholder', 'old_address', 'new_address'} —
+    old and new differ by construction since the placeholder holds
+    the old one. Each step is recorded on the run's action
+    timeline; a docker failure raises so the calling scenario
+    reports the move never completed.
+    """
+    run_id, sha = record['run_id'], record['attempted_sha']
+    container = _controller_container(run_id, name, pair)
+    net = 'dcs-hwtest-' + run_id
+    placeholder = _address_placeholder(run_id, pair)
+    old_address = _container_bridge_address(container)
+    timeline('controller-move', 'docker rm -f ' + container
+             + '; hold ' + old_address + ' on ' + placeholder)
+    docker('rm', '-f', container, timeout=90)
+    docker('rm', '-f', placeholder, check=False, timeout=60)
+    try:
+        docker(*_docker_run_args(cfg, run_id, placeholder),
+               '--network', net, '--ip', old_address,
+               '--entrypoint', 'sleep',
+               IMAGE_PREFIX + 'controller:' + sha, 'infinity')
+        relaunch_controller(cfg, record, run_dir, model, name,
+                            timeline, pair=pair)
+    except Exception:
+        # The recreate half failed — the move is incomplete: free
+        # the placeholder so a re-driven move starts from a released
+        # address rather than wedging it.
+        docker('rm', '-f', placeholder, check=False, timeout=60)
+        raise
+    new_address = _container_bridge_address(container)
+    timeline('controller-moved', container + ' moved ' + old_address
+             + ' -> ' + new_address + ' (' + placeholder
+             + ' holds the old address)')
+    return {'container': container, 'placeholder': placeholder,
+            'old_address': old_address, 'new_address': new_address}
+
+
+def release_address_placeholder(run_id, timeline, pair='deployed'):
+    """Free the bridge address move_controller_address's placeholder
+    holds — `docker rm -f` on the placeholder container. Tolerates an
+    already-absent placeholder so an aborted pass's cleanup can be
+    re-driven; recorded on the run's action timeline like the other
+    lifecycle actions."""
+    container = _address_placeholder(run_id, pair)
+    timeline('address-release', 'docker rm -f ' + container)
+    result = docker('rm', '-f', container, check=False, timeout=60)
+    timeline('address-released', container
+             + (' removed' if result.returncode == 0
+                else ' already absent'))
+
+
 # The --state-file sink's write-then-rename temporary sibling
 # (dcs-monitor's write_state_file writes '<state>.tmp' beside the
 # state file, then renames it into place): the path the 'fifo' mount
@@ -2216,6 +2310,18 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
             relaunch_controller(
                 cfg, record, run_dir, src / cfg['model_fixture'], name,
                 timeline, track),
+        # The tracking-source address-move staging — the
+        # rediscovery leg's reproduction of the stale-IP-pin
+        # finding: the runner removes the named member's container,
+        # holds its freed bridge address on a placeholder, and
+        # recreates the launch so the configured DNS name resolves
+        # to a NEW address. release_address_placeholder frees the
+        # held address again.
+        'move_controller_address': lambda name: move_controller_address(
+            cfg, record, run_dir, src / cfg['model_fixture'], name,
+            timeline),
+        'release_address_placeholder': lambda:
+            release_address_placeholder(run_id, timeline),
         # The sink-isolation leg's mount lever — the impede/restore
         # pair on the endpoints the run config declares a stalled
         # mount kind for. No declaration means no lever, and the leg
@@ -2345,6 +2451,12 @@ def _probe_ctx(ctx, cfg, record, src, run_dir, probe, mounts,
             relaunch_controller(
                 cfg, record, run_dir, src / probe['model_fixture'],
                 name, timeline, track, pair='probe'),
+        'move_controller_address': lambda name: move_controller_address(
+            cfg, record, run_dir, src / probe['model_fixture'], name,
+            timeline, pair='probe'),
+        'release_address_placeholder': lambda:
+            release_address_placeholder(run_id, timeline,
+                                        pair='probe'),
         'impede_state_file': (lambda name: impede_state_file(
             run_id, run_dir, name, timeline, mounts, pair='probe'))
             if probe_mounts else None,
