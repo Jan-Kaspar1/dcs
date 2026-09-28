@@ -293,24 +293,38 @@ fn unknown_sim_tcp_parameter_is_invalid_device_parameters() {
 }
 
 #[test]
-fn unreachable_sim_tcp_backend_fails_before_any_scan() {
-    // A guaranteed-dead address: bind once to learn a free port, then drop
-    // the listener so the connect is refused.
+fn an_unreachable_sim_tcp_backend_assembles_link_down() {
+    // A guaranteed-dead address: bind once to learn a free port, then
+    // drop the listener so the connect is refused. The born-active
+    // startup contract defers the transport half of the attach: the
+    // backend assembles in the same link-down state a severed link
+    // already serves — the unreachable field is the launched run's
+    // pending startup class, not an assembly failure — and the
+    // declared-point correspondence probe waits inside the startup
+    // claim's first answered contact.
     let dead = TcpListener::bind(("127.0.0.1", 0))
         .unwrap()
         .local_addr()
         .unwrap();
     let model = mixed_model(dead);
-    let error = resolve_drivers(&model, &DriverRegistry::standard())
-        .err()
+    let driver = resolve_drivers(&model, &DriverRegistry::standard())
+        .unwrap()
+        .build()
         .unwrap();
-    match error {
-        AssemblyError::DeviceBackend { device, kind, .. } => {
-            assert_eq!(device, DeviceId(2));
-            assert_eq!(kind, "sim-tcp");
-        }
-        other => panic!("expected DeviceBackend, got {other:?}"),
-    }
+
+    // The link-down state is the remote kind's ordinary outage shape:
+    // the point answers `Disconnected`, and the startup claim's ask
+    // produces no verdict — the deferred probe reporting the silent
+    // plant — the inconclusive answer the pending run retries on.
+    assert!(matches!(
+        driver.read(LEVEL_RAW),
+        Err(dcs_core::IoError::Disconnected(_))
+    ));
+    let error = driver.claim_field_writer_unless_held(1).unwrap_err();
+    assert!(
+        error.to_string().contains("deferred assembly probe"),
+        "{error}"
+    );
 }
 
 #[test]

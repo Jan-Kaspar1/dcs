@@ -319,6 +319,17 @@ pub struct Peer<'d> {
     /// a claim a dead owner left standing is still preempted, the
     /// restart-as-active recovery path.
     startup_claim: Option<StartupClaim<'d>>,
+    /// Whether the born-active's conditional startup grant is still
+    /// unsettled — set by [`activate`](Self::activate) when the ask
+    /// produced no verdict (`Err`) and cleared when a retry lands
+    /// one: a grant promotes the run to field owner, a refusal ends
+    /// the pending state as the ordinary tracking standby the refusal
+    /// stand-down already reported. While set the peer reports
+    /// `standby`/`unsynchronized`-or-degraded and refuses every
+    /// promotion — the launched run may enter field ownership only
+    /// through the conditional grant, never through an unconditional
+    /// claim that could preempt a live incumbent it lost track of.
+    startup_pending: bool,
     /// The claim's orphan-promotion counterpart — the conditional grant
     /// a [`promote`](Self::promote) or [`self_promote`](Self::self_promote)
     /// from [`StandbySync::Orphaned`] runs in place of the
@@ -450,14 +461,16 @@ pub struct Peer<'d> {
     /// The claim's fencing-loss counterpart — the *bound* conditional
     /// re-grant a fencing-demoted ex-owner probes each scan while its
     /// loss mark stands, installed by
-    /// [`with_field_reclaim`](Self::with_field_reclaim). Granted only
-    /// where the field stands unclaimed or already names this run's
-    /// token, so the reclaim never preempts a standing owner — a
-    /// still-held rogue claim keeps the field until it releases — and
-    /// bound, unlike the orphan cycle's unbound probe, because the
-    /// peer's gate lifts on it: the run's attachments must stand in
-    /// the claim's holders for its writes to pass the arbitration it
-    /// just re-took.
+    /// [`with_field_reclaim`](Self::with_field_reclaim). Granted where
+    /// the field stands unclaimed, already names this run's token, or
+    /// stands under a different owner's holderless claim — the
+    /// dead-owner or orphan-placeholder shape, whose refusal would
+    /// wedge the pair the claim was raised to fence — so the reclaim
+    /// never preempts a live attachment: a still-held rogue claim
+    /// keeps the field until it releases. The grant is bound, unlike
+    /// the orphan cycle's unbound probe, because the peer's gate lifts
+    /// on it: the run's attachments must stand in the claim's holders
+    /// for its writes to pass the arbitration it just re-took.
     reclaim: Option<Reclaim<'d>>,
     /// The field's write-ownership claim as the last probe observed it
     /// — what [`report`](Self::report) serves as `field_claim`. `None`
@@ -586,11 +599,16 @@ impl fmt::Debug for Claimant<'_> {
 /// The fencing-loss counterpart of [`Ensure`]: the *bound* conditional
 /// re-grant a fencing-demoted ex-owner probes each scan while its loss
 /// mark stands — the wedge escape a released preemption owes the pair.
-/// Granted only where the field stands unclaimed or already names this
-/// run's token — `Ok(true)` — answering `Ok(false)` while a different
-/// owner stands and `Err` where the field could not be asked, so the
-/// reclaim never preempts a standing owner: a live incumbent — even a
-/// rogue's still-held claim — keeps the field until it releases. The
+/// Granted where the field stands unclaimed, already names this run's
+/// token, or stands under a different owner's *holderless* claim —
+/// `Ok(true)` — answering `Ok(false)` only while a different owner's
+/// claim has live holders and `Err` where the field could not be
+/// asked, so the reclaim never preempts a live attachment: a live
+/// incumbent — even a rogue's still-held claim — keeps the field until
+/// it releases. A different owner's holderless claim protects no one —
+/// the dead-owner shape, and the orphan placeholder a sibling
+/// ex-owner's unbound probe raises — so the re-grant preempts it
+/// rather than wedging the pair the claim was raised to fence. The
 /// grant is bound, unlike the orphan cycle's unbound probe, because
 /// the peer's gate lifts on it: the run's attachments must stand in
 /// the claim's holders for its writes to pass the arbitration it just
@@ -960,6 +978,38 @@ pub enum TrackReport {
     },
 }
 
+/// What a launched active's [`Peer::activate`] settled the startup to —
+/// the three verdicts the born-active startup-failure contract records
+/// for the conditional startup grant, each already carried into the
+/// peer's reported state before the caller learns it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Activation {
+    /// The startup claim granted — or no conditional grant was asked —
+    /// and the gate lifted: the run owns the field, `role: active`.
+    Granted,
+    /// The startup claim produced no verdict — the field could not be
+    /// asked, or the ask failed without an answer. The run stands
+    /// pending: reported `standby`/`unsynchronized`, gate closed,
+    /// non-promotable, the conditional grant re-issuing once per
+    /// answered field contact until a verdict lands. `detail` is the
+    /// claim ask's own report — the served evidence of why the run
+    /// waits.
+    Pending {
+        /// What the inconclusive ask reported.
+        detail: String,
+    },
+    /// A live incumbent holds the field's write-ownership claim — the
+    /// refusal verdict. The run already settled `active` → `standby`
+    /// and journaled the refusal's observed claimant; `error` is the
+    /// [`SwitchError::FieldClaimFailed`] the caller's disposition
+    /// decides on — rejoin the declared pair as its standby where one
+    /// was configured, or exit where none was.
+    Refused {
+        /// The refusal the startup claim met.
+        error: SwitchError,
+    },
+}
+
 impl<'d> Peer<'d> {
     /// An instance owning field writes: role `active`.
     ///
@@ -995,6 +1045,7 @@ impl<'d> Peer<'d> {
             was_owner: true,
             ensure: None,
             startup_claim: None,
+            startup_pending: false,
             orphan_claim: None,
             pending_orphans: Vec::new(),
             pending_refusals: Vec::new(),
@@ -1216,15 +1267,20 @@ impl<'d> Peer<'d> {
     /// Arms the claim's fencing-loss counterpart — the *bound*
     /// conditional re-grant a fencing-demoted ex-owner probes each
     /// scan while its loss mark stands. `reclaim` takes the field's
-    /// write-ownership under this run's token only where the field
-    /// stands unclaimed or already names the token — `Ok(true)` — and
-    /// answers `Ok(false)` while a different owner stands, so a
+    /// write-ownership under this run's token where the field stands
+    /// unclaimed, already names the token, or stands under a different
+    /// owner's holderless claim — `Ok(true)` — and answers `Ok(false)`
+    /// only while a different owner's claim has live holders, so a
     /// still-held preemptor's claim keeps the field until it releases
-    /// and the probe never preempts. Unlike the orphan cycle's unbound
-    /// probe the grant joins the run's attachments to the claim's
-    /// holders — the gate it re-lifts must pass the arbitration it
-    /// re-took. On `Ok(true)` the peer clears the loss mark, lifts the
-    /// field gate the demotion closed, and reports
+    /// and the probe never preempts a live attachment. The holderless
+    /// shapes the grant still takes — a dead owner's standing claim
+    /// and the orphan placeholder a sibling ex-owner's unbound probe
+    /// raises — protect no one, and refusing them would wedge the pair
+    /// the claim was raised to fence. Unlike the orphan cycle's
+    /// unbound probe the grant joins the run's attachments to the
+    /// claim's holders — the gate it re-lifts must pass the
+    /// arbitration it re-took. On `Ok(true)` the peer clears the loss
+    /// mark, lifts the field gate the demotion closed, and reports
     /// [`FieldClaim::Held`] from the claim it just re-took; `Ok(false)`
     /// and `Err` leave the mark standing for the next scan. A peer
     /// built without the hook keeps the pre-reclaim behavior — the
@@ -1292,6 +1348,7 @@ impl<'d> Peer<'d> {
             was_owner: false,
             ensure: None,
             startup_claim: None,
+            startup_pending: false,
             orphan_claim: None,
             pending_orphans: Vec::new(),
             pending_refusals: Vec::new(),
@@ -1337,12 +1394,26 @@ impl<'d> Peer<'d> {
     /// field and silently roll back commands the incumbent receipted
     /// and applied.
     ///
+    /// The born-active startup-failure contract settles every ask the
+    /// grant returns into the run's reported state before answering:
+    /// `Ok(true)` is [`Activation::Granted`] — gate lifted, `active`;
+    /// `Ok(false)` is [`Activation::Refused`], the launched run already
+    /// stood down to the pair's standby surface with the incumbent's
+    /// observed claimant journaled — the caller rejoins the declared
+    /// pair or exits, the peer never stays an unpaired active; and
+    /// `Err` is [`Activation::Pending`], the same stand-down plus the
+    /// `startup_pending` mark that re-issues the conditional ask on
+    /// each answered field contact until a verdict lands — a field
+    /// that cannot be asked is the unreachable-at-boot class the
+    /// contract keeps the process running for.
+    ///
     /// Only a launched `active` activates — any other role is refused
-    /// with [`SwitchError::NotActive`] — and a refused or failed claim
-    /// refuses the start as [`SwitchError::FieldClaimFailed`] with the
-    /// gate still closed. On a peer carrying no claim hook — a private
-    /// field — the gate simply lifts.
-    pub fn activate(&mut self) -> Result<(), SwitchError> {
+    /// with [`SwitchError::NotActive`]. Without the conditional hook —
+    /// a private field, or a driver surface that cannot arbitrate live
+    /// holders — the unconditional claim runs and a failed one still
+    /// refuses the start as [`SwitchError::FieldClaimFailed`], the
+    /// recorded fallback.
+    pub fn activate(&mut self) -> Result<Activation, SwitchError> {
         if self.role != Role::Active {
             return Err(SwitchError::NotActive);
         }
@@ -1350,19 +1421,31 @@ impl<'d> Peer<'d> {
             match startup.0() {
                 Ok(true) => {
                     self.open_gate();
-                    Ok(())
+                    Ok(Activation::Granted)
                 }
-                Ok(false) => Err(SwitchError::FieldClaimFailed {
-                    detail: "a live peer holds the field's write-ownership claim — a \
-                             controller restarting into a pair cannot prove its resumed \
-                             state is current with the incumbent's and must not preempt \
-                             it; rejoin as a standby instead"
-                        .to_string(),
-                }),
-                Err(detail) => Err(SwitchError::FieldClaimFailed { detail }),
+                Ok(false) => {
+                    let error = SwitchError::FieldClaimFailed {
+                        detail: "a live peer holds the field's write-ownership claim — a \
+                                 controller restarting into a pair cannot prove its resumed \
+                                 state is current with the incumbent's and must not preempt \
+                                 it; rejoin as a standby instead"
+                            .to_string(),
+                    };
+                    // The verdict itself is the claim observation:
+                    // the incumbent's claim stands — and the refusal
+                    // is what the stand-down journals under.
+                    self.field_claim = Some(FieldClaim::Held);
+                    self.observe_claim_refusal(self.executor.tick());
+                    self.stand_down(SwitchOrigin::Fenced);
+                    Ok(Activation::Refused { error })
+                }
+                Err(detail) => {
+                    self.enter_pending();
+                    Ok(Activation::Pending { detail })
+                }
             }
         } else {
-            self.lift_gate()
+            self.lift_gate().map(|()| Activation::Granted)
         }
     }
 
@@ -1482,6 +1565,16 @@ impl<'d> Peer<'d> {
             Role::Active | Role::Promoting => return Err(SwitchError::AlreadyActive),
             Role::Standby | Role::Demoting => {}
         }
+        // The pending born-active enters field ownership only through
+        // its conditional startup grant: the claim has not settled,
+        // so no promotion lifts the gate — the unconditional claim
+        // path could preempt a live incumbent the pending run lost
+        // track of.
+        if self.startup_pending {
+            return Err(SwitchError::NotConverged {
+                sync: self.sync.clone(),
+            });
+        }
         if !matches!(
             self.sync,
             StandbySync::Tracking { .. }
@@ -1531,6 +1624,16 @@ impl<'d> Peer<'d> {
         match self.role {
             Role::Active | Role::Promoting => return Err(SwitchError::AlreadyActive),
             Role::Standby | Role::Demoting => {}
+        }
+        // The pending born-active refuses the failover gate like the
+        // requested one: while its startup claim is unsettled the run
+        // promotes only through the conditional grant, and an armed
+        // run's each due boundary journals this `not_converged`
+        // refusal.
+        if self.startup_pending {
+            return Err(SwitchError::NotConverged {
+                sync: self.sync.clone(),
+            });
         }
         if !(self.failover_due() && self.converged) {
             return Err(SwitchError::NotConverged {
@@ -1659,6 +1762,54 @@ impl<'d> Peer<'d> {
         self.attribution = attribution;
         self.change(self.executor.tick(), Role::Demoting);
         Ok(())
+    }
+
+    /// The born-active startup-failure contract's settle — the
+    /// launched run's move onto the pair's standby surface when its
+    /// startup claim cannot lift the gate: the gate stays (or returns)
+    /// closed, the release hook forgets any recorded ownership token,
+    /// the queued commands suspend, the tracking state resets to
+    /// `unsynchronized`, and the reported role moves straight to
+    /// `standby`. The same terminal state a demotion settles into,
+    /// reached in one transition: no scan ever ran under this run's
+    /// field ownership, so there is no `demoting` surface to serve.
+    fn stand_down(&mut self, origin: SwitchOrigin) {
+        if let Some(gate) = self.gate {
+            gate.close();
+        }
+        if let Some(release) = &self.release {
+            release.0();
+        }
+        self.executor.suspend_pending_commands();
+        self.sync = StandbySync::Unsynchronized;
+        self.aligned = None;
+        self.applied_offset = None;
+        self.staged = None;
+        self.misses = 0;
+        self.converged = false;
+        self.open_refusal = None;
+        // This run never held the field — the startup stand-down
+        // clears the born-active's construction-time mark, so the
+        // orphan cycle never re-arms a claim that never stood and a
+        // pulled checkpoint's commanded state audits against the
+        // tracked line, not this run's pre-ownership image.
+        self.was_owner = false;
+        self.attribution = SwitchAttribution {
+            origin,
+            actor: None,
+        };
+        self.change(self.executor.tick(), Role::Standby);
+    }
+
+    /// The pending half of the born-active contract: the launched run
+    /// stands down behind the pending-claim surface — reported
+    /// `standby`, gate closed, promotable by nobody — while
+    /// `startup_pending` keeps the conditional grant retrying on each
+    /// answered field contact (see
+    /// [`retry_startup_claim`](Self::retry_startup_claim)).
+    fn enter_pending(&mut self) {
+        self.stand_down(SwitchOrigin::Fenced);
+        self.startup_pending = true;
     }
 
     /// One best-effort synchronization at the promotion boundary — a
@@ -2840,22 +2991,25 @@ impl<'d> Peer<'d> {
     /// the field and the claim was preempted under it" — the ex-owner
     /// the reclaim exists for. The probe is the *bound* conditional
     /// grant: `Ok(true)` takes the field's write-ownership back under
-    /// this run's token — the field stood unclaimed or already named
-    /// the token — joining the run's attachments to the claim's
-    /// holders so the re-lifted gate's writes pass the arbitration it
-    /// re-took, then reports `promoting` exactly as a promotion's
-    /// granted claim does, the next field-owning scan settling
-    /// `active`. `Ok(false)` — a different owner's claim still stands
-    /// — and `Err` leave mark and gate untouched for the next scan:
-    /// the reclaim never preempts a standing owner, so a still-held
-    /// rogue claim keeps the field until it releases and a concurrent
-    /// reclaimer's grant refuses the loser. A peer built without the
-    /// hook probes nothing — the wedge stands until an operator's
-    /// promote unwedges, the pre-hook behavior. A refused probe the
-    /// field's arbitration attributes to a standing foreign owner
-    /// journals one observed-claimant record per distinct token — the
-    /// audit trail the preempt-and-release episode between this run's
-    /// writes would otherwise leave empty.
+    /// this run's token — the field stood unclaimed, already named the
+    /// token, or stood under a different owner's holderless claim, the
+    /// dead-owner or orphan-placeholder shape the re-grant preempts
+    /// without abandoning a live attachment — joining the run's
+    /// attachments to the claim's holders so the re-lifted gate's
+    /// writes pass the arbitration it re-took, then reports
+    /// `promoting` exactly as a promotion's granted claim does, the
+    /// next field-owning scan settling `active`. `Ok(false)` — a
+    /// different owner's claim still has live holders — and `Err`
+    /// leave mark and gate untouched for the next scan: the reclaim
+    /// never preempts a live attachment, so a still-held rogue claim
+    /// keeps the field until it releases and a concurrent reclaimer's
+    /// grant refuses the loser. A peer built without the hook probes
+    /// nothing — the wedge stands until an operator's promote
+    /// unwedges, the pre-hook behavior. A refused probe the field's
+    /// arbitration attributes to a standing foreign owner journals one
+    /// observed-claimant record per distinct token — the audit trail
+    /// the preempt-and-release episode between this run's writes would
+    /// otherwise leave empty.
     fn reclaim_field_claim(&mut self, tick: Tick) {
         if self.role != Role::Standby || !self.fencing_lost {
             return;
@@ -2879,6 +3033,49 @@ impl<'d> Peer<'d> {
             // A refusal names the standing owner the verdict carried —
             // journal it once per claimant, deduplicated on the token.
             Ok(false) => self.observe_claim_refusal(tick),
+            Err(_) => {}
+        }
+    }
+
+    /// The deferred startup grant's retry — the born-active pending
+    /// state's per-scan claim ask. While `startup_pending` stands the
+    /// launched run has already stood down behind the pending-claim
+    /// surface; each scan whose claim probe answered the field re-issues
+    /// the conditional `startup_claim` ask: a grant lifts the gate and
+    /// reports `promoting`, settling `active` on the next scan under the
+    /// lifted gate — completing what the boot could not — while a
+    /// refusal ends the pending state and journals the observed claimant
+    /// the launched-active refusal records, and an `Err` leaves the run
+    /// waiting for the next answered contact. An unanswered contact
+    /// issues no ask: the field cannot be asked.
+    fn retry_startup_claim(&mut self, tick: Tick, field_answered: bool) {
+        if !self.startup_pending || !field_answered {
+            return;
+        }
+        let Some(outcome) = self.startup_claim.as_ref().map(|startup| startup.0()) else {
+            self.startup_pending = false;
+            return;
+        };
+        match outcome {
+            Ok(true) => {
+                self.startup_pending = false;
+                self.open_gate();
+                self.attribution = SwitchAttribution {
+                    origin: SwitchOrigin::Reclaim,
+                    actor: None,
+                };
+                self.change(tick, Role::Promoting);
+                // The grant just took the claim — report the held
+                // arbitration without waiting on the next probe.
+                self.field_claim = Some(FieldClaim::Held);
+            }
+            Ok(false) => {
+                self.startup_pending = false;
+                // The incumbent's refusal settled the startup: the run
+                // stays the tracking standby it already reported, and
+                // the observed-claimant record attributes the verdict.
+                self.observe_claim_refusal(tick);
+            }
             Err(_) => {}
         }
     }
@@ -2999,10 +3196,15 @@ impl<'d> Peer<'d> {
         // what a mutation from this run's attachments would meet —
         // read-only, so reporting an unclaimed field cannot seize it,
         // and a failed probe is no observation: the last answer stands.
+        // The answered contact also gates the deferred startup grant's
+        // retry — a pending born-active re-issues its claim ask only
+        // on contacts the field answered.
+        let mut field_answered = false;
         if let Some(probe) = &self.probe
             && let Ok(observed) = probe.0()
         {
             self.field_claim = Some(observed);
+            field_answered = true;
         }
         let quiesced = !self.owns_field();
         let tick = if quiesced {
@@ -3067,6 +3269,7 @@ impl<'d> Peer<'d> {
             _ => {}
         }
         self.reclaim_field_claim(tick);
+        self.retry_startup_claim(tick, field_answered);
         if self.owns_field() {
             self.staged = None;
         } else {
@@ -3962,10 +4165,12 @@ mod tests {
     }
 
     /// A live incumbent's standing claim refuses the startup grant —
-    /// the stale-checkpoint takeover the grant exists to prevent: the
-    /// launch fails `FieldClaimFailed` naming the live holder and the
-    /// standby-rejoin remedy, the gate stays closed, and the
-    /// unconditional preempt hook never ran.
+    /// the stale-checkpoint takeover the grant exists to prevent. The
+    /// born-active contract answers [`Activation::Refused`] carrying
+    /// `FieldClaimFailed` naming the live holder and the standby-rejoin
+    /// remedy, the launched run already stood down to the standby
+    /// surface — the gate stays closed and the unconditional preempt
+    /// hook never ran.
     #[test]
     fn a_live_incumbent_refuses_the_startup_grant() {
         let driver = StubDriver::new(PointId(1), Value::Float(0.0));
@@ -3978,26 +4183,35 @@ mod tests {
             })
             .with_field_startup_claim(|| Ok(false));
 
-        let error = peer.activate().unwrap_err();
-        let SwitchError::FieldClaimFailed { detail } = error else {
-            panic!("the refused grant must fail named: {error:?}");
+        let activation = peer.activate().unwrap();
+        let Activation::Refused {
+            error: SwitchError::FieldClaimFailed { detail },
+        } = activation
+        else {
+            panic!("the refused grant must answer Refused: {activation:?}");
         };
         assert!(
             detail.contains("live peer") && detail.contains("standby"),
             "the refusal must name the live incumbent and the remedy: {detail}"
         );
         assert!(!gate.is_open());
+        assert_eq!(peer.role(), Role::Standby);
+        assert_eq!(peer.sync_state(), &StandbySync::Unsynchronized);
+        assert_eq!(peer.report().field_claim, Some(FieldClaim::Held));
         assert!(
             !claimed.load(Ordering::Relaxed),
             "a refused startup grant must not fall back to preempting"
         );
     }
 
-    /// A startup grant the field could not answer fails the activation
-    /// with the backend's own detail — the same `FieldClaimFailed` a
-    /// refused unconditional claim produces.
+    /// A startup grant the field could not answer leaves the launched
+    /// run pending — [`Activation::Pending`] carrying the backend's own
+    /// detail — behind the same standby surface a demotion settles
+    /// into: gate closed, `unsynchronized`, non-promotable, the
+    /// conditional ask retrying on each answered field contact until a
+    /// verdict lands.
     #[test]
-    fn a_failed_startup_grant_refuses_the_activation() {
+    fn an_unanswered_startup_grant_stands_the_launch_pending() {
         let driver = StubDriver::new(PointId(1), Value::Float(0.0));
         let gate = WriteGate::closed(&driver);
         let mut peer = Peer::active(executor(&gate), Some(&gate))
@@ -4005,11 +4219,130 @@ mod tests {
 
         assert_eq!(
             peer.activate(),
-            Err(SwitchError::FieldClaimFailed {
+            Ok(Activation::Pending {
                 detail: "field unreachable".to_string()
             })
         );
         assert!(!gate.is_open());
+        assert_eq!(peer.role(), Role::Standby);
+        assert_eq!(peer.sync_state(), &StandbySync::Unsynchronized);
+        assert!(!peer.accepts_commands());
+        assert_eq!(
+            peer.promote(),
+            Err(SwitchError::NotConverged {
+                sync: StandbySync::Unsynchronized
+            })
+        );
+    }
+
+    /// The pending launch's deferred grant lands on the first contact
+    /// the field answers: the per-scan claim probe's `Ok` arms one
+    /// retry — a grant lifts the gate and reports `promoting`,
+    /// settling `active` on the next scan — while a silent field
+    /// issues no ask at all.
+    #[test]
+    fn the_pending_launch_retries_the_grant_on_each_answered_contact() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let field_up = AtomicBool::new(false);
+        let asks = std::sync::atomic::AtomicUsize::new(0);
+        let mut peer = Peer::active(executor(&gate), Some(&gate))
+            .with_field_probe(|| {
+                if field_up.load(Ordering::Relaxed) {
+                    Ok(FieldClaim::Unclaimed)
+                } else {
+                    Err("no contact".to_string())
+                }
+            })
+            .with_field_startup_claim(|| {
+                asks.fetch_add(1, Ordering::Relaxed);
+                if field_up.load(Ordering::Relaxed) {
+                    Ok(true)
+                } else {
+                    Err("field unreachable".to_string())
+                }
+            });
+
+        assert_eq!(
+            peer.activate(),
+            Ok(Activation::Pending {
+                detail: "field unreachable".to_string()
+            })
+        );
+
+        // A silent field issues no further ask: the run scans quiesced
+        // and the unanswered probe keeps `field_claim` unobserved.
+        peer.scan();
+        peer.scan();
+        assert_eq!(
+            asks.load(Ordering::Relaxed),
+            1,
+            "no answered contact must issue no retry"
+        );
+        assert_eq!(peer.role(), Role::Standby);
+        assert_eq!(peer.report().field_claim, None);
+
+        // The field answers: the same scan re-issues the ask, the
+        // grant lifts the gate, and the role walks `promoting` to
+        // `active` across the next boundary — the deferred startup
+        // completing what the boot could not.
+        field_up.store(true, Ordering::Relaxed);
+        peer.scan();
+        assert_eq!(peer.role(), Role::Promoting);
+        assert!(gate.is_open());
+        assert_eq!(peer.report().field_claim, Some(FieldClaim::Held));
+        peer.scan();
+        assert_eq!(peer.role(), Role::Active);
+        assert!(peer.owns_field());
+        assert!(peer.accepts_commands());
+        assert_eq!(asks.load(Ordering::Relaxed), 2);
+    }
+
+    /// A deferred ask the incumbent refuses ends the pending state
+    /// where it stands: the run stays the tracking standby it already
+    /// reported, the observed-claimant record attributes the verdict,
+    /// and the gate never lifted.
+    #[test]
+    fn a_pending_asks_refusal_settles_the_startup_standby() {
+        const OUTPUT: PointId = PointId(2);
+        let driver = StubDriver::field(&[(OUTPUT, Value::Float(0.0))]);
+        let gate = WriteGate::closed(&driver);
+        let field_up = AtomicBool::new(false);
+        let map = PointMap::new().with_point(OUTPUT, Direction::Out, ValueKind::Float);
+        let mut peer = Peer::active(Executor::new(&gate, map, Vec::new()).unwrap(), Some(&gate))
+            .with_field_probe(|| {
+                if field_up.load(Ordering::Relaxed) {
+                    Ok(FieldClaim::Held)
+                } else {
+                    Err("no contact".to_string())
+                }
+            })
+            .with_field_startup_claim(|| {
+                if field_up.load(Ordering::Relaxed) {
+                    Ok(false)
+                } else {
+                    Err("field unreachable".to_string())
+                }
+            })
+            .with_claim_observer(|| vec![77]);
+
+        assert!(matches!(peer.activate(), Ok(Activation::Pending { .. })));
+        field_up.store(true, Ordering::Relaxed);
+        peer.scan();
+        assert_eq!(peer.role(), Role::Standby);
+        assert!(!gate.is_open());
+        // The pending state resolved — the ordinary convergence gate
+        // now decides promotions.
+        assert_eq!(
+            peer.promote(),
+            Err(SwitchError::NotConverged {
+                sync: StandbySync::Unsynchronized
+            })
+        );
+        let observations = peer.take_claim_observations();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].claimant, 77);
+        assert_eq!(observations[0].point, OUTPUT);
     }
 
     /// A write the shared field fenced — its answer to a preempted
