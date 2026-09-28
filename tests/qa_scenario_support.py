@@ -662,7 +662,11 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
     the field-claim scenario exercises: claim_writer preempts
     unconditionally, ensure_writer grants only into an unclaimed or
     same-owner claim — `claimed_shared` while other live attachments
-    hold the token — release_writer drops only the caller's hold (the
+    hold the token — reclaim_writer, the fencing-loss counterpart,
+    grants additionally over a different owner's *holderless* claim —
+    the dead-owner or orphan-placeholder shape, which protects no live
+    attachment — and refuses only a different-owner claim with live
+    holders, release_writer drops only the caller's hold (the
     claim freed when the holder set empties, never on disconnect), and
     write/step fence every attachment outside the holder set —
     `unclaimed` while no claim stands at all. Fault flags stage each
@@ -809,6 +813,23 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
                 self.shared_conns.add(cid)
                 if self.ensure_done:
                     return {'result': 'done'}
+                return {'result': 'claimed_shared',
+                        'owner': owner}
+            if op == 'reclaim_writer':
+                owner = request['owner']
+                if self.claim is not None \
+                        and owner != self.claim['owner'] \
+                        and self.claim['holders']:
+                    return self._fenced()
+                if self.claim is None or owner != self.claim['owner']:
+                    # Unclaimed, or a different owner's holderless
+                    # claim — the dead-owner or orphan-placeholder
+                    # shape the fencing-loss re-grant preempts.
+                    self.claim = {'owner': owner, 'holders': {cid}}
+                    self.shared_conns = set()
+                    return {'result': 'done'}
+                self.claim['holders'].add(cid)
+                self.shared_conns.add(cid)
                 return {'result': 'claimed_shared',
                         'owner': owner}
             if op == 'release_writer':

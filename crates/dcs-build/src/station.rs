@@ -525,11 +525,12 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
         .collect();
 
     // Field points — `inflow`, `net-flow`, and the draws are produced by
-    // the dynamics document's elements, so their handles go unused here.
+    // the dynamics document's elements, so their handles serve only the
+    // durable-duty marks below.
     let level_primary = plant.field_input::<f64>(points::LEVEL_PRIMARY, level_primary_ch, false);
     let level_backup = plant.field_input::<f64>(points::LEVEL_BACKUP, level_backup_ch, false);
-    plant.field_input::<f64>(points::INFLOW, inflow_ch, false);
-    plant.field_input_stale_after::<f64>(
+    let inflow = plant.field_input::<f64>(points::INFLOW, inflow_ch, false);
+    let net_flow = plant.field_input_stale_after::<f64>(
         points::NET_FLOW,
         net_flow_ch,
         false,
@@ -540,6 +541,15 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
     // decision 74's durable record marks it `journaled` so its
     // transitions land in the journal beside its alarm's.
     plant.journaled(power_fail);
+    // Decision 102's declared recording duty: the wet-well compliance
+    // series — the level measurements and the flow channels — record
+    // into the durable history file every scan. Cadence 1 keeps the
+    // QA lane's retention leg inside its bounded wait: the served
+    // window's declared bound fills in under a minute of scans.
+    plant.record(level_primary, 1);
+    plant.record(level_backup, 1);
+    plant.record(inflow, 1);
+    plant.record(net_flow, 1);
 
     signal(
         &mut plant,

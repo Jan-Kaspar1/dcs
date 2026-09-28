@@ -12,8 +12,11 @@
 //! owes (dropping its live reader drains the remainder, the same
 //! unbounded wait) — a heartbeat lane for the pair-liveness reads,
 //! `GET /health`, `GET /checkpoint`, and `GET /role`, a control lane
-//! for the bodiless
-//! switchover POSTs, `POST /promote` and `POST /demote`, and a
+//! for the switchover POSTs `POST /promote` and `POST /demote` — bare
+//! or carrying the small attributed body, which arrives already
+//! buffered under tiny_http's eager-read bound, so a client-paced
+//! wait can never reach it; a switch request still owing the client
+//! body bytes takes the submission lane's quarantine instead — and a
 //! serving lane for everything else. A client that stalls mid-body
 //! pins at most the command worker or the small submission pool, so
 //! request-body traffic can never impersonate a dead active. The
@@ -730,14 +733,15 @@ const MAX_ANNOUNCED_AHEAD: u64 = 32;
 /// a handful of peers.
 const MAX_ANNOUNCED: usize = 8;
 
-/// How long the tracking path waits before re-probing an announced
-/// hint set a verify pass already refused — the involuntary path's
-/// re-probe bound: a peer demoted mid-run with only unproven hints
-/// re-verifies when the set changes — a new announce lands or the
-/// order shifts — or once this much wall time has passed, so a dead
-/// or hostile set cannot stall every scan cycle on a bounded pull
-/// burst while a hint that recovers still earns a fresh probe inside
-/// a bounded window.
+/// How long the tracking path waits before re-probing endpoints a
+/// verify pass already refused — the re-probe bound shared by the
+/// involuntary path's announced hint set, the claim's declared
+/// monitor, and the orphan-resolution probe's candidate set: a peer
+/// demoted mid-run with only unproven hints re-verifies when the set
+/// changes — a new announce lands or the order shifts — or once this
+/// much wall time has passed, so a dead or hostile set cannot stall
+/// every scan cycle on a bounded pull burst while an endpoint that
+/// recovers still earns a fresh probe inside a bounded window.
 const ANNOUNCED_VERIFY_RETRY: Duration = Duration::from_secs(4);
 
 /// How many distinct `(source, reason)` adoption-refusal signatures
@@ -872,6 +876,18 @@ const LANE_QUEUE_DEPTH: usize = 64;
 /// byte is read, and the read itself is `take`-bounded so a chunked or
 /// understated body cannot grow the buffer past the cap either.
 const MAX_REQUEST_BODY: u64 = 64 * 1024;
+
+/// tiny_http's eager-read bound: a request whose declared
+/// `Content-Length` fits under it arrives at routing with the body
+/// already buffered — read inside `new_request` on the connection
+/// task — so no handler read or dropped-reader drain can ever wait on
+/// the client for it. The attributed switch body is a
+/// [`SwitchRequest`] of tens of bytes, always under the bound; the
+/// control lane takes it on that proof. Only a `Content-Length`
+/// request earns the eager path: a chunked stream, an
+/// `Expect: 100-continue` handshake, or a connection upgrade leaves
+/// the reader live on the socket at any size.
+const EAGER_BODY_LIMIT: usize = 1024;
 
 /// The bound on the scans one `POST /scan` request may ask for — the
 /// unbounded-batch fix (#1203). The externally paced contract is that
@@ -1091,6 +1107,24 @@ pub struct Monitor<'d> {
     /// a dead announced hint falls back within. Outside `shared`:
     /// request-path bookkeeping like `announced_verify`.
     claimed_verify: Mutex<Option<ClaimedVerify>>,
+    /// The last orphan-resolution probe pass's bookkeeping — the
+    /// candidate set probed, in probe order, and the wall-clock time
+    /// the pass ran. `track_cycle` runs the probe on every orphaned
+    /// apply, so an unrecorded failure would re-dial every dead
+    /// candidate — the standing claim's declared monitor first — once
+    /// per scan, one [`CHECKPOINT_PULL_TIMEOUT`] each: the paced
+    /// cadence collapses under the burst while a foreign claim stands
+    /// (the QA finding
+    /// `orphan-resolution-dead-claimed-monitor-stalls-scan`). A failed
+    /// pass is remembered here so the next cycle's resolution
+    /// re-probes only a changed set — a fresh claim declaration, a
+    /// moved owner stamp, a new announcer — or the same one after
+    /// [`ANNOUNCED_VERIFY_RETRY`] elapses, the same bound a dead
+    /// declared monitor falls back within on the claimed path. A pass
+    /// that resolves a candidate clears the record: the set proved an
+    /// owner. Outside `shared`: pull-path bookkeeping like
+    /// `claimed_verify`.
+    resolve_verify: Mutex<Option<ResolveVerify>>,
     /// The tracking source a verified announced demotion pinned — the
     /// endpoint `POST /demote` proved serves this run's continuation
     /// under the pair's key and journaled as the adopted source. The
@@ -1209,6 +1243,19 @@ struct AnnouncedVerify {
 struct ClaimedVerify {
     /// The declared monitor endpoint the pass pulled.
     monitor: SocketAddr,
+    /// When the pass ran.
+    at: Instant,
+}
+
+/// One orphan-resolution probe pass's bookkeeping — the candidate set
+/// probed, in probe order, and the wall-clock time the pass ran. The
+/// tracking path re-probes only a changed set or one whose pass aged
+/// past [`ANNOUNCED_VERIFY_RETRY`], so a dead claimed monitor or
+/// announced hint costs one bounded pull per window rather than one
+/// per scan.
+struct ResolveVerify {
+    /// The candidate set the pass probed, in probe order.
+    candidates: Vec<SocketAddr>,
     /// When the pass ran.
     at: Instant,
 }
@@ -1347,6 +1394,7 @@ impl<'d> Monitor<'d> {
             announced: Mutex::new(VecDeque::new()),
             announced_verify: Mutex::new(None),
             claimed_verify: Mutex::new(None),
+            resolve_verify: Mutex::new(None),
             adopted: Mutex::new(None),
             resolved: Mutex::new(None),
             pulling: Mutex::new(None),
@@ -1566,19 +1614,26 @@ impl<'d> Monitor<'d> {
     /// appended to the executor's log in submission order, so the lane
     /// drains through one worker and queues [`command_lane_depth`]
     /// deep — enough to hold the whole pipelined wave the contract's
-    /// flood shape can send before a response returns. [`submission`]
-    /// next — requests that can hold a worker on a client-paced body
+    /// flood shape can send before a response returns. [`role_change`]
+    /// next — the switchover POSTs split on [`buffered_body`]: one
+    /// whose body is already off the wire — the bare request, and the
+    /// attributed `{"actor":…}` body that always fits tiny_http's
+    /// eager-read bound — takes the control lane's
+    /// [`CONTROL_WORKERS`], keeping the incident-time actuation
+    /// guarantee for the operator's declared-identity form; one still
+    /// owing the client body bytes takes the submission lane instead.
+    /// [`submission`] next — the remaining requests that can hold a
+    /// worker on a client-paced body
     /// wait (`POST /scan`, plus any request still carrying a body the
     /// client owes, whose dropped reader drains the rest the same
     /// way) go to the submission lane's [`SUBMIT_WORKERS`] workers,
     /// whatever their path: a stalled-body `GET /checkpoint` must not
-    /// pin a heartbeat worker either, nor a bodied `POST /promote` a
-    /// control one. Bodiless pair-liveness reads — `GET /health`,
+    /// pin a heartbeat worker either. Bodiless pair-liveness reads —
+    /// `GET /health`,
     /// `GET /checkpoint`, `GET /role` — go to the heartbeat lane's
     /// [`HEARTBEAT_WORKERS`]
-    /// workers, and the bodiless switchover POSTs — `POST /promote`,
-    /// `POST /demote` — to the control lane's [`CONTROL_WORKERS`];
-    /// everything else goes to the serving lane's [`SERVE_WORKERS`].
+    /// workers; everything else goes to the serving lane's
+    /// [`SERVE_WORKERS`].
     ///
     /// The split exists because serving holds two waits no handler can
     /// bound: the body read and the response write — tiny_http exposes
@@ -1647,12 +1702,25 @@ impl<'d> Monitor<'d> {
                         }
                         continue;
                     }
-                    let lane = if submission(&request) {
+                    let lane = if role_change(&request) {
+                        // A switchover request splits on whether its
+                        // body can still wait on the client: the bare
+                        // request and the attributed `{"actor":…}` body
+                        // — always inside tiny_http's eager-read bound —
+                        // arrive already buffered and keep the control
+                        // lane's incident-time guarantee, while one
+                        // still owing the client body bytes takes the
+                        // submission lane's quarantine like every other
+                        // body wait.
+                        if buffered_body(&request) {
+                            &control
+                        } else {
+                            &submissions
+                        }
+                    } else if submission(&request) {
                         &submissions
                     } else if pair_liveness(&request) {
                         &heartbeat
-                    } else if role_change(&request) {
-                        &control
                     } else {
                         &served
                     };
@@ -3321,6 +3389,16 @@ impl<'d> Monitor<'d> {
     /// any prior resolution rather than pinning a guess. Returns the
     /// tracking target after resolution, or `None` when the line named
     /// no routable owner and nothing resolves.
+    ///
+    /// The probe runs on the scan thread once per orphaned apply, so a
+    /// pass that proves nothing is remembered in `resolve_verify`: a
+    /// later cycle re-probes only when the candidate set changed or
+    /// [`ANNOUNCED_VERIFY_RETRY`] elapsed — the same bound
+    /// [`adopt_claimed_source`](Self::adopt_claimed_source) applies to
+    /// a dead declared endpoint — so a foreign claim's undialable
+    /// declared monitor costs one bounded pull burst per window rather
+    /// than one per scan (the QA finding
+    /// `orphan-resolution-dead-claimed-monitor-stalls-scan`).
     pub fn resolve_tracking_source(&self) -> Option<SocketAddr> {
         let (own, claimed) = {
             let shared = self.shared.lock().unwrap();
@@ -3384,8 +3462,25 @@ impl<'d> Monitor<'d> {
         };
         extra.retain(|hint| !candidates.contains(hint) && Some(*hint) != tracked_addr);
         candidates.extend(extra);
+        // A candidate set a probe pass already refused earns a fresh
+        // pass only when the set changed — a fresh claim declaration,
+        // a moved owner stamp, a new or reordered announcer — or once
+        // [`ANNOUNCED_VERIFY_RETRY`] ages the record out: every
+        // candidate's bounded pull is paid once per window rather than
+        // once per orphaned scan. The recorded pass already cleared
+        // `resolved`, and this probe is its only writer, so the cached
+        // verdict still carries the line's no-owner answer.
+        {
+            let last = self.resolve_verify.lock().unwrap();
+            if let Some(last) = &*last
+                && last.candidates == candidates
+                && last.at.elapsed() < ANNOUNCED_VERIFY_RETRY
+            {
+                return None;
+            }
+        }
         let nonce = self.pair_key.map(|_| mint_generation());
-        for candidate in candidates {
+        for &candidate in &candidates {
             // A candidate naming this run's own monitor can never
             // prove succession — journaled once per signature like
             // the served refusals.
@@ -3444,10 +3539,18 @@ impl<'d> Monitor<'d> {
             let Shared { peer, recorder, .. } = &mut *shared;
             recorder.note_tracking_source(peer.tick(), candidate);
             drop(shared);
+            // The set proved an owner — the failure record no
+            // longer describes it, so a later orphaned cycle on
+            // the same candidates probes fresh.
+            *self.resolve_verify.lock().unwrap() = None;
             *self.resolved.lock().unwrap() = Some(candidate);
             self.refused.lock().unwrap().clear();
             return Some(candidate);
         }
+        *self.resolve_verify.lock().unwrap() = Some(ResolveVerify {
+            candidates,
+            at: Instant::now(),
+        });
         *self.resolved.lock().unwrap() = None;
         None
     }
@@ -3479,12 +3582,16 @@ fn command_request(request: &Request) -> bool {
 }
 
 /// Whether the request can hold a worker on a client-paced wait —
-/// the routing [`Monitor::serve`] applies. Two request shapes can:
+/// the routing [`Monitor::serve`] applies after the switchover POSTs
+/// split off through [`role_change`] (a switch request still owing
+/// client body bytes lands here too, on the quarantine side of its
+/// split). Two request shapes can:
 ///
-/// - `POST /command` and `POST /scan`, the only handlers that read a
-///   request body: tiny_http hands them the body still on the socket,
-///   and a client that stalls mid-body holds the reader as long as it
-///   cares to.
+/// - `POST /command` and `POST /scan`, the only body-reading handlers
+///   left on this routing step — `POST /promote` and `POST /demote`
+///   already routed — plus tiny_http hands them the body still on the
+///   socket whenever it passed the eager buffer, and a client that
+///   stalls mid-body holds the reader as long as it cares to.
 /// - Any request still owing the client body bytes, whatever its
 ///   path: a declared `Content-Length` past the library's small eager
 ///   buffer leaves the remainder on a live reader whose drop drains
@@ -3528,14 +3635,19 @@ fn pair_liveness(request: &Request) -> bool {
 }
 
 /// Whether the request is a switchover action — `POST /promote` or
-/// `POST /demote` — [`Monitor::serve`]'s routing step after
-/// [`pair_liveness`]. Role changes are the pair's control-plane
+/// `POST /demote` — [`Monitor::serve`]'s routing step ahead of
+/// [`submission`]. Role changes are the pair's control-plane
 /// actuation, not bulk reads: they take the dedicated control lane so
 /// an operator's promote or demote — issued during an incident,
 /// exactly when consoles wedge — never queues behind serving workers
-/// pinned by undrained responses. Only bodiless ones reach this
-/// routing: a switchover request still owing the client body bytes
-/// already went to the submission lane, where its drain quarantine
+/// pinned by undrained responses or submission workers pinned by a
+/// dead client's owed body. That guarantee extends to the attributed
+/// shape: a [`SwitchRequest`] `{"actor":…}` body is tens of bytes, so
+/// [`buffered_body`] proves it arrived already read and it rides the
+/// control lane beside the bare request. A switchover request whose
+/// body could still wait on the client — a longer declared body, a
+/// chunked or `Expect`-deferred one, a connection upgrade — takes the
+/// submission lane instead, where its read or drain quarantine
 /// belongs. The query string is ignored.
 fn role_change(request: &Request) -> bool {
     request.method() == &Method::Post
@@ -3543,6 +3655,44 @@ fn role_change(request: &Request) -> bool {
             request.url().split('?').next(),
             Some("/promote") | Some("/demote")
         )
+}
+
+/// Whether the request's body is already off the wire — the second
+/// half of [`Monitor::serve`]'s switchover routing, deciding which
+/// lane a [`role_change`] request takes. tiny_http reads a declared
+/// `Content-Length` of at most [`EAGER_BODY_LIMIT`] eagerly while
+/// assembling the request, on the connection task before the request
+/// ever reaches routing: such a body is a buffered cursor here, and a
+/// request declaring none carries an empty reader the same way, so no
+/// body read or dropped-reader drain on this lane can ever wait on
+/// the client. Every other shape still owes client-paced bytes — a
+/// declared body past the bound, an `Expect: 100-continue` handshake
+/// (which holds even a small declared body live on the socket), a
+/// chunked stream, or a connection upgrade — and stays on the
+/// submission lane's quarantine.
+///
+/// The header tests below mirror tiny_http's own `new_request`
+/// predicates exactly — its upgrade test is a case-insensitive
+/// substring match on the `Connection` value, not a token match —
+/// because this function's verdict is only sound when it agrees with
+/// the reader shape the request was actually built with: a `lazy`
+/// answer here must cover every request tiny_http handed a live
+/// socket reader.
+fn buffered_body(request: &Request) -> bool {
+    let lazy = request.headers().iter().any(|header| {
+        header.field.equiv("Transfer-Encoding")
+            || header.field.equiv("Expect")
+            || (header.field.equiv("Connection")
+                && header
+                    .value
+                    .as_str()
+                    .to_ascii_lowercase()
+                    .contains("upgrade"))
+    });
+    !lazy
+        && request
+            .body_length()
+            .is_none_or(|length| length <= EAGER_BODY_LIMIT)
 }
 
 /// One lane's bounded request queue — [`Monitor::serve`]'s dispatcher

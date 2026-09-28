@@ -15,7 +15,7 @@ use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorClient, TrackTarget};
 use dcs_runtime::{
     Checkpoint, Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap,
-    PointSpec, StepError, mint_generation,
+    PointSpec, StepError, TrackReport, mint_generation,
 };
 use dcs_sim::{ChannelId, ChannelMap, PointBinding, SimDriver};
 use dcs_sim_net::{PlantServer, RemoteDriver, RemoteError};
@@ -4346,5 +4346,140 @@ fn a_demoted_ex_owner_rejoins_a_successor_carrying_the_outage_lead() {
         )),
         "the field-arbitrated adoption journals on the demoted peer: {:?}",
         a.client.journal(0).unwrap()
+    );
+}
+
+/// The QA finding `orphan-resolution-dead-claimed-monitor-stalls-scan`:
+/// on the reported build every orphaned `track_cycle` ran
+/// `resolve_tracking_source` synchronously on the scan thread, and its
+/// first candidate — the standing claim's declared monitor — cost the
+/// full checkpoint-pull bound on every cycle while the foreign claim
+/// stood, collapsing the paced cadence (~2 ticks/s at `--scan-ms 100`)
+/// and stretching the failover miss budget's wall time with it. The
+/// probe now remembers a refused candidate set the way
+/// `adopt_claimed_source` remembers a dead declared monitor: the same
+/// set earns no fresh pass until it changes or the retry window
+/// elapses, so the dead endpoint costs one bounded pull burst per
+/// window rather than one per scan.
+#[test]
+fn orphaned_cycles_cache_the_failed_resolution_probe() {
+    // The reproduction's ownerless line: a standby serving
+    // `source_owns_field: false` checkpoints — every landed apply
+    // reports orphaned, firing the resolution probe each cycle.
+    let a_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let a = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(a_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    let a_addr = dialable(a.monitor.local_addr());
+    a.client.advance(2).unwrap();
+
+    // The foreign claim's declared monitor: accepts the connect and
+    // never answers — the reproduction's silent sink — so each probe
+    // pass against it costs the full pull bound.
+    let silent = TcpListener::bind("127.0.0.1:0").unwrap();
+    let dead = silent.local_addr().unwrap();
+
+    // The reproduction's orphaned peer: tracking the ownerless sibling
+    // while the standing claim's verdicts declare the dead monitor.
+    let claimed: &'static Mutex<Option<SocketAddr>> = Box::leak(Box::new(Mutex::new(Some(dead))));
+    let b_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let b = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(b_driver), None)
+                .with_claimed_monitor(move || *claimed.lock().unwrap()),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(a_addr),
+            after_scan: None,
+        }),
+    );
+
+    // One scan cycle's tracking half, shaped like the paced loop's:
+    // a pull from the configured source applied in place, ending in
+    // the orphan probe while the verdict is `Orphaned`.
+    let orphaned_cycle = |monitor: &Monitor<'static>| -> Duration {
+        let started = Instant::now();
+        let report = monitor.track_cycle(|| {
+            MonitorClient::new(a_addr)
+                .checkpoint()
+                .map_err(|error| error.to_string())
+        });
+        assert!(
+            matches!(report, TrackReport::Applied(_)),
+            "the ownerless line's checkpoint must apply: {report:?}"
+        );
+        started.elapsed()
+    };
+
+    // The first orphaned cycle pays the probe — the dead declared
+    // monitor's bounded pull plus the live tracked source's owner
+    // refusal — and reports the verdict that fires it.
+    let first = orphaned_cycle(&b.monitor);
+    assert!(
+        first >= Duration::from_millis(500),
+        "the uncached probe must reach the dead endpoint's bound: {first:?}"
+    );
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Orphaned { .. })
+        ),
+        "the ownerless apply reports orphaned: {:?}",
+        b.client.role().unwrap()
+    );
+
+    // The defect: every repeated orphaned cycle re-dialed the dead
+    // endpoint, one pull bound per scan. The refused candidate set is
+    // remembered now, so the window's later cycles keep the scan's own
+    // cost instead of stalling on it.
+    for cycle in 0..3 {
+        let elapsed = orphaned_cycle(&b.monitor);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "orphaned cycle {cycle} re-probed the dead declared monitor \
+             inside its retry window: {elapsed:?}"
+        );
+    }
+
+    // Aged past the retry window the unchanged set earns one fresh
+    // probe — bounded by the pull timeout — and the pass after it is
+    // cached again.
+    thread::sleep(Duration::from_millis(4200));
+    let reprobe = orphaned_cycle(&b.monitor);
+    assert!(
+        reprobe >= Duration::from_millis(500),
+        "the aged-out candidate set re-probes the dead endpoint: {reprobe:?}"
+    );
+    let elapsed = orphaned_cycle(&b.monitor);
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "the re-probe's failure is cached for its own window: {elapsed:?}"
+    );
+
+    // The claim's release changes the candidate set — the next cycle
+    // probes immediately rather than riding out the window — and stays
+    // cheap: the only candidate left is the live ownerless source.
+    *claimed.lock().unwrap() = None;
+    let elapsed = orphaned_cycle(&b.monitor);
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "a changed candidate set re-probes without waiting out the \
+         window: {elapsed:?}"
     );
 }
