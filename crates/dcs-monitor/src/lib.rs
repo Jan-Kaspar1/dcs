@@ -3776,6 +3776,12 @@ fn track_and_record(
     for orphan in peer.take_orphans() {
         recorder.note_field_orphaned(orphan);
     }
+    // An orphan-cycle re-arm that actually landed the claim — the
+    // record naming who re-took the field the orphan detection alone
+    // cannot attribute — journals beside the orphan record too.
+    for rearm in peer.take_claim_rearms() {
+        recorder.note_claim_rearmed(rearm);
+    }
     // A foreign owner the orphan cycle's re-arm probe just met —
     // the claimant token the refusal named — journals beside the
     // orphan record it answered, once per distinct claimant.
