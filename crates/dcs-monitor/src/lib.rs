@@ -12,8 +12,11 @@
 //! owes (dropping its live reader drains the remainder, the same
 //! unbounded wait) — a heartbeat lane for the pair-liveness reads,
 //! `GET /health`, `GET /checkpoint`, and `GET /role`, a control lane
-//! for the bodiless
-//! switchover POSTs, `POST /promote` and `POST /demote`, and a
+//! for the switchover POSTs `POST /promote` and `POST /demote` — bare
+//! or carrying the small attributed body, which arrives already
+//! buffered under tiny_http's eager-read bound, so a client-paced
+//! wait can never reach it; a switch request still owing the client
+//! body bytes takes the submission lane's quarantine instead — and a
 //! serving lane for everything else. A client that stalls mid-body
 //! pins at most the command worker or the small submission pool, so
 //! request-body traffic can never impersonate a dead active. The
@@ -857,6 +860,18 @@ const LANE_QUEUE_DEPTH: usize = 64;
 /// understated body cannot grow the buffer past the cap either.
 const MAX_REQUEST_BODY: u64 = 64 * 1024;
 
+/// tiny_http's eager-read bound: a request whose declared
+/// `Content-Length` fits under it arrives at routing with the body
+/// already buffered — read inside `new_request` on the connection
+/// task — so no handler read or dropped-reader drain can ever wait on
+/// the client for it. The attributed switch body is a
+/// [`SwitchRequest`] of tens of bytes, always under the bound; the
+/// control lane takes it on that proof. Only a `Content-Length`
+/// request earns the eager path: a chunked stream, an
+/// `Expect: 100-continue` handshake, or a connection upgrade leaves
+/// the reader live on the socket at any size.
+const EAGER_BODY_LIMIT: usize = 1024;
+
 /// The bound on the scans one `POST /scan` request may ask for — the
 /// unbounded-batch fix (#1203). The externally paced contract is that
 /// the run is exactly as deterministic as the requests driving it,
@@ -1540,19 +1555,26 @@ impl<'d> Monitor<'d> {
     /// appended to the executor's log in submission order, so the lane
     /// drains through one worker and queues [`command_lane_depth`]
     /// deep — enough to hold the whole pipelined wave the contract's
-    /// flood shape can send before a response returns. [`submission`]
-    /// next — requests that can hold a worker on a client-paced body
+    /// flood shape can send before a response returns. [`role_change`]
+    /// next — the switchover POSTs split on [`buffered_body`]: one
+    /// whose body is already off the wire — the bare request, and the
+    /// attributed `{"actor":…}` body that always fits tiny_http's
+    /// eager-read bound — takes the control lane's
+    /// [`CONTROL_WORKERS`], keeping the incident-time actuation
+    /// guarantee for the operator's declared-identity form; one still
+    /// owing the client body bytes takes the submission lane instead.
+    /// [`submission`] next — the remaining requests that can hold a
+    /// worker on a client-paced body
     /// wait (`POST /scan`, plus any request still carrying a body the
     /// client owes, whose dropped reader drains the rest the same
     /// way) go to the submission lane's [`SUBMIT_WORKERS`] workers,
     /// whatever their path: a stalled-body `GET /checkpoint` must not
-    /// pin a heartbeat worker either, nor a bodied `POST /promote` a
-    /// control one. Bodiless pair-liveness reads — `GET /health`,
+    /// pin a heartbeat worker either. Bodiless pair-liveness reads —
+    /// `GET /health`,
     /// `GET /checkpoint`, `GET /role` — go to the heartbeat lane's
     /// [`HEARTBEAT_WORKERS`]
-    /// workers, and the bodiless switchover POSTs — `POST /promote`,
-    /// `POST /demote` — to the control lane's [`CONTROL_WORKERS`];
-    /// everything else goes to the serving lane's [`SERVE_WORKERS`].
+    /// workers; everything else goes to the serving lane's
+    /// [`SERVE_WORKERS`].
     ///
     /// The split exists because serving holds two waits no handler can
     /// bound: the body read and the response write — tiny_http exposes
@@ -1621,12 +1643,25 @@ impl<'d> Monitor<'d> {
                         }
                         continue;
                     }
-                    let lane = if submission(&request) {
+                    let lane = if role_change(&request) {
+                        // A switchover request splits on whether its
+                        // body can still wait on the client: the bare
+                        // request and the attributed `{"actor":…}` body
+                        // — always inside tiny_http's eager-read bound —
+                        // arrive already buffered and keep the control
+                        // lane's incident-time guarantee, while one
+                        // still owing the client body bytes takes the
+                        // submission lane's quarantine like every other
+                        // body wait.
+                        if buffered_body(&request) {
+                            &control
+                        } else {
+                            &submissions
+                        }
+                    } else if submission(&request) {
                         &submissions
                     } else if pair_liveness(&request) {
                         &heartbeat
-                    } else if role_change(&request) {
-                        &control
                     } else {
                         &served
                     };
@@ -3333,12 +3368,16 @@ fn command_request(request: &Request) -> bool {
 }
 
 /// Whether the request can hold a worker on a client-paced wait —
-/// the routing [`Monitor::serve`] applies. Two request shapes can:
+/// the routing [`Monitor::serve`] applies after the switchover POSTs
+/// split off through [`role_change`] (a switch request still owing
+/// client body bytes lands here too, on the quarantine side of its
+/// split). Two request shapes can:
 ///
-/// - `POST /command` and `POST /scan`, the only handlers that read a
-///   request body: tiny_http hands them the body still on the socket,
-///   and a client that stalls mid-body holds the reader as long as it
-///   cares to.
+/// - `POST /command` and `POST /scan`, the only body-reading handlers
+///   left on this routing step — `POST /promote` and `POST /demote`
+///   already routed — plus tiny_http hands them the body still on the
+///   socket whenever it passed the eager buffer, and a client that
+///   stalls mid-body holds the reader as long as it cares to.
 /// - Any request still owing the client body bytes, whatever its
 ///   path: a declared `Content-Length` past the library's small eager
 ///   buffer leaves the remainder on a live reader whose drop drains
@@ -3382,14 +3421,19 @@ fn pair_liveness(request: &Request) -> bool {
 }
 
 /// Whether the request is a switchover action — `POST /promote` or
-/// `POST /demote` — [`Monitor::serve`]'s routing step after
-/// [`pair_liveness`]. Role changes are the pair's control-plane
+/// `POST /demote` — [`Monitor::serve`]'s routing step ahead of
+/// [`submission`]. Role changes are the pair's control-plane
 /// actuation, not bulk reads: they take the dedicated control lane so
 /// an operator's promote or demote — issued during an incident,
 /// exactly when consoles wedge — never queues behind serving workers
-/// pinned by undrained responses. Only bodiless ones reach this
-/// routing: a switchover request still owing the client body bytes
-/// already went to the submission lane, where its drain quarantine
+/// pinned by undrained responses or submission workers pinned by a
+/// dead client's owed body. That guarantee extends to the attributed
+/// shape: a [`SwitchRequest`] `{"actor":…}` body is tens of bytes, so
+/// [`buffered_body`] proves it arrived already read and it rides the
+/// control lane beside the bare request. A switchover request whose
+/// body could still wait on the client — a longer declared body, a
+/// chunked or `Expect`-deferred one, a connection upgrade — takes the
+/// submission lane instead, where its read or drain quarantine
 /// belongs. The query string is ignored.
 fn role_change(request: &Request) -> bool {
     request.method() == &Method::Post
@@ -3397,6 +3441,44 @@ fn role_change(request: &Request) -> bool {
             request.url().split('?').next(),
             Some("/promote") | Some("/demote")
         )
+}
+
+/// Whether the request's body is already off the wire — the second
+/// half of [`Monitor::serve`]'s switchover routing, deciding which
+/// lane a [`role_change`] request takes. tiny_http reads a declared
+/// `Content-Length` of at most [`EAGER_BODY_LIMIT`] eagerly while
+/// assembling the request, on the connection task before the request
+/// ever reaches routing: such a body is a buffered cursor here, and a
+/// request declaring none carries an empty reader the same way, so no
+/// body read or dropped-reader drain on this lane can ever wait on
+/// the client. Every other shape still owes client-paced bytes — a
+/// declared body past the bound, an `Expect: 100-continue` handshake
+/// (which holds even a small declared body live on the socket), a
+/// chunked stream, or a connection upgrade — and stays on the
+/// submission lane's quarantine.
+///
+/// The header tests below mirror tiny_http's own `new_request`
+/// predicates exactly — its upgrade test is a case-insensitive
+/// substring match on the `Connection` value, not a token match —
+/// because this function's verdict is only sound when it agrees with
+/// the reader shape the request was actually built with: a `lazy`
+/// answer here must cover every request tiny_http handed a live
+/// socket reader.
+fn buffered_body(request: &Request) -> bool {
+    let lazy = request.headers().iter().any(|header| {
+        header.field.equiv("Transfer-Encoding")
+            || header.field.equiv("Expect")
+            || (header.field.equiv("Connection")
+                && header
+                    .value
+                    .as_str()
+                    .to_ascii_lowercase()
+                    .contains("upgrade"))
+    });
+    !lazy
+        && request
+            .body_length()
+            .is_none_or(|length| length <= EAGER_BODY_LIMIT)
 }
 
 /// One lane's bounded request queue — [`Monitor::serve`]'s dispatcher
