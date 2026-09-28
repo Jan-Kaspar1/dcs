@@ -32,7 +32,19 @@
 //! `JournalEvent::SourceRestarted` — from its own tracking-state reset:
 //! a demoted peer's first pull on its uninterrupted successor regresses
 //! in tick but names the generation the demoted run's own captures
-//! stamped, which is no restart. The `source_owns_field` stamp — set by
+//! stamped, which is no restart. The `stream_tick` stamp locates the
+//! captured `tick` in the line's origin domain: a tracking peer's paced
+//! clock keeps counting through every source outage it survives while
+//! the pulled stream stands still, so its run tick accrues a permanent
+//! lead the stamp declares — and that survives promotion, where the
+//! run's numbering leads the line's position ever after. The
+//! line-membership bounds a demoted or orphaned peer verifies a pulled
+//! document against are written in that declared stream position, not
+//! either run's raw tick: run ticks are not synchronized to the line,
+//! so only the stream position distinguishes an honest outage lead —
+//! same generation, same fingerprint, same line — from a foreign
+//! stream forging the line's identity at a far-ahead tick. The
+//! `source_owns_field` stamp — set by
 //! the serving peer, absent on a bare executor's capture — lets a
 //! tracking peer name the mutual-standby wedge: a checkpoint applied
 //! cleanly from a run owning no field writes means the tracked line

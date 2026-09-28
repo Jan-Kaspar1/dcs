@@ -3025,15 +3025,27 @@ impl<'d> Monitor<'d> {
             // run's own document back — never a successor — and on
             // the involuntary path the demoted run's own standby
             // document would pass the continuation checks, wedging
-            // the peer onto pulling itself.
+            // the peer onto pulling itself. The refusal journals once
+            // per signature like the rest — a hint that can never
+            // prove succession is the same auditable refusal.
             if hint == self.local_addr() {
+                self.note_source_refusal(hint, "the hint names this run's own monitor".to_string());
                 continue;
             }
             let pulled = match MonitorClient::with_timeout(hint, CHECKPOINT_PULL_TIMEOUT)
                 .checkpoint_tracking(None, nonce)
             {
                 Ok(pulled) => pulled,
-                Err(_) => continue,
+                // An unanswered pull refuses the adoption like any
+                // served refusal — journaled once per signature, so a
+                // set of dead hints strands auditably, not silently.
+                Err(error) => {
+                    self.note_source_refusal(
+                        hint,
+                        format!("the verify pull produced no checkpoint: {error}"),
+                    );
+                    continue;
+                }
             };
             // Every refusal class journals once per signature: the
             // hinted endpoint that answers but cannot prove this
@@ -3242,9 +3254,22 @@ impl<'d> Monitor<'d> {
             at: Instant::now(),
         });
         let nonce = self.pair_key.map(|_| mint_generation());
-        let pulled = MonitorClient::with_timeout(claimed, CHECKPOINT_PULL_TIMEOUT)
+        // A declared monitor that does not answer refuses the
+        // adoption as surely as one the checks refuse — journaled
+        // once per signature, so a dead claimed endpoint leaves the
+        // strand auditable rather than silent.
+        let pulled = match MonitorClient::with_timeout(claimed, CHECKPOINT_PULL_TIMEOUT)
             .checkpoint_tracking(None, nonce)
-            .ok()?;
+        {
+            Ok(pulled) => pulled,
+            Err(error) => {
+                self.note_source_refusal(
+                    claimed,
+                    format!("the claim's declared monitor answered no checkpoint: {error}"),
+                );
+                return None;
+            }
+        };
         // A serving endpoint the line-membership or proof checks
         // refuse is the strand the adoption exists to close, so the
         // refusal journals once per signature — a permanently
@@ -3361,14 +3386,30 @@ impl<'d> Monitor<'d> {
         candidates.extend(extra);
         let nonce = self.pair_key.map(|_| mint_generation());
         for candidate in candidates {
+            // A candidate naming this run's own monitor can never
+            // prove succession — journaled once per signature like
+            // the served refusals.
             if candidate == self.local_addr() {
+                self.note_source_refusal(
+                    candidate,
+                    "the candidate names this run's own monitor".to_string(),
+                );
                 continue;
             }
             let pulled = match MonitorClient::with_timeout(candidate, CHECKPOINT_PULL_TIMEOUT)
                 .checkpoint_tracking(None, nonce)
             {
                 Ok(pulled) => pulled,
-                Err(_) => continue,
+                // The unanswered candidate is the same refusal class
+                // as a refused document — journaled once per
+                // signature, so a strand on dead endpoints audits.
+                Err(error) => {
+                    self.note_source_refusal(
+                        candidate,
+                        format!("the resolution pull produced no checkpoint: {error}"),
+                    );
+                    continue;
+                }
             };
             match verify_owner_checkpoint(&pulled, &own) {
                 // A refused candidate re-probes on every orphaned

@@ -575,10 +575,18 @@ mod tests {
             JournalEntry {
                 seq: 17,
                 tick: Tick(20),
-                event: JournalEvent::RunBoundary { run: 2 },
+                event: JournalEvent::TrackingSourceRefused {
+                    source: "127.0.0.1:8082".parse().unwrap(),
+                    detail: "the pulled checkpoint's stream position leads the line's".to_string(),
+                },
             },
             JournalEntry {
                 seq: 18,
+                tick: Tick(20),
+                event: JournalEvent::RunBoundary { run: 2 },
+            },
+            JournalEntry {
+                seq: 19,
                 tick: Tick(21),
                 event: JournalEvent::FieldOrphaned { aligned: Tick(20) },
             },
@@ -603,6 +611,7 @@ mod tests {
         assert!(json.contains("\"field_orphaned\""), "{json}");
         assert!(json.contains("\"source_restarted\""), "{json}");
         assert!(json.contains("\"tracking_source_adopted\""), "{json}");
+        assert!(json.contains("\"tracking_source_refused\""), "{json}");
         assert!(json.contains("\"run_boundary\""), "{json}");
         // A `field_claim_lost` entry an older build journaled carried
         // no claimant field; it still decodes, the verdict reading as
