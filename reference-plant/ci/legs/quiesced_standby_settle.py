@@ -144,7 +144,7 @@ import takeover
 # its resolution — each must surface the named diagnostic on the
 # honest run rather than passing an unexercised audit.
 LEG = {
-    "order": 580,
+    "order": 590,
     "title": "the quiesced-standby-settle leg",
     "passes": "quiesced-standby-settle",
     "failed": "quiesced-settle-failed",
