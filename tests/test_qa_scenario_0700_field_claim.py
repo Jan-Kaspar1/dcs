@@ -47,10 +47,10 @@ class FieldClaimFeed:
     contract's degrade path — field_claim_lost journaled with the
     claimant the verdict named, demoting then standby — and the
     standby's fencing-loss mark drives the bound conditional reclaim
-    every scan: refused while the rogue claim's holders stand, granted
-    once the release frees the field, walking promoting -> active with
-    no operator call. Fault flags stage each named failure the
-    scenario reports."""
+    every scan: refused while a different owner's claim has live
+    holders, granted once the release frees the field, walking
+    promoting -> active with no operator call. Fault flags stage each
+    named failure the scenario reports."""
 
     TOKEN_A = 0xD5C00A
     TOKEN_B = 0xD5C00B
@@ -146,13 +146,13 @@ class FieldClaimFeed:
                 self.reconverge -= 1
             # The fencing-loss reclaim: the demoted ex-owner probes the
             # bound conditional re-grant every standby scan — refused
-            # while a different owner's claim stands at all, granted
-            # the first scan the field frees or already names the
-            # token — then walks promoting -> active on the
-            # field-owning scans.
+            # while a different owner's claim has live holders, granted
+            # the first scan the field frees, already names the token,
+            # or stands under a holderless claim — then walks
+            # promoting -> active on the field-owning scans.
             if self.fencing_lost and not self.never_reclaims:
                 if not self._fenced(self._roundtrip(
-                        {'op': 'ensure_writer',
+                        {'op': 'reclaim_writer',
                          'owner': self.TOKEN_A})):
                     self.holds = True
                     self.fencing_lost = False
