@@ -153,6 +153,47 @@ class StateTests(unittest.TestCase):
         self.assertEqual(flow['park_causes']['previous'],
                          {cause: 0 for cause in merge_flow.PARK_CAUSES})
 
+    def test_merge_flow_carries_dispatch_merge_and_backlog_counts(self):
+        # Previous window: issue 1 parks and stays blocked, issue 2 merges.
+        self.state.reserve(1, 'one', 'a')
+        self.state.update_job(1, status='blocked', error='x')
+        self.state.reserve(2, 'two', 'a')
+        self.state.complete(2)
+        with self.state.db:
+            self.state.db.execute(
+                'UPDATE work_events SET at=at-? WHERE issue IN (1,2)', (10 * 86400,))
+            self.state.db.execute(
+                'UPDATE jobs SET updated=updated-? WHERE issue IN (1,2)', (10 * 86400,))
+        # Current window: issue 3 parks, redispatches, parks again;
+        # issue 4 merges; issue 5 is dispatched and still working.
+        self.state.reserve(3, 'three', 'a')
+        self.state.update_job(3, status='blocked', error='y')
+        self.state.retry(3, 'quota-requeue')
+        self.state.update_job(3, status='blocked', error='z')
+        self.state.reserve(4, 'four', 'a')
+        self.state.complete(4)
+        self.state.reserve(5, 'five', 'a')
+        flow = self.state.merge_flow()
+        self.assertEqual(flow['dispatches']['previous'], 2)
+        self.assertEqual(flow['first_dispatches']['previous'], 2)
+        self.assertEqual(flow['retry_dispatches']['previous'], 0)
+        self.assertEqual(flow['merged_and_closed']['previous'], 1)
+        self.assertEqual(flow['still_blocked']['previous'], 1)
+        self.assertEqual(flow['dispatches']['current'], 4)
+        self.assertEqual(flow['first_dispatches']['current'], 3)
+        self.assertEqual(flow['retry_dispatches']['current'], 1)
+        self.assertEqual(flow['merged_and_closed']['current'], 1)
+        self.assertEqual(flow['still_blocked']['current'], 2)
+
+    def test_merge_flow_reports_zero_counts_on_empty_ledger(self):
+        flow = self.state.merge_flow()
+        for window in ('current', 'previous'):
+            self.assertEqual(flow['dispatches'][window], 0)
+            self.assertEqual(flow['first_dispatches'][window], 0)
+            self.assertEqual(flow['retry_dispatches'][window], 0)
+            self.assertEqual(flow['merged_and_closed'][window], 0)
+            self.assertEqual(flow['still_blocked'][window], 0)
+
     def test_ramp_and_restart(self):
         for number in range(1,16):
             self.assertIsNotNone(self.state.reserve(number,'one','a'))

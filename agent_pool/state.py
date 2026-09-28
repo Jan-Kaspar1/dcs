@@ -133,11 +133,14 @@ class State:
 
         Beyond the merge counts, each window carries the work ledger's
         measured detail through agent_pool.merge_flow's shared classifiers:
-        ranked conflict paths with the concentrated/spread verdict, ranked
-        failing-check names for ci-failure repairs, the bounded park-cause
-        counts behind status:blocked transitions, and the count of publish
-        merges resolved mechanically in-process (a separate ledger kind, so
-        they never inflate the agent-repair attribution).
+        dispatch reservations split into first and retry dispatches,
+        merged-and-closed completions, the still-blocked backlog replayed
+        to each window's end, ranked conflict paths with the
+        concentrated/spread verdict, ranked failing-check names for
+        ci-failure repairs, the bounded park-cause counts behind
+        status:blocked transitions, and the count of publish merges
+        resolved mechanically in-process (a separate ledger kind, so they
+        never inflate the agent-repair attribution).
         """
         now = time.time() if now is None else now
         bounds = window_bounds(now, window_seconds)
@@ -166,6 +169,11 @@ class State:
                 'conflict_paths': {w: attribution[w]['conflict_paths'] for w in bounds},
                 'conflict_load': {w: attribution[w]['conflict_load'] for w in bounds},
                 'failing_checks': {w: attribution[w]['failing_checks'] for w in bounds},
+                'dispatches': {w: flow[w]['dispatches'] for w in bounds},
+                'first_dispatches': {w: flow[w]['first_dispatches'] for w in bounds},
+                'retry_dispatches': {w: flow[w]['retry_dispatches'] for w in bounds},
+                'merged_and_closed': {w: flow[w]['merged_and_closed'] for w in bounds},
+                'still_blocked': {w: flow[w]['still_blocked'] for w in bounds},
                 'parked': {w: flow[w]['parked'] for w in bounds},
                 'park_causes': {w: flow[w]['park_causes'] for w in bounds}}
 
