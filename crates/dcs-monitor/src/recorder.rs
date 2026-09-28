@@ -714,6 +714,23 @@ impl Recorder {
         self.push(tick, JournalEvent::TrackingSourceAdopted { source });
     }
 
+    /// Journals a refused tracking-source probe — a successor
+    /// candidate's served checkpoint failed the line-membership
+    /// verification — attributed to the run tick the probe ran at and
+    /// naming both the endpoint and the named refusal, so a strand on
+    /// a persistently refusing source is durable audit rather than
+    /// journal silence. Callers dedup per (source, reason) signature —
+    /// the bound on how often one standing refusal journals lives in
+    /// `Monitor::note_source_refusal`, not here.
+    pub(super) fn note_tracking_source_refused(
+        &mut self,
+        tick: Tick,
+        source: SocketAddr,
+        detail: String,
+    ) {
+        self.push(tick, JournalEvent::TrackingSourceRefused { source, detail });
+    }
+
     /// Marks the executor's standing state already observed — the
     /// baseline a `--state-file` restore brings to a fresh recorder,
     /// adopted at bind before the resumed run's first scan. The
