@@ -90,7 +90,7 @@ import pair
 # diagnostic on the honest refusal assertion — the batch it called
 # over-bound running unrefused — never a silently unexercised bound.
 LEG = {
-    "order": 570,
+    "order": 580,
     "title": "the scan-batch bound leg",
     "passes": "scan-batch-bound-leg",
     "tampers": [
