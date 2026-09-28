@@ -942,7 +942,44 @@ fn attributed_switch_requests_keep_the_control_lane() {
         "POST /scan answered — the submission lane was never pinned"
     );
 
+    // The reproduction's unbounded form: two lazy bodies — a declared
+    // `Content-Length` past tiny_http's eager bound, seven bytes sent,
+    // then silence — hold both submission workers forever, not for a
+    // batch's span. The attributed actuation still answers inside the
+    // bound: its own body is the eager-read one, so no wait on the
+    // dead clients' lane ever reaches it. Without the routing fix
+    // this request never answered while the stalls lived.
+    let mut stalls: Vec<TcpStream> = (0..2)
+        .map(|_| {
+            let mut stream = TcpStream::connect(rig.addr).unwrap();
+            stream
+                .write_all(
+                    b"POST /scan HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+                      Content-Length: 2048\r\n\r\n{\"scans\":1}",
+                )
+                .unwrap();
+            stream
+        })
+        .collect();
+    thread::sleep(Duration::from_millis(250));
+    let (status, body) = client
+        .request("POST", "/demote", Some("{\"actor\":\"qa-h1\"}"))
+        .unwrap_or_else(|error| {
+            panic!("attributed POST /demote queued behind stalled bodies: {error}")
+        });
+    assert_eq!(
+        status, 409,
+        "attributed POST /demote answered {status}: {body}"
+    );
+    assert!(
+        MonitorClient::with_timeout(rig.addr, Duration::from_millis(750))
+            .advance(1)
+            .is_err(),
+        "POST /scan answered — the submission lane was never pinned"
+    );
+
     streams.clear();
+    stalls.clear();
     // The recovery, on a timeout sized to let the pinned batches drain:
     // submissions settle normally again once the workers free.
     MonitorClient::with_timeout(rig.addr, Duration::from_secs(10))

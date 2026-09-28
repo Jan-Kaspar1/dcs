@@ -3445,6 +3445,14 @@ fn role_change(request: &Request) -> bool {
 /// (which holds even a small declared body live on the socket), a
 /// chunked stream, or a connection upgrade — and stays on the
 /// submission lane's quarantine.
+///
+/// The header tests below mirror tiny_http's own `new_request`
+/// predicates exactly — its upgrade test is a case-insensitive
+/// substring match on the `Connection` value, not a token match —
+/// because this function's verdict is only sound when it agrees with
+/// the reader shape the request was actually built with: a `lazy`
+/// answer here must cover every request tiny_http handed a live
+/// socket reader.
 fn buffered_body(request: &Request) -> bool {
     let lazy = request.headers().iter().any(|header| {
         header.field.equiv("Transfer-Encoding")
@@ -3453,8 +3461,8 @@ fn buffered_body(request: &Request) -> bool {
                 && header
                     .value
                     .as_str()
-                    .split(',')
-                    .any(|token| token.trim().eq_ignore_ascii_case("upgrade")))
+                    .to_ascii_lowercase()
+                    .contains("upgrade"))
     });
     !lazy
         && request
