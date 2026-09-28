@@ -461,14 +461,16 @@ pub struct Peer<'d> {
     /// The claim's fencing-loss counterpart — the *bound* conditional
     /// re-grant a fencing-demoted ex-owner probes each scan while its
     /// loss mark stands, installed by
-    /// [`with_field_reclaim`](Self::with_field_reclaim). Granted only
-    /// where the field stands unclaimed or already names this run's
-    /// token, so the reclaim never preempts a standing owner — a
-    /// still-held rogue claim keeps the field until it releases — and
-    /// bound, unlike the orphan cycle's unbound probe, because the
-    /// peer's gate lifts on it: the run's attachments must stand in
-    /// the claim's holders for its writes to pass the arbitration it
-    /// just re-took.
+    /// [`with_field_reclaim`](Self::with_field_reclaim). Granted where
+    /// the field stands unclaimed, already names this run's token, or
+    /// stands under a different owner's holderless claim — the
+    /// dead-owner or orphan-placeholder shape, whose refusal would
+    /// wedge the pair the claim was raised to fence — so the reclaim
+    /// never preempts a live attachment: a still-held rogue claim
+    /// keeps the field until it releases. The grant is bound, unlike
+    /// the orphan cycle's unbound probe, because the peer's gate lifts
+    /// on it: the run's attachments must stand in the claim's holders
+    /// for its writes to pass the arbitration it just re-took.
     reclaim: Option<Reclaim<'d>>,
     /// The field's write-ownership claim as the last probe observed it
     /// — what [`report`](Self::report) serves as `field_claim`. `None`
@@ -597,11 +599,16 @@ impl fmt::Debug for Claimant<'_> {
 /// The fencing-loss counterpart of [`Ensure`]: the *bound* conditional
 /// re-grant a fencing-demoted ex-owner probes each scan while its loss
 /// mark stands — the wedge escape a released preemption owes the pair.
-/// Granted only where the field stands unclaimed or already names this
-/// run's token — `Ok(true)` — answering `Ok(false)` while a different
-/// owner stands and `Err` where the field could not be asked, so the
-/// reclaim never preempts a standing owner: a live incumbent — even a
-/// rogue's still-held claim — keeps the field until it releases. The
+/// Granted where the field stands unclaimed, already names this run's
+/// token, or stands under a different owner's *holderless* claim —
+/// `Ok(true)` — answering `Ok(false)` only while a different owner's
+/// claim has live holders and `Err` where the field could not be
+/// asked, so the reclaim never preempts a live attachment: a live
+/// incumbent — even a rogue's still-held claim — keeps the field until
+/// it releases. A different owner's holderless claim protects no one —
+/// the dead-owner shape, and the orphan placeholder a sibling
+/// ex-owner's unbound probe raises — so the re-grant preempts it
+/// rather than wedging the pair the claim was raised to fence. The
 /// grant is bound, unlike the orphan cycle's unbound probe, because
 /// the peer's gate lifts on it: the run's attachments must stand in
 /// the claim's holders for its writes to pass the arbitration it just
@@ -1260,15 +1267,20 @@ impl<'d> Peer<'d> {
     /// Arms the claim's fencing-loss counterpart — the *bound*
     /// conditional re-grant a fencing-demoted ex-owner probes each
     /// scan while its loss mark stands. `reclaim` takes the field's
-    /// write-ownership under this run's token only where the field
-    /// stands unclaimed or already names the token — `Ok(true)` — and
-    /// answers `Ok(false)` while a different owner stands, so a
+    /// write-ownership under this run's token where the field stands
+    /// unclaimed, already names the token, or stands under a different
+    /// owner's holderless claim — `Ok(true)` — and answers `Ok(false)`
+    /// only while a different owner's claim has live holders, so a
     /// still-held preemptor's claim keeps the field until it releases
-    /// and the probe never preempts. Unlike the orphan cycle's unbound
-    /// probe the grant joins the run's attachments to the claim's
-    /// holders — the gate it re-lifts must pass the arbitration it
-    /// re-took. On `Ok(true)` the peer clears the loss mark, lifts the
-    /// field gate the demotion closed, and reports
+    /// and the probe never preempts a live attachment. The holderless
+    /// shapes the grant still takes — a dead owner's standing claim
+    /// and the orphan placeholder a sibling ex-owner's unbound probe
+    /// raises — protect no one, and refusing them would wedge the pair
+    /// the claim was raised to fence. Unlike the orphan cycle's
+    /// unbound probe the grant joins the run's attachments to the
+    /// claim's holders — the gate it re-lifts must pass the
+    /// arbitration it re-took. On `Ok(true)` the peer clears the loss
+    /// mark, lifts the field gate the demotion closed, and reports
     /// [`FieldClaim::Held`] from the claim it just re-took; `Ok(false)`
     /// and `Err` leave the mark standing for the next scan. A peer
     /// built without the hook keeps the pre-reclaim behavior — the
@@ -2979,22 +2991,25 @@ impl<'d> Peer<'d> {
     /// the field and the claim was preempted under it" — the ex-owner
     /// the reclaim exists for. The probe is the *bound* conditional
     /// grant: `Ok(true)` takes the field's write-ownership back under
-    /// this run's token — the field stood unclaimed or already named
-    /// the token — joining the run's attachments to the claim's
-    /// holders so the re-lifted gate's writes pass the arbitration it
-    /// re-took, then reports `promoting` exactly as a promotion's
-    /// granted claim does, the next field-owning scan settling
-    /// `active`. `Ok(false)` — a different owner's claim still stands
-    /// — and `Err` leave mark and gate untouched for the next scan:
-    /// the reclaim never preempts a standing owner, so a still-held
-    /// rogue claim keeps the field until it releases and a concurrent
-    /// reclaimer's grant refuses the loser. A peer built without the
-    /// hook probes nothing — the wedge stands until an operator's
-    /// promote unwedges, the pre-hook behavior. A refused probe the
-    /// field's arbitration attributes to a standing foreign owner
-    /// journals one observed-claimant record per distinct token — the
-    /// audit trail the preempt-and-release episode between this run's
-    /// writes would otherwise leave empty.
+    /// this run's token — the field stood unclaimed, already named the
+    /// token, or stood under a different owner's holderless claim, the
+    /// dead-owner or orphan-placeholder shape the re-grant preempts
+    /// without abandoning a live attachment — joining the run's
+    /// attachments to the claim's holders so the re-lifted gate's
+    /// writes pass the arbitration it re-took, then reports
+    /// `promoting` exactly as a promotion's granted claim does, the
+    /// next field-owning scan settling `active`. `Ok(false)` — a
+    /// different owner's claim still has live holders — and `Err`
+    /// leave mark and gate untouched for the next scan: the reclaim
+    /// never preempts a live attachment, so a still-held rogue claim
+    /// keeps the field until it releases and a concurrent reclaimer's
+    /// grant refuses the loser. A peer built without the hook probes
+    /// nothing — the wedge stands until an operator's promote
+    /// unwedges, the pre-hook behavior. A refused probe the field's
+    /// arbitration attributes to a standing foreign owner journals one
+    /// observed-claimant record per distinct token — the audit trail
+    /// the preempt-and-release episode between this run's writes would
+    /// otherwise leave empty.
     fn reclaim_field_claim(&mut self, tick: Tick) {
         if self.role != Role::Standby || !self.fencing_lost {
             return;

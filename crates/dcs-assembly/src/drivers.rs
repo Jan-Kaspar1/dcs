@@ -349,14 +349,15 @@ pub type EnsureHook = Arc<dyn Fn(u64) -> Result<bool, StepError> + Send + Sync>;
 /// The fencing-loss counterpart of [`EnsureHook`] — the per-backend
 /// half of [`FanoutDriver::reclaim_field_writer`], run while a
 /// fencing-demoted ex-owner's loss mark stands: re-takes the claim
-/// under `owner` only where the field stands unclaimed or already
-/// names the token — `Ok(true)` — refusing `Ok(false)` where a
-/// different owner stands, so a released preemption ends with the
-/// ex-owner holding the claim again and no probe ever preempts.
-/// Unlike `ensure` the grant is *bound*: the reclaiming attachment
-/// joins the claim's holders, because the peer's gate lifts on success
-/// and its writes must pass the claim it just took back. `Err`
-/// reports the backend could not be asked. `None` on kinds whose
+/// under `owner` where the field stands unclaimed, already names the
+/// token, or stands under a different owner's *holderless* claim —
+/// `Ok(true)` — refusing `Ok(false)` only where a different owner's
+/// claim has live holders, so a released preemption ends with the
+/// ex-owner holding the claim again and no probe ever preempts a live
+/// attachment. Unlike `ensure` the grant is *bound*: the reclaiming
+/// attachment joins the claim's holders, because the peer's gate lifts
+/// on success and its writes must pass the claim it just took back.
+/// `Err` reports the backend could not be asked. `None` on kinds whose
 /// arbitration has no bound conditional grant.
 pub type ReclaimHook = Arc<dyn Fn(u64) -> Result<bool, StepError> + Send + Sync>;
 
@@ -461,10 +462,11 @@ pub struct DeviceBackend {
     pub probe: Option<ProbeHook>,
     /// The fencing-loss reclaim — the bound conditional re-grant a
     /// fencing-demoted ex-owner probes each scan while its loss mark
-    /// stands: granted while the field is unclaimed or already names
-    /// the token, refused while a different owner stands, never
-    /// preempting. `None` on kinds whose arbitration has no bound
-    /// conditional grant.
+    /// stands: granted while the field is unclaimed, already names the
+    /// token, or stands under a different owner's holderless claim,
+    /// refused only while a different owner's claim has live holders —
+    /// never preempting a live attachment. `None` on kinds whose
+    /// arbitration has no bound conditional grant.
     pub reclaim: Option<ReclaimHook>,
     /// The claimant-attribution counterpart of `probe` — reports the
     /// owner token the field's arbitration named when it last fenced
@@ -898,18 +900,20 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                 detail: error.to_string(),
             })
         })),
-        // The fencing-loss reclaim: the plant server's *bound*
-        // `ensure_writer` — a fencing-demoted ex-owner takes its claim
-        // back once the field stands unclaimed or already names its
-        // token, the grant joining this attachment to the holders so
-        // the re-lifted gate's writes pass the claim it re-took. A
-        // different owner's claim refuses it whether held or standing
-        // holderless — the reclaim never preempts, so a foreign claim
-        // that outlives its attachment still wedges the pair as an
-        // operator-promotable state rather than silently handing the
-        // field back over a live arbitration.
+        // The fencing-loss reclaim: the plant server's `reclaim_writer`
+        // — a fencing-demoted ex-owner takes its claim back once the
+        // field stands unclaimed, already names its token, or stands
+        // under a different owner's *holderless* claim — the dead-owner
+        // or orphan-placeholder shape, which protects no live
+        // attachment. The grant joins this attachment to the holders so
+        // the re-lifted gate's writes pass the claim it re-took, and
+        // refuses only while a different owner's claim has live
+        // holders: a still-held claim keeps the field until it
+        // releases, while a holderless one is precisely what the
+        // reclaim exists to clear — refusing it would wedge the pair
+        // behind a claim nobody stands behind.
         reclaim: Some(Arc::new(move |owner| {
-            match reclaiming.ensure_writer(owner) {
+            match reclaiming.reclaim_writer(owner) {
                 Ok(_) => Ok(true),
                 Err(RemoteError::Fenced) => Ok(false),
                 Err(error) => Err(StepError::Backend {
@@ -1985,19 +1989,21 @@ impl FanoutDriver {
     /// [`ensure_field_writer`](Self::ensure_field_writer) — the *bound*
     /// conditional re-grant a fencing-demoted ex-owner probes each scan
     /// while its loss mark stands: takes the claim under `owner` on
-    /// every field-facing backend that answers, granted only where the
-    /// field stands unclaimed or already names the token — the grant
-    /// joining this attachment to the claim's holders, so the peer's
-    /// re-lifted gate writes pass the claim it just took back.
-    /// `Ok(true)` means the claim stands under `owner` on every probed
-    /// backend; `Ok(false)` that a different owner stands on at least
-    /// one — the reclaim never preempts, so a preemptor's claim that
-    /// outlives its attachment leaves the wedge standing as an
-    /// operator-promotable state — or that no backend can answer a
-    /// conditional grant at all; `Err` that a backend could not be
-    /// asked. Field-facing backends without a reclaim hook are skipped
-    /// exactly as `ensure_field_writer` skips unprobeable kinds. A
-    /// refused backend's fencing verdict lands in
+    /// every field-facing backend that answers, granted where the field
+    /// stands unclaimed, already names the token, or stands under a
+    /// different owner's holderless claim — the dead-owner or
+    /// orphan-placeholder shape the re-grant preempts without
+    /// abandoning a live attachment — the grant joining this
+    /// attachment to the claim's holders, so the peer's re-lifted gate
+    /// writes pass the claim it just took back. `Ok(true)` means the
+    /// claim stands under `owner` on every probed backend; `Ok(false)`
+    /// that a different owner's claim still has live holders on at
+    /// least one — a still-held claim keeps the field until it
+    /// releases — or that no backend can answer a conditional grant at
+    /// all; `Err` that a backend could not be asked. Field-facing
+    /// backends without a reclaim hook are skipped exactly as
+    /// `ensure_field_writer` skips unprobeable kinds. A refused
+    /// backend's fencing verdict lands in
     /// [`refused_claimants`](Self::refused_claimants) exactly as the
     /// orphan probe's does.
     pub fn reclaim_field_writer(&self, owner: u64) -> Result<bool, StepError> {

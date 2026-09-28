@@ -48,8 +48,11 @@ class ReclaimPlantPeer(FakePlantPeer):
     attachment holder tracking, `claim_writer`'s unconditional
     preemption, `ensure_writer`'s conditional grant (`rebind`
     joining the holder, refused while a different owner's claim
-    stands), `release_writer` dropping only this attachment's hold
-    (the last-holder release unclaiming the field), disconnect
+    stands), `reclaim_writer`'s fencing-loss re-grant (refused only
+    while a different owner's claim has live holders — a holderless
+    claim protects no one), `release_writer` dropping only this
+    attachment's hold (the last-holder release unclaiming the
+    field), disconnect
     dropping the hold but never the claim, and `write`/`step`
     fencing against the standing claim — with decision 97's
     attribution: every fencing verdict names the standing claim's
@@ -120,20 +123,22 @@ class ReclaimPlantPeer(FakePlantPeer):
 
     def reclaim_ensure(self):
         """The demoted ex-owner's bound conditional re-grant —
-        ensure_writer under its own pinned token, rebind=true:
-        refused while a different owner's claim stands (unless the
+        reclaim_writer under its own pinned token: refused only
+        while a different owner's claim has live holders (unless the
         preempting doctor grants it anyway), granted into an
-        unclaimed or same-owner claim — the bound grant joining
-        'controller' to the holders unless the unbound doctor
-        leaves the re-take holderless."""
+        unclaimed, same-owner, or holderless claim — the dead-owner
+        or orphan-placeholder shape protects no one — the bound
+        grant joining 'controller' to the holders unless the
+        unbound doctor leaves the re-take holderless."""
         if self.claim is not None \
-                and self.claim['owner'] != self.owner:
+                and self.claim['owner'] != self.owner \
+                and self._holders():
             if not self.ensure_preempts:
                 return 'refused'
             self.claim = {'owner': self.owner,
                           'holders': {'controller'}}
             return 'granted'
-        if self.claim is None:
+        if self.claim is None or self.claim['owner'] != self.owner:
             self.claim = {'owner': self.owner, 'holders': set()}
         if not self.unbound_grant:
             self.claim['holders'].add('controller')
@@ -168,6 +173,16 @@ class ReclaimPlantPeer(FakePlantPeer):
             if request.get('rebind', True):
                 self.claim['holders'].add(conn)
             return {'result': 'done'}
+        if op == 'reclaim_writer':
+            # The fencing-loss re-grant: refused only while a
+            # different owner's claim has live holders — a
+            # holderless claim protects no one, so the re-grant
+            # preempts it rather than wedging the pair.
+            if self.claim is not None \
+                    and self.claim['owner'] != owner \
+                    and self._holders() \
+                    and not self.ensure_preempts:
+                return self._verdict(op)
         shared = self.claim is not None \
             and self.claim['owner'] == owner \
             and any(h is not conn for h in self._holders())
@@ -188,7 +203,8 @@ class ReclaimPlantPeer(FakePlantPeer):
             self.plant_tick += 1
             self.samples[self.OUT].update(tick=self.plant_tick)
         op = request.get('op')
-        if op in ('claim_writer', 'ensure_writer', 'release_writer'):
+        if op in ('claim_writer', 'ensure_writer', 'reclaim_writer',
+                  'release_writer'):
             self.requests.append(request)
             if op == 'release_writer' and self.release_opens_field:
                 self.open_field = True

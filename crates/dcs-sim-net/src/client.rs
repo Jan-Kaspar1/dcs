@@ -740,6 +740,51 @@ impl RemoteDriver {
         Ok(grant)
     }
 
+    /// The fencing-loss counterpart of the bound
+    /// [`ensure_writer`](Self::ensure_writer) — the conditional
+    /// re-grant a fencing-demoted controller probes each scan while its
+    /// loss mark stands: takes the claim for `owner` while the field is
+    /// unclaimed, the standing claim already names `owner`, or the
+    /// standing claim's holder set is empty — the dead-owner or
+    /// orphan-placeholder shape, whose owner is gone or never bound, so
+    /// the re-grant preempts no live attachment. Refused
+    /// [`RemoteError::Fenced`] only while a *different* owner's claim
+    /// has live holders — held controller claim or held tool claim
+    /// alike: a still-held claim keeps the field until it releases,
+    /// while a holderless claim protects no one and refusing it would
+    /// wedge the redundant pair it was raised to fence (two successive
+    /// ex-owners' unbound `ensure_writer` probes each leave a
+    /// holderless claim standing, and a reclaim that refused them could
+    /// never land).
+    ///
+    /// Unlike the orphan cycle's unbound probe the grant *binds* this
+    /// connection to the claim's holders — the re-lifted gate's writes
+    /// must pass the arbitration it re-took — and records the token on
+    /// the attachment exactly as `ensure_writer` does, so a later
+    /// re-attach re-arms it.
+    pub fn reclaim_writer(&self, owner: u64) -> Result<ClaimGrant, RemoteError> {
+        let monitor = self.connection.lock().unwrap().claim_monitor;
+        let grant = match self.request(&PlantRequest::ReclaimWriter { owner, monitor })? {
+            PlantResponse::Done => ClaimGrant::Exclusive,
+            PlantResponse::ClaimedShared { .. } => ClaimGrant::Shared,
+            PlantResponse::Error { error } => {
+                let error: RemoteError = error.into();
+                if matches!(error, RemoteError::Fenced) {
+                    // A refused re-grant means a different owner stands
+                    // held — forget the recorded token so a later
+                    // re-attach does not re-assert a claim this
+                    // attachment no longer holds, exactly like every
+                    // fenced path.
+                    self.connection.lock().unwrap().owner = None;
+                }
+                return Err(self.fail(error));
+            }
+            _ => return Err(self.protocol_violation()),
+        };
+        self.connection.lock().unwrap().owner = Some(owner);
+        Ok(grant)
+    }
+
     /// The orphan cycle's probe shape of [`ensure_writer`](Self::ensure_writer):
     /// raises or confirms the claim *for* `owner` — while the field is
     /// unclaimed or already names the token — without binding this
