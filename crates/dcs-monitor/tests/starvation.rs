@@ -34,7 +34,7 @@ use dcs_runtime::{
 };
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -296,6 +296,19 @@ impl Drop for Rig {
             let _ = thread.join();
         }
     }
+}
+
+/// A standby executor with no failover budget — a driven rig whose
+/// tracking source is meant to stay dead can never arm a
+/// self-promotion off its misses mid-test.
+fn driven_standby_peer() -> Peer<'static> {
+    let driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(0.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let executor = Executor::new(driver, point_map(), vec![Box::new(Scale)]).unwrap();
+    Peer::standby(executor, None)
 }
 
 /// A standby executor with the armed failover budget — the
@@ -839,4 +852,100 @@ fn floods_past_the_lane_queue_are_refused_not_queued() {
 
     pins.clear();
     assert_recovery(rig.addr);
+}
+
+/// The reproduction of `attributed-switch-requests-queue-behind-submission-lane`:
+/// a `POST /promote`/`POST /demote` carrying the attributed
+/// `{"actor":…}` body once inherited the submission lane — routing
+/// quarantined any request still carrying a body — so on a driven
+/// standby whose tracking source had wedged, two severed `/scan`
+/// batches pinning both submission workers queued the incident-time
+/// actuation behind them (~38s on the rig), exactly when an operator
+/// most needs the control lane's guarantee. The attributed body is
+/// tens of bytes, always inside tiny_http's eager-read bound, so it
+/// arrives already buffered and now rides the control lane beside the
+/// bare request: the refusals below answer inside the bound the
+/// reproduction waited ~38s for.
+#[test]
+fn attributed_switch_requests_keep_the_control_lane() {
+    // The reproduction's dead tracking source: the kernel completes
+    // each handshake and nothing ever answers, so every driven scan's
+    // checkpoint pull waits the pull bound out — stretching each scan
+    // to ~1s the way the rig's paused peer did.
+    let dead = TcpListener::bind("127.0.0.1:0").unwrap();
+    let rig = Rig::peer(
+        driven_standby_peer(),
+        Some(Driven {
+            track: Some(dead.local_addr().unwrap()),
+            after_scan: None,
+        }),
+    );
+
+    // Two severed multi-scan batches — the reproduction's shape: each
+    // pins its submission worker for ~4s of dead-source pulls the way
+    // its scans=40 batches pinned ~40s.
+    let body = b"{\"scans\":4}";
+    let mut streams: Vec<TcpStream> = (0..2)
+        .map(|_| {
+            let mut stream = TcpStream::connect(rig.addr).unwrap();
+            stream
+                .write_all(
+                    format!(
+                        "POST /scan HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+            stream.write_all(body).unwrap();
+            stream
+        })
+        .collect();
+    // Let the pins land — both submission workers inside their batches.
+    thread::sleep(Duration::from_millis(250));
+
+    // The reproduction's actuation: the attributed demote queued 37.6s
+    // behind the first batch on the rig, the attributed promote 19.5s;
+    // the bare demote answered in milliseconds throughout. The
+    // attributed forms now answer inside the same bound — the refusals
+    // are the standby's own named answers, `not_active` from a
+    // non-owner and `not_converged` from an unconverged standby whose
+    // final-sync pull just failed against the dead source.
+    let client = MonitorClient::with_timeout(rig.addr, ANSWER_BOUND);
+    for (path, refusal) in [("/demote", "not_active"), ("/promote", "not_converged")] {
+        let (status, body) = client
+            .request("POST", path, Some("{\"actor\":\"qa-h1\"}"))
+            .unwrap_or_else(|error| {
+                panic!("attributed POST {path} queued behind pinned submissions: {error}")
+            });
+        assert_eq!(
+            status, 409,
+            "attributed POST {path} answered {status}: {body}"
+        );
+        assert!(
+            body.contains(refusal),
+            "attributed POST {path} refused with an unexpected body: {body}"
+        );
+    }
+    // The reproduction's baseline beside them: the bare demote's
+    // control-lane answer the attributed form now shares.
+    let (status, body) = client.request("POST", "/demote", None).unwrap();
+    assert_eq!(status, 409, "bare POST /demote answered {status}: {body}");
+
+    // The pin is real: another submission still queues behind the two
+    // running batches, so the answers above rode the control lane.
+    assert!(
+        MonitorClient::with_timeout(rig.addr, Duration::from_millis(750))
+            .advance(1)
+            .is_err(),
+        "POST /scan answered — the submission lane was never pinned"
+    );
+
+    streams.clear();
+    // The recovery, on a timeout sized to let the pinned batches drain:
+    // submissions settle normally again once the workers free.
+    MonitorClient::with_timeout(rig.addr, Duration::from_secs(10))
+        .advance(1)
+        .expect("POST /scan never recovered");
 }
