@@ -201,6 +201,7 @@ mod tests {
             generation: None,
             anchor: None,
             tick: Tick(tick),
+            stream_tick: None,
             components: Default::default(),
             driver: None,
             outputs: Default::default(),
