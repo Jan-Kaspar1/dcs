@@ -20,7 +20,8 @@
       "name": "ctrl-a",
       "listen": "0.0.0.0:8080",
       "state_file": "/var/tmp/state.json",
-      "journal_file": "/var/tmp/journal.jsonl"
+      "journal_file": "/var/tmp/journal.jsonl",
+      "history_file": "/var/tmp/history.jsonl"
     },
     {
       "name": "ctrl-b",
@@ -28,7 +29,8 @@
       "standby": "ctrl-a:8080",
       "failover_budget": 3,
       "state_file": "/var/tmp/state.json",
-      "journal_file": "/var/tmp/journal.jsonl"
+      "journal_file": "/var/tmp/journal.jsonl",
+      "history_file": "/var/tmp/history.jsonl"
     }
   ],
   "topology": {

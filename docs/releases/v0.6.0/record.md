@@ -25,8 +25,8 @@ they cannot diverge from the code before the tag is cut.
 | Served-registry schema sha256 | `ddc00496814a4e8cd0d6ec8a5d9fbb95e83f518dcd927b17a4802f13ac84013a` |
 | Dynamics-document JSON Schema | `dynamics.schema.json` beside this record — `dcs-plant-server --dynamics-schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the drift test in `crates/dcs-plant/tests/dynamics_schema.rs`. Unchanged since `v0.3.0`'s recorded commit |
 | Dynamics-document schema sha256 | `98fb4a4298c5974b8ab0adf1374cd6d53b0c2cfbd2e24a31c874090235b46f02` |
-| Deployment-manifest JSON Schema | `deploy-manifest.schema.json` beside this record — `dcs-model deploy-schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the drift test in `crates/dcs-model/tests/deploy_schema.rs`. Unchanged since `v0.3.0`'s recorded commit |
-| Deployment-manifest schema sha256 | `b43dadc6cf3455cb26b20ab1656137e892f0609387b9dbedfc3291716afd1005` |
+| Deployment-manifest JSON Schema | `deploy-manifest.schema.json` beside this record — `dcs-model deploy-schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the drift test in `crates/dcs-model/tests/deploy_schema.rs`. Moved once since `v0.3.0`'s recorded commit: #1282's additive-optional `history_file` per-controller declaration — decision 102's durable process-history mount, landing in this record's tranche beside the store itself; a manifest predating the field validates unchanged |
+| Deployment-manifest schema sha256 | `980430ca8725af997a7b5063f00d2a9663fe4619ca00a542917bde24f270cfa9` |
 | `dcs-controller` image digest | *pending* — `dcs-controller@sha256:<digest>`, the image `docker build` produces from `Dockerfile` at the tag |
 | `dcs-plant-server` image digest | *pending* — `dcs-plant-server@sha256:<digest>`, the image `docker build -f Dockerfile.plant` produces at the tag |
 
@@ -153,7 +153,10 @@ The determination:
   expectation is the repin itself — the reference plant's
   `ci/check.sh` `upgrade` stage proves the `v0.5.0` → `v0.6.0`
   crossing byte-identically; non-Rust consumers pin the same four
-  schema artifacts `v0.5.0` recorded, their emissions unchanged.
+  schema artifacts `v0.5.0` recorded — three byte-identical, the
+  deployment-manifest emission moving once with #1282's
+  additive-optional `history_file` controller declaration, so a
+  `v0.5.0` manifest still validates unchanged.
 - The `dcs-build` `station`, `dosing`, `ijmuiden`, and `ethercat`
   modules remain platform-owned reference compositions outside the
   compatibility policy (decision 81); a consumer composes from the

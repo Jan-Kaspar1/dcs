@@ -9,9 +9,10 @@ definition. This leg runs the declared pair on the released tooling:
 `dcs-plant-server` serves the checked-in model and dynamics while the
 manifest's two controllers run `dcs-controller --driven --remote`, the
 tracking peer's `--standby` flag wired at the controller the manifest
-names and each controller's declared `--state-file`/`--journal-file`
-carried at runner-owned scratch paths — the persistence vocabulary's
-first behavioral, not merely static, exercise. The run:
+names and each controller's declared
+`--state-file`/`--journal-file`/`--history-file` carried at
+runner-owned scratch paths — the persistence vocabulary's first
+behavioral, not merely static, exercise. The run:
 
 - converges the declared standby to `tracking`: each driven tick scans
   the tracking peer first — its `POST /scan` pulling and applying the
@@ -224,6 +225,7 @@ def spawn_peer(
     for field, flag in (
         ("state_file", "--state-file"),
         ("journal_file", "--journal-file"),
+        ("history_file", "--history-file"),
     ):
         if files.get(field) is not None:
             argv += [flag, files[field]]
@@ -408,7 +410,7 @@ def persistence_files(scratch, entry):
         field: os.path.join(root, os.path.basename(entry[field]))
         if entry.get(field)
         else None
-        for field in ("state_file", "journal_file")
+        for field in ("state_file", "journal_file", "history_file")
     }
 
 

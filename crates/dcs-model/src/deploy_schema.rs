@@ -159,7 +159,8 @@ const SCHEMA_SOURCE: &str = r##"{
         "standby": { "$ref": "#/$defs/address" },
         "failover_budget": { "type": "integer", "minimum": 1 },
         "state_file": { "$ref": "#/$defs/path" },
-        "journal_file": { "$ref": "#/$defs/path" }
+        "journal_file": { "$ref": "#/$defs/path" },
+        "history_file": { "$ref": "#/$defs/path" }
       }
     },
     "pair": {
