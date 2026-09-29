@@ -2165,7 +2165,34 @@ fn a_probe_observed_foreign_claim_journals_once_beside_the_reclaim() {
             })
         })
         .with_claim_observer(move || (*claim.lock().unwrap()).into_iter().collect());
-    let active = Serving::start(Monitor::bind_peer("127.0.0.1:0", peer, signal_index()).unwrap());
+    // The sibling standby the demoted peer tracks — the pair topology
+    // every refused-probe contract stages: its checkpoints stamp the
+    // ownerless line `orphaned`, so the demoted ex-owner reconverges
+    // there and its bound reclaim's refused asks keep running — the
+    // convergence evidence the preempting ask needs while a claim
+    // stands.
+    let orphan_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let orphan = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(orphan_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    orphan.client.advance(1).unwrap();
+    let active = Serving::start(
+        Monitor::bind_peer("127.0.0.1:0", peer, signal_index())
+            .unwrap()
+            .driven(Driven {
+                track: Some(dialable(orphan.monitor.local_addr())),
+                after_scan: None,
+            }),
+    );
 
     active.client.advance(1).unwrap();
     assert_eq!(active.client.role().unwrap().role, Role::Active);
