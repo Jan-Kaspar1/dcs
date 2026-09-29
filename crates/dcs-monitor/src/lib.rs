@@ -1843,6 +1843,21 @@ impl<'d> Monitor<'d> {
         }
     }
 
+    /// The deferred startup grant's latched refusal verdict, drained —
+    /// [`Peer::take_startup_refusal`](dcs_runtime::Peer::take_startup_refusal)
+    /// under the shared lock. `Some` once per run: a scan settled the
+    /// pending born-active's conditional ask into the deferred half of
+    /// the [`Activation::Refused`](dcs_runtime::Activation::Refused)
+    /// verdict, which no activation result can carry to the run's
+    /// shell. The caller disposes of it under the identical contract
+    /// the activation-time answer takes — rejoin the declared pair, or
+    /// exit where none was declared. A driven run's serve loop stands
+    /// down when that verdict lands pairless so the shell settles it;
+    /// a paced loop drains it inside its own scan cycle.
+    pub fn take_startup_refusal(&self) -> Option<SwitchError> {
+        self.shared.lock().unwrap().peer.take_startup_refusal()
+    }
+
     /// Runs one executor scan through the shared lock, records it, and
     /// publishes its immutable read model — the entry point for a
     /// process pacing its own scan loop once the monitor owns the
@@ -2087,6 +2102,9 @@ impl<'d> Monitor<'d> {
         let activation = peer.activate()?;
         for observation in peer.take_claim_observations() {
             recorder.note_claim_observed(observation);
+        }
+        for refusal in peer.take_startup_refusals() {
+            recorder.note_startup_claim_refused(refusal);
         }
         for change in peer.take_role_changes() {
             recorder.note_role_change(&change);
@@ -2417,6 +2435,14 @@ impl<'d> Monitor<'d> {
         // scan re-queues the carried receipt rather than losing the
         // command unaudited. The wait runs below, off the lock.
         let mut admission = None;
+        // The deferred startup refusal's pairless disposition: a
+        // `POST /scan` whose scan settled the pending born-active's
+        // refused conditional grant on a run that declared no pair.
+        // The request still answers the refusal — the durable-record
+        // waits below run first — then the serve loop stands down so
+        // the run's shell settles the latched verdict as the exit the
+        // activation-time answer would already have taken.
+        let mut terminal = false;
         let response = match (method, path) {
             (Method::Get, "/") | (Method::Get, "/index.html") => html(PAGE),
             (Method::Get, "/signals") => json(200, &self.signals),
@@ -2698,6 +2724,29 @@ impl<'d> Monitor<'d> {
                         // out.
                         let mut shared = self.shared.lock().unwrap();
                         scan_and_record(&mut shared, &self.store);
+                        // A deferred startup grant's refusal settling
+                        // inside this scan is the born-active
+                        // contract's `Refused` verdict arriving
+                        // mid-run, with no activation result to carry
+                        // it. A run whose pair was declared keeps
+                        // standing — the standby surface the pending
+                        // stand-down reported is the rejoin the
+                        // contract prescribes, and the drained verdict
+                        // needs no further settle — while a pairless
+                        // run has nothing to rejoin: the verdict stays
+                        // latched for the shell, the batch ends on the
+                        // refusal's answer, and the serve loop stands
+                        // down for the run's exit.
+                        if shared.peer.startup_refusal().is_some() {
+                            if self.configured_source().is_some() {
+                                shared.peer.take_startup_refusal();
+                            } else {
+                                failure =
+                                    shared.peer.startup_refusal().map(|error| error.to_string());
+                                terminal = true;
+                                break;
+                            }
+                        }
                         if let Some(after_scan) = &self.driven.after_scan
                             && let Err(error) = after_scan(&shared.peer)
                         {
@@ -2767,6 +2816,9 @@ impl<'d> Monitor<'d> {
         // A dropped client connection makes respond fail; the request is
         // already handled, so the error is ignored.
         let _ = request.respond(response);
+        if terminal {
+            self.shutdown();
+        }
     }
 
     /// `POST /promote` (`promote` true) or `POST /demote` (`false`):
@@ -3999,6 +4051,14 @@ fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Tick {
     // scan's own events, once per distinct claimant.
     for observation in peer.take_claim_observations() {
         recorder.note_claim_observed(observation);
+    }
+    // A deferred startup grant's refusal — the pending born-active's
+    // re-issued ask answered mid-scan — journals the settled verdict
+    // once, beside the observed-claimant record attributing it: the
+    // entry that makes the pending state's terminal settle durable on
+    // run shapes whose shell never regains control.
+    for refusal in peer.take_startup_refusals() {
+        recorder.note_startup_claim_refused(refusal);
     }
     for change in peer.take_role_changes() {
         recorder.note_role_change(&change);

@@ -46,7 +46,7 @@ use dcs_core::{
 };
 use dcs_runtime::{
     ClaimObservation, ClaimRearm, Executor, OrphanReport, PromotionRefusal, ResolutionReport,
-    RoleChange, SourceRestart,
+    RoleChange, SourceRestart, StartupRefusal,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
@@ -758,6 +758,25 @@ impl Recorder {
             JournalEvent::FieldClaimObserved {
                 point: observation.point,
                 claimant: observation.claimant,
+            },
+        );
+    }
+
+    /// Journals a startup-grant refusal — the born-active's conditional
+    /// ask met a live incumbent's claim — attributed to the tick the
+    /// verdict landed on and carrying the named `FieldClaimFailed`. The
+    /// verdict answers at activation or at a pending run's first
+    /// answered field contact; either timing queues the same record,
+    /// so the journal names the refused settle whether the run's shell
+    /// saw it — the driven run's shell never does, making this entry
+    /// the only durable trace that the pending state's settle happened.
+    /// One entry per refused startup grant: the ask never re-issues
+    /// after a verdict.
+    pub(super) fn note_startup_claim_refused(&mut self, refusal: StartupRefusal) {
+        self.push(
+            refusal.tick,
+            JournalEvent::StartupClaimRefused {
+                error: refusal.error,
             },
         );
     }

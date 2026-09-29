@@ -1892,6 +1892,24 @@ fn main() -> ExitCode {
         }
         eprintln!("listening on {}", monitor.local_addr());
         monitor.serve();
+        // The driven run's serve loop stands down when a `POST /scan`
+        // settles the deferred startup grant's refusal on a pairless
+        // run — the born-active contract's `Refused` verdict arriving
+        // mid-run, latched for the shell since no activation result
+        // can carry it. It drains here for the identical disposition
+        // the activation-time answer takes: a declared pair keeps the
+        // run (the handler left the run serving), a pairless run ends
+        // the launch the verdict refused.
+        if let Some(error) = monitor.take_startup_refusal()
+            && let Err(error) = settle_activation(
+                Ok(Activation::Refused { error }),
+                &driver,
+                owner,
+                options.peer.is_some(),
+            )
+        {
+            return fail(error);
+        }
         return ExitCode::SUCCESS;
     }
 
@@ -1940,7 +1958,7 @@ fn main() -> ExitCode {
                 let mut puller = None;
                 run_monitored(
                     &monitor,
-                    || tracked_cycle(&monitor, &mut puller),
+                    || tracked_cycle(&monitor, &mut puller, &driver, owner, &options),
                     step,
                     &options,
                     period.unwrap(),
@@ -2067,7 +2085,7 @@ fn main() -> ExitCode {
                                 observation.claimant, observation.tick.0, observation.point
                             );
                         }
-                        scanned
+                        Ok(scanned)
                     },
                     || peer.borrow().snapshot(),
                     || persist_state_file(&state_sink, &peer),
@@ -2145,7 +2163,7 @@ fn main() -> ExitCode {
                 let mut puller = None;
                 run_monitored(
                     &monitor,
-                    || tracked_cycle(&monitor, &mut puller),
+                    || tracked_cycle(&monitor, &mut puller, &driver, owner, &options),
                     step,
                     &options,
                     period.unwrap(),
@@ -2206,7 +2224,23 @@ fn main() -> ExitCode {
                                 change.from, change.to, change.tick.0
                             );
                         }
-                        scanned
+                        // A deferred startup-claim refusal settling
+                        // inside this scan is the born-active
+                        // contract's `Refused` verdict arriving
+                        // mid-run — settled exactly as the
+                        // activation-time answer was: no monitor is
+                        // served and `--peer` requires `--listen`, so
+                        // none was declared and the refusal ends the
+                        // launch.
+                        if let Some(error) = peer.take_startup_refusal() {
+                            settle_activation(
+                                Ok(Activation::Refused { error }),
+                                &driver,
+                                owner,
+                                options.peer.is_some(),
+                            )?;
+                        }
+                        Ok(scanned)
                     },
                     || peer.borrow().snapshot(),
                     || persist_state_file(&state_sink, &peer),
@@ -2246,10 +2280,24 @@ fn main() -> ExitCode {
 /// again without a respawn. A
 /// field-owning cycle's [`Monitor::track_cycle`] short-circuits before
 /// the pull, so the puller's fetch thread idles until a demotion.
+///
+/// The scan's completion can settle the deferred startup grant: a
+/// pending born-active's re-issued conditional ask meeting a live
+/// incumbent's refusal lands the verdict inside `paced_scan` — the
+/// born-active contract's `Refused` arriving mid-run, where no
+/// activation result remains to carry it to the shell. The latch
+/// drains here for the identical disposition the activation-time
+/// answer took: a declared pair keeps the run standing as its rejoined
+/// standby, while a run launched without one has nothing to rejoin —
+/// the cycle fails and the scan loop ends the launch the verdict
+/// refused, exactly as the boot-time answer would.
 fn tracked_cycle(
     monitor: &Monitor<'_>,
     puller: &mut Option<(TrackTarget, CheckpointPuller)>,
-) -> Tick {
+    driver: &Driver,
+    owner: u64,
+    options: &Options,
+) -> Result<Tick, String> {
     if let Some(source) = monitor.verified_tracking_source() {
         if puller.as_ref().map(|(bound, _)| bound) != Some(&source) {
             let announce = Some(monitor.local_addr());
@@ -2268,7 +2316,16 @@ fn tracked_cycle(
         let report = monitor.track_cycle(|| puller.as_mut().unwrap().1.poll());
         report_tracking(&report, &source);
     }
-    monitor.paced_scan()
+    let tick = monitor.paced_scan();
+    if let Some(error) = monitor.take_startup_refusal() {
+        settle_activation(
+            Ok(Activation::Refused { error }),
+            driver,
+            owner,
+            options.peer.is_some(),
+        )?;
+    }
+    Ok(tick)
 }
 
 /// The standby loop's presentation half of a tracking cycle: logs what
@@ -2309,7 +2366,7 @@ fn report_tracking(report: &TrackReport, source: &TrackTarget) {
 /// the run ends and the scope join completes the graceful close.
 fn run_monitored(
     monitor: &Monitor<'_>,
-    scan: impl FnMut() -> Tick,
+    scan: impl FnMut() -> Result<Tick, String>,
     step: impl Fn() -> Result<(), String>,
     options: &Options,
     period: Duration,
@@ -2540,7 +2597,7 @@ impl SnapshotSink {
 /// wall-clock overrun detection stays out here in the shell and only a
 /// count, not a timestamp, enters the tick domain.
 fn scan_loop(
-    mut scan: impl FnMut() -> Tick,
+    mut scan: impl FnMut() -> Result<Tick, String>,
     snapshot: impl Fn() -> TelemetrySnapshot,
     persist: impl Fn() -> Result<(), String>,
     step: impl Fn() -> Result<(), String>,
@@ -2561,7 +2618,13 @@ fn scan_loop(
         .then(|| SnapshotSink::start(std::io::stdout()));
     loop {
         let started = Instant::now();
-        scan();
+        // A scan cycle can settle a verdict the launch could not have
+        // answered — the deferred startup grant's refusal landing
+        // mid-run ends a pairless run exactly as the activation-time
+        // answer does.
+        if let Err(error) = scan() {
+            return fail(error);
+        }
         if let Err(error) = step() {
             return fail(error);
         }

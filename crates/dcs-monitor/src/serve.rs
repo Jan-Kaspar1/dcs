@@ -305,6 +305,7 @@ fn attributed(entry: &JournalEntry, name: &str, points: &BTreeSet<PointId>) -> b
         JournalEvent::EventEmitted { event } => event.component == name,
         JournalEvent::RoleChanged { .. }
         | JournalEvent::PromotionRefused { .. }
+        | JournalEvent::StartupClaimRefused { .. }
         | JournalEvent::DivergenceDetected { .. }
         | JournalEvent::DivergenceResolved { .. }
         | JournalEvent::Reinitialized { .. }
