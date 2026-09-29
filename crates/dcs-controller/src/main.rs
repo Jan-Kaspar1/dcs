@@ -322,8 +322,8 @@
 use dcs_assembly::{DriverRegistry, FanoutDriver, StepError, assemble, resolve_drivers};
 use dcs_controller::registry;
 use dcs_core::{
-    CarryoverReport, FieldClaim, IoDriver, PointId, SwitchError, TelemetrySnapshot, Tick,
-    TickAnchor,
+    CarryoverReport, FieldClaim, IoDriver, IoError, PointId, SwitchError, TelemetrySnapshot, Tick,
+    TickAnchor, ValueKind,
 };
 use dcs_model::PlantModel;
 use dcs_monitor::{
@@ -349,8 +349,17 @@ use std::time::{Duration, Instant};
 enum Driver {
     /// The registry-resolved backends held in this process.
     Local(FanoutDriver),
-    /// A client of a shared plant server.
-    Remote(RemoteDriver),
+    /// A client of a shared plant server — the `--remote` attachment.
+    /// `deferred` holds the declared-point correspondence probes still
+    /// outstanding against it: the launch-time check the `sim-tcp`
+    /// device factory runs eagerly could not complete while the plant
+    /// answered nothing, so the startup claim re-runs them ahead of
+    /// the grant ask — a plant that answers serving a different model
+    /// never lets the claim land.
+    Remote {
+        remote: RemoteDriver,
+        deferred: Mutex<Vec<(PointId, ValueKind)>>,
+    },
 }
 
 impl Driver {
@@ -358,7 +367,7 @@ impl Driver {
     fn io(&self) -> &(dyn IoDriver + Sync) {
         match self {
             Self::Local(fanout) => fanout,
-            Self::Remote(remote) => remote,
+            Self::Remote { remote, .. } => remote,
         }
     }
 
@@ -378,7 +387,7 @@ impl Driver {
         match (self, owns_field) {
             (Self::Local(fanout), true) => degrade_step(fanout.step(dt)),
             (Self::Local(fanout), false) => degrade_step(fanout.step_local(dt)),
-            (Self::Remote(remote), true) => match remote.step(dt) {
+            (Self::Remote { remote, .. }, true) => match remote.step(dt) {
                 Ok(_) => Ok(()),
                 Err(RemoteError::InvalidRequest(detail)) => {
                     Err(format!("plant step failed: {detail}"))
@@ -388,7 +397,7 @@ impl Driver {
                     Ok(())
                 }
             },
-            (Self::Remote(_), false) => Ok(()),
+            (Self::Remote { .. }, false) => Ok(()),
         }
     }
 
@@ -403,7 +412,7 @@ impl Driver {
     /// with it — anyway.
     fn release_claim(&self) {
         match self {
-            Self::Remote(remote) => {
+            Self::Remote { remote, .. } => {
                 let _ = remote.release_writer_keep_claim();
             }
             Self::Local(fanout) => fanout.release_field_claims(),
@@ -415,7 +424,7 @@ impl Driver {
     /// so its write-ownership claim means something.
     fn has_shared_field(&self) -> bool {
         match self {
-            Self::Remote(_) => true,
+            Self::Remote { .. } => true,
             Self::Local(fanout) => fanout.has_field_backend(),
         }
     }
@@ -432,19 +441,28 @@ impl Driver {
     /// defeating the arbitration this claim exists to provide.
     fn claim_writer(&self, owner: u64) -> Result<(), String> {
         match self {
-            Self::Remote(remote) => match remote.claim_writer(owner) {
-                Ok(ClaimGrant::Exclusive) => Ok(()),
-                Ok(ClaimGrant::Shared) => {
-                    eprintln!(
-                        "warning: field write-ownership claim for owner token {owner} is \
-                         shared with another live attachment — expected only for a \
-                         deliberate same-owner attachment; a second controller pinned to \
-                         the same --owner-token defeats single-writer fencing"
-                    );
-                    Ok(())
+            Self::Remote { remote, deferred } => {
+                // The same outstanding correspondence probes gate the
+                // promotion path's unconditional claim: a plant that
+                // could not answer at launch and answers serving a
+                // different model refuses here too.
+                if let Err(detail) = probe_remote_correspondence(remote, deferred) {
+                    return Err(format!("plant write-ownership claim failed: {detail}"));
                 }
-                Err(error) => Err(format!("plant write-ownership claim failed: {error}")),
-            },
+                match remote.claim_writer(owner) {
+                    Ok(ClaimGrant::Exclusive) => Ok(()),
+                    Ok(ClaimGrant::Shared) => {
+                        eprintln!(
+                            "warning: field write-ownership claim for owner token {owner} is \
+                             shared with another live attachment — expected only for a \
+                             deliberate same-owner attachment; a second controller pinned to \
+                             the same --owner-token defeats single-writer fencing"
+                        );
+                        Ok(())
+                    }
+                    Err(error) => Err(format!("plant write-ownership claim failed: {error}")),
+                }
+            }
             Self::Local(fanout) => fanout
                 .claim_field_writer(owner)
                 .map_err(|error| format!("plant write-ownership claim failed: {error}")),
@@ -470,20 +488,29 @@ impl Driver {
     /// holders fall back to the unconditional claim.
     fn claim_writer_unless_held(&self, owner: u64) -> Result<bool, String> {
         match self {
-            Self::Remote(remote) => match remote.claim_writer_unless_held(owner) {
-                Ok(ClaimGrant::Exclusive) => Ok(true),
-                Ok(ClaimGrant::Shared) => {
-                    eprintln!(
-                        "warning: field write-ownership claim for owner token {owner} is \
-                         shared with another live attachment — expected only for a \
-                         deliberate same-owner attachment; a second controller pinned to \
-                         the same --owner-token defeats single-writer fencing"
-                    );
-                    Ok(true)
+            Self::Remote { remote, deferred } => {
+                // The declared-point correspondence probes a launch
+                // against an unreachable plant left outstanding run
+                // ahead of the grant ask — a plant that answers
+                // serving a different model never lets the claim land.
+                if let Err(detail) = probe_remote_correspondence(remote, deferred) {
+                    return Err(format!("plant write-ownership claim failed: {detail}"));
                 }
-                Err(RemoteError::Fenced) => Ok(false),
-                Err(error) => Err(format!("plant write-ownership claim failed: {error}")),
-            },
+                match remote.claim_writer_unless_held(owner) {
+                    Ok(ClaimGrant::Exclusive) => Ok(true),
+                    Ok(ClaimGrant::Shared) => {
+                        eprintln!(
+                            "warning: field write-ownership claim for owner token {owner} is \
+                             shared with another live attachment — expected only for a \
+                             deliberate same-owner attachment; a second controller pinned to \
+                             the same --owner-token defeats single-writer fencing"
+                        );
+                        Ok(true)
+                    }
+                    Err(RemoteError::Fenced) => Ok(false),
+                    Err(error) => Err(format!("plant write-ownership claim failed: {error}")),
+                }
+            }
             Self::Local(fanout) => fanout
                 .claim_field_writer_unless_held(owner)
                 .map_err(|error| format!("plant write-ownership claim failed: {error}")),
@@ -504,7 +531,7 @@ impl Driver {
     /// vacuously.
     fn ensure_writer(&self, owner: u64) -> Result<bool, String> {
         match self {
-            Self::Remote(remote) => match remote.ensure_writer_unbound(owner) {
+            Self::Remote { remote, .. } => match remote.ensure_writer_unbound(owner) {
                 Ok(()) => Ok(true),
                 Err(RemoteError::Fenced) => Ok(false),
                 Err(error) => Err(format!("plant write-ownership re-arm failed: {error}")),
@@ -524,7 +551,7 @@ impl Driver {
     /// observation stands.
     fn probe_field_claim(&self) -> Result<FieldClaim, String> {
         match self {
-            Self::Remote(remote) => remote
+            Self::Remote { remote, .. } => remote
                 .probe_writer()
                 .map_err(|error| format!("plant write-ownership probe failed: {error}")),
             Self::Local(fanout) => fanout
@@ -550,7 +577,7 @@ impl Driver {
     /// field backend answers `Ok(false)` — nothing probed.
     fn reclaim_writer(&self, owner: u64) -> Result<bool, String> {
         match self {
-            Self::Remote(remote) => match remote.reclaim_writer(owner) {
+            Self::Remote { remote, .. } => match remote.reclaim_writer(owner) {
                 Ok(ClaimGrant::Exclusive) => Ok(true),
                 Ok(ClaimGrant::Shared) => {
                     eprintln!(
@@ -578,7 +605,7 @@ impl Driver {
     /// the rendezvous an unkeyed pair has no other way to prove.
     fn set_claim_monitor(&self, monitor: SocketAddr) {
         match self {
-            Self::Remote(remote) => remote.set_claim_monitor(monitor),
+            Self::Remote { remote, .. } => remote.set_claim_monitor(monitor),
             Self::Local(fanout) => fanout.declare_field_monitor(monitor),
         }
     }
@@ -590,7 +617,7 @@ impl Driver {
     /// verdict has named one.
     fn claimed_monitor(&self) -> Option<SocketAddr> {
         match self {
-            Self::Remote(remote) => remote.claimed_monitor(),
+            Self::Remote { remote, .. } => remote.claimed_monitor(),
             Self::Local(fanout) => fanout.claimed_monitor(),
         }
     }
@@ -603,7 +630,7 @@ impl Driver {
     /// no owner identity — and the loss then records unattributed.
     fn fencing_claimant(&self, point: PointId) -> Option<u64> {
         match self {
-            Self::Remote(remote) => remote.fenced_by(),
+            Self::Remote { remote, .. } => remote.fenced_by(),
             Self::Local(fanout) => fanout.fencing_claimant(point),
         }
     }
@@ -617,7 +644,7 @@ impl Driver {
     /// Empty where no refusal named a claimant.
     fn refused_claimants(&self) -> Vec<u64> {
         match self {
-            Self::Remote(remote) => remote.fenced_by().into_iter().collect(),
+            Self::Remote { remote, .. } => remote.fenced_by().into_iter().collect(),
             Self::Local(fanout) => fanout.refused_claimants(),
         }
     }
@@ -628,7 +655,7 @@ impl Driver {
     /// attachment always arbitrates through the plant server's claim.
     fn unfenced_field_devices(&self) -> Vec<String> {
         match self {
-            Self::Remote(_) => Vec::new(),
+            Self::Remote { .. } => Vec::new(),
             Self::Local(fanout) => fanout
                 .unfenced_field_devices()
                 .iter()
@@ -636,6 +663,98 @@ impl Driver {
                 .collect(),
         }
     }
+}
+
+/// The `--remote` attachment's declared-point correspondence probe —
+/// the same rule the `sim-tcp` device factory applies inside driver
+/// assembly: every channel-bound `io_point` the model declares must be
+/// served by the plant, with the declared value kind, before the
+/// field's write-ownership claim may land. A miswired `--remote`
+/// endpoint — the wrong plant container, stale DNS, a copy-paste
+/// deployment — answers honestly for the points its model does not
+/// serve, so the mismatch is detectable here at launch rather than
+/// surfacing as per-point quality faults under a claimed, active run.
+/// Channel-less internal points are image-carried and probed against
+/// nothing — the plant serves only the field set.
+///
+/// The born-active contract defers only the transport: a plant that
+/// cannot answer at all returns `Disconnected`/`Timeout` on every
+/// probe, so the check returns the full declared set as *outstanding*
+/// — carried on the [`Driver::Remote`] attachment and re-run by the
+/// startup claim's first answered contact — while a plant that answers
+/// but serves a different model is `Err`, a launch failure.
+fn remote_correspondence(
+    remote: &RemoteDriver,
+    model: &PlantModel,
+    addr: SocketAddr,
+) -> Result<Vec<(PointId, ValueKind)>, String> {
+    let declared: Vec<(PointId, ValueKind)> = model
+        .io_points
+        .iter()
+        .filter(|point| point.channel.is_some())
+        .map(|point| (point.id, point.value_type))
+        .collect();
+    for &(point, kind) in &declared {
+        match remote.read(point) {
+            Ok(sample) if sample.value.kind() == kind => {}
+            Ok(sample) => {
+                return Err(format!(
+                    "plant server at {addr} serves io point {} as {:?}, the model declares {:?}",
+                    point.0,
+                    sample.value.kind(),
+                    kind
+                ));
+            }
+            Err(IoError::Disconnected(_) | IoError::Timeout(_)) => {
+                return Ok(declared);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "plant server at {addr} does not serve io point {}: {error}",
+                    point.0
+                ));
+            }
+        }
+    }
+    Ok(Vec::new())
+}
+
+/// The deferred half of [`remote_correspondence`] — the outstanding
+/// probes a launch against an unreachable plant left on the
+/// attachment, re-run ahead of every conditional startup-claim ask
+/// until every declared point answers with the declared kind. `Err`
+/// names the mismatch or the still-unanswerable contact; either way
+/// the grant ask that follows never runs, so a plant serving a foreign
+/// model is never claimed — the probe's own detail is the pending
+/// run's evidence.
+fn probe_remote_correspondence(
+    remote: &RemoteDriver,
+    deferred: &Mutex<Vec<(PointId, ValueKind)>>,
+) -> Result<(), String> {
+    let mut deferred = deferred.lock().unwrap();
+    if deferred.is_empty() {
+        return Ok(());
+    }
+    for &(point, kind) in deferred.iter() {
+        match remote.read(point) {
+            Ok(sample) if sample.value.kind() == kind => {}
+            Ok(sample) => {
+                return Err(format!(
+                    "deferred assembly probe: the plant serves io point {} as {:?}, the model declares {:?}",
+                    point.0,
+                    sample.value.kind(),
+                    kind
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "deferred assembly probe: the plant does not serve io point {point:?}: {error}"
+                ));
+            }
+        }
+    }
+    deferred.clear();
+    Ok(())
 }
 
 /// A local backend step result under the same rule [`Driver::step`]
@@ -1497,7 +1616,22 @@ fn main() -> ExitCode {
                 // preempt while they stand live.
                 .map(|remote| remote.as_controller());
             match remote {
-                Ok(remote) => Driver::Remote(remote),
+                Ok(remote) => {
+                    // The declared-point correspondence probe the
+                    // `sim-tcp` device factory runs inside assembly —
+                    // a `--remote` endpoint serving a different model
+                    // fails the launch here rather than running as the
+                    // wrong plant's owner, and a plant that cannot
+                    // answer at all leaves the probes outstanding on
+                    // the attachment's deferred startup claim.
+                    match remote_correspondence(&remote, &model, addr) {
+                        Ok(deferred) => Driver::Remote {
+                            remote,
+                            deferred: Mutex::new(deferred),
+                        },
+                        Err(error) => return fail(error),
+                    }
+                }
                 Err(error) => {
                     return fail(format!("cannot connect to plant at {addr}: {error}"));
                 }
@@ -1522,7 +1656,7 @@ fn main() -> ExitCode {
     // backends still see their writes and their private plant keeps
     // tracking.
     let gate = match &driver {
-        Driver::Remote(remote) => Some(WriteGate::closed(remote)),
+        Driver::Remote { remote, .. } => Some(WriteGate::closed(remote)),
         Driver::Local(fanout) if fanout.has_field_backend() => {
             Some(WriteGate::closed_covering(fanout, |point| {
                 fanout.is_field_point(point)
