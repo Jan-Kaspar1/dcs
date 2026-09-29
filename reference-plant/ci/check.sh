@@ -79,7 +79,8 @@
 #                wiring, the standby's optional failover_budget
 #                declaration carried as its --auto-promote flag, and
 #                the optional per-controller persistence
-#                paths (state_file/journal_file) backed by writable
+#                paths (state_file/journal_file/history_file) backed
+#                by writable
 #                mounts and flags, the declared topology
 #                section's pairs — the checked-in manifest naming
 #                the deployed pair under topology.pairs, each pair
@@ -99,7 +100,8 @@
 #   restart      the restart-recovery leg (WW-LCM-001's
 #                lone-controller clause): the field-owning controller
 #                runs the deterministic scenario on the
-#                manifest-declared --state-file/--journal-file flags
+#                manifest-declared
+#                --state-file/--journal-file/--history-file flags
 #                pointed at runner-owned scratch paths, is stopped at
 #                a leg boundary, and relaunches onto the same files —
 #                the resumed run must continue at the persisted tick
@@ -490,6 +492,10 @@ if case == "missing-required":
     del document["model"]["fingerprint"]
 elif case == "mistyped-field":
     document["controllers"][1]["failover_budget"] = "high"
+elif case == "mistyped-history-file":
+    # The durable-history mount is a path field — a non-string value
+    # violates its shape the same way a mistyped journal_file would.
+    document["controllers"][0]["history_file"] = 7
 elif case == "undeclared-field":
     # The pair's shared tracking secret is a deployment secret the
     # manifest shape deliberately never records.
@@ -534,7 +540,8 @@ PY
         || fail "schema-mismatch-unchecked: the dynamics document's $1 case did not report schema-mismatch: $out"
     echo "  dynamics $1 refused: schema-mismatch"
 }
-for case in missing-required mistyped-field undeclared-field; do
+for case in missing-required mistyped-field mistyped-history-file \
+        undeclared-field; do
     manifest_case "$case"
 done
 for case in missing-required mistyped-field undeclared-element; do
@@ -812,6 +819,15 @@ elif case == "persistence-flag-divergence":
     # ctrl-a's --journal-file argument diverges from the manifest.
     compose = compose.replace(
         "- /var/tmp/journal.jsonl", "- /var/tmp/other.jsonl", 1)
+elif case == "persistence-history-flag-divergence":
+    # ctrl-a's --history-file argument diverges from the manifest.
+    compose = compose.replace(
+        "- /var/tmp/history.jsonl", "- /var/tmp/other.jsonl", 1)
+elif case == "persistence-history-flag-missing":
+    # ctrl-a keeps its declared history_file while the rig
+    # definition drops the --history-file flag.
+    compose = compose.replace(
+        "      - --history-file\n      - /var/tmp/history.jsonl\n", "", 1)
 elif case == "persistence-mount-read-only":
     compose = compose.replace(
         "ctrl-a-data:/var/tmp", "ctrl-a-data:/var/tmp:ro", 1)
@@ -820,6 +836,12 @@ elif case == "undeclared-persistence-flag":
     # field — an undeclared flag.
     document = json.loads(manifest)
     del document["controllers"][0]["journal_file"]
+    manifest = json.dumps(document, indent=2)
+elif case == "undeclared-history-flag":
+    # ctrl-a keeps its --history-file while the manifest drops the
+    # field — an undeclared flag.
+    document = json.loads(manifest)
+    del document["controllers"][0]["history_file"]
     manifest = json.dumps(document, indent=2)
 elif case == "undeclared-writable-mount":
     # ctrl-a gains writable storage the manifest declares nothing
@@ -853,18 +875,21 @@ elif case == "failover-wrong-peer":
         document["controllers"][1].pop("failover_budget")
     manifest = json.dumps(document, indent=2)
 elif case == "persistence-omitted":
-    # Both fields omitted together with their flags and mounts — the
-    # optional deployment a consumer without durable storage declares.
+    # All three fields omitted together with their flags and mounts —
+    # the optional deployment a consumer without durable storage
+    # declares.
     document = json.loads(manifest)
     for controller in document["controllers"]:
         controller.pop("state_file", None)
         controller.pop("journal_file", None)
+        controller.pop("history_file", None)
     manifest = json.dumps(document, indent=2)
     for line in (
         "      - ctrl-a-data:/var/tmp\n",
         "      - ctrl-b-data:/var/tmp\n",
         "      - --state-file\n      - /var/tmp/state.json\n",
         "      - --journal-file\n      - /var/tmp/journal.jsonl\n",
+        "      - --history-file\n      - /var/tmp/history.jsonl\n",
     ):
         compose = compose.replace(line, "")
 elif case == "topology-declared":
@@ -891,6 +916,7 @@ elif case == "topology-multi-pair":
             "listen": "0.0.0.0:8082",
             "state_file": "/var/tmp/state.json",
             "journal_file": "/var/tmp/journal.jsonl",
+            "history_file": "/var/tmp/history.jsonl",
         },
         {
             "name": "ctrl-d",
@@ -898,6 +924,7 @@ elif case == "topology-multi-pair":
             "standby": "ctrl-c:8082",
             "state_file": "/var/tmp/state.json",
             "journal_file": "/var/tmp/journal.jsonl",
+            "history_file": "/var/tmp/history.jsonl",
         },
     ]
     document["topology"] = {
@@ -940,6 +967,7 @@ elif case == "undeployable-second-duty":
             "listen": "0.0.0.0:8082",
             "state_file": "/var/tmp/state.json",
             "journal_file": "/var/tmp/journal.jsonl",
+            "history_file": "/var/tmp/history.jsonl",
         }
     )
     manifest = json.dumps(document, indent=2)
@@ -1022,7 +1050,10 @@ PY
 }
 
 for divergence in persistence-mount-divergence persistence-flag-divergence \
+        persistence-history-flag-divergence \
+        persistence-history-flag-missing \
         persistence-mount-read-only undeclared-persistence-flag \
+        undeclared-history-flag \
         undeclared-writable-mount failover-flag-missing \
         failover-flag-undeclared failover-wrong-peer \
         persistence-omitted topology-declared topology-multi-pair \

@@ -311,7 +311,8 @@ pumped-down all-stop — identically on every run.
 The check's `restart` stage then proves the recovery contract the
 manifest's persistence fields declare — `ci/restart.py` launches the
 field-owning `dcs-controller --driven` with the manifest-declared
-`--state-file`/`--journal-file` flags pointed at runner-owned scratch
+`--state-file`/`--journal-file`/`--history-file` flags pointed at
+runner-owned scratch
 paths, drives the deterministic scenario past a leg boundary — far
 enough to leave applied receipts and journaled transitions — stops the
 controller, and relaunches it onto the same files. The resumed run
@@ -380,7 +381,8 @@ the manifest-declared deployment on the released tooling —
 `dcs-plant-server` plus two released `dcs-controller --driven --remote`
 instances wired exactly as the manifest declares, the standby's
 `--standby` flag at the peer it names, each controller's declared
-`--state-file`/`--journal-file` carried at runner-owned scratch paths,
+`--state-file`/`--journal-file`/`--history-file` carried at
+runner-owned scratch paths,
 plus the shared `--pair-token` the keyed announced-source contract
 runs on — converging the standby to `tracking`, driving scans through
 `POST /scan` on each peer keeping their served snapshots identical,
@@ -511,15 +513,21 @@ and the redundant controller pair:
   `standby` wiring alone never arms it. A standby deployment without
   the field switches only through the operator's receipted
   `demote`/`promote` path.
-- `controllers[].state_file` / `controllers[].journal_file` —
-  **optional** per-controller container paths for the runtime's two
-  durability files: `state_file` is the restart-recovery checkpoint —
-  a restarted container resumes in place at the last persisted scan —
-  and `journal_file` is the durable attributed operator-action record
-  surviving the process lifetime. Each declared path must land on
-  writable deployment storage and rides the invocation's
-  `--state-file`/`--journal-file` flags; a deployment without durable
-  storage omits both fields and the flags stay absent. A restarted
+- `controllers[].state_file` / `controllers[].journal_file` /
+  `controllers[].history_file` — **optional** per-controller container
+  paths for the runtime's durability files: `state_file` is the
+  restart-recovery checkpoint — a restarted container resumes in
+  place at the last persisted scan — `journal_file` is the durable
+  attributed operator-action record surviving the process lifetime,
+  and `history_file` is the durable process-history store — the
+  declared-duty samples' append-only file, replayed at bind into the
+  bounded served window behind its run-boundary marks (decision 102).
+  `history_file` is additive-optional: a manifest written before it
+  exists declares no durable-history mount and validates unchanged.
+  Each declared path must land on writable deployment storage and
+  rides the invocation's `--state-file`/`--journal-file`/
+  `--history-file` flags; a deployment without durable storage omits
+  the fields and the flags stay absent. A restarted
   tracking standby resumes from its declared files exactly as the
   lone controller does — rejoining in standby at the persisted tick
   and reconverging to `tracking` on its peer's checkpoints —
@@ -556,9 +564,10 @@ records as run commands: one `dcs-plant-server` container serving the
 mounted model and dynamics documents read-only, and the `ctrl-a` /
 `ctrl-b` pair attaching to its listener through `--remote`, the standby
 following the duty's monitor through `--standby`, both monitor ports
-published. Each peer's declared `state_file`/`journal_file` lands on
-its writable named volume — `ctrl-a-data`/`ctrl-b-data` — and rides
-the invocation's `--state-file`/`--journal-file` flags, while the
+published. Each peer's declared `state_file`/`journal_file`/
+`history_file` lands on its writable named volume —
+`ctrl-a-data`/`ctrl-b-data` — and rides the invocation's
+`--state-file`/`--journal-file`/`--history-file` flags, while the
 model and dynamics mounts stay read-only. Each controller invocation
 carries the manifest's fingerprint in its `DCS_MODEL_FINGERPRINT`
 environment — the identity checkpoint negotiation verifies on the

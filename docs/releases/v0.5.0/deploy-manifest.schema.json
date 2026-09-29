@@ -16,6 +16,9 @@
           "minimum": 1,
           "type": "integer"
         },
+        "history_file": {
+          "$ref": "#/$defs/path"
+        },
         "journal_file": {
           "$ref": "#/$defs/path"
         },
