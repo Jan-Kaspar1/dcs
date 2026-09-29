@@ -2386,6 +2386,288 @@ def stop_forge_endpoint(run_id, timeline, pair='deployed'):
     timeline('forge-stopped', container + ' removed')
 
 
+# The born-active startup-failure leg's staging surface (decision 103 —
+# #985's record, #1017's implementation, #1033's consuming leg): a
+# scratch sim-serve field the leg silences, serves, and freezes — never
+# the deployed pair's own plant, whose claim arbitration and scan feed
+# stay undisturbed — plus the labeled scenario seats the leg launches
+# born-active controllers onto. Each born launch is cold by contract:
+# the seat's runner-owned state/journal/history artifacts reset with the
+# container so the launch exercises the startup claim, never the resume
+# path.
+BORN_SEATS = {'revised': 'c', 'foreign': 'foreign', 'driven': 'd'}
+# The sim-serve port the scratch field binds inside its container —
+# bridge-placed only (rig-dialed by name, never host-published): the
+# born-active's --remote is the only attachment that dials it.
+BORN_FIELD_PORT = 9003
+# The --listen port every born seat's monitor binds in-container —
+# identical across seats since each container owns its netns.
+BORN_MONITOR_PORT = 8082
+
+
+def _born_seat_container(run_id, seat):
+    """The labeled container a born launch occupies — the scenario
+    ctx's endpoint key mapped to the seat's container suffix."""
+    if seat not in BORN_SEATS:
+        raise RuntimeError('born-active launches run on the scenario '
+                           'seats ' + json.dumps(sorted(BORN_SEATS))
+                           + ', got ' + repr(seat))
+    return 'dcs-hw-' + run_id + '-' + BORN_SEATS[seat]
+
+
+def _born_target(run_id, value):
+    """The --peer/--standby argument a born launch carries: a seat key
+    resolves to that seat's rig-bridge monitor address; anything else —
+    the leg's deliberately unresolvable peer name — passes through
+    verbatim."""
+    if value in BORN_SEATS:
+        return 'dcs-hw-' + run_id + '-' + BORN_SEATS[value] \
+            + ':' + str(BORN_MONITOR_PORT)
+    return value
+
+
+def _born_seat_role(cfg, seat):
+    """The seat's served RoleReport through its published monitor port,
+    or None while unreachable — the refuse-to-replace guard's read of
+    whether an existing seat container currently owns a field."""
+    try:
+        with urllib.request.urlopen(
+                'http://127.0.0.1:' + str(cfg[seat + '_port'])
+                + '/role', timeout=3) as response:
+            return json.loads(response.read() or b'null')
+    except Exception:
+        return None
+
+
+def start_born_field(cfg, record, run_dir, model, dynamics, timeline,
+                     mode):
+    """The scenario-callable born-active staging field: the leg's own
+    scratch sim-serve container on the rig bridge, mode-selected to
+    reproduce each field-side startup condition decision 103 records:
+
+    - 'silent' launches a sleeping placeholder under the field's
+      container name — the address resolves but nothing listens, the
+      unreachable-field class (a)'s resolvable-but-dead transport;
+    - 'serving' launches the run's plant server on the run model and
+      dynamics — the field whose answered contact resolves the pending
+      state, and whose held claim refuses the class (b) launches;
+      `pause_born_field` on top of it stages the class (c)
+      attach-without-verdict inconclusive claim.
+
+    The container carries the run's managed and run labels so teardown
+    reconciles it; a previous born field — either mode — is removed
+    first. The launch is recorded on the run's action timeline; a docker
+    failure raises so the calling scenario reports the staging never
+    completed. Returns {'container', 'remote', 'mode'} — `remote` is
+    the container-name sim-serve address a born controller's --remote
+    dials.
+    """
+    run_id, sha = record['run_id'], record['attempted_sha']
+    if mode not in ('serving', 'silent'):
+        raise RuntimeError('start_born_field modes are '
+                           "'serving'/'silent', got " + repr(mode))
+    container = 'dcs-hw-' + run_id + '-born-plant'
+    docker('rm', '-f', container, check=False, timeout=60)
+    timeline('born-field-start', 'launch ' + container + ' (' + mode
+             + ')')
+    if mode == 'silent':
+        docker(*_docker_run_args(cfg, run_id, container),
+               '--network', 'dcs-hwtest-' + run_id,
+               '--entrypoint', 'sleep',
+               IMAGE_PREFIX + 'controller:' + sha, 'infinity')
+    else:
+        docker(*_docker_run_args(cfg, run_id, container),
+               '--network', 'dcs-hwtest-' + run_id,
+               '-v', str(model) + ':/model/plant.json:ro',
+               '-v', str(dynamics) + ':/model/dynamics.json:ro',
+               IMAGE_PREFIX + 'plant:' + sha,
+               '/model/plant.json', '--dynamics', '/model/dynamics.json',
+               '--listen', '0.0.0.0:' + str(BORN_FIELD_PORT))
+        # The deferred attach tolerates a not-yet-bound listener, but
+        # the refusal classes need the claim arbitration live: wait for
+        # the server to serve before handing the address out — probed
+        # through the shipped tool inside the container's own netns
+        # since nothing host-side reaches the bridge.
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            probe = docker('exec', container, 'dcs-plant-ctl',
+                           '127.0.0.1:' + str(BORN_FIELD_PORT), 'list',
+                           check=False, timeout=10)
+            if probe.returncode == 0:
+                break
+            time.sleep(1)
+        else:
+            raise RuntimeError('born field listener never bound')
+    timeline('born-field-up', container + ' ' + mode)
+    return {'container': container,
+            'remote': container + ':' + str(BORN_FIELD_PORT),
+            'mode': mode}
+
+
+def pause_born_field(run_id, timeline):
+    """The inconclusive-claim half of the born-active staging:
+    `docker pause` freezes the scratch field in place — a born-active's
+    attach completes into the listener's backlog but the claim request
+    never answers, the verdict-free `Err` leg class (c) records.
+    `unpause_born_field` lets the deferred grant land. Recorded on the
+    run's action timeline; a docker failure raises so the calling
+    scenario reports the freeze never landed."""
+    container = 'dcs-hw-' + run_id + '-born-plant'
+    timeline('born-field-pause', 'docker pause ' + container)
+    docker('pause', container, timeout=30)
+    timeline('born-field-paused', container + ' paused')
+
+
+def unpause_born_field(run_id, timeline):
+    """The recovery half: `docker unpause` resumes the frozen scratch
+    field — the pending born-active's next answered contact re-issues
+    the conditional startup grant."""
+    container = 'dcs-hw-' + run_id + '-born-plant'
+    timeline('born-field-unpause', 'docker unpause ' + container)
+    docker('unpause', container, timeout=30)
+    timeline('born-field-unpaused', container + ' running')
+
+
+def stop_born_field(run_id, timeline):
+    """Tear down the leg's scratch field — `docker rm -f`, tolerating an
+    already-absent container so a failed staging's cleanup can re-run.
+    Removing the field drops every claim its attachments held."""
+    container = 'dcs-hw-' + run_id + '-born-plant'
+    timeline('born-field-stop', 'docker rm -f ' + container)
+    docker('rm', '-f', container, check=False, timeout=60)
+    timeline('born-field-stopped', container + ' removed')
+
+
+def start_born_controller(cfg, record, run_dir, model, seat, remote,
+                          timeline, peer=None, standby=None):
+    """The scenario-callable born-active launch — the born-active
+    startup-failure leg's per-class launcher: runs a controller on one
+    of the labeled scenario seats (`revised`/`foreign`/`driven` — the
+    run's third-controller containers 'c'/'foreign'/'d') bound to
+    `remote`, the scratch field's sim-serve address.
+
+    `peer` and `standby` name the tracking wiring the launch carries:
+    `peer` launches a born-active declaring its pair member — the
+    `--peer` whose declared rejoin the refused-claim class exercises —
+    while `standby` launches the pair's tracking member. Both take a
+    seat key resolved to its rig-bridge monitor address, or a verbatim
+    `host:port` — the unreachable-peer edge's deliberately dead name.
+    A leftover seat container is removed first, but only after its
+    served /role proves it does not own a field — an active or
+    promoting seat refuses removal by name. The seat's runner-owned
+    state, journal, and history reset with the launch: a born launch
+    is cold by contract, and a stale --state-file would run the resume
+    path — a different class entirely.
+
+    The container carries the run's managed and run labels, mounts the
+    run's model read-only, publishes its monitor on the seat's recorded
+    port, and carries the seat's pinned --owner-token plus the run's
+    --pair-token. The launch is recorded on the run's action timeline;
+    a docker failure raises so the calling scenario reports the launch
+    never completed. Returns {'container', 'seat', 'address', 'remote',
+    'peer', 'standby', 'monitor'} — `address` is the rig-bridge
+    monitor endpoint a peer's tracking declaration dials, `monitor`
+    the published host-loopback URL the scenario reads.
+    """
+    run_id, sha = record['run_id'], record['attempted_sha']
+    if peer is not None and standby is not None:
+        raise RuntimeError('a born launch is either the pair\'s '
+                           'born-active (--peer) or its tracking '
+                           'standby (--standby), never both')
+    container = _born_seat_container(run_id, seat)
+    listed = docker('ps', '-a', '--filter',
+                    'name=^/' + container + '$', '--format', '{{.ID}}',
+                    check=False)
+    if listed.returncode != 0:
+        raise RuntimeError('start_born_controller cannot prove the '
+                           'seat is absent: docker ps failed: '
+                           + listed.stderr.strip()[:300])
+    if listed.stdout.strip():
+        report = _born_seat_role(cfg, seat)
+        if report and report.get('role') in ('active', 'promoting'):
+            raise RuntimeError('start_born_controller refuses to '
+                               'replace ' + container + ': it reports '
+                               'role ' + str(report['role']))
+        timeline('born-replace', 'docker rm -f ' + container
+                 + ' (served role ' + str((report or {}).get('role'))
+                 + ')')
+        docker('rm', '-f', container, timeout=60)
+    directory = _controller_dir(run_dir, BORN_SEATS[seat])
+    directory.mkdir(parents=True, exist_ok=True)
+    directory.chmod(0o777)
+    for artifact in ('state.json', 'journal.jsonl', 'history.jsonl'):
+        (directory / artifact).unlink(missing_ok=True)
+    owner_token = _plant_owner_tokens(cfg)[seat]
+    peer_flag = _born_target(run_id, peer) if peer is not None else None
+    standby_flag = (_born_target(run_id, standby)
+                    if standby is not None else None)
+    timeline('born-start',
+             'launch ' + container + ' --remote ' + remote
+             + (' --peer ' + peer_flag if peer_flag else '')
+             + (' --standby ' + standby_flag if standby_flag else '')
+             + ' --owner-token ' + str(owner_token))
+    docker(*_docker_run_args(cfg, run_id, container),
+           '--network', 'dcs-hwtest-' + run_id,
+           '-p', '127.0.0.1:' + str(cfg[seat + '_port']) + ':'
+           + str(BORN_MONITOR_PORT),
+           '-v', str(model) + ':/model/plant.json:ro',
+           '-v', str(directory) + ':' + CONTAINER_RUN_DIR,
+           IMAGE_PREFIX + 'controller:' + sha,
+           '/model/plant.json',
+           '--remote', remote,
+           '--owner-token', str(owner_token),
+           *(['--peer', peer_flag] if peer_flag else []),
+           *(['--standby', standby_flag] if standby_flag else []),
+           '--scan-ms', '100', '--listen', '0.0.0.0:'
+           + str(BORN_MONITOR_PORT),
+           '--state-file', CONTAINER_STATE_FILE,
+           '--journal-file', CONTAINER_JOURNAL_FILE,
+           '--history-file', CONTAINER_HISTORY_FILE,
+           *(['--pair-token', str(cfg['pair_token'])]
+             if cfg.get('pair_token') else []))
+    timeline('born-up', container + ' launched')
+    return {'container': container, 'seat': seat,
+            'address': container + ':' + str(BORN_MONITOR_PORT),
+            'remote': remote, 'peer': peer_flag,
+            'standby': standby_flag,
+            'monitor': 'http://127.0.0.1:' + str(cfg[seat + '_port'])}
+
+
+def stop_born_controller(run_id, seat, timeline):
+    """The born seat's teardown — `docker rm -f`, tolerating an
+    already-absent container so a failed staging's cleanup can re-run.
+    Removing an incumbent drops its field claim with the attachment."""
+    container = _born_seat_container(run_id, seat)
+    timeline('born-stop', 'docker rm -f ' + container)
+    docker('rm', '-f', container, check=False, timeout=90)
+    timeline('born-stopped', container + ' removed')
+
+
+def born_controller_state(run_id, seat):
+    """The born seat container's process verdict — the
+    undeclared-refusal class's evidence: `{'container', 'running',
+    'exit', 'logs', 'absent'}` — Running=false with a nonzero exit and
+    the named refusal on the log tail is the recorded disposition; an
+    absent container reports `absent` rather than raising, since the
+    read itself is the leg's evidence collection."""
+    container = _born_seat_container(run_id, seat)
+    probe = docker('inspect', '-f', '{{.State.Running}} {{.State.ExitCode}}',
+                   container, check=False)
+    if probe.returncode != 0:
+        return {'container': container, 'running': False, 'exit': None,
+                'logs': '', 'absent': True}
+    parts = probe.stdout.split()
+    running = parts[:1] == ['true']
+    try:
+        exit_code = int(parts[1])
+    except (IndexError, ValueError):
+        exit_code = None
+    logs = docker('logs', '--tail', '60', container, check=False)
+    return {'container': container, 'running': running,
+            'exit': exit_code, 'absent': False,
+            'logs': (logs.stdout or '') + (logs.stderr or '')}
+
+
 def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
                   timeline):
     """The scenario driver's view of the running rig: monitor base URLs
@@ -2398,7 +2680,9 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
     evidence dir and deadline, the runner-owned
     controller restart/cold-restart/relaunch, plant stop/start,
     model-revision, foreign-peer launch/teardown, driven-peer
-    launch/teardown, and forged-checkpoint-endpoint
+    launch/teardown, born-active launch/teardown/state reads, and
+    born-field serve/silence/freeze actions, and
+    forged-checkpoint-endpoint
     launch/teardown actions, the run's shared --pair-token the
     announced-source legs' keyed posture answers, the shipped plant
     tool's docker-exec invocation, the run config's recorded endpoint
@@ -2523,6 +2807,28 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
             timeline),
         'stop_driven': lambda: stop_driven_controller(
             run_id, timeline),
+        # The born-active startup-failure leg's staging surface
+        # (decision 103, #1033): the scratch sim-serve field the leg
+        # silences, serves, and freezes — never the deployed pair's own
+        # plant — and the labeled scenario seats it launches born-active
+        # controllers onto. born_controller_state is the read-only
+        # process verdict the undeclared-refusal class's exit evidence
+        # comes from.
+        'start_born_field': lambda mode: start_born_field(
+            cfg, record, run_dir, src / cfg['model_fixture'],
+            src / cfg['dynamics_fixture'], timeline, mode),
+        'pause_born_field': lambda: pause_born_field(run_id, timeline),
+        'unpause_born_field': lambda: unpause_born_field(
+            run_id, timeline),
+        'stop_born_field': lambda: stop_born_field(run_id, timeline),
+        'start_born_controller': lambda seat, remote, peer=None,
+                standby=None: start_born_controller(
+                    cfg, record, run_dir, src / cfg['model_fixture'],
+                    seat, remote, timeline, peer=peer, standby=standby),
+        'stop_born_controller': lambda seat: stop_born_controller(
+            run_id, seat, timeline),
+        'born_controller_state': lambda seat: born_controller_state(
+            run_id, seat),
         # The run's shared --pair-token — the keyed posture the
         # announced-source legs need: absent means the rig verifies
         # nothing and the legs report inconclusive rather than failed.
