@@ -25,7 +25,17 @@ the leg measures the served evidence of exactly that:
 
 - the pair launches the way the deployment declares it — paced at
   the manifest's `--scan-ms`, unkeyed, each controller bound on its
-  declared wildcard listen host — and settles `active`/`tracking`;
+  declared wildcard listen host — and settles `active`/`tracking`.
+  The manifest's declared `failover_budget` stays unarmed for this
+  leg: an armed gate retires the orphaned peer's tracking-source
+  probe after `budget` applies — each later orphaned cycle is a
+  refused promotion attempt rather than a probe, so the contract's
+  cost surface leaves the scan path entirely and pre-contract and
+  bounded builds become indistinguishable in-window — and its
+  re-armed claim probe at the release would race the ex-owner's
+  bound reclaim. The armed gate's refused-promotion behavior is the
+  failover legs' own contract; this leg needs the orphaned-apply
+  probe held reachable for the claim's whole standing window;
 - a dedicated plant-socket attachment places the foreign claim with
   the silent endpoint declared as its monitor; the superseded owner
   demotes in place and both peers read orphaned: the fenced ex-owner
@@ -37,22 +47,26 @@ the leg measures the served evidence of exactly that:
   advance within the declared bound of the scan cadence, while the
   fencing verdict keeps naming the foreign claim's dead monitor;
   and the served `io_health.scan_overruns` must show the bounded
-  episode's own cost — a handful for the probe passes the retry
-  bound paid, never the per-scan collapse the finding measured. A
-  collapse, and a window that pays nothing because the claim's
-  monitor never entered the probe's candidate set, are the pinned
-  release predating the contract — not a contract violation;
+  probe's own cost — a handful for the passes the retry bound
+  paid, never the per-scan collapse the finding measured — and
+  each peer's journal must carry the refused-probe record naming
+  the dead endpoint, the claim's monitor verifiably inside its
+  probe set. A collapse, and a window paying nothing or journaling
+  no refusal because the claim's monitor never entered the probe's
+  candidate set, are the pinned release predating the contract —
+  not a contract violation;
 - the release resolves through the ex-owner's recorded reclaim —
   the unattended `standby → promoting → active` walk under the
   `reclaim` origin — the pair reconverging to its launch roles with
   the claim re-seated under the launch owner's token.
 
-The contract postdates the pinned release line: where the launched
+The contract postdates the early release line: where the launched
 tooling predates it — no owner-token claim line, an unanswered claim
 verb, a fencing verdict naming no owner or no declared monitor, a
 snapshot without the `io_health`/`publication` counters, a role
-report without the sync vocabulary — or where the run's own reading
-is the collapse the contract closed — the leg reports
+report without the sync vocabulary, or a journal carrying no
+refused-probe audit — or where the run's own reading is the collapse
+the contract closed — the leg reports
 `orphan-probe-cadence-digest inconclusive` rather than asserting
 until the manifest repins a release carrying it.
 
@@ -155,10 +169,11 @@ POLL_INTERVAL = 0.05
 # peer's served `publication.published` count of completed paced
 # scans and its run tick must advance at least this fraction of the
 # window's declared scan count, while `io_health.scan_overruns`
-# growth stays inside the slack the bounded probe passes legitimately
-# cost — and never reaches zero, a window paying nothing having
-# exercised the probe path the contract bounds.
-HOLD_SECONDS = 6.0
+# growth shows the bounded probe passes the retry window paid —
+# never the per-scan collapse — the journaled `tracking_source_refused`
+# naming the dead endpoint on each peer carrying the durable half
+# of the proof that the probe path was exercised at all.
+HOLD_SECONDS = 8.0
 CADENCE_FRACTION = 0.5
 OVERRUN_SLACK = 4
 
@@ -185,8 +200,10 @@ def spawn_paced(binary, model, plant_addr, standby, files,
     pair peer — the manifest's paced deployment shape rather than
     the driven `POST /scan` run `pair.spawn_peer` builds: `standby`
     the manifest's tracking wiring (None on the field owner),
-    `auto_promote` the manifest's declared failover budget (None
-    leaves promotion manual), `files` the controller's declared
+    `auto_promote` an optional failover budget (None leaves
+    promotion manual — the shape this leg needs, an armed gate
+    retiring the orphaned peer's probe path into refused
+    promotions), `files` the controller's declared
     persistence paths under the rig's scratch directory, `listen`
     the `--listen` bind (the declared wildcard host on a
     runner-assigned port), `bound` an optional list the verbatim
@@ -243,10 +260,16 @@ def launch_paced_unkeyed(args, declared):
     """The manifest-declared pair launched the way the deployment
     declares it — paced at `--scan-ms`, no `--pair-token`, each
     controller bound on its declared wildcard listen host with a
-    runner-assigned port. The shared `pair.launch_pair` runs driven
-    scans on a keyed pair — neither the cadence surface nor the
-    claim shape this leg exercises — so the leg composes the same
-    spawn sequence itself. Returns the PairRig."""
+    runner-assigned port — save the standby's declared
+    `failover_budget`, left unarmed here: an armed gate retires the
+    orphaned peer's tracking-source probe into refused promotions
+    after `budget` applies, so the contract's per-window cost would
+    leave the scan path for the standing window, and its re-armed
+    conditional claim would race the ex-owner's bound reclaim at
+    the release. The shared `pair.launch_pair` runs driven scans on
+    a keyed pair — neither the cadence surface nor the claim shape
+    this leg exercises — so the leg composes the same spawn
+    sequence itself. Returns the PairRig."""
     rig = pair.PairRig(declared)
     try:
         rig.plant, rig.plant_addr = pair.spawn_plant(
@@ -275,7 +298,6 @@ def launch_paced_unkeyed(args, declared):
                 rig.plant_addr,
                 rig.duty_url.removeprefix("http://"),
                 rig.standby_files,
-                auto_promote=rig.standby_decl.get("failover_budget"),
                 listen=pair.listen_bind(rig.standby_decl),
                 bound=rig.standby_bound,
             )
@@ -737,10 +759,13 @@ def orphan_probe_cadence_pass(args, tamper):
         # Phase 5 — the standing window: while the dead-monitor
         # claim stands, each peer's `publication.published` — one
         # per completed paced scan — and run tick must advance
-        # within the declared bound of the scan cadence, and the
-        # served `io_health.scan_overruns` must hold at baseline.
-        # A collapse is the finding's own reproduction: the pinned
-        # release predates the bounded probe contract.
+        # within the declared bound of the scan cadence, while the
+        # served `io_health.scan_overruns` growth stays inside the
+        # slack the bounded probe passes legitimately cost — and
+        # each peer's journal carries the refused probe naming the
+        # dead endpoint. A collapse is the finding's own
+        # reproduction: the pinned release predates the bounded
+        # probe contract.
         start = {
             "duty": snapshot(duty_url, failures),
             "sibling": snapshot(standby_url, failures),
@@ -843,6 +868,40 @@ def orphan_probe_cadence_pass(args, tamper):
             peer: advance["overruns"]
             for peer, advance in measured.items()
         }
+        # The durable half of the probe's exercise: each peer's
+        # journal must carry a `tracking_source_refused` naming the
+        # claim's dead monitor — the orphaned sibling's resolution
+        # pass and the fenced ex-owner's claimed-monitor pass both
+        # auditing the endpoint that never answered — so a window
+        # whose cost bound held only because the dead endpoint never
+        # entered the probe's candidate set reports inconclusive.
+        probed = {}
+        for peer, url in (("duty", duty_url), ("sibling", standby_url)):
+            journal = pair.get(
+                f"{url}/journal", "GET /journal", failures
+            )
+            probed[peer] = [
+                record
+                for entry in journal
+                for record in [
+                    (entry.get("event") or {}).get(
+                        "tracking_source_refused"
+                    )
+                ]
+                if (record or {}).get("source") == dead_addr
+            ]
+        evidence["probe_refusals"] = {
+            peer: len(records) for peer, records in probed.items()
+        }
+        if not all(probed.values()):
+            raise Inconclusive(
+                "the claim's dead monitor never entered a peer's "
+                "probe set — no journaled tracking_source_refused "
+                "names the endpoint — the pinned release predating "
+                "the candidate ordering the contract bounds",
+                f"dead endpoint {dead_addr}, per-peer refusals "
+                f"{evidence['probe_refusals']}",
+            )
         unpaid = [
             peer
             for peer, growth in over_growth.items()
@@ -851,9 +910,8 @@ def orphan_probe_cadence_pass(args, tamper):
         if unpaid:
             raise Inconclusive(
                 "the dead-monitor claim's bounded probe never paid "
-                "its declared cost — the claim's monitor never "
-                "entered the orphaned peers' resolution set, the "
-                "pinned release predating the candidate ordering "
+                "its declared cost inside the standing window — the "
+                "pinned release predating the per-window re-probe "
                 "the contract bounds",
                 f"per-peer overrun growth {over_growth}, "
                 f"unpaid: {unpaid}",
@@ -1129,10 +1187,10 @@ def main():
     print(
         f"orphan-probe-cadence-digest {digest} — the held "
         "dead-monitor claim bounded the orphaned peers' probe "
-        "cost per window, the paced cadence and the overrun "
-        "counters holding at baseline, the released field "
-        "reclaimed under the launch owner's token, and the "
-        "pair back on its launch roles"
+        "cost per window, the paced cadence holding and the "
+        "overrun counters inside the bounded-probe slack, the "
+        "released field reclaimed under the launch owner's "
+        "token, and the pair back on its launch roles"
     )
     return 0
 
