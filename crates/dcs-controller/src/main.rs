@@ -1746,6 +1746,12 @@ fn main() -> ExitCode {
                                 orphan.tick.0, orphan.aligned.0
                             );
                         }
+                        for rearm in peer.take_claim_rearms() {
+                            eprintln!(
+                                "standby: field write-ownership claim re-armed under this run's token at tick {} (point {:?})",
+                                rearm.tick.0, rearm.point
+                            );
+                        }
                         for observation in peer.take_claim_observations() {
                             eprintln!(
                                 "standby: field write-ownership claim observed standing under foreign owner token {} at tick {} (point {:?})",

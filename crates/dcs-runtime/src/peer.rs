@@ -302,12 +302,36 @@ pub struct Peer<'d> {
     /// never owned, which has no claim to re-arm and no audit of its
     /// own to check a pulled document's commanded state against.
     was_owner: bool,
+    /// Whether the ownership `was_owner` records ended in this run's
+    /// own voluntary demotion — set by an `origin: request` demote's
+    /// release, cleared by the fenced-write demotion's and by every
+    /// granted claim lift. While it stands the orphan cycle's
+    /// conditional re-arm stays off: the released claim — the
+    /// deliberate hand-back the field records as yielded — is the
+    /// successor's to take through the documented conditional paths
+    /// (the fencing-loss reclaim, the conditional promote, the startup
+    /// grant), and re-arming it under this run's token would pin the
+    /// field's arbitration under a member reporting standby. A
+    /// fencing-loss demotion does not yield — the preemption, not this
+    /// run's choice, ended that ownership — so its orphan re-arm keeps
+    /// covering a field the owner lost rather than handed back.
+    yielded: bool,
     /// The claim's orphan-cycle counterpart — the conditional re-arm a
     /// demoted ex-owner probes while the tracked line reports no field
     /// owner: granted only where the field stands unclaimed or already
     /// names this run's token, so a released claim re-arms without ever
     /// preempting a standing owner.
     ensure: Option<Ensure<'d>>,
+    /// Whether the standing orphan-ensure streak already queued its
+    /// [`ClaimRearm`] — one journal record per landing, not one per
+    /// granted probe. A refused probe — a different owner standing
+    /// between landings — clears it, as does every granted claim lift,
+    /// so the next grant after either journals fresh.
+    ensure_granted: bool,
+    /// Landed orphan-cycle re-arms not yet consumed for journaling —
+    /// one [`ClaimRearm`] per ensure grant after the standing streak's
+    /// first.
+    pending_rearms: Vec<ClaimRearm>,
     /// The claim's startup counterpart — the conditional grant a
     /// launched active's [`activate`](Self::activate) asserts in place
     /// of the unconditional [`Claim`]: takes the field's write-ownership
@@ -460,7 +484,9 @@ pub struct Peer<'d> {
     pending_observations: Vec<ClaimObservation>,
     /// The claim's fencing-loss counterpart — the *bound* conditional
     /// re-grant a fencing-demoted ex-owner probes each scan while its
-    /// loss mark stands, installed by
+    /// loss mark stands, or while an orphaned tracked line reports the
+    /// field ownerless over an ownership the run did not hand back,
+    /// installed by
     /// [`with_field_reclaim`](Self::with_field_reclaim). Granted where
     /// the field stands unclaimed, already names this run's token, or
     /// stands under a different owner's holderless claim — the
@@ -744,6 +770,24 @@ pub struct OrphanReport {
     /// The applied checkpoint's source tick — where the tracked line
     /// stood when the observation landed.
     pub aligned: Tick,
+}
+
+/// An orphan-cycle ensure probe landed — the field's write-ownership
+/// claim stands under this run's recorded token again, re-armed while
+/// the tracked line reported no field owner. The journal's durable
+/// record of who re-took the claim: the re-arm the orphan transition
+/// alone cannot attribute. One report queues per landing — a granted
+/// probe confirming the standing re-arm queues nothing further until a
+/// refusal ends the streak — and the report names the field point the
+/// claim domain arbitrates through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimRearm {
+    /// The run tick the granted probe landed at.
+    pub tick: Tick,
+    /// The field point the record attributes through — the point the
+    /// standing fencing-loss mark was recorded on where one stands,
+    /// else a field-served point of this run's map.
+    pub point: PointId,
 }
 
 /// An armed peer's failover self-promotion at the miss boundary was
@@ -1043,7 +1087,10 @@ impl<'d> Peer<'d> {
             claim: None,
             release: None,
             was_owner: true,
+            yielded: false,
             ensure: None,
+            ensure_granted: false,
+            pending_rearms: Vec::new(),
             startup_claim: None,
             startup_pending: false,
             orphan_claim: None,
@@ -1346,7 +1393,10 @@ impl<'d> Peer<'d> {
             claim: None,
             release: None,
             was_owner: false,
+            yielded: false,
             ensure: None,
+            ensure_granted: false,
+            pending_rearms: Vec::new(),
             startup_claim: None,
             startup_pending: false,
             orphan_claim: None,
@@ -1739,7 +1789,12 @@ impl<'d> Peer<'d> {
     /// claim forces runs the same survivable path under
     /// `origin: fenced`, so the journaled transitions name what
     /// initiated them rather than reading as an unattributed operator
-    /// request.
+    /// request. The origin also marks the release: a requested
+    /// demotion's is the deliberate hand-back the orphan cycle's
+    /// conditional re-arm must not undo — the claim this run gave up
+    /// is the successor's to take, not this standby's to re-arm under
+    /// its own token — while a fenced demotion's release ends an
+    /// ownership the field took, so its orphan coverage keeps.
     fn demote_inner(&mut self, attribution: SwitchAttribution) -> Result<(), SwitchError> {
         match self.role {
             Role::Active | Role::Promoting => {}
@@ -1751,6 +1806,7 @@ impl<'d> Peer<'d> {
         if let Some(release) = &self.release {
             release.0();
         }
+        self.yielded = attribution.origin == SwitchOrigin::Request;
         self.executor.suspend_pending_commands();
         self.sync = StandbySync::Unsynchronized;
         self.aligned = None;
@@ -2975,30 +3031,70 @@ impl<'d> Peer<'d> {
     /// grab, and no probe ever preempts. A peer that never owned has
     /// no claim to re-arm; a peer built without the hook probes
     /// nothing; a probe's refusal or failure leaves the wedge
-    /// surfaced, not silently worsened. A refusal the field's
-    /// arbitration attributes to a standing foreign owner journals one
+    /// surfaced, not silently worsened.
+    ///
+    /// The probe stays off for a peer whose ownership ended in its own
+    /// voluntary demotion — the `yielded` mark the `origin: request`
+    /// release sets: that release was this run's deliberate hand-back,
+    /// so re-arming the claim under this run's token would stand a
+    /// member reporting `standby` on the field's arbitration and fence
+    /// every conditional path the demotion handed the field to. A
+    /// fencing-loss demotion's orphan coverage keeps: the field took
+    /// that ownership, so its released claim is exactly the wedge the
+    /// re-arm exists to cover.
+    ///
+    /// A granted probe is durable: one [`ClaimRearm`] queues per
+    /// landing — the record naming who re-took the claim the orphan
+    /// transition alone cannot attribute — deduplicated across the
+    /// contiguous granted streak so repeat probes confirming the same
+    /// re-arm journal once. A refusal the field's arbitration
+    /// attributes to a standing foreign owner journals one
     /// observed-claimant record per distinct token — see
     /// [`observe_claim_refusal`](Self::observe_claim_refusal).
     fn ensure_field_claim(&mut self) {
-        if !self.was_owner {
+        if !self.was_owner || self.yielded {
             return;
         }
-        let refused = self
-            .ensure
-            .as_ref()
-            .is_some_and(|ensure| matches!(ensure.0(), Ok(false)));
-        if refused {
-            self.observe_claim_refusal(self.tick());
+        let Some(ensure) = &self.ensure else {
+            return;
+        };
+        match ensure.0() {
+            Ok(true) => {
+                // The probe granted rather than observed — report the
+                // held claim the grant confirmed without waiting on
+                // next scan's probe, and journal the landing once per
+                // granted streak.
+                self.field_claim = Some(FieldClaim::Held);
+                if !self.ensure_granted {
+                    self.ensure_granted = true;
+                    if let Some(point) = self.observation_point() {
+                        self.pending_rearms.push(ClaimRearm {
+                            tick: self.tick(),
+                            point,
+                        });
+                    }
+                }
+            }
+            Ok(false) => {
+                // A different owner stood between landings — the next
+                // grant is a new landing, and the refusal's claimant
+                // journals through the observation path.
+                self.ensure_granted = false;
+                self.observe_claim_refusal(self.tick());
+            }
+            Err(_) => {}
         }
     }
 
     /// The fencing-loss reclaim — the released-preemption wedge escape
     /// [`with_field_reclaim`](Self::with_field_reclaim) arms. Only a
-    /// `standby` peer still carrying the loss mark probes: the mark is
-    /// set solely by the fenced-write demotion and cleared solely by
-    /// the next granted claim, so its standing means "this run owned
-    /// the field and the claim was preempted under it" — the ex-owner
-    /// the reclaim exists for. The probe is the *bound* conditional
+    /// `standby` ex-owner whose ownership ended in the field's fencing
+    /// probes — the loss mark standing, or the orphaned pull reporting
+    /// the ownerless line after it stood down — while a voluntarily
+    /// demoted peer's `yielded` mark stays its probe: the arm means
+    /// "this run owned the field, the claim was preempted under it, and
+    /// no owner stands now" — the ex-owner the reclaim exists for. The
+    /// probe is the *bound* conditional
     /// grant: `Ok(true)` takes the field's write-ownership back under
     /// this run's token — the field stood unclaimed, already named the
     /// token, or stood under a different owner's holderless claim, the
@@ -3020,7 +3116,19 @@ impl<'d> Peer<'d> {
     /// the preempt-and-release episode between this run's writes would
     /// otherwise leave empty.
     fn reclaim_field_claim(&mut self, tick: Tick) {
-        if self.role != Role::Standby || !self.fencing_lost {
+        // The arm is the ex-owner's live evidence that no owner stands:
+        // the loss mark itself — standing since the fenced-write
+        // demotion while no tracked owner resolved the succession — or
+        // an orphaned pull, the tracked line itself reporting the field
+        // ownerless, which re-arms the reclaim where the mark stood
+        // down for the successor that has since left. A voluntary
+        // demotion's `yielded` mark keeps the probe off: the claim this
+        // run handed back belongs to the successors' conditional paths,
+        // not to this standby's re-take under its own token.
+        let armed = self.was_owner
+            && !self.yielded
+            && (self.fencing_lost || matches!(self.sync, StandbySync::Orphaned { .. }));
+        if self.role != Role::Standby || !armed {
             return;
         }
         let Some(outcome) = self.reclaim.as_ref().map(|reclaim| reclaim.0()) else {
@@ -3364,6 +3472,15 @@ impl<'d> Peer<'d> {
         std::mem::take(&mut self.pending_orphans)
     }
 
+    /// Drains landed orphan-cycle re-arms queued since the last call —
+    /// one [`ClaimRearm`] per ensure grant after the standing granted
+    /// streak's first — for the transition journal the monitoring
+    /// layer records them into: the durable record of who re-took the
+    /// field's write-ownership claim.
+    pub fn take_claim_rearms(&mut self) -> Vec<ClaimRearm> {
+        std::mem::take(&mut self.pending_rearms)
+    }
+
     /// Drains refused armed self-promotions queued since the last call —
     /// one [`PromotionRefusal`] per distinct refusal cause a continuous
     /// refused streak produced — for the transition journal the
@@ -3539,6 +3656,11 @@ impl<'d> Peer<'d> {
         // claimant a later refused probe names is a new episode the
         // journal has not seen.
         self.observed_claimants.clear();
+        // The ownership this lift opens is no hand-back: a later
+        // demotion decides its own origin, and a prior episode's
+        // landed re-arm must not dedup this epoch's first landing.
+        self.yielded = false;
+        self.ensure_granted = false;
         // This run held the field — the mark the orphan cycle's
         // conditional re-arm probes on: only a peer that owned the
         // claim re-arms it once released.
@@ -6562,62 +6684,303 @@ mod tests {
         assert_eq!(peer.missed_transfers(), 0);
     }
 
-    /// The orphan cycle's conditional re-arm: a demoted ex-owner probes
-    /// the claim it released — granted while the field stands unclaimed
-    /// — while a peer that never owned the field probes nothing.
+    /// The orphan cycle's conditional re-arm: an ex-owner whose
+    /// ownership the *field* ended — a preempted claim fencing its
+    /// write, not its own demote request — probes the claim the
+    /// demotion released, granted while the field stands unclaimed,
+    /// and the landing queues one [`ClaimRearm`] record per granted
+    /// streak so the durable trail can name who re-took the field. A
+    /// peer that never owned the field probes nothing.
     #[test]
-    fn the_demoted_ex_owner_re_arms_its_released_claim() {
-        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
-        let gate = WriteGate::closed(&driver);
+    fn the_fencing_demoted_ex_owner_re_arms_its_released_claim() {
+        let driver = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let fenced = FencingDriver {
+            inner: &driver,
+            armed: AtomicBool::new(false),
+        };
+        let gate = WriteGate::closed(&fenced);
         // The field's single-writer claim as the driver surface sees
         // it: `Some(owner)` while claimed, `None` once released.
         let field = Mutex::new(None::<u64>);
-        let mut peer = Peer::active(executor(&gate), Some(&gate))
-            .with_field_claim(|| {
-                *field.lock().unwrap() = Some(7);
-                Ok(())
-            })
-            .with_field_release(|| {
-                let mut held = field.lock().unwrap();
-                if *held == Some(7) {
-                    *held = None;
+        let mut peer = Peer::active(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        )
+        .with_field_claim(|| {
+            *field.lock().unwrap() = Some(7);
+            Ok(())
+        })
+        .with_field_release(|| {
+            let mut held = field.lock().unwrap();
+            if *held == Some(7) {
+                *held = None;
+            }
+        })
+        .with_field_ensure(|| {
+            let mut held = field.lock().unwrap();
+            match *held {
+                None | Some(7) => {
+                    *held = Some(7);
+                    Ok(true)
                 }
-            })
-            .with_field_ensure(|| {
-                let mut held = field.lock().unwrap();
-                match *held {
-                    None | Some(7) => {
-                        *held = Some(7);
-                        Ok(true)
-                    }
-                    Some(_) => Ok(false),
-                }
-            });
+                Some(_) => Ok(false),
+            }
+        });
         peer.activate().unwrap();
         peer.scan();
-        peer.demote().unwrap();
+        assert_eq!(*field.lock().unwrap(), Some(7));
+
+        // A preempting claim fenced the next write: the field took the
+        // ownership, so the demotion keeps its orphan coverage. The
+        // release still leaves the claim unclaimed, and the run
+        // settles standby.
+        fenced.armed.store(true, Ordering::Relaxed);
         peer.scan();
-        // The demotion's release left the field unclaimed — and the
-        // demoted run still owns nothing itself.
+        peer.scan();
         assert_eq!(*field.lock().unwrap(), None);
         assert_eq!(peer.role(), Role::Standby);
+        assert!(peer.take_claim_rearms().is_empty());
 
         // The tracked line's checkpoint reports no field owner: the
         // orphan cycle probes the ensure, which re-arms the released
-        // claim — the field is not left open to a foreign grab.
-        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
-        let mut source = executor(&source_driver);
+        // claim — the field is not left open to a foreign grab — and
+        // the landing journals once, naming the run's token through
+        // the point the fencing loss marked.
+        let source_driver =
+            StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let mut source =
+            Executor::new(&source_driver, loop_map(), vec![Box::new(PassThrough)]).unwrap();
         source.run(9);
         let mut checkpoint = source.checkpoint();
         checkpoint.source_owns_field = Some(false);
-        let report = peer.track_once(|| Ok(checkpoint));
+        let report = peer.track_once(|| Ok(checkpoint.clone()));
         assert_eq!(report, TrackReport::Applied(Transfer::Applied));
         assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
         assert_eq!(*field.lock().unwrap(), Some(7));
+        assert_eq!(
+            peer.take_claim_rearms(),
+            vec![ClaimRearm {
+                tick: Tick(9),
+                point: OUTPUT,
+            }]
+        );
         // Re-arming the claim changes no reported state by itself: the
         // peer stays standby/orphaned — surfaced, never silently
         // healthy — until a promotion or a field-owning source ends it.
         assert_eq!(peer.role(), Role::Standby);
+
+        // Repeat probes confirming the same standing claim are one
+        // landing: the granted streak deduplicates the record.
+        peer.track_once(|| Ok(checkpoint.clone()));
+        peer.track_once(|| Ok(checkpoint.clone()));
+        assert!(peer.take_claim_rearms().is_empty());
+
+        // A different owner between landings resets the streak: the
+        // next grant is a new landing and journals again.
+        *field.lock().unwrap() = Some(99);
+        peer.track_once(|| Ok(checkpoint.clone()));
+        assert!(peer.take_claim_rearms().is_empty());
+        *field.lock().unwrap() = None;
+        peer.track_once(|| Ok(checkpoint));
+        assert_eq!(*field.lock().unwrap(), Some(7));
+        assert_eq!(peer.take_claim_rearms().len(), 1);
+    }
+
+    /// The demotion the orphan cycle's re-arm must not undo — the QA
+    /// finding's defect leg: a peer whose own *requested* demotion
+    /// released the claim hands the field to the successor's
+    /// conditional paths. Its own ensure probe never runs — the claim
+    /// it gave up stands released however many orphaned pulls arrive,
+    /// no `ClaimRearm` journals, and the member reporting `standby`
+    /// holds no field arbitration.
+    ///
+    /// The hand-back mark is per-ownership, not per-run: a re-promoted
+    /// peer's later *fencing* demotion re-arms its released claim
+    /// exactly as any other field-forced release does.
+    #[test]
+    fn a_voluntarily_demoted_owner_leaves_the_released_claim_alone() {
+        let driver = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let fenced = FencingDriver {
+            inner: &driver,
+            armed: AtomicBool::new(false),
+        };
+        let gate = WriteGate::closed(&fenced);
+        let field = Mutex::new(None::<u64>);
+        let probed = AtomicBool::new(false);
+        let mut peer = Peer::active(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        )
+        .with_field_claim(|| {
+            *field.lock().unwrap() = Some(7);
+            Ok(())
+        })
+        .with_field_release(|| {
+            let mut held = field.lock().unwrap();
+            if *held == Some(7) {
+                *held = None;
+            }
+        })
+        .with_field_ensure(|| {
+            probed.store(true, Ordering::Relaxed);
+            let mut held = field.lock().unwrap();
+            match *held {
+                None | Some(7) => {
+                    *held = Some(7);
+                    Ok(true)
+                }
+                Some(_) => Ok(false),
+            }
+        });
+        peer.activate().unwrap();
+        peer.scan();
+        assert_eq!(*field.lock().unwrap(), Some(7));
+
+        // The routine maintenance action: the requested demotion's
+        // release leaves the field unclaimed.
+        peer.demote().unwrap();
+        peer.scan();
+        assert_eq!(*field.lock().unwrap(), None);
+        assert_eq!(peer.role(), Role::Standby);
+
+        // Orphaned pulls arrive: the probe the field would grant never
+        // runs — the run's own release stays released rather than
+        // re-arming under the standby's token within a scan.
+        let source_driver =
+            StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let mut source =
+            Executor::new(&source_driver, loop_map(), vec![Box::new(PassThrough)]).unwrap();
+        source.run(9);
+        let mut checkpoint = source.checkpoint();
+        checkpoint.source_owns_field = Some(false);
+        peer.track_once(|| Ok(checkpoint.clone()));
+        peer.track_once(|| Ok(checkpoint));
+        assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
+        assert_eq!(
+            *field.lock().unwrap(),
+            None,
+            "a voluntary demotion's release must not re-arm under the standby's token"
+        );
+        assert!(
+            !probed.load(Ordering::Relaxed),
+            "the yielded mark must skip the orphan-cycle ensure"
+        );
+        assert!(peer.take_claim_rearms().is_empty());
+        assert_eq!(peer.role(), Role::Standby);
+
+        // The mark is no lifetime ban: the re-promoted run's fresh
+        // ownership clears it — a *fenced* demotion of that new
+        // ownership probes and re-arms the released claim as before.
+        peer.promote().unwrap();
+        peer.scan();
+        assert_eq!(peer.role(), Role::Active);
+        assert_eq!(*field.lock().unwrap(), Some(7));
+        peer.demote_inner(SwitchAttribution {
+            origin: SwitchOrigin::Fenced,
+            actor: None,
+        })
+        .unwrap();
+        peer.scan();
+        assert_eq!(peer.role(), Role::Standby);
+        assert_eq!(*field.lock().unwrap(), None);
+        let mut orphaned = source.checkpoint();
+        orphaned.source_owns_field = Some(false);
+        peer.track_once(|| Ok(orphaned));
+        assert!(probed.load(Ordering::Relaxed));
+        assert_eq!(*field.lock().unwrap(), Some(7));
+        assert_eq!(peer.take_claim_rearms().len(), 1);
+    }
+
+    /// The stand-down is not the arm's end: a fencing-demoted ex-owner
+    /// that reconverged on the preemptor's owning checkpoints — its
+    /// loss mark stood down while a live owner stood — probes nothing
+    /// while that tracking lasts, and re-arms the bound reclaim on the
+    /// orphaned pull's evidence once the successor's claim stands
+    /// released. The grant re-binds the run's token and walks
+    /// `promoting` → `active`: the voluntary demotion's hand-back
+    /// reaching the ex-owner the release handed the field to. A
+    /// voluntarily demoted peer's `yielded` mark would keep the probe
+    /// off through the same orphaned pulls.
+    #[test]
+    fn an_orphaned_pull_re_arms_the_reconverged_ex_owners_reclaim() {
+        const OWNER: u64 = 7;
+        const FOREIGN: u64 = 99;
+        let driver = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let fenced = FencingDriver {
+            inner: &driver,
+            armed: AtomicBool::new(false),
+        };
+        let gate = WriteGate::closed(&fenced);
+        let claim = ScriptedClaim::unclaimed();
+        let mut peer = Peer::active(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        )
+        .with_field_claim(|| {
+            claim.claim(OWNER);
+            Ok(())
+        })
+        .with_field_probe(|| Ok(claim.probe()))
+        .with_field_ensure(|| Ok(claim.ensure(OWNER)))
+        .with_field_reclaim(|| Ok(claim.ensure(OWNER)));
+        peer.activate().unwrap();
+        assert_eq!(peer.scan(), Tick(1));
+        assert_eq!(claim.holder(), Some(OWNER));
+
+        // The preemption: the foreign attachment takes the claim and
+        // the fenced write demotes this run — the loss mark stands.
+        claim.claim(FOREIGN);
+        fenced.armed.store(true, Ordering::Relaxed);
+        assert_eq!(peer.scan(), Tick(2));
+        assert_eq!(peer.scan(), Tick(3));
+        assert_eq!(peer.role(), Role::Standby);
+
+        let source_driver =
+            StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let mut source =
+            Executor::new(&source_driver, loop_map(), vec![Box::new(PassThrough)]).unwrap();
+        source.run(9);
+
+        // Tracking the preemptor's owning checkpoints resolves the
+        // succession — the loss mark stands down — and while that
+        // owner stands, neither probe runs: the released-preemption
+        // coverage must not linger to preempt a live incumbent.
+        let mut owned = source.checkpoint();
+        owned.source_owns_field = Some(true);
+        peer.track_once(|| Ok(owned));
+        for _ in 0..2 {
+            peer.scan();
+        }
+        assert_eq!(claim.holder(), Some(FOREIGN));
+        assert_eq!(peer.role(), Role::Standby);
+
+        // Even the foreign claim's release while the tracked line
+        // still reports an owner arms nothing — the arm is the
+        // orphaned pull's ownerless evidence, not the standby's
+        // residency.
+        claim.release();
+        peer.scan();
+        assert_eq!(claim.holder(), None);
+        assert_eq!(peer.role(), Role::Standby);
+
+        // The tracked line reports the field ownerless: the orphan
+        // cycle's ensure re-arms the released claim (journaling its
+        // landing), and the scan's bound reclaim — armed on the same
+        // evidence for an ownership this run did not hand back —
+        // binds the run's token to the claim and walks the peer back
+        // to `active`.
+        source.run(4);
+        let mut orphaned = source.checkpoint();
+        orphaned.source_owns_field = Some(false);
+        peer.track_once(|| Ok(orphaned));
+        assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
+        assert_eq!(claim.holder(), Some(OWNER));
+        assert_eq!(peer.take_claim_rearms().len(), 1);
+        fenced.armed.store(false, Ordering::Relaxed);
+        assert_eq!(peer.scan(), Tick(14));
+        assert_eq!(peer.role(), Role::Promoting);
+        assert_eq!(peer.scan(), Tick(15));
+        assert_eq!(peer.role(), Role::Active);
     }
 
     /// A standby that never held the field has no claim to re-arm — the
@@ -6649,41 +7012,52 @@ mod tests {
     /// worsened.
     #[test]
     fn the_orphan_probe_never_preempts_a_standing_foreign_owner() {
-        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
-        let gate = WriteGate::closed(&driver);
+        let driver = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let fenced = FencingDriver {
+            inner: &driver,
+            armed: AtomicBool::new(false),
+        };
+        let gate = WriteGate::closed(&fenced);
         let field = Mutex::new(None::<u64>);
-        let mut peer = Peer::active(executor(&gate), Some(&gate))
-            .with_field_claim(|| {
-                *field.lock().unwrap() = Some(7);
-                Ok(())
-            })
-            .with_field_release(|| {
-                let mut held = field.lock().unwrap();
-                if *held == Some(7) {
-                    *held = None;
+        let mut peer = Peer::active(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        )
+        .with_field_claim(|| {
+            *field.lock().unwrap() = Some(7);
+            Ok(())
+        })
+        .with_field_release(|| {
+            let mut held = field.lock().unwrap();
+            if *held == Some(7) {
+                *held = None;
+            }
+        })
+        .with_field_ensure(|| {
+            let mut held = field.lock().unwrap();
+            match *held {
+                None | Some(7) => {
+                    *held = Some(7);
+                    Ok(true)
                 }
-            })
-            .with_field_ensure(|| {
-                let mut held = field.lock().unwrap();
-                match *held {
-                    None | Some(7) => {
-                        *held = Some(7);
-                        Ok(true)
-                    }
-                    Some(_) => Ok(false),
-                }
-            });
+                Some(_) => Ok(false),
+            }
+        });
         peer.activate().unwrap();
         peer.scan();
-        peer.demote().unwrap();
+        fenced.armed.store(true, Ordering::Relaxed);
         peer.scan();
+        peer.scan();
+        assert_eq!(peer.role(), Role::Standby);
 
         // A foreign owner claims the field between the demotion's
         // release and the orphan probe.
         *field.lock().unwrap() = Some(99);
 
-        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
-        let mut source = executor(&source_driver);
+        let source_driver =
+            StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let mut source =
+            Executor::new(&source_driver, loop_map(), vec![Box::new(PassThrough)]).unwrap();
         source.run(9);
         let mut checkpoint = source.checkpoint();
         checkpoint.source_owns_field = Some(false);
@@ -6692,6 +7066,7 @@ mod tests {
         assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
         assert_eq!(*field.lock().unwrap(), Some(99));
         assert_eq!(peer.role(), Role::Standby);
+        assert!(peer.take_claim_rearms().is_empty());
     }
 
     /// The audit half of the orphan probe's refusal: a foreign
@@ -6705,7 +7080,11 @@ mod tests {
     #[test]
     fn a_refused_orphan_probe_journals_the_observed_claimant_once() {
         let driver = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
-        let gate = WriteGate::closed(&driver);
+        let fenced = FencingDriver {
+            inner: &driver,
+            armed: AtomicBool::new(false),
+        };
+        let gate = WriteGate::closed(&fenced);
         // The field's single-writer claim as the driver surface sees
         // it: `Some(owner)` while claimed, `None` once released.
         let field = Mutex::new(None::<u64>);
@@ -6736,8 +7115,10 @@ mod tests {
         .with_claim_observer(|| (*field.lock().unwrap()).into_iter().collect());
         peer.activate().unwrap();
         peer.scan();
-        peer.demote().unwrap();
+        fenced.armed.store(true, Ordering::Relaxed);
         peer.scan();
+        peer.scan();
+        assert_eq!(peer.role(), Role::Standby);
         assert!(peer.take_claim_observations().is_empty());
 
         // A foreign claim_writer takes the field the demotion
