@@ -952,6 +952,72 @@ def _docker_run_args(cfg, run_id, name):
             '--restart', 'no']
 
 
+def _controller_argv(cfg, pair, name, prefix,
+                     model='/model/plant.json', standby=None,
+                     track=None, revised=False, driven=False,
+                     keyed=True):
+    """The complete dcs-controller argv a rig launch hands to docker
+    run — the single assembly point every controller launch routes
+    through, so the launch contract cannot drift between the sites
+    that build it.
+
+    `pair` and `name` name the endpoint the launch serves: the pair's
+    --remote plant address (_pair_plant_remote), the endpoint's
+    --owner-token pin (_pair_owner_key), the in-container monitor
+    port (PAIR_MONITOR_PORTS for the pair's own members,
+    DRIVEN_MONITOR_PORT for a third controller), and the CONTAINER_*
+    persistence trio all follow from them. `name='standby'` launches
+    the pair's tracking member: its --standby target defaults to the
+    pair's active and carries the --auto-promote failover budget.
+
+    The named deltas are what the specialty levers pass: `model`
+    overrides the mounted document's in-container path (the revised
+    and foreign derivations), `standby` hands a non-member tracker
+    its explicit --standby target — no --auto-promote, only the
+    pair's own standby promotes — `track` doctors a relaunch's
+    tracking wiring (--peer on the launched active, the --standby
+    target on the launched standby), `driven` runs the externally
+    paced mode — --driven in place of --scan-ms, since a driven
+    standby scans only inside POST /scan — `revised` opts the launch
+    into the revised model's carryover, and `keyed=False` pins the
+    tokenless posture the foreign peer keeps even on a keyed run.
+    The pair's --pair-token lands whenever the pair carries one and
+    the launch is keyed.
+    """
+    peers = PAIRS[pair]['peers']
+    tokens = _plant_owner_tokens(cfg)
+    argv = [model,
+            '--remote', _pair_plant_remote(cfg, pair, prefix),
+            '--owner-token',
+            str(tokens[_pair_owner_key(pair, name)])]
+    if name == 'standby':
+        argv += ['--standby',
+                 track if track is not None else
+                 prefix + '-' + peers['active'] + ':'
+                 + str(PAIR_MONITOR_PORTS['active']),
+                 '--auto-promote', str(cfg['failover_misses'])]
+    elif track is not None:
+        argv += ['--peer', track]
+    if standby is not None:
+        argv += ['--standby', standby]
+    if revised:
+        argv += ['--revised']
+    if driven:
+        argv += ['--driven']
+    else:
+        argv += ['--scan-ms', '100']
+    argv += ['--listen',
+             '0.0.0.0:' + str(PAIR_MONITOR_PORTS.get(
+                 name, DRIVEN_MONITOR_PORT)),
+             '--state-file', CONTAINER_STATE_FILE,
+             '--journal-file', CONTAINER_JOURNAL_FILE,
+             '--history-file', CONTAINER_HISTORY_FILE]
+    token = _pair_token(cfg, pair) if keyed else None
+    if token:
+        argv += ['--pair-token', str(token)]
+    return argv
+
+
 # Restart recovery (decisions 35/36): each controller runs with
 # --state-file and --journal-file on a runner-owned per-controller
 # directory inside the run dir, bind-mounted into the container at
@@ -1255,7 +1321,8 @@ def relaunch_controller(cfg, record, run_dir, model, name, timeline,
                         track=None, pair='deployed'):
     """The scenario-callable flag-doctoring relaunch: `docker rm -f`
     on the pair member's container, then a fresh `docker run`
-    rebuilding the launch from the run config — same image, model and
+    rebuilding the member's launch through the same _controller_argv
+    spec the rig's launches assemble — same image, model and
     state/journal mounts, published monitor port, owner-token pin,
     failover budget, and pair token — with the tracking-source
     argument optionally doctored. Where `docker start` can only rerun
@@ -1265,8 +1332,9 @@ def relaunch_controller(cfg, record, run_dir, model, name, timeline,
     demoted, the "--standby name" an owning run carries — and
     replaces `--standby`'s target on the launched standby. track=None
     recreates the launch command unchanged: the restore half of a
-    doctored pass, since no start can un-apply a flag a recreate
-    added.
+    doctored pass, constructionally identical to the member's initial
+    launch so a flag added to the spec cannot drop here, since no
+    start can un-apply a flag a recreate added.
 
     `name` is the scenario ctx's endpoint key ('active' is ctrl-a,
     'standby' ctrl-b on the deployed pair; the probe pair's ctx maps
@@ -1291,29 +1359,8 @@ def relaunch_controller(cfg, record, run_dir, model, name, timeline,
                            'key, got ' + repr(name))
     peer = peers[name]
     container = prefix + '-' + peer
-    tokens = _plant_owner_tokens(cfg)
-    token = _pair_token(cfg, pair)
-    remote = _pair_plant_remote(cfg, pair, prefix)
     monitor_port = PAIR_MONITOR_PORTS[name]
-    command = ['/model/plant.json',
-               '--remote', remote,
-               '--owner-token',
-               str(tokens[_pair_owner_key(pair, name)])]
-    if name == 'standby':
-        command += ['--standby',
-                    track if track is not None else
-                    prefix + '-' + peers['active'] + ':'
-                    + str(PAIR_MONITOR_PORTS['active']),
-                    '--auto-promote', str(cfg['failover_misses'])]
-    elif track is not None:
-        command += ['--peer', track]
-    command += ['--scan-ms', '100',
-                '--listen', '0.0.0.0:' + str(monitor_port),
-                '--state-file', CONTAINER_STATE_FILE,
-                '--journal-file', CONTAINER_JOURNAL_FILE,
-                '--history-file', CONTAINER_HISTORY_FILE]
-    if token:
-        command += ['--pair-token', str(token)]
+    command = _controller_argv(cfg, pair, name, prefix, track=track)
     flag = '' if track is None else (
         ('--peer ' if name == 'active' else '--standby ') + track)
     timeline('controller-relaunch', 'docker rm -f ' + container
@@ -2072,27 +2119,21 @@ def start_revised_controller(cfg, record, run_dir, model, active,
              + '); launch ' + container
              + ' --standby ' + standby + ' --revised'
              + ' --owner-token ' + str(owner_token))
+    # The roll demotes the field owner toward this peer's announced
+    # address — under the keyed announced-source contract only a peer
+    # carrying the pair's token can sign the line_proof the demoted
+    # peer's verify pull demands, so the launch keeps the pair's keyed
+    # posture.
     docker(*_docker_run_args(cfg, run_id, container),
            '--network', 'dcs-hwtest-' + run_id,
-           '-p', '127.0.0.1:' + str(cfg['revised_port']) + ':8082',
+           '-p', '127.0.0.1:' + str(cfg['revised_port']) + ':'
+           + str(DRIVEN_MONITOR_PORT),
            '-v', str(revised_doc) + ':/model/revised.json:ro',
            '-v', str(directory) + ':' + CONTAINER_RUN_DIR,
            IMAGE_PREFIX + 'controller:' + sha,
-           '/model/revised.json',
-           '--remote', prefix + '-plant:' + str(cfg['plant_port']),
-           '--owner-token', str(owner_token),
-           '--standby', standby,
-           '--revised',
-           '--scan-ms', '100', '--listen', '0.0.0.0:8082',
-           '--state-file', CONTAINER_STATE_FILE,
-           '--journal-file', CONTAINER_JOURNAL_FILE,
-           '--history-file', CONTAINER_HISTORY_FILE,
-           # The roll demotes the field owner toward this peer's
-           # announced address — under the keyed announced-source
-           # contract only a peer carrying the pair's token can sign
-           # the line_proof the demoted peer's verify pull demands.
-           *(['--pair-token', str(cfg['pair_token'])]
-             if cfg.get('pair_token') else []))
+           *_controller_argv(cfg, 'deployed', 'revised', prefix,
+                             model='/model/revised.json',
+                             standby=standby, revised=True))
     timeline('model-revision-up', container
              + ' running the revised model')
     return dict(info, container=container)
@@ -2144,18 +2185,17 @@ def start_foreign_controller(cfg, record, run_dir, model, active,
              + ' --owner-token ' + str(owner_token))
     docker(*_docker_run_args(cfg, run_id, container),
            '--network', 'dcs-hwtest-' + run_id,
-           '-p', '127.0.0.1:' + str(cfg['foreign_port']) + ':8082',
+           '-p', '127.0.0.1:' + str(cfg['foreign_port']) + ':'
+           + str(DRIVEN_MONITOR_PORT),
            '-v', str(foreign_doc) + ':/model/foreign.json:ro',
            '-v', str(directory) + ':' + CONTAINER_RUN_DIR,
            IMAGE_PREFIX + 'controller:' + sha,
-           '/model/foreign.json',
-           '--remote', prefix + '-plant:' + str(cfg['plant_port']),
-           '--owner-token', str(owner_token),
-           '--standby', standby,
-           '--scan-ms', '100', '--listen', '0.0.0.0:8082',
-           '--state-file', CONTAINER_STATE_FILE,
-           '--journal-file', CONTAINER_JOURNAL_FILE,
-           '--history-file', CONTAINER_HISTORY_FILE)
+           # The labeled foreign peer stays unkeyed on purpose — the
+           # negotiation-refusal leg's fingerprint gate answers on the
+           # document alone.
+           *_controller_argv(cfg, 'deployed', 'foreign', prefix,
+                             model='/model/foreign.json',
+                             standby=standby, keyed=False))
     timeline('negotiation-up', container
              + ' running a foreign-fingerprint model')
     return dict(info, container=container)
@@ -2223,7 +2263,6 @@ def start_driven_controller(cfg, record, run_dir, model, active,
     timeline('driven-start', 'launch ' + container + ' --standby '
              + standby + ' --driven --remote ' + remote
              + ' --owner-token ' + str(owner_token))
-    token = _pair_token(cfg, pair)
     docker(*_docker_run_args(cfg, run_id, container),
            '--network', 'dcs-hwtest-' + run_id,
            '-p', '127.0.0.1:'
@@ -2232,21 +2271,14 @@ def start_driven_controller(cfg, record, run_dir, model, active,
            '-v', str(model) + ':/model/plant.json:ro',
            '-v', str(directory) + ':' + CONTAINER_RUN_DIR,
            IMAGE_PREFIX + 'controller:' + sha,
-           '/model/plant.json',
-           '--remote', remote,
-           '--owner-token', str(owner_token),
-           '--standby', standby,
-           '--driven', '--listen', '0.0.0.0:'
-           + str(DRIVEN_MONITOR_PORT),
-           '--state-file', CONTAINER_STATE_FILE,
-           '--journal-file', CONTAINER_JOURNAL_FILE,
-           '--history-file', CONTAINER_HISTORY_FILE,
            # The stale-island leg promotes this peer onto the field
            # and the islanded pair's orphan-resolution probes pull
            # its checkpoint with ?prove= — under the keyed contract
            # only a peer carrying the pair's token can sign the
-           # line_proof those verify pulls demand.
-           *(['--pair-token', str(token)] if token else []))
+           # line_proof those verify pulls demand, so the launch keeps
+           # the pair's keyed posture.
+           *_controller_argv(cfg, pair, 'driven', prefix,
+                             standby=standby, driven=True))
     timeline('driven-up', container + ' serving a driven standby')
     return {'container': container}
 
@@ -3084,44 +3116,29 @@ def _start_rig(cfg, record, src, run_dir, timeline):
     # carry the run config's shared --pair-token so a demoted owner's
     # verify pull can demand the keyed line_proof. An empty token runs
     # the rig unkeyed — where every announced-only demotion refuses.
-    pair_flags = (['--pair-token', str(cfg['pair_token'])]
-                  if cfg.get('pair_token') else [])
+    keyed = bool(cfg.get('pair_token'))
     docker(*_docker_run_args(cfg, run_id, prefix + '-a'),
            '--network', net,
-           '-p', '127.0.0.1:' + str(cfg['active_port']) + ':8080',
+           '-p', '127.0.0.1:' + str(cfg['active_port']) + ':'
+           + str(PAIR_MONITOR_PORTS['active']),
            '-v', str(model) + ':/model/plant.json:ro',
            '-v', str(_controller_dir(run_dir, 'a'))
            + ':' + CONTAINER_RUN_DIR,
-           'dcs-hwtest/controller:' + sha,
-           '/model/plant.json',
-           '--remote', prefix + '-plant:' + str(cfg['plant_port']),
-           '--owner-token', str(tokens['active']),
-           '--scan-ms', '100', '--listen', '0.0.0.0:8080',
-           '--state-file', CONTAINER_STATE_FILE,
-           '--journal-file', CONTAINER_JOURNAL_FILE,
-           '--history-file', CONTAINER_HISTORY_FILE,
-           *pair_flags)
+           IMAGE_PREFIX + 'controller:' + sha,
+           *_controller_argv(cfg, 'deployed', 'active', prefix))
     docker(*_docker_run_args(cfg, run_id, prefix + '-b'),
            '--network', net,
-           '-p', '127.0.0.1:' + str(cfg['standby_port']) + ':8081',
+           '-p', '127.0.0.1:' + str(cfg['standby_port']) + ':'
+           + str(PAIR_MONITOR_PORTS['standby']),
            '-v', str(model) + ':/model/plant.json:ro',
            '-v', str(_controller_dir(run_dir, 'b'))
            + ':' + CONTAINER_RUN_DIR,
-           'dcs-hwtest/controller:' + sha,
-           '/model/plant.json',
-           '--remote', prefix + '-plant:' + str(cfg['plant_port']),
-           '--owner-token', str(tokens['standby']),
-           '--standby', prefix + '-a:8080',
-           '--auto-promote', str(cfg['failover_misses']),
-           '--scan-ms', '100', '--listen', '0.0.0.0:8081',
-           '--state-file', CONTAINER_STATE_FILE,
-           '--journal-file', CONTAINER_JOURNAL_FILE,
-           '--history-file', CONTAINER_HISTORY_FILE,
-           *pair_flags)
+           IMAGE_PREFIX + 'controller:' + sha,
+           *_controller_argv(cfg, 'deployed', 'standby', prefix))
     timeline('rig-up', 'plant + controller pair on ' + net
              + ' (owner tokens active=' + str(tokens['active'])
              + ', standby=' + str(tokens['standby'])
-             + (', pair-keyed' if pair_flags else ', unkeyed') + ')')
+             + (', pair-keyed' if keyed else ', unkeyed') + ')')
     if probe is not None:
         _start_probe_pair(cfg, record, src, run_dir, net, probe,
                           timeline)
@@ -3181,36 +3198,22 @@ def _start_probe_pair(cfg, record, src, run_dir, net, probe,
     token = str(probe['pair_token'])
     docker(*_docker_run_args(cfg, run_id, prefix + '-probe-a'),
            '--network', net,
-           '-p', '127.0.0.1:' + str(probe['active_port']) + ':8080',
+           '-p', '127.0.0.1:' + str(probe['active_port']) + ':'
+           + str(PAIR_MONITOR_PORTS['active']),
            '-v', str(model) + ':/model/plant.json:ro',
            '-v', str(_controller_dir(run_dir, 'probe-a'))
            + ':' + CONTAINER_RUN_DIR,
-           'dcs-hwtest/controller:' + sha,
-           '/model/plant.json',
-           '--remote', container + ':' + str(probe['plant_port']),
-           '--owner-token', str(tokens['probe_active']),
-           '--scan-ms', '100', '--listen', '0.0.0.0:8080',
-           '--state-file', CONTAINER_STATE_FILE,
-           '--journal-file', CONTAINER_JOURNAL_FILE,
-           '--history-file', CONTAINER_HISTORY_FILE,
-           '--pair-token', token)
+           IMAGE_PREFIX + 'controller:' + sha,
+           *_controller_argv(cfg, 'probe', 'active', prefix))
     docker(*_docker_run_args(cfg, run_id, prefix + '-probe-b'),
            '--network', net,
-           '-p', '127.0.0.1:' + str(probe['standby_port']) + ':8081',
+           '-p', '127.0.0.1:' + str(probe['standby_port']) + ':'
+           + str(PAIR_MONITOR_PORTS['standby']),
            '-v', str(model) + ':/model/plant.json:ro',
            '-v', str(_controller_dir(run_dir, 'probe-b'))
            + ':' + CONTAINER_RUN_DIR,
-           'dcs-hwtest/controller:' + sha,
-           '/model/plant.json',
-           '--remote', container + ':' + str(probe['plant_port']),
-           '--owner-token', str(tokens['probe_standby']),
-           '--standby', prefix + '-probe-a:8080',
-           '--auto-promote', str(cfg['failover_misses']),
-           '--scan-ms', '100', '--listen', '0.0.0.0:8081',
-           '--state-file', CONTAINER_STATE_FILE,
-           '--journal-file', CONTAINER_JOURNAL_FILE,
-           '--history-file', CONTAINER_HISTORY_FILE,
-           '--pair-token', token)
+           IMAGE_PREFIX + 'controller:' + sha,
+           *_controller_argv(cfg, 'probe', 'standby', prefix))
     timeline('probe-rig-up', 'probe plant + keyed probe pair on '
              + net + ' (owner tokens probe_active='
              + str(tokens['probe_active']) + ', probe_standby='
