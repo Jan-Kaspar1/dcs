@@ -1357,6 +1357,12 @@ impl<'d> Monitor<'d> {
         signals: SignalIndex,
         config: MonitorConfig,
     ) -> io::Result<Self> {
+        // The three persistence paths must be distinct files — the
+        // bind refuses the aliased configuration the controller's
+        // option parse already refuses on its flags, so a
+        // programmatically assembled `MonitorConfig` cannot smuggle it
+        // in either (finding state-file-alias-clobbers-append-durable-files).
+        config.check_persistence_paths()?;
         // The state-file sink's writer spawns at bind beside the
         // recorder's journal drain — its shared counters stamp every
         // publication's `state_sink` section from the bind-time read
