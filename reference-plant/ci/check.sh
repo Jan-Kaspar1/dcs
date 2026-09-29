@@ -201,9 +201,12 @@
 #                the earlier compatible revision the upgrade stage
 #                materializes the tree at before repinning to $DCS_REV
 #                (default: the previous release's recorded rev — the
-#                v0.5.0 commit — so the stage proves the v0.5.0 → v0.6.0
-#                crossing the manifest names; the workspace-side proof
-#                seeds its stand-in remote to serve it).
+#                v0.6.0 publish commit, the first release line whose
+#                builder API carries the composition's declared
+#                recording duties — so the stage proves the recorded
+#                rev → tag half of the v0.6.0 crossing the manifest
+#                names; the workspace-side proof seeds its stand-in
+#                remote to serve it).
 #   DCS_UPGRADE  set to 0 to skip the upgrade stage — the stage's own
 #                repinned re-run uses this internally.
 #   DCS_TOOLS    a directory holding prebuilt `dcs-model`,
@@ -233,7 +236,7 @@ cd "$(dirname "$0")/.."
 
 DCS_REMOTE="${DCS_REMOTE:-https://github.com/Jan-Kaspar1/dcs.git}"
 DCS_REV="${DCS_REV:-v0.6.0}"
-DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-07e7131b288b6506cdcc420d263cdd561b3bdd9f}"
+DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-b0580bff9df23e009abdce15c241c4711c64a9c2}"
 DCS_TOOLS="${DCS_TOOLS:-}"
 DCS_RECORD_DIR="${DCS_RECORD_DIR:-}"
 TOOLS=""
@@ -778,7 +781,8 @@ python3 ci/overview_url.py
 # scratch copies so the checked-in pair stays pristine: each must
 # report rig-mismatch — a declared path missing its mount or flag, a
 # flag or writable mount the manifest does not declare, a persistence
-# mount left read-only — while the fields omitted outright (with their
+# mount left read-only, one controller's journal_file aliased with its
+# state_file — while the fields omitted outright (with their
 # mounts and flags) stay a valid deployment. The same harness proves
 # the checked-in manifest's declared topology section — the deployed
 # pair named under `topology.pairs`: the declaration validates under
@@ -874,6 +878,17 @@ elif case == "failover-wrong-peer":
     document["controllers"][0]["failover_budget"] = \
         document["controllers"][1].pop("failover_budget")
     manifest = json.dumps(document, indent=2)
+elif case == "persistence-aliased-paths":
+    # ctrl-a's journal_file aliases its state_file — the checkpoint's
+    # write-then-rename would orphan the append writer's descriptor
+    # (finding state-file-alias-clobbers-append-durable-files). The
+    # flag follows the field so flag/field parity still holds and the
+    # only divergence is the alias itself.
+    document = json.loads(manifest)
+    document["controllers"][0]["journal_file"] = "/var/tmp/state.json"
+    manifest = json.dumps(document, indent=2)
+    compose = compose.replace(
+        "- /var/tmp/journal.jsonl", "- /var/tmp/state.json", 1)
 elif case == "persistence-omitted":
     # All three fields omitted together with their flags and mounts —
     # the optional deployment a consumer without durable storage
@@ -1056,7 +1071,8 @@ for divergence in persistence-mount-divergence persistence-flag-divergence \
         undeclared-history-flag \
         undeclared-writable-mount failover-flag-missing \
         failover-flag-undeclared failover-wrong-peer \
-        persistence-omitted topology-declared topology-multi-pair \
+        persistence-aliased-paths persistence-omitted \
+        topology-declared topology-multi-pair \
         undeployable-second-duty topology-undeclared-member \
         topology-shared-member topology-external-standby \
         topology-two-standbys topology-unwired-pair; do

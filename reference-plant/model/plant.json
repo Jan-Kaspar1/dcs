@@ -92,6 +92,10 @@
       "channel": {
         "device": 1,
         "name": "level-primary"
+      },
+      "record": {
+        "every_ticks": 5,
+        "retain_days": 1095
       }
     },
     {
@@ -101,6 +105,10 @@
       "channel": {
         "device": 1,
         "name": "level-backup"
+      },
+      "record": {
+        "every_ticks": 5,
+        "retain_days": 1095
       }
     },
     {
@@ -110,6 +118,10 @@
       "channel": {
         "device": 1,
         "name": "inflow"
+      },
+      "record": {
+        "every_ticks": 5,
+        "retain_days": 1095
       }
     },
     {
@@ -119,6 +131,10 @@
       "channel": {
         "device": 1,
         "name": "net-flow"
+      },
+      "record": {
+        "every_ticks": 5,
+        "retain_days": 1095
       }
     },
     {
@@ -731,6 +747,10 @@
       "channel": {
         "device": 1,
         "name": "p101-draw"
+      },
+      "record": {
+        "every_ticks": 5,
+        "retain_days": 1095
       }
     },
     {
@@ -741,7 +761,11 @@
         "device": 2,
         "name": "p101-run"
       },
-      "journaled": true
+      "journaled": true,
+      "record": {
+        "every_ticks": 5,
+        "retain_days": 1095
+      }
     },
     {
       "id": 60,
@@ -1198,6 +1222,10 @@
       "channel": {
         "device": 1,
         "name": "p102-draw"
+      },
+      "record": {
+        "every_ticks": 5,
+        "retain_days": 1095
       }
     },
     {
@@ -1208,7 +1236,11 @@
         "device": 2,
         "name": "p102-run"
       },
-      "journaled": true
+      "journaled": true,
+      "record": {
+        "every_ticks": 5,
+        "retain_days": 1095
+      }
     },
     {
       "id": 61,

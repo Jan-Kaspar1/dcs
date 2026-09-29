@@ -657,9 +657,10 @@ A compatible upgrade is a repin: change the `rev`/`tag` in
 `MODEL_VERSION` are unchanged — the check passing is the upgrade's
 acceptance. `ci/check.sh` proves the path itself: its `upgrade` stage
 materializes this tree at the previous release's recorded rev —
-`v0.5.0`'s recorded commit — repins it to this tree's recorded
-release, and re-runs the full check requiring a byte-identical
-`model/plant.json`.
+`v0.6.0`'s publish commit, the earliest release line whose builder
+API carries the composition's declared recording duties — repins it
+to this tree's recorded release, and re-runs the full check requiring
+a byte-identical `model/plant.json`.
 
 An **incompatible** crossing fails with named diagnostics, never
 silently: a pin that resolves no release crates is `pin-unresolvable`;

@@ -85,6 +85,97 @@ fn pair_token_requires_the_monitor_it_keys() {
 }
 
 #[test]
+fn aliased_persistence_paths_are_a_usage_error() {
+    // Finding state-file-alias-clobbers-append-durable-files: an
+    // aliased --state-file used to pass every validation, then the
+    // checkpoint's write-then-rename orphaned the append writer's
+    // descriptor and crash-looped the restart on a checkpoint
+    // document the strict replay cannot read. The alias is a usage
+    // error named at parse — for each pair.
+    let dir = std::env::temp_dir().join(format!("dcs-cli-alias-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let shared = dir.join("shared");
+    let shared = shared.to_str().unwrap();
+
+    for (first, second) in [
+        ("--state-file", "--history-file"),
+        ("--state-file", "--journal-file"),
+        ("--journal-file", "--history-file"),
+    ] {
+        let output = run(&[
+            TANK_LOOP,
+            "--scan-ms",
+            "100",
+            "--listen",
+            "127.0.0.1:0",
+            first,
+            shared,
+            second,
+            shared,
+        ]);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{first} aliased with {second} must exit 2"
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains(first) && stderr.contains(second) && stderr.contains("distinct"),
+            "{first} and {second}: {stderr}"
+        );
+    }
+
+    // A `..` detour spelling the same file is the same file.
+    let detour = dir.join("sub").join("..").join("shared");
+    let output = run(&[
+        TANK_LOOP,
+        "--scan-ms",
+        "100",
+        "--listen",
+        "127.0.0.1:0",
+        "--state-file",
+        detour.to_str().unwrap(),
+        "--history-file",
+        shared,
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+
+    // Distinct paths launch cleanly — a paced --ticks run that scans
+    // and exits is the contract the alias refusal must not trip.
+    let state = dir.join("state.json");
+    let journal = dir.join("journal.jsonl");
+    let history = dir.join("history.jsonl");
+    let output = run(&[
+        TANK_LOOP,
+        "--scan-ms",
+        "100",
+        "--ticks",
+        "3",
+        "--listen",
+        "127.0.0.1:0",
+        "--state-file",
+        state.to_str().unwrap(),
+        "--journal-file",
+        journal.to_str().unwrap(),
+        "--history-file",
+        history.to_str().unwrap(),
+    ]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        output.status.success(),
+        "distinct paths must launch and run: {stderr}"
+    );
+    // And each file holds its own format — the state sink's rename
+    // landed on its own path, the append sinks' records on theirs.
+    let head = std::fs::read_to_string(&history).unwrap();
+    assert!(
+        head.lines().next().unwrap().contains("run_boundary"),
+        "the history file keeps append-format records: {head}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn driven_requires_listen_and_excludes_pacing() {
     // --driven needs the monitor the requests arrive through.
     let output = run(&[TANK_LOOP, "--driven"]);
