@@ -277,6 +277,23 @@ pub enum JournalEvent {
         /// the field's arbitration answered the refusal with.
         claimant: u64,
     },
+    /// The orphan cycle's conditional ensure probe landed the field's
+    /// write-ownership claim under this run's recorded token — the
+    /// re-arm a demoted ex-owner whose ownership the field took
+    /// asserts while the tracked line reports no owner, granted only
+    /// where the field stood unclaimed or already named the token.
+    /// The durable record of who re-took the claim: the orphan
+    /// transition journals the detection, this entry attributes the
+    /// re-arm it produced — one entry per landing, not one per probe,
+    /// so a standing re-arm journals once however many orphaned pulls
+    /// confirm it. A peer whose own voluntary demotion released the
+    /// claim never lands this probe — the handed-back field belongs
+    /// to the successor's conditional paths, and the yield is what
+    /// they preempt.
+    FieldClaimRearmed {
+        /// The field point the claim domain arbitrates through.
+        point: PointId,
+    },
     /// A tracking peer's applied checkpoint stamped its serving run as
     /// not owning field writes — the checkpoint's `source_owns_field`
     /// stamp — meaning the tracked line has no field owner: the
@@ -285,11 +302,15 @@ pub enum JournalEvent {
     /// to [`StandbySync::Orphaned`](crate::StandbySync) and a peer that
     /// once owned the field re-arms its claim conditionally — granted
     /// only while the field is unclaimed or already names its own
-    /// token, never preempting a standing owner. One entry journals per
-    /// transition into the orphaned state, attributed to the tick the
-    /// orphaned apply landed at; `aligned` carries the applied
-    /// checkpoint's own tick — where the tracked line stood when the
-    /// observation landed.
+    /// token, never preempting a standing owner — unless its own
+    /// voluntary demotion is what released it: the handed-back claim
+    /// is the successor's to take, and the suppressed probe leaves it
+    /// to them. One entry journals per transition into the orphaned
+    /// state, attributed to the tick the orphaned apply landed at;
+    /// `aligned` carries the applied checkpoint's own tick — where the
+    /// tracked line stood when the observation landed. A re-arm the
+    /// cycle actually lands journals as
+    /// [`FieldClaimRearmed`](Self::FieldClaimRearmed) beside it.
     FieldOrphaned {
         /// The applied checkpoint's tick — the tracked line's position.
         aligned: Tick,

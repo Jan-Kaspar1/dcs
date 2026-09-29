@@ -2885,6 +2885,7 @@ function alarmEntryComponent(entry, descriptors) {
   if ("quality_changed" in event) return owner(event.quality_changed.point);
   if ("field_claim_lost" in event) return owner(event.field_claim_lost.point);
   if ("field_claim_observed" in event) return owner(event.field_claim_observed.point);
+  if ("field_claim_rearmed" in event) return owner(event.field_claim_rearmed.point);
   if ("command_settled" in event) {
     const command = event.command_settled.receipt.command;
     if ("set_parameter" in command) return command.set_parameter.component;
@@ -3203,6 +3204,7 @@ function equipmentJournalEntries(descriptor) {
     if ("quality_changed" in event) return bound.has(event.quality_changed.point);
     if ("field_claim_lost" in event) return bound.has(event.field_claim_lost.point);
     if ("field_claim_observed" in event) return bound.has(event.field_claim_observed.point);
+    if ("field_claim_rearmed" in event) return bound.has(event.field_claim_rearmed.point);
     if ("command_settled" in event) {
       const command = event.command_settled.receipt.command;
       if (named(command)) return true;
@@ -3646,6 +3648,9 @@ function describeEventField(field) {
 // {"field_claim_observed": {point, claimant}} — a conditional claim
 // probe's refusal naming the standing foreign owner, once per
 // claimant — |
+// {"field_claim_rearmed": {point}} — the orphan cycle's granted
+// ensure re-arming the released claim under this run's token, once
+// per granted streak — |
 // {"source_restarted": {was_aligned, resumed_at}} — the tracked
 // stream's generation boundary — | {"run_boundary": {run}} — a new
 // process lifetime's marker on a restarted journal file.
@@ -3762,6 +3767,15 @@ function describeEvent(event) {
     // observed, never fenced against.
     return "field write-ownership observed held by foreign owner " +
       "token " + observed.claimant + " at " + pointName(observed.point);
+  }
+  if ("field_claim_rearmed" in event) {
+    const rearmed = event.field_claim_rearmed;
+    // The orphan cycle's conditional ensure granted — this run
+    // re-armed the released claim under its own token while the
+    // tracked line reported no owner. The audit record attributing
+    // the re-take the orphaned transition alone cannot name.
+    return "field write-ownership re-armed at " +
+      pointName(rearmed.point) + " — orphan-cycle claim granted";
   }
   if ("event_emitted" in event) {
     const emitted = event.event_emitted.event;

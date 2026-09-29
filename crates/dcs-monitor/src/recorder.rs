@@ -45,8 +45,8 @@ use dcs_core::{
     TickAnchor, Value,
 };
 use dcs_runtime::{
-    ClaimObservation, Executor, OrphanReport, PromotionRefusal, ResolutionReport, RoleChange,
-    SourceRestart,
+    ClaimObservation, ClaimRearm, Executor, OrphanReport, PromotionRefusal, ResolutionReport,
+    RoleChange, SourceRestart,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
@@ -654,6 +654,19 @@ impl Recorder {
                 point: observation.point,
                 claimant: observation.claimant,
             },
+        );
+    }
+
+    /// Journals a landed orphan-cycle re-arm — the conditional ensure
+    /// probe took the field's write-ownership claim back under this
+    /// run's recorded token while the tracked line reported no owner —
+    /// attributed to the run tick the grant landed at, `point` naming
+    /// the field point the claim domain arbitrates through. One entry
+    /// per landing: a standing re-arm's confirming probes journal once.
+    pub(super) fn note_claim_rearmed(&mut self, rearm: ClaimRearm) {
+        self.push(
+            rearm.tick,
+            JournalEvent::FieldClaimRearmed { point: rearm.point },
         );
     }
 

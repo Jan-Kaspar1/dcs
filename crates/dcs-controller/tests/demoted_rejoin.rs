@@ -33,8 +33,9 @@
 //! `0.0.0.0` verdict would dial the demoted peer's own netns and
 //! refuse forever, exactly the `qax-20260927-005` evidence.
 
-use dcs_core::{JournalEvent, Role, StandbySync, SwitchError};
+use dcs_core::{FieldClaim, JournalEvent, Role, StandbySync, SwitchError};
 use dcs_monitor::MonitorClient;
+use dcs_sim_net::RemoteDriver;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -223,6 +224,195 @@ fn a_remote_promotion_lets_the_demoted_peer_rejoin_tracking() {
         rejoined,
         "the second demoted peer must re-join tracking the same way: {:?}",
         pair.standby.role().unwrap().sync
+    );
+}
+
+/// The pinned `--owner-token` values the hand-off legs assert on —
+/// the field's own fencing verdicts name the standing claim's owner,
+/// so fixed tokens let the script tell "the claim still names the
+/// demoted peer" from "the claim transferred to the fencing-armed
+/// ex-owner".
+const OWNER_A: u64 = 0xA0_10_00_01;
+const OWNER_B: u64 = 0xB0_20_00_02;
+/// The driven ticks the voluntary hand-off gets to complete: the
+/// fencing-armed peer's bound reclaim probes every standby scan, so
+/// the transfer lands inside a handful — the bound only guards a
+/// wedge.
+const HANDOFF_TICKS: u64 = 8;
+
+/// The QA finding
+/// `demote-orphan-ensure-rearms-claim-under-standby` (#1270): on the
+/// unkeyed pair, a routine `POST /demote` on the freshly promoted
+/// owner released its write claim — and the demoted run's own
+/// orphan-cycle ensure re-armed that claim under its own token inside
+/// about one scan. The field then answered `fenced` under a member
+/// reporting `standby`: the superseded peer's bound fencing-loss
+/// reclaim — every conditional path back, in fact — refused forever,
+/// and no journal record named who re-took the claim.
+///
+/// The contract the finding demands: a voluntary demotion's release
+/// is a hand-back the demoted run must not undo — its orphan-cycle
+/// ensure stays out of the arbitration it yielded, so the released
+/// field stands unclaimed or transfers to the fencing-loss-armed
+/// peer's reclaim inside a bounded window, and any orphan-cycle
+/// ensure that does land a claim journals the re-arm it performed.
+/// Here the released claim is the yielded hand-off the
+/// fencing-armed ex-owner's bound reclaim takes: the pair closes on
+/// exactly one active — the *other* member — and the demoted run
+/// reconverges `tracking`, its journal showing the orphan transition
+/// but never a re-arm under its own token.
+#[test]
+fn a_voluntary_demote_hands_the_claim_to_the_fencing_armed_peer() {
+    let plant = spawn_plant(Path::new(STATION), Path::new(DYNAMICS));
+    let remote = ["--remote".to_string(), plant.addr.to_string()];
+    let mut active_args = remote.to_vec();
+    active_args.extend(["--owner-token".to_string(), OWNER_A.to_string()]);
+    let active_process = spawn_unkeyed(STATION, &active_args, DT);
+    let mut standby_args = remote.to_vec();
+    standby_args.extend([
+        "--standby".to_string(),
+        active_process.addr.to_string(),
+        "--owner-token".to_string(),
+        OWNER_B.to_string(),
+    ]);
+    let standby_process = spawn_unkeyed(STATION, &standby_args, DT);
+    let active = MonitorClient::new(active_process.addr);
+    let standby = MonitorClient::new(standby_process.addr);
+    // The field-side observer: `probe_writer` answers the standing
+    // claim's verdict and the verdict's owner token lands in
+    // `fenced_by` — the arbitration's own word for who holds the
+    // field, exactly as the QA leg's probe read it.
+    let field = RemoteDriver::connect(plant.addr).unwrap();
+
+    // The reproduction's healthy precondition: b converges `tracking`
+    // on the launched a.
+    let mut converged = false;
+    for _ in 0..CONVERGE_BOUND {
+        standby.advance(1).unwrap();
+        active.advance(1).unwrap();
+        if matches!(
+            standby.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ) {
+            converged = true;
+            break;
+        }
+    }
+    assert!(converged, "the standby never converged on the active");
+
+    // `POST /promote` on b: its unconditional claim preempts a's; a's
+    // first fenced write demotes it in place — the fencing-loss mark
+    // that arms a's bound reclaim — and a settles `standby`, tracking
+    // the claim's declared monitor.
+    assert_eq!(standby.promote().unwrap().role, Role::Promoting);
+    active.advance(1).unwrap();
+    standby.advance(1).unwrap();
+    active.advance(1).unwrap();
+    assert_eq!(active.role().unwrap().role, Role::Standby);
+    assert_eq!(standby.role().unwrap().role, Role::Active);
+    assert_eq!(
+        field.probe_writer().unwrap(),
+        FieldClaim::Held,
+        "the promoted peer must hold the claim before the demote"
+    );
+    assert_eq!(
+        field.fenced_by(),
+        Some(OWNER_B),
+        "the promoted claim must stand under b's token"
+    );
+
+    // The routine maintenance action the defect self-pinned on.
+    assert_eq!(standby.demote().unwrap().role, Role::Demoting);
+
+    // The hand-off window: the released claim may still *name* b's
+    // token — yielded, holderless — while the fencing-armed ex-owner's
+    // reclaim converges on it; what the defect produced was the claim
+    // re-armed under b's token by b's own ensure, which these ticks
+    // must never let stand. The window ends on the first probe that
+    // reads unclaimed or names a — and it must end inside the bound.
+    let mut handed = None;
+    for tick in 1..=HANDOFF_TICKS {
+        standby.advance(1).unwrap();
+        active.advance(1).unwrap();
+        match field.probe_writer().unwrap() {
+            FieldClaim::Unclaimed => {
+                handed = Some(None);
+                break;
+            }
+            FieldClaim::Held => match field.fenced_by() {
+                Some(OWNER_B) => {}
+                owner => {
+                    handed = Some(owner);
+                    break;
+                }
+            },
+        }
+        let b = standby.role().unwrap();
+        assert_eq!(
+            b.role,
+            Role::Standby,
+            "tick {tick}: the demoted peer must stay standby: {b:?}"
+        );
+    }
+    assert_eq!(
+        handed,
+        Some(Some(OWNER_A)),
+        "the released claim must transfer to the fencing-loss-armed \
+         peer inside {HANDOFF_TICKS} ticks — never re-armed under the \
+         demoted peer's token"
+    );
+
+    // The reclaim's own resolution: a walks `promoting` → `active` on
+    // the claim it re-took and the pair converges on exactly one
+    // field owner — b reconverging `tracking` on the successor's
+    // declared monitor.
+    for _ in 0..HANDOFF_TICKS {
+        active.advance(1).unwrap();
+        standby.advance(1).unwrap();
+        if active.role().unwrap().role == Role::Active
+            && matches!(
+                standby.role().unwrap().sync,
+                Some(StandbySync::Tracking { .. })
+            )
+        {
+            break;
+        }
+    }
+    assert_eq!(active.role().unwrap().role, Role::Active);
+    let b = standby.role().unwrap();
+    assert_eq!(b.role, Role::Standby, "{b:?}");
+    assert!(
+        matches!(b.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted peer must reconverge on the reclaiming owner: {b:?}"
+    );
+
+    // The durable half: the demoted run's orphan transition journals —
+    // but no `field_claim_rearmed` may ever land on it, because its
+    // own orphan-cycle ensure never re-armed the claim it yielded.
+    let journal = standby.journal(0).unwrap();
+    assert!(
+        journal
+            .iter()
+            .any(|entry| matches!(entry.event, JournalEvent::FieldOrphaned { .. })),
+        "the demoted peer's orphan transition must journal: {journal:?}"
+    );
+    assert!(
+        !journal
+            .iter()
+            .any(|entry| matches!(entry.event, JournalEvent::FieldClaimRearmed { .. })),
+        "a voluntary demotion must never journal a re-arm under its \
+         own token: {journal:?}"
+    );
+    // And the pair's *other* side of the defect stays closed: a's
+    // reclaim landed inside the same orphan window it refused before —
+    // the journaled claimant record attributes the standing claim it
+    // probed while b's yielded token still stood.
+    let a_journal = active.journal(0).unwrap();
+    assert!(
+        a_journal
+            .iter()
+            .any(|entry| matches!(entry.event, JournalEvent::FieldClaimLost { .. })),
+        "the fencing demotion must journal on the superseded owner: {a_journal:?}"
     );
 }
 
