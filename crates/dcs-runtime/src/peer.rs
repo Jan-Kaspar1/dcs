@@ -347,13 +347,35 @@ pub struct Peer<'d> {
     /// unsettled — set by [`activate`](Self::activate) when the ask
     /// produced no verdict (`Err`) and cleared when a retry lands
     /// one: a grant promotes the run to field owner, a refusal ends
-    /// the pending state as the ordinary tracking standby the refusal
-    /// stand-down already reported. While set the peer reports
+    /// the pending state on the standby surface the stand-down
+    /// already reported and latches the verdict into
+    /// `startup_refusal` for the run's shell to dispose of — the
+    /// deferred half of [`Activation::Refused`]'s contract. While set
+    /// the peer reports
     /// `standby`/`unsynchronized`-or-degraded and refuses every
     /// promotion — the launched run may enter field ownership only
     /// through the conditional grant, never through an unconditional
     /// claim that could preempt a live incumbent it lost track of.
     startup_pending: bool,
+    /// The deferred startup grant's latched refusal verdict — the
+    /// deferred [`Activation::Refused`]: the pending run's re-issued
+    /// ask answered `Ok(false)` inside a scan, where no activation
+    /// result reaches the run's caller to settle. `Some` once — the
+    /// ask never re-issues after a verdict — until
+    /// [`take_startup_refusal`](Self::take_startup_refusal) drains it
+    /// for the shell's disposition, the identical one the
+    /// activation-time answer takes. `activate`'s own refusal returns
+    /// through the [`Activation`] result instead, so the latch only
+    /// ever carries the verdict no call could have delivered.
+    startup_refusal: Option<SwitchError>,
+    /// Deferred startup-grant refusals not yet consumed for journaling
+    /// — one [`StartupRefusal`] per run: the `startup_claim_refused`
+    /// entry recording that the pending state settled under a verdict
+    /// rather than standing forever. [`activate`](Self::activate)'s
+    /// own `Ok(false)` queues the same record, so the durable trace
+    /// names the verdict whether it answered at activation or at the
+    /// pending run's first answered contact.
+    pending_startup_refusals: Vec<StartupRefusal>,
     /// The claim's orphan-promotion counterpart — the conditional grant
     /// a [`promote`](Self::promote) or [`self_promote`](Self::self_promote)
     /// from [`StandbySync::Orphaned`] runs in place of the
@@ -809,6 +831,27 @@ pub struct PromotionRefusal {
     pub error: SwitchError,
 }
 
+/// The pending born-active's deferred conditional grant met the
+/// field's refusal — a live incumbent's claim answering the re-issued
+/// ask at the first contact the field took — the deferred half of the
+/// born-active contract's [`Activation::Refused`] verdict. One report
+/// queues per run, attributed to the tick the verdict landed on: the
+/// durable record that the pending state's settle *happened*, beside
+/// the [`ClaimObservation`] attributing *who* refused it. The run's
+/// disposition is the shell's — the sibling `startup_refusal` latch
+/// carries the same verdict to the run loop that settles it: the
+/// declared pair's standby rejoin, or the pairless run's exit the
+/// activation-time answer already takes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StartupRefusal {
+    /// The run tick the refused ask answered at.
+    pub tick: Tick,
+    /// The named refusal — the same
+    /// [`SwitchError::FieldClaimFailed`] verdict [`Activation::Refused`]
+    /// carries at activation.
+    pub error: SwitchError,
+}
+
 /// The tracked checkpoint stream regressed across a generation
 /// boundary — the source tick it served fell below the run's last
 /// alignment (or, before any alignment stood, below the run's own tick)
@@ -1054,6 +1097,21 @@ pub enum Activation {
     },
 }
 
+/// The named refusal the conditional startup grant's `Ok(false)`
+/// produces — one verdict shared by [`Peer::activate`]'s
+/// activation-time ask and the pending run's deferred retry, so both
+/// timings of the same answer settle under the identical
+/// [`SwitchError::FieldClaimFailed`].
+fn startup_claim_refused() -> SwitchError {
+    SwitchError::FieldClaimFailed {
+        detail: "a live peer holds the field's write-ownership claim — a \
+                 controller restarting into a pair cannot prove its resumed \
+                 state is current with the incumbent's and must not preempt \
+                 it; rejoin as a standby instead"
+            .to_string(),
+    }
+}
+
 impl<'d> Peer<'d> {
     /// An instance owning field writes: role `active`.
     ///
@@ -1093,6 +1151,8 @@ impl<'d> Peer<'d> {
             pending_rearms: Vec::new(),
             startup_claim: None,
             startup_pending: false,
+            startup_refusal: None,
+            pending_startup_refusals: Vec::new(),
             orphan_claim: None,
             pending_orphans: Vec::new(),
             pending_refusals: Vec::new(),
@@ -1399,6 +1459,8 @@ impl<'d> Peer<'d> {
             pending_rearms: Vec::new(),
             startup_claim: None,
             startup_pending: false,
+            startup_refusal: None,
+            pending_startup_refusals: Vec::new(),
             orphan_claim: None,
             pending_orphans: Vec::new(),
             pending_refusals: Vec::new(),
@@ -1474,18 +1536,16 @@ impl<'d> Peer<'d> {
                     Ok(Activation::Granted)
                 }
                 Ok(false) => {
-                    let error = SwitchError::FieldClaimFailed {
-                        detail: "a live peer holds the field's write-ownership claim — a \
-                                 controller restarting into a pair cannot prove its resumed \
-                                 state is current with the incumbent's and must not preempt \
-                                 it; rejoin as a standby instead"
-                            .to_string(),
-                    };
+                    let error = startup_claim_refused();
                     // The verdict itself is the claim observation:
                     // the incumbent's claim stands — and the refusal
                     // is what the stand-down journals under.
                     self.field_claim = Some(FieldClaim::Held);
                     self.observe_claim_refusal(self.executor.tick());
+                    self.pending_startup_refusals.push(StartupRefusal {
+                        tick: self.executor.tick(),
+                        error: error.clone(),
+                    });
                     self.stand_down(SwitchOrigin::Fenced);
                     Ok(Activation::Refused { error })
                 }
@@ -3161,9 +3221,14 @@ impl<'d> Peer<'d> {
     /// the conditional `startup_claim` ask: a grant lifts the gate and
     /// reports `promoting`, settling `active` on the next scan under the
     /// lifted gate — completing what the boot could not — while a
-    /// refusal ends the pending state and journals the observed claimant
-    /// the launched-active refusal records, and an `Err` leaves the run
-    /// waiting for the next answered contact. An unanswered contact
+    /// refusal ends the pending state and settles the deferred
+    /// [`Activation::Refused`]: the verdict no activation result could
+    /// deliver latches into `startup_refusal` for the run's shell to
+    /// dispose of under the same contract the activation-time answer
+    /// takes — rejoin the declared pair, exit where none was declared —
+    /// and journals once beside the observed-claimant record
+    /// attributing it. An `Err` leaves the run waiting for the next
+    /// answered contact — no verdict answered. An unanswered contact
     /// issues no ask: the field cannot be asked.
     fn retry_startup_claim(&mut self, tick: Tick, field_answered: bool) {
         if !self.startup_pending || !field_answered {
@@ -3188,10 +3253,23 @@ impl<'d> Peer<'d> {
             }
             Ok(false) => {
                 self.startup_pending = false;
-                // The incumbent's refusal settled the startup: the run
-                // stays the tracking standby it already reported, and
-                // the observed-claimant record attributes the verdict.
+                // The incumbent's refusal settled the startup — the
+                // deferred half of the born-active contract's refused
+                // verdict, arriving at the first answered contact
+                // rather than at activation. The run already stands on
+                // the standby surface the pending stand-down reported;
+                // the verdict itself latches for the shell — a run
+                // whose pair was declared keeps standing, one launched
+                // without a pair has nothing to rejoin and its shell
+                // ends it exactly as the activation-time answer does —
+                // while the journal record makes the settle durable on
+                // run shapes the shell's exit message cannot reach.
+                self.field_claim = Some(FieldClaim::Held);
                 self.observe_claim_refusal(tick);
+                let error = startup_claim_refused();
+                self.startup_refusal = Some(error.clone());
+                self.pending_startup_refusals
+                    .push(StartupRefusal { tick, error });
             }
             Err(_) => {}
         }
@@ -3453,6 +3531,46 @@ impl<'d> Peer<'d> {
     /// into.
     pub fn take_claim_observations(&mut self) -> Vec<ClaimObservation> {
         std::mem::take(&mut self.pending_observations)
+    }
+
+    /// The deferred startup grant's latched refusal verdict — the
+    /// born-active contract's [`Activation::Refused`] produced inside
+    /// a scan rather than answered from [`activate`](Self::activate):
+    /// `Some` after the pending run's re-issued conditional ask met a
+    /// live incumbent's `Ok(false)`, until
+    /// [`take_startup_refusal`](Self::take_startup_refusal) drains it
+    /// for the shell's disposition. `None` on every other run — the
+    /// activation-time refusal returns through the `Activation`
+    /// result, so the latch only ever carries the verdict no caller
+    /// could have received.
+    pub fn startup_refusal(&self) -> Option<&SwitchError> {
+        self.startup_refusal.as_ref()
+    }
+
+    /// Drains [`startup_refusal`](Self::startup_refusal): `Some` once
+    /// per run — the deferred ask never re-issues after a verdict —
+    /// for the run's shell to settle under the identical disposition
+    /// the activation-time answer takes: keep the run where the pair
+    /// was declared (the standby surface already stands), or end it
+    /// where none was. The peer's reported state needs no settle
+    /// here — it already reports the standby the pending stand-down
+    /// produced.
+    pub fn take_startup_refusal(&mut self) -> Option<SwitchError> {
+        self.startup_refusal.take()
+    }
+
+    /// Drains deferred startup-grant refusals queued since the last
+    /// call — one [`StartupRefusal`] per run — for the transition
+    /// journal the monitoring layer records them into as
+    /// `startup_claim_refused`: the durable record that the pending
+    /// state's settle happened, on run shapes where the shell's exit
+    /// message cannot reach — a driven run never regains its shell.
+    /// [`activate`](Self::activate)'s own refused verdict queues the
+    /// same record, so the journal names the refusal identically
+    /// whether it answered at activation or at the pending run's
+    /// first answered contact.
+    pub fn take_startup_refusals(&mut self) -> Vec<StartupRefusal> {
+        std::mem::take(&mut self.pending_startup_refusals)
     }
 
     /// Drains tracked-source restarts queued since the last call — one
@@ -4432,13 +4550,17 @@ mod tests {
     /// A deferred ask the incumbent refuses ends the pending state
     /// where it stands: the run stays the tracking standby it already
     /// reported, the observed-claimant record attributes the verdict,
-    /// and the gate never lifted.
+    /// and the gate never lifted. The verdict itself — the deferred
+    /// half of [`Activation::Refused`] no activation result could
+    /// deliver — latches once for the run's shell to settle and queues
+    /// once for the journal, the ask never re-issuing after it.
     #[test]
     fn a_pending_asks_refusal_settles_the_startup_standby() {
         const OUTPUT: PointId = PointId(2);
         let driver = StubDriver::field(&[(OUTPUT, Value::Float(0.0))]);
         let gate = WriteGate::closed(&driver);
         let field_up = AtomicBool::new(false);
+        let asks = std::sync::atomic::AtomicUsize::new(0);
         let map = PointMap::new().with_point(OUTPUT, Direction::Out, ValueKind::Float);
         let mut peer = Peer::active(Executor::new(&gate, map, Vec::new()).unwrap(), Some(&gate))
             .with_field_probe(|| {
@@ -4449,6 +4571,7 @@ mod tests {
                 }
             })
             .with_field_startup_claim(|| {
+                asks.fetch_add(1, Ordering::Relaxed);
                 if field_up.load(Ordering::Relaxed) {
                     Ok(false)
                 } else {
@@ -4474,6 +4597,32 @@ mod tests {
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].claimant, 77);
         assert_eq!(observations[0].point, OUTPUT);
+
+        // The refused verdict latched for the shell — the same
+        // `FieldClaimFailed` the activation-time answer carries — and
+        // queued once for the journal at the scan's tick.
+        let refusals = peer.take_startup_refusals();
+        assert_eq!(refusals.len(), 1);
+        assert_eq!(refusals[0].tick, peer.tick());
+        let Some(SwitchError::FieldClaimFailed { detail }) = peer.startup_refusal() else {
+            panic!(
+                "the deferred refusal must latch: {:?}",
+                peer.startup_refusal()
+            );
+        };
+        assert_eq!(&refusals[0].error, peer.startup_refusal().unwrap());
+        assert!(detail.contains("live peer") && detail.contains("standby"));
+        assert_eq!(peer.take_startup_refusal(), Some(refusals[0].error.clone()));
+        assert_eq!(peer.take_startup_refusal(), None);
+        assert!(peer.take_startup_refusals().is_empty());
+
+        // The verdict ended the ask: later scans answer the field but
+        // never re-issue the conditional grant.
+        let asked = asks.load(Ordering::Relaxed);
+        peer.scan();
+        assert_eq!(asks.load(Ordering::Relaxed), asked);
+        assert_eq!(peer.role(), Role::Standby);
+        assert!(!gate.is_open());
     }
 
     /// A write the shared field fenced — its answer to a preempted

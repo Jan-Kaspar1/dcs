@@ -94,6 +94,6 @@ pub use executor::{
 pub use gate::WriteGate;
 pub use peer::{
     Activation, ApplyError, ClaimObservation, ClaimRearm, OrphanReport, Peer, PromotionRefusal,
-    RoleChange, SourceRestart, TrackReport, Transfer,
+    RoleChange, SourceRestart, StartupRefusal, TrackReport, Transfer,
 };
 pub use revision::CarryoverError;

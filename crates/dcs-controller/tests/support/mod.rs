@@ -54,6 +54,36 @@ impl Drop for Spawned {
     }
 }
 
+impl Spawned {
+    /// Waits up to `timeout` for the process to exit — `Some` with the
+    /// status when it settled, `None` while it still runs: the two
+    /// halves a contract's process disposition asserts ("the run ends"
+    /// vs "the run stays serving").
+    pub fn wait_exit(&mut self, timeout: std::time::Duration) -> Option<std::process::ExitStatus> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return Some(status);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Drains the process's stderr tail — every line the spawn's
+    /// announcement parse did not consume — at exit, so the caller can
+    /// assert the run's last words (a settled verdict's disposition
+    /// among them).
+    pub fn stderr_tail(&mut self) -> String {
+        use std::io::Read;
+        let mut tail = String::new();
+        self._stderr.read_to_string(&mut tail).unwrap();
+        tail
+    }
+}
+
 /// Kills `spawned` and reaps it — the mid-run process loss the restart
 /// and failover scripts drive.
 pub fn kill(spawned: &mut Spawned) {

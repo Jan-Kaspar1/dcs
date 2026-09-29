@@ -14,6 +14,11 @@
 //!   refusal settles the launch onto the declared pair's standby —
 //!   tracking the `--peer` it named — or exits the process where no
 //!   pair was declared.
+//! - `deferred-startup-claim-refusal-strands-unpaired-standby`: the
+//!   same refusal verdict landing mid-scan — a pending born-active's
+//!   re-issued ask answered at the first contact the thawed field
+//!   takes — settles under the identical contract rather than leaving
+//!   a peerless standby wedged where the boot-time verdict exits.
 //!
 //! The rig is the failover harness's shape: a `dcs-plant-server`
 //! process owns the shared `tank_loop` plant and the controllers load
@@ -34,8 +39,8 @@ use std::process::Command as Process;
 mod support;
 
 use support::{
-    CONTROLLER, SimTcp, controller_model, listening_on, spawn, spawn_controller, spawn_plant,
-    workspace_binary,
+    CONTROLLER, SimTcp, controller_model, kill, listening_on, spawn, spawn_controller,
+    spawn_controller_logged, spawn_controller_paced, spawn_plant, workspace_binary,
 };
 
 /// The shared plant's model — the dcs-plant tank loop: level raw (10)
@@ -67,6 +72,13 @@ fn scratch(test: &str) -> PathBuf {
     dir
 }
 
+/// Serializes a frozen field's `thaw` → `spawn_plant_at` instant: the
+/// freed port returns to the kernel's `bind(:0)` pool for that beat,
+/// and the parallel tests in this binary each chase ephemeral ports —
+/// without the lock one's pick could land on another's just-thawed
+/// address.
+static PLANT_PORT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// A port nothing listens on: bound to learn the address, dropped so
 /// the plant server can take it later — the unreachable-field endpoint
 /// the pending run retries toward.
@@ -75,6 +87,35 @@ fn unclaimed_addr() -> std::net::SocketAddr {
     let addr = held.local_addr().unwrap();
     drop(held);
     addr
+}
+
+/// A frozen field — the `docker pause` reproduction: a bound listener
+/// that never accepts, so the pending run's connects complete at the
+/// kernel while no request is ever answered. The address stays bound
+/// through the whole pending phase, so nothing — not even this test
+/// binary's own ephemeral binds — can claim the port between the
+/// pending launches and the plant's thaw, the race a drop-then-rebind
+/// pick would leave open.
+struct FrozenField(TcpListener);
+
+impl FrozenField {
+    fn bind() -> Self {
+        Self(TcpListener::bind("127.0.0.1:0").unwrap())
+    }
+
+    fn addr(&self) -> std::net::SocketAddr {
+        self.0.local_addr().unwrap()
+    }
+
+    /// The field's return: the listener drops — the queued links
+    /// reset — freeing the port for the caller's `spawn_plant_at` to
+    /// bind. The caller holds [`PLANT_PORT`] across the drop→bind
+    /// instant.
+    fn thaw(self) -> std::net::SocketAddr {
+        let addr = self.addr();
+        drop(self.0);
+        addr
+    }
 }
 
 /// A `dcs-plant-server` process bound at `addr` — the late-arriving
@@ -361,6 +402,307 @@ fn a_refused_startup_claim_undeclared_exits() {
         incumbent_client.advance(1).unwrap();
         assert_eq!(incumbent_client.role().unwrap().role, Role::Active);
     }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The deferred leg of the refused-startup-claim class — QA finding
+/// `deferred-startup-claim-refusal-strands-unpaired-standby`. Two
+/// born-actives launch pending on a field that cannot answer; when the
+/// field arrives, the first seat's deferred grant claims it and the
+/// second's meets the incumbent's refusal mid-scan rather than at
+/// activation. The recorded contract's disposition is identical either
+/// way: the pairless run exits nonzero naming the refusal and the
+/// rejoin remedy — and the deferred settle journals
+/// `startup_claim_refused`, not merely the observed claimant.
+#[test]
+fn a_deferred_startup_claim_refusal_exits_the_pairless_run() {
+    let dir = scratch("deferred-exit");
+    let field = FrozenField::bind();
+    let plant_addr = field.addr();
+    let model = controller_model(&dir, "pair.json", MODEL_SOURCE, plant_addr, SimTcp::Merged).0;
+    let journal_path = dir.join("deferred.jsonl");
+
+    // Both seats launch pending on the frozen field — connects that
+    // the kernel completes while no verdict ever answers, the
+    // conditional startup grant of each waiting on the first answered
+    // contact.
+    let mut winner = spawn_controller(
+        &model,
+        &["--owner-token".to_string(), INCUMBENT.to_string()],
+        DT,
+    );
+    let (mut loser, preamble) = spawn_controller_logged(
+        &model,
+        &[
+            "--owner-token".to_string(),
+            LAUNCHED.to_string(),
+            "--journal-file".to_string(),
+            journal_path.to_str().unwrap().to_string(),
+        ],
+        DT,
+    );
+    assert!(
+        preamble.iter().any(|line| line.contains("stands pending")),
+        "the pending launch must report itself: {preamble:?}"
+    );
+    let winner_client = MonitorClient::new(winner.addr);
+    let loser_client = MonitorClient::new(loser.addr);
+    for client in [&winner_client, &loser_client] {
+        let report = client.role().unwrap();
+        assert_eq!(report.role, Role::Standby);
+        assert_eq!(report.sync, Some(StandbySync::Unsynchronized));
+    }
+
+    // The field arrives: driven scans order the race — the first seat
+    // to re-ask takes the claim, the second's deferred grant meets the
+    // standing incumbent's refusal.
+    let _port = PLANT_PORT.lock().unwrap();
+    let _plant = spawn_plant_at(
+        Path::new(PLANT_MODEL),
+        Path::new(PLANT_DYNAMICS),
+        field.thaw(),
+    );
+    drop(_port);
+    // The remote kind's re-attach cadence bounds the first contact —
+    // the recorded one-attempt-per-interval cadence, not a grace.
+    std::thread::sleep(
+        dcs_sim_net::RemoteDriver::REATTACH_INTERVAL + std::time::Duration::from_millis(200),
+    );
+    winner_client.advance(2).unwrap();
+    let report = winner_client.role().unwrap();
+    assert_eq!(report.role, Role::Active);
+    assert_eq!(report.field_claim, Some(FieldClaim::Held));
+
+    // The loser's first answered contact: the scan settles the refusal
+    // — the request itself answers the named verdict — and the
+    // pairless run ends the launch the verdict refused rather than
+    // wedging a sourceless standby.
+    let error = loser_client.advance(1).unwrap_err().to_string();
+    assert!(
+        error.contains("a live peer holds the field's write-ownership claim"),
+        "the deferred refusal must answer the scan request: {error}"
+    );
+    let status = loser
+        .wait_exit(std::time::Duration::from_secs(10))
+        .expect("the deferred-refused pairless run must exit, not wedge standby");
+    assert!(!status.success(), "the refused run must exit nonzero");
+    let stderr = loser.stderr_tail();
+    assert!(
+        stderr.contains("a live peer holds the field's write-ownership claim"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("no --peer was declared, so there is no pair to rejoin"),
+        "{stderr}"
+    );
+
+    // The deferred refusal's own trace — the journaled verdict beside
+    // the observed-claimant record attributing it — flushed before the
+    // refused scan answered.
+    let journal = std::fs::read_to_string(&journal_path).unwrap();
+    assert!(
+        journal.contains("startup_claim_refused"),
+        "the deferred refusal must journal its own verdict: {journal}"
+    );
+    assert!(
+        journal.contains("field_claim_observed"),
+        "the incumbent's attribution journals beside it: {journal}"
+    );
+
+    // The winner's claim stands untouched through the refusal — a
+    // preempted claim would fence its next write — and once the winner
+    // is removed the field settles under a fresh born-active, the seat
+    // the defect would have wedged already gone.
+    let probe = RemoteDriver::connect(plant_addr).unwrap();
+    assert_eq!(probe.ensure_writer(INCUMBENT).unwrap(), ClaimGrant::Shared);
+    probe.release_writer().unwrap();
+    kill(&mut winner);
+    let successor = spawn_controller(
+        &model,
+        &["--owner-token".to_string(), (LAUNCHED + 10).to_string()],
+        DT,
+    );
+    let successor_client = MonitorClient::new(successor.addr);
+    successor_client.advance(2).unwrap();
+    let report = successor_client.role().unwrap();
+    assert_eq!(report.role, Role::Active);
+    assert_eq!(report.field_claim, Some(FieldClaim::Held));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The deferred refusal's declared-pair leg: the same mid-scan verdict
+/// on a launch that declared `--peer` keeps the run — the rejoin the
+/// contract prescribes instead of the exit. The refused seat journals
+/// the settled verdict, stands tracking its declared peer, and — the
+/// armed failover counting the dead incumbent's missed pulls — takes
+/// the field once the winner is removed: the wedge the finding
+/// recorded becomes an ordinary recovery.
+#[test]
+fn a_deferred_startup_claim_refusal_rejoins_the_declared_pair() {
+    let dir = scratch("deferred-rejoin");
+    let field = FrozenField::bind();
+    let plant_addr = field.addr();
+    let model = controller_model(&dir, "pair.json", MODEL_SOURCE, plant_addr, SimTcp::Merged).0;
+
+    let mut winner = spawn_controller(
+        &model,
+        &["--owner-token".to_string(), INCUMBENT.to_string()],
+        DT,
+    );
+    let mut loser = spawn_controller(
+        &model,
+        &[
+            "--owner-token".to_string(),
+            LAUNCHED.to_string(),
+            "--peer".to_string(),
+            winner.addr.to_string(),
+            "--auto-promote".to_string(),
+            "2".to_string(),
+        ],
+        DT,
+    );
+    let winner_client = MonitorClient::new(winner.addr);
+    let loser_client = MonitorClient::new(loser.addr);
+    assert_eq!(loser_client.role().unwrap().role, Role::Standby);
+
+    // The field arrives under the same ordering: the winner's deferred
+    // grant claims it, the loser's meets the refusal — but the pair was
+    // declared, so the run keeps the standby surface its pull ahead of
+    // the same scan already converged.
+    let _port = PLANT_PORT.lock().unwrap();
+    let _plant = spawn_plant_at(
+        Path::new(PLANT_MODEL),
+        Path::new(PLANT_DYNAMICS),
+        field.thaw(),
+    );
+    drop(_port);
+    std::thread::sleep(
+        dcs_sim_net::RemoteDriver::REATTACH_INTERVAL + std::time::Duration::from_millis(200),
+    );
+    winner_client.advance(2).unwrap();
+    assert_eq!(winner_client.role().unwrap().role, Role::Active);
+
+    loser_client.advance(1).unwrap();
+    let report = loser_client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert!(
+        matches!(
+            report.sync,
+            Some(StandbySync::Tracking { .. } | StandbySync::Reinitialized { .. })
+        ),
+        "the refused seat tracks its declared peer: {report:?}"
+    );
+    assert!(
+        loser
+            .wait_exit(std::time::Duration::from_millis(500))
+            .is_none(),
+        "a declared pair keeps the refused run"
+    );
+
+    // The deferred settle journals its own verdict beside the
+    // incumbent-attributing observation — the record the wedged seat
+    // never carried.
+    let journal = loser_client.journal(0).unwrap();
+    assert!(
+        journal
+            .iter()
+            .any(|entry| matches!(&entry.event, JournalEvent::StartupClaimRefused { .. })),
+        "the deferred refusal must journal its verdict: {journal:?}"
+    );
+    assert!(
+        journal.iter().any(|entry| matches!(
+            &entry.event,
+            JournalEvent::FieldClaimObserved { claimant, .. } if *claimant == INCUMBENT
+        )),
+        "the incumbent's refusal must attribute: {journal:?}"
+    );
+
+    // Remove the winner: the rejoined seat's failover budget counts the
+    // dead source's misses and the promotion it could never reach while
+    // pending lands — the deferred refusal's settle completing.
+    kill(&mut winner);
+    loser_client.advance(4).unwrap();
+    let report = loser_client.role().unwrap();
+    assert_eq!(report.role, Role::Active);
+    assert_eq!(report.field_claim, Some(FieldClaim::Held));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The deferred refusal's paced leg — the same frozen-field race on a
+/// wall-clock-paced seat, so the verdict settling inside a paced cycle
+/// ends the pairless run under the identical contract the driven
+/// request path follows. The incumbent claims the thawed field
+/// directly — a controller attachment the test owns — while the paced
+/// seat's scan cadence has already armed its re-attach gate on the
+/// just-freed port's refusals, so the race orders itself.
+#[test]
+fn a_deferred_startup_claim_refusal_exits_a_paced_pairless_run() {
+    let dir = scratch("deferred-exit-paced");
+    let field = FrozenField::bind();
+    let model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        field.addr(),
+        SimTcp::Merged,
+    )
+    .0;
+
+    // The paced seat launches pending on the frozen field: the boot
+    // ask produced no verdict — the wedged connect's request never
+    // answered — and the scan loop keeps the pending state quiet until
+    // the field answers again.
+    let mut loser = spawn_controller_paced(
+        &model,
+        &["--owner-token".to_string(), LAUNCHED.to_string()],
+        50,
+        "127.0.0.1:0",
+    );
+    let loser_client = MonitorClient::new(loser.addr);
+    let report = loser_client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert_eq!(report.sync, Some(StandbySync::Unsynchronized));
+
+    // The field returns: the frozen listener drops — the queued links
+    // reset — and a beat on the still-free port lets the paced loop's
+    // next re-attach meet the refusal and arm its one-per-interval
+    // gate before the plant binds, so the incumbent's claim lands
+    // first and the paced run's next answered contact meets a standing
+    // claim, never an open field.
+    let plant_addr = field.thaw();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let _port = PLANT_PORT.lock().unwrap();
+    let _plant = spawn_plant_at(
+        Path::new(PLANT_MODEL),
+        Path::new(PLANT_DYNAMICS),
+        plant_addr,
+    );
+    drop(_port);
+    let incumbent = RemoteDriver::connect(plant_addr).unwrap().as_controller();
+    assert_eq!(
+        incumbent.ensure_writer(INCUMBENT).unwrap(),
+        ClaimGrant::Exclusive
+    );
+
+    // The recorded contract's disposition, identically to the driven
+    // leg: the run exits nonzero naming the refusal and the missing
+    // pair — no wedged standby outliving the field's settleability.
+    let status = loser
+        .wait_exit(std::time::Duration::from_secs(15))
+        .expect("the deferred-refused paced run must exit, not wedge standby");
+    assert!(!status.success(), "the refused run must exit nonzero");
+    let stderr = loser.stderr_tail();
+    assert!(
+        stderr.contains("a live peer holds the field's write-ownership claim"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("no --peer was declared, so there is no pair to rejoin"),
+        "{stderr}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

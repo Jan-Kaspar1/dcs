@@ -277,6 +277,24 @@ pub enum JournalEvent {
         /// the field's arbitration answered the refusal with.
         claimant: u64,
     },
+    /// The pending born-active's deferred conditional grant met the
+    /// field's refusal — the verdict the boot-time ask would have
+    /// answered at activation, landing instead at the first answered
+    /// field contact of a run that launched pending on a silent
+    /// field. The born-active contract disposes of it identically
+    /// whichever way it arrived — rejoin the declared pair, exit
+    /// where none was declared — and this entry is the durable record
+    /// that the settle happened at all: the
+    /// [`FieldClaimObserved`](Self::FieldClaimObserved) beside it
+    /// attributes *who* refused, this one records that the launch's
+    /// pending state ended under a refusal verdict rather than
+    /// standing on forever. One entry per refused startup grant — the
+    /// ask never re-issues after a verdict — attributed to the scan
+    /// tick the answer landed on.
+    StartupClaimRefused {
+        /// The named refusal the grant met.
+        error: SwitchError,
+    },
     /// The orphan cycle's conditional ensure probe landed the field's
     /// write-ownership claim under this run's recorded token — the
     /// re-arm a demoted ex-owner whose ownership the field took

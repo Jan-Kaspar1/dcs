@@ -790,14 +790,16 @@ def yielded_claim_rearm_pass(args, tamper):
             if kind == "entry"
             and "run_boundary" not in record.get("event", {})
         ]
-        # The fenced start's own recorded evidence — the refused
-        # claim's observed incumbent and the active -> standby
-        # stand-down — is the launch's journaled verdict, not the
-        # field seizure the refusal exists to stop; only records
-        # past it mean the claim reached farther than it allows.
+        # The fenced start's own recorded evidence — the named
+        # refusal verdict, the observed incumbent's attribution, and
+        # the active -> standby stand-down — is the launch's
+        # journaled verdict, not the field seizure the refusal
+        # exists to stop; only records past it mean the claim
+        # reached farther than it allows.
         restartee_overreach = [
             record for record in restartee_entries
             if "field_claim_observed" not in record.get("event", {})
+            and "startup_claim_refused" not in record.get("event", {})
             and (record.get("event", {}).get("role_changed", {})
                  .get("to") != "standby")
         ]
