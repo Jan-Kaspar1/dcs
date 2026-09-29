@@ -580,6 +580,82 @@ class RelaunchActionTests(unittest.TestCase):
         launch = self._launch(calls, 'dcs-hw-qa-1-probe-a')
         self.assertIn('--peer', launch)
 
+    def test_relaunch_rebuilds_the_members_launch_spec(self):
+        # track=None is constructional: the relaunched argv is the
+        # shared builder's launch spec for the member, byte for byte —
+        # the guarantee that a flag added to the launch spec cannot
+        # silently drop from the restore half.
+        prefix = 'dcs-hw-' + self.record['run_id']
+        for name, container in (('active', prefix + '-a'),
+                                ('standby', prefix + '-b')):
+            calls, _ = self._relaunch(name=name)
+            launch = self._launch(calls, container)
+            index = launch.index('/model/plant.json')
+            self.assertEqual(
+                list(launch[index:]),
+                runner._controller_argv(self.cfg, 'deployed', name,
+                                        prefix), name)
+
+    def test_doctored_relaunch_is_the_spec_plus_its_delta(self):
+        # track=X relaunches the same spec modulo only the doctored
+        # flag: --peer <track> on the active, the --standby target on
+        # the standby.
+        prefix = 'dcs-hw-' + self.record['run_id']
+        track = 'dcs-peer-down.invalid:8080'
+        spec = runner._controller_argv(self.cfg, 'deployed',
+                                       'active', prefix)
+        calls, _ = self._relaunch(name='active', track=track)
+        launch = self._launch(calls, prefix + '-a')
+        index = launch.index('/model/plant.json')
+        at = spec.index('--scan-ms')
+        self.assertEqual(list(launch[index:]),
+                         spec[:at] + ['--peer', track] + spec[at:])
+        spec = runner._controller_argv(self.cfg, 'deployed',
+                                       'standby', prefix)
+        calls, _ = self._relaunch(name='standby', track=track)
+        launch = self._launch(calls, prefix + '-b')
+        index = launch.index('/model/plant.json')
+        expected = list(spec)
+        expected[spec.index('--standby') + 1] = track
+        self.assertEqual(list(launch[index:]), expected)
+
+    def test_spec_change_flows_to_launch_and_relaunch_alike(self):
+        # The structural regression this consolidation removes: a flag
+        # added to the launch spec reaches both the rig's initial
+        # launch and the relaunch's restore with no second edit.
+        real = runner._controller_argv
+
+        def extended(*args, **kwargs):
+            return real(*args, **kwargs) + ['--new-persistence-flag']
+
+        self.cfg['probe_pair'] = None
+        dynamics = self.src / self.cfg['dynamics_fixture']
+        dynamics.parent.mkdir(parents=True, exist_ok=True)
+        dynamics.write_text('{}')
+        calls = []
+
+        class FakeConn:
+            def close(self):
+                pass
+
+        with patch.object(runner, 'docker',
+                          lambda *a, **k: calls.append(a)
+                          or Result('')), \
+                patch.object(runner, '_controller_argv', extended), \
+                patch.object(runner.socket, 'create_connection',
+                             return_value=FakeConn()):
+            runner._start_rig(self.cfg, self.record, self.src,
+                              self.run_dir, lambda e, d=None: None)
+            runner.relaunch_controller(
+                self.cfg, self.record, self.run_dir, self.model,
+                'active', lambda e, d=None: None)
+        launches = [c for c in calls
+                    if c[:4] == ('run', '-d', '--name',
+                                 'dcs-hw-qa-1-a')]
+        self.assertEqual(len(launches), 2)
+        for launch in launches:
+            self.assertIn('--new-persistence-flag', launch)
+
 
 class PlantActionTests(unittest.TestCase):
     """The scenario-callable plant stop/start: the run's shared-plant

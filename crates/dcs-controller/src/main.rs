@@ -128,7 +128,13 @@
 //! would interleave duplicate `seq`s into an un-replayable record —
 //! exits nonzero naming the file and the conflict, while a dead
 //! holder's lock releases with its descriptor and a restart
-//! re-acquires it.
+//! re-acquires it. The three persistence paths are distinct files on
+//! pain of a usage error: the checkpoint's write-then-rename cannot
+//! share the append sinks' lock, so an aliased `--state-file` would
+//! orphan the append writer's descriptor on the renamed-away inode —
+//! the durable record landing nowhere the path reaches and the next
+//! startup's strict replay refusing the checkpoint document it finds
+//! instead.
 //!
 //! Redundancy, per the peer-transport and switchover-semantics
 //! decisions: every instance whose driver surface reaches the shared
@@ -916,7 +922,9 @@ controller scan.
                   the reason; a missing file is a cold start. With
                   --revised, a foreign-fingerprint file instead crosses
                   the model boundary under the carryover rule — the lone
-                  controller's scheduled-outage roll
+                  controller's scheduled-outage roll. PATH must be
+                  distinct from --journal-file and --history-file: the
+                  rename would orphan an append writer sharing it
   --journal-file PATH
                   persist the transition journal to PATH — one
                   line-delimited JSON record per journaled entry,
@@ -929,7 +937,18 @@ controller scan.
                   file is a cold start. The file is single-writer: a
                   second live process on the same PATH exits nonzero
                   naming the writer-lock conflict — never point two
-                  controllers at one journal file. Requires --listen
+                  controllers at one journal file. Requires --listen.
+                  PATH must be distinct from --state-file and
+                  --history-file
+  --history-file PATH
+                  persist the durable process history to PATH — the
+                  declared-record points' samples, run-boundary
+                  markers, and tick-domain seams as line-delimited JSON
+                  records appended through the same bounded-writer
+                  scheme the journal file takes — and replay it at
+                  startup into the served window GET /history/durable
+                  answers from. Requires --listen. PATH must be
+                  distinct from --state-file and --journal-file
   -h, --help      show this text
 
 With neither --ticks nor --scan-ms, a paced run at 100 ms is assumed.
@@ -1132,6 +1151,39 @@ impl Options {
                     .to_string(),
             );
         }
+        // The three persistence paths must be distinct files. The
+        // append sinks' single-writer contract runs on an exclusive
+        // advisory lock the checkpoint sink does not take: its save
+        // is write-then-rename, so an aliased path leaves the append
+        // writer's descriptor on the renamed-away inode — every
+        // durable record lands nowhere reachable while the visible
+        // file reads as checkpoint JSON the next startup's strict
+        // replay refuses (finding
+        // state-file-alias-clobbers-append-durable-files). The
+        // append-append alias already fails closed at the file lock;
+        // this refuses every pair at parse, before either sink opens.
+        let persistence = [
+            ("--state-file", state_file.as_deref()),
+            ("--journal-file", journal_file.as_deref()),
+            ("--history-file", history_file.as_deref()),
+        ];
+        for (index, (flag, path)) in persistence.iter().enumerate() {
+            let Some(path) = *path else { continue };
+            for (other_flag, other_path) in &persistence[index + 1..] {
+                let Some(other_path) = *other_path else {
+                    continue;
+                };
+                if same_persistence_path(path, other_path) {
+                    return Err(format!(
+                        "{flag} and {other_flag} both name {}: the persistence files \
+                         must be distinct paths — the checkpoint's write-then-rename \
+                         orphans an append writer's descriptor, diverting its durable \
+                         record onto an unreachable inode",
+                        path.display()
+                    ));
+                }
+            }
+        }
         Ok(Self {
             model,
             check,
@@ -1152,6 +1204,65 @@ impl Options {
             pair_token,
         })
     }
+}
+
+/// Whether two configured persistence paths name the same file —
+/// resolved through [`resolve_persistence_path`] so spellings that
+/// differ textually yet land on one file still compare equal.
+fn same_persistence_path(a: &Path, b: &Path) -> bool {
+    resolve_persistence_path(a) == resolve_persistence_path(b)
+}
+
+/// The identity the persistence-path distinctness check compares: the
+/// filesystem's canonical answer for the deepest prefix of `path`
+/// that resolves — catching spellings that differ textually yet name
+/// one file (`./x` beside `x`, a `..` detour, a path through a
+/// symlinked directory) — with the not-yet-existing tail reattached
+/// and its `.`/`..` components folded, so equal spellings still
+/// compare equal before a cold start creates the file.
+fn resolve_persistence_path(path: &Path) -> PathBuf {
+    // Canonicalize the deepest existing ancestor — an absolute path
+    // always bottoms out at the root — then reattach the missing
+    // tail. A relative path no ancestor of which resolves folds into
+    // the working directory textually.
+    let mut tail = Vec::new();
+    let mut cursor = path;
+    let mut resolved = loop {
+        if let Ok(resolved) = std::fs::canonicalize(cursor) {
+            break resolved;
+        }
+        match cursor.components().next_back() {
+            Some(std::path::Component::Normal(name)) => tail.push(name.to_os_string()),
+            Some(std::path::Component::ParentDir) => tail.push("..".into()),
+            _ => {
+                return fold_components(
+                    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
+                );
+            }
+        }
+        cursor = cursor.parent().unwrap_or_else(|| Path::new(""));
+    };
+    for component in tail.iter().rev() {
+        resolved.push(component);
+    }
+    fold_components(resolved)
+}
+
+/// `path` with `.` components dropped and each `..` collapsing the
+/// component before it — the textual half of the path identity the
+/// distinctness check compares.
+fn fold_components(path: PathBuf) -> PathBuf {
+    let mut folded = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                folded.pop();
+            }
+            component => folded.push(component),
+        }
+    }
+    folded
 }
 
 fn fail(message: impl std::fmt::Display) -> ExitCode {
@@ -2434,6 +2545,76 @@ mod tests {
             assert!(started.elapsed() < deadline, "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    /// Finding `state-file-alias-clobbers-append-durable-files`: the
+    /// three persistence paths must be distinct — an aliased
+    /// `--state-file` passed every validation, then the checkpoint's
+    /// write-then-rename orphaned the append writer's descriptor, the
+    /// durable record landing on an unreachable inode while the
+    /// restart's strict replay refused the checkpoint document it
+    /// found. `Options::parse` refuses every aliased pair naming both
+    /// flags, and catches spellings that differ textually yet name
+    /// one file.
+    #[test]
+    fn aliased_persistence_paths_fail_option_parsing() {
+        let dir = std::env::temp_dir().join(format!("dcs-options-alias-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shared = dir.join("shared");
+        let base = [
+            "model.json".to_string(),
+            "--scan-ms".to_string(),
+            "100".to_string(),
+            "--listen".to_string(),
+            "127.0.0.1:0".to_string(),
+        ];
+
+        for (first, second) in [
+            ("--state-file", "--journal-file"),
+            ("--state-file", "--history-file"),
+            ("--journal-file", "--history-file"),
+        ] {
+            let args = base.iter().cloned().chain([
+                first.to_string(),
+                shared.to_str().unwrap().to_string(),
+                second.to_string(),
+                shared.to_str().unwrap().to_string(),
+            ]);
+            let error = match Options::parse(args) {
+                Ok(_) => panic!("{first} aliased with {second} must fail parsing"),
+                Err(error) => error,
+            };
+            assert!(
+                error.contains(first) && error.contains(second) && error.contains("distinct paths"),
+                "{first} and {second}: {error}"
+            );
+        }
+
+        // A `..` detour spelling the same file is the same file —
+        // the check compares resolved paths, not flag strings.
+        let detour = dir.join("sub").join("..").join("shared");
+        let args = base.iter().cloned().chain([
+            "--state-file".to_string(),
+            detour.to_str().unwrap().to_string(),
+            "--history-file".to_string(),
+            shared.to_str().unwrap().to_string(),
+        ]);
+        match Options::parse(args) {
+            Ok(_) => panic!("a `..` detour to the same file must fail parsing"),
+            Err(error) => assert!(error.contains("distinct paths"), "{error}"),
+        }
+
+        // Distinct paths parse.
+        let args = base.iter().cloned().chain([
+            "--state-file".to_string(),
+            dir.join("state.json").to_str().unwrap().to_string(),
+            "--journal-file".to_string(),
+            dir.join("journal.jsonl").to_str().unwrap().to_string(),
+            "--history-file".to_string(),
+            dir.join("history.jsonl").to_str().unwrap().to_string(),
+        ]);
+        Options::parse(args).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

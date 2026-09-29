@@ -51,7 +51,7 @@ use dcs_runtime::{
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Retention bounds for a [`Monitor`](crate::Monitor)'s recorded and
 /// published streams, plus the journal's optional durable sink.
@@ -184,6 +184,111 @@ impl Default for MonitorConfig {
             state_drain_capacity: crate::state_file::DEFAULT_STATE_DRAIN_CAPACITY,
         }
     }
+}
+
+impl MonitorConfig {
+    /// Refuses a config naming one file for two of the three
+    /// persistence sinks — the same refusal the controller's option
+    /// parse applies to its flags, held at the bind so a
+    /// programmatically assembled `MonitorConfig` cannot build the
+    /// misconfiguration either. The append sinks' single-writer
+    /// advisory lock cannot cover the state sink: its checkpoint
+    /// lands by write-then-rename, so an aliased path detaches the
+    /// append writer's descriptor from the path — the durable record
+    /// landing on an orphaned inode while the visible file reads as
+    /// checkpoint JSON the next startup's strict replay refuses
+    /// (finding state-file-alias-clobbers-append-durable-files). The
+    /// journal/history alias already fails closed at the file lock
+    /// when the second sink opens; naming every pair here fails the
+    /// bind before any sink opens.
+    pub(crate) fn check_persistence_paths(&self) -> io::Result<()> {
+        let configured = [
+            ("state_file", self.state_file.as_deref()),
+            ("journal_file", self.journal_file.as_deref()),
+            ("history_file", self.history_file.as_deref()),
+        ];
+        for (index, (field, path)) in configured.iter().enumerate() {
+            let Some(path) = *path else { continue };
+            for (other_field, other_path) in &configured[index + 1..] {
+                let Some(other_path) = *other_path else {
+                    continue;
+                };
+                if same_persistence_file(path, other_path) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "monitor persistence paths must be distinct files: \
+                             {field} and {other_field} both name {} — the \
+                             checkpoint's write-then-rename orphans an append \
+                             writer's descriptor, diverting its durable record \
+                             onto an unreachable inode",
+                            path.display()
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether two configured persistence paths name the same file —
+/// resolved through [`resolve_persistence_file`] so spellings that
+/// differ textually yet land on one file still compare equal.
+fn same_persistence_file(a: &Path, b: &Path) -> bool {
+    resolve_persistence_file(a) == resolve_persistence_file(b)
+}
+
+/// The identity the persistence-path distinctness check compares: the
+/// filesystem's canonical answer for the deepest prefix of `path`
+/// that resolves — catching spellings that differ textually yet name
+/// one file (`./x` beside `x`, a `..` detour, a path through a
+/// symlinked directory) — with the not-yet-existing tail reattached
+/// and its `.`/`..` components folded, so equal spellings still
+/// compare equal before a cold start creates the file.
+fn resolve_persistence_file(path: &Path) -> PathBuf {
+    // Canonicalize the deepest existing ancestor — an absolute path
+    // always bottoms out at the root — then reattach the missing
+    // tail. A relative path no ancestor of which resolves folds into
+    // the working directory textually.
+    let mut tail = Vec::new();
+    let mut cursor = path;
+    let mut resolved = loop {
+        if let Ok(resolved) = std::fs::canonicalize(cursor) {
+            break resolved;
+        }
+        match cursor.components().next_back() {
+            Some(std::path::Component::Normal(name)) => tail.push(name.to_os_string()),
+            Some(std::path::Component::ParentDir) => tail.push("..".into()),
+            _ => {
+                return fold_components(
+                    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
+                );
+            }
+        }
+        cursor = cursor.parent().unwrap_or_else(|| Path::new(""));
+    };
+    for component in tail.iter().rev() {
+        resolved.push(component);
+    }
+    fold_components(resolved)
+}
+
+/// `path` with `.` components dropped and each `..` collapsing the
+/// component before it — the textual half of the path identity the
+/// distinctness check compares.
+fn fold_components(path: PathBuf) -> PathBuf {
+    let mut folded = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                folded.pop();
+            }
+            component => folded.push(component),
+        }
+    }
+    folded
 }
 
 /// Records bounded per-point history and the transition journal, one scan
