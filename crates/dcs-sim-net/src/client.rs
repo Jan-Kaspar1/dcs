@@ -327,10 +327,14 @@ fn exchange(
 /// rather than killing the driver for good, and a plant that returns is
 /// served by the same `RemoteDriver` — the link-loss contract that lets
 /// a field-owning controller ride a plant restart out instead of dying
-/// with the link. Re-attach attempts are bounded to one per
-/// [`REATTACH_INTERVAL`](Self::REATTACH_INTERVAL), so a dead endpoint
-/// costs each access burst one refused connect rather than one
-/// connect-timeout per point. A timed-out response could arrive after
+/// with the link. Contact attempts are bounded to one per
+/// [`REATTACH_INTERVAL`](Self::REATTACH_INTERVAL): a dead endpoint costs
+/// each access burst one refused connect rather than one
+/// connect-timeout per point, and an endpoint that completes the
+/// handshake but never answers — a frozen or blackholed peer — costs
+/// one timed-out exchange per interval rather than one per request, so
+/// a scan's burst of accesses stalls once near the request timeout
+/// instead of once per point. A timed-out response could arrive after
 /// the fact and pair with a later request, so the driver never reuses a
 /// suspect link.
 ///
@@ -990,10 +994,15 @@ impl RemoteDriver {
     /// connection: the response stream's position is unknown afterward,
     /// and a later read could pick up a stale answer. A dead link reports
     /// `Disconnected` until the next
-    /// [`REATTACH_INTERVAL`](Self::REATTACH_INTERVAL) window opens. A
-    /// completed exchange clears the recorded failure — the health
-    /// surface reports the standing failure while it stands and nothing
-    /// once it clears.
+    /// [`REATTACH_INTERVAL`](Self::REATTACH_INTERVAL) window opens — and
+    /// a failed exchange counts as the window's attempt, so a peer that
+    /// completes the handshake but never answers costs one timed-out
+    /// exchange per interval rather than one per request: a scan's probe
+    /// and point reads against the frozen endpoint pay a single timeout
+    /// between them, keeping every lock-taking caller's wait bounded
+    /// near it. A completed exchange clears the recorded failure — the
+    /// health surface reports the standing failure while it stands and
+    /// nothing once it clears.
     fn request(&self, request: &PlantRequest) -> Result<PlantResponse, RemoteError> {
         let mut connection = self.connection.lock().unwrap();
         if connection.stream.is_none() {
@@ -1040,6 +1049,12 @@ impl RemoteDriver {
             Err(error) => {
                 connection.stream = None;
                 connection.last_error = Some(error.to_string());
+                // The failed exchange is this interval's re-attach
+                // attempt — an endpoint that completes the handshake
+                // but never answers otherwise charges every request the
+                // full timeout, and a scan's burst of probes and point
+                // reads would serialize into one stall per point.
+                connection.retry_at = Instant::now() + RemoteDriver::REATTACH_INTERVAL;
                 Err(error)
             }
         }
