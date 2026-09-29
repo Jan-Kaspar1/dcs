@@ -355,10 +355,15 @@ fn worktree_delta() -> (Vec<String>, Vec<String>) {
 fn seed_release_commit(remote: &Path, head: &str) -> String {
     let index = remote.join("seed-index");
     let plumbing = |args: &[&str]| -> String {
+        // The stand-in is bare, but update-index's file forms —
+        // --force-remove for the delta's deleted paths — insist on a
+        // work tree; the checkout's tree is the one the delta was
+        // measured against, so the plumbing names it.
         let output = Command::new("git")
             .args(args)
             .current_dir(remote)
             .env("GIT_INDEX_FILE", &index)
+            .env("GIT_WORK_TREE", root())
             .env("GIT_AUTHOR_NAME", "reference-plant-proof")
             .env("GIT_AUTHOR_EMAIL", "proof@example.invalid")
             .env("GIT_AUTHOR_DATE", "@0 +0000")

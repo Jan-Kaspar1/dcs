@@ -83,6 +83,18 @@ def _check_constraints(modules, order, case):
                     '%s declares RUNS_LAST' % name)
 
 
+def _position_collisions(stems):
+    """Schedule positions claimed by more than one leg module —
+    {NNNN prefix: [stems]} for each duplicated run position."""
+    claimed = {}
+    for stem in stems:
+        number, _, _ = stem.partition('_')
+        claimed.setdefault(number, []).append(stem)
+    return {number: sorted(occupants)
+            for number, occupants in claimed.items()
+            if len(occupants) > 1}
+
+
 def _iter_cases(suite):
     for item in suite:
         if isinstance(item, unittest.TestSuite):
@@ -158,6 +170,39 @@ class OrderingConstraintTests(unittest.TestCase):
         index = names.index('scenario_demote_carry_settle') + 1
         self.assertEqual(names[index], 'scenario_synthetic_leg')
         _check_constraints(modules, names, self)
+
+
+class LegPositionTests(unittest.TestCase):
+    """The numeric half of the split-schedule contract: the NNNN_
+    filename prefix is the run position, so two legs sharing one
+    number co-schedule on filename order alone — a silent convention
+    violation the merge path cannot see. These checks fail the
+    structure suite on any duplicated position."""
+
+    def test_every_leg_occupies_a_unique_numbered_position(self):
+        collisions = _position_collisions(scenarios._leg_stems())
+        self.assertFalse(
+            collisions,
+            'leg modules share a schedule position: %s' % collisions)
+
+    def test_a_duplicated_leg_position_is_detected(self):
+        # A second leg filed on an occupied NNNN_ position — the
+        # shape parallel leg merges produce — must surface as a
+        # collision here rather than silently co-scheduling.
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, '1900_synthetic_leg.py').write_text(
+                'def scenario_synthetic_leg(ctx):\n'
+                '    return None\n')
+            scenarios.__path__.append(tmp)
+            try:
+                collisions = _position_collisions(
+                    scenarios._leg_stems())
+            finally:
+                scenarios.__path__.remove(tmp)
+        self.assertEqual(
+            collisions,
+            {'1900': ['1900_demote_carry_settle',
+                      '1900_synthetic_leg']})
 
 
 class TestModuleDiscoveryTests(unittest.TestCase):
