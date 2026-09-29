@@ -254,10 +254,10 @@ fn recorded_release_schema_matches_the_emitted_output() {
     // recorded sha256 pins the tagged emission, which the tracked file
     // has legitimately moved past since the cut — `v0.2.0`'s with the
     // `requires_reason` io_point field (#908). `v0.3.0`'s, `v0.4.0`'s,
-    // `v0.5.0`'s, and `v0.6.0`'s tags are pending, so their artifacts
-    // and published sha256s track the current emission — identical
-    // across the four records, the emission having moved once with
-    // #907's `record` io_point field.
+    // `v0.5.0`'s, `v0.6.0`'s, and `v0.7.0`'s tags are pending, so their
+    // artifacts and published sha256s track the current emission —
+    // identical across the five records, the emission having moved once
+    // with #907's `record` io_point field.
     let output = run_schema_subcommand();
     assert!(
         output.status.success(),
@@ -284,6 +284,10 @@ fn recorded_release_schema_matches_the_emitted_output() {
         ),
         (
             "docs/releases/v0.6.0/plant-model.schema.json",
+            Some("04c5a0c8fb1bff547f5d5f289936a945e6883970fed6fa7c63b2f291420133c5"),
+        ),
+        (
+            "docs/releases/v0.7.0/plant-model.schema.json",
             Some("04c5a0c8fb1bff547f5d5f289936a945e6883970fed6fa7c63b2f291420133c5"),
         ),
     ] {
