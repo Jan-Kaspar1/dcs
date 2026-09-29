@@ -19,7 +19,7 @@ use dcs_sim_net::{ClaimGrant, PlantError, PlantResponse, PlantServer, RemoteDriv
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn binding(point: u64, direction: Direction, initial: Value) -> PointBinding {
     PointBinding {
@@ -680,7 +680,7 @@ fn a_recovered_link_clears_the_standing_failure_from_diagnostics() {
 }
 
 #[test]
-fn an_unresponsive_peer_surfaces_timeout_on_every_access() {
+fn an_unresponsive_peer_pays_one_timeout_per_reattach_window() {
     // A listener that never answers: the handshake completes out of the
     // backlog but no response ever arrives.
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -689,13 +689,30 @@ fn an_unresponsive_peer_surfaces_timeout_on_every_access() {
 
     assert_eq!(remote.read(PointId(1)), Err(IoError::Timeout(PointId(1))));
     // A late answer could pair with a later request, so the link is
-    // dropped — but the peer is still listening, so the lazy re-attach
-    // lands a fresh stream and the next access waits out its own
-    // timeout rather than failing fast.
+    // dropped — and the timed-out exchange counts as the interval's
+    // contact attempt: a burst of accesses against a peer that
+    // handshakes but never answers pays one timeout per
+    // REATTACH_INTERVAL window rather than one per request — the bound
+    // that keeps a scan's probe-plus-reads burst to a single stall
+    // instead of serializing into one per point.
+    let started = Instant::now();
+    assert_eq!(
+        remote.read(PointId(1)),
+        Err(IoError::Disconnected(PointId(1)))
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "an access inside the re-attach window must fail fast, not wait out another timeout"
+    );
+
+    // The window past, the next access retries the contact — a
+    // still-silent peer answers it with the same timeout again.
+    std::thread::sleep(RemoteDriver::REATTACH_INTERVAL + Duration::from_millis(200));
     assert_eq!(remote.read(PointId(1)), Err(IoError::Timeout(PointId(1))));
     drop(listener);
-    // With the listener gone the re-attach itself is refused — the
-    // endpoint now reports not-answerable at connect time.
+    // With the listener gone the next window's re-attach is refused at
+    // connect time — the endpoint reports not-answerable at the socket.
+    std::thread::sleep(RemoteDriver::REATTACH_INTERVAL + Duration::from_millis(200));
     assert_eq!(
         remote.read(PointId(1)),
         Err(IoError::Disconnected(PointId(1)))

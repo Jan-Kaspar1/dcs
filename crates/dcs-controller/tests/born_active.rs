@@ -934,3 +934,107 @@ fn a_deferred_startup_claim_refusal_on_a_paused_claimed_field_exits() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// QA finding `pending-born-active-frozen-field-endpoint-starvation` —
+/// the pending born-active's scans must stay bounded near one field
+/// timeout. On the defect build a failed exchange never armed the
+/// remote driver's re-attach window, so a field that completes the
+/// handshake but never answers — the reproduction's `docker pause`,
+/// here the [`FrozenField`] listener that accepts nothing — charged
+/// every request its own full timeout: the per-scan claim probe plus
+/// the quiesced scan's per-point reads serialized ~14 stalls into one
+/// ~72s scan under the monitor's executor lock, and every lock-taking
+/// endpoint — `GET /checkpoint`, `POST /promote` — starved with it.
+/// The pending contract still owes the served surface: standby,
+/// unsynchronized, commands refused `not_active`, promote refused
+/// `not_converged` — each inside a bound near the request timeout, and
+/// the paced cadence held to a floor rather than collapsed ~700x.
+#[test]
+fn a_pending_born_active_on_a_frozen_field_keeps_serving_bounded_scans() {
+    let dir = scratch("pending-frozen-bounded");
+    let field = FrozenField::bind();
+    let model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        field.addr(),
+        SimTcp::Merged,
+    )
+    .0;
+
+    // The reproduction's launch shape: a wall-clock-paced run serving
+    // the monitor, attached to the never-answering field.
+    let launched = spawn_controller_paced(
+        &model,
+        &[
+            "--remote".to_string(),
+            field.addr().to_string(),
+            "--owner-token".to_string(),
+            LAUNCHED.to_string(),
+        ],
+        100,
+        "127.0.0.1:0",
+    );
+
+    // The bound every lock-taking request must answer inside: near one
+    // field timeout, never the defect's ~72s — a client carrying it
+    // turns a wedged scan into a request failure the assertions read.
+    let bound = RemoteDriver::DEFAULT_TIMEOUT + Duration::from_secs(4);
+    let client = MonitorClient::with_timeout(launched.addr, bound);
+
+    // The pending surface itself: standby, unsynchronized, the claim
+    // unobserved while no probe has answered, commands refused.
+    let report = client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert_eq!(report.sync, Some(StandbySync::Unsynchronized));
+    assert_eq!(report.field_claim, None);
+    assert_command_refused(&client);
+
+    // The finding's starved reads, polled across more than one
+    // re-attach window: every answer lands inside the bound — the
+    // defect held them 11s to 72s, past this client's patience.
+    for _ in 0..3 {
+        client
+            .checkpoint()
+            .expect("GET /checkpoint starved behind a wedged scan");
+    }
+
+    // The pending run's promote refusal is the contract's
+    // `not_converged` verdict — served, not stalled.
+    let error = client
+        .promote()
+        .expect_err("the pending run has nothing to promote from")
+        .to_string();
+    assert!(
+        error.contains("not_converged"),
+        "the pending promote must answer the named refusal: {error}"
+    );
+
+    // The paced cadence held to its floor: `GET /role` reads the
+    // published mirror — lock-free, so the observation never queues
+    // behind the lock — and the tick keeps advancing between the
+    // bounded field stalls, where the defect ran ~1 tick per ~70s on a
+    // 100ms schedule.
+    let first = client.role().unwrap().tick;
+    std::thread::sleep(
+        RemoteDriver::DEFAULT_TIMEOUT + RemoteDriver::REATTACH_INTERVAL + Duration::from_secs(2),
+    );
+    let advanced = client.role().unwrap().tick.0 - first.0;
+    assert!(
+        advanced >= 4,
+        "the pending run's scans must keep cadence through the frozen \
+         field — {advanced} ticks inside the observation window"
+    );
+
+    // And the liveness probe reports the freshness honestly: the scan
+    // age stays bounded near one field timeout — not the defect's
+    // tens of seconds.
+    let health = client.health().unwrap();
+    assert!(
+        health.last_scan_age_ms.unwrap_or(u64::MAX)
+            < (RemoteDriver::DEFAULT_TIMEOUT + Duration::from_secs(3)).as_millis() as u64,
+        "last_scan_age_ms must stay near one field timeout: {health:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
