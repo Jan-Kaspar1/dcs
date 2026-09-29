@@ -165,14 +165,16 @@ YAML is equivalent data):
       "name": "ctrl-a",
       "listen": "0.0.0.0:8080",
       "state_file": "/var/tmp/state.json",
-      "journal_file": "/var/tmp/journal.jsonl"
+      "journal_file": "/var/tmp/journal.jsonl",
+      "history_file": "/var/tmp/history.jsonl"
     },
     {
       "name": "ctrl-b",
       "listen": "0.0.0.0:8081",
       "standby": "ctrl-a:8080",
       "state_file": "/var/tmp/state.json",
-      "journal_file": "/var/tmp/journal.jsonl"
+      "journal_file": "/var/tmp/journal.jsonl",
+      "history_file": "/var/tmp/history.jsonl"
     }
   ]
 }
@@ -193,17 +195,30 @@ dynamics document the deployment's `dynamics.path` serves. When the
 field is recorded, the consumer's check holds the served document —
 the pair launched on the declared path — and the checked-in artifact
 equal to it; a manifest omitting the field declares no dynamics pin.
-A controller entry's `state_file` and
-`journal_file` are **optional** per-controller container paths
-carried to the invocation's `--state-file` and `--journal-file`
-flags: `state_file` is decision 35's restart-recovery checkpoint — a
-container restart resumes in place at the last persisted scan — and
-`journal_file` is decision 36's durable journal, the attributed
-operator-action record that survives the process lifetime. Each
+A controller entry's `state_file`,
+`journal_file`, and `history_file` are **optional** per-controller
+container paths carried to the invocation's `--state-file`,
+`--journal-file`, and `--history-file` flags: `state_file` is
+decision 35's restart-recovery checkpoint — a container restart
+resumes in place at the last persisted scan — `journal_file` is
+decision 36's durable journal, the attributed operator-action record
+that survives the process lifetime, and `history_file` is decision
+102's durable process-history store — the declared-duty samples'
+append-only file, replayed at bind into the bounded served window
+behind its run-boundary marks. `history_file` is additive-optional:
+a manifest written before it exists declares no durable-history mount
+and validates unchanged. Each
 declared path must live on writable deployment storage — a named
 volume in the checked-in rig definition — while the model and
 dynamics mounts stay read-only; a consumer without durable storage
-omits both fields, and the flags are then absent. What the shape
+omits the fields, and the flags are then absent. The deploy stage's
+rig check holds each declared field to its mount and flag: a
+declared path the rig definition never mounts or mounts read-only,
+a flag the invocation drops or diverges on, and a flag or writable
+mount the manifest does not declare each report `rig-mismatch`
+identically across the three fields — a declared-but-unmounted
+history path is undeployable the same way a state or journal path
+is. What the shape
 deliberately never records is the pair's `--pair-token`: the shared
 tracking secret the keyed announced-source contract runs on is a
 deployment secret, carried on the invocation alone — the reference
@@ -636,6 +651,6 @@ The checks' failures are named diagnostics:
 | `durable-history-nondeterministic` | Two passes of the durable process-history leg produced different digests. Reported by the reference plant's `ci/check.sh`. |
 | `rig-invalid` | The consumer's checked-in rig definition does not parse — `docker compose config` or the fallback YAML parser rejected it. Reported by the reference plant's `ci/check.sh`. |
 | `rig-unverifiable` | The rig-definition consistency check could not run: neither `docker compose` nor PyYAML is available to parse the definition. Reported by the reference plant's `ci/check.sh`. |
-| `rig-mismatch` | The consumer's checked-in rig definition diverges from its deployment manifest — images, mounted model or dynamics paths, the propagated model fingerprint, listen addresses, the controller pair's standby wiring, the standby's declared `failover_budget` against its `--auto-promote` flag (a declared budget with no flag, a flag with no declaration, a diverging value, or the field placed on the duty entry), the declared persistence paths' mounts and flags, or the optional `topology` section's named pairs (a member the manifest does not declare, a member two pairs share, or a declared pair whose standby wiring does not close inside it) disagree with what the manifest declares. Reported by the reference plant's `ci/check.sh`. |
+| `rig-mismatch` | The consumer's checked-in rig definition diverges from its deployment manifest — images, mounted model or dynamics paths, the propagated model fingerprint, listen addresses, the controller pair's standby wiring, the standby's declared `failover_budget` against its `--auto-promote` flag (a declared budget with no flag, a flag with no declaration, a diverging value, or the field placed on the duty entry), the declared persistence paths' (`state_file`/`journal_file`/`history_file`) mounts and flags — a declared path left unmounted or read-only, an invocation flag dropped or diverged, a flag or writable mount the manifest does not declare, or the optional `topology` section's named pairs (a member the manifest does not declare, a member two pairs share, or a declared pair whose standby wiring does not close inside it) disagree with what the manifest declares. Reported by the reference plant's `ci/check.sh`. |
 | `pair-legs-invalid` | The pair stage's leg driver could not register the legs directory: a `ci/legs/*.py` file carried no `LEG` literal, a `LEG` record did not parse or lacked a required field (`order`, `title`, `passes`, or a malformed `failed`/`tools`/`tampers` entry), two legs declared the same `order`, or the directory held no leg files. The diagnostic names the offending file; a leg is never silently dropped. Reported by the reference plant's `ci/check.sh`. |
 | `<leg>-unchecked` | The paired self-check diagnostic every checked leg carries: `ci/check.sh` plants a negative case for each leg — a doctored input or tampered expectation the leg must refuse with its named diagnostic — and reports `<leg>-unchecked`, formed on the leg stem its failure (`<leg>-failed` or, for the divergence leg, `<leg>-missed`) and `<leg>-nondeterministic` diagnostics share, when the planted case passes or the leg answers a name other than its declared one (e.g. a drifted record artifact passing the interface-schema non-drift leg reports `schema-drift-unchecked`, not `schema-drift`). It is distinct from `<leg>-failed`: the failed diagnostic is the leg's contract check failing on a real divergence; the unchecked diagnostic is the leg's own negative self-test failing — the leg can no longer be trusted to catch what it names. Reported by the reference plant's `ci/check.sh`; the emitted set grows with each leg that plants a negative case — currently `schema-drift-unchecked`, `diff-mismatch-unchecked`, `alarm-validation-unchecked`, `fingerprint-unchecked`, `dynamics-fingerprint-unchecked`, `rig-mismatch-unchecked`, `restart-resume-unchecked`, `schema-mismatch-unchecked`, `pair-unchecked`, `negotiation-unchecked`, `startup-claim-unchecked`, `refusal-unchecked`, `handover-unchecked`, `takeover-unchecked`, `force-carryover-unchecked`, `tune-carryover-unchecked`, `force-release-unchecked`, `stale-checkpoint-unchecked`, `burst-order-unchecked`, `peer-announce-unchecked`, `availability-unchecked`, `failover-unchecked`, `attribution-unchecked`, `divergence-unchecked`, `standby-restart-unchecked`, `report-unchecked`, `command-switch-unchecked`, `demote-pending-unchecked`, `managed-lifecycle-unchecked`, `carry-unchecked`, `staging-unchecked`, `oos-unchecked`, `power-trip-unchecked`, `monitor-starvation-unchecked`, `event-parity-unchecked`, `commissioning-unchecked`, `journal-boundary-unchecked`, `command-admission-unchecked`, `shelving-reason-unchecked`, `ack-edge-lifecycle-unchecked`, `invoke-args-unchecked`, `history-run-unchecked`, `rolling-upgrade-unchecked`, `nonfinite-refusal-unchecked`, `driver-recovery-unchecked`, `command-overflow-order-unchecked`, `state-file-sink-isolation-unchecked`, `bare-point-restamp-unchecked`, `suspended-alias-audit-unchecked`, `claim-reclaim-unchecked`, `claim-observed-unchecked`, `failover-proof-unchecked`, `journal-sink-isolation-unchecked`, `stranded-rejoin-unchecked`, `orchestrated-restart-unchecked`, `resume-settle-once-unchecked`, `bounded-liveness-unchecked`, `standby-dns-resume-unchecked`, `command-abort-verdict-unchecked`, `dynamics-admission-unchecked`, `repromote-suspended-settle-unchecked`, `yielded-claim-rearm-unchecked`, `claim-monitor-rendezvous-unchecked`, `tracking-source-fallback-unchecked`, `pair-overview-unchecked`, `orphan-retarget-journal-unchecked`, `failover-refusal-journal-unchecked`, `failover-refuse-retry-unchecked`, `track-source-rediscovery-unchecked`, `scan-batch-bound-unchecked`, `quiesced-standby-settle-unchecked`, `tracker-realign-tick-order-unchecked`, `foreign-claim-release-unchecked`, `dead-active-unconverged-unchecked`, `durable-history-unchecked` — and this convention entry declares each new name without a per-leg row. |

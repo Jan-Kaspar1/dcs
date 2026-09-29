@@ -14,10 +14,11 @@ journal carries the run-boundary marker; the journal-boundary leg
 (`ci/legs/journal_boundary.py`) proves journal eviction reads as a
 served numbering gap. This leg pins the process-history half of the
 same contract on the deployed pair through `GET /history/durable`:
-each controller launches with the store's `--history-file` beside its
-declared `--state-file`/`--journal-file` mounts — all runner-owned
-scratch paths — so the pair the leg drives is the manifest-declared
-one, the store file the leg's own mount. The emitted model declares
+each controller launches with the store's declared `--history-file`
+beside its `--state-file`/`--journal-file` mounts — the manifest's
+own persistence declarations instantiated at runner-owned scratch
+paths — so the pair the leg drives is the manifest-declared one,
+the store file included. The emitted model declares
 no `record` duty, so the leg seeds the tracking peer's file with a
 first lifetime's recorded datasets — the file's documented line
 format, written at the leg's own seam — making the launched lifetime
@@ -30,7 +31,8 @@ resume. The run:
   the launched lifetime's `run_boundary` mark — and audits the field
   owner's own store, a single-lifetime file serving nothing yet;
 - stops the tracking standby and relaunches it onto its declared
-  `--state-file`/`--journal-file` mounts — the manifest's own wiring —
+  `--state-file`/`--journal-file`/`--history-file` mounts — the
+  manifest's own wiring —
   while the field owner keeps scanning through the downtime window;
   the relaunch must report the resume at the persisted tick, and the
   served durable stream must answer the recorded datasets verbatim
@@ -216,12 +218,13 @@ def pad_history(path, first_seq, count, point):
 
 def spawn_peer(binary, args, rig, files, standby=None):
     """Spawn one `dcs-controller --driven --remote` peer of the
-    manifest-declared pair — `pair.spawn_peer`'s shape plus the
-    durable store's `--history-file` mount beside the declared
-    `--state-file`/`--journal-file` paths under the rig's runner-owned
-    scratch. Returns `(process, monitor_url, preamble)`: `monitor_url`
-    is None when the process exits before reporting a listener, the
-    preamble then carrying the startup refusal's stderr lines."""
+    manifest-declared pair — `pair.spawn_peer`'s shape over the
+    manifest's declared persistence fields, the durable store's
+    `--history-file` included, instantiated under the rig's
+    runner-owned scratch. Returns `(process, monitor_url, preamble)`:
+    `monitor_url` is None when the process exits before reporting a
+    listener, the preamble then carrying the startup refusal's stderr
+    lines."""
     argv = [
         binary,
         args.model,
@@ -403,10 +406,10 @@ def stop_and_checkpoint(rig, failures):
 
 def relaunch(rig, args, failures, persisted):
     """Relaunch the stopped tracking peer on the manifest's wiring —
-    its declared persistence files and the leg's history-file mount —
-    asserting the preamble reports the resume at the persisted tick
-    and the resumed peer rejoins in standby, never claiming the
-    field. Returns the startup preamble."""
+    its declared persistence files, the durable-history mount
+    included — asserting the preamble reports the resume at the
+    persisted tick and the resumed peer rejoins in standby, never
+    claiming the field. Returns the startup preamble."""
     process, url, preamble = spawn_peer(
         args.controller,
         args,
@@ -495,22 +498,23 @@ def durable_history_pass(args, tamper):
     rig = pair.PairRig(declared)
     try:
         point = declared_point(args.model, failures)
-        for name, files in (
-            (rig.duty_decl["name"], rig.duty_files),
-            (rig.standby_decl["name"], rig.standby_files),
-        ):
-            files["history_file"] = os.path.join(
-                rig.scratch, name, "history.jsonl"
-            )
         state_file = rig.standby_files.get("state_file")
         journal_file = rig.standby_files.get("journal_file")
-        if state_file is None or journal_file is None:
+        history_file = rig.standby_files.get("history_file")
+        if (
+            state_file is None
+            or journal_file is None
+            or history_file is None
+            or rig.duty_files.get("history_file") is None
+        ):
             raise Abort(
-                "the manifest's standby declares no "
-                "state_file/journal_file — the durable-history leg "
-                "has nothing to exercise"
+                "the manifest's declared pair omits a "
+                "state_file/journal_file/history_file — the "
+                "durable-history leg exercises the manifest's own "
+                "persistence declarations and has nothing to "
+                "exercise"
             )
-        seed_history(rig.standby_files["history_file"], point)
+        seed_history(history_file, point)
 
         rig.plant, rig.plant_addr = pair.spawn_plant(
             args.plant_server, args.model, args.dynamics

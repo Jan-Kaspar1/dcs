@@ -612,10 +612,27 @@ def rolling_upgrade_pass(args, tamper):
         # the pinned release's `dcs-plant-server`. A predecessor
         # member that cannot run the deployment at all cannot
         # interoperate as a pair — inconclusive, never a launch
-        # failure of the pinned release.
+        # failure of the pinned release. The predecessor release
+        # predates the manifest's optional `history_file` field — the
+        # upgrade-from deployment's manifest never declared it and its
+        # controller takes no `--history-file` — so the predecessor
+        # pair launches on declarations stripped of the field, and each
+        # peer's pinned relaunch picks the declared mount up: the
+        # additive-optional field arriving exactly with the repin.
+        predecessor = (
+            _manifest,
+            *[
+                {
+                    key: value
+                    for key, value in entry.items()
+                    if key != "history_file"
+                }
+                for entry in (duty_decl, standby_decl)
+            ],
+        )
         try:
             rig = pair.launch_pair(
-                args, declared, controller=args.upgrade_controller
+                args, predecessor, controller=args.upgrade_controller
             )
         except Abort as abort:
             raise Inconclusive(
@@ -625,6 +642,14 @@ def rolling_upgrade_pass(args, tamper):
             )
         duty_url, standby_url = rig.duty_url, rig.standby_url
         duty_files, standby_files = rig.duty_files, rig.standby_files
+        for entry, files in (
+            (duty_decl, duty_files),
+            (standby_decl, standby_files),
+        ):
+            if entry.get("history_file"):
+                files["history_file"] = pair.persistence_files(
+                    rig.scratch, entry
+                )["history_file"]
         steps = {"expected": field_tick(rig.plant_io)}
 
         converged = converge(rig, steps, failures)
