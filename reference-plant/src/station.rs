@@ -67,6 +67,14 @@
 //!   into the durable journal, and `progress` each scan into the
 //!   latest-value view; the kind's declared `advance`/`reset` commands
 //!   pace or restart it through the receipted command path.
+//! - **Recording duty:** the operations record's reportable series —
+//!   both wet-well level measurements, the station flow meters, and
+//!   each pump's run feedback and totalized draw — carry the model's
+//!   declared `record` duty (WW-REP-001's recording clauses, decision
+//!   102): the monitor's durable history file samples each at its
+//!   declared cadence under the declared retention span, the durable
+//!   record outliving the restarts the volatile history window never
+//!   promised to span.
 //!
 //! ## The declared point-id scheme
 //!
@@ -220,6 +228,18 @@ const GATE_OR: i64 = 1;
 /// The bound a single-sided level alarm parks its unused limit at —
 /// far outside any measurable span, so only the declared side trips.
 const PARKED_LIMIT: f64 = 1.0e9;
+
+/// The site's declared recording cadence — the durable-history
+/// decision's per-series duty (decision 102): every reportable series
+/// the operations record consumes lands in the `--history-file`
+/// store every `REPORT_RECORD_TICKS` run ticks.
+const REPORT_RECORD_TICKS: u64 = 5;
+/// The site's declared retention for the recorded series, in days —
+/// the deployment-sizing half of the duty (the multi-year regulatory
+/// records term WW-REP-001's retention clauses bind): a downstream
+/// records system sizes, rotates, and archives the durable file
+/// against it; the controller never enforces it.
+const REPORT_RETAIN_DAYS: u64 = 1095;
 
 /// One annunciation tier's class data — the site's alarm vocabulary,
 /// carried as the managed alarms' `priority`/`class`/`response_ticks`.
@@ -1161,6 +1181,36 @@ pub fn lift_station(config: &SiteConfig) -> Result<Station, BuildError> {
         ),
     ] {
         signal(&mut plant, PointId(point), name, unit, description, "program");
+    }
+
+    // The site's declared recording duty — WW-REP-001's recording
+    // clauses through the durable-history decision's declared-duty
+    // mechanism (decision 102): the reportable series the operations
+    // record is built from — both wet-well level measurements, the
+    // station flow meters, and each pump's run feedback and totalized
+    // draw — sample into the durable history file at the declared
+    // cadence under the declared retention, so the regulatory record
+    // survives the process lifetimes and bounded windows the volatile
+    // history ring never promised to.
+    for point in [
+        points::LEVEL_PRIMARY,
+        points::LEVEL_BACKUP,
+        points::INFLOW,
+        points::NET_FLOW,
+    ] {
+        plant.record_retained(point, REPORT_RECORD_TICKS, REPORT_RETAIN_DAYS);
+    }
+    for index in 0..config.pumps {
+        plant.record_retained(
+            points::run(index),
+            REPORT_RECORD_TICKS,
+            REPORT_RETAIN_DAYS,
+        );
+        plant.record_retained(
+            points::draw(index),
+            REPORT_RECORD_TICKS,
+            REPORT_RETAIN_DAYS,
+        );
     }
 
     let model = plant.build()?;

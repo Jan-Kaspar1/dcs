@@ -513,14 +513,18 @@ class PairRig:
         latest checkpoint and the peers rest at the same tick with
         identical images — then the role reports, the standby expected
         `tracking` and the field owner `active`. Returns the converge
-        record: `ticks`, the final `owner` snapshot, and both role
+        record: `ticks` (the field owner's), `tracked_ticks` (the
+        tracking peer's own scan ticks — the axis its own recorders
+        attribute to), the final `owner` snapshot, and both role
         reports."""
         ticks = []
+        tracked_ticks = []
         for _ in range(count):
-            _tracked, owner = self.tick(
+            tracked, owner = self.tick(
                 self.standby_url, self.duty_url, failures
             )
             ticks.append(owner["tick"])
+            tracked_ticks.append(tracked["tick"])
         standby_role = get(f"{self.standby_url}/role", "GET /role", failures)
         duty_role = get(f"{self.duty_url}/role", "GET /role", failures)
         sync = standby_role.get("sync")
@@ -540,6 +544,7 @@ class PairRig:
             raise Abort
         return {
             "ticks": ticks,
+            "tracked_ticks": tracked_ticks,
             "owner": owner,
             "duty_role": duty_role,
             "standby_role": standby_role,

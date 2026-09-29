@@ -3,52 +3,63 @@
 consumer-boundary mirror of the qa lane's durable-history leg
 (WW-ENG-003, WW-REP-001, WW-LCM-002): the released durable
 process-history store exercised on the customer-owned redundant pair
-the manifest declares, so a controller restart on the deployed pair —
-not just the rig — resumes the store's recorded datasets with their
-lifetime-attribution marks, and retention eviction surfaces to a
-served consumer as a numbering gap rather than silent loss.
+the manifest declares, against the plant's own declared recording
+duties — the reportable series the emitted model's `record` fields
+name — so a controller restart on the deployed pair resumes the
+recorded datasets with their lifetime-attribution marks, and
+retention eviction surfaces to a served consumer as a numbering gap
+rather than silent loss.
 
 The restart legs (`ci/restart.py`, `ci/legs/standby_restart.py`) prove
 the resumed run continues at the persisted tick and the durable
 journal carries the run-boundary marker; the journal-boundary leg
 (`ci/legs/journal_boundary.py`) proves journal eviction reads as a
 served numbering gap. This leg pins the process-history half of the
-same contract on the deployed pair through `GET /history/durable`:
-each controller launches with the store's declared `--history-file`
-beside its `--state-file`/`--journal-file` mounts — the manifest's
-own persistence declarations instantiated at runner-owned scratch
-paths — so the pair the leg drives is the manifest-declared one,
-the store file included. The emitted model declares
-no `record` duty, so the leg seeds the tracking peer's file with a
-first lifetime's recorded datasets — the file's documented line
-format, written at the leg's own seam — making the launched lifetime
-the file's second run and giving the restart real datasets to
-resume. The run:
+same contract on the deployed pair through `GET /history/durable`
+and the `--history-file` the manifest declares per controller —
+instantiated at runner-owned scratch paths, so the pair the leg
+drives is the manifest-declared one, the store file included, and
+every recorded dataset is a post-scan image sample the released
+controller itself wrote at a declared duty's cadence. The run:
 
-- converges the manifest-declared pair to `tracking` through the pair
-  rig's driven-tick loop, then reads the tracking peer's
-  `GET /history/durable`: the seeded run-1 datasets verbatim ahead of
-  the launched lifetime's `run_boundary` mark — and audits the field
-  owner's own store, a single-lifetime file serving nothing yet;
+- converges the manifest-declared pair to `tracking` through the
+  pair rig's driven-tick loop past two cadence intervals, then audits
+  both peers' durable files and the tracking peer's served stream:
+  the emitted model's declared `record` duties — the reportable
+  series the composition names — account for every recorded sample,
+  each point's stream lands at its declared cadence with the
+  first-observation census, no undeclared point is ever recorded, and
+  the tracking peer's recorded series is the field owner's own
+  record, verbatim;
 - stops the tracking standby and relaunches it onto its declared
   `--state-file`/`--journal-file`/`--history-file` mounts — the
-  manifest's own wiring —
-  while the field owner keeps scanning through the downtime window;
-  the relaunch must report the resume at the persisted tick, and the
-  served durable stream must answer the recorded datasets verbatim
-  behind the restart's `run_boundary` mark — the new lifetime's
-  attribution — with the `seq` axis continuing the file's numbering;
-- stops the peer once more and appends recorded datasets past the
-  served window's retention bound at the file seam — the leg's
-  fixture for a long accumulation — then relaunches: the served
-  stream must read the pinned lifetime marks ahead of a retained tail
-  whose `seq`s expose the evicted stretch as a numbering gap, while
-  the file itself stays contiguous — eviction bounds the served
-  window, never the record;
-- drives the tracking-first ticks that rejoin the pair after each
-  restart, then audits the launch roles restored: the field owner
+  manifest's own wiring — after one field-owner downtime scan; the
+  relaunch must report the resume at the persisted tick, the file's
+  `run_boundary` record attributes the new lifetime, the served
+  stream answers the recorded datasets verbatim behind the restart's
+  `run_boundary` mark with the `seq` axis continuing, and the
+  adopted cadence baselines hold: the resumed run's first post-
+  boundary sample lands at the interval the file already paced out —
+  not a fresh census at the resumed run's first scan;
+- drives the field owner past the served window's retention bound
+  with batched driven scans — real declared-duty samples only — and
+  asserts the eviction reads as a numbering gap at the window's
+  head while the file itself stays contiguous: eviction bounds the
+  served window, never the record;
+- drives the tracking-first ticks that rejoin the pair after the
+  restart, then audits the launch roles restored — the field owner
   active, the declared standby tracking it — and the owner's store
-  untouched by its peer's restarts.
+  still a single lifetime, untouched by its peer's restart;
+- launches one paced cold-start lifetime on the tracking peer's
+  declared journal/history mounts — the `--scan-ms` deployment shape
+  the rig definition paces at — so the durable file's own
+  `run_boundary` record stamps the tick domain's minted civil-time
+  anchor and the tracked line's adoption lands its `domain` seam:
+  the boundary/anchor marks the file format declares, minted by the
+  released binary rather than fixtured. Driven legs stay unanchored
+  on purpose — their artifacts must stay byte-identical — so the
+  anchor marks' exercise is this one paced lifetime, whose
+  wall-clock anchor value never enters the digest.
 
 The leg runs against the pinned release's tooling; a pin predating
 the durable store — a controller refusing `--history-file`, a monitor
@@ -81,6 +92,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -131,24 +143,45 @@ class Inconclusive(Exception):
     the run classifies inconclusive, never a product failure."""
 
 
-# The driven ticks each window runs — the downtime window the field
-# owner keeps scanning through while its standby is dead, and the
-# tracking-first window the relaunched peer re-tracks inside.
-DOWNTIME_TICKS = 3
-RECONVERGE_TICKS = 4
+# The driven ticks each phase runs — the converge long enough to
+# bank two cadence intervals on every declared duty, the downtime
+# window the field owner keeps scanning through while its standby is
+# dead, and the tracking-first window the relaunched peer re-tracks
+# inside.
+CONVERGE_TICKS = 12
+DOWNTIME_TICKS = 1
+RECONVERGE_TICKS = 6
 
 # The released store's served retention bound — `durable_capacity` is
-# the tooling's fixed default, not a deployment knob — and the
-# recorded datasets the leg's seeded first lifetime carries.
+# the tooling's fixed default, not a deployment knob — the bound the
+# eviction phase rolls the field owner's real accumulation past.
 SERVED_BOUND = 1024
-SEED_SAMPLES = 3
+# `POST /scan`'s per-request bound and the paced epilogue's real-time
+# bounds — the wait for the paced lifetime's marks and samples, and
+# its scan period.
+SCAN_BATCH = 256
+PACED_SCAN_MS = 10
+PACED_DEADLINE = 10.0
+
+# The reportable series the emitted model must declare `record`
+# duties on — the customer-boundary pin for the issue's named
+# series: both wet-well level measurements (10, 11), the station
+# flow meters (12 inflow, 13 net flow), and each pump's totalized
+# draw (20+i) and run feedback (40+i) — the declared point-id scheme
+# the dynamics document addresses.
+REPORTABLE_DUTIES = {10, 11, 12, 13, 20, 21, 40, 41}
+
+# The event kinds a durable entry may carry — `sampled` datasets and
+# the `run_boundary`/`domain` attribution marks; anything else is a
+# malformed record.
+ENTRY_KINDS = {"sampled", "run_boundary", "domain"}
 
 
 def history_records(path):
     """The `--history-file`'s lines in file order: `("boundary",
-    {"run", "tick"})` markers and `("entry", entry)` records — the
-    durable store's file format, audited at the leg's own seam like
-    the journal file's."""
+    {"run", "tick", ...})` markers and `("entry", entry)` records —
+    the durable store's file format, audited at the leg's own seam
+    like the journal file's."""
     records = []
     with open(path) as handle:
         for number, line in enumerate(handle, 1):
@@ -170,83 +203,188 @@ def history_records(path):
     return records
 
 
-def sampled_entry(seq, point, value, tick):
-    """One recorded `sampled` durable entry — the fixture dataset's
-    wire form, identical served and filed."""
-    return {
-        "seq": seq,
-        "tick": tick,
-        "event": {
-            "sampled": {
-                "point": point,
-                "sample": {
-                    "value": {"float": value},
-                    "quality": "good",
-                    "tick": tick,
-                },
-            }
-        },
-    }
+def declared_duties(model_path, failures):
+    """The emitted model's declared `record` duties — `{point_id:
+    {"every_ticks": ..., "retain_days": ...}}` read from the
+    `io_points` section, every cadence asserted positive, and the
+    issue's named reportable series asserted declared. An emitted
+    model declaring none — the consumer boundary this leg exists to
+    prove — fails the leg rather than fixture an answer."""
+    with open(model_path) as handle:
+        model = json.load(handle)
+    duties = {}
+    declared_ids = set()
+    for point in model.get("io_points") or []:
+        declared_ids.add(point["id"])
+        record = point.get("record")
+        if record is None:
+            continue
+        every = record.get("every_ticks")
+        retain = record.get("retain_days")
+        if not isinstance(every, int) or every <= 0:
+            failures.append(
+                f"io point {point['id']} declares a non-positive "
+                f"recording cadence {every!r}"
+            )
+            raise Abort
+        if retain is not None and (
+            not isinstance(retain, int) or retain <= 0
+        ):
+            failures.append(
+                f"io point {point['id']} declares a non-positive "
+                f"retention {retain!r}"
+            )
+            raise Abort
+        duties[point["id"]] = {"every_ticks": every, "retain_days": retain}
+    if not duties:
+        failures.append(
+            "the emitted model declares no record duty — the "
+            "composition's reportable series carry no durable "
+            "recording, the gap this leg exists to close"
+        )
+        raise Abort
+    missing = REPORTABLE_DUTIES - duties.keys()
+    if missing:
+        failures.append(
+            f"the emitted model's record duties miss the reportable "
+            f"series {sorted(missing)} — the wet-well level, station "
+            "inflow, and pump run/totalized records the operations "
+            "record is built from"
+        )
+        raise Abort
+    undeclared = declared_ids - duties.keys()
+    return duties, undeclared
 
 
-def seed_history(path, point):
-    """Fixture the store's first lifetime: the run-1 `run_boundary`
-    marker plus `SEED_SAMPLES` recorded `sampled` datasets on the
-    emitted model's first declared point — the accumulation a restart
-    must resume. Written in the file's documented record format while
-    no process holds its writer lock."""
-    with open(path, "w") as handle:
-        handle.write(json.dumps({"run_boundary": {"run": 1, "tick": 0}}))
-        handle.write("\n")
-        for seq in range(1, SEED_SAMPLES + 1):
-            entry = sampled_entry(seq, point, seq + 0.5, seq)
-            handle.write(json.dumps({"entry": entry}))
-            handle.write("\n")
+def audit_entries(entries, duties, label, failures):
+    """Audit one `DurableEntry` stream — the file's `entry` records or
+    the served `/history/durable` answer, the same entry shape at
+    both seams — against the emitted model's declared duties. Every
+    record must be a declared kind; every `sampled` record must name
+    a declared-duty point, land no denser than the point's declared
+    cadence within its tick domain, and carry a well-formed
+    quality-stamped sample; a `run_boundary`/`domain` mark opening a
+    different anchor's domain resets the cadence baseline exactly
+    the way the recorder clears it on a domain crossing. Returns
+    `(sampled, counts, census_ticks)`: the `sampled` entries, the
+    per-point sample count, and each point's first-sample tick in
+    the last tick domain."""
+    sampled = []
+    counts = {}
+    census_ticks = {}
+    anchor = None
+    last = {}
+    for entry in entries:
+        event = entry.get("event")
+        kind = next(iter(event)) if isinstance(event, dict) else None
+        if kind not in ENTRY_KINDS:
+            failures.append(
+                f"{label}: a durable entry carries a malformed "
+                f"event: {entry!r}"
+            )
+            raise Abort
+        body = event[kind] or {}
+        if kind in ("run_boundary", "domain"):
+            if kind == "run_boundary" and not isinstance(
+                body.get("run"), int
+            ):
+                failures.append(
+                    f"{label}: a run_boundary entry carries no "
+                    f"lifetime ordinal: {entry!r}"
+                )
+                raise Abort
+            stamped = body.get("anchor")
+            if stamped is not None and not (
+                isinstance(stamped, dict)
+                and isinstance(stamped.get("epoch_ms"), int)
+                and stamped["epoch_ms"] > 0
+            ):
+                failures.append(
+                    f"{label}: a {kind} mark carries a malformed "
+                    f"anchor: {entry!r}"
+                )
+                raise Abort
+            # A mark on a different anchor's domain clears the
+            # cadence baseline — the recorder's own rule — so the
+            # post-mark stretch re-censuses.
+            if stamped != anchor:
+                anchor = stamped
+                last = {}
+                census_ticks = {}
+            continue
+        point = body.get("point")
+        sample = body.get("sample")
+        if point not in duties:
+            failures.append(
+                f"{label}: an undeclared point {point!r} was "
+                f"recorded — the durable store may only write the "
+                f"model's declared record duties: {entry!r}"
+            )
+            raise Abort
+        if not isinstance(sample, dict) or not (
+            isinstance(sample.get("value"), dict)
+            and isinstance(sample.get("quality"), str)
+            and isinstance(sample.get("tick"), int)
+        ):
+            failures.append(
+                f"{label}: a sampled record carries a malformed "
+                f"sample: {entry!r}"
+            )
+            raise Abort
+        previous = last.get(point)
+        if previous is not None and (
+            entry["tick"] - previous < duties[point]["every_ticks"]
+        ):
+            failures.append(
+                f"{label}: point {point} recorded at tick "
+                f"{entry['tick']}, {entry['tick'] - previous} ticks "
+                f"after its previous sample — inside its declared "
+                f"cadence of {duties[point]['every_ticks']}"
+            )
+            raise Abort
+        last[point] = entry["tick"]
+        census_ticks.setdefault(point, entry["tick"])
+        counts[point] = counts.get(point, 0) + 1
+        sampled.append(entry)
+    return sampled, counts, census_ticks
 
 
-def pad_history(path, first_seq, count, point):
-    """Append `count` recorded `sampled` datasets continuing the
-    file's `seq` axis — the leg's fixture driving the store past its
-    served retention bound, written while the owning process is
-    stopped so the single-writer lock never conflicts."""
-    with open(path, "a") as handle:
-        for seq in range(first_seq, first_seq + count):
-            entry = sampled_entry(seq, point, float(seq), seq)
-            handle.write(json.dumps({"entry": entry}))
-            handle.write("\n")
-
-
-def spawn_peer(binary, args, rig, files, standby=None):
-    """Spawn one `dcs-controller --driven --remote` peer of the
-    manifest-declared pair — `pair.spawn_peer`'s shape over the
-    manifest's declared persistence fields, the durable store's
-    `--history-file` included, instantiated under the rig's
-    runner-owned scratch. Returns `(process, monitor_url, preamble)`:
-    `monitor_url` is None when the process exits before reporting a
-    listener, the preamble then carrying the startup refusal's stderr
-    lines."""
+def spawn_paced(binary, args, rig, files, standby):
+    """Spawn the epilogue's paced tracking peer — the deployment
+    shape the rig definition declares (`--scan-ms`), a deliberate
+    cold start (no `--state-file`) so the run's own pacing mints the
+    tick domain's civil-time anchor at its origin tick, still wired
+    at the field owner and still appending to the declared
+    `--journal-file`/`--history-file` mounts. Its served snapshots
+    go to devnull — the real-time scan count is the leg's one
+    nondeterministic stdout line count, and two passes must print
+    identical output. Returns `(process, monitor_url, preamble)`."""
     argv = [
         binary,
         args.model,
         "--remote",
         rig.plant_addr,
-        "--driven",
+        "--scan-ms",
+        str(PACED_SCAN_MS),
         "--listen",
         "127.0.0.1:0",
-        "--dt",
-        str(args.dt),
+        "--standby",
+        standby,
+        "--pair-token",
+        pair.PAIR_TOKEN,
     ]
-    if standby is not None:
-        argv += ["--standby", standby]
-    argv += ["--pair-token", pair.PAIR_TOKEN]
     for field, flag in (
-        ("state_file", "--state-file"),
         ("journal_file", "--journal-file"),
         ("history_file", "--history-file"),
     ):
         if files.get(field) is not None:
             argv += [flag, files[field]]
-    process = subprocess.Popen(argv, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen(
+        argv,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
     preamble = []
     for line in process.stderr:
         line = line.strip()
@@ -259,10 +397,18 @@ def spawn_peer(binary, args, rig, files, standby=None):
 
 
 def spawn_or_abort(name, binary, args, rig, files, standby=None):
-    """`spawn_peer` plus the failure classification: a controller
+    """`pair.spawn_peer` plus the failure classification: a controller
     refusing `--history-file` is a pinned release predating the store
     — inconclusive, never a startup failure."""
-    process, url, preamble = spawn_peer(binary, args, rig, files, standby)
+    process, url, preamble = pair.spawn_peer(
+        binary,
+        args.model,
+        args.dt,
+        rig.plant_addr,
+        standby,
+        files,
+        pair_token=pair.PAIR_TOKEN,
+    )
     if url is not None:
         return process, url, preamble
     if any(
@@ -280,15 +426,20 @@ def spawn_or_abort(name, binary, args, rig, files, standby=None):
     )
 
 
-def durable_page(url, since, failures, doctor=None):
+def durable_page(url, since, failures, point=None, doctor=None):
     """One `GET /history/durable?since=<since>` read — the durable
-    store's served window, `seq`-cursor read like the journal's. A
-    monitor answering the route's absence is a pinned release
-    predating the store — inconclusive. `doctor`, when given,
-    rewrites the page at the leg's own read seam — the tamper cases'
-    doctored served answer, never a rig change."""
+    store's served window, `seq`-cursor read like the journal's with
+    the `?point=` filter scoping sampled records to one declared
+    point while the pinned marks answer through. A monitor answering
+    the route's absence is a pinned release predating the store —
+    inconclusive. `doctor`, when given, rewrites the page at the
+    leg's own read seam — the tamper cases' doctored served answer,
+    never a rig change."""
+    query = f"{url}/history/durable?since={since}"
+    if point is not None:
+        query += f"&point={point}"
     try:
-        body = simulate.http(f"{url}/history/durable?since={since}")
+        body = simulate.http(query)
     except urllib.error.HTTPError as error:
         if error.code == 404:
             raise Inconclusive(
@@ -345,13 +496,24 @@ def role(url, failures):
     return pair.get(f"{url}/role", "GET /role", failures)
 
 
+def scan_n(url, scans, failures):
+    """Drive `scans` scans through one `POST /scan` — the served
+    batch bound paces the request; returns the served snapshot."""
+    try:
+        return simulate.http(f"{url}/scan", {"scans": scans})
+    except Exception as error:
+        failures.append(f"POST /scan on {url} answered {error}")
+        raise Abort
+
+
 def reconverge(rig, failures):
     """Tracking-first driven ticks until the resumed peer reports
     `tracking` inside the leg's declared window — the field owner's
-    scans landing throughout. Returns the owner ticks."""
+    scans landing throughout. Returns `(tracked_ticks, ticks)`."""
+    tracked_ticks = []
     ticks = []
     for _ in range(RECONVERGE_TICKS):
-        _tracked, owner = pair.tick(
+        tracked, owner = pair.tick(
             rig.standby_url,
             rig.duty_url,
             failures,
@@ -359,9 +521,10 @@ def reconverge(rig, failures):
             "field owner's at tick {tick} — the restart's re-pull "
             "never realigned the pair",
         )
+        tracked_ticks.append(tracked["tick"])
         ticks.append(owner["tick"])
         if tracking(role(rig.standby_url, failures)):
-            return ticks
+            return tracked_ticks, ticks
     failures.append(
         "the resumed standby never reconverged to tracking inside "
         f"the declared {RECONVERGE_TICKS}-tick window — GET /role "
@@ -404,18 +567,22 @@ def stop_and_checkpoint(rig, failures):
     return persisted
 
 
-def relaunch(rig, args, failures, persisted):
+def relaunch(rig, args, failures, persisted, files=None):
     """Relaunch the stopped tracking peer on the manifest's wiring —
     its declared persistence files, the durable-history mount
     included — asserting the preamble reports the resume at the
     persisted tick and the resumed peer rejoins in standby, never
-    claiming the field. Returns the startup preamble."""
-    process, url, preamble = spawn_peer(
+    claiming the field. `files` overrides the relaunched mounts when
+    a phase deliberately cold-starts the declared journal/history
+    files. Returns the startup preamble."""
+    process, url, preamble = pair.spawn_peer(
         args.controller,
-        args,
-        rig,
-        rig.standby_files,
-        standby=rig.duty_url.removeprefix("http://"),
+        args.model,
+        args.dt,
+        rig.plant_addr,
+        rig.duty_url.removeprefix("http://"),
+        rig.standby_files if files is None else files,
+        pair_token=pair.PAIR_TOKEN,
     )
     rig.standby = process
     rig.standby_url = url
@@ -423,6 +590,12 @@ def relaunch(rig, args, failures, persisted):
         detail = "; ".join(preamble[-2:]) or "no diagnostic"
         failures.append(f"the relaunched standby exited at startup: {detail}")
         raise Abort
+    return preamble
+
+
+def assert_resume(preamble, persisted, failures):
+    """The relaunched peer's resume report: a startup naming the
+    persisted tick, else the cold start silently abandoned the run."""
     line = next(
         (line for line in preamble if "resumed from state file" in line),
         None,
@@ -442,52 +615,17 @@ def relaunch(rig, args, failures, persisted):
             f"file persisted {persisted}"
         )
         raise Abort
-    standby_role = role(rig.standby_url, failures)
-    if standby_role.get("role") != "standby" or (
-        standby_role.get("sync") != "unsynchronized"
-    ):
-        failures.append(
-            f"the resumed standby reports {standby_role} — expected "
-            "standby/unsynchronized: it must rejoin in standby, "
-            "never claiming the field"
-        )
-        raise Abort
-    duty_role = role(rig.duty_url, failures)
-    if duty_role.get("role") != "active":
-        failures.append(
-            f"the field owner reports {duty_role.get('role')!r} "
-            "across the standby's relaunch, expected active — the "
-            "resumed peer disturbed the field"
-        )
-        raise Abort
-    return preamble
-
-
-def declared_point(model_path, failures):
-    """The emitted model's first declared io point's id — the point
-    the leg's fixture datasets attribute to."""
-    with open(model_path) as handle:
-        model = json.load(handle)
-    points = model.get("io_points") or []
-    if not points:
-        failures.append(
-            "the emitted model declares no io points — the "
-            "durable-history leg has no declared point to attribute "
-            "its recorded datasets to"
-        )
-        raise Abort
-    return points[0]["id"]
 
 
 def durable_history_pass(args, tamper):
-    """The durable-history run: seed the tracking peer's store, launch
-    the pair on their declared wiring plus the store's file mount,
-    converge, restart the peer onto its declared mounts, assert the
-    recorded datasets resume behind the restart's run_boundary mark,
-    then drive the file past the served retention bound and assert
-    the eviction reads as a numbering gap — the pair restored to its
-    launch roles throughout. Returns `(digest_entries, evidence,
-    failures)`."""
+    """The durable-history run: converge the declared pair past two
+    recording cadences, audit the declared-duty record both peers'
+    stores carry, restart the tracking peer onto its declared mounts
+    and pin the seq/boundary/cadence-baseline continuity, roll the
+    owner's served window past its retention bound on real samples
+    and pin the numbering gap, restore the launch roles, then mint
+    the anchor marks on a paced cold-start lifetime. Returns
+    `(digest_entries, evidence, failures)`."""
     declared = pair.manifest_pair(args.manifest)
     if declared is None:
         raise Abort(
@@ -497,7 +635,7 @@ def durable_history_pass(args, tamper):
     digest_entries, evidence, failures = [], {}, []
     rig = pair.PairRig(declared)
     try:
-        point = declared_point(args.model, failures)
+        duties, undeclared = declared_duties(args.model, failures)
         state_file = rig.standby_files.get("state_file")
         journal_file = rig.standby_files.get("journal_file")
         history_file = rig.standby_files.get("history_file")
@@ -514,7 +652,6 @@ def durable_history_pass(args, tamper):
                 "persistence declarations and has nothing to "
                 "exercise"
             )
-        seed_history(history_file, point)
 
         rig.plant, rig.plant_addr = pair.spawn_plant(
             args.plant_server, args.model, args.dynamics
@@ -537,64 +674,148 @@ def durable_history_pass(args, tamper):
             )
         )
 
-        # Phase 1 — convergence: the pair leg's driven-tick loop, the
-        # tracking peer scanned first so each pull applies the
-        # owner's latest checkpoint and the peers rest at the same
-        # tick.
-        converged = rig.converge(failures)
+        # Phase 1 — convergence past two cadence intervals: the pair
+        # leg's driven-tick loop, the tracking peer scanned first so
+        # each pull applies the owner's latest checkpoint and the
+        # peers rest at the same tick — each peer's durable store
+        # accumulating its declared-duty samples all the while.
+        converged = rig.converge(failures, count=CONVERGE_TICKS)
         evidence["converged"] = converged["ticks"][-1]
         digest_entries.append(
             {
                 "phase": "converge",
                 "ticks": converged["ticks"],
+                "tracked_ticks": converged["tracked_ticks"],
                 "duty_role": converged["duty_role"],
                 "standby_role": converged["standby_role"],
             }
         )
 
-        # Phase 2 — the baseline: the tracking peer's served durable
-        # stream carries the seeded run-1 datasets verbatim ahead of
-        # the launched lifetime's `run_boundary` mark — the file's
-        # second lifetime, its cold-start mark file-only like the
-        # first's. The field owner's own store opened a single
-        # lifetime and serves nothing until its first restart.
-        base = durable_page(rig.standby_url, 0, failures)
-        expected_base = [
-            sampled_entry(seq, point, seq + 0.5, seq)
-            for seq in range(1, SEED_SAMPLES + 1)
-        ] + [
-            {
-                "seq": SEED_SAMPLES + 1,
-                "tick": 0,
-                "event": {"run_boundary": {"run": 2}},
-            }
-        ]
-        if base != expected_base:
-            failures.append(
-                "the converged standby's served durable stream is "
-                f"{base}, expected the seeded run-1 datasets verbatim "
-                "behind the launched lifetime's run_boundary mark "
-                f"{expected_base[-1]}"
-            )
-            raise Abort
-        if durable_page(rig.duty_url, 0, failures) != []:
-            failures.append(
-                "the field owner's served durable stream answers "
-                "entries on a single-lifetime store — cold starts "
-                "carry no served mark"
-            )
-            raise Abort
-        if history_records(rig.duty_files["history_file"]) != [
-            ("boundary", {"run": 1, "tick": 0})
+        # Phase 2 — the baseline: both peers' durable files opened a
+        # single lifetime and hold the declared-duty samples the
+        # run's own scans wrote — the tracking peer's recorded series
+        # the field owner's own record verbatim — and the tracking
+        # peer's served stream answers its file's entries. The audit
+        # pins the whole declared-duty contract at once: only
+        # declared points recorded, each at its declared cadence with
+        # the first-observation census, and the driven domain's marks
+        # honestly unanchored.
+        sb_records = history_records(rig.standby_files["history_file"])
+        if [record for kind, record in sb_records if kind == "boundary"] != [
+            {"run": 1, "tick": 0}
         ]:
             failures.append(
-                "the field owner's durable file carries more than its "
-                "cold-start run boundary — a peer's restarts reach "
-                "into it"
+                "the tracking peer's durable file did not open a "
+                "single cold-start lifetime — a peer's restarts "
+                "reached into it before the leg ran"
+            )
+            raise Abort
+        sb_entries = [
+            record for kind, record in sb_records if kind == "entry"
+        ]
+        if [entry["seq"] for entry in sb_entries] != list(
+            range(1, len(sb_entries) + 1)
+        ):
+            failures.append(
+                "the tracking peer's durable file seqs are not "
+                "contiguous: "
+                f"{[entry['seq'] for entry in sb_entries][:8]}"
+            )
+            raise Abort
+        _sampled, counts, census = audit_entries(
+            sb_entries, duties, "the tracking peer's file", failures
+        )
+        for point, duty in duties.items():
+            if counts.get(point, 0) < 2:
+                failures.append(
+                    f"declared-duty point {point} recorded "
+                    f"{counts.get(point, 0)} samples inside "
+                    f"{CONVERGE_TICKS} driven ticks — the declared "
+                    f"cadence of {duty['every_ticks']} never paced a "
+                    "second sample"
+                )
+                raise Abort
+        if len(set(census.values())) != 1:
+            failures.append(
+                "the declared duties' first samples did not land on "
+                f"one census tick: {census} — the standing "
+                "first-observation census a new domain opens its "
+                "record with"
+            )
+            raise Abort
+        gaps = {}
+        for point in duties:
+            ticks = [
+                entry["tick"]
+                for entry in _sampled
+                if entry["event"]["sampled"]["point"] == point
+            ]
+            gaps[point] = [b - a for a, b in zip(ticks, ticks[1:])]
+        if any(
+            gap != duty["every_ticks"]
+            for point, duty in duties.items()
+            for gap in gaps[point]
+        ):
+            failures.append(
+                f"the converged run's sample intervals {gaps} do not "
+                "hold each declared duty's declared cadence exactly"
+            )
+            raise Abort
+        duty_records = history_records(rig.duty_files["history_file"])
+        if [record for kind, record in duty_records if kind == "boundary"] != [
+            {"run": 1, "tick": 0}
+        ]:
+            failures.append(
+                "the field owner's durable file carries more than "
+                "its cold-start run boundary"
+            )
+            raise Abort
+        duty_entries = [
+            record for kind, record in duty_records if kind == "entry"
+        ]
+        if duty_entries != sb_entries:
+            failures.append(
+                "the tracking peer's durable record is not the field "
+                "owner's own series verbatim — the tracked image's "
+                "recorded samples diverge from the owner's record"
+            )
+            raise Abort
+        base = durable_page(rig.standby_url, 0, failures)
+        if base != sb_entries:
+            failures.append(
+                "the converged standby's served durable stream does "
+                "not answer its file's recorded datasets verbatim"
+            )
+            raise Abort
+        duty_base = durable_page(rig.duty_url, 0, failures)
+        if duty_base != duty_entries:
+            failures.append(
+                "the field owner's served durable stream does not "
+                "answer its own file's recorded datasets verbatim"
+            )
+            raise Abort
+        # The undeclared-point probe: a point the model declares but
+        # records no duty for must answer an empty filtered series —
+        # the filter's pinned marks being the only exceptions an
+        # anchored era could mint.
+        probe_point = sorted(undeclared)[0]
+        filtered = durable_page(
+            rig.standby_url, 0, failures, point=probe_point
+        )
+        if filtered != []:
+            failures.append(
+                f"a point-filtered read on undeclared point "
+                f"{probe_point} answered {filtered} — an undeclared "
+                "series entered the durable record"
             )
             raise Abort
         digest_entries.append(
-            {"phase": "baseline", "served": base}
+            {
+                "phase": "baseline",
+                "duties": sorted(duties),
+                "served": base,
+                "duty_entries": duty_entries,
+            }
         )
 
         # The tamper cases' doctored reads, applied at the leg's own
@@ -612,7 +833,7 @@ def durable_history_pass(args, tamper):
                 if (entry.get("event") or {}).get("run_boundary", {}).get(
                     "run"
                 )
-                != 3
+                != 2
             ]
         eviction_doctor = None
         if tamper == "hidden-eviction":
@@ -622,44 +843,60 @@ def durable_history_pass(args, tamper):
             ]
 
         # Phase 3 — the restart: the tracking peer's declared state
-        # file audited, its container stopped, the field owner kept
-        # scanning through the downtime window, then the relaunch on
-        # the manifest's own wiring — and the served stream answering
-        # the recorded datasets verbatim behind the restart's
-        # run_boundary mark, the seq axis continuing.
+        # file audited, its container stopped, one field-owner scan
+        # through the downtime window, then the relaunch on the
+        # manifest's own wiring — the served stream answering the
+        # recorded datasets verbatim behind the restart's
+        # run_boundary mark, the seq axis continuing, and the
+        # adopted cadence baselines holding the run-1 intervals
+        # rather than re-censusing at the resumed run's first scan.
         persisted = stop_and_checkpoint(rig, failures)
-        downtime = []
-        for _ in range(DOWNTIME_TICKS):
-            downtime.append(pair.scan(rig.duty_url, failures)["tick"])
-        relaunch(rig, args, failures, persisted)
+        downtime = [
+            scan_n(rig.duty_url, 1, failures)["tick"]
+            for _ in range(DOWNTIME_TICKS)
+        ]
+        preamble = relaunch(rig, args, failures, persisted)
+        assert_resume(preamble, persisted, failures)
         resumed = durable_page(
             rig.standby_url, 0, failures, doctor=restart_doctor
         )
         expected_mark = {
-            "seq": SEED_SAMPLES + 2,
+            "seq": len(sb_entries) + 1,
             "tick": persisted,
-            "event": {"run_boundary": {"run": 3}},
+            "event": {"run_boundary": {"run": 2}},
         }
-        if resumed != expected_base + [expected_mark]:
+        if resumed != sb_entries + [expected_mark]:
             failures.append(
-                "the relaunched peer's served durable stream does not "
-                "answer the recorded datasets verbatim behind the "
-                "restart's run_boundary mark "
+                "the relaunched peer's served durable stream does "
+                "not answer the recorded datasets verbatim behind "
+                "the restart's run_boundary mark "
                 f"{expected_mark}: {resumed}"
             )
             raise Abort
+        # The resumed run's cadence baselines adopt the file's own
+        # record: each declared point's next sample owes the
+        # interval the run-1 record already paced out, so the first
+        # post-boundary sample lands exactly one declared cadence
+        # past the last pre-restart sample — a fresh baseline would
+        # re-census at the resumed run's first scan instead. The
+        # served stream holds no post-boundary samples yet — a
+        # resumed driven run records nothing until it scans.
+        last_pre = {
+            entry["event"]["sampled"]["point"]: entry["tick"]
+            for entry in sb_entries
+            if "sampled" in entry.get("event", {})
+        }
         records = history_records(rig.standby_files["history_file"])
         marks = [record for kind, record in records if kind == "boundary"]
         if marks != [
             {"run": 1, "tick": 0},
-            {"run": 2, "tick": 0},
-            {"run": 3, "tick": persisted},
+            {"run": 2, "tick": persisted},
         ]:
             failures.append(
                 f"the standby's durable file boundaries are {marks}, "
-                "expected run 1 and 2 at tick 0 and run 3 at the "
-                f"persisted tick {persisted} — the restarted lifetime "
-                "is not attributed in the file's record"
+                "expected run 1 at tick 0 and run 2 at the "
+                f"persisted tick {persisted} — the restarted "
+                "lifetime is not attributed in the file's record"
             )
             raise Abort
         entries = [record for kind, record in records if kind == "entry"]
@@ -671,7 +908,7 @@ def durable_history_pass(args, tamper):
                 f"across the restart: {[entry['seq'] for entry in entries]}"
             )
             raise Abort
-        evidence["resumed_run"] = 3
+        evidence["resumed_run"] = 2
         evidence["resumed_tick"] = persisted
         digest_entries.append(
             {
@@ -684,58 +921,138 @@ def durable_history_pass(args, tamper):
 
         # Phase 4 — reconvergence: the resumed peer re-tracks inside
         # the declared window, the field owner's scans landing
-        # throughout.
-        ticks = reconverge(rig, failures)
-        digest_entries.append({"phase": "reconverge", "ticks": ticks})
+        # throughout — and the adopted cadence baselines keep the
+        # resumed run from re-censusing: each declared point's first
+        # post-boundary sample lands exactly one declared cadence
+        # past its last pre-restart sample. The loop drives past the
+        # due tick — tracking answers inside a tick or two while the
+        # baselines' next intervals land a few ticks later.
+        tracked_ticks = []
+        ticks = []
+        entries = []
+        expected_due = {
+            point: tick + duties[point]["every_ticks"]
+            for point, tick in last_pre.items()
+        }
+        for _ in range(RECONVERGE_TICKS):
+            tracked, owner = pair.tick(
+                rig.standby_url,
+                rig.duty_url,
+                failures,
+                diverged="the resumed standby's image diverged from the "
+                "field owner's at tick {tick} — the restart's re-pull "
+                "never realigned the pair",
+            )
+            tracked_ticks.append(tracked["tick"])
+            ticks.append(owner["tick"])
+            entries = [
+                record
+                for kind, record in history_records(
+                    rig.standby_files["history_file"]
+                )
+                if kind == "entry"
+            ]
+            post_boundary = [
+                entry
+                for entry in entries
+                if entry["seq"] > len(sb_entries)
+                and "sampled" in entry.get("event", {})
+            ]
+            covered = {
+                entry["event"]["sampled"]["point"]
+                for entry in post_boundary
+            }
+            if (
+                tracking(role(rig.standby_url, failures))
+                and covered >= duties.keys()
+            ):
+                break
+        else:
+            failures.append(
+                "the resumed standby never re-tracked and re-"
+                "recorded its declared duties inside the declared "
+                f"{RECONVERGE_TICKS}-tick window — GET /role answers "
+                f"{role(rig.standby_url, failures)}, post-boundary "
+                f"samples cover {sorted(covered)}"
+            )
+            raise Abort
+        for point in duties:
+            ticks_p = [
+                entry["tick"]
+                for entry in post_boundary
+                if entry["event"]["sampled"]["point"] == point
+            ]
+            if not ticks_p or ticks_p[0] != expected_due[point]:
+                failures.append(
+                    f"declared-duty point {point}'s first "
+                    f"post-restart sample landed at tick "
+                    f"{ticks_p[0] if ticks_p else None}, expected "
+                    f"the adopted baseline's next interval "
+                    f"{expected_due[point]} — the resumed run "
+                    "re-censused instead of continuing the file's "
+                    "own cadence"
+                )
+                raise Abort
+        audit_entries(
+            entries,
+            duties,
+            "the tracking peer's restarted file",
+            failures,
+        )
+        digest_entries.append(
+            {
+                "phase": "reconverge",
+                "ticks": ticks,
+                "tracked_ticks": tracked_ticks,
+                "post_boundary": post_boundary,
+            }
+        )
 
-        # Phase 5 — retention: the peer stopped once more, its
-        # durable file appended past the served window's bound at the
-        # leg's own seam, then relaunched. The served stream must
-        # read the pinned lifetime marks — the evicted boundary
-        # entries — ahead of a retained tail whose seqs expose the
-        # evicted stretch as a numbering gap, while the file itself
-        # stays contiguous: eviction bounds the served window, never
-        # the record.
-        persisted2 = stop_and_checkpoint(rig, failures)
-        history_file = rig.standby_files["history_file"]
-        entries = [
+        # Phase 5 — retention: the field owner's own accumulation,
+        # driven past the served window's bound by batched scans of
+        # real declared-duty samples. The served stream's head rolls
+        # forward — the evicted stretch reads as a numbering gap —
+        # while the file itself stays contiguous: eviction bounds
+        # the served window, never the record.
+        filed = [
             record
-            for kind, record in history_records(history_file)
+            for kind, record in history_records(
+                rig.duty_files["history_file"]
+            )
             if kind == "entry"
         ]
-        first_seq = len(entries) + 1
-        pad_history(
-            history_file,
-            first_seq,
-            SERVED_BOUND + 8 - first_seq,
-            point,
-        )
-        relaunch(rig, args, failures, persisted2)
-        served = durable_page(
-            rig.standby_url, 0, failures, doctor=eviction_doctor
-        )
-        records = history_records(history_file)
-        filed = [record for kind, record in records if kind == "entry"]
+        batches = 0
+        while len(filed) <= SERVED_BOUND + 8:
+            scan_n(rig.duty_url, SCAN_BATCH, failures)
+            batches += 1
+            filed = [
+                record
+                for kind, record in history_records(
+                    rig.duty_files["history_file"]
+                )
+                if kind == "entry"
+            ]
         filed_seqs = [entry["seq"] for entry in filed]
         if filed_seqs != list(range(1, len(filed) + 1)):
             failures.append(
-                "the durable file's seq axis is not contiguous — the "
-                f"record itself lost entries: {filed_seqs[:8]}…"
+                "the durable file's seq axis is not contiguous — "
+                f"the record itself lost entries: {filed_seqs[:8]}…"
             )
             raise Abort
         total = filed_seqs[-1]
         evicted = total - SERVED_BOUND
         if evicted <= 0:
             failures.append(
-                f"the fixture's {total} recorded entries never "
+                f"the run's {total} recorded entries never "
                 f"exceeded the served bound {SERVED_BOUND} — the "
                 "retention check exercised nothing"
             )
             raise Abort
+        served = durable_page(
+            rig.duty_url, 0, failures, doctor=eviction_doctor
+        )
         pinned = [
-            entry["seq"]
-            for entry in filed
-            if entry["seq"] <= evicted and marker(entry) is not None
+            entry["seq"] for entry in filed[:evicted] if marker(entry)
         ]
         expected = pinned + list(range(evicted + 1, total + 1))
         served_seqs = [entry["seq"] for entry in served]
@@ -748,30 +1065,23 @@ def durable_history_pass(args, tamper):
                 f"retained tail {evicted + 1}…{total}"
             )
             raise Abort
-        if served[-1] != {
-            "seq": total,
-            "tick": persisted2,
-            "event": {"run_boundary": {"run": 4}},
-        }:
-            failures.append(
-                "the second relaunch's run_boundary mark does not "
-                f"head the retained tail: {served[-1]}"
-            )
-            raise Abort
-        tail = durable_page(rig.standby_url, pinned[-1], failures)
+        tail = durable_page(rig.duty_url, evicted, failures)
         if tail != served[len(pinned) :]:
             failures.append(
-                f"a since cursor at the last pinned mark answers "
+                f"a since cursor at the eviction boundary answers "
                 f"{[entry['seq'] for entry in tail][:6]}…, expected "
-                "exactly the retained tail"
+                "exactly the retained tail — fabricated continuity "
+                "over the evicted stretch"
             )
             raise Abort
+        audit_entries(
+            filed, duties, "the field owner's accumulated file", failures
+        )
         evidence["evicted"] = evicted
-        evidence["resumed_run4_tick"] = persisted2
         digest_entries.append(
             {
                 "phase": "retention",
-                "persisted": persisted2,
+                "batches": batches,
                 "evicted": evicted,
                 "pinned": pinned,
                 "tail": [served_seqs[len(pinned)], served_seqs[-1]],
@@ -779,17 +1089,21 @@ def durable_history_pass(args, tamper):
         )
 
         # Phase 6 — the roles restored: the resumed peer re-tracks
-        # inside the declared window and the pair rests in its launch
-        # roles, the field owner active, the declared standby
-        # tracking it — the owner's store untouched by its peer's
-        # restarts.
-        ticks = reconverge(rig, failures)
-        if history_records(rig.duty_files["history_file"]) != [
-            ("boundary", {"run": 1, "tick": 0})
-        ]:
+        # inside the declared window and the pair rests in its
+        # launch roles — the field owner's store still a single
+        # lifetime, its peer's restarts and scan volume never
+        # reaching into it.
+        tracked_ticks, ticks = reconverge(rig, failures)
+        if [
+            record
+            for kind, record in history_records(
+                rig.duty_files["history_file"]
+            )
+            if kind == "boundary"
+        ] != [{"run": 1, "tick": 0}]:
             failures.append(
-                "the field owner's durable file moved across its "
-                "peer's restarts — the store's record must stay "
+                "the field owner's durable file carries a second "
+                "lifetime — the store's record must stay "
                 "per-process"
             )
             raise Abort
@@ -797,11 +1111,155 @@ def durable_history_pass(args, tamper):
             {
                 "phase": "restored",
                 "ticks": ticks,
+                "tracked_ticks": tracked_ticks,
                 "standby_role": role(rig.standby_url, failures),
                 "duty_role": role(rig.duty_url, failures),
             }
         )
         evidence["final_tick"] = ticks[-1]
+
+        # Phase 7 — the anchor marks: a paced cold-start lifetime on
+        # the tracking peer's declared journal/history mounts — the
+        # deployment's `--scan-ms` shape, so the run's own pacing
+        # mints the tick domain's civil-time anchor the file's
+        # `run_boundary` record stamps, and the tracked line's
+        # adoption lands the `domain` seam the crossing declares.
+        # The wall-clock anchor value is the one nondeterministic
+        # byte this leg can mint — it enters the evidence, never the
+        # digest.
+        pair.stop(rig.standby)
+        paced_files = {
+            "journal_file": rig.standby_files["journal_file"],
+            "history_file": rig.standby_files["history_file"],
+        }
+        sb_total = len(
+            [
+                record
+                for kind, record in history_records(
+                    rig.standby_files["history_file"]
+                )
+                if kind == "entry"
+            ]
+        )
+        paced, paced_url, paced_preamble = spawn_paced(
+            args.controller,
+            args,
+            rig,
+            paced_files,
+            rig.duty_url.removeprefix("http://"),
+        )
+        if paced_url is None:
+            detail = "; ".join(paced_preamble[-2:]) or "no diagnostic"
+            failures.append(
+                f"the paced standby exited at startup: {detail}"
+            )
+            raise Abort
+        rig.standby = paced
+        rig.standby_url = paced_url
+        anchored = None
+        domain_seam = None
+        deadline = time.monotonic() + PACED_DEADLINE
+        while time.monotonic() < deadline:
+            try:
+                records = [
+                    record
+                    for kind, record in history_records(
+                        rig.standby_files["history_file"]
+                    )
+                    if kind == "boundary"
+                ]
+            except Abort:
+                # A torn final line while the paced run appends —
+                # retry on the next pass.
+                records = []
+            if records:
+                last_boundary = records[-1]
+                anchor = last_boundary.get("anchor")
+                if last_boundary.get("run") == 3 and isinstance(
+                    anchor, dict
+                ) and isinstance(anchor.get("epoch_ms"), int):
+                    try:
+                        entries = [
+                            record
+                            for kind, record in history_records(
+                                rig.standby_files["history_file"]
+                            )
+                            if kind == "entry"
+                        ]
+                    except Abort:
+                        continue
+                    domain = [
+                        entry
+                        for entry in entries
+                        if "domain" in entry.get("event", {})
+                    ]
+                    paced_samples = [
+                        entry
+                        for entry in entries
+                        if entry["seq"] > sb_total
+                        and "sampled" in entry.get("event", {})
+                    ]
+                    if domain and len(paced_samples) >= len(duties):
+                        anchored = last_boundary
+                        domain_seam = domain[0]
+                        break
+            time.sleep(0.1)
+        if anchored is None:
+            failures.append(
+                "the paced cold-start lifetime never stamped its "
+                "minted anchor and domain seam into the declared "
+                "history file — the run_boundary's anchor mark and "
+                "the adoption's domain mark stayed unexercised"
+            )
+            raise Abort
+        # The served form: the paced lifetime's run_boundary entry
+        # carries the minted anchor to the consumer, and the domain
+        # seam lands among the record's marks.
+        served_marks = durable_page(paced_url, sb_total, failures)
+        boundary_mark = next(
+            (
+                entry
+                for entry in served_marks
+                if (entry.get("event") or {}).get("run_boundary", {}).get(
+                    "run"
+                )
+                == 3
+            ),
+            None,
+        )
+        if boundary_mark is None or (
+            boundary_mark["event"]["run_boundary"].get("anchor")
+            != anchored["anchor"]
+        ):
+            failures.append(
+                "the paced lifetime's served run_boundary mark does "
+                f"not carry the filed anchor {anchored['anchor']}: "
+                f"{boundary_mark}"
+            )
+            raise Abort
+        if domain_seam["event"]["domain"].get("anchor") is not None:
+            failures.append(
+                "the tracked adoption's domain seam carries an "
+                "anchor the unanchored field owner's domain never "
+                f"declared: {domain_seam}"
+            )
+            raise Abort
+        evidence["anchored"] = True
+        digest_entries.append(
+            {
+                "phase": "anchor",
+                "boundary": {
+                    "run": anchored["run"],
+                    "tick": anchored["tick"],
+                    "anchored": True,
+                },
+                "domain_seam": {
+                    "seq": domain_seam["seq"],
+                    "tick": domain_seam["tick"],
+                    "anchored": False,
+                },
+            }
+        )
     except Inconclusive:
         raise
     except Abort as abort:
@@ -873,11 +1331,11 @@ def main():
     print(
         f"durable-history-digest {digest} — tracking by tick "
         f"{evidence['converged']}, run {evidence['resumed_run']} "
-        f"resumed at tick {evidence['resumed_tick']}, run 4 resumed "
-        f"at tick {evidence['resumed_run4_tick']} with "
-        f"{evidence['evicted']} evicted entries reading as a "
-        f"numbering gap, roles restored at tick "
-        f"{evidence['final_tick']}"
+        f"resumed at tick {evidence['resumed_tick']} with adopted "
+        f"cadence baselines, the field owner's window evicting "
+        f"{evidence['evicted']} entries as a numbering gap, the "
+        "paced lifetime's anchor and domain marks stamped, roles "
+        f"restored at tick {evidence['final_tick']}"
     )
     return 0
 
