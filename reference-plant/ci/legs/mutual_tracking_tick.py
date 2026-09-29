@@ -35,12 +35,13 @@ exercises exactly that shape on the manifest-declared pair:
   the ownerless line honestly owes;
 - freezes the demoted peer — `SIGSTOP` on the spawned process — while
   the configured peer's quiesced scans pace its run clock past the
-  frozen peer's served tick: the seeded offset, the run's standing lead
-  over the tracked stream, stamped `stream_tick` on its checkpoint;
+  frozen peer's served tick: the seeded offset, the run's standing
+  lead over the tracked stream;
 - thaws the frozen peer and drives tracking-first scans through the
   recovery — the resumed peer's stale checkpoint landing as a hold on
-  the survivor, never a rewind, and the seed clearing as the realigned
-  stream catches up;
+  the survivor, never a rewind, that apply minting the standing lead
+  its served checkpoint stamps `stream_tick`, and the seed clearing
+  as the realigned stream catches up;
 - audits every observation — the serving `/role` reports collected
   through the run and both peers' durable journals after it — against
   the bounded tick-domain contract: no observed or journaled tick ever
@@ -557,10 +558,9 @@ def mutual_tracking_tick_pass(args, tamper):
         # Phase 4 — the seeded offset: freeze the demoted peer while
         # the configured peer's quiesced scans pace its run clock past
         # the frozen peer's served tick — each scan a produced-nothing
-        # pull, the run's standing lead over the tracked stream
-        # growing one tick per driven scan. The surviving peer's
-        # checkpoint must stamp that lead `stream_tick` — the seeded
-        # offset's declared evidence.
+        # pull reporting `degraded`, the run's standing lead over the
+        # tracked stream growing one tick per driven scan against the
+        # held mark.
         frozen = frames[-1].get("duty") or peer_row(duty_url)
         if frozen is None or not int_tick(frozen.get("tick")):
             raise Inconclusive(
@@ -569,6 +569,7 @@ def mutual_tracking_tick_pass(args, tamper):
                 "absent"
             )
         frozen_tick = frozen["tick"]
+        window_start = len(frames)
         pause_peer(rig.duty)
         resume_error = None
         try:
@@ -601,59 +602,80 @@ def mutual_tracking_tick_pass(args, tamper):
                         "more and never less"
                     )
                     break
+        # The seed: the survivor's standing lead over the tracked
+        # stream — its last window tick against the frozen mark. The
+        # stream position cannot move while the peer stands frozen,
+        # so the quiesced ticks are the offset the recovered stream
+        # must clear; the `degraded` verdicts the window's missed
+        # pulls report carry no aligned mark to measure it by.
         seeded = None
         if not advanced:
             inconclusive.append(
                 "the held window collected no served rows — the "
                 "starved peer gave the audit nothing to read"
             )
-        elif int_tick(window[-1].get("aligned")):
-            seeded = window[-1]["tick"] - window[-1]["aligned"]
-        survivor_checkpoint = pair.get(
-            f"{standby_url}/checkpoint", "GET /checkpoint", failures
-        )
-        stream_tick = (
-            survivor_checkpoint.get("stream_tick")
-            if isinstance(survivor_checkpoint, dict)
-            else None
-        )
-        if seeded is None or seeded < WINDOW_SCANS - 1:
-            inconclusive.append(
-                "the seeded offset never formed — the held window's "
-                "quiesced scans did not leave the run standing ahead "
-                f"of its tracked stream: last row {window[-1] if window else None}"
-            )
-        elif not int_tick(stream_tick) or not (
-            stream_tick < survivor_checkpoint.get("tick", 0)
-        ):
-            inconclusive.append(
-                "the surviving peer's checkpoint carries no "
-                "`stream_tick` under a standing lead — the pinned "
-                "release predates the lead stamp the contract is "
-                "read through"
-            )
+        else:
+            seeded = advanced[-1] - frozen_tick
+            if seeded < WINDOW_SCANS - 1:
+                inconclusive.append(
+                    "the seeded offset never formed — the held "
+                    "window's quiesced scans did not leave the run "
+                    "standing ahead of its tracked stream: the "
+                    f"survivor rests at {advanced[-1]} against the "
+                    f"frozen mark {frozen_tick}"
+                )
+                seeded = None
         digest_entries.append(
             {
                 "phase": "window",
                 "scans": WINDOW_SCANS,
                 "frozen": "held",
-                "seeded": "standing" if seeded else "none",
-                "stream_tick": "stamped" if int_tick(stream_tick) else "absent",
+                "seeded": "standing" if seeded is not None else "none",
             }
         )
         if failures or inconclusive:
             raise Abort
 
         # Phase 5 — the recovery: the thawed peer's stale checkpoint
-        # lands on the survivor as a hold — never a rewind — and the
-        # resumed pulls realign the frozen run onto the stream. The
-        # seeded offset clears as the tracked stream catches up: both
-        # peers' aligned mark returns within CLEAR_BOUND of the run
-        # tick while the runs stay within CADENCE of each other.
+        # lands on the survivor as a hold — never a rewind — and that
+        # first apply mints the standing lead: the survivor's served
+        # checkpoint stamps `stream_tick` where the adopted stream
+        # position sits below its run tick, the seeded offset's
+        # declared evidence. The resumed pulls then realign the
+        # frozen run onto the stream and the seeded offset clears:
+        # both peers' aligned mark returns within CLEAR_BOUND of the
+        # run tick while the runs stay within CADENCE of each other.
         cleared = None
         seed_index = len(frames)
-        for _ in range(RECOVERY_ROUNDS):
+        stamped_lead = None
+        for round_ in range(RECOVERY_ROUNDS):
             scan(standby_url)
+            if round_ == 0:
+                survivor_checkpoint = pair.get(
+                    f"{standby_url}/checkpoint",
+                    "GET /checkpoint",
+                    failures,
+                )
+                survivor_tick = (
+                    survivor_checkpoint.get("tick")
+                    if isinstance(survivor_checkpoint, dict)
+                    else None
+                )
+                stream_tick = (
+                    survivor_checkpoint.get("stream_tick")
+                    if isinstance(survivor_checkpoint, dict)
+                    else None
+                )
+                if int_tick(stream_tick) and int_tick(survivor_tick):
+                    if stream_tick < survivor_tick:
+                        stamped_lead = survivor_tick - stream_tick
+                if stamped_lead is None or stamped_lead < seeded:
+                    inconclusive.append(
+                        "the surviving peer's checkpoint stamps no "
+                        "standing lead over the held stream — the "
+                        "pinned release predates the `stream_tick` "
+                        "stamp the contract is read through"
+                    )
             scan(duty_url)
             time.sleep(SETTLE_S)
             observe(("duty", duty_url), ("standby", standby_url))
@@ -680,7 +702,6 @@ def mutual_tracking_tick_pass(args, tamper):
             ):
                 cleared = row
                 break
-        seed_row = frames[seed_index - 1] if seed_index else None
         if cleared is None:
             failures.append(
                 "the seeded offset never cleared as the tracked "
@@ -693,6 +714,7 @@ def mutual_tracking_tick_pass(args, tamper):
             {
                 "phase": "recover",
                 "seeded": seeded,
+                "stream_tick": "stamped" if stamped_lead else "absent",
                 "cleared": "yes" if cleared is not None else "no",
             }
         )
