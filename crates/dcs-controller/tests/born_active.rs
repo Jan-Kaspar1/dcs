@@ -19,12 +19,19 @@
 //!   re-issued ask answered at the first contact the thawed field
 //!   takes — settles under the identical contract rather than leaving
 //!   a peerless standby wedged where the boot-time verdict exits.
+//! - `deferred-startup-refusal-strands-undeclared-born`: the finding's
+//!   own sequencing — the incumbent's claim stands *before* the pause,
+//!   and `docker pause`/`unpause` holds every field link open but
+//!   unanswered rather than severing it — the pending run's deferred
+//!   ask must still reach the refused verdict's named disposition
+//!   instead of standing as an invisible dead seat.
 //!
 //! The rig is the failover harness's shape: a `dcs-plant-server`
 //! process owns the shared `tank_loop` plant and the controllers load
 //! the same model re-pointed at `sim-tcp`, `--driven` so every scan —
 //! and therefore every claim probe and deferred ask — happens inside a
-//! `POST /scan` request.
+//! `POST /scan` request, or wall-clock `--scan-ms` paced for the QA
+//! deployment's own launch shape.
 
 use dcs_core::{
     Command, CommandError, CommandOutcome, FieldClaim, JournalEvent, PointId, Role, StandbySync,
@@ -32,9 +39,13 @@ use dcs_core::{
 };
 use dcs_monitor::MonitorClient;
 use dcs_sim_net::{ClaimGrant, RemoteDriver};
-use std::net::TcpListener;
+use std::io::{self, Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command as Process;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 mod support;
 
@@ -115,6 +126,126 @@ impl FrozenField {
         let addr = self.addr();
         drop(self.0);
         addr
+    }
+}
+
+/// A pausable TCP relay between the controllers and the plant — the
+/// `docker pause`/`unpause` cycle the finding ran, made of real
+/// sockets: while `paused` stands the pump threads hold every
+/// connection open and forward nothing, so a link's in-flight request
+/// sits unanswered exactly as it does inside a frozen plant process —
+/// the claim table and the incumbent's hold included, where
+/// [`FrozenField`]'s dropped listener is the colder *restart* shape.
+/// Released, the buffered bytes flow and the stalled exchanges
+/// complete or time out on their own clocks.
+struct PausableRelay {
+    addr: SocketAddr,
+    paused: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+}
+
+impl PausableRelay {
+    /// Binds a relay on an ephemeral loopback port forwarding to
+    /// `upstream`, its accept loop on a spawned thread. Accepts and
+    /// upstream connects run through the pause — a stopped process
+    /// still completes handshakes at the kernel — so a launch on the
+    /// frozen field attaches and then hears nothing, the pending
+    /// born-active's exact boot shape.
+    fn forwarding(upstream: SocketAddr) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let relay = Self {
+            addr: listener.local_addr().unwrap(),
+            paused: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(AtomicBool::new(false)),
+        };
+        let (paused, stop) = (relay.paused.clone(), relay.stop.clone());
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((downstream, _)) => {
+                        let Ok(served) = TcpStream::connect(upstream) else {
+                            continue;
+                        };
+                        for (from, to) in [
+                            (downstream.try_clone().unwrap(), served.try_clone().unwrap()),
+                            (served, downstream),
+                        ] {
+                            let (paused, stop) = (paused.clone(), stop.clone());
+                            std::thread::spawn(move || Self::pump(from, to, paused, stop));
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) if stop.load(Ordering::Relaxed) => return,
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        });
+        relay
+    }
+
+    /// The address controllers point their `sim-tcp` devices at.
+    fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// `docker pause`: the pumps stop moving bytes while every socket
+    /// stays open — a frozen plant process's exact wire shape.
+    fn pause(&self) {
+        self.paused.store(true, Ordering::Relaxed);
+    }
+
+    /// `docker unpause`: buffered bytes flow again and every in-flight
+    /// exchange completes on the surviving link or fails on the
+    /// requester's own timeout.
+    fn resume(&self) {
+        self.paused.store(false, Ordering::Relaxed);
+    }
+
+    /// Copies `from` to `to` until either side closes, polling its
+    /// read so a pause or the relay's stop lands within a beat.
+    fn pump(
+        mut from: TcpStream,
+        mut to: TcpStream,
+        paused: Arc<AtomicBool>,
+        stop: Arc<AtomicBool>,
+    ) {
+        let _ = from.set_read_timeout(Some(Duration::from_millis(10)));
+        let mut buf = [0u8; 8192];
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            if paused.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            match from.read(&mut buf) {
+                Ok(0) => {
+                    let _ = to.shutdown(Shutdown::Write);
+                    return;
+                }
+                Ok(n) => {
+                    if to.write_all(&buf[..n]).is_err() {
+                        return;
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => return,
+            }
+        }
+    }
+}
+
+impl Drop for PausableRelay {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
     }
 }
 
@@ -703,6 +834,103 @@ fn a_deferred_startup_claim_refusal_exits_a_paced_pairless_run() {
         stderr.contains("no --peer was declared, so there is no pair to rejoin"),
         "{stderr}"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// QA finding `deferred-startup-refusal-strands-undeclared-born` — the
+/// reproduction's own sequencing, which the earlier deferred legs do
+/// not run: the incumbent's claim stands *before* the pause, and the
+/// field freezes in place rather than severing. A `PausableRelay` in
+/// front of the plant is the `docker pause` wire shape — every link
+/// held open, nothing answered — so the thawed field still serves the
+/// incumbent's live hold, where a respawned plant's claim table would
+/// have cleared. The undeclared born-active launches against the
+/// silent field, its startup ask meeting no verdict; the unpause's
+/// first answered contact settles the incumbent's refusal and the
+/// pairless run reaches the named disposition — process exit naming
+/// the verdict — instead of the invisible dead seat the finding
+/// watched: no tracking source, adoption refused, promotion gated, and
+/// the startup ask permanently disarmed.
+#[test]
+fn a_deferred_startup_claim_refusal_on_a_paused_claimed_field_exits() {
+    let dir = scratch("deferred-exit-paused-claimed");
+    let plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let relay = PausableRelay::forwarding(plant.addr);
+    let model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        relay.addr(),
+        SimTcp::Merged,
+    )
+    .0;
+
+    // The incumbent claims the field ahead of the freeze — a driven
+    // run, so the pause costs its claim-holding link no timed-out
+    // request and the hold stays live for the deferred ask to meet.
+    let incumbent = spawn_controller(
+        &model,
+        &["--owner-token".to_string(), INCUMBENT.to_string()],
+        DT,
+    );
+    let incumbent_client = MonitorClient::new(incumbent.addr);
+    incumbent_client.advance(1).unwrap();
+    let report = incumbent_client.role().unwrap();
+    assert_eq!(report.role, Role::Active);
+    assert_eq!(report.field_claim, Some(FieldClaim::Held));
+
+    // `docker pause`: every link to the field stays open and
+    // unanswered — the launch's attach still completes while its
+    // startup ask waits on a verdict the frozen field never sends.
+    relay.pause();
+    let mut launched = spawn_controller_paced(
+        &model,
+        &["--owner-token".to_string(), LAUNCHED.to_string()],
+        50,
+        "127.0.0.1:0",
+    );
+    // The pending surface the finding watched strand: standby,
+    // unsynchronized, no claim verdict observed — the run serves but
+    // owns nothing it could promote from.
+    let client = MonitorClient::new(launched.addr);
+    let report = client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert_eq!(report.sync, Some(StandbySync::Unsynchronized));
+    assert_eq!(report.field_claim, None);
+    assert_command_refused(&client);
+
+    // `docker unpause`: buffered and fresh exchanges flow again. The
+    // pending run's first answered probe re-issues the conditional
+    // grant, the incumbent's still-live claim refuses it, and the
+    // pairless run takes the launch-time refusal's disposition —
+    // exit-or-rejoin parity with `activate()`'s identical verdict —
+    // rather than standing inert until an external restart.
+    relay.resume();
+    let status = launched
+        .wait_exit(Duration::from_secs(20))
+        .expect("the deferred-refused pairless run must exit, not wedge standby");
+    assert!(!status.success(), "the refused run must exit nonzero");
+    let stderr = launched.stderr_tail();
+    assert!(
+        stderr.contains("a live peer holds the field's write-ownership claim"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("no --peer was declared, so there is no pair to rejoin"),
+        "{stderr}"
+    );
+
+    // The incumbent held the field through the whole episode — the
+    // deferred refusal never touched its claim, and its run keeps
+    // owning the field when its link answers again.
+    incumbent_client.advance(1).unwrap();
+    let report = incumbent_client.role().unwrap();
+    assert_eq!(report.role, Role::Active);
+    assert_eq!(report.field_claim, Some(FieldClaim::Held));
+    let probe = RemoteDriver::connect(plant.addr).unwrap();
+    assert_eq!(probe.ensure_writer(INCUMBENT).unwrap(), ClaimGrant::Shared);
+    probe.release_writer().unwrap();
 
     let _ = std::fs::remove_dir_all(&dir);
 }
