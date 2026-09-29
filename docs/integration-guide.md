@@ -671,16 +671,23 @@ A factory returns one of two `DeviceDriver` contributions:
   (`Fn(u64) -> Result<bool, dcs_assembly::StepError>`) — the *bound*
   conditional re-grant a fencing-demoted ex-owner probes each standby
   scan while its loss mark stands: `FanoutDriver::reclaim_field_writer`
-  runs it to take the claim back under the run's token only where the
-  field stands unclaimed or already names it — `Ok(true)` — refusing
-  `Ok(false)` while a different owner stands, so a released preemption
-  ends with the ex-owner holding the field again and no probe ever
-  preempts. Unlike `ensure` the grant binds the probing attachment to
-  the claim's holders, because the peer's gate lifts on it and its
-  writes must pass the arbitration it re-took. `sim-tcp` installs the
-  plant server's bound `ensure_writer`; a kind without a bound
-  conditional grant leaves it `None` and the demoted peer keeps the
-  pre-hook wedge — an operator's promote unwedges.
+  runs it to take the claim back under the run's token where the field
+  stands unclaimed, already names it, or stands under a different
+  owner's holderless claim — `Ok(true)` — refusing `Ok(false)` only
+  while a different owner's claim has live holders, so a released
+  preemption ends with the ex-owner holding the field again and no
+  probe ever preempts a live attachment. Because the ask can preempt
+  the holderless shapes the field cannot tell from a dead owner's — a
+  merely transport-frozen incumbent's included — the peer issues it
+  only where its own scan probe just answered `unclaimed` or its
+  standing convergence proof holds: an unconverged ex-owner never
+  preempts a standing claim (decision 105). Unlike `ensure` the grant
+  binds the probing attachment to the claim's holders, because the
+  peer's gate lifts on it and its writes must pass the arbitration it
+  re-took. `sim-tcp` installs the plant server's `reclaim_writer`; a
+  kind without a bound conditional grant leaves it `None` and the
+  demoted peer keeps the pre-hook wedge — an operator's promote
+  unwedges.
   `fenced_by` is an optional `FencedByHook` (`Fn() -> Option<u64>`) —
   the claimant attribution the field-ownership audit reads:
   `FanoutDriver::fencing_claimant(point)` asks it for the owner token
