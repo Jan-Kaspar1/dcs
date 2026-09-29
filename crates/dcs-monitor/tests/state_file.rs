@@ -254,3 +254,64 @@ fn the_paced_persist_queues_and_the_health_reports_by_name() {
         .is_none()));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Finding `state-file-alias-clobbers-append-durable-files`: a
+/// `MonitorConfig` naming one path for two persistence sinks must
+/// fail the bind naming the conflict — the append sinks' writer lock
+/// cannot see the checkpoint's write-then-rename, so the alias would
+/// orphan the append writer's descriptor and divert its durable
+/// record onto an unreachable inode the next replay refuses.
+#[test]
+fn aliased_persistence_paths_fail_the_bind_naming_the_conflict() {
+    let dir = scratch("alias");
+    let shared = dir.join("shared");
+    let cases: [(MonitorConfig, [&str; 2]); 3] = [
+        (
+            MonitorConfig {
+                state_file: Some(shared.clone()),
+                journal_file: Some(shared.clone()),
+                ..MonitorConfig::default()
+            },
+            ["state_file", "journal_file"],
+        ),
+        (
+            MonitorConfig {
+                state_file: Some(shared.clone()),
+                history_file: Some(shared.clone()),
+                ..MonitorConfig::default()
+            },
+            ["state_file", "history_file"],
+        ),
+        (
+            MonitorConfig {
+                journal_file: Some(shared.clone()),
+                history_file: Some(shared.clone()),
+                ..MonitorConfig::default()
+            },
+            ["journal_file", "history_file"],
+        ),
+    ];
+    for (config, [first, second]) in cases {
+        let driver = StubDriver {
+            points: Mutex::new(HashMap::new()),
+        };
+        let map = PointMap::new().with_writable_point(PointId(10), Direction::In, ValueKind::Float);
+        let executor = Executor::new(&driver, map, Vec::new()).unwrap();
+        let error = match Monitor::bind_with("127.0.0.1:0", executor, signal_index(), config) {
+            Ok(_) => panic!("{first} and {second} on one path must fail the bind"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("distinct") && message.contains(first) && message.contains(second),
+            "{first} and {second}: {message}"
+        );
+        // The refusal ran before any sink opened: the shared path
+        // stays untouched.
+        assert!(
+            !shared.exists(),
+            "the refused bind left the aliased path touched"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
