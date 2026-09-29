@@ -570,7 +570,7 @@ use dcs_runtime::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::io::{self, Cursor, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::mpsc;
@@ -703,16 +703,24 @@ const JOURNAL_DRAIN_WAIT: Duration = Duration::from_secs(30);
 /// trail silently.
 const STATE_DRAIN_WAIT: Duration = crate::state_file::STATE_DRAIN_WAIT;
 
-/// How far ahead of this run's own tick a checkpoint pulled to verify
-/// an announced demotion hint may serve: a successor tracking this run
-/// applies this run's checkpoints and scans alongside it, so it can
+/// How far ahead of the line's stream position a checkpoint pulled to
+/// verify an announced demotion hint, a claimed source, or an orphan
+/// resolution may serve: a successor tracking this line applies its
+/// checkpoints and scans alongside it, so its stream position can
 /// honestly sit a few ticks ahead — but a same-generation stream far
-/// ahead of the run's tick is not this line's continuation. It is the
-/// signature of a forged or foreign stream served from an
-/// attacker-chosen endpoint, and the demotion refuses it rather than
-/// moving the run onto it. Thirty-two ticks is a short skew window at
-/// any deployed scan period — far beyond the lockstep drift of a real
-/// tracking peer, far below any forgery worth serving.
+/// ahead of the line's position is not this line's continuation. It
+/// is the signature of a forged or foreign stream served from an
+/// attacker-chosen endpoint, and the verification refuses it rather
+/// than moving the run onto it. The comparison runs on each
+/// document's declared [`stream position`](Checkpoint::stream_tick),
+/// not the probing run's own paced tick: a tracking peer's run clock
+/// accrues a permanent lead over the stream for every source outage
+/// it survives, so run ticks are not synchronized to the line and
+/// only the declared stream position locates the document in the
+/// domain the line's generation began in. Thirty-two ticks is a
+/// short skew window at any deployed scan period — far beyond the
+/// lockstep drift of a real tracking peer, far below any forgery
+/// worth serving.
 const MAX_ANNOUNCED_AHEAD: u64 = 32;
 
 /// How many announced follow-peer hints the tracking-source contract
@@ -735,6 +743,14 @@ const MAX_ANNOUNCED: usize = 8;
 /// every scan cycle on a bounded pull burst while an endpoint that
 /// recovers still earns a fresh probe inside a bounded window.
 const ANNOUNCED_VERIFY_RETRY: Duration = Duration::from_secs(4);
+
+/// How many distinct `(source, reason)` adoption-refusal signatures
+/// one tracking epoch journals — the dedup bound behind
+/// [`Monitor::note_source_refusal`]: each stands as durable audit
+/// while a flooding adversary minting fresh reasons per probe cannot
+/// grow the journal unboundedly. The set clears on every landed
+/// adoption, so a re-strand audits its refusals fresh.
+const MAX_REFUSAL_SIGNATURES: usize = 64;
 
 /// How many consecutive produced-nothing pulls a learned tracking pin
 /// — the orphan probe's `resolved` owner or the verified `adopted`
@@ -1173,6 +1189,15 @@ pub struct Monitor<'d> {
     /// line's field ownership lives. Serve-time bookkeeping like
     /// `announced`; a field owner stamps itself and never reads this.
     line_owner: Mutex<Option<SocketAddr>>,
+    /// The adoption-refusal signatures this run's tracking path has
+    /// already journaled — (endpoint, reason) pairs, one
+    /// `tracking_source_refused` entry each, so a persistently
+    /// refusing successor the resolution re-probes every cycle audits
+    /// once rather than flooding the journal — and never silently.
+    /// Cleared when a source adoption lands: a new tracking epoch can
+    /// meet the same refusal fresh. Outside `shared`: pull-path
+    /// bookkeeping like `pin_misses`.
+    refused: Mutex<BTreeSet<(SocketAddr, String)>>,
     /// This run's half of the pair's shared tracking secret — the key
     /// [`with_pair_key`](Self::with_pair_key) installs from
     /// dcs-controller's `--pair-token`. A `GET /checkpoint?prove=<nonce>`
@@ -1375,6 +1400,7 @@ impl<'d> Monitor<'d> {
             pulling: Mutex::new(None),
             pin_misses: Mutex::new(None),
             line_owner: Mutex::new(None),
+            refused: Mutex::new(BTreeSet::new()),
             pair_key: None,
         })
     }
@@ -2167,6 +2193,31 @@ impl<'d> Monitor<'d> {
         self.store.sync_liveness(shared.peer.report());
     }
 
+    /// Journals a tracking-source probe's refusal of the endpoint it
+    /// verified against — `source`'s served checkpoint failed the
+    /// line-membership bar — once per distinct `(source, reason)`
+    /// signature per tracking epoch: a demoted or orphaned peer
+    /// re-probes the standing refusal every cycle, and the durable
+    /// record should name it once, not once per scan, while a source
+    /// adoption clears the epoch so a re-strand audits fresh. Past
+    /// [`MAX_REFUSAL_SIGNATURES`] distinct signatures the epoch's
+    /// audit stops recording new reasons rather than letting a
+    /// rotating forgery flood the journal.
+    fn note_source_refusal(&self, source: SocketAddr, detail: String) {
+        {
+            let mut refused = self.refused.lock().unwrap();
+            if refused.len() >= MAX_REFUSAL_SIGNATURES || !refused.insert((source, detail.clone()))
+            {
+                return;
+            }
+        }
+        let mut shared = self.shared.lock().unwrap();
+        let tick = shared.peer.tick();
+        shared
+            .recorder
+            .note_tracking_source_refused(tick, source, detail);
+    }
+
     /// Runs the standby's per-scan tracking cycle — the paced loop's
     /// pre-scan half: `pull` fetches the active's checkpoint once,
     /// routed through
@@ -2833,6 +2884,7 @@ impl<'d> Monitor<'d> {
                 Some(source) if self.announced.lock().unwrap().contains(&source) => {
                     recorder.note_tracking_source(peer.tick(), source);
                     *self.adopted.lock().unwrap() = Some(source);
+                    self.refused.lock().unwrap().clear();
                     peer.demote_as(actor)
                 }
                 _ => Err(SwitchError::NoTrackingSource),
@@ -3041,26 +3093,49 @@ impl<'d> Monitor<'d> {
             // run's own document back — never a successor — and on
             // the involuntary path the demoted run's own standby
             // document would pass the continuation checks, wedging
-            // the peer onto pulling itself.
+            // the peer onto pulling itself. The refusal journals once
+            // per signature like the rest — a hint that can never
+            // prove succession is the same auditable refusal.
             if hint == self.local_addr() {
+                self.note_source_refusal(hint, "the hint names this run's own monitor".to_string());
                 continue;
             }
             let pulled = match MonitorClient::with_timeout(hint, CHECKPOINT_PULL_TIMEOUT)
                 .checkpoint_tracking(None, nonce)
             {
                 Ok(pulled) => pulled,
-                Err(_) => continue,
+                // An unanswered pull refuses the adoption like any
+                // served refusal — journaled once per signature, so a
+                // set of dead hints strands auditably, not silently.
+                Err(error) => {
+                    self.note_source_refusal(
+                        hint,
+                        format!("the verify pull produced no checkpoint: {error}"),
+                    );
+                    continue;
+                }
             };
-            if !self.proven(&pulled, nonce)
-                || verify_announced_checkpoint(&pulled, own).is_err()
-                || self
-                    .shared
-                    .lock()
-                    .unwrap()
-                    .peer
-                    .unaccounted(&pulled)
-                    .is_some()
-            {
+            // Every refusal class journals once per signature: the
+            // hinted endpoint that answers but cannot prove this
+            // line's continuation is the strand the announced contract
+            // exists to refuse — and it refuses auditably.
+            if !self.proven(&pulled, nonce) {
+                self.note_source_refusal(
+                    hint,
+                    "the pull's line proof did not verify under the pair key".to_string(),
+                );
+                continue;
+            }
+            if let Err(reason) = verify_announced_checkpoint(&pulled, own) {
+                self.note_source_refusal(hint, reason.to_string());
+                continue;
+            }
+            // `unaccounted` runs under the shared lock, so its answer
+            // binds and releases before the refusal journals — the
+            // note takes `shared` itself.
+            let unaccounted = self.shared.lock().unwrap().peer.unaccounted(&pulled);
+            if let Some(detail) = unaccounted {
+                self.note_source_refusal(hint, detail.to_string());
                 continue;
             }
             if pulled.source_owns_field == Some(true) {
@@ -3151,6 +3226,7 @@ impl<'d> Monitor<'d> {
             recorder.note_tracking_source(peer.tick(), source);
             drop(shared);
             *self.adopted.lock().unwrap() = Some(source);
+            self.refused.lock().unwrap().clear();
             return Some(source);
         }
         // No hint proved this run's continuation — but a successor
@@ -3206,8 +3282,14 @@ impl<'d> Monitor<'d> {
         // The verdict could name this monitor itself — a stale
         // record the field supplanted with a fresher claim would
         // only ever serve this run's own standby document back,
-        // which can never prove succession.
+        // which can never prove succession. The self-name journals
+        // like a served refusal: a verdict that never updates is the
+        // same permanent strand, and it must not sit silent.
         if claimed == self.local_addr() {
+            self.note_source_refusal(
+                claimed,
+                "the standing claim declares this run's own monitor".to_string(),
+            );
             return None;
         }
         // A wildcard declaration is a bind address, not a dialable
@@ -3220,6 +3302,10 @@ impl<'d> Monitor<'d> {
         // pull, and it spends no retry window so the first routable
         // verdict verifies on the next pass.
         if claimed.ip().is_unspecified() {
+            self.note_source_refusal(
+                claimed,
+                "the claim's declared monitor is undialable".to_string(),
+            );
             return None;
         }
         {
@@ -3236,10 +3322,36 @@ impl<'d> Monitor<'d> {
             at: Instant::now(),
         });
         let nonce = self.pair_key.map(|_| mint_generation());
-        let pulled = MonitorClient::with_timeout(claimed, CHECKPOINT_PULL_TIMEOUT)
+        // A declared monitor that does not answer refuses the
+        // adoption as surely as one the checks refuse — journaled
+        // once per signature, so a dead claimed endpoint leaves the
+        // strand auditable rather than silent.
+        let pulled = match MonitorClient::with_timeout(claimed, CHECKPOINT_PULL_TIMEOUT)
             .checkpoint_tracking(None, nonce)
-            .ok()?;
-        if verify_owner_checkpoint(&pulled, &own).is_err() || !self.proven(&pulled, nonce) {
+        {
+            Ok(pulled) => pulled,
+            Err(error) => {
+                self.note_source_refusal(
+                    claimed,
+                    format!("the claim's declared monitor answered no checkpoint: {error}"),
+                );
+                return None;
+            }
+        };
+        // A serving endpoint the line-membership or proof checks
+        // refuse is the strand the adoption exists to close, so the
+        // refusal journals once per signature — a permanently
+        // unacceptable successor is durable audit, never journal
+        // silence.
+        if let Err(reason) = verify_owner_checkpoint(&pulled, &own) {
+            self.note_source_refusal(claimed, reason.to_string());
+            return None;
+        }
+        if !self.proven(&pulled, nonce) {
+            self.note_source_refusal(
+                claimed,
+                "the pull's line proof did not verify under the pair key".to_string(),
+            );
             return None;
         }
         // Pin only while nothing proven stands — a promotion or an
@@ -3254,6 +3366,7 @@ impl<'d> Monitor<'d> {
         recorder.note_tracking_source(peer.tick(), claimed);
         drop(shared);
         *self.adopted.lock().unwrap() = Some(claimed);
+        self.refused.lock().unwrap().clear();
         Some(claimed)
     }
 
@@ -3368,38 +3481,71 @@ impl<'d> Monitor<'d> {
         }
         let nonce = self.pair_key.map(|_| mint_generation());
         for &candidate in &candidates {
+            // A candidate naming this run's own monitor can never
+            // prove succession — journaled once per signature like
+            // the served refusals.
             if candidate == self.local_addr() {
+                self.note_source_refusal(
+                    candidate,
+                    "the candidate names this run's own monitor".to_string(),
+                );
                 continue;
             }
             let pulled = match MonitorClient::with_timeout(candidate, CHECKPOINT_PULL_TIMEOUT)
                 .checkpoint_tracking(None, nonce)
             {
                 Ok(pulled) => pulled,
-                Err(_) => continue,
-            };
-            if verify_owner_checkpoint(&pulled, &own).is_ok() && self.proven(&pulled, nonce) {
-                // Pin only while the peer still owns no field — a
-                // promotion landing mid-probe already answered where
-                // the pulls go — and journal the re-target exactly
-                // like the announced- and claimed-source adoptions:
-                // the resolved pin carries the same pull-target
-                // authority, outranking the configured tracking
-                // source, so the durable audit records where the
-                // orphaned peer moved its pulls.
-                let mut shared = self.shared.lock().unwrap();
-                if shared.peer.owns_field() {
-                    return None;
+                // The unanswered candidate is the same refusal class
+                // as a refused document — journaled once per
+                // signature, so a strand on dead endpoints audits.
+                Err(error) => {
+                    self.note_source_refusal(
+                        candidate,
+                        format!("the resolution pull produced no checkpoint: {error}"),
+                    );
+                    continue;
                 }
-                let Shared { peer, recorder, .. } = &mut *shared;
-                recorder.note_tracking_source(peer.tick(), candidate);
-                drop(shared);
-                // The set proved an owner — the failure record no
-                // longer describes it, so a later orphaned cycle on
-                // the same candidates probes fresh.
-                *self.resolve_verify.lock().unwrap() = None;
-                *self.resolved.lock().unwrap() = Some(candidate);
-                return Some(candidate);
+            };
+            match verify_owner_checkpoint(&pulled, &own) {
+                // A refused candidate re-probes on every orphaned
+                // cycle while it stands — the strand that names no
+                // endpoint is the silent one, so each distinct
+                // refusal journals once.
+                Err(reason) => {
+                    self.note_source_refusal(candidate, reason.to_string());
+                    continue;
+                }
+                Ok(()) if !self.proven(&pulled, nonce) => {
+                    self.note_source_refusal(
+                        candidate,
+                        "the pull's line proof did not verify under the pair key".to_string(),
+                    );
+                    continue;
+                }
+                _ => {}
             }
+            // Pin only while the peer still owns no field — a
+            // promotion landing mid-probe already answered where
+            // the pulls go — and journal the re-target exactly
+            // like the announced- and claimed-source adoptions:
+            // the resolved pin carries the same pull-target
+            // authority, outranking the configured tracking
+            // source, so the durable audit records where the
+            // orphaned peer moved its pulls.
+            let mut shared = self.shared.lock().unwrap();
+            if shared.peer.owns_field() {
+                return None;
+            }
+            let Shared { peer, recorder, .. } = &mut *shared;
+            recorder.note_tracking_source(peer.tick(), candidate);
+            drop(shared);
+            // The set proved an owner — the failure record no
+            // longer describes it, so a later orphaned cycle on
+            // the same candidates probes fresh.
+            *self.resolve_verify.lock().unwrap() = None;
+            *self.resolved.lock().unwrap() = Some(candidate);
+            self.refused.lock().unwrap().clear();
+            return Some(candidate);
         }
         *self.resolve_verify.lock().unwrap() = Some(ResolveVerify {
             candidates,
@@ -3978,6 +4124,21 @@ pub fn line_proof(key: u64, nonce: u64, checkpoint: &Checkpoint) -> u64 {
     u64::from_le_bytes(digest[..8].try_into().unwrap())
 }
 
+/// The position a checkpoint document occupies in the tracked line's
+/// origin tick domain — the currency the announced/owner skew bound is
+/// written in. `stream_tick` is the serving run's declaration of where
+/// its capture lands in the domain the line's generation began in;
+/// absent — a lead-free run or a pre-field capture — the document's
+/// own `tick` is the only position it can claim. A document declaring
+/// a position past its own tick is nonsense and reads as lead-free:
+/// the bound stays written against `tick`, the stricter answer.
+fn stream_position(checkpoint: &Checkpoint) -> Tick {
+    checkpoint
+        .stream_tick
+        .unwrap_or(checkpoint.tick)
+        .min(checkpoint.tick)
+}
+
 /// Why a checkpoint pulled to verify an announced demotion hint is
 /// not this run's continuation — [`verify_announced_checkpoint`]'s
 /// named refusals. Each means the announced endpoint serves a stream
@@ -4001,16 +4162,16 @@ enum AnnouncedCheckpointError {
     /// against this run's unidentified one, is not the tracked
     /// continuation.
     ForeignGeneration,
-    /// The pulled checkpoint's tick runs more than
+    /// The pulled checkpoint's stream position runs more than
     /// [`MAX_ANNOUNCED_AHEAD`] past this run's own: a successor
-    /// tracking this run sits only a few ticks ahead of it, so a
-    /// same-generation stream that far ahead is not this line's
+    /// tracking this line sits only a few stream ticks ahead of it,
+    /// so a same-generation stream that far ahead is not this line's
     /// continuation — it is a forged or foreign tick domain wearing
     /// this line's identity.
     Ahead {
-        /// The tick the pulled checkpoint claims.
+        /// The stream position the pulled checkpoint claims.
         pulled: Tick,
-        /// This run's own tick when the hint was verified.
+        /// This run's stream position when the pull was verified.
         own: Tick,
     },
     /// The pulled checkpoint claims its source owns the field — the
@@ -4039,6 +4200,35 @@ enum AnnouncedCheckpointError {
     /// would pin the demoted peer onto another subordinate of the
     /// same stale island.
     NotOwner,
+}
+
+impl std::fmt::Display for AnnouncedCheckpointError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnreadableVersion { found } => {
+                write!(formatter, "unreadable checkpoint format version {found}")
+            }
+            Self::ForeignGeneration => {
+                write!(
+                    formatter,
+                    "the pulled checkpoint names a foreign generation"
+                )
+            }
+            Self::Ahead { pulled, own } => write!(
+                formatter,
+                "the pulled checkpoint's stream position {} leads the line's {} \
+                 past the announced skew bound",
+                pulled.0, own.0
+            ),
+            Self::OwnDocument { pulled, own } => write!(
+                formatter,
+                "the pulled field-owning checkpoint at {} is not ahead of this \
+                 run's {} — the replayable own-document shape",
+                pulled.0, own.0
+            ),
+            Self::NotOwner => write!(formatter, "the pulled checkpoint does not claim the field"),
+        }
+    }
 }
 
 /// Whether one checkpoint pulled from an announced demotion hint
@@ -4085,10 +4275,18 @@ fn verify_announced_checkpoint(
     if pulled.generation != own.generation {
         return Err(AnnouncedCheckpointError::ForeignGeneration);
     }
-    if pulled.tick.0 > own.tick.0.saturating_add(MAX_ANNOUNCED_AHEAD) {
+    // The skew bound compares stream positions, not run ticks: each
+    // side's declared position in the line's origin domain is the
+    // comparable currency — a successor whose paced clock accrued an
+    // outage lead keeps the honest stream position it serves, while a
+    // foreign document without that declaration keeps the run tick it
+    // claims as its position.
+    let pulled_stream = stream_position(pulled);
+    let own_stream = stream_position(own);
+    if pulled_stream.0 > own_stream.0.saturating_add(MAX_ANNOUNCED_AHEAD) {
         return Err(AnnouncedCheckpointError::Ahead {
-            pulled: pulled.tick,
-            own: own.tick,
+            pulled: pulled_stream,
+            own: own_stream,
         });
     }
     if pulled.source_owns_field == Some(true) && pulled.tick.0 <= own.tick.0 {
@@ -4124,10 +4322,16 @@ fn verify_owner_checkpoint(
     if pulled.generation != own.generation {
         return Err(AnnouncedCheckpointError::ForeignGeneration);
     }
-    if pulled.tick.0 > own.tick.0.saturating_add(MAX_ANNOUNCED_AHEAD) {
+    // As in `verify_announced_checkpoint`: the skew bound compares
+    // each document's declared stream position — the probing run's own
+    // paced tick carries whatever outage lead it survived and is no
+    // line-membership reference.
+    let pulled_stream = stream_position(pulled);
+    let own_stream = stream_position(own);
+    if pulled_stream.0 > own_stream.0.saturating_add(MAX_ANNOUNCED_AHEAD) {
         return Err(AnnouncedCheckpointError::Ahead {
-            pulled: pulled.tick,
-            own: own.tick,
+            pulled: pulled_stream,
+            own: own_stream,
         });
     }
     if pulled.source_owns_field != Some(true) {
@@ -5119,6 +5323,7 @@ mod tests {
             generation: Some(11),
             anchor: None,
             tick: Tick(100),
+            stream_tick: None,
             components: Default::default(),
             driver: None,
             outputs: Default::default(),
@@ -5216,6 +5421,40 @@ mod tests {
             verify_announced_checkpoint(&just_past, &own),
             Err(AnnouncedCheckpointError::Ahead { .. })
         ));
+        // The QA finding
+        // `tracking-verify-own-tick-ahead-bound-permanent-strand`: the
+        // bound compares declared stream positions, not run ticks. A
+        // successor whose paced clock accrued a source-outage lead
+        // serves `tick` arbitrarily far ahead while its `stream_tick`
+        // honestly locates the line's position — and verifies; a
+        // probed run whose own clock carries a lead declares it the
+        // same way, so neither side's outage history moves the line's
+        // reference. The *declared* stream position is still bounded:
+        // a stream_tick past the window is the same forgery shape,
+        // and a declaration ahead of the document's own tick is
+        // nonsense — the run tick stays the strictest claim it can
+        // make.
+        let mut led = checkpoint();
+        led.tick = Tick(own.tick.0 + 700);
+        led.stream_tick = Some(Tick(own.tick.0 + 4));
+        assert_eq!(verify_announced_checkpoint(&led, &own), Ok(()));
+        let mut led_own = checkpoint();
+        led_own.stream_tick = Some(Tick(own.tick.0 - 10));
+        assert_eq!(verify_announced_checkpoint(&led, &led_own), Ok(()));
+        let mut runaway = checkpoint();
+        runaway.tick = Tick(own.tick.0 + 700);
+        runaway.stream_tick = Some(Tick(own.tick.0 + MAX_ANNOUNCED_AHEAD + 1));
+        assert!(matches!(
+            verify_announced_checkpoint(&runaway, &own),
+            Err(AnnouncedCheckpointError::Ahead { .. })
+        ));
+        let mut nonsense = checkpoint();
+        nonsense.tick = Tick(own.tick.0 + MAX_ANNOUNCED_AHEAD + 1);
+        nonsense.stream_tick = Some(Tick(nonsense.tick.0 + 100));
+        assert!(matches!(
+            verify_announced_checkpoint(&nonsense, &own),
+            Err(AnnouncedCheckpointError::Ahead { .. })
+        ));
         // A foreign generation — a restarted or unrelated stream, and
         // an identified stream against this run's unidentified one —
         // and an unreadable format are refusals too.
@@ -5253,6 +5492,7 @@ mod tests {
             generation: Some(11),
             anchor: None,
             tick: Tick(100),
+            stream_tick: None,
             components: Default::default(),
             driver: None,
             outputs: Default::default(),
@@ -5281,6 +5521,29 @@ mod tests {
         ahead.source_owns_field = Some(true);
         ahead.tick = Tick(own.tick.0 + MAX_ANNOUNCED_AHEAD);
         assert_eq!(verify_owner_checkpoint(&ahead, &own), Ok(()));
+        // The QA finding
+        // `tracking-verify-own-tick-ahead-bound-permanent-strand`'s
+        // reproduction shape: the promoted successor's paced clock
+        // carries the standby's accrued source-outage lead — `tick`
+        // arbitrarily far past the bound — while its declared
+        // `stream_tick` honestly locates the line's position. The
+        // bound compares stream positions, so the legitimate owner
+        // verifies and the demoted ex-owner rejoins.
+        let mut successor = checkpoint();
+        successor.source_owns_field = Some(true);
+        successor.tick = Tick(own.tick.0 + 700);
+        successor.stream_tick = Some(Tick(own.tick.0 + 5));
+        assert_eq!(verify_owner_checkpoint(&successor, &own), Ok(()));
+        // A declared stream position itself past the bound is the
+        // same forgery shape the unmarked runaway is — refused.
+        let mut declared_runaway = checkpoint();
+        declared_runaway.source_owns_field = Some(true);
+        declared_runaway.tick = Tick(own.tick.0 + 700);
+        declared_runaway.stream_tick = Some(Tick(own.tick.0 + MAX_ANNOUNCED_AHEAD + 1));
+        assert!(matches!(
+            verify_owner_checkpoint(&declared_runaway, &own),
+            Err(AnnouncedCheckpointError::Ahead { .. })
+        ));
 
         // The reproduction's shape: a sibling standby's checkpoint —
         // this line's continuation stamped `source_owns_field: false`

@@ -311,6 +311,7 @@ fn attributed(entry: &JournalEntry, name: &str, points: &BTreeSet<PointId>) -> b
         | JournalEvent::FieldOrphaned { .. }
         | JournalEvent::SourceRestarted { .. }
         | JournalEvent::TrackingSourceAdopted { .. }
+        | JournalEvent::TrackingSourceRefused { .. }
         | JournalEvent::RunBoundary { .. } => false,
     }
 }

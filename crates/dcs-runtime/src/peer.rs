@@ -2104,6 +2104,12 @@ impl<'d> Peer<'d> {
         } else {
             adopted = Checkpoint {
                 tick: landed,
+                // The landed document keeps the pull's stream
+                // position — resolved rather than inherited, so a
+                // lead-free source's document mints the landing
+                // offset as this run's lead instead of reading the
+                // absent stamp as a lead of zero.
+                stream_tick: Some(checkpoint.stream_tick.unwrap_or(checkpoint.tick)),
                 ..checkpoint.clone()
             };
             self.executor.apply(&adopted)
@@ -2778,6 +2784,9 @@ impl<'d> Peer<'d> {
         } else {
             adopted = Checkpoint {
                 tick: landed,
+                // As in `apply`: the landing offset is this run's
+                // lead over the pull's resolved stream position.
+                stream_tick: Some(checkpoint.stream_tick.unwrap_or(checkpoint.tick)),
                 ..checkpoint.clone()
             };
             self.executor.reinitialize(&adopted)
