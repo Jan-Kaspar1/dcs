@@ -14,10 +14,11 @@ use dcs_core::{
     TelemetrySnapshot, Value,
 };
 use dcs_model::PlantModel;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command as Process, Stdio};
+use std::process::{Child, ChildStderr, Command as Process, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 /// The controller binary under test.
 pub const CONTROLLER: &str = env!("CARGO_BIN_EXE_dcs-controller");
@@ -59,6 +60,27 @@ impl Drop for Spawned {
 pub fn kill(spawned: &mut Spawned) {
     spawned.child.kill().unwrap();
     spawned.child.wait().unwrap();
+}
+
+/// Waits for `spawned` to exit on its own — the contract-verdict exits
+/// the born-active startup-failure classes owe — returning its status
+/// and every stderr line past the announcement, where the fatal
+/// disposition names its reason. A run still alive at `within` fails
+/// the test: bounded liveness is what these exits must prove.
+pub fn wait_exited(spawned: &mut Spawned, within: Duration) -> (ExitStatus, String) {
+    let deadline = Instant::now() + within;
+    loop {
+        if let Some(status) = spawned.child.try_wait().unwrap() {
+            let mut rest = String::new();
+            spawned._stderr.read_to_string(&mut rest).unwrap();
+            return (status, rest);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the run did not exit within {within:?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 /// Pins a snapshot's journal-sink drain report to its run-stable

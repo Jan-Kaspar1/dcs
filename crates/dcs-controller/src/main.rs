@@ -699,17 +699,34 @@ fn settle_activation(
             );
             Ok(())
         }
-        Ok(Activation::Refused { error }) if declared_peer => {
+        Ok(Activation::Refused { error }) => settle_startup_refusal(Some(error), declared_peer),
+        Err(error) => Err(format!("{error}")),
+    }
+}
+
+/// The born-active contract's refusal disposition — the (b) class of
+/// the startup-failure record, applied identically at boot
+/// ([`settle_activation`]'s `Refused` arm) and to the deferred grant's
+/// later answer ([`Peer::take_startup_refusal`]). `Some(error)` is the
+/// `FieldClaimFailed` the conditional ask met: where the launch
+/// declared a `--peer` the run already stands rejoined as the pair's
+/// standby and the refusal only reports; where none was declared the
+/// run has no tracking source to rejoin, so `Err` carries the loud
+/// exit naming the refusal and the pair it lacks. `None` means the
+/// deferred grant has not refused — no disposition to apply.
+fn settle_startup_refusal(refusal: Option<SwitchError>, declared_peer: bool) -> Result<(), String> {
+    match refusal {
+        Some(error) if declared_peer => {
             eprintln!(
                 "startup: {error} — the declared pair keeps this run: it stands \
                  rejoined as standby, tracking the configured --peer"
             );
             Ok(())
         }
-        Ok(Activation::Refused { error }) => Err(format!(
+        Some(error) => Err(format!(
             "{error} — no --peer was declared, so there is no pair to rejoin"
         )),
-        Err(error) => Err(format!("{error}")),
+        None => Ok(()),
     }
 }
 
@@ -1758,6 +1775,14 @@ fn main() -> ExitCode {
         }
         eprintln!("listening on {}", monitor.local_addr());
         monitor.serve();
+        // A `/scan` that met the deferred startup grant's refusal shut
+        // the serve loop down; the verdict it left settles here under
+        // the same born-active disposition the boot-time ask got.
+        if let Err(error) =
+            settle_startup_refusal(monitor.take_startup_refusal(), options.peer.is_some())
+        {
+            return fail(error);
+        }
         return ExitCode::SUCCESS;
     }
 
@@ -1806,7 +1831,11 @@ fn main() -> ExitCode {
                 let mut puller = None;
                 run_monitored(
                     &monitor,
-                    || tracked_cycle(&monitor, &mut puller),
+                    // A `--standby` run never defers a startup grant, so
+                    // the refusal flag can never land here; the declared
+                    // disposition argument only keeps `tracked_cycle`'s
+                    // signature shared with the born-active caller.
+                    || tracked_cycle(&monitor, &mut puller, true),
                     step,
                     &options,
                     period.unwrap(),
@@ -1933,7 +1962,7 @@ fn main() -> ExitCode {
                                 observation.claimant, observation.tick.0, observation.point
                             );
                         }
-                        scanned
+                        Ok(scanned)
                     },
                     || peer.borrow().snapshot(),
                     || persist_state_file(&state_sink, &peer),
@@ -2011,7 +2040,10 @@ fn main() -> ExitCode {
                 let mut puller = None;
                 run_monitored(
                     &monitor,
-                    || tracked_cycle(&monitor, &mut puller),
+                    // The deferred grant's refusal settles per cycle:
+                    // the declared pair keeps the rejoined standby,
+                    // and undeclared the `Err` ends the run.
+                    || tracked_cycle(&monitor, &mut puller, options.peer.is_some()),
                     step,
                     &options,
                     period.unwrap(),
@@ -2072,7 +2104,13 @@ fn main() -> ExitCode {
                                 change.from, change.to, change.tick.0
                             );
                         }
-                        scanned
+                        // The deferred startup grant's refusal settles
+                        // the way the boot-time ask's did: with no
+                        // monitor served, `--peer` requires `--listen`,
+                        // so no pair was ever declared and the `Err`
+                        // ends the run.
+                        settle_startup_refusal(peer.take_startup_refusal(), false)?;
+                        Ok(scanned)
                     },
                     || peer.borrow().snapshot(),
                     || persist_state_file(&state_sink, &peer),
@@ -2112,10 +2150,17 @@ fn main() -> ExitCode {
 /// again without a respawn. A
 /// field-owning cycle's [`Monitor::track_cycle`] short-circuits before
 /// the pull, so the puller's fetch thread idles until a demotion.
+///
+/// The scan the cycle ends with is also where a pending born-active's
+/// deferred claim retry lands its verdict: an answered refusal settles
+/// here under the same disposition the boot-time ask gets — `Err`
+/// ends the run where no `--peer` was declared, the declared pair
+/// keeping the rejoined standby otherwise.
 fn tracked_cycle(
     monitor: &Monitor<'_>,
     puller: &mut Option<(TrackTarget, CheckpointPuller)>,
-) -> Tick {
+    declared_peer: bool,
+) -> Result<Tick, String> {
     if let Some(source) = monitor.verified_tracking_source() {
         if puller.as_ref().map(|(bound, _)| bound) != Some(&source) {
             let announce = Some(monitor.local_addr());
@@ -2134,7 +2179,9 @@ fn tracked_cycle(
         let report = monitor.track_cycle(|| puller.as_mut().unwrap().1.poll());
         report_tracking(&report, &source);
     }
-    monitor.paced_scan()
+    let tick = monitor.paced_scan();
+    settle_startup_refusal(monitor.take_startup_refusal(), declared_peer)?;
+    Ok(tick)
 }
 
 /// The standby loop's presentation half of a tracking cycle: logs what
@@ -2171,11 +2218,13 @@ fn report_tracking(report: &TrackReport, source: &TrackTarget) {
 /// capture, and a `POST /promote`/`POST /demote` lands at the same
 /// boundary. `scan` is one scan cycle — a plain
 /// [`Monitor::paced_scan`] for an active, a checkpoint pull plus paced
-/// scan for a standby. [`Monitor::shutdown`] stops the serve loop when
-/// the run ends and the scope join completes the graceful close.
+/// scan for a standby — and an `Err` from it is a terminal verdict the
+/// loop fails on, so [`Monitor::shutdown`] still runs the graceful
+/// close on the way out. [`Monitor::shutdown`] stops the serve loop
+/// when the run ends and the scope join completes the graceful close.
 fn run_monitored(
     monitor: &Monitor<'_>,
-    scan: impl FnMut() -> Tick,
+    scan: impl FnMut() -> Result<Tick, String>,
     step: impl Fn() -> Result<(), String>,
     options: &Options,
     period: Duration,
@@ -2406,7 +2455,7 @@ impl SnapshotSink {
 /// wall-clock overrun detection stays out here in the shell and only a
 /// count, not a timestamp, enters the tick domain.
 fn scan_loop(
-    mut scan: impl FnMut() -> Tick,
+    mut scan: impl FnMut() -> Result<Tick, String>,
     snapshot: impl Fn() -> TelemetrySnapshot,
     persist: impl Fn() -> Result<(), String>,
     step: impl Fn() -> Result<(), String>,
@@ -2427,7 +2476,12 @@ fn scan_loop(
         .then(|| SnapshotSink::start(std::io::stdout()));
     loop {
         let started = Instant::now();
-        scan();
+        // A scan's `Err` is a terminal verdict — the deferred startup
+        // grant's refusal settling with no declared pair to rejoin —
+        // and exits the run the way a step or persist failure does.
+        if let Err(error) = scan() {
+            return fail(error);
+        }
         if let Err(error) = step() {
             return fail(error);
         }

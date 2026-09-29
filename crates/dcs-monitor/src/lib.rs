@@ -2095,6 +2095,21 @@ impl<'d> Monitor<'d> {
         Ok(activation)
     }
 
+    /// Drains the deferred startup grant's refusal verdict — the
+    /// [`SwitchError`] a pending born-active's re-issued conditional
+    /// claim recorded when an answered field contact found a live
+    /// incumbent's claim standing (`Peer::take_startup_refusal`).
+    /// `None` while the startup claim is unsettled, was granted, or
+    /// was already drained. The run's shell disposes of the verdict
+    /// under the born-active contract: a declared `--peer` keeps the
+    /// already-rejoined standby; without one the run exits nonzero.
+    /// A driven run's refusal ends [`serve`](Self::serve) itself — the
+    /// `/scan` handler that met it shut the server down — so the
+    /// shell reads the verdict here once `serve` returns.
+    pub fn take_startup_refusal(&self) -> Option<SwitchError> {
+        self.shared.lock().unwrap().peer.take_startup_refusal()
+    }
+
     /// Applies a checkpoint pulled from the active peer — the standby's
     /// tracking half of the redundancy contract, taken under the same
     /// lock that serializes scans, so the apply lands at a scan
@@ -2698,6 +2713,28 @@ impl<'d> Monitor<'d> {
                         // out.
                         let mut shared = self.shared.lock().unwrap();
                         scan_and_record(&mut shared, &self.store);
+                        // The deferred startup grant's refusal — the
+                        // born-active contract's undeclared exit
+                        // (decision 103's (b)): a pending launch whose
+                        // re-issued claim met a live incumbent has no
+                        // rejoin where no pair was declared, so the run
+                        // ends rather than stranding a sourceless
+                        // standby. The serve loop shuts down and the
+                        // shell names the verdict on the way out — the
+                        // `500` this request answers is the same text.
+                        // A declared source drains the verdict instead:
+                        // the run already stands rejoined as the pair's
+                        // standby, the refusal's recorded disposition.
+                        if let Some(error) = shared.peer.startup_refusal() {
+                            if self.standby_source.is_none() {
+                                failure = Some(format!(
+                                    "{error} — no --peer was declared, so there is no pair to rejoin"
+                                ));
+                                self.shutdown();
+                                break;
+                            }
+                            shared.peer.take_startup_refusal();
+                        }
                         if let Some(after_scan) = &self.driven.after_scan
                             && let Err(error) = after_scan(&shared.peer)
                         {

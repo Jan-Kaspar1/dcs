@@ -354,6 +354,19 @@ pub struct Peer<'d> {
     /// through the conditional grant, never through an unconditional
     /// claim that could preempt a live incumbent it lost track of.
     startup_pending: bool,
+    /// The deferred startup grant's terminal verdict — set by
+    /// [`retry_startup_claim`](Self::retry_startup_claim) when an
+    /// answered contact's re-issued conditional ask met a live
+    /// incumbent's claim. The pending mark clears with it, so the
+    /// refusal stands once: the run's shell reads it through
+    /// [`startup_refusal`](Self::startup_refusal) and
+    /// [`take_startup_refusal`](Self::take_startup_refusal) to apply
+    /// the born-active contract's disposition — rejoin the declared
+    /// pair's standby, or exit where no pair was declared — the same
+    /// choice [`activate`](Self::activate)'s `Refused` answer hands
+    /// the caller at boot. The peer itself cannot pick: whether a
+    /// pair was declared is the launch's, not the run's.
+    startup_refused: Option<SwitchError>,
     /// The claim's orphan-promotion counterpart — the conditional grant
     /// a [`promote`](Self::promote) or [`self_promote`](Self::self_promote)
     /// from [`StandbySync::Orphaned`] runs in place of the
@@ -1093,6 +1106,7 @@ impl<'d> Peer<'d> {
             pending_rearms: Vec::new(),
             startup_claim: None,
             startup_pending: false,
+            startup_refused: None,
             orphan_claim: None,
             pending_orphans: Vec::new(),
             pending_refusals: Vec::new(),
@@ -1399,6 +1413,7 @@ impl<'d> Peer<'d> {
             pending_rearms: Vec::new(),
             startup_claim: None,
             startup_pending: false,
+            startup_refused: None,
             orphan_claim: None,
             pending_orphans: Vec::new(),
             pending_refusals: Vec::new(),
@@ -1474,13 +1489,7 @@ impl<'d> Peer<'d> {
                     Ok(Activation::Granted)
                 }
                 Ok(false) => {
-                    let error = SwitchError::FieldClaimFailed {
-                        detail: "a live peer holds the field's write-ownership claim — a \
-                                 controller restarting into a pair cannot prove its resumed \
-                                 state is current with the incumbent's and must not preempt \
-                                 it; rejoin as a standby instead"
-                            .to_string(),
-                    };
+                    let error = startup_claim_refusal();
                     // The verdict itself is the claim observation:
                     // the incumbent's claim stands — and the refusal
                     // is what the stand-down journals under.
@@ -3189,9 +3198,13 @@ impl<'d> Peer<'d> {
             Ok(false) => {
                 self.startup_pending = false;
                 // The incumbent's refusal settled the startup: the run
-                // stays the tracking standby it already reported, and
-                // the observed-claimant record attributes the verdict.
+                // stays the tracking standby it already reported, the
+                // observed-claimant record attributes the verdict, and
+                // the verdict itself waits for the shell — whether a
+                // pair was declared is the launch's call, so the (b)
+                // disposition — rejoin or exit — applies outside.
                 self.observe_claim_refusal(tick);
+                self.startup_refused = Some(startup_claim_refusal());
             }
             Err(_) => {}
         }
@@ -3455,6 +3468,26 @@ impl<'d> Peer<'d> {
         std::mem::take(&mut self.pending_observations)
     }
 
+    /// The deferred startup grant's refusal verdict, where one landed —
+    /// the [`SwitchError::FieldClaimFailed`]
+    /// [`retry_startup_claim`](Self::retry_startup_claim) recorded when
+    /// an answered contact's re-issued conditional ask met a live
+    /// incumbent's claim. `None` while the startup claim is unsettled,
+    /// was granted, or was never deferred. The run's shell disposes of
+    /// the verdict under the born-active contract: a declared pair
+    /// keeps the rejoined standby; without one the run exits nonzero —
+    /// the same disposition [`activate`](Self::activate)'s `Refused`
+    /// answer carries at boot.
+    pub fn startup_refusal(&self) -> Option<&SwitchError> {
+        self.startup_refused.as_ref()
+    }
+
+    /// Drains the verdict [`startup_refusal`](Self::startup_refusal)
+    /// reports — `Some` once per refused deferred grant, `None` after.
+    pub fn take_startup_refusal(&mut self) -> Option<SwitchError> {
+        self.startup_refused.take()
+    }
+
     /// Drains tracked-source restarts queued since the last call — one
     /// [`SourceRestart`] per regressed-stream adoption that crossed a
     /// generation boundary — for the transition journal the monitoring
@@ -3681,6 +3714,22 @@ impl<'d> Peer<'d> {
             origin: self.attribution.origin,
             actor: self.attribution.actor.clone(),
         });
+    }
+}
+
+/// The [`SwitchError::FieldClaimFailed`] a refused conditional startup
+/// grant carries — the same verdict whether the ask refused inside
+/// [`Peer::activate`] at boot or inside
+/// [`Peer::retry_startup_claim`] on a deferred contact, so the
+/// born-active contract's (b) disposition reads identically either
+/// way.
+fn startup_claim_refusal() -> SwitchError {
+    SwitchError::FieldClaimFailed {
+        detail: "a live peer holds the field's write-ownership claim — a \
+                 controller restarting into a pair cannot prove its resumed \
+                 state is current with the incumbent's and must not preempt \
+                 it; rejoin as a standby instead"
+            .to_string(),
     }
 }
 

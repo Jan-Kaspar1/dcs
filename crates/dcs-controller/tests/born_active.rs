@@ -35,7 +35,7 @@ mod support;
 
 use support::{
     CONTROLLER, SimTcp, controller_model, listening_on, spawn, spawn_controller, spawn_plant,
-    workspace_binary,
+    wait_exited, workspace_binary,
 };
 
 /// The shared plant's model — the dcs-plant tank loop: level raw (10)
@@ -361,6 +361,111 @@ fn a_refused_startup_claim_undeclared_exits() {
         incumbent_client.advance(1).unwrap();
         assert_eq!(incumbent_client.role().unwrap().role, Role::Active);
     }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The deferred refused-startup-claim class without a declared pair —
+/// QA finding `deferred-claim-refusal-strands-undeclared-standby`
+/// (#1314): the first startup ask is inconclusive against a dead
+/// field, and the first *answered* retry meets a live incumbent's
+/// claim. The verdict settles under the same disposition the
+/// boot-time refusal gets: no `--peer` was declared, so the run exits
+/// nonzero naming the refusal and the `--standby` remedy rather than
+/// stranding as a sourceless standby/unsynchronized forever.
+#[test]
+fn a_deferred_refused_startup_claim_undeclared_exits() {
+    let dir = scratch("deferred-refused-exit");
+    let plant_addr = unclaimed_addr();
+    let model = controller_model(&dir, "pair.json", MODEL_SOURCE, plant_addr, SimTcp::Merged).0;
+
+    // The finding's staging: the model-declared `sim-tcp` field is
+    // dead at boot, so the conditional startup ask produces no verdict
+    // and the run stands pending behind the served standby surface.
+    let mut launched = spawn_controller(
+        &model,
+        &["--owner-token".to_string(), LAUNCHED.to_string()],
+        DT,
+    );
+    let client = MonitorClient::new(launched.addr);
+    let report = client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert_eq!(report.sync, Some(StandbySync::Unsynchronized));
+    assert_eq!(report.field_claim, None);
+    assert_stood_down(&client);
+
+    // Unanswered contacts issue no ask — the run is still pending.
+    client.advance(2).unwrap();
+    let report = client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+
+    // The field arrives already claimed: a probe marked a
+    // controller's (`as_controller`) holds the incumbent's
+    // write-ownership arbitration the way the QA rig's `inc2` does —
+    // a live controller hold under a foreign owner token, the exact
+    // shape `claim_writer_unless_held` must refuse rather than
+    // preempt. An unmarked tool claim would be preemptable by design.
+    let _plant = spawn_plant_at(
+        Path::new(PLANT_MODEL),
+        Path::new(PLANT_DYNAMICS),
+        plant_addr,
+    );
+    let probe = RemoteDriver::connect(plant_addr).unwrap().as_controller();
+    assert_eq!(
+        probe.ensure_writer(INCUMBENT).unwrap(),
+        ClaimGrant::Exclusive
+    );
+
+    // The remote kind's re-attach cadence paces the retry — one
+    // bounded wait, then each driven scan is an answered contact the
+    // re-issued conditional ask can refuse on. The scan that lands the
+    // verdict answers the driving request `500` with the refusal text
+    // and ends the run; the loop's bound is the defect's own — a run
+    // that kept answering `200` past it would be the stranded standby
+    // again.
+    std::thread::sleep(
+        dcs_sim_net::RemoteDriver::REATTACH_INTERVAL + std::time::Duration::from_millis(200),
+    );
+    let mut refusal = None;
+    for _ in 0..5 {
+        match client.advance(1) {
+            Ok(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(error) => {
+                refusal = Some(error.to_string());
+                break;
+            }
+        }
+    }
+    let refusal = refusal.expect("the deferred refusal must surface within five answered contacts");
+    assert!(
+        refusal.contains("no --peer was declared, so there is no pair to rejoin"),
+        "{refusal}"
+    );
+
+    // Bounded liveness: the process exits nonzero naming the refusal
+    // and the `--standby` remedy — the defect was this run staying
+    // alive as a sourceless standby instead.
+    let (status, stderr) = wait_exited(&mut launched, std::time::Duration::from_secs(10));
+    assert!(!status.success(), "the undeclared deferred refusal ran");
+    assert!(
+        stderr.contains("field write-ownership claim failed"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("no --peer was declared, so there is no pair to rejoin"),
+        "{stderr}"
+    );
+
+    // The incumbent's claim stands untouched — a preempted claim
+    // would have re-armed under the launched token, so the probe's
+    // re-ask must find INCUMBENT's hold still shared, not grant fresh.
+    let check = RemoteDriver::connect(plant_addr).unwrap();
+    assert_eq!(
+        check.ensure_writer(INCUMBENT).unwrap(),
+        ClaimGrant::Shared,
+        "the incumbent's claim was preempted"
+    );
+    check.release_writer().unwrap();
 
     let _ = std::fs::remove_dir_all(&dir);
 }
