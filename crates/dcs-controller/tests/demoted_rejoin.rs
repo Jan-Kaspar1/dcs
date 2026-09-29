@@ -409,10 +409,9 @@ fn a_voluntary_demote_hands_the_claim_to_the_fencing_armed_peer() {
     // probed while b's yielded token still stood.
     let a_journal = active.journal(0).unwrap();
     assert!(
-        a_journal.iter().any(|entry| matches!(
-            entry.event,
-            JournalEvent::FieldClaimLost { .. }
-        )),
+        a_journal
+            .iter()
+            .any(|entry| matches!(entry.event, JournalEvent::FieldClaimLost { .. })),
         "the fencing demotion must journal on the superseded owner: {a_journal:?}"
     );
 }
