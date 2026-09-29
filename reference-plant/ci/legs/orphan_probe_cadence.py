@@ -118,7 +118,7 @@ import stranded_rejoin
 # diagnostic on the honest held window rather than passing an
 # unexercised contract.
 LEG = {
-    "order": 650,
+    "order": 660,
     "title": "the orphan-probe-cadence leg",
     "passes": "orphan-probe-cadence-leg",
     "tampers": [
