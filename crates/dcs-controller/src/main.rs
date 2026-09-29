@@ -568,12 +568,16 @@ impl Driver {
     /// holderless claim — `Ok(true)` — answering `Ok(false)` only
     /// while a different owner's claim has live holders, so a
     /// still-held preemptor's claim keeps the field until it releases
-    /// and the probe never preempts a live attachment. Unlike the
-    /// orphan cycle's unbound probe the grant joins this instance's
-    /// attachments to the claim's holders — the gate the reclaim
-    /// re-lifts must pass the arbitration it re-took. A purely local
-    /// simulated model has no shared field to claim and answers
-    /// `Ok(true)` vacuously; a fan-out with no reclaim-capable
+    /// and the probe never preempts a live attachment. The peer issues
+    /// the ask only where its own scan probe just answered `unclaimed`
+    /// or its standing convergence proof holds — the holderless shapes
+    /// the grant preempts include a merely transport-frozen incumbent's
+    /// claim, so an unconverged ex-owner never preempts a standing
+    /// claim. Unlike the orphan cycle's unbound probe the grant joins
+    /// this instance's attachments to the claim's holders — the gate
+    /// the reclaim re-lifts must pass the arbitration it re-took. A
+    /// purely local simulated model has no shared field to claim and
+    /// answers `Ok(true)` vacuously; a fan-out with no reclaim-capable
     /// field backend answers `Ok(false)` — nothing probed.
     fn reclaim_writer(&self, owner: u64) -> Result<bool, String> {
         match self {

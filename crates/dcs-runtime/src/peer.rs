@@ -518,7 +518,11 @@ pub struct Peer<'d> {
     /// keeps the field until it releases. The grant is bound, unlike
     /// the orphan cycle's unbound probe, because the peer's gate lifts
     /// on it: the run's attachments must stand in the claim's holders
-    /// for its writes to pass the arbitration it just re-took.
+    /// for its writes to pass the arbitration it just re-took. The ask
+    /// issues only where the field just probed `unclaimed` — nothing
+    /// stands to preempt — or the run's standing convergence proof
+    /// holds, so an unconverged ex-owner never preempts a merely
+    /// transport-frozen incumbent's standing claim.
     reclaim: Option<Reclaim<'d>>,
     /// The field's write-ownership claim as the last probe observed it
     /// — what [`report`](Self::report) serves as `field_claim`. `None`
@@ -660,7 +664,11 @@ impl fmt::Debug for Claimant<'_> {
 /// grant is bound, unlike the orphan cycle's unbound probe, because
 /// the peer's gate lifts on it: the run's attachments must stand in
 /// the claim's holders for its writes to pass the arbitration it just
-/// re-took.
+/// re-took. The bound ask may preempt a standing claim, so the peer
+/// issues it only where its own fresh probe answered `unclaimed` or
+/// the standing convergence proof `self_promote` reads still stands —
+/// an unconverged ex-owner's probe never preempts a merely
+/// transport-frozen incumbent's epoch.
 struct Reclaim<'d>(Box<dyn Fn() -> Result<bool, String> + Send + Sync + 'd>);
 
 impl fmt::Debug for Reclaim<'_> {
@@ -1386,13 +1394,20 @@ impl<'d> Peer<'d> {
     /// the claim was raised to fence. Unlike the orphan cycle's
     /// unbound probe the grant joins the run's attachments to the
     /// claim's holders — the gate it re-lifts must pass the
-    /// arbitration it re-took. On `Ok(true)` the peer clears the loss
-    /// mark, lifts the field gate the demotion closed, and reports
-    /// [`FieldClaim::Held`] from the claim it just re-took; `Ok(false)`
-    /// and `Err` leave the mark standing for the next scan. A peer
-    /// built without the hook keeps the pre-reclaim behavior — the
-    /// wedge stands until an operator's promote unwedges. See
-    /// [`Reclaim`].
+    /// arbitration it re-took. The ask can preempt the holderless
+    /// shapes the field cannot distinguish from a dead owner's — a
+    /// merely transport-frozen incumbent's included — so the peer
+    /// issues it only where this scan's own claim probe answered
+    /// [`FieldClaim::Unclaimed`] or the standing convergence proof
+    /// `self_promote` reads still stands; an unconverged ex-owner
+    /// never preempts a standing claim, a re-attaching incumbent's
+    /// ownership epoch outliving the freeze. On `Ok(true)` the peer
+    /// clears the loss mark, lifts the field gate the demotion closed,
+    /// and reports [`FieldClaim::Held`] from the claim it just
+    /// re-took; `Ok(false)` and `Err` leave the mark standing for the
+    /// next scan. A peer built without the hook keeps the pre-reclaim
+    /// behavior — the wedge stands until an operator's promote
+    /// unwedges. See [`Reclaim`].
     pub fn with_field_reclaim(
         mut self,
         reclaim: impl Fn() -> Result<bool, String> + Send + Sync + 'd,
@@ -3175,7 +3190,23 @@ impl<'d> Peer<'d> {
     /// observed-claimant record per distinct token — the audit trail
     /// the preempt-and-release episode between this run's writes would
     /// otherwise leave empty.
-    fn reclaim_field_claim(&mut self, tick: Tick) {
+    ///
+    /// The ask the arm issues may *preempt*: a claim standing on the
+    /// field is someone's ownership epoch, and a different owner's
+    /// holderless claim reads identical to a dead owner's at the
+    /// arbitration — a merely transport-frozen incumbent's included —
+    /// so an ex-owner whose image is not current with the field's line
+    /// could seize it and silently roll the incumbent's applied state
+    /// back. The preempting ask therefore runs only on the standing
+    /// convergence proof `self_promote` reads — the last applied
+    /// verdict was promotable — while an `unclaimed` observation this
+    /// scan's own probe just answered needs no proof: nothing stands
+    /// to preempt there, the released-preemption wedge being exactly
+    /// what the reclaim exists to close. An unconverged ex-owner's
+    /// probe never issues against a standing claim — a re-attaching
+    /// incumbent's epoch outlives the freeze — and an unanswered probe
+    /// is no observation: the cautious read is that a claim may stand.
+    fn reclaim_field_claim(&mut self, tick: Tick, field_answered: bool) {
         // The arm is the ex-owner's live evidence that no owner stands:
         // the loss mark itself — standing since the fenced-write
         // demotion while no tracked owner resolved the succession — or
@@ -3189,6 +3220,15 @@ impl<'d> Peer<'d> {
             && !self.yielded
             && (self.fencing_lost || matches!(self.sync, StandbySync::Orphaned { .. }));
         if self.role != Role::Standby || !armed {
+            return;
+        }
+        // The convergence gate: the probe's grant preempts the
+        // holderless shapes the field cannot tell from a dead owner's —
+        // including a live incumbent whose transport froze — so the
+        // ask issues only where the field just answered `unclaimed` or
+        // the run's convergence proof still stands.
+        let free_field = field_answered && self.field_claim == Some(FieldClaim::Unclaimed);
+        if !(free_field || self.converged) {
             return;
         }
         let Some(outcome) = self.reclaim.as_ref().map(|reclaim| reclaim.0()) else {
@@ -3463,7 +3503,7 @@ impl<'d> Peer<'d> {
             Role::Demoting => self.change(tick, Role::Standby),
             _ => {}
         }
-        self.reclaim_field_claim(tick);
+        self.reclaim_field_claim(tick, field_answered);
         self.retry_startup_claim(tick, field_answered);
         if self.owns_field() {
             self.staged = None;
@@ -4956,6 +4996,24 @@ mod tests {
             "the claimant the loss entry attributed is not re-journaled"
         );
 
+        // The ex-owner reconverges on the tracked line's ownerless
+        // verdict — the orphaned pull leaves the loss mark armed and
+        // re-stands the convergence proof the preempting ask needs, so
+        // its refused probes journal again from here.
+        let source_driver =
+            StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let mut source =
+            Executor::new(&source_driver, loop_map(), vec![Box::new(PassThrough)]).unwrap();
+        source.run(4);
+        let mut orphaned = source.checkpoint();
+        orphaned.source_owns_field = Some(false);
+        assert_eq!(
+            peer.track_once(|| Ok(orphaned)),
+            TrackReport::Applied(Transfer::Applied)
+        );
+        assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
+        assert!(peer.take_claim_observations().is_empty());
+
         // The preemptor released and a *different* foreign attachment
         // took the claim before the probe ran again: this refusal names
         // a claimant no journal record of this run carries — the
@@ -5021,6 +5079,107 @@ mod tests {
                     actor: None,
                 },
             ]
+        );
+    }
+
+    /// The QA finding `reclaim-grants-ownership-without-convergence`:
+    /// an ex-owner whose image is not current with the field's line
+    /// must never preempt a standing claim on stale state. A merely
+    /// transport-frozen incumbent's claim reads identical to a dead
+    /// owner's at the field's arbitration — both stand holderless —
+    /// so the peer-side guard is the convergence proof the promotion
+    /// paths already require: while the run's own claim probe keeps
+    /// answering `held`, an unconverged ex-owner's bound ask never
+    /// issues and the frozen incumbent's ownership epoch survives to
+    /// its re-attach — no `reclaim` walk, no rollback of the
+    /// incumbent's applied state. Convergence evidence re-arms the
+    /// same probe: the bound grant then preempts the still-holderless
+    /// shape by design.
+    #[test]
+    fn an_unconverged_ex_owner_never_preempts_a_standing_claim() {
+        const OWNER: u64 = 7;
+        const FOREIGN: u64 = 999;
+        let field = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let fenced = FencingDriver {
+            inner: &field,
+            armed: AtomicBool::new(false),
+        };
+        let gate = WriteGate::closed(&fenced);
+        let claim = ScriptedClaim::unclaimed();
+        let asks = std::sync::atomic::AtomicUsize::new(0);
+        let mut peer = Peer::active(
+            Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
+            Some(&gate),
+        )
+        .with_field_claim(|| {
+            claim.claim(OWNER);
+            Ok(())
+        })
+        .with_field_probe(|| Ok(claim.probe()))
+        .with_field_claimant(|_| claim.holder())
+        .with_field_reclaim(|| {
+            asks.fetch_add(1, Ordering::Relaxed);
+            Ok(claim.reclaim(OWNER))
+        });
+        peer.activate().unwrap();
+        assert_eq!(peer.scan(), Tick(1));
+        assert_eq!(claim.holder(), Some(OWNER));
+
+        // The preemption: the foreign incumbent takes the claim live,
+        // the owner's next write fences, and the demote path leaves
+        // the ex-owner `standby`/`unsynchronized` — the loss mark
+        // armed with no tracking source to converge on.
+        claim.claim(FOREIGN);
+        fenced.armed.store(true, Ordering::Relaxed);
+        assert_eq!(peer.scan(), Tick(2));
+        assert_eq!(peer.scan(), Tick(3));
+        assert_eq!(peer.role(), Role::Standby);
+        assert_eq!(peer.sync_state(), &StandbySync::Unsynchronized);
+        assert_eq!(claim.holder(), Some(FOREIGN));
+
+        // The incumbent's transport freezes: its claim keeps standing
+        // holderless — indistinguishable from a dead owner's at the
+        // arbitration — while this run's own probe keeps answering
+        // `held`. Zero convergence evidence: the bound ask never
+        // issues, the incumbent's epoch survives to its re-attach,
+        // and the stale ex-owner stays surfaced `standby`.
+        claim.freeze();
+        for tick in 4..=6 {
+            assert_eq!(peer.scan(), Tick(tick));
+            assert_eq!(peer.role(), Role::Standby);
+            assert_eq!(claim.holder(), Some(FOREIGN));
+        }
+        assert!(!gate.is_open());
+        assert_eq!(
+            asks.load(Ordering::Relaxed),
+            0,
+            "an unsynchronized ex-owner's reclaim ask must never \
+             preempt a standing claim — the frozen incumbent's epoch"
+        );
+
+        // Convergence evidence re-arms the same probe: the applied
+        // checkpoint lands `tracking`, the standing promotable verdict
+        // `self_promote` reads, and the next scan's bound grant
+        // preempts the still-holderless claim — the reclaim's designed
+        // coverage, the ex-owner now current with the field's line.
+        let source_driver =
+            StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let mut source =
+            Executor::new(&source_driver, loop_map(), vec![Box::new(PassThrough)]).unwrap();
+        source.run(6);
+        peer.apply(&source.checkpoint()).unwrap();
+        assert!(matches!(peer.sync_state(), StandbySync::Tracking { .. }));
+        fenced.armed.store(false, Ordering::Relaxed);
+        assert_eq!(peer.scan(), Tick(7));
+        assert_eq!(peer.role(), Role::Promoting);
+        assert_eq!(claim.holder(), Some(OWNER));
+        assert!(gate.is_open());
+        assert_eq!(peer.scan(), Tick(8));
+        assert_eq!(peer.role(), Role::Active);
+        assert_eq!(
+            field.value(OUTPUT),
+            Value::Float(1.0),
+            "the converged reclaimant's writes must pass the claim it re-took"
         );
     }
 
@@ -5908,12 +6067,17 @@ mod tests {
 
     /// A scripted field-claim arbitration — the plant server's rule in
     /// miniature: `holder` carries the standing claim's owner token
-    /// while one stands and `None` while the field is unclaimed.
-    /// `claim` takes it unconditionally, as a promotion's arbitration
-    /// does; `probe` reads the standing state without touching it — an
-    /// observation cannot seize the field it reports.
+    /// while one stands and `None` while the field is unclaimed, and
+    /// `live` whether a live attachment stands behind that claim —
+    /// `freeze` drops the holders while the claim keeps standing, the
+    /// merely transport-frozen incumbent the bound `reclaim` grant
+    /// preempts while `ensure` refuses either way. `claim` takes it
+    /// unconditionally, as a promotion's arbitration does; `probe`
+    /// reads the standing state without touching it — an observation
+    /// cannot seize the field it reports.
     struct ScriptedClaim {
         holder: Mutex<Option<u64>>,
+        live: AtomicBool,
     }
 
     impl ScriptedClaim {
@@ -5922,6 +6086,7 @@ mod tests {
         fn unclaimed() -> Self {
             Self {
                 holder: Mutex::new(None),
+                live: AtomicBool::new(false),
             }
         }
 
@@ -5938,18 +6103,38 @@ mod tests {
         /// The unconditional grant a promotion claims through.
         fn claim(&self, owner: u64) {
             *self.holder.lock().unwrap() = Some(owner);
+            self.live.store(true, Ordering::Relaxed);
         }
 
-        /// The conditional grant the reclaim probes: takes the claim
-        /// for `owner` only while the field stands unclaimed or already
-        /// names the token — refused while a different owner stands,
-        /// so the probe never preempts.
+        /// The conditional grant the orphan cycle probes: takes the
+        /// claim for `owner` only while the field stands unclaimed or
+        /// already names the token — refused while a different owner
+        /// stands, so the probe never preempts.
         fn ensure(&self, owner: u64) -> bool {
             let mut holder = self.holder.lock().unwrap();
             match *holder {
                 Some(standing) if standing != owner => false,
                 _ => {
                     *holder = Some(owner);
+                    self.live.store(true, Ordering::Relaxed);
+                    true
+                }
+            }
+        }
+
+        /// The bound conditional grant the fencing-loss reclaim
+        /// probes: grants where the field stands unclaimed or already
+        /// names `owner`, and preempts a different owner's *holderless*
+        /// claim — the dead-owner or transport-frozen shape the field's
+        /// arbitration cannot tell apart — refusing only while a
+        /// different owner's claim still has a live attachment.
+        fn reclaim(&self, owner: u64) -> bool {
+            let mut holder = self.holder.lock().unwrap();
+            match *holder {
+                Some(standing) if standing != owner && self.live.load(Ordering::Relaxed) => false,
+                _ => {
+                    *holder = Some(owner);
+                    self.live.store(true, Ordering::Relaxed);
                     true
                 }
             }
@@ -5958,6 +6143,15 @@ mod tests {
         /// The last holder's release — the field returns to unclaimed.
         fn release(&self) {
             *self.holder.lock().unwrap() = None;
+            self.live.store(false, Ordering::Relaxed);
+        }
+
+        /// The holders' transport freeze: the claim keeps standing —
+        /// `probe` still answers `held` — with no live attachment
+        /// behind it, the shape a thawing connection leaves until the
+        /// incumbent re-attaches.
+        fn freeze(&self) {
+            self.live.store(false, Ordering::Relaxed);
         }
 
         /// The standing owner, for the test's own assertions.
