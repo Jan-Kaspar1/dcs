@@ -200,6 +200,40 @@ impl Connection {
         }
         self.stream = Some(stream);
     }
+
+    /// Runs `request` on the live link, keeping the connection's
+    /// failure bookkeeping: a successful exchange clears the standing
+    /// failure; a `fenced` answer forgets the recorded writer token —
+    /// the field's standing claim names another owner, so the
+    /// attachment holds nothing left to re-assert; and a failed
+    /// exchange drops the link — the response stream's position is
+    /// unknown afterward — and counts as the window's re-attach
+    /// attempt.
+    fn exchange_on(&mut self, request: &BusRequest) -> Result<BusResponse, LinkError> {
+        let Some(stream) = self.stream.as_mut() else {
+            return Err(LinkError::Disconnected);
+        };
+        match exchange(stream, request) {
+            Ok(response) => {
+                if matches!(
+                    response,
+                    BusResponse::Error {
+                        error: BusError::Fenced { .. }
+                    }
+                ) {
+                    self.owner = None;
+                }
+                self.last_failure = None;
+                Ok(response)
+            }
+            Err(error) => {
+                self.stream = None;
+                self.retry_at = Instant::now() + BusDriver::REATTACH_INTERVAL;
+                self.last_failure = Some(error.clone());
+                Err(error)
+            }
+        }
+    }
 }
 
 /// Connects a stream to the first answering of `addresses` with the
@@ -460,8 +494,14 @@ impl BusDriver {
     /// [`release_claim`](Self::release_claim) forgets it — the
     /// demotion path's half of the rule that only the field's owner
     /// re-arms.
+    ///
+    /// The ask rides the claim path's
+    /// [`claim_request`](Self::claim_request): a link that died
+    /// unexercised — a promotion's first touch of an idle attachment —
+    /// replays once on a fresh link rather than refusing a recovered
+    /// field.
     pub fn claim_writer(&self, owner: u64) -> Result<(), LinkError> {
-        match self.request(&BusRequest::ClaimWriter { owner })? {
+        match self.claim_request(&BusRequest::ClaimWriter { owner })? {
             BusResponse::Done => {
                 self.connection.lock().unwrap().owner = Some(owner);
                 Ok(())
@@ -482,9 +522,11 @@ impl BusDriver {
     /// A granted token is recorded exactly as `claim_writer` records
     /// it — every later re-attach re-asserts it; a refused one is
     /// forgotten, since the field's standing claim belongs to another
-    /// owner and this attachment holds nothing to re-assert.
+    /// owner and this attachment holds nothing to re-assert. Like the
+    /// claim, the ask rides [`claim_request`](Self::claim_request) — a
+    /// link that died unexercised replays once on a fresh attachment.
     pub fn ensure_writer(&self, owner: u64) -> Result<(), LinkError> {
-        match self.request(&BusRequest::EnsureWriter { owner })? {
+        match self.claim_request(&BusRequest::EnsureWriter { owner })? {
             BusResponse::Done => {
                 self.connection.lock().unwrap().owner = Some(owner);
                 Ok(())
@@ -547,10 +589,13 @@ impl BusDriver {
     /// not: a failed exchange already severed the link, and
     /// re-asserting a claim the caller meant to hand back is the
     /// stale-token race [`release_claim`](Self::release_claim) exists
-    /// to close.
+    /// to close. The ask rides [`claim_request`](Self::claim_request)
+    /// — a demotion landing on a link that died unexercised replays
+    /// the release on the fresh attachment, freeing the field's claim
+    /// rather than leaving it to the dead link's holder bookkeeping.
     pub fn release_writer(&self) -> Result<(), LinkError> {
         self.connection.lock().unwrap().owner = None;
-        match self.request(&BusRequest::ReleaseWriter)? {
+        match self.claim_request(&BusRequest::ReleaseWriter)? {
             BusResponse::Done => Ok(()),
             BusResponse::Error { error } => Err(refused(error)),
             _ => Err(self.protocol_violation()),
@@ -605,30 +650,39 @@ impl BusDriver {
                 return Err(LinkError::Disconnected);
             }
             connection.reattach(&self.addresses, self.timeout);
-            if connection.stream.is_none() {
+        }
+        connection.exchange_on(request)
+    }
+
+    /// The claim family's `request`: [`request`](Self::request)'s
+    /// windowed laziness plus one replay for the corpse case — an
+    /// attachment whose link died unexercised still reports a live
+    /// stream, nothing having touched it since the outage, so a
+    /// lifecycle ask like a promotion's claim would otherwise spend
+    /// itself discovering the drop and refuse a recovered field. The
+    /// ask replays once on a fresh link: every claim operation is
+    /// replay-safe — where the severed link's copy was delivered, the
+    /// grant or release it produced is the same verdict the replay
+    /// lands — while a still-dead endpoint refuses the replay's
+    /// re-attach exactly as it refused the first ask. The replay is
+    /// bounded to asks that rode a stream the driver already held: a
+    /// failure on a link this call just attached is the endpoint's
+    /// genuine answer, not a corpse.
+    fn claim_request(&self, request: &BusRequest) -> Result<BusResponse, LinkError> {
+        let mut connection = self.connection.lock().unwrap();
+        let held_stream = connection.stream.is_some();
+        if connection.stream.is_none() {
+            if Instant::now() < connection.retry_at {
                 return Err(LinkError::Disconnected);
             }
+            connection.reattach(&self.addresses, self.timeout);
         }
-        let stream = connection.stream.as_mut().unwrap();
-        match exchange(stream, request) {
-            Ok(response) => {
-                if matches!(
-                    response,
-                    BusResponse::Error {
-                        error: BusError::Fenced { .. }
-                    }
-                ) {
-                    connection.owner = None;
-                }
-                connection.last_failure = None;
-                Ok(response)
+        match connection.exchange_on(request) {
+            Err(_) if held_stream => {
+                connection.reattach(&self.addresses, self.timeout);
+                connection.exchange_on(request)
             }
-            Err(error) => {
-                connection.stream = None;
-                connection.retry_at = Instant::now() + BusDriver::REATTACH_INTERVAL;
-                connection.last_failure = Some(error.clone());
-                Err(error)
-            }
+            other => other,
         }
     }
 

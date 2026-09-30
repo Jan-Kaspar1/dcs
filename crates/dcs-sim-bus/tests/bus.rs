@@ -17,10 +17,12 @@ use dcs_sim_bus::{
     ProcessElement, RegisterBank, RegisterDecl,
 };
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The device-server binary under test, built by Cargo alongside the
 /// test harness.
@@ -414,7 +416,7 @@ fn stopping_the_server_surfaces_disconnected_not_panics() {
 
         // The diagnostics hook names the same event at link level:
         // disconnected, carrying the failure that severed the link —
-        // permanently, since the driver never reconnects.
+        // which stands recorded until a later re-attach clears it.
         assert_eq!(
             bus.diagnostics(),
             Some(DriverDiagnostics {
@@ -450,6 +452,13 @@ fn an_unresponsive_peer_surfaces_timeout_then_disconnects() {
             exchange: None,
         })
     );
+
+    // The window past, the next access retries the contact — the
+    // still-silent peer answers it with the same timeout again, so the
+    // bound is one stall per REATTACH_INTERVAL rather than one per
+    // access, the RemoteDriver shape this driver now shares.
+    thread::sleep(BusDriver::REATTACH_INTERVAL + Duration::from_millis(200));
+    assert_eq!(bus.read(PointId(1)), Err(IoError::Timeout(PointId(1))));
     drop(listener);
 }
 
@@ -831,6 +840,411 @@ fn disconnect_releases_the_claim_for_a_promoted_peer() {
         standby.claim_writer(2).unwrap();
         standby.write(PointId(2), Value::Float(2.0)).unwrap();
         assert_eq!(standby.read(PointId(2)).unwrap().value, Value::Float(2.0));
+    });
+}
+
+/// Polls `bus`'s link until the lazy re-attach lands or `deadline`
+/// expires — the returned-device half of every restart test.
+fn wait_for_reattach(bus: &BusDriver, deadline: Duration) {
+    let start = Instant::now();
+    while start.elapsed() < deadline {
+        if bus.read(PointId(1)).is_ok() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("the bus driver did not re-attach within {deadline:?}");
+}
+
+/// Rebinds `addr` for the restarted device of a restart test: the
+/// freed port races the whole test binary's ephemeral allocator —
+/// another test's `(_, 0)` bind can land on it inside the drop→bind
+/// instant — so `AddrInUse` retries through the transient rather than
+/// flaking on a scheduling accident.
+fn rebind(addr: SocketAddr) -> BusServer {
+    for _ in 0..200 {
+        match BusServer::bind(addr, RegisterBank::new(fixture_decls()).unwrap()) {
+            Ok(server) => return server,
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => panic!("cannot rebind {addr}: {error}"),
+        }
+    }
+    panic!("port {addr} stayed bound through the retry window");
+}
+
+/// A pausable TCP relay between a driver and the device server — the
+/// `docker pause`/`unpause` half of the QA finding's reproduction,
+/// made of real sockets: while `paused` stands the pump threads hold
+/// every connection open and forward nothing, so a link's in-flight
+/// request sits unanswered exactly as it does inside a frozen device
+/// process. Released, the buffered bytes flow and the stalled
+/// exchanges complete or time out on their own clocks.
+struct PausableRelay {
+    addr: SocketAddr,
+    paused: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+}
+
+impl PausableRelay {
+    /// Binds a relay on an ephemeral loopback port forwarding to
+    /// `upstream`, its accept loop on a detached thread. Accepts and
+    /// upstream connects run through the pause — a stopped process
+    /// still completes handshakes at the kernel.
+    fn forwarding(upstream: SocketAddr) -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let relay = Self {
+            addr: listener.local_addr().unwrap(),
+            paused: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(AtomicBool::new(false)),
+        };
+        let (paused, stop) = (relay.paused.clone(), relay.stop.clone());
+        thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((downstream, _)) => {
+                        let Ok(served) = TcpStream::connect(upstream) else {
+                            continue;
+                        };
+                        for (from, to) in [
+                            (downstream.try_clone().unwrap(), served.try_clone().unwrap()),
+                            (served, downstream),
+                        ] {
+                            let (paused, stop) = (paused.clone(), stop.clone());
+                            thread::spawn(move || Self::pump(from, to, paused, stop));
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) if stop.load(Ordering::Relaxed) => return,
+                    Err(_) => thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        });
+        relay
+    }
+
+    /// The address drivers point at.
+    fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// `docker pause`: the pumps stop moving bytes while every socket
+    /// stays open — a frozen device process's exact wire shape.
+    fn pause(&self) {
+        self.paused.store(true, Ordering::Relaxed);
+    }
+
+    /// `docker unpause`: buffered bytes flow again and every in-flight
+    /// exchange completes on the surviving link or fails on the
+    /// requester's own timeout.
+    fn resume(&self) {
+        self.paused.store(false, Ordering::Relaxed);
+    }
+
+    /// Copies `from` to `to` until either side closes, polling its
+    /// read so a pause or the relay's stop lands within a beat.
+    fn pump(
+        mut from: TcpStream,
+        mut to: TcpStream,
+        paused: Arc<AtomicBool>,
+        stop: Arc<AtomicBool>,
+    ) {
+        let _ = from.set_read_timeout(Some(Duration::from_millis(10)));
+        let mut buf = [0u8; 8192];
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            if paused.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            match from.read(&mut buf) {
+                Ok(0) => {
+                    let _ = to.shutdown(Shutdown::Write);
+                    return;
+                }
+                Ok(n) => {
+                    // Bytes read under the flag's nose still hold for
+                    // the pause — a frozen process's receive buffer,
+                    // not a lost one — then flow on the thaw.
+                    while paused.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    if to.write_all(&buf[..n]).is_err() {
+                        return;
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => return,
+            }
+        }
+    }
+}
+
+impl Drop for PausableRelay {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn a_restarted_server_is_re_served_by_the_same_attachment() {
+    // QA `sim-bus-driver-permanent-disconnect-after-device-blip`: a
+    // device restart must not permanently sever the attachment — the
+    // driver re-attaches lazily past its backoff window and the
+    // recorded writer claim re-arms under its owner on the restarted
+    // device, without a fresh `BusDriver` or a controller restart.
+    let server = BusServer::bind(
+        ("127.0.0.1", 0),
+        RegisterBank::new(fixture_decls()).unwrap(),
+    )
+    .unwrap();
+    let addr = server.local_addr().unwrap();
+    let bus = thread::scope(|scope| {
+        scope.spawn(|| server.serve());
+        let _guard = ShutdownOnDrop(&server);
+        let bus = BusDriver::connect(addr, &fixture_points()).unwrap();
+        bus.claim_writer(7).unwrap();
+        bus.write(PointId(2), Value::Float(1.0)).unwrap();
+        bus.step(0.1).unwrap();
+        // While the claim stands, a claim-less attachment's mutation
+        // is already fenced out.
+        let probe = BusDriver::connect(addr, &fixture_points()).unwrap();
+        assert_eq!(probe.step(0.1), Err(LinkError::Fenced));
+
+        server.shutdown();
+        // The severed link fails at the boundary — dropped, its
+        // failure recorded — but the drop is the link's, not the
+        // driver's: the attachment re-serves the field once the
+        // endpoint returns.
+        assert_eq!(bus.read(PointId(1)), Err(IoError::Disconnected(PointId(1))));
+        bus
+    });
+    // The accept thread is joined and `server` dropped — its listener
+    // released the port — so the restarted device rebinds the same
+    // address, the `docker stop`/`start` shape the QA reproduction
+    // produces.
+    drop(server);
+    let restarted = rebind(addr);
+    thread::scope(|scope| {
+        scope.spawn(|| restarted.serve());
+        let _guard = ShutdownOnDrop(&restarted);
+
+        // The restart is a new claim lifetime: the register bank's
+        // unclaimed field is open — a fresh attachment's mutation
+        // lands, no claim standing to fence it.
+        let probe = BusDriver::connect(addr, &fixture_points()).unwrap();
+        assert!(probe.step(0.1).is_ok());
+
+        wait_for_reattach(&bus, Duration::from_secs(10));
+        assert!(bus.connected());
+        // The recorded claim re-armed itself on the re-attach: the
+        // fresh device's arbitration names owner 7 again — the
+        // claim-less probe's mutation now answers `fenced`, and its
+        // conditional claim cannot join a different owner.
+        assert_eq!(probe.step(0.1), Err(LinkError::Fenced));
+        assert_eq!(probe.ensure_writer(9), Err(LinkError::Fenced));
+
+        // The owner's own mutations pass through on the re-armed claim.
+        bus.write(PointId(2), Value::Float(2.0)).unwrap();
+        bus.step(0.1).unwrap();
+        assert_eq!(bus.read(PointId(2)).unwrap().value, Value::Float(2.0));
+        // Diagnostics report the link live again with the outage's
+        // failure record cleared — the first successful exchange after
+        // recovery drops it, so the surface describes current health.
+        assert_eq!(
+            bus.diagnostics(),
+            Some(DriverDiagnostics {
+                link: LinkState::Connected,
+                last_error: None,
+                exchange: None,
+            })
+        );
+    });
+}
+
+#[test]
+fn a_reconnecting_attachment_cannot_preempt_a_standing_claim() {
+    // The restart's other half: where a different owner claimed the
+    // field during the outage — the peer that promoted while the link
+    // was down — the returning attachment's re-attach must not seize
+    // it. `EnsureWriter` is the conditional grant: refused while a
+    // different owner stands.
+    let server = BusServer::bind(
+        ("127.0.0.1", 0),
+        RegisterBank::new(fixture_decls()).unwrap(),
+    )
+    .unwrap();
+    let addr = server.local_addr().unwrap();
+    let bus = thread::scope(|scope| {
+        scope.spawn(|| server.serve());
+        let _guard = ShutdownOnDrop(&server);
+        let bus = BusDriver::connect(addr, &fixture_points()).unwrap();
+        bus.claim_writer(7).unwrap();
+        bus.write(PointId(2), Value::Float(1.0)).unwrap();
+        server.shutdown();
+        bus
+    });
+    drop(server);
+    // The field came back under a different owner — the peer that
+    // promoted during the outage claimed it unconditionally.
+    let restarted = rebind(addr);
+    thread::scope(|scope| {
+        scope.spawn(|| restarted.serve());
+        let _guard = ShutdownOnDrop(&restarted);
+        let new_owner = BusDriver::connect(addr, &fixture_points()).unwrap();
+        new_owner.claim_writer(9).unwrap();
+
+        // The superseded attachment re-attaches, but its recorded
+        // claim cannot preempt owner 9: the fenced re-arm drops the
+        // recorded token and keeps the fresh link, so the
+        // attachment's mutations stay fenced at the field.
+        wait_for_reattach(&bus, Duration::from_secs(10));
+        assert!(bus.connected());
+        assert_eq!(
+            bus.write(PointId(2), Value::Float(3.0)),
+            Err(IoError::Fenced(PointId(2)))
+        );
+        assert_eq!(bus.step(0.1), Err(LinkError::Fenced));
+        // The standing owner is undisturbed.
+        new_owner.write(PointId(2), Value::Float(4.0)).unwrap();
+        assert_eq!(bus.read(PointId(2)).unwrap().value, Value::Float(4.0));
+    });
+}
+
+#[test]
+fn release_claim_keeps_a_demoted_attachment_from_re_arm() {
+    // The demotion counterpart: a peer that gave the field up forgets
+    // its token, so the re-attach after a device restart re-asserts
+    // nothing — the restarted field's arbitration stays free for the
+    // peer that legitimately owns it.
+    let server = BusServer::bind(
+        ("127.0.0.1", 0),
+        RegisterBank::new(fixture_decls()).unwrap(),
+    )
+    .unwrap();
+    let addr = server.local_addr().unwrap();
+    let bus = thread::scope(|scope| {
+        scope.spawn(|| server.serve());
+        let _guard = ShutdownOnDrop(&server);
+        let bus = BusDriver::connect(addr, &fixture_points()).unwrap();
+        bus.claim_writer(7).unwrap();
+        // Demotion: the gate closes and the recorded claim is
+        // forgotten — the restarted device's empty arbitration is not
+        // this attachment's to re-arm. The local forget is enough: the
+        // server-side hold dies with the link either way.
+        bus.release_claim();
+        server.shutdown();
+        bus
+    });
+    drop(server);
+
+    let restarted = rebind(addr);
+    thread::scope(|scope| {
+        scope.spawn(|| restarted.serve());
+        let _guard = ShutdownOnDrop(&restarted);
+        wait_for_reattach(&bus, Duration::from_secs(10));
+        // Had the demoted attachment re-armed owner 7, a claim-less
+        // attachment's mutation would answer `fenced`; it lands on the
+        // still-unclaimed field instead — free for whichever peer
+        // legitimately claims it.
+        let probe = BusDriver::connect(addr, &fixture_points()).unwrap();
+        assert!(probe.step(0.1).is_ok());
+        probe.claim_writer(9).unwrap();
+        assert!(probe.step(0.1).is_ok());
+    });
+}
+
+#[test]
+fn a_claim_on_an_untouched_dead_link_replays_on_the_reattach() {
+    // The promote-time shape from the QA finding: an attachment whose
+    // link died unexercised — a quiesced peer's write-only backend sees
+    // no scan traffic to reveal the drop — still reports a live
+    // stream, so a promotion's claim would otherwise spend itself
+    // discovering the corpse and refuse the recovered field. The
+    // claim family replays the ask once on a fresh link instead.
+    let server = BusServer::bind(
+        ("127.0.0.1", 0),
+        RegisterBank::new(fixture_decls()).unwrap(),
+    )
+    .unwrap();
+    let addr = server.local_addr().unwrap();
+    let bus = thread::scope(|scope| {
+        scope.spawn(|| server.serve());
+        let _guard = ShutdownOnDrop(&server);
+        // Attached but never touched: the link dies with nothing left
+        // to reveal it — the corpse the claim lands on.
+        let bus = BusDriver::connect(addr, &fixture_points()).unwrap();
+        server.shutdown();
+        bus
+    });
+    drop(server);
+
+    let restarted = rebind(addr);
+    thread::scope(|scope| {
+        scope.spawn(|| restarted.serve());
+        let _guard = ShutdownOnDrop(&restarted);
+
+        // The first ask after the restart is the claim: it rides the
+        // corpse once — the exchange fails — then replays on the fresh
+        // link and lands, fencing the field under its owner.
+        bus.claim_writer(7).unwrap();
+        assert!(bus.connected());
+        let probe = BusDriver::connect(addr, &fixture_points()).unwrap();
+        assert_eq!(probe.step(0.1), Err(LinkError::Fenced));
+        bus.write(PointId(2), Value::Float(3.0)).unwrap();
+        assert_eq!(bus.diagnostics().unwrap().last_error, None);
+    });
+}
+
+#[test]
+fn a_frozen_field_recovers_through_the_same_attachment() {
+    // The QA finding's freeze half: the device server never dies — it
+    // stalls mid-exchange — so its side of the link survives while the
+    // driver's request times out. The driver drops the link, and the
+    // thawed device's next-window contact re-serves the same
+    // attachment, the recorded claim re-joining the hold the frozen
+    // side never released.
+    with_server(&fixture_decls(), |_, upstream| {
+        let relay = PausableRelay::forwarding(upstream);
+        let bus = BusDriver::connect_with_timeout(
+            relay.addr(),
+            Duration::from_millis(200),
+            &fixture_points(),
+        )
+        .unwrap();
+        bus.claim_writer(7).unwrap();
+        bus.write(PointId(2), Value::Float(1.0)).unwrap();
+
+        relay.pause();
+        // The frozen field's exchange pays one request timeout, drops
+        // the link, and in-window accesses fail fast — the outage
+        // degrades, it does not hang.
+        assert_eq!(bus.read(PointId(1)), Err(IoError::Timeout(PointId(1))));
+        assert_eq!(bus.read(PointId(1)), Err(IoError::Disconnected(PointId(1))));
+
+        relay.resume();
+        // The thaw: the same attachment re-serves the field once the
+        // re-attach window opens, and the claim stands again — either
+        // the frozen side's hold never released and the ensure
+        // re-joined it, or it released with the dropped link and the
+        // ensure re-claimed; the fenced verdict on a claim-less
+        // attachment is the observable.
+        wait_for_reattach(&bus, Duration::from_secs(10));
+        let probe = BusDriver::connect(relay.addr(), &fixture_points()).unwrap();
+        assert_eq!(probe.step(0.1), Err(LinkError::Fenced));
+        bus.write(PointId(2), Value::Float(2.0)).unwrap();
+        assert_eq!(bus.read(PointId(2)).unwrap().value, Value::Float(2.0));
+        assert_eq!(bus.diagnostics().unwrap().last_error, None);
     });
 }
 
