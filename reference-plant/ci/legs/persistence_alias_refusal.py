@@ -88,7 +88,7 @@ import simulate
 # surface the named diagnostic rather than passing an unexercised
 # contract.
 LEG = {
-    "order": 680,
+    "order": 690,
     "title": "the persistence-alias refusal leg",
     "passes": "persistence-alias-refusal",
     "tampers": [

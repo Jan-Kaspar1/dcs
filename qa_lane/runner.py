@@ -2012,6 +2012,99 @@ def admit_dynamics(cfg, record, run_dir, model, name, document,
     return result
 
 
+# The persistence-alias leg's launch bounds: a refused launch exits at
+# option-parse — well inside a second — while an admitted one paces its
+# --ticks budget to exit 0, so one bounded foreground `docker run`
+# captures the whole verdict. The probes never touch the rig's network
+# or the deployed members' mounts, so the bound is staging overhead
+# plus the paced budget, not a settlement window.
+ALIAS_PROBE_TICKS = 5
+ALIAS_PROBE_TIMEOUT = 60
+ALIAS_PROBE_PORT = 8095  # the probe's in-container --listen port
+
+
+def admit_persistence(cfg, record, run_dir, model, name, paths,
+                      timeline):
+    """The scenario-callable persistence-alias launch probe — the
+    persistence-path-distinctness leg's per-run variant seam: run the
+    run's controller image once, in a labeled networkless scratch
+    container, carrying the caller's persistence trio.
+
+    `paths` declares all three sinks —
+    {'state_file', 'journal_file', 'history_file'} — as names inside a
+    per-probe scratch directory the launch mounts at CONTAINER_RUN_DIR;
+    an alias is two keys naming one file. The launch is the rig shape
+    minus its pair wiring: the same --scan-ms pacing, --listen, and
+    persistence flags, bounded by --ticks so an admitted launch scans
+    its budget and exits 0 with the final snapshot on stdout — a
+    refused one exits at option-parse with the conflicting flags and
+    shared path named on stderr. The probe binds no rig endpoint:
+    '--network none' keeps the deployed pair's field and monitor
+    endpoints untouched (the persistence trio only requires --listen,
+    which binds in-container loopback), the scratch mount never shares
+    the members' files, and the deployed members' launches are never
+    rebuilt — the launch configuration needs no restoring because no
+    member's launch was touched.
+
+    Returns {'name': safe, 'dir': scratch dir, 'paths': declared dict,
+    'argv': the launch argv, 'exit': code, 'stdout':, 'stderr':} — the
+    leg names the verdict. A docker failure raises so the leg reports
+    the launch never ran rather than reading an empty refusal; the
+    launch and its captured verdict are recorded on the run's action
+    timeline. '--rm' plus a reconciling rm sweep keep a leftover probe
+    container from outliving its call.
+    """
+    run_id, sha = record['run_id'], record['attempted_sha']
+    flags = {'state_file': '--state-file',
+             'journal_file': '--journal-file',
+             'history_file': '--history-file'}
+    if not isinstance(paths, dict) or sorted(paths) != sorted(flags):
+        raise RuntimeError('admit_persistence expects all three '
+                           'persistence sinks declared: '
+                           + ', '.join(sorted(flags)))
+    bad = {key: value for key, value in paths.items()
+           if not isinstance(value, str) or not value
+           or value.startswith('/')}
+    if bad:
+        raise RuntimeError('admit_persistence paths must be file names '
+                           'inside the probe mount: ' + json.dumps(bad))
+    safe = ''.join(c if c.isalnum() or c == '-' else '-'
+                   for c in str(name).lower())
+    directory = Path(run_dir) / 'persistence-probes' / safe
+    directory.mkdir(parents=True, exist_ok=True)
+    directory.chmod(0o777)
+    argv = ['/model/plant.json', '--scan-ms', '100',
+            '--ticks', str(ALIAS_PROBE_TICKS),
+            '--listen', '127.0.0.1:' + str(ALIAS_PROBE_PORT)]
+    for key in ('state_file', 'journal_file', 'history_file'):
+        argv += [flags[key], CONTAINER_RUN_DIR + '/' + paths[key]]
+    container = 'dcs-hw-' + run_id + '-persist-' + safe
+    timeline('persistence-probe',
+             'docker run ' + container + ' (' + safe + ')')
+    docker('rm', '-f', container, check=False, timeout=60)
+    try:
+        proc = docker('run', '--rm', '--name', container,
+                      '--label', MANAGED_LABEL + '=1',
+                      '--label', RUN_LABEL + '=' + run_id,
+                      '--cpus', cfg['rig_cpus'],
+                      '--memory', cfg['rig_memory'],
+                      '--memory-swap', cfg['rig_memory'],
+                      '--pids-limit', str(cfg['rig_pids']),
+                      '--network', 'none',
+                      '-v', str(model) + ':/model/plant.json:ro',
+                      '-v', str(directory) + ':' + CONTAINER_RUN_DIR,
+                      IMAGE_PREFIX + 'controller:' + sha,
+                      *argv, check=False, timeout=ALIAS_PROBE_TIMEOUT)
+    finally:
+        docker('rm', '-f', container, check=False, timeout=60)
+    timeline('persistence-probed',
+             container + ' exited ' + str(proc.returncode))
+    return {'name': safe, 'dir': str(directory),
+            'paths': dict(paths), 'argv': argv,
+            'exit': proc.returncode,
+            'stdout': proc.stdout, 'stderr': proc.stderr}
+
+
 def _revised_peer_role(cfg):
     """The run's third controller's served RoleReport, or None when
     its monitor is unreachable — the relaunch guard's read of whether
@@ -2825,6 +2918,13 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
             admit_dynamics(cfg, record, run_dir,
                            src / cfg['model_fixture'], name, document,
                            timeline),
+        # The persistence-alias launch lever — a scenario declares the
+        # three persistence sinks' names and gets the doctored launch's
+        # verdict back; see admit_persistence for the seam's shape.
+        'admit_persistence': lambda name, paths:
+            admit_persistence(cfg, record, run_dir,
+                              src / cfg['model_fixture'], name, paths,
+                              timeline),
         'start_revised': lambda name, incompatible=False:
             start_revised_controller(
                 cfg, record, run_dir, src / cfg['model_fixture'],
@@ -2983,6 +3083,14 @@ def _probe_ctx(ctx, cfg, record, src, run_dir, probe, mounts,
             admit_dynamics(cfg, record, run_dir,
                            src / probe['model_fixture'], name,
                            document, timeline),
+        # The persistence-alias launch lever, bound to the probe
+        # pair's own model fixture — the scratch launch is pair-blind:
+        # networkless, unlabeled with any peer, its sinks under the
+        # probe's own persistence-probes directory.
+        'admit_persistence': lambda name, paths:
+            admit_persistence(cfg, record, run_dir,
+                              src / probe['model_fixture'], name,
+                              paths, timeline),
         'start_revised': None,
         'start_foreign': None,
         'stop_foreign': None,
