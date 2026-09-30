@@ -4291,7 +4291,8 @@ fn a_demoted_ex_owner_rejoins_a_successor_carrying_the_outage_lead() {
 
     // The bounded source outage: the stream cuts while a's served
     // document freezes — the reproduction's stopped active — and b
-    // keeps pacing past MAX_ANNOUNCED_AHEAD ticks of missed pulls.
+    // keeps pacing well past the old bound's thirty-two ticks of
+    // missed pulls.
     relay.partition(true);
     b.client.advance(40).unwrap();
     assert!(
@@ -4334,9 +4335,9 @@ fn a_demoted_ex_owner_rejoins_a_successor_carrying_the_outage_lead() {
     assert_eq!(b.client.role().unwrap().role, Role::Active);
 
     // The trigger the defect wedged on verbatim: the promoted
-    // successor's served run tick sits more than MAX_ANNOUNCED_AHEAD
-    // past the ex-owner's own — while its declared stream position
-    // honestly locates the line.
+    // successor's served run tick sits more than the old bound's
+    // thirty-two ticks past the ex-owner's own — while its declared
+    // stream position honestly locates the line.
     let own = a.client.checkpoint().unwrap();
     let successor = b.client.checkpoint().unwrap();
     assert!(
