@@ -4,8 +4,8 @@
 # dependencies are the pinned release crates. The pin is the release
 # contract's recorded mechanism: `git = "<published origin>"` at an
 # immutable revision on the release line — the tag recorded below is
-# the `v0.6.0` release
-# (docs/releases/v0.6.0/record.md — the recorded commit, filled at the
+# the `v0.7.0` release
+# (docs/releases/v0.7.0/record.md — the recorded commit, filled at the
 # cut, is the same pin as a `rev`), whose tooling serves the
 # block-interface registry, declared commands, routed emitted events,
 # the redundant-pair claim and suspended-receipt contracts the legs
@@ -14,7 +14,11 @@
 # rediscovery, the bounded driven-scan batch, the honest status-line
 # label, the bounded history backfill, the born-active's recorded
 # startup-failure dispositions, and the declared-duty durable
-# process-history store the mirror legs gate on, and the shipped
+# process-history store — beside the voluntary demotion's
+# released-claim hand-back, the persistence paths' startup
+# distinctness refusal, the deferred startup-claim refusal's named
+# dispositions, and the remote born-active's deferred correspondence
+# gate the mirror legs gate on — and the shipped
 # `dcs-ctl`/`dcs-alarm-report` tooling the clean check proves;
 # `docs/release-contract.md` records the mechanism.
 [package]
@@ -28,6 +32,6 @@ description = "Reference duty/standby lift station — a DCS consumer plant"
 [workspace]
 
 [dependencies]
-dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.6.0" }
-dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.6.0" }
+dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.7.0" }
+dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.7.0" }
 serde_json = "1"
