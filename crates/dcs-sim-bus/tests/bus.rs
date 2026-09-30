@@ -835,6 +835,84 @@ fn disconnect_releases_the_claim_for_a_promoted_peer() {
 }
 
 #[test]
+fn the_conditional_claim_refuses_a_live_different_owner_without_touching_it() {
+    with_server(&fixture_decls(), |_, addr| {
+        // Two attachments under the incumbent's token — the
+        // multi-connection shape one controller presents — plus the
+        // born-active starter asking under a fresh token.
+        let incumbent_a = BusDriver::connect(addr, &fixture_points()).unwrap();
+        let incumbent_b = BusDriver::connect(addr, &fixture_points()).unwrap();
+        let starter = BusDriver::connect(addr, &fixture_points()).unwrap();
+
+        // The grant lands on a free field, like the unconditional
+        // claim, and the same owner's second attachment joins the
+        // holders — both keep writing and stepping.
+        incumbent_a.claim_writer_unless_held(1).unwrap();
+        incumbent_b.claim_writer_unless_held(1).unwrap();
+        incumbent_a.write(PointId(2), Value::Float(1.0)).unwrap();
+        assert_eq!(incumbent_b.step(0.1), Ok(Tick(1)));
+
+        // The starter's conditional ask refuses: a different owner's
+        // claim stands — on this protocol always a live incumbent —
+        // and the refusal touches nothing: no preemption, no join.
+        assert_eq!(starter.claim_writer_unless_held(2), Err(LinkError::Fenced));
+        // The verdict is a protocol answer, not a link failure: the
+        // refused attachment's connection stays live, records no
+        // failure, and repeats the same verdict on a second ask.
+        assert!(starter.connected());
+        assert_eq!(starter.last_failure(), None);
+        assert_eq!(starter.claim_writer_unless_held(2), Err(LinkError::Fenced));
+        // The claim it met stands untouched: the incumbent still
+        // writes and steps, and the refused attachment's mutations
+        // stay fenced.
+        assert_eq!(
+            starter.write(PointId(2), Value::Float(9.0)),
+            Err(IoError::Fenced(PointId(2)))
+        );
+        assert_eq!(starter.step(0.1), Err(LinkError::Fenced));
+        incumbent_a.write(PointId(2), Value::Float(2.0)).unwrap();
+        assert_eq!(incumbent_b.step(0.1), Ok(Tick(2)));
+        assert_eq!(starter.read(PointId(2)).unwrap().value, Value::Float(2.0));
+
+        // The deliberate takeover stays unconditional: the promotion
+        // path's claim preempts the live incumbent exactly as before.
+        starter.claim_writer(2).unwrap();
+        starter.write(PointId(2), Value::Float(3.0)).unwrap();
+        assert_eq!(
+            incumbent_a.write(PointId(2), Value::Float(9.0)),
+            Err(IoError::Fenced(PointId(2)))
+        );
+    });
+}
+
+#[test]
+fn the_conditional_claim_grants_once_the_standing_claim_dies() {
+    with_server(&fixture_decls(), |_, addr| {
+        let incumbent = BusDriver::connect(addr, &fixture_points()).unwrap();
+        incumbent.claim_writer(1).unwrap();
+        let starter = BusDriver::connect(addr, &fixture_points()).unwrap();
+        assert_eq!(starter.claim_writer_unless_held(2), Err(LinkError::Fenced));
+
+        // The claim dies with the holder's link: once the incumbent is
+        // gone the field stands unclaimed and the conditional grant —
+        // the restart-as-active recovery path — takes it. The server
+        // observes the close asynchronously, so the ask retries until
+        // the freed field grants it.
+        drop(incumbent);
+        let granted = (0..100).any(|_| {
+            if starter.claim_writer_unless_held(2).is_ok() {
+                true
+            } else {
+                thread::sleep(Duration::from_millis(10));
+                false
+            }
+        });
+        assert!(granted, "the freed field must grant the conditional claim");
+        starter.write(PointId(2), Value::Float(2.0)).unwrap();
+    });
+}
+
+#[test]
 fn executor_runs_unchanged_with_identical_behavior_local_and_register_mapped() {
     let local = SimDriver::new(local_map()).unwrap();
     let local_trace = scripted_run(&local, || {
