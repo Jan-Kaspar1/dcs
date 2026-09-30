@@ -34,6 +34,7 @@ const OP_INJECT_QUALITY: u8 = 0x07;
 const OP_CLEAR_QUALITY: u8 = 0x08;
 const OP_EXCHANGE: u8 = 0x09;
 const OP_SCRIPT_EXCHANGE: u8 = 0x0a;
+const OP_ENSURE_WRITER: u8 = 0x0b;
 
 // Response variant tags.
 const RESP_SAMPLE: u8 = 0x01;
@@ -143,6 +144,19 @@ pub enum BusRequest {
     /// connection dropping. Releasing a claim the attachment does not
     /// hold is a no-op.
     ReleaseWriter,
+    /// The conditional counterpart of [`BusRequest::ClaimWriter`] —
+    /// the grant a re-attached field owner re-arms its dropped claim
+    /// with: takes the write-ownership claim under `owner`, binding
+    /// this attachment as a holder, while the field is unclaimed or
+    /// the standing claim already names `owner`. Refused
+    /// [`BusError::Fenced`] while a *different* owner stands — a
+    /// re-attaching attachment never preempts the claim another
+    /// owner took during its outage, so the grant is safe for a
+    /// driver to re-assert lazily on reconnect.
+    EnsureWriter {
+        /// The ownership token the re-arm asserts.
+        owner: u64,
+    },
     /// Stamps `register`'s stored sample with `quality` — the inject
     /// half of the quality-override pair, this protocol's analogue of
     /// `dcs-sim-net`'s `inject_fault` carrying a quality fault. The
@@ -618,6 +632,10 @@ pub(crate) fn encode_request(request: &BusRequest) -> Vec<u8> {
             body.extend_from_slice(&owner.to_be_bytes());
         }
         BusRequest::ReleaseWriter => body.push(OP_RELEASE_WRITER),
+        BusRequest::EnsureWriter { owner } => {
+            body.push(OP_ENSURE_WRITER);
+            body.extend_from_slice(&owner.to_be_bytes());
+        }
         BusRequest::InjectQuality { register, quality } => {
             body.push(OP_INJECT_QUALITY);
             body.extend_from_slice(&register.to_be_bytes());
@@ -762,6 +780,9 @@ pub(crate) fn decode_request(body: &[u8]) -> Result<BusRequest, String> {
             owner: reader.u64().ok_or_else(short)?,
         },
         OP_RELEASE_WRITER => BusRequest::ReleaseWriter,
+        OP_ENSURE_WRITER => BusRequest::EnsureWriter {
+            owner: reader.u64().ok_or_else(short)?,
+        },
         OP_INJECT_QUALITY => BusRequest::InjectQuality {
             register: reader.u16().ok_or_else(short)?,
             quality: reader.quality().ok_or_else(short)?,
@@ -909,6 +930,7 @@ mod tests {
             BusRequest::Step { dt: 0.1 },
             BusRequest::ClaimWriter { owner: 42 },
             BusRequest::ReleaseWriter,
+            BusRequest::EnsureWriter { owner: 7 },
             BusRequest::InjectQuality {
                 register: 4,
                 quality: Quality::Bad(QualityReason::DeviceFault),
@@ -984,10 +1006,19 @@ mod tests {
             serde_json::to_string(&BusRequest::Step { dt: 0.5 }).unwrap(),
             r#"{"op":"step","dt":0.5}"#
         );
-        // A claim is tag plus the eight-byte owner token.
+        // A claim is tag plus the eight-byte owner token — and so is
+        // its conditional ensure counterpart.
         assert_eq!(
             encode_request(&BusRequest::ClaimWriter { owner: 0x0102 }),
             vec![0, 9, 0x05, 0, 0, 0, 0, 0, 0, 1, 2]
+        );
+        assert_eq!(
+            encode_request(&BusRequest::EnsureWriter { owner: 0x0102 }),
+            vec![0, 9, 0x0b, 0, 0, 0, 0, 0, 0, 1, 2]
+        );
+        assert_eq!(
+            serde_json::to_string(&BusRequest::EnsureWriter { owner: 42 }).unwrap(),
+            r#"{"op":"ensure_writer","owner":42}"#
         );
         assert_eq!(
             serde_json::to_string(&BusRequest::InjectQuality {

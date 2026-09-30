@@ -39,7 +39,7 @@ use dcs_sim::{
     SimDriver,
 };
 use dcs_sim_bus::{
-    BusDriver, CyclicBusDriver, CyclicDeviceParameters, CyclicPoint, DeviceParameters,
+    BusDriver, CyclicBusDriver, CyclicDeviceParameters, CyclicPoint, DeviceParameters, LinkError,
     PointRegister,
 };
 use dcs_sim_net::{RemoteDriver, RemoteError};
@@ -332,7 +332,8 @@ pub type ClaimHook = Arc<dyn Fn(u64) -> Result<(), StepError> + Send + Sync>;
 /// this peer demotes: an attachment that gave the field up must not
 /// re-assert a stale claim when a re-attach finds the field's
 /// arbitration reset. `None` on kinds whose claim bookkeeping needs no
-/// forgetting — e.g. `sim-bus`, where a claim dies with its connection.
+/// forgetting — e.g. `sim-cyclic`, whose attachments record no claim
+/// to re-assert.
 pub type ReleaseHook = Arc<dyn Fn() + Send + Sync>;
 
 /// The conditional counterpart of [`ClaimHook`] — the per-backend half
@@ -1009,6 +1010,10 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
     let bus = Arc::new(bus);
     let stepping = Arc::clone(&bus);
     let claiming = Arc::clone(&bus);
+    let releasing = Arc::clone(&bus);
+    let ensuring = Arc::clone(&bus);
+    let starting = Arc::clone(&bus);
+    let reclaiming = Arc::clone(&bus);
     let inspect: Arc<dyn Any + Send + Sync> = bus.clone();
     let device = spec.id.0;
     Ok(DeviceDriver::Backend(DeviceBackend {
@@ -1029,25 +1034,66 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                     detail: error.to_string(),
                 })
         })),
-        // The device claim dies with its connection, so a re-attach
-        // never re-asserts it — there is nothing to forget.
-        release: None,
-        // The device's claim protocol has no conditional grant — and
-        // needs none: the claim dying with its connection frees the
-        // field on the peer's death, so no dead token ever fences it.
-        ensure: None,
-        // The same protocol has no live-holder query the startup
-        // claim could consult; the startup path falls back to the
-        // unconditional grant.
-        startup_claim: None,
-        // Nor a read-only claim observation — the device claim binds
-        // to the connection, so "unclaimed" never outlives a holder's
-        // link and there is no probe to ask.
+        // The claim's demotion counterpart: the attachment drops its
+        // hold on the field's claim — freeing it when it held the last
+        // — and forgets its recorded token, so a re-attach never
+        // re-asserts a claim the demoted peer gave up. Best-effort: a
+        // dead device's drop already freed the hold.
+        release: Some(Arc::new(move || {
+            let _ = releasing.release_writer();
+        })),
+        // The claim's orphan-cycle counterpart: the device server's
+        // conditional `ensure_writer` grant — the demoted ex-owner's
+        // probe re-arms the claim for the token while the field stands
+        // unclaimed or already names it, `Fenced` while a different
+        // owner stands. The grant is bound — on this protocol a claim
+        // stands only while an attachment holds it, so re-arming
+        // without joining the holders would free the claim the answer
+        // just granted.
+        ensure: Some(Arc::new(move |owner| {
+            match ensuring.ensure_writer(owner) {
+                Ok(()) => Ok(true),
+                Err(LinkError::Fenced) => Ok(false),
+                Err(error) => Err(StepError::Backend {
+                    backend: format!("device {device}"),
+                    detail: error.to_string(),
+                }),
+            }
+        })),
+        // The claim's startup counterpart: the same conditional grant —
+        // on this protocol a standing claim always has a live holder,
+        // so `ensure_writer`'s refusal while a different owner stands
+        // is exactly "a live incumbent holds the field", while a dead
+        // owner's claim has already freed itself.
+        startup_claim: Some(Arc::new(move |owner| {
+            match starting.ensure_writer(owner) {
+                Ok(()) => Ok(true),
+                Err(LinkError::Fenced) => Ok(false),
+                Err(error) => Err(StepError::Backend {
+                    backend: format!("device {device}"),
+                    detail: error.to_string(),
+                }),
+            }
+        })),
+        // No read-only claim observation — the device protocol has no
+        // probe request, so the run keeps its last observed verdict.
         probe: None,
-        // No bound conditional grant either — a claim that dies with
-        // its connection needs no reclaim path — and the device's
-        // fencing verdict names no claimant.
-        reclaim: None,
+        // The fencing-loss reclaim: `ensure_writer` is already the
+        // bound conditional grant the reclaim asks — a claim that has
+        // no live holders cannot stand on this protocol, so "a
+        // different owner stands" and "a different owner's claim has
+        // live holders" are the same refusal.
+        reclaim: Some(Arc::new(move |owner| {
+            match reclaiming.ensure_writer(owner) {
+                Ok(()) => Ok(true),
+                Err(LinkError::Fenced) => Ok(false),
+                Err(error) => Err(StepError::Backend {
+                    backend: format!("device {device}"),
+                    detail: error.to_string(),
+                }),
+            }
+        })),
+        // The device's fencing verdict names no claimant.
         fenced_by: None,
         declare_monitor: None,
         claimed_monitor: None,

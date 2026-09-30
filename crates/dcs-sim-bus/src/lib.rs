@@ -37,6 +37,7 @@
 //! | `0x08` | clear quality | `u16 register` |
 //! | `0x09` | exchange | `u16 count`, then per staged output `u16 register`, `u8 kind`, value bytes |
 //! | `0x0a` | script exchange | `u16 count`, then outcome entries |
+//! | `0x0b` | ensure writer | `u64 owner` |
 //!
 //! A scripted exchange outcome's first byte is `0x01` complete, `0x02`
 //! miss, `0x03` late, `0x04` short-station (`u16` name length, UTF-8
@@ -103,7 +104,7 @@
 //! | `0x03` | registers | `u16 count`, then per register `u16 register`, `u8 kind`, value bytes, `u64 tick`, quality bytes |
 //! | `0x04` | stepped | `u64 tick` — the bank's new tick |
 //! | `0x05` | error | `u8 code`, code body |
-//! | `0x06` | done | none — a claim, release, inject, clear, or script applied |
+//! | `0x06` | done | none — a claim, release, ensure, inject, clear, or script applied |
 //! | `0x07` | exchanged | `u8 flags`, `u16 count`, then per register `u16 register`, `u8 kind`, value bytes, `u64 tick`, quality bytes |
 //!
 //! The `exchanged` flags byte's bit 0 marks a late answer — the
@@ -169,7 +170,14 @@
 //! drops the requesting connection's hold — a no-op when it holds
 //! nothing — and a connection's drop releases it likewise, the last
 //! release freeing the field so a dead owner's claim cannot fence a
-//! promoted peer's. Where the claim cannot be held — an attachment
+//! promoted peer's. `ensure_writer` is `claim_writer`'s conditional
+//! counterpart: granted — binding the requesting attachment as a
+//! holder — only while the field is unclaimed or the standing claim
+//! already names `owner`, refused `fenced` while a different owner
+//! stands. It is the grant a re-attached field owner re-arms its
+//! dropped claim with, so a restart or link loss cannot preempt the
+//! claim another owner took during the outage. Where the claim cannot
+//! be held — an attachment
 //! whose link is down holds nothing — the field-claim failure refuses
 //! the promotion as `SwitchError::FieldClaimFailed`, and a field kind
 //! that cannot arbitrate at all keeps automatic self-promotion
@@ -183,8 +191,14 @@
 //! `IoError::InvalidValue` — refused locally, like the kind check, so a
 //! value the bank cannot represent is a caller error rather than a
 //! link fault — and a fenced-out write as
-//! `IoError::Fenced` — the first failure drops the connection
-//! for good, and [`BusDriver`] reports that link health through
+//! `IoError::Fenced`. A failed exchange drops the connection — a late
+//! answer could desync the request/response pairing — but not the
+//! driver: the next access re-attaches lazily, spacing contact
+//! attempts so a device restart or brief stall degrades scans to
+//! `Disconnected` only while the endpoint stays unanswerable, and a
+//! recorded writer claim re-arms through `ensure_writer` on the
+//! re-attach rather than preempting a successor. [`BusDriver`] reports
+//! that link health through
 //! `IoDriver::diagnostics` for the telemetry snapshot's I/O-health
 //! section. The
 //! `dcs-sim-bus-device` binary in this crate serves one model-declared
