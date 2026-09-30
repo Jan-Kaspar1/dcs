@@ -495,6 +495,48 @@ Implementation order: second, after [daily architecture review](daily-architectu
   a pull inside the pending window reports inconclusive; the pair
   leaves on its launch roles.
 
+### Landed 2026-09-30 (persistence-path alias-refusal leg, #1295)
+
+- The persistence-path distinctness startup contract — #1292's fix
+  serving WW-LCM-001's continuity clause — is exercised on the
+  deployed rig by scenario leg
+  `3695_persistence_path_alias_refusal`. `--state-file`,
+  `--journal-file`, and `--history-file` are distinct-file
+  declarations with distinct formats — a write-then-rename
+  checkpoint beside two append-only record streams — and an
+  aliased pair must fail startup by name rather than divert the
+  append stream onto the orphaned inode the observed run produced
+  (a healthy /history/durable writing nowhere reachable, then a
+  crash-loop on restart reading the checkpoint document as a
+  history record). The leg stages each recorded pair through the
+  run context's `admit_persistence` lever — the harness's
+  per-run variant seam for a doctored launch: the run's own
+  controller image in a labeled `--rm` networkless scratch
+  container mounting a per-probe run-dir directory, launched on
+  the rig's pacing shape bounded by `--ticks`. The
+  `--state-file`/`--history-file` and `--state-file`/`--journal-file`
+  aliases must each exit nonzero naming both conflicting flags
+  and the shared path; the `--journal-file`/`--history-file`
+  append-append alias is the standing contrast the finding
+  recorded — every build fails it closed, the named parse refusal
+  replacing the second sink's writer-lock conflict once the
+  contract lands; and the correctly-distinct launch of the same
+  shape must scan its ticks and write each sink's own file. The
+  deployed pair never moves — the scratch containers share no
+  file, port, or field claim with the running members — and no
+  member launch is rebuilt, so the launch configuration stands
+  untouched throughout.
+- Named diagnostics are `persistence-alias-accepted` and
+  `persistence-alias-nondeterministic`, with the self-check's
+  `persistence-alias-unchecked` covering the planted accepted
+  aliases, unnamed refusals, refused control, and disturbed pair;
+  two consecutive passes produce identical digests; a run whose
+  ctx carries no `admit_persistence` lever, whose pair is
+  unreachable or never settles tracking, or whose staged revision
+  predates the contract — the append-append alias still failing
+  closed through the writer lock alone — reports inconclusive;
+  the pair leaves on its launch roles.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,
