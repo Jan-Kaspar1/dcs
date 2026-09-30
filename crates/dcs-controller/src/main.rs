@@ -170,6 +170,14 @@
 //! the old active first — keeps exactly one peer writing the field.
 //! A standby-local `SimDriver` needs no gate: its plant is a private
 //! tracking copy every checkpoint's driver section resynchronizes.
+//! Whichever flag names the tracking source, it must be a different
+//! instance: a `--standby` or `--peer` target that resolves to this
+//! instance's own `--listen` socket is a usage error at launch — the
+//! run's own checkpoint can never carry a peer's field ownership (a
+//! standby's own document always stamps `source_owns_field:false`,
+//! which the apply counts as a heartbeat miss), so the self-addressed
+//! standby would cover no peer while an armed one promoted itself on
+//! its own misses.
 //!
 //! Demotion is the launch asymmetry the follow-peer half of the
 //! tracking contract closes: a launched active never named a peer —
@@ -971,13 +979,16 @@ controller scan.
                   the peer down with its name in the routine
                   mid-failover condition, degrades tracking as pull
                   misses the name's later answer reconverges; it is
-                  never a startup error
+                  never a startup error. ADDR must name a different
+                  instance, though: a target resolving to this
+                  instance's own --listen socket is a usage error
   --peer ADDR     run as the active, but name the peer's monitoring
                   address this instance tracks if it is later demoted
                   — so a demoted active reconverges and stays
                   promotable; degrades like --standby when the name
                   does not resolve. Mutually exclusive with --standby;
-                  requires --listen
+                  requires --listen, and like --standby must name a
+                  different instance than that socket
   --revised       declare this instance's model a deliberate revision of
                   the run's previous one. On a --standby peer a pulled
                   checkpoint whose model fingerprint differs crosses the
@@ -1307,6 +1318,38 @@ impl Options {
                 }
             }
         }
+        // A tracking source must name a different instance. Pointed at
+        // this instance's own --listen socket, every pull returns the
+        // run's own checkpoint — which a standby's document always
+        // stamps source_owns_field:false — so each apply scores a
+        // heartbeat miss: an unarmed run reports standby covering no
+        // peer forever, and an armed one manufactures a failover
+        // against itself at every budget
+        // (self-tracking-standby-never-refused). The comparison
+        // resolves both spellings — an equal socket, a wildcard listen
+        // reached through any of this host's addresses (a container's
+        // own DNS name resolves to its bridge IP, not loopback), and a
+        // wildcard target the loopback stack answers all refuse at
+        // parse, like the persistence aliases above. A target that
+        // does not resolve stays the documented degraded source — the
+        // pull-miss contract, never a startup error — since it cannot
+        // be shown to be this instance.
+        if let Some(listen_addr) = listen.as_deref() {
+            for (flag, target) in [("--standby", &standby), ("--peer", &peer)] {
+                let Some(target) = target.as_deref() else {
+                    continue;
+                };
+                if let Some(socket) = own_monitor_socket(listen_addr, target) {
+                    return Err(format!(
+                        "{flag} {target} resolves to this instance's own --listen \
+                         socket {socket}: the tracking source must be a different \
+                         instance — a run pulling its own checkpoints tracks no \
+                         peer, and an armed standby self-promotes on the heartbeat \
+                         misses its own non-owning documents score"
+                    ));
+                }
+            }
+        }
         Ok(Self {
             model,
             check,
@@ -1386,6 +1429,73 @@ fn fold_components(path: PathBuf) -> PathBuf {
         }
     }
     folded
+}
+
+/// The `listen` socket a connection to `target` would reach — `Some`
+/// when a `--standby`/`--peer` target names this instance's own
+/// monitor, the misconfiguration the self-tracking check refuses at
+/// parse. Both spellings resolve through `ToSocketAddrs` and every
+/// resolved pair is tested, so a name answering with several
+/// addresses is judged on all of them. A name that does not resolve
+/// yields `None`: an unresolvable tracking target is the documented
+/// degraded source — a pull miss per cycle, never a startup error —
+/// and it cannot be shown to be this instance anyway.
+fn own_monitor_socket(listen: &str, target: &str) -> Option<SocketAddr> {
+    use std::net::ToSocketAddrs;
+    let resolve_all = |addr: &str| -> Vec<SocketAddr> {
+        addr.to_socket_addrs()
+            .map(|resolved| resolved.collect())
+            .unwrap_or_default()
+    };
+    let listens = resolve_all(listen);
+    for target in resolve_all(target) {
+        for listen in &listens {
+            if socket_reaches(target, *listen) {
+                return Some(*listen);
+            }
+        }
+    }
+    None
+}
+
+/// Whether a connection dialed to `target` lands on `listen` — the
+/// reachability half of the self-tracking check, on already-resolved
+/// addresses. The ports must match; then the socket is shared when
+/// the addresses are equal, when `listen` is a wildcard every local
+/// address reaches, or when `target` is a wildcard — a wildcard dial
+/// lands on the loopback stack, so it reaches only a listener bound
+/// on loopback or everywhere.
+fn socket_reaches(target: SocketAddr, listen: SocketAddr) -> bool {
+    if target.port() != listen.port() {
+        return false;
+    }
+    // The canonical form folds an IPv4-mapped IPv6 address to its IPv4
+    // counterpart, so `[::ffff:127.0.0.1]` spells loopback — and the
+    // wildcard arm below lets a dual-stack `[::]` listener answer an
+    // IPv4-local dial.
+    let target_ip = target.ip().to_canonical();
+    let listen_ip = listen.ip().to_canonical();
+    if target_ip == listen_ip {
+        return true;
+    }
+    if listen_ip.is_unspecified() {
+        return ip_is_local(target_ip);
+    }
+    target_ip.is_unspecified() && listen_ip.is_loopback()
+}
+
+/// Whether `ip` is one of this host's own addresses: loopback and the
+/// unspecified address outright, anything else by probing it with a
+/// bind — an ephemeral listen on `ip` succeeds only when the address
+/// is assigned to a local interface. The probe is what the
+/// self-addressed deployment needs: a standby pointed at its own
+/// container DNS name resolves to the container's bridge IP, not
+/// loopback.
+fn ip_is_local(ip: std::net::IpAddr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() {
+        return true;
+    }
+    std::net::TcpListener::bind(SocketAddr::new(ip, 0)).is_ok()
 }
 
 fn fail(message: impl std::fmt::Display) -> ExitCode {
@@ -2816,6 +2926,76 @@ mod tests {
         ]);
         Options::parse(args).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Finding `self-tracking-standby-never-refused`: a `--standby` or
+    /// `--peer` target resolving to this instance's own `--listen`
+    /// socket pulled its own checkpoint stream — every apply scoring
+    /// the heartbeat miss a standby's `source_owns_field:false`
+    /// document always carries — so the unarmed run reported standby
+    /// covering no peer forever, and the armed one self-promoted
+    /// against itself at every budget. `Options::parse` refuses the
+    /// self-addressed source naming both flags, under every spelling
+    /// that reaches the own socket.
+    #[test]
+    fn self_addressed_tracking_source_fails_option_parsing() {
+        let base = [
+            "model.json".to_string(),
+            "--scan-ms".to_string(),
+            "100".to_string(),
+        ];
+        let parse = |listen: &str, flag: &str, target: &str| {
+            Options::parse(base.iter().cloned().chain([
+                "--listen".to_string(),
+                listen.to_string(),
+                flag.to_string(),
+                target.to_string(),
+            ]))
+        };
+
+        for (flag, listen, target) in [
+            // The reported spelling: a wildcard listen, a loopback
+            // target.
+            ("--standby", "0.0.0.0:28080", "127.0.0.1:28080"),
+            // The identical spelling.
+            ("--standby", "127.0.0.1:28081", "127.0.0.1:28081"),
+            // A resolved-equal name.
+            ("--standby", "127.0.0.1:28082", "localhost:28082"),
+            // A wildcard target dials into the loopback listener.
+            ("--standby", "127.0.0.1:28083", "0.0.0.0:28083"),
+            // A wildcard listener answers a dial to any local address
+            // on the port — the IPv6 wildcard included.
+            ("--standby", "[::]:28084", "127.0.0.1:28084"),
+            // The demotion-tracking flag refuses the same way.
+            ("--peer", "0.0.0.0:28085", "127.0.0.1:28085"),
+            ("--peer", "127.0.0.1:28086", "localhost:28086"),
+        ] {
+            let error = match parse(listen, flag, target) {
+                Ok(_) => {
+                    panic!("{flag} {target} against --listen {listen} must fail parsing")
+                }
+                Err(error) => error,
+            };
+            assert!(
+                error.contains(flag) && error.contains("--listen"),
+                "{flag} {target} against --listen {listen}: {error}"
+            );
+        }
+
+        // The supported deployments still parse: a same-host pair is a
+        // different port on the same address, a remote peer a
+        // non-local one — and the wildcard spellings are one-sided.
+        for (flag, listen, target) in [
+            ("--standby", "0.0.0.0:28080", "127.0.0.1:28087"),
+            ("--standby", "127.0.0.1:28080", "127.0.0.1:28087"),
+            ("--peer", "127.0.0.1:28080", "127.0.0.1:28087"),
+            ("--standby", "0.0.0.0:28080", "192.0.2.1:28080"),
+            ("--standby", "127.0.0.1:28080", "0.0.0.0:28087"),
+        ] {
+            if let Err(error) = parse(listen, flag, target) {
+                panic!("{flag} {target} against --listen {listen} must parse: {error}");
+            }
+        }
     }
 
     #[test]
