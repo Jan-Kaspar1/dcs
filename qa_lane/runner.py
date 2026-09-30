@@ -224,6 +224,15 @@ DEFAULT_CONFIG = {
     # needs the declared inflow so the station cycles demand on its own
     # — the duty-rotation case's honest lever.
     'dynamics_fixture': 'qa_lane/fixtures/pump_station_dynamics.json',
+    # The foreign-model correspondence leg's staging fixtures (#1309):
+    # the born legs' scratch field can instead serve a DIFFERENT model —
+    # the dosing skid shares the pump station's low channel ids but
+    # declares nothing at 120 and different kinds on shared ids — so a
+    # miswired --remote meets the declared-point correspondence refusal
+    # the #1302 fix records rather than owning a foreign plant.
+    'foreign_model_fixture': 'crates/dcs-demo/fixtures/dosing_skid.json',
+    'foreign_dynamics_fixture':
+        'crates/dcs-demo/fixtures/dosing_skid_dynamics.json',
     'capabilities': [
         {'key': 'no-ethercat',
          'detail': 'No EtherCAT driver in this revision; all field I/O '
@@ -2577,7 +2586,13 @@ def start_born_field(cfg, record, run_dir, model, dynamics, timeline,
       dynamics — the field whose answered contact resolves the pending
       state, and whose held claim refuses the class (b) launches;
       `pause_born_field` on top of it stages the class (c)
-      attach-without-verdict inconclusive claim.
+      attach-without-verdict inconclusive claim;
+    - 'foreign' launches the same plant server on the run config's
+      foreign fixtures (`foreign_model_fixture`/`foreign_dynamics_fixture`
+      — the dosing skid) — the miswired-remote field the
+      foreign-model correspondence leg stages: its served point set
+      and kinds differ from the rig model's, so a --remote born-active
+      declaring the run model must meet the #1302 startup refusal.
 
     The container carries the run's managed and run labels so teardown
     reconciles it; a previous born field — either mode — is removed
@@ -2588,9 +2603,10 @@ def start_born_field(cfg, record, run_dir, model, dynamics, timeline,
     dials.
     """
     run_id, sha = record['run_id'], record['attempted_sha']
-    if mode not in ('serving', 'silent'):
+    if mode not in ('serving', 'silent', 'foreign'):
         raise RuntimeError('start_born_field modes are '
-                           "'serving'/'silent', got " + repr(mode))
+                           "'serving'/'silent'/'foreign', got "
+                           + repr(mode))
     container = 'dcs-hw-' + run_id + '-born-plant'
     docker('rm', '-f', container, check=False, timeout=60)
     timeline('born-field-start', 'launch ' + container + ' (' + mode
@@ -2793,6 +2809,22 @@ def born_controller_state(run_id, seat):
             'logs': (logs.stdout or '') + (logs.stderr or '')}
 
 
+def born_field_ctl(run_id, *args):
+    """The scenario-callable plant-tool invocation against the born
+    legs' scratch field: `docker exec` runs the shipped `dcs-plant-ctl`
+    inside the field's own container against its loopback listener —
+    the born plant is rig-bridge-placed, reachable only as a --remote
+    address, so its census and claim evidence reach the lane through
+    the container's own netns, the same seam `plant_ctl` gives the
+    deployed pair's plant. `check=False` returns the CompletedProcess
+    on a refused request — the tool's nonzero exit and stderr are the
+    answer the caller classifies, not a docker failure."""
+    container = 'dcs-hw-' + run_id + '-born-plant'
+    return docker('exec', container, 'dcs-plant-ctl',
+                  '127.0.0.1:' + str(BORN_FIELD_PORT), *args,
+                  check=False, timeout=60)
+
+
 def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
                   timeline):
     """The scenario driver's view of the running rig: monitor base URLs
@@ -2947,8 +2979,12 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         # process verdict the undeclared-refusal class's exit evidence
         # comes from.
         'start_born_field': lambda mode: start_born_field(
-            cfg, record, run_dir, src / cfg['model_fixture'],
-            src / cfg['dynamics_fixture'], timeline, mode),
+            cfg, record, run_dir,
+            src / (cfg['foreign_model_fixture']
+                   if mode == 'foreign' else cfg['model_fixture']),
+            src / (cfg['foreign_dynamics_fixture']
+                   if mode == 'foreign' else cfg['dynamics_fixture']),
+            timeline, mode),
         'pause_born_field': lambda: pause_born_field(run_id, timeline),
         'unpause_born_field': lambda: unpause_born_field(
             run_id, timeline),
@@ -2961,6 +2997,7 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
             run_id, seat, timeline),
         'born_controller_state': lambda seat: born_controller_state(
             run_id, seat),
+        'born_field_ctl': lambda *args: born_field_ctl(run_id, *args),
         # The run's shared --pair-token — the keyed posture the
         # announced-source legs need: absent means the rig verifies
         # nothing and the legs report inconclusive rather than failed.
