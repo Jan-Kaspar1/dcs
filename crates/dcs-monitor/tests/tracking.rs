@@ -4376,6 +4376,150 @@ fn a_demoted_ex_owner_rejoins_a_successor_carrying_the_outage_lead() {
     );
 }
 
+/// The QA finding `skew-bound-strands-slower-cadence-ex-owner`: the
+/// announced/owner skew bound compared the pulled checkpoint's
+/// declared stream position against the *probing* run's own — but a
+/// detached prober's stream position advances at its own scan cadence
+/// while the pulled one advances at the successor's, so any sustained
+/// pace asymmetry diverges the gap monotonically and the verify can
+/// never pass. On the defective build a slow-scanning demoted ex-owner
+/// refused a faster promoted successor `Ahead` at every re-probe —
+/// `standby`/`unsynchronized` forever, `not_converged` on promote,
+/// journal repeating the skew-bound refusal as N-M grew. The
+/// prober's own paced position is no line-membership reference: a
+/// same-generation successor honestly declaring its stream position
+/// is the line's continuation however fast it advances, so no
+/// ahead-of-own bound stands and the demoted peer's claimed-monitor
+/// adoption converges `tracking`.
+#[test]
+fn a_demoted_ex_owner_rejoins_a_faster_paced_successor() {
+    // The reproduction's ctrl-a: the launched field owner with no
+    // configured tracking source, driven over a fencing front so the
+    // successor's claim preempts its writes mid-run — no `POST
+    // /demote` boundary ever runs — and carrying the field's claim
+    // verdicts the claimed-monitor adoption reads. The verdict names
+    // a's own monitor while its claim stands.
+    let fencing = FencingDriver::start();
+    let claimed: &'static Mutex<SocketAddr> = Box::leak(Box::new(Mutex::new(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        0,
+    ))));
+    let a = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(
+                fenced_executor(fencing).with_generation(mint_generation()),
+                None,
+            )
+            .with_claimed_monitor(move || Some(*claimed.lock().unwrap())),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: None,
+            after_scan: None,
+        }),
+    );
+    let a_addr = dialable(a.monitor.local_addr());
+    *claimed.lock().unwrap() = a_addr;
+
+    // The reproduction's ctrl-b: a standby tracking a — no outage
+    // anywhere in this staging; the divergence is pace alone.
+    let b_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let b = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(b_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(a_addr),
+            after_scan: None,
+        }),
+    );
+    let b_addr = dialable(b.monitor.local_addr());
+
+    a.client.advance(3).unwrap();
+    b.client.advance(1).unwrap();
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby converged on the line before the promotion"
+    );
+
+    // The routine promote: b claims the field — the arbitration's
+    // fencing verdict preempts a's writes and names b's monitor — and
+    // settles the field owner.
+    assert_eq!(b.client.promote().unwrap().role, Role::Promoting);
+    fencing.preempt();
+    *claimed.lock().unwrap() = b_addr;
+    b.client.advance(1).unwrap();
+    assert_eq!(b.client.role().unwrap().role, Role::Active);
+
+    // The reproduction's cadence asymmetry, staged without a wall
+    // clock: the faster successor keeps scanning — each driven scan
+    // advancing its declared stream position — while the demoted
+    // ex-owner has not yet observed the fencing, so the pulled
+    // position leads the prober's own past the defective build's
+    // bound and keeps diverging.
+    b.client.advance(40).unwrap();
+    let own = a.client.checkpoint().unwrap();
+    let successor = b.client.checkpoint().unwrap();
+    let own_position = own.stream_tick.unwrap_or(own.tick).min(own.tick);
+    let pulled_position = successor
+        .stream_tick
+        .unwrap_or(successor.tick)
+        .min(successor.tick);
+    assert!(
+        pulled_position.0 > own_position.0 + 32,
+        "the successor's declared stream position leads the detached \
+         prober's own past the old skew bound — the refusal the defect \
+         made permanent: {successor:?} vs {own:?}"
+    );
+    assert_eq!(
+        successor.generation, own.generation,
+        "same generation — the line's own continuation, honestly \
+         declared: {successor:?} vs {own:?}"
+    );
+
+    // a's next field-owning scan fences: `field_claim_lost` demotes it
+    // in place, and the first sourceless scan resolves the field's
+    // declared monitor — proving the successor's document on its line
+    // membership, where the defective build refused it `Ahead` on
+    // every re-probe — then pins, journals, and pulls it.
+    a.client.advance(2).unwrap();
+    let report = a.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted ex-owner reconverges on the faster successor \
+         instead of stranding unsynchronized: {report:?}"
+    );
+    assert_eq!(a.monitor.tracking_source(), Some(b_addr));
+    let journal = a.client.journal(0).unwrap();
+    assert!(
+        journal.iter().any(|entry| matches!(
+            entry.event,
+            JournalEvent::TrackingSourceAdopted { source } if source == b_addr
+        )),
+        "the field-arbitrated adoption journals on the demoted peer: {journal:?}"
+    );
+    assert!(
+        journal.iter().all(|entry| !matches!(
+            entry.event,
+            JournalEvent::TrackingSourceRefused { source, .. } if source == b_addr
+        )),
+        "no verify refusal strands the honest successor: {journal:?}"
+    );
+}
+
 /// The QA finding `orphan-resolution-dead-claimed-monitor-stalls-scan`:
 /// on the reported build every orphaned `track_cycle` ran
 /// `resolve_tracking_source` synchronously on the scan thread, and its
