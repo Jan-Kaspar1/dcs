@@ -176,6 +176,70 @@ fn aliased_persistence_paths_are_a_usage_error() {
 }
 
 #[test]
+fn self_addressed_tracking_source_is_a_usage_error() {
+    // Finding self-tracking-standby-never-refused: --standby aimed at
+    // the instance's own --listen socket used to launch and park
+    // standby/orphaned/aligned on its own checkpoint stream — an
+    // apparent standby covering no peer — and armed with
+    // --auto-promote it self-promoted at every budget, each apply
+    // counting the heartbeat miss its own source_owns_field:false
+    // document carries. The self-addressed source is a usage error
+    // named at parse, under every spelling that reaches the own
+    // socket, for both tracking flags.
+    for (flag, listen, target) in [
+        // The reported spelling: a wildcard listen, a loopback target.
+        ("--standby", "0.0.0.0:18080", "127.0.0.1:18080"),
+        // The identical spelling.
+        ("--standby", "127.0.0.1:18081", "127.0.0.1:18081"),
+        // A resolved-equal name.
+        ("--standby", "127.0.0.1:18082", "localhost:18082"),
+        // The demotion-tracking flag refuses the same way.
+        ("--peer", "0.0.0.0:18083", "127.0.0.1:18083"),
+        ("--peer", "127.0.0.1:18084", "localhost:18084"),
+    ] {
+        let output = run(&[
+            TANK_LOOP,
+            "--scan-ms",
+            "100",
+            "--listen",
+            listen,
+            flag,
+            target,
+        ]);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{flag} {target} on --listen {listen} must exit 2"
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains(flag) && stderr.contains("--listen"),
+            "{flag} {target} on --listen {listen}: {stderr}"
+        );
+    }
+
+    // The supported same-host pair — the tracking peer one port over
+    // — still launches: a paced --ticks standby run that scans and
+    // exits is the contract the refusal must not shadow.
+    let output = run(&[
+        TANK_LOOP,
+        "--scan-ms",
+        "100",
+        "--ticks",
+        "3",
+        "--listen",
+        "127.0.0.1:0",
+        "--standby",
+        "127.0.0.1:18085",
+    ]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        output.status.success(),
+        "a distinct-port same-host standby must launch and run: {stderr}"
+    );
+}
+
+#[test]
 fn driven_requires_listen_and_excludes_pacing() {
     // --driven needs the monitor the requests arrive through.
     let output = run(&[TANK_LOOP, "--driven"]);
