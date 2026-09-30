@@ -29,9 +29,12 @@ prose and whose `LEG` literal carries its stage registration:
                 "dcs-controller",        # --upgrade-tools, the recorded
         },                               # upgrade-from revision's
                                          # tooling directory
-        "tampers": [                     # optional — the leg's doctored
-                                         # cases, each a `--tamper`
-                                         # choice the leg accepts
+        "tampers": [                     # required, nonempty — the
+                                         # leg's doctored cases, each
+                                         # a `--tamper` choice the leg
+                                         # accepts; a leg whose own
+                                         # audit is never proven to
+                                         # fire cannot register
             {
                 "name": "expect-tracking",
                 "passed": "…",           # the <stem>-unchecked
@@ -133,7 +136,13 @@ def validate_leg(path, record):
                 raise Invalid(
                     f"{path}: LEG[{field!r}] must map flags to binaries"
                 )
-    for tamper in record.get("tampers", []):
+    tampers = record.get("tampers")
+    if not isinstance(tampers, list) or not tampers:
+        raise Invalid(
+            f"{path}: LEG must declare 'tampers' — a nonempty list "
+            "of the leg's doctored cases"
+        )
+    for tamper in tampers:
         if not isinstance(tamper, dict) or not all(
             isinstance(tamper.get(field), str)
             for field in ("name", "passed", "missed")
