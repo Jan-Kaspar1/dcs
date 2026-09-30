@@ -629,7 +629,7 @@ def remote_foreign_model_pass(args, tamper):
             pair.stop(process)
         members.clear()
         for _ in range(SETTLE_TICKS):
-            rig.tick(standby_url, duty_url, failures)
+            tracked, owner = rig.tick(standby_url, duty_url, failures)
         if not driver_recovery.roles_hold(
             rig, failures, "after the foreign-model attempt"
         ):
