@@ -511,6 +511,7 @@ impl BusDriver {
         }
     }
 
+<<<<<<< HEAD
     /// The conditional counterpart of [`claim_writer`](Self::claim_writer):
     /// takes the claim for `owner` — binding this attachment as a
     /// holder — while the field is unclaimed or the standing claim
@@ -531,11 +532,33 @@ impl BusDriver {
                 self.connection.lock().unwrap().owner = Some(owner);
                 Ok(())
             }
+=======
+    /// The conditional counterpart of [`claim_writer`](Self::claim_writer)
+    /// — the grant a launched controller's startup claim asks. Takes
+    /// the claim for `owner` where the device stands unclaimed or the
+    /// standing claim already names `owner` — this attachment then
+    /// joining the claim's holders, exactly as `claim_writer` joins
+    /// them — and refuses [`LinkError::Fenced`] while a *different*
+    /// owner's claim stands, the claim it met left untouched: the ask
+    /// never preempts, never joins, never mutates.
+    ///
+    /// On this protocol a standing claim always has live holders — it
+    /// dies with its last holder's link — so the refused ask is
+    /// exactly the live-incumbent verdict the born-active startup
+    /// contract refuses startup on: a restarted controller cannot
+    /// prove its resumed state is current with the incumbent's and
+    /// must not preempt it. The deliberate takeover — a promotion's
+    /// claim — stays unconditional: it calls `claim_writer`.
+    pub fn claim_writer_unless_held(&self, owner: u64) -> Result<(), LinkError> {
+        match self.request(&BusRequest::ClaimWriterUnlessHeld { owner })? {
+            BusResponse::Done => Ok(()),
+>>>>>>> origin/main
             BusResponse::Error { error } => Err(refused(error)),
             _ => Err(self.protocol_violation()),
         }
     }
 
+<<<<<<< HEAD
     /// Forgets the recorded writer claim — the demotion counterpart of
     /// [`claim_writer`](Self::claim_writer): the demoted peer's write
     /// gate is already closed, and without this its next re-attach
@@ -548,6 +571,8 @@ impl BusDriver {
         self.connection.lock().unwrap().owner = None;
     }
 
+=======
+>>>>>>> origin/main
     /// Stamps `register`'s stored sample with `quality` —
     /// [`BusRequest::InjectQuality`], the register protocol's analogue
     /// of `dcs-sim-net`'s `RemoteDriver::inject_fault` carrying a

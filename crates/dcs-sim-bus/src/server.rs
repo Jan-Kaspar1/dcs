@@ -365,6 +365,37 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> Option<Bus
             }
             BusResponse::Done
         }
+        BusRequest::ClaimWriterUnlessHeld { owner } => {
+            // The conditional grant a launched controller's startup
+            // claim asks: refuse while a *different* owner's claim
+            // stands — on this protocol a standing claim always has
+            // live holders, so the standing claim is the live
+            // incumbent a born-active restart must not preempt — and
+            // leave it untouched: no preemption, no join. Grant
+            // otherwise: the held owner joins this attachment to its
+            // holders exactly as `ClaimWriter` does, and an unclaimed
+            // device takes the claim.
+            let mut writer = shared.writer.lock().unwrap();
+            match writer.as_mut() {
+                Some(claim) if claim.owner != owner => BusResponse::Error {
+                    error: BusError::Fenced {
+                        detail: "a live attachment holds the device's write-ownership claim"
+                            .to_string(),
+                    },
+                },
+                Some(claim) => {
+                    claim.holders.insert(connection);
+                    BusResponse::Done
+                }
+                None => {
+                    *writer = Some(WriterClaim {
+                        owner,
+                        holders: HashSet::from([connection]),
+                    });
+                    BusResponse::Done
+                }
+            }
+        }
         BusRequest::ReleaseWriter => {
             release_claim(&shared.writer, connection);
             BusResponse::Done
@@ -427,11 +458,20 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> Option<Bus
 /// write claim to the requesting attachment — preempting whichever
 /// owner held it — and while a claim stands, `write_register` and
 /// `step` from an attachment not holding it answer
+<<<<<<< HEAD
 /// [`BusError::Fenced`]. [`BusRequest::EnsureWriter`] is the
 /// conditional counterpart a re-attached owner re-arms with: granted
 /// only while the field is unclaimed or already names the token,
 /// never preempting a different owner's standing claim. The claim is
 /// bound to its attachments: it
+=======
+/// [`BusError::Fenced`]. [`BusRequest::ClaimWriterUnlessHeld`] is the
+/// conditional counterpart the born-active startup claim asks:
+/// refused `Fenced` while a different owner's claim stands — which on
+/// this protocol is exactly a live incumbent, the claim dying with
+/// its last holder — granted otherwise. The claim is bound to its
+/// attachments: it
+>>>>>>> origin/main
 /// releases on the holder's disconnect or
 /// [`BusRequest::ReleaseWriter`], the last release reopening the field.
 ///

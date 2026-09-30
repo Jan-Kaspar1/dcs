@@ -37,7 +37,11 @@
 //! | `0x08` | clear quality | `u16 register` |
 //! | `0x09` | exchange | `u16 count`, then per staged output `u16 register`, `u8 kind`, value bytes |
 //! | `0x0a` | script exchange | `u16 count`, then outcome entries |
+<<<<<<< HEAD
 //! | `0x0b` | ensure writer | `u64 owner` |
+=======
+//! | `0x0b` | claim writer unless held | `u64 owner` |
+>>>>>>> origin/main
 //!
 //! A scripted exchange outcome's first byte is `0x01` complete, `0x02`
 //! miss, `0x03` late, `0x04` short-station (`u16` name length, UTF-8
@@ -158,7 +162,15 @@
 //! `claim_writer` grants the write claim to the requesting attachment
 //! under an opaque `owner` token, the grant unconditional: it preempts
 //! whichever owner held the device, and one owner's several
-//! attachments claim the same token so all of them write. While a
+//! attachments claim the same token so all of them write.
+//! `claim_writer_unless_held` is the conditional counterpart a
+//! launched controller's startup claim asks: granted while the field
+//! stands unclaimed or the standing claim already names `owner`,
+//! refused `fenced` while a *different* owner's claim stands — the
+//! claim it met left untouched. On this protocol a standing claim
+//! always has live holders, so the refused ask is exactly the
+//! live-incumbent verdict the born-active startup contract refuses
+//! startup on. While a
 //! claim stands, `write_register` and `step` from an attachment not
 //! holding it answer the `fenced` error — surfaced through
 //! [`BusDriver`] as `IoError::Fenced` on the addressed point and

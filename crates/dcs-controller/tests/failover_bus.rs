@@ -41,7 +41,12 @@ use std::time::{Duration, Instant};
 mod support;
 
 use support::{
+<<<<<<< HEAD
     Spawned, image_value, kill, pump, serving_device, spawn, spawn_controller, workspace_binary,
+=======
+    CONTROLLER, PAIR_TOKEN, Spawned, image_value, pump, serving_device, spawn, spawn_controller,
+    workspace_binary,
+>>>>>>> origin/main
 };
 
 /// The model the rig runs — the shared tank-loop document whose
@@ -747,6 +752,7 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+<<<<<<< HEAD
 #[test]
 fn a_restarted_device_recovers_and_the_peer_promotes() {
     // QA `sim-bus-driver-permanent-disconnect-after-device-blip`: a
@@ -763,10 +769,36 @@ fn a_restarted_device_recovers_and_the_peer_promotes() {
     let pair_model = bus_model(&dir, "pair.json", |device| {
         pair_devices[&device].addr.to_string()
     });
+=======
+/// The QA reproduction: a second controller launched born-active on
+/// the live pair's field must not seize the standing claim. The
+/// register protocol's conditional grant answers `fenced` for a
+/// different owner's live claim — bus claims die with their last
+/// holder's link, so a standing claim *is* a live incumbent — and the
+/// born-active launch settles that refusal by exiting nonzero: no
+/// preemption, no incumbent fencing, no orphaned tracking peer.
+#[test]
+fn a_born_active_launch_refuses_over_a_live_incumbent_claim() {
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-failover-bus-born-active-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let serving = bus_model(&dir, "serving.json", |_| "127.0.0.1:0".to_string());
+    let pair_devices = spawn_devices(&serving);
+    let pair_model = bus_model(&dir, "pair.json", |device| {
+        pair_devices[&device].addr.to_string()
+    });
+    // The rig's window on the banks — this attachment never claims, so
+    // once a claim stands its writes fence: the field's own verdict on
+    // whether the claim flipped.
+>>>>>>> origin/main
     let field_ai = attach(pair_devices[&AI_DEVICE].addr, AI_POINTS);
     let field_ao = attach(pair_devices[&AO_DEVICE].addr, AO_POINTS);
     field_ai.write(SETPOINT, Value::Float(50.0)).unwrap();
 
+<<<<<<< HEAD
     let active_process = spawn_controller(&pair_model, &[], DT);
     let mut standby_process = spawn_controller(
         &pair_model,
@@ -910,11 +942,20 @@ fn a_restarted_device_recovers_and_the_peer_promotes() {
     let owned = standby.advance(1).unwrap();
     assert_eq!(standby.role().unwrap().role, Role::Active);
     // The promoted run's first field-owning scan wrote the bank.
+=======
+    // Controller A launches born-active: its conditional startup grant
+    // lands on the unclaimed field and it scans as the field owner.
+    let active_process = spawn_controller(&pair_model, &[], DT);
+    let active = MonitorClient::new(active_process.addr);
+    let owned = active.advance(1).unwrap();
+    assert_eq!(active.role().unwrap().role, Role::Active);
+>>>>>>> origin/main
     assert_eq!(
         field_ao.read(VALVE).unwrap().value,
         image_value(&owned, VALVE)
     );
 
+<<<<<<< HEAD
     // The takeover is the field's own arbitration: the superseded
     // active's next scan fences its writes and demotes it in place,
     // and the re-closed gate keeps its writes off the registers.
@@ -934,6 +975,74 @@ fn a_restarted_device_recovers_and_the_peer_promotes() {
     assert_eq!(active.role().unwrap().role, Role::Demoting);
     active.advance(1).unwrap();
     assert_eq!(active.role().unwrap().role, Role::Standby);
+=======
+    // The reproduction's second launch: born-active on the same model,
+    // no `--peer` — previously the unconditional claim seized the
+    // field out from under A. Now the conditional ask meets A's
+    // standing claim, answers fenced, and the pairless launch fails —
+    // exiting nonzero and naming the live incumbent, exactly the
+    // sim-tcp verdict.
+    let output = std::process::Command::new(CONTROLLER)
+        .args([
+            pair_model.to_str().unwrap(),
+            "--pair-token",
+            PAIR_TOKEN,
+            "--listen",
+            "127.0.0.1:0",
+            "--driven",
+            "--dt",
+            DT,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "the born-active launch over a live claim must exit nonzero: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("a live peer holds the field's write-ownership claim"),
+        "the refusal must name the live incumbent's claim: {stderr}"
+    );
+
+    // A never felt the attempt: it keeps scanning, stepping, and
+    // writing as the active — and the claim stands unflipped: a fresh
+    // attachment's conditional ask on a foreign token still refuses on
+    // every bank, and its writes still fence.
+    for _ in 0..N {
+        let owned = active.advance(1).unwrap();
+        assert_eq!(active.role().unwrap().role, Role::Active);
+        assert_eq!(
+            field_ao.read(VALVE).unwrap().value,
+            image_value(&owned, VALVE),
+            "the field must carry only the incumbent's writes"
+        );
+    }
+    let probe_ai = attach(pair_devices[&AI_DEVICE].addr, AI_POINTS);
+    let probe_ao = attach(pair_devices[&AO_DEVICE].addr, AO_POINTS);
+    assert_eq!(
+        probe_ai.claim_writer_unless_held(0xffff),
+        Err(LinkError::Fenced)
+    );
+    assert_eq!(
+        probe_ao.claim_writer_unless_held(0xffff),
+        Err(LinkError::Fenced)
+    );
+    assert_eq!(
+        field_ao.write(VALVE, Value::Float(0.0)),
+        Err(IoError::Fenced(VALVE))
+    );
+    // The incumbent's record shows no fencing episode — the refused
+    // ask never disturbed the standing claim.
+    assert!(
+        active
+            .journal(0)
+            .unwrap()
+            .iter()
+            .all(|entry| !matches!(entry.event, JournalEvent::FieldClaimLost { .. })),
+        "the incumbent must never report a lost claim"
+    );
+>>>>>>> origin/main
 
     let _ = std::fs::remove_dir_all(&dir);
 }

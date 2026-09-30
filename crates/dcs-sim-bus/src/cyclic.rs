@@ -480,6 +480,26 @@ impl CyclicBusDriver {
         }
     }
 
+    /// The conditional counterpart of [`claim_writer`](Self::claim_writer)
+    /// — the grant a launched controller's startup claim asks, on the
+    /// same terms
+    /// [`BusDriver::claim_writer_unless_held`](crate::BusDriver::claim_writer_unless_held)
+    /// documents: granted while the field stands unclaimed or the
+    /// standing claim already names `owner`, refused
+    /// [`LinkError::Fenced`] while a different owner's claim stands,
+    /// the claim it met left untouched.
+    ///
+    /// The lazy re-attach caveat applies as it does to `claim_writer`:
+    /// a dropped link reconnects for the ask, and a granted claim
+    /// lands on the new connection.
+    pub fn claim_writer_unless_held(&self, owner: u64) -> Result<(), LinkError> {
+        match self.request(&BusRequest::ClaimWriterUnlessHeld { owner })? {
+            BusResponse::Done => Ok(()),
+            BusResponse::Error { error } => Err(refused(error)),
+            _ => Err(self.protocol_violation()),
+        }
+    }
+
     /// Releases this attachment's hold on the write-ownership claim —
     /// the explicit half of the claim's release rule; the other is the
     /// connection dropping.
