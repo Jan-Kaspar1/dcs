@@ -223,7 +223,8 @@ class Admission:
                         cooldown_until = now + (retry_after or group['cooldown_len']) + self.jitter()
                         self.db.execute('UPDATE admission_groups SET target=?,mode=?,cooldown_until=?,'
                                         'window_start=?,useful=0,loaded=NULL WHERE grp=?',
-                                        (max(1, math.ceil(group['target'] / 2)), 'probing',
+                                        (max(self.groups[name].get('minimum', 1),
+                                             math.ceil(group['target'] / 2)), 'probing',
                                          cooldown_until, now, name))
                     else:
                         length = retry_after or group['cooldown_len'] or self.cooldown

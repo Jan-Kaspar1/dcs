@@ -40,6 +40,10 @@ def scheduler(raw):
                 raise ValueError('scheduler group ' + name + ' needs a positive integer initial')
             if not isinstance(group.get('ceiling'), int) or group['ceiling'] < group['initial']:
                 raise ValueError('scheduler group ' + name + ' needs ceiling >= initial')
+            minimum = group.get('minimum', 1)
+            if (type(minimum) is not int or minimum < 1
+                    or minimum > group['initial']):
+                raise ValueError('scheduler group ' + name + ' needs 1 <= minimum <= initial')
             if not isinstance(group.get('external_slots', 0), int) or group.get('external_slots', 0) < 0:
                 raise ValueError('scheduler group ' + name + ' needs external_slots >= 0')
     for key in ('quiet_seconds', 'cooldown_seconds', 'max_cooldown_seconds',

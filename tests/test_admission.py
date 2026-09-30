@@ -4,6 +4,7 @@ from pathlib import Path
 
 from agent_pool.admission import Admission, classify
 from agent_pool.state import State
+from agent_pool.config import scheduler
 
 
 class AdmissionTests(unittest.TestCase):
@@ -86,6 +87,39 @@ class AdmissionTests(unittest.TestCase):
         self.a.useful(m)
         self.start('next')
         self.assertEqual(self.a.summary()['groups']['swe']['target'], 1)
+
+    def test_configured_floor_recovers_capacity_after_quota_probe(self):
+        self.config['scheduler']['groups']['swe'].update(initial=4, minimum=3)
+        # Start four sessions, then a real quota receipt enters cooldown.
+        metas = [self.start(str(i)) for i in range(4)]
+        self.a.finish('0', metas[0], 'rate')
+        self.assertEqual(self.a.summary()['groups']['swe']['target'], 3)
+        for i in range(1, 4):
+            self.a.finish(str(i), metas[i], 'success')
+        self.assertFalse(self.a.reserve('waiting', 'swe-2-high', 'waiting', 5))
+        self.now += 10
+        probe = self.start('probe')
+        self.assertFalse(self.a.reserve('second-probe', 'swe-2-high', 'second-probe', 5))
+        self.a.finish('probe', probe, 'success')
+        self.a.useful(probe)
+        for i in range(3):
+            self.start('recovered-' + str(i))
+        self.assertFalse(self.a.reserve('fourth', 'swe-2-high', 'fourth', 5))
+        self.now += 60
+        self.a.finish('recovered-0', {'invocation': 'recovered-0-run'}, 'success')
+        self.start('fourth')
+        self.assertEqual(self.a.summary()['groups']['swe']['target'], 4)
+
+    def test_group_minimum_configuration_rejects_invalid_bounds(self):
+        self.config['scheduler']['groups'].pop('muse')
+        group = self.config['scheduler']['groups']['swe']
+        for value in (0, -1, 3, 1.5, True, None):
+            with self.subTest(value=value):
+                group['minimum'] = value
+                with self.assertRaises(ValueError):
+                    scheduler(self.config['scheduler'])
+        group['minimum'] = 2
+        scheduler(self.config['scheduler'])
 
     def test_parent_group_and_external_headroom(self):
         self.config['scheduler']['groups']['account'] = {
