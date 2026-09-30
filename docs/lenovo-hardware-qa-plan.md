@@ -500,7 +500,7 @@ Implementation order: second, after [daily architecture review](daily-architectu
 - The persistence-path distinctness startup contract — #1292's fix
   serving WW-LCM-001's continuity clause — is exercised on the
   deployed rig by scenario leg
-  `3960_persistence_path_alias_refusal`. `--state-file`,
+  `3695_persistence_path_alias_refusal`. `--state-file`,
   `--journal-file`, and `--history-file` are distinct-file
   declarations with distinct formats — a write-then-rename
   checkpoint beside two append-only record streams — and an

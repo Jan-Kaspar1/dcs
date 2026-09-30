@@ -4,10 +4,11 @@ the ordering rule and the shared seam."""
 from .common import *
 
 # Ordering: the persistence-alias case runs late — after the failover
-# switch, inside the unpinned window before the dcs-ctl closer: its
-# doctored launches run in labeled networkless scratch containers that
-# never touch the deployed pair, so the leg needs only a settled pair
-# to prove non-interference against.
+# switch, at the end of the unpinned window ahead of the pinned
+# unclaimed-rearm → dcs-ctl tail: its doctored launches run in labeled
+# networkless scratch containers that never touch the deployed pair,
+# so the leg needs only a settled pair to prove non-interference
+# against.
 RUNS_AFTER = frozenset({'scenario_failover'})
 
 

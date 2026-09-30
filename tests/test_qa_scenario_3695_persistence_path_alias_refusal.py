@@ -1,4 +1,4 @@
-"""The 3960_persistence_path_alias_refusal leg's scenario unit
+"""The 3695_persistence_path_alias_refusal leg's scenario unit
 coverage — the feed fake, the stubbed doctored-launch lever, and the
 TestCase class for scenario_persistence_path_alias_refusal, per the
 module-per-leg test convention (#940). The shared fakes and helpers
