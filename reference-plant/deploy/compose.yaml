@@ -54,11 +54,11 @@
 
 name: reference-plant
 
-x-dcs-release: v0.6.0
+x-dcs-release: v0.7.0
 
 services:
   dcs-plant:
-    image: dcs-plant-server:v0.6.0
+    image: dcs-plant-server:v0.7.0
     container_name: dcs-plant
     networks:
       - dcs-rig
@@ -84,7 +84,7 @@ services:
       start_period: 2s
 
   ctrl-a:
-    image: dcs-controller:v0.6.0
+    image: dcs-controller:v0.7.0
     container_name: ctrl-a
     depends_on:
       dcs-plant:
@@ -116,7 +116,7 @@ services:
       - dcs-reference-pair
 
   ctrl-b:
-    image: dcs-controller:v0.6.0
+    image: dcs-controller:v0.7.0
     container_name: ctrl-b
     depends_on:
       dcs-plant:
