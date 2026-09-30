@@ -2145,6 +2145,70 @@ class BornActiveActionTests(unittest.TestCase):
              '127.0.0.1:' + str(runner.BORN_FIELD_PORT), 'list'))
         self.assertEqual(info['mode'], 'serving')
 
+    def test_foreign_field_serves_the_foreign_fixtures(self):
+        foreign_model = self.src / self.cfg['foreign_model_fixture']
+        foreign_dynamics = (self.src
+                            / self.cfg['foreign_dynamics_fixture'])
+        foreign_model.parent.mkdir(parents=True, exist_ok=True)
+        foreign_dynamics.parent.mkdir(parents=True, exist_ok=True)
+        foreign_model.write_text(json.dumps({'version': 2}))
+        foreign_dynamics.write_text(json.dumps({}))
+        calls, events = [], []
+
+        def docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', docker):
+            ctx = runner._scenario_ctx(
+                self.cfg, self._record(), self.src, self.run_dir,
+                self.run_dir / 'evidence', 0,
+                lambda e, d=None: events.append(e))
+            info = ctx['start_born_field']('foreign')
+        launch = self._run(calls)
+        self.assertIn(str(foreign_model) + ':/model/plant.json:ro',
+                      launch)
+        self.assertIn(str(foreign_dynamics)
+                      + ':/model/dynamics.json:ro', launch)
+        self.assertNotIn(str(self.model) + ':', launch)
+        self.assertEqual(info['mode'], 'foreign')
+        self.assertEqual(info['remote'],
+                         'dcs-hw-qa-1-born-plant:'
+                         + str(runner.BORN_FIELD_PORT))
+        # The foreign field is still a serving listener — the
+        # correspondence refusal needs live claim arbitration — so
+        # the same in-container probe gates the address handoff.
+        probe = next(c for c in calls if c[0] == 'exec')
+        self.assertEqual(
+            probe,
+            ('exec', 'dcs-hw-qa-1-born-plant', 'dcs-plant-ctl',
+             '127.0.0.1:' + str(runner.BORN_FIELD_PORT), 'list'))
+
+    def test_born_field_ctl_execs_the_tool_inside_the_field(self):
+        calls = []
+
+        def docker(*args, timeout=120, check=True):
+            calls.append((args, check))
+            return Result('{"result": "points", "points": []}')
+
+        with patch.object(runner, 'docker', docker):
+            ctx = runner._scenario_ctx(
+                self.cfg, self._record(), self.src, self.run_dir,
+                self.run_dir / 'evidence', 0,
+                lambda e, d=None: None)
+            answer = ctx['born_field_ctl']('list')
+            refused = ctx['born_field_ctl']('step', '0')
+        self.assertEqual(
+            calls,
+            [(('exec', 'dcs-hw-qa-1-born-plant', 'dcs-plant-ctl',
+               '127.0.0.1:' + str(runner.BORN_FIELD_PORT), 'list'),
+              False),
+             (('exec', 'dcs-hw-qa-1-born-plant', 'dcs-plant-ctl',
+               '127.0.0.1:' + str(runner.BORN_FIELD_PORT), 'step', '0'),
+              False)])
+        self.assertEqual(answer.returncode, 0)
+        self.assertEqual(refused.returncode, 0)
+
     def test_serving_field_retries_until_the_listener_binds(self):
         polls = []
 
