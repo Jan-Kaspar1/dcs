@@ -653,7 +653,12 @@ A factory returns one of two `DeviceDriver` contributions:
   checkpoint cannot preempt it and silently roll back commands the
   incumbent receipted and applied. A claim a dead owner left standing
   still preempts — the restart-as-active recovery path. `sim-tcp`
-  installs the plant server's `claim_writer_unless_held`; a kind whose
+  installs the plant server's `claim_writer_unless_held`, and
+  `sim-bus`/`sim-cyclic` install the register protocol's
+  `claim_writer_unless_held`: on that wire a standing claim always
+  has live holders — the claim dies with its last holder's
+  connection — so "a different owner's claim stands" *is* the
+  live-incumbent verdict. A kind whose
   arbitration cannot distinguish live holders leaves it `None` and the
   fan-out falls back to the unconditional `claim` for it, the pre-hook
   behavior.
