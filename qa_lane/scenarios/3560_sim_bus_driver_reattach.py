@@ -58,11 +58,15 @@ RUNS_AFTER = frozenset({'scenario_remote_driver_recovery'})
 # Functional misses on the recovery contract name
 # sim-bus-reattach-failed; verdicts on the run's own determinism — a
 # rewound tick, two passes whose digests disagree — name
-# sim-bus-reattach-nondeterministic. A run context carrying no
-# register-mapped field rig, a rig whose device or pair never answers,
-# a pair that never settles tracking, a staging lever that never
-# completes, and a staged revision whose served surface cannot express
-# the contract at all report inconclusive.
+# sim-bus-reattach-nondeterministic. The unchecked-diagnostic
+# self-check replays the recovered-link audit over planted negatives —
+# the standing record lingering, the streak standing, the counted
+# history reset, the tick held at the baseline — and any it lets
+# through reports sim-bus-reattach-unchecked. A run context carrying
+# no register-mapped field rig, a rig whose device or pair never
+# answers, a pair that never settles tracking, a staging lever that
+# never completes, and a staged revision whose served surface cannot
+# express the contract at all report inconclusive.
 
 # The documented recovery bound: the fix's REATTACH_INTERVAL (one
 # second) plus one request timeout and the restarted device server's
@@ -384,38 +388,8 @@ def _bus_outage(ctx, subject, active, peer, leg, number):
                    'io_health': hits[name].get('io_health')}
             for name in members}
 
-        for name in members:
-            health = hits[name].get('io_health') or {}
-            driver = _driver_health(hits[name]) or {}
-            before = outage_health.get(name) or {}
-            if driver.get('last_error'):
-                failed('lingered-' + name,
-                       name + '\'s register-driver last_error lingered '
-                       'behind its restored link — the first successful '
-                       'exchange after the ' + leg + ' did not clear '
-                       'the standing failure: '
-                       + str(driver.get('last_error'))[:300])
-            if (health.get('consecutive_failures') or 0) > 0:
-                failed('streak-stood-' + name,
-                       name + '\'s boundary failure streak still stood '
-                       'behind the healthy link: '
-                       + json.dumps(health)[:300])
-            if (health.get('failed_reads') or 0) \
-                    < (before.get('failed_reads') or 0) \
-                    or (health.get('failed_writes') or 0) \
-                    < (before.get('failed_writes') or 0) \
-                    or not health.get('last_error'):
-                failed('history-lost-' + name,
-                       name + '\'s counted outage history reset across '
-                       'the recovery — the cumulative counters or the '
-                       'recorded fault dropped what they counted: '
-                       + json.dumps(health)[:400])
-            if not (hits[name].get('tick') or 0) > (ticks[name] or 0):
-                marks['cadence'] = 'stalled'
-                failed('cadence-' + name,
-                       name + '\'s served tick did not advance across '
-                       'the ' + leg + ' — the scan cadence held at '
-                       + str(hits[name].get('tick')))
+        _bus_reattach_audit(members, hits, outage_health, ticks, leg,
+                            marks, note)
         if not violations and marks['cadence'] != 'stalled':
             marks['cadence'] = 'advancing'
         evidence['digest'] = digest()
@@ -431,6 +405,100 @@ def _bus_outage(ctx, subject, active, peer, leg, number):
                 pass
 
 
+def _bus_reattach_audit(members, hits, outage_health, ticks, leg,
+                      marks, note):
+    """The recovered-serve assertions — runnable against planted hits
+    in the self-check. `hits` maps each member to the first serve
+    reporting its link connected; the first such serve must already
+    carry the cleared standing record, the reset boundary streak, the
+    kept cumulative history and recorded fault, and a served tick
+    advanced past the baseline — on every member, never one.
+    `note(key, diagnostic, detail)` records each clause the hits
+    violate; a stalled tick also marks the digest's cadence."""
+    def failed(key, detail):
+        note(key, 'sim-bus-reattach-failed', detail)
+
+    for name in members:
+        health = hits[name].get('io_health') or {}
+        driver = _driver_health(hits[name]) or {}
+        before = outage_health.get(name) or {}
+        if driver.get('last_error'):
+            failed('lingered-' + name,
+                   name + '\'s register-driver last_error lingered '
+                   'behind its restored link — the first successful '
+                   'exchange after the ' + leg + ' did not clear '
+                   'the standing failure: '
+                   + str(driver.get('last_error'))[:300])
+        if (health.get('consecutive_failures') or 0) > 0:
+            failed('streak-stood-' + name,
+                   name + '\'s boundary failure streak still stood '
+                   'behind the healthy link: '
+                   + json.dumps(health)[:300])
+        if (health.get('failed_reads') or 0) \
+                < (before.get('failed_reads') or 0) \
+                or (health.get('failed_writes') or 0) \
+                < (before.get('failed_writes') or 0) \
+                or not health.get('last_error'):
+            failed('history-lost-' + name,
+                   name + '\'s counted outage history reset across '
+                   'the recovery — the cumulative counters or the '
+                   'recorded fault dropped what they counted: '
+                   + json.dumps(health)[:400])
+        if not (hits[name].get('tick') or 0) > (ticks[name] or 0):
+            marks['cadence'] = 'stalled'
+            failed('cadence-' + name,
+                   name + '\'s served tick did not advance across '
+                   'the ' + leg + ' — the scan cadence held at '
+                   + str(hits[name].get('tick')))
+
+
+def _bus_reattach_self_check():
+    """The leg's unchecked-diagnostic self-test: replay the recovered-
+    link audit over each planted negative the contract names — a
+    standing last_error behind the restored link, a streak still
+    standing, the counted history reset, the tick held at the
+    baseline — and require each to trip sim-bus-reattach-failed while
+    the clean record trips nothing. Returns the planted case names the
+    audit let through or wrongly named."""
+    def snap(tick, driver_error=None, streak=0, reads=9, writes=2,
+             fault='faulted'):
+        return {'tick': tick,
+                'io_health': {'failed_reads': reads,
+                              'failed_writes': writes,
+                              'consecutive_failures': streak,
+                              'last_error': fault,
+                              'driver': {'link': 'connected',
+                                         'last_error': driver_error}}}
+
+    members = ('active', 'standby')
+    outage_health = {name: {'failed_reads': 7, 'failed_writes': 2,
+                            'last_error': {'tick': 5}}
+                     for name in members}
+    ticks = {name: 4 for name in members}
+    clean = {name: snap(9) for name in members}
+    plants = {'clean': (clean, False),
+              'lingered': ({**clean, 'active': snap(
+                  9, driver_error='connection reset by peer')}, True),
+              'streak-stood': ({**clean, 'active': snap(9, streak=3)},
+                               True),
+              'history-lost': ({**clean, 'active': snap(
+                  9, reads=0, fault=None)}, True),
+              'cadence': ({**clean, 'active': snap(4)}, True)}
+    slipped = []
+    for name, (hits, expect) in plants.items():
+        violations = {}
+        _bus_reattach_audit(
+            members, hits, outage_health, ticks, 'device-restart',
+            {'cadence': 'held'},
+            lambda key, diagnostic, detail:
+                violations.setdefault(key, (diagnostic, detail)))
+        tripped = any(diagnostic == 'sim-bus-reattach-failed'
+                      for diagnostic, _ in violations.values())
+        if tripped != expect:
+            slipped.append(name)
+    return slipped
+
+
 def _bus_promote_probe(ctx, subject, owner, tracker):
     """The promotable-standby half: with the backend recovered,
     `POST /promote` on the converged standby must answer inside the
@@ -444,9 +512,9 @@ def _bus_promote_probe(ctx, subject, owner, tracker):
     record = {'promoted': tracker, 'restored': owner}
 
     def settled_at(key):
-        return wait_for(lambda: _bus_owner(ctx, subject) == key,
-                        time.monotonic() + BUS_REATTACH_SETTLE,
-                        interval=BUS_REATTACH_POLL) is not None
+        return bool(wait_for(lambda: _bus_owner(ctx, subject) == key,
+                             time.monotonic() + BUS_REATTACH_SETTLE,
+                             interval=BUS_REATTACH_POLL))
 
     def refuse(clause, detail):
         record['violations'] = [clause]
@@ -518,7 +586,7 @@ def scenario_sim_bus_driver_reattach(ctx):
     converged standby answers inside its bound once the backend is
     back — each class twice with identical digests, the launch roles
     restored afterward."""
-    case = Case('sim-bus-reattach',
+    case = Case('sim-bus-driver-reattach',
                 'The point-wise register driver re-attaches after a '
                 'device restart and a brief stall',
                 'with a controller pair settled on the rig\'s '
@@ -576,7 +644,8 @@ def scenario_sim_bus_driver_reattach(ctx):
                 digest, violations, evidence = _bus_outage(
                     ctx, subject, owner, tracker, leg, number)
                 ref = save_evidence(
-                    ctx['evidence_dir'], 'sim-bus-reattach-' + leg
+                    ctx['evidence_dir'], 'sim-bus-driver-reattach-'
+                    + leg
                     + '-pass-' + str(number) + '.json', evidence)
                 case.evidence('file', ref, leg + ', pass '
                               + str(number) + ' — the baseline, outage '
@@ -604,14 +673,28 @@ def scenario_sim_bus_driver_reattach(ctx):
                 'passes\' digests diverged: '
                 + json.dumps(diverged, sort_keys=True))
         ref = save_evidence(ctx['evidence_dir'],
-                            'sim-bus-reattach-digest.json',
+                            'sim-bus-driver-reattach-digest.json',
                             {'passes': passes})
         case.evidence('file', ref, 'the normalized deterministic digest '
                       'both passes of each outage class produced')
 
+        # The unchecked self-check: the recovered-link audit, replayed
+        # over each planted negative the contract names, must trip —
+        # a silent audit can no longer be trusted to catch what it
+        # names.
+        slipped = _bus_reattach_self_check()
+        if slipped:
+            return case.finish(
+                'failed', 'sim-bus-reattach-unchecked: the '
+                'recovered-link audit stayed silent on, or wrongly '
+                'named, the planted negatives: ' + ', '.join(slipped))
+        case.observe('the self-check leg\'s planted negatives each '
+                     'named sim-bus-reattach-failed')
+
         probe = _bus_promote_probe(ctx, subject, owner, tracker)
         ref = save_evidence(ctx['evidence_dir'],
-                            'sim-bus-reattach-promote.json', probe)
+                            'sim-bus-driver-reattach-promote.json',
+                            probe)
         case.evidence('file', ref, 'the promotion probe and the restored '
                       'launch roles')
         if probe.get('inconclusive'):

@@ -3063,18 +3063,6 @@ def _start_bus_rig(cfg, record, src, run_dir, net, timeline):
     fixture = src / bus['model_fixture']
     if not fixture.is_file():
         raise RuntimeError('bus-rig fixture missing: ' + str(fixture))
-    placements = _endpoint_placement(cfg)
-    for key in ('bus_active', 'bus_standby'):
-        if placements[key] != 'loopback':
-            raise RuntimeError('endpoint_placement records ' + key
-                               + ' as ' + repr(placements[key])
-                               + ' but the bus rig publishes it on '
-                               'host loopback')
-    if placements['bus_device'] != 'bridge':
-        raise RuntimeError('endpoint_placement records bus_device as '
-                           + repr(placements['bus_device'])
-                           + ' but the register device is rig-dialed '
-                           'only — no host-side attachment exists')
     document = derive_bus_model(
         fixture, Path(run_dir) / 'model-bus.json',
         prefix + '-' + BUS_RIG_SUFFIX['device'] + ':'
@@ -3596,6 +3584,26 @@ def _start_rig(cfg, record, src, run_dir, timeline):
                                + ' but the probe field is rig-dialed '
                                'only — no host-side attachment '
                                'exists')
+    bus = _bus_rig(cfg)
+    if bus is not None:
+        # The staged register-device rig's placements: its pair's
+        # monitors publish on host loopback like the deployed pair's;
+        # the device itself is rig-dialed only — recorded 'bridge',
+        # since nothing host-side ever attaches to it.
+        for key in ('bus_active', 'bus_standby'):
+            if placements[key] != 'loopback':
+                raise RuntimeError('endpoint_placement records '
+                                   + key + ' as '
+                                   + repr(placements[key])
+                                   + ' but the rig publishes it on '
+                                   'host loopback')
+        if placements['bus_device'] != 'bridge':
+            raise RuntimeError('endpoint_placement records bus_device '
+                               'as '
+                               + repr(placements['bus_device'])
+                               + ' but the register device is '
+                               'rig-dialed only — no host-side '
+                               'attachment exists')
     model = src / cfg['model_fixture']
     dynamics = src / cfg['dynamics_fixture']
     for path in (model, dynamics):

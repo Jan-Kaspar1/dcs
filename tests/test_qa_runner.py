@@ -28,6 +28,31 @@ def cfg_for(root):
     return cfg
 
 
+# The register-mapped document the bus rig's derivation reads: a
+# sim-bus device carrying the __BUS_ADDR__ placeholder — minimal, just
+# enough for derive_bus_model's device lookup and stamp.
+BUS_FIXTURE = {'version': 1,
+               'devices': [{'id': 2, 'kind': 'sim-bus',
+                            'parameters': {'address': '__BUS_ADDR__',
+                                           'registers': {
+                                               'level-raw': 4}},
+                            'channels': {
+                                'level-raw': {'direction': 'in',
+                                              'value_type': 'float'}}}],
+               'io_points': [], 'signals': [], 'components': [],
+               'connections': []}
+
+
+def write_bus_fixture(cfg, src):
+    """Write the bus rig's register-mapped fixture into a test's fake
+    src tree — the run's bus_rig block names the path and
+    _start_bus_rig derives the stamped document off it."""
+    path = Path(src) / cfg['bus_rig']['model_fixture']
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(BUS_FIXTURE))
+    return path
+
+
 class ReconcileTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -629,6 +654,7 @@ class RelaunchActionTests(unittest.TestCase):
             return real(*args, **kwargs) + ['--new-persistence-flag']
 
         self.cfg['probe_pair'] = None
+        self.cfg['bus_rig'] = None
         dynamics = self.src / self.cfg['dynamics_fixture']
         dynamics.parent.mkdir(parents=True, exist_ok=True)
         dynamics.write_text('{}')
@@ -787,6 +813,7 @@ class RigStateFileTests(unittest.TestCase):
             path = self.src / fixture
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('{}')
+        write_bus_fixture(self.cfg, self.src)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -947,6 +974,7 @@ class OwnerTokenPinTests(unittest.TestCase):
             if not path.exists():
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('{}')
+        write_bus_fixture(self.cfg, self.src)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -1242,6 +1270,8 @@ class DcsCtlBuildTests(unittest.TestCase):
     def _fake_docker(self, calls, binaries=('dcs-controller',
                                             'dcs-plant-server',
                                             'dcs-plant-ctl',
+                                            'dcs-sim-bus-device',
+                                            'dcs-sim-bus-ctl',
                                             'dcs-ctl',
                                             'dcs-forge')):
         def fake_docker(*args, timeout=120, check=True):
@@ -1274,7 +1304,9 @@ class DcsCtlBuildTests(unittest.TestCase):
                           self._fake_docker(
                               [], binaries=('dcs-controller',
                                             'dcs-plant-server',
-                                            'dcs-plant-ctl'))):
+                                            'dcs-plant-ctl',
+                                            'dcs-sim-bus-device',
+                                            'dcs-sim-bus-ctl'))):
             with self.assertRaises(RuntimeError):
                 runner._build_images(self.src, self.cfg, self.run_dir,
                                      lambda e, d=None: None, 'qa-1')
@@ -1311,6 +1343,8 @@ class PlantCtlShipTests(unittest.TestCase):
     def _fake_docker(self, calls, binaries=('dcs-controller',
                                             'dcs-plant-server',
                                             'dcs-plant-ctl',
+                                            'dcs-sim-bus-device',
+                                            'dcs-sim-bus-ctl',
                                             'dcs-ctl',
                                             'dcs-forge')):
         def fake_docker(*args, timeout=120, check=True):
@@ -1360,6 +1394,8 @@ class PlantCtlShipTests(unittest.TestCase):
                           self._fake_docker(
                               [], binaries=('dcs-controller',
                                             'dcs-plant-server',
+                                            'dcs-sim-bus-device',
+                                            'dcs-sim-bus-ctl',
                                             'dcs-ctl'))):
             with self.assertRaises(RuntimeError):
                 runner._build_images(self.src, self.cfg, self.run_dir,
@@ -2708,7 +2744,8 @@ class ForgeEndpointTests(unittest.TestCase):
             if args[0] == 'run' and 'cargo' in str(args):
                 target.mkdir(parents=True, exist_ok=True)
                 for binary in ('dcs-controller', 'dcs-plant-server',
-                               'dcs-plant-ctl', 'dcs-ctl', 'dcs-forge'):
+                               'dcs-plant-ctl', 'dcs-sim-bus-device',
+                               'dcs-sim-bus-ctl', 'dcs-ctl', 'dcs-forge'):
                     (target / binary).write_text('bin')
             if args[:2] == ('image', 'inspect'):
                 return Result('sha256:' + 'a' * 64)
@@ -2742,7 +2779,8 @@ class ForgeEndpointTests(unittest.TestCase):
             if args[0] == 'run' and 'cargo' in str(args):
                 target.mkdir(parents=True, exist_ok=True)
                 for binary in ('dcs-controller', 'dcs-plant-server',
-                               'dcs-plant-ctl', 'dcs-ctl'):
+                               'dcs-plant-ctl', 'dcs-sim-bus-device',
+                               'dcs-sim-bus-ctl', 'dcs-ctl'):
                     (target / binary).write_text('bin')
             if args[:2] == ('image', 'inspect'):
                 return Result('sha256:' + 'a' * 64)
@@ -2779,6 +2817,7 @@ class ProbePairTests(unittest.TestCase):
             path = self.src / fixture
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('{}')
+        write_bus_fixture(self.cfg, self.src)
         self.document = {'format_version': 1, 'generation': 7,
                          'tick': 42, 'source_owns_field': False}
 
@@ -2931,6 +2970,7 @@ class ProbePairTests(unittest.TestCase):
 
     def test_no_probe_block_stages_no_probe_pair(self):
         self.cfg['probe_pair'] = None
+        self.cfg['bus_rig'] = None
         calls = []
         self._rig(calls)
         launched = [c for c in calls if c[0] == 'run']
@@ -3087,7 +3127,10 @@ class ProbePairTests(unittest.TestCase):
         self.assertEqual(ports, {str(self.cfg['active_port']),
                                  str(self.cfg['standby_port']),
                                  str(self.probe['active_port']),
-                                 str(self.probe['standby_port'])})
+                                 str(self.probe['standby_port']),
+                                 str(self.cfg['bus_rig']['active_port']),
+                                 str(self.cfg['bus_rig']
+                                     ['standby_port'])})
 
     def test_probe_objects_teardown_with_the_rig(self):
         # Probe containers carry the run labels like the rest of the
@@ -3110,6 +3153,225 @@ class ProbePairTests(unittest.TestCase):
         self.assertEqual(failures, [])
         removed = [c for c in calls if c[0] == 'rm']
         self.assertEqual(len(removed), 4)
+
+
+class BusRigTests(unittest.TestCase):
+    """The lane-staged register-mapped field rig (#1355): a
+    `dcs-sim-bus-device` server plus a controller pair bound to the
+    derived register model — the subject the sim-bus driver-reattach
+    leg exercises through ctx['bus']. The device is bridge-placed and
+    rig-dialed only; the pair's monitors publish on host loopback and
+    carry the block's distinct --owner-token pins and shared
+    --pair-token."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.bus = self.cfg['bus_rig']
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        self.run_dir.mkdir(parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+        for fixture in (self.cfg['model_fixture'],
+                        self.cfg['dynamics_fixture'],
+                        self.cfg['probe_pair']['model_fixture'],
+                        self.cfg['probe_pair']['dynamics_fixture']):
+            path = self.src / fixture
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{}')
+        self.fixture = write_bus_fixture(self.cfg, self.src)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _record(self):
+        return {'run_id': 'qa-1', 'attempted_sha': SHA_A}
+
+    @staticmethod
+    def _docker(calls):
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+        return fake_docker
+
+    @staticmethod
+    def _launch(calls, container):
+        return next(c for c in calls
+                    if c[0] == 'run' and container in c)
+
+    def _rig(self, calls, events=None):
+        class FakeConn:
+            def close(self):
+                pass
+        with patch.object(runner, 'docker', self._docker(calls)), \
+                patch.object(runner.socket, 'create_connection',
+                             return_value=FakeConn()):
+            runner._start_rig(
+                self.cfg, self._record(), self.src, self.run_dir,
+                lambda e, d=None: events is not None
+                and events.append((e, d)))
+
+    def _ctx(self):
+        return runner._scenario_ctx(
+            self.cfg, self._record(), self.src, self.run_dir,
+            self.run_dir / 'evidence', 0, lambda e, d=None: None)
+
+    def test_bus_block_validation_fails_loudly(self):
+        for broken in ({'pair_token': 'x'},
+                       'not-a-mapping',
+                       dict(self.bus, pair_token=None),
+                       dict(self.bus, active_port=0),
+                       dict(self.bus, device_port='9010'),
+                       dict(self.bus, device_id=-1),
+                       dict(self.bus, timeout_ms='1500'),
+                       dict(self.bus, owner_tokens={'active': 1,
+                                                    'standby': 1}),
+                       dict(self.bus, owner_tokens={'active': 1})):
+            with self.assertRaises(RuntimeError):
+                runner._bus_rig({**self.cfg, 'bus_rig': broken})
+        self.assertIsNone(runner._bus_rig(
+            {**self.cfg, 'bus_rig': None}))
+
+    def test_derive_bus_model_stamps_the_rig_facts(self):
+        out = self.run_dir / 'model-bus.json'
+        summary = runner.derive_bus_model(
+            self.fixture, out, 'dcs-hw-qa-1-bus-device:9010', 2, 1500)
+        self.assertEqual(summary['device'], 2)
+        self.assertEqual(summary['kind'], 'sim-bus')
+        self.assertEqual(summary['address'],
+                         'dcs-hw-qa-1-bus-device:9010')
+        self.assertEqual(summary['timeout_ms'], 1500)
+        derived = json.loads(out.read_text())
+        device = next(d for d in derived['devices'] if d['id'] == 2)
+        self.assertEqual(device['parameters']['address'],
+                         'dcs-hw-qa-1-bus-device:9010')
+        self.assertEqual(device['parameters']['timeout_ms'], 1500)
+
+    def test_derive_bus_model_fails_loudly(self):
+        out = self.run_dir / 'model-bus.json'
+        with self.assertRaises(RuntimeError):
+            runner.derive_bus_model(self.fixture, out, 'x:1', 9, 1500)
+        cyclic = dict(BUS_FIXTURE, devices=[
+            {**BUS_FIXTURE['devices'][0], 'kind': 'sim'}])
+        fixture = self.src / 'crates/dcs-assembly/fixtures/plain.json'
+        fixture.write_text(json.dumps(cyclic))
+        with self.assertRaises(RuntimeError):
+            runner.derive_bus_model(fixture, out, 'x:1', 2, 1500)
+
+    def test_start_rig_stages_the_bus_rig(self):
+        calls, events = [], []
+        self._rig(calls, events)
+        # The register device: run's labels and rig bridge, the
+        # derived document mounted read-only, the shipped
+        # dcs-sim-bus-device under --entrypoint, no host publish.
+        device = self._launch(calls, 'dcs-hw-qa-1-bus-device')
+        self.assertIn(runner.MANAGED_LABEL + '=1', device)
+        self.assertIn(runner.RUN_LABEL + '=qa-1', device)
+        self.assertIn('dcs-hwtest-qa-1', device)
+        self.assertNotIn('-p', device)
+        self.assertIn('--entrypoint', device)
+        self.assertIn('dcs-sim-bus-device', device)
+        self.assertIn(str(self.run_dir / 'model-bus.json')
+                      + ':/model/bus.json:ro', device)
+        self.assertIn('--device', device)
+        self.assertIn(str(self.bus['device_id']), device)
+        self.assertIn('0.0.0.0:' + str(self.bus['device_port']), device)
+        # Readiness runs through the shipped field tool inside the
+        # device's own netns — no host port exists to probe.
+        self.assertTrue(any(
+            c[:3] == ('exec', 'dcs-hw-qa-1-bus-device',
+                      'dcs-sim-bus-ctl')
+            and '127.0.0.1:' + str(self.bus['device_port']) in c
+            and 'list' in c
+            for c in calls))
+        # The keyed pair: shared --pair-token, the block's own
+        # distinct --owner-token pins, monitors published on host
+        # loopback, bus-b tracking bus-a — and no --remote: the pair's
+        # field is the register device itself.
+        for name, container, publish in (
+                ('active', 'dcs-hw-qa-1-bus-a',
+                 '127.0.0.1:' + str(self.bus['active_port'])
+                 + ':8080'),
+                ('standby', 'dcs-hw-qa-1-bus-b',
+                 '127.0.0.1:' + str(self.bus['standby_port'])
+                 + ':8081')):
+            launch = self._launch(calls, container)
+            self.assertIn(runner.MANAGED_LABEL + '=1', launch)
+            self.assertIn(runner.RUN_LABEL + '=qa-1', launch)
+            self.assertIn(publish, launch)
+            self.assertIn('--pair-token', launch)
+            self.assertIn(self.bus['pair_token'], launch)
+            self.assertNotIn('--remote', launch)
+            self.assertEqual(
+                launch[launch.index('--owner-token') + 1],
+                str(self.bus['owner_tokens'][name]), name)
+            self.assertNotEqual(
+                launch[launch.index('--owner-token') + 1],
+                str(self.cfg['plant_owner_tokens']['active']), name)
+        bus_b = self._launch(calls, 'dcs-hw-qa-1-bus-b')
+        self.assertIn('--standby', bus_b)
+        self.assertIn('dcs-hw-qa-1-bus-a:8080', bus_b)
+        self.assertIn('--auto-promote', bus_b)
+        self.assertIn('bus-rig-up', [event for event, _ in events])
+        # The pair's state dirs live under the run dir like every
+        # other launched controller's.
+        for name in ('bus-a', 'bus-b'):
+            self.assertTrue((self.run_dir / 'controllers' / name)
+                            .is_dir())
+
+    def test_no_bus_block_stages_no_bus_rig(self):
+        self.cfg['bus_rig'] = None
+        calls = []
+        self._rig(calls)
+        self.assertFalse(any('bus' in ' '.join(str(part) for part in c)
+                             for c in calls))
+        self.assertIsNone(self._ctx()['bus'])
+
+    def test_bus_subject_ctx_carries_the_levers(self):
+        calls = []
+        with patch.object(runner, 'docker', self._docker(calls)):
+            ctx = self._ctx()
+            subject = ctx['bus']
+            self.assertEqual(subject['active'],
+                             'http://127.0.0.1:'
+                             + str(self.bus['active_port']))
+            self.assertEqual(subject['standby'],
+                             'http://127.0.0.1:'
+                             + str(self.bus['standby_port']))
+            subject['device_ctl']('list')
+            subject['restart_device']()
+            subject['freeze_device']()
+            subject['thaw_device']()
+        self.assertEqual(calls[0],
+                         ('exec', 'dcs-hw-qa-1-bus-device',
+                          'dcs-sim-bus-ctl',
+                          '127.0.0.1:' + str(self.bus['device_port']),
+                          'list'))
+        self.assertIn(('restart', '--time', '2',
+                       'dcs-hw-qa-1-bus-device'), calls)
+        self.assertIn(('pause', 'dcs-hw-qa-1-bus-device'), calls)
+        self.assertIn(('unpause', 'dcs-hw-qa-1-bus-device'), calls)
+
+    def test_bus_endpoints_require_their_recorded_placements(self):
+        for key, value in (('bus_device', 'loopback'),
+                           ('bus_active', 'bridge'),
+                           ('bus_standby', 'bridge')):
+            self.cfg['endpoint_placement'] = {
+                **self.cfg['endpoint_placement'], key: value}
+            calls = []
+            try:
+                with patch.object(runner, 'docker',
+                                  self._docker(calls)):
+                    with self.assertRaises(RuntimeError) as caught:
+                        runner._start_rig(
+                            self.cfg, self._record(), self.src,
+                            self.run_dir, lambda e, d=None: None)
+            finally:
+                self.cfg['endpoint_placement'] = dict(
+                    runner.DEFAULT_CONFIG['endpoint_placement'])
+            self.assertIn(key, str(caught.exception), key)
+            self.assertFalse(any(
+                'bus' in str(part) for c in calls if c[0] == 'run'
+                for part in c), key)
 
 
 if __name__ == '__main__':
