@@ -670,7 +670,24 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
     claim freed when the holder set empties, never on disconnect), and
     write/step fence every attachment outside the holder set —
     `unclaimed` while no claim stands at all. Fault flags stage each
-    named failure the scenario reports."""
+    named failure the scenario reports.
+
+    The full claim-introspection surface the field-claim contract
+    arbitrates on is here too, so a rig leg can stage it against this
+    double exactly as it stages it against the shipped server:
+    claim_writer_unless_held — the launched-controller conditional
+    grant, refused while a *live* holder stands under a different
+    owner and granted otherwise, the claim it met left untouched;
+    probe_writer — the read-only observation, answering `done` while
+    this attachment holds, `fenced` naming the standing claim while
+    another owner holds it, `unclaimed` while none does, asserting,
+    joining, and releasing nothing; the `monitor` declaration every
+    claim carries and records (the claim's own dict gains the key only
+    once a declaration lands, so an undeclared claim's record keeps
+    the shape an earlier build's carried); and the claimant token plus
+    that declared monitor on every `fenced` verdict, so a superseded
+    owner's audit attributes the preemption to a named claimant and
+    its tracking path can re-join the field-arbitrated successor."""
 
     def __init__(self):
         self.samples = {
@@ -742,11 +759,21 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
             self.next_conn += 1
         return self.conn_ids[key]
 
-    def _fenced(self):
-        return {'result': 'error',
-                'error': {'kind': 'fenced',
-                          'detail': 'writer claim held by another '
-                                    'attachment'}}
+    def _fenced(self, claim=None):
+        """The fencing verdict: the standing claim named, so a refused
+        attachment's audit attributes the preemption to a claimant
+        token and its tracking path can re-join the declared monitor —
+        the field's own arbitration as the authority. A claim that
+        declared no monitor carries the token alone; the caller can
+        pass the claim it means where this peer tracks several."""
+        error = {'kind': 'fenced',
+                 'detail': 'writer claim held by another attachment'}
+        claim = self.claim if claim is None else claim
+        if claim is not None:
+            error['owner'] = claim['owner']
+            if claim.get('monitor') is not None:
+                error['monitor'] = claim['monitor']
+        return {'result': 'error', 'error': error}
 
     def _handle(self, conn):
         try:
@@ -771,6 +798,27 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
                 self.conn_ids.pop(id(conn), None)
             conn.close()
 
+    def _grant(self, owner, cid, request):
+        """The claim a granted request lands: the owner token, this
+        attachment as its first holder, and the monitor declaration the
+        request carried — recorded only when one was declared, so an
+        undeclared claim's record keeps the shape an earlier build's
+        carried."""
+        claim = {'owner': owner, 'holders': {cid}}
+        monitor = request.get('monitor')
+        if monitor is not None:
+            claim['monitor'] = monitor
+        return claim
+
+    def _declare(self, request):
+        """A same-owner grant carrying a monitor declaration rebinds
+        the standing claim's declaration; an undeclared one keeps the
+        declaration its owner already made, so a tool's join cannot
+        erase where the owner serves."""
+        monitor = request.get('monitor')
+        if monitor is not None and self.claim is not None:
+            self.claim['monitor'] = monitor
+
     def _respond(self, conn, request):
         with self.lock:
             self.requests.append(request.get('op'))
@@ -793,22 +841,37 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
                 owner = request['owner']
                 if self.refuse_rogue and owner == self.rogue_token:
                     return self._fenced()
-                self.claim = {'owner': owner, 'holders': {cid}}
+                self.claim = self._grant(owner, cid, request)
+                self.shared_conns = set()
+                return {'result': 'done'}
+            if op == 'claim_writer_unless_held':
+                # The launched-controller conditional grant: granted
+                # where the field stands unclaimed or the standing
+                # claim already names this token — this attachment
+                # joining the holders either way — and refused while a
+                # *live* holder stands under a different owner, the
+                # claim it met left untouched: no preemption, no join.
+                owner = request['owner']
+                if self.claim is not None \
+                        and owner != self.claim['owner'] \
+                        and self.claim['holders']:
+                    return self._fenced()
+                self.claim = self._grant(owner, cid, request)
                 self.shared_conns = set()
                 return {'result': 'done'}
             if op == 'ensure_writer':
                 owner = request['owner']
                 if self.claim is None:
-                    self.claim = {'owner': owner, 'holders': {cid}}
+                    self.claim = self._grant(owner, cid, request)
                     self.shared_conns = set()
                     return {'result': 'done'}
                 if owner != self.claim['owner']:
                     if self.ensure_preempts:
-                        self.claim = {'owner': owner,
-                                      'holders': {cid}}
+                        self.claim = self._grant(owner, cid, request)
                         self.shared_conns = set()
                         return {'result': 'done'}
                     return self._fenced()
+                self._declare(request)
                 self.claim['holders'].add(cid)
                 self.shared_conns.add(cid)
                 if self.ensure_done:
@@ -825,13 +888,28 @@ class ClaimPlantPeer(_SocketPeerLifecycle):
                     # Unclaimed, or a different owner's holderless
                     # claim — the dead-owner or orphan-placeholder
                     # shape the fencing-loss re-grant preempts.
-                    self.claim = {'owner': owner, 'holders': {cid}}
+                    self.claim = self._grant(owner, cid, request)
                     self.shared_conns = set()
                     return {'result': 'done'}
+                self._declare(request)
                 self.claim['holders'].add(cid)
                 self.shared_conns.add(cid)
                 return {'result': 'claimed_shared',
                         'owner': owner}
+            if op == 'probe_writer':
+                # The read-only claim observation: the verdict a
+                # mutation from this connection would meet, without
+                # mutating. Asserting, joining, and releasing nothing,
+                # so an `unclaimed` answer cannot seize the field it
+                # reports.
+                if self.claim is None:
+                    return {'result': 'error',
+                            'error': {'kind': 'unclaimed',
+                                      'detail': 'no attachment holds '
+                                                'field writes'}}
+                if cid in self.claim['holders']:
+                    return {'result': 'done'}
+                return self._fenced()
             if op == 'release_writer':
                 if self.claim is not None \
                         and cid in self.claim['holders']:

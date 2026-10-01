@@ -159,6 +159,64 @@ class AdmissionTests(unittest.TestCase):
         stream = 'stream error: Reached free model rate limit. Your limit will reset in 17 seconds.'
         self.assertEqual(classify({'status': 'timeout'}, stream), ('rate', 17))
 
+    def test_retry_hint_units_provenance_and_bound(self):
+        """#1366: a hint reads the provider's unit, needs quota provenance.
+
+        Millisecond fields are milliseconds, not delta-seconds; a bare
+        'retry after N' in agent output or a test fixture classifies nothing;
+        and an unreadable unit falls back to the group cooldown instead of a
+        guess.
+        """
+        cases = [
+            ('{"error": "rate limit", "retryAfterMs": 5000}', ('rate', 5)),
+            ('{"error": "rate limit", "retry_after_ms": 90000}', ('rate', 90)),
+            ('{"error": "rate limit", "retryAfter": 45}', ('rate', 45)),
+            ('{"error": "rate limit", "retry-after-ms": 1500}', ('rate', 2)),
+            ('Rate limit exceeded. Retry-After: 300', ('rate', 300)),
+            ('Rate limit exceeded. retry-after=2500ms', ('rate', 3)),
+            ('rate limit. please retry after 5 minutes', ('rate', 300)),
+            ('rate limit. retry after 90 seconds', ('rate', 90)),
+            ('rate limit exceeded. Retry-After: 30 days', ('rate', None)),
+            ('test failed: flaky endpoint, will retry after 30 seconds', ('failure', None)),
+            ('{"error": "upstream", "retry-after": 30}', ('failure', None)),
+            ('service unavailable, retry-after: 30', ('endpoint', 30)),
+            ('internal server error. please retry after 30 seconds', ('endpoint', None)),
+        ]
+        for text, expected in cases:
+            with self.subTest(text=text):
+                self.assertEqual(classify({'exit_code': 1}, text), expected)
+                self.assertEqual(classify({'exit_code': 0}, text), ('success', None))
+
+    def test_claimed_delay_is_clamped_to_the_cooldown_maximum(self):
+        """A provider-claimed duration sizes one bounded cooldown."""
+        cases = ['Rate limit exceeded. Retry-After: 999999',
+                 'Reached free model rate limit. Your limit will reset in 9999 hours.']
+        for index, text in enumerate(cases):
+            with self.subTest(text=text):
+                self.now += self.a.hint_ceiling  # past any previous cooldown
+                self.assertEqual(classify({'exit_code': 1}, text), ('rate', 7200))
+                self.assertEqual(classify({'exit_code': 1}, text, 80), ('rate', 80))
+                owner = 'limited-' + str(index)
+                meta = self.start(owner)
+                category, delay = classify({'exit_code': 1}, text, self.a.hint_ceiling)
+                self.a.finish(owner, meta, category, retry_after=delay)
+                self.assertEqual(self.a.summary()['groups']['swe']['cooldown_until'],
+                                 self.now + self.a.hint_ceiling)
+
+    def test_configured_cooldown_ceiling_bounds_a_claimed_delay(self):
+        """max_cooldown_seconds raises the ceiling; it never shortens a window."""
+        self.assertEqual(self.a.hint_ceiling, 7200)
+        self.config['scheduler']['max_cooldown_seconds'] = 14400
+        admission = Admission(self.state, self.config, clock=lambda: self.now, jitter=lambda: 0)
+        self.assertEqual(admission.hint_ceiling, 14400)
+        self.assertEqual(admission.max_cooldown, 14400)
+
+    def test_unbounded_retry_after_cannot_park_the_group(self):
+        meta = self.start('one')
+        self.a.finish('one', meta, 'rate', retry_after=999999)
+        self.assertEqual(self.a.summary()['groups']['swe']['cooldown_until'],
+                         self.now + self.a.hint_ceiling)
+
     def test_timeout_with_provider_stream_error_scopes_cooldown(self):
         tail = 'level=ERROR message="stream error" error.error="AI_APICallError: Rate limit exceeded"'
         self.assertEqual(classify({'status': 'timeout', 'exit_code': -15}, tail)[0], 'rate')
