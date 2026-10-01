@@ -2014,7 +2014,7 @@ fn main() -> ExitCode {
         // the activation-time answer takes: a declared pair keeps the
         // run (the handler left the run serving), a pairless run ends
         // the launch the verdict refused.
-        if let Some(error) = monitor.take_startup_refusal()
+        if let Some(error) = monitor.drain_startup_refusal()
             && let Err(error) = settle_activation(
                 Ok(Activation::Refused { error }),
                 &driver,
@@ -2440,7 +2440,7 @@ fn tracked_cycle(
         report_tracking(&report, &source);
     }
     let tick = monitor.paced_scan();
-    if let Some(error) = monitor.take_startup_refusal() {
+    if let Some(error) = monitor.drain_startup_refusal() {
         settle_activation(
             Ok(Activation::Refused { error }),
             driver,

@@ -1854,7 +1854,14 @@ impl<'d> Monitor<'d> {
     /// exit where none was declared. A driven run's serve loop stands
     /// down when that verdict lands pairless so the shell settles it;
     /// a paced loop drains it inside its own scan cycle.
-    pub fn take_startup_refusal(&self) -> Option<SwitchError> {
+    ///
+    /// The one accessor outside [`Peer::drain_pending`](dcs_runtime::Peer::drain_pending),
+    /// and deliberately so: the latch answers how this run *ends*, which
+    /// the run's shell decides at the boundary the verdict answers, while
+    /// the drained events answer what the run *observed* — the journal's
+    /// account. The verdict's journal entry is queued and does drain with
+    /// the rest.
+    pub fn drain_startup_refusal(&self) -> Option<SwitchError> {
         self.shared.lock().unwrap().peer.drain_startup_refusal()
     }
 
