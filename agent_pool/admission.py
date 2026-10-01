@@ -12,6 +12,9 @@ cools down only the models sharing that provider budget, other groups
 keep dispatching, and recovery reopens with a single probe session
 instead of a retry wave. Authentication and credit failures block the
 group until an explicit operator reset — sleeping cannot fix them.
+Provider feedback is ordered against a lease's grant, so a probe only
+lifts the group state that existed when it was granted; a block or a
+provider reset duration recorded while it was in flight stands.
 """
 import json
 import math
@@ -135,7 +138,8 @@ class Admission:
                         'VALUES(?,?,?,?,0,0)', (name, cfg['initial'], 'normal', self.cooldown))
         return {'grp': name, 'target': cfg['initial'], 'mode': 'normal',
                 'cooldown_until': None, 'cooldown_len': self.cooldown,
-                'window_start': 0, 'loaded': None, 'useful': 0}
+                'window_start': 0, 'loaded': None, 'useful': 0,
+                'congested_at': None}
 
     def _active(self, name, probe=None):
         query = "SELECT COUNT(*) FROM admission_leases WHERE instr(grps, ?)"
@@ -193,8 +197,8 @@ class Admission:
                         and now - group['window_start'] >= self.quiet):
                     self.db.execute('UPDATE admission_groups SET target=?,window_start=?,useful=0,loaded=NULL WHERE grp=?',
                                     (min(self.groups[name]['ceiling'], group['target'] + 1), now, name))
-            self.db.execute('INSERT INTO admission_leases(owner,model,grps,clone,probe,updated) VALUES(?,?,?,?,?,?)',
-                            (owner, model, json.dumps(names), clone, int(probe_grant), now))
+            self.db.execute('INSERT INTO admission_leases(owner,model,grps,clone,probe,granted,updated) VALUES(?,?,?,?,?,?,?)',
+                            (owner, model, json.dumps(names), clone, int(probe_grant), now, now))
             self.db.commit()
             return True
         except Exception:
@@ -211,7 +215,10 @@ class Admission:
         """Record one deduplicated outcome and release the inference lease.
 
         A repeated report for the same invocation never spends another
-        penalty: congestion episodes decrease the group target once.
+        penalty: congestion episodes decrease the group target once. A
+        probe lease only lifts the group state that existed when it was
+        granted — a block or a provider reset recorded after that grant
+        is the newer truth and outlives the probe's success.
         """
         now = self.clock()
         try:
@@ -241,27 +248,45 @@ class Admission:
                     if group['mode'] == 'normal':
                         cooldown_until = now + (retry_after or group['cooldown_len']) + self.jitter()
                         self.db.execute('UPDATE admission_groups SET target=?,mode=?,cooldown_until=?,'
-                                        'window_start=?,useful=0,loaded=NULL WHERE grp=?',
+                                        'window_start=?,congested_at=?,useful=0,loaded=NULL WHERE grp=?',
                                         (max(self.groups[name].get('minimum', 1),
                                              math.ceil(group['target'] / 2)), 'probing',
-                                         cooldown_until, now, name))
+                                         cooldown_until, now, now, name))
                     else:
                         length = retry_after or group['cooldown_len'] or self.cooldown
                         cooldown_until = max(group['cooldown_until'] or 0, now + length + self.jitter())
                         new_len = group['cooldown_len']
                         if lease and lease['probe']:
                             new_len = min(self.max_cooldown, max(new_len, self.cooldown) * 2)
-                        self.db.execute('UPDATE admission_groups SET cooldown_until=?,cooldown_len=? WHERE grp=?',
-                                        (cooldown_until, new_len, name))
+                        self.db.execute('UPDATE admission_groups SET cooldown_until=?,cooldown_len=?,'
+                                        'congested_at=? WHERE grp=?',
+                                        (cooldown_until, new_len, now, name))
                 elif category in ('auth', 'credits'):
-                    self.db.execute("UPDATE admission_groups SET mode='blocked',cooldown_until=NULL WHERE grp=?", (name,))
+                    self.db.execute("UPDATE admission_groups SET mode='blocked',cooldown_until=NULL,"
+                                    'congested_at=? WHERE grp=?', (now, name))
                 elif category == 'success' and lease and lease['probe']:
-                    self.db.execute("UPDATE admission_groups SET mode='normal',cooldown_until=NULL,cooldown_len=? WHERE grp=?",
-                                    (self.cooldown, name))
+                    if not self._outranked(group, lease):
+                        self.db.execute("UPDATE admission_groups SET mode='normal',cooldown_until=NULL,"
+                                        'cooldown_len=?,congested_at=NULL WHERE grp=?',
+                                        (self.cooldown, name))
             self.db.commit()
         except Exception:
             self.db.rollback()
             raise
+
+    @staticmethod
+    def _outranked(group, lease):
+        """True when newer provider feedback outranks this probe's success.
+
+        A blocked group is never auto-retried, so only an operator reset can
+        open it. Otherwise the probe may lift exactly the episode it was
+        granted for: congestion recorded at or after the grant belongs to a
+        later report and keeps its cooldown.
+        """
+        if group['mode'] == 'blocked':
+            return True
+        return (group['congested_at'] is not None
+                and group['congested_at'] >= (lease['granted'] or 0))
 
     def useful(self, meta):
         """Credit a verified useful completion to its quota groups' growth window."""
@@ -297,7 +322,7 @@ class Admission:
             self._tx()
             self._group(name)
             self.db.execute("UPDATE admission_groups SET mode='normal',cooldown_until=NULL,cooldown_len=?,"
-                            'window_start=?,useful=0,loaded=NULL WHERE grp=?',
+                            'window_start=?,congested_at=NULL,useful=0,loaded=NULL WHERE grp=?',
                             (self.cooldown, self.clock(), name))
             self.db.commit()
         except Exception:

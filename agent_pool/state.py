@@ -64,6 +64,14 @@ MIGRATIONS = [
       payload TEXT NOT NULL DEFAULT '{}');
     CREATE INDEX IF NOT EXISTS work_events_issue ON work_events(issue,id);
     """,
+    # 6: order a recovery probe's unblock against later provider feedback.
+    # admission_groups.congested_at is when the group's latest congestion or
+    # block event was recorded; admission_leases.granted is when the lease took
+    # its slot, so a probe can only close the episode it was granted for.
+    """
+    ALTER TABLE admission_groups ADD COLUMN congested_at REAL;
+    ALTER TABLE admission_leases ADD COLUMN granted REAL NOT NULL DEFAULT 0;
+    """,
 ]
 
 # Bounded cause classes persisted on 'repair'/'redispatch' work_events rows so
