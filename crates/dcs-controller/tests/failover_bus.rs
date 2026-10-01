@@ -23,8 +23,8 @@
 use dcs_assembly::{DriverRegistry, FanoutDriver, assemble, resolve_drivers};
 use dcs_controller::registry;
 use dcs_core::{
-    IoDriver, IoError, JournalEvent, PointId, Role, Sample, StandbySync, TelemetrySnapshot, Value,
-    ValueKind,
+    IoDriver, IoError, JournalEvent, LinkState, PointId, Role, Sample, StandbySync,
+    TelemetrySnapshot, Value, ValueKind,
 };
 use dcs_model::PlantModel;
 use dcs_monitor::MonitorClient;
@@ -36,12 +36,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 mod support;
 
 use support::{
-    CONTROLLER, PAIR_TOKEN, Spawned, image_value, pump, serving_device, spawn, spawn_controller,
-    workspace_binary,
+    CONTROLLER, PAIR_TOKEN, Spawned, image_value, kill, pump, serving_device, spawn,
+    spawn_controller, workspace_binary,
 };
 
 /// The model the rig runs — the shared tank-loop document whose
@@ -101,6 +102,12 @@ const AO_POINTS: &[PointRegister] = &[PointRegister {
 /// on an ephemeral port: it announces `serving device <id> on <addr>
 /// (declared <listen>)` once bound.
 fn spawn_device(model: &Path, device: u64) -> Spawned {
+    spawn_device_at(model, device, "127.0.0.1:0".to_string())
+}
+
+/// [`spawn_device`] bound at `listen` — the restarted device process a
+/// restart scenario re-serves the carried address with.
+fn spawn_device_at(model: &Path, device: u64, listen: String) -> Spawned {
     spawn(
         &workspace_binary("dcs-sim-bus-device"),
         &[
@@ -108,7 +115,7 @@ fn spawn_device(model: &Path, device: u64) -> Spawned {
             "--device".to_string(),
             device.to_string(),
             "--listen".to_string(),
-            "127.0.0.1:0".to_string(),
+            listen,
         ],
         serving_device(device),
     )
@@ -737,6 +744,197 @@ fn a_partitioned_active_is_fenced_when_it_returns() {
         active.advance(1).unwrap();
         assert_eq!(active.role().unwrap().role, Role::Standby, "tick {tick}");
     }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_restarted_device_recovers_and_the_peer_promotes() {
+    // QA `sim-bus-driver-permanent-disconnect-after-device-blip`: a
+    // device server dying and rebinding under a live pair used to sever
+    // every attachment permanently — the active scanned on dead field
+    // I/O and the peer's promote refused `no live connection`. The
+    // drivers now re-attach lazily, so the recovered field serves the
+    // same pair and the promotion lands.
+    let dir = std::env::temp_dir().join(format!("dcs-failover-bus-restart-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let serving = bus_model(&dir, "serving.json", |_| "127.0.0.1:0".to_string());
+    let mut pair_devices = spawn_devices(&serving);
+    let pair_model = bus_model(&dir, "pair.json", |device| {
+        pair_devices[&device].addr.to_string()
+    });
+    let field_ai = attach(pair_devices[&AI_DEVICE].addr, AI_POINTS);
+    let field_ao = attach(pair_devices[&AO_DEVICE].addr, AO_POINTS);
+    field_ai.write(SETPOINT, Value::Float(50.0)).unwrap();
+
+    let active_process = spawn_controller(&pair_model, &[], DT);
+    let mut standby_process = spawn_controller(
+        &pair_model,
+        &["--standby".to_string(), active_process.addr.to_string()],
+        DT,
+    );
+    let active = MonitorClient::new(active_process.addr);
+    let standby = MonitorClient::new(standby_process.addr);
+
+    // Converged ticks before the loss.
+    for _ in 0..N {
+        standby.advance(1).unwrap();
+        active.advance(1).unwrap();
+    }
+    assert!(
+        matches!(
+            standby.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby never converged"
+    );
+
+    // The outage: both device processes die — listeners, links, and
+    // claims with them — while the controllers keep running.
+    let addrs: BTreeMap<u64, SocketAddr> = pair_devices
+        .iter()
+        .map(|(device, spawned)| (*device, spawned.addr))
+        .collect();
+    for spawned in pair_devices.values_mut() {
+        kill(spawned);
+    }
+    // The observer attachment severs the same way: the field is down.
+    assert_eq!(field_ao.read(VALVE), Err(IoError::Disconnected(VALVE)));
+
+    // A scan inside the outage degrades at the field boundary — failed
+    // reads and writes counted, the aggregate link disconnected — and
+    // completes anyway: field loss is a transient health event, not a
+    // run failure, so the role stays `active`.
+    let degraded = active.advance(1).unwrap();
+    assert!(
+        degraded.io_health.failed_reads > 0,
+        "{:?}",
+        degraded.io_health
+    );
+    assert!(
+        degraded.io_health.failed_writes > 0,
+        "{:?}",
+        degraded.io_health
+    );
+    assert_eq!(
+        degraded.io_health.driver.as_ref().map(|driver| driver.link),
+        Some(LinkState::Disconnected),
+        "{:?}",
+        degraded.io_health
+    );
+    assert_eq!(active.role().unwrap().role, Role::Active);
+    // The tracking pull never touches the field — the standby stays
+    // attached to its source through the outage.
+    standby.advance(1).unwrap();
+
+    // The devices come back on the same addresses — the restart.
+    for (device, addr) in &addrs {
+        pair_devices.insert(
+            *device,
+            spawn_device_at(&serving, *device, addr.to_string()),
+        );
+    }
+
+    // Recovery is bounded: the drivers re-attach lazily with one
+    // contact attempt per re-attach window, so a handful more requested
+    // scans serve the field again — no controller restart. Both sides'
+    // aggregate link must report connected: the standby's quiesced
+    // scans keep its links exercised, and its claim asks ride them at
+    // promote time.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut scans = 0u64;
+    let recovered = loop {
+        let standby_snapshot = standby.advance(1).unwrap();
+        let snapshot = active.advance(1).unwrap();
+        scans += 1;
+        let connected = |snapshot: &TelemetrySnapshot| {
+            snapshot
+                .io_health
+                .driver
+                .as_ref()
+                .is_some_and(|driver| driver.link == LinkState::Connected)
+        };
+        if connected(&standby_snapshot) && connected(&snapshot) {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the controllers' drivers never re-attached"
+        );
+        thread::sleep(Duration::from_millis(200));
+    };
+    assert!(
+        scans <= 12,
+        "recovery took {scans} scans — the re-attach must land within a few windows"
+    );
+    // The re-armed claim holds: the owner's writes fence a claim-less
+    // attachment again, and the bank carried the recovered scan's
+    // write.
+    assert_eq!(
+        field_ao.write(VALVE, Value::Float(0.0)),
+        Err(IoError::Fenced(VALVE))
+    );
+    assert_eq!(
+        field_ao.read(VALVE).unwrap().value,
+        image_value(&recovered, VALVE)
+    );
+
+    // The reproduction's tail — `POST /promote` on the converged peer:
+    // pre-fix it refused with `backend device 2 failed to step: no live
+    // connection` because the severed link could never return; now the
+    // claim rides the re-attached link (and a link no scan traffic had
+    // exercised since the outage replays its claim ask once on the
+    // fresh attachment).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        standby.advance(1).unwrap();
+        if matches!(
+            standby.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the standby never reconverged");
+    }
+    let promoted = match standby.promote() {
+        Ok(report) => report,
+        Err(error) => {
+            kill(&mut standby_process);
+            panic!(
+                "promote failed: {error}\nstandby stderr:\n{}",
+                standby_process.stderr_tail()
+            );
+        }
+    };
+    assert_eq!(promoted.role, Role::Promoting, "{promoted:?}");
+    let owned = standby.advance(1).unwrap();
+    assert_eq!(standby.role().unwrap().role, Role::Active);
+    // The promoted run's first field-owning scan wrote the bank.
+    assert_eq!(
+        field_ao.read(VALVE).unwrap().value,
+        image_value(&owned, VALVE)
+    );
+
+    // The takeover is the field's own arbitration: the superseded
+    // active's next scan fences its writes and demotes it in place,
+    // and the re-closed gate keeps its writes off the registers.
+    let fenced = active.advance(1).unwrap();
+    assert!(
+        matches!(
+            fenced
+                .io_health
+                .last_error
+                .as_ref()
+                .map(|fault| &fault.error),
+            Some(IoError::Fenced(_))
+        ),
+        "the superseded peer's write must fence: {:?}",
+        fenced.io_health
+    );
+    assert_eq!(active.role().unwrap().role, Role::Demoting);
+    active.advance(1).unwrap();
+    assert_eq!(active.role().unwrap().role, Role::Standby);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -40,6 +40,12 @@
   "model_fixture": "crates/dcs-demo/fixtures/pump_station.json",
   "dynamics_fixture": "qa_lane/fixtures/probe_dynamics.json"
  },
+ "sim_bus_device": {
+  "device": 1,
+  "port": 9005,
+  "model_fixture": "crates/dcs-demo/fixtures/two_kinds_bus.json",
+  "cyclic_model": "crates/dcs-demo/fixtures/wago_rig_cyclic.json"
+ },
  "git_dir": "/srv/dcs-hwtest/repo.git",
  "exploration_enabled": false,
  "exploration_devin": "/home/jan-kaspar/.local/bin/devin",

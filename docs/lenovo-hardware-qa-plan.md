@@ -537,6 +537,196 @@ Implementation order: second, after [daily architecture review](daily-architectu
   closed through the writer lock alone — reports inconclusive;
   the pair leaves on its launch roles.
 
+### Landed 2026-10-01 (sim-bus device server in the lane image set, #1368)
+
+- The sim-bus rig legs stage against the released protocol server: the
+  bounded builder adds `-p dcs-sim-bus --bin dcs-sim-bus-device` to
+  its compile set and the ship map carries that binary into the
+  controller image beside `dcs-controller`, so a leg launches the
+  real register-protocol server out of the revision under test —
+  the `dcs-plant-ctl` precedent #654 recorded for the plant image,
+  and the `dcs-forge --entrypoint` precedent on the same image —
+  instead of a disposable in-session server or a Python
+  reimplementation of the wire protocol. The two reported digests,
+  the controller entrypoint, and the host-side `dcs-ctl` seam are
+  unchanged; a dedicated bus image would have changed the digest set.
+- The `sim_bus_device` config block names the device the server
+  serves, its bridge port, and the bus model declaring it;
+  `endpoint_placement` records it `bridge` like the probe field,
+  since no host socket is reachable from the rig. The launch stages
+  the fixture inside the run directory with that device's
+  `__BUS_ADDR__` placeholder bound to the device container's bridge
+  name, mounts it into a controller-image container run under
+  `--entrypoint dcs-sim-bus-device`, waits for the server's own
+  bound-address report, and returns the bridge address and the staged
+  document a leg mounts into the controller it points at the field.
+  An enabler for the sim-bus rig legs (#1355/#1356/#1357); a leg
+  needing the server itself to misbehave may still stage a double.
+
+### Landed 2026-10-01 (holderless-claim reclaim recovery leg, #1260)
+
+- The holderless-claim reclaim recovery contract — the continuity
+  clause behind #1255's bound `reclaim_writer` grant, serving
+  WW-LCM-001 — is exercised on the deployed pair by scenario leg
+  `2390_holderless_claim_recovery`, the per-revision lane evidence
+  that a standing claim with zero holders is the dead-owner shape
+  the reclaim exists to preempt and that the fencing-loss peer's
+  bound grant never refuses it forever. The defect the leg stages is
+  the one the shipped unkeyed pair recorded: two successive
+  ex-owners orphaned — the launch owner demoted by the standby's
+  operator `POST /promote`, the successor fenced by a foreign tool
+  claim — then the field's freeing racing both peers' unbound orphan
+  probes so the winner left a holderless claim standing under the
+  cleared peer's stale token, and the pre-fix bound re-grant refusing
+  that placeholder on every scan while the placeholder fenced the
+  field. The pair lost all field ownership for minutes until an
+  operator promoted.
+- With the pair settled and tracking the leg posts `/promote` on the
+  standby so the active demotes and re-joins tracking with its loss
+  mark cleared (the first ex-owner), drives a scenario attachment's
+  `claim_writer` through the lane's claim-aware seam under a foreign
+  tool token so the promoted owner is fenced and demotes orphaned
+  with its loss mark standing (the second ex-owner), and reads both
+  peers until they report the orphan island. The held foreign claim
+  must refuse every conditional path for the window's rounds. A
+  second attachment's `claim_writer` plus `release_writer` then frees
+  the field while a staged unbound `ensure_writer` — the orphan
+  cycle's own probe shape — raises the cleared ex-owner's holderless
+  placeholder. From there no operator call and no restart: the
+  loss-marked peer's bound reclaim must take that placeholder inside
+  the resolution bound, the winner's journaled walk carrying
+  `origin: reclaim` and never `request`, its writes landing through
+  the re-seated claim, and the pair reconverging to exactly one
+  active plus one tracking standby.
+- Every stage is audited through both peers' serving monitors, the
+  `probe_writer` claim surface, and the bind-mounted
+  `--journal-file` mirrors: the attributed `field_claim_lost` on each
+  ex-owner (the promote's successor token on the first, the foreign
+  token on the second), the `field_orphaned` transitions, the
+  refused probes' `field_claim_observed` claimant records, the
+  loser's quiet journal, and the durable kinds each mirror holds. The
+  doctored negative the leg must refuse is a pair *asserted*
+  recovered — the fenced peer's monitor reporting `role=active` while
+  `probe_writer` still names the cleared ex-owner's holderless claim
+  and both peers stay orphaned. The orphan budget's own recorded
+  `claim_writer_unless_held` rescue is the broken reclaim's symptom,
+  never an alternative success, so a rig whose `--auto-promote`
+  budget would fire inside the resolution watch reports inconclusive.
+- Named diagnostics are `holderless-reclaim-failed` and
+  `holderless-reclaim-nondeterministic`, with the self-check's
+  `holderless-reclaim-unchecked` covering the planted asserted
+  recovery, the planted wedge, and the planted operator-origin
+  recovery; two consecutive passes produce identical digests; a run
+  whose served surfaces predate the contract (no `probe_writer` claim
+  surface, no owner/monitor attribution on the fencing verdicts, no
+  pinned owner tokens, no `plant_ctl` seam, no per-controller journal
+  mounts) reports inconclusive; the pair leaves on its launch roles.
+
+### Landed 2026-10-01 (sim-cyclic fencing-loss demotion leg, #1357)
+
+- The sim-cyclic fencing-loss demotion contract — the per-revision
+  lane evidence for the single-writer/one-active invariant
+  WW-FND-002 requires, over the claim protocol #1352's fix
+  establishes — is exercised on the deployed rig by scenario leg
+  `2470_sim_cyclic_fencing_loss_demote`. The leg stages the lane's
+  `dcs-sim-bus-device` server on the run config's
+  `sim_bus_device.cyclic_model` document (the block carries one
+  fixture per register-protocol model the legs serve), launches a
+  controller pair onto the staged `sim-cyclic` device on the
+  driven/foreign born seats — a register-protocol model carries its
+  device address in its parameters, so the pair needs no `--remote`
+  — and severs every attachment's control connection with a device
+  restart, the rig-durable link flap that releases the
+  connection-bound claim to nobody. POST /promote on the tracking
+  member then takes the claim, so the ex-owner's next staged
+  exchange meets the fence: the leg asserts the demotion through
+  the named path — served role walking `demoting` to `standby`, the
+  durable `--journal-file` carrying `role_changed` with origin
+  `fenced` beside exactly one `field_claim_lost` attributed to the
+  promoted peer's owner token — inside the documented bound, with
+  never two peers reporting `role:active` at any poll. The promoted
+  owner's exchanges must keep completing with the claim held, the
+  demoted peer's go census-only once its staged image releases, and
+  the pair reconverges to its launch roles; the deployed pair is
+  framed undisturbed before and after.
+- Named diagnostics are `cyclic-fencing-loss-failed` and
+  `cyclic-fencing-loss-nondeterministic`, with the self-check's
+  `cyclic-fencing-loss-unchecked`; two passes produce identical
+  digests. A run staging no device server, no `cyclic_model`, a
+  staged model whose served device is not `sim-cyclic` or declares
+  no output channel, a pair that never settles — or the recorded
+  defect signature itself, the ex-owner whose io_health never names
+  a fenced exchange and who stays active beside its promoted peer —
+  reports inconclusive; the pair leaves on its launch roles.
+
+### Landed 2026-10-01 (sim-bus driver lazy-reattach leg, #1355)
+
+- The point-wise `BusDriver`'s lazy-reattach contract — #1351's fix
+  serving WW-LCM-001's continuity clause and the health model's rule
+  that a field communication fault is a transient, retriable event —
+  is exercised per revision by scenario leg
+  `3560_sim_bus_driver_reattach`. `dcs-sim-bus`'s `BusDriver` and
+  `dcs-sim-net`'s `RemoteDriver` implement their recovery
+  independently, so a rig with no register-mapped device says
+  nothing about this one; the leg stages the subject through the
+  lane's `sim_bus_device` seam — `start_sim_bus_device` launches the
+  revision's own shipped `dcs-sim-bus-device` binary on the rig
+  bridge, serving the run config's bus model with a `timeout_ms`
+  stamped under the leg's ~2 s stall so a frozen device times out
+  mid-exchange and the driver has a failed exchange to recover from.
+  A controller pair is born-launched onto the `driven`/`foreign`
+  seats with the staged document mounted and no `--remote` — a
+  register-protocol model carries its device address in its
+  parameters — so each member's serving monitor is the leg's window
+  on its own driver's health. The pre-fix defect dropped the
+  point-wise driver's stream on the first failed exchange and
+  answered `Disconnected` for the life of the process: the active's
+  scanning `communication_fault` values never cleared and the
+  standby stayed unpromotable, because a promotion must claim the
+  device and the claim request rode a dead link. The leg drives
+  both outage classes the finding records — (a) the device server
+  restarted under the pair, returning with its claim table empty so
+  the owner must re-attach *and* re-arm, and (b) the device frozen
+  ~2 s then thawed through the lane's `freeze_sim_bus_device`/
+  `thaw_sim_bus_device` levers, a transient unanswerable window with
+  nothing dying — and through each member's serving monitor asserts
+  the healthy baseline carries a connected link and no standing
+  `last_error`; the outage is counted in the served `io_health` —
+  the boundary counters moved over the baseline with the fault
+  stamped — and the first serve reporting the link `connected`
+  after the outage already carries the cleared standing record, the
+  reset failure streak, and the kept cumulative history and recorded
+  fault, with the served tick and scan cadence resumed without
+  rewinding past the running peak, which would be a controller
+  restart rather than a driver recovery; the pair's launch roles
+  hold throughout; and `POST /promote` on the converged standby must
+  answer inside its own bound once the backend is back — the
+  promotion path's device claim riding the recovered link — after
+  which the launch roles are restored by promoting the original
+  owner back. The re-attach is fast by design, so the window in
+  which the link is observably down is about one re-attach interval
+  wide and no poll can prove it caught it: the stall class, whose
+  freeze the leg owns, therefore *holds* the device down past the
+  documented stall until every member has surfaced the outage as
+  `disconnected` with the severing failure named, and only that
+  class gates on the transient — the restart class lets the device
+  return on its own schedule and witnesses an outage that fell
+  between two polls through the moved counters instead.
+- Named diagnostics are `sim-bus-reattach-failed` and
+  `sim-bus-reattach-nondeterministic`, with the self-check's
+  `sim-bus-reattach-unchecked` covering the planted lingering
+  record, standing streak, reset history, uncounted outage, and held
+  tick; both outage classes run twice with identical digests; a run
+  context carrying no `sim_bus_device` device-server seam or born-
+  controller levers, a rig whose device or pair never answers, a
+  device that never serves again after a restart, a pair that never
+  settles tracking, a staging lever that never completes, a restore
+  the leg cannot classify, and a staged revision whose served
+  `io_health` cannot express the driver's diagnostics and
+  failed-exchange accounting — every build, until #1351's fix lands
+  — report inconclusive; the rig leaves on its launch roles with
+  the staged born seats and device container torn down.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,

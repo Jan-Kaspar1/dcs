@@ -177,6 +177,82 @@ same managed/run labels and are reaped by the same teardown and
 reconciliation as the rest of the rig; a probe launch failure is
 an ordinary rig-start failure and leaves no orphaned objects.
 
+## Image build contract
+
+The bounded builder compiles the lane's runtime binaries out of the
+revision under test — the controller and plant servers, the
+sim-net/sim-bus libraries, the monitor's operator CLI, the plant-side
+`dcs-plant-ctl`, the `dcs-forge` checkpoint endpoint, and the
+sim-bus `dcs-sim-bus-device` register-protocol server — then
+packages two minimal images, `dcs-hwtest/controller:<sha>` and
+`dcs-hwtest/plant:<sha>`. Both report the same two digests as
+before; only the binaries riding inside them changed:
+
+- `dcs-hwtest/plant` ships `dcs-plant-server` as its entrypoint plus
+  `dcs-plant-ctl` beside it. The lane's plant ops `docker exec` that
+  tool inside the container against the server's loopback listener,
+  so covered operations run through the released binary rather than a
+  second implementation of the plant wire protocol (#654).
+- `dcs-hwtest/controller` ships `dcs-controller` as its entrypoint
+  plus `dcs-forge` and `dcs-sim-bus-device` beside it. Both are
+  launched through `--entrypoint` on that one image: the forge is the
+  bridge-placed checkpoint endpoint the tracking-source/auth legs
+  announce, and the device server is the bridge-placed sim-bus field
+  the sim-bus rig legs stage (#1368). A separate bus image would
+  change the reported digest set, so the existing image carries it.
+- `dcs-ctl` is not in either image: it stays a host-side binary in
+  `build-cache/target/release/`, exec'd against the pair's published
+  monitor ports.
+
+A build that produces no one of an image's shipped binaries fails
+the run loudly rather than leaving a leg to run against a phantom
+tool.
+
+## The lane's sim-bus device server
+
+`sim_bus_device` names the sim-bus rig's field: the `device` id the
+server serves out of the model, the bridge `port` its register
+protocol binds, and the `model_fixture` declaring that device. A leg
+launches it through the run context's `start_sim_bus_device`, which
+stages the fixture inside the run's directory with that device's
+`address` parameter — the `__BUS_ADDR__` placeholder the checked-in
+bus models carry — bound to the device container's rig-bridge name,
+mounts the staged document into a controller-image container run
+under `--entrypoint dcs-sim-bus-device`, and waits for the server's
+own report of the address it serves on. The launch returns the bridge
+address the rig's sim-bus attachments dial and the staged document a
+leg mounts into the controller it points at the field, so both ends
+of the register protocol read one declaration. `start_sim_bus_device`
+also accepts `timeout_ms`, stamped onto the staged document's device
+parameters — a leg staging a field stall needs the driver's declared
+per-request timeout to sit under the outage, where the fixtures'
+five-second default would not.
+`stop_sim_bus_device` removes the container outright, for a leg's
+device-outage induction. `restart_sim_bus_device` severs every
+attachment's control connection while the same server comes back —
+the register bank and the connection-bound claim reset with the fresh
+process — and `freeze_sim_bus_device`/`thaw_sim_bus_device` hold the
+attachments' sockets open and unanswered for a bounded stall instead,
+the field's state surviving. `sim_bus_device_serving` reports whether
+the server is answering right now, so a leg separates a field that
+never came back from a driver that never re-attached. The container
+carries the run's
+`dcs-hwtest.managed=1` / `dcs-hwtest.run=<id>` labels, so ordinary
+teardown and reconciliation reap a leg that leaves one running.
+
+The endpoint is bridge-placed: `endpoint_placement` must record
+`sim_bus_device` as `bridge`, and nothing host-side dials the
+register protocol — a host socket is unreachable from the rig bridge.
+Add both keys to the deployed `config.json` when the pinned lane copy
+is upgraded; `sim_bus_device: null` stages no device server, and the
+placement key is required, so a config predating this contract
+refuses the run rather than launching an unreachable endpoint.
+
+Normal-path staging runs the released device server; a fault-injection
+leg that needs the server itself to misbehave can still stage a
+protocol double of its own — but the register-protocol evidence runs
+against the shipped binary.
+
 ## Storage bound and retention
 
 The lane's whole footprint — `src/` archives and extractions,

@@ -37,7 +37,16 @@
 //! | `0x08` | clear quality | `u16 register` |
 //! | `0x09` | exchange | `u16 count`, then per staged output `u16 register`, `u8 kind`, value bytes |
 //! | `0x0a` | script exchange | `u16 count`, then outcome entries |
-//! | `0x0b` | claim writer unless held | `u64 owner` |
+//! | `0x0b` | claim writer unless held | `u64 owner`, optional monitor |
+//! | `0x0c` | ensure writer | `u64 owner`, optional monitor |
+//! | `0x0d` | probe writer | none |
+//!
+//! The three claim requests carry an optional monitor block after the
+//! owner token — the claimant's declared tracking endpoint, written only
+//! when it declares one: an address-family tag (`0x04` IPv4, `0x06`
+//! IPv6), the address bytes, then a `u16` port. A claim declaring no
+//! monitor sends nothing, so its payload stays byte-for-byte the shape a
+//! build predating the field sent.
 //!
 //! A scripted exchange outcome's first byte is `0x01` complete, `0x02`
 //! miss, `0x03` late, `0x04` short-station (`u16` name length, UTF-8
@@ -104,11 +113,21 @@
 //! | `0x03` | registers | `u16 count`, then per register `u16 register`, `u8 kind`, value bytes, `u64 tick`, quality bytes |
 //! | `0x04` | stepped | `u64 tick` — the bank's new tick |
 //! | `0x05` | error | `u8 code`, code body |
-//! | `0x06` | done | none — a claim, release, inject, clear, or script applied |
+//! | `0x06` | done | none — a claim, release, ensure, inject, clear, or script applied |
 //! | `0x07` | exchanged | `u8 flags`, `u16 count`, then per register `u16 register`, `u8 kind`, value bytes, `u64 tick`, quality bytes |
+//! | `0x08` | claim status | attribution block |
 //!
 //! The `exchanged` flags byte's bit 0 marks a late answer — the
 //! deadline miss the driver's `missed_deadlines` counter reads.
+//!
+//! The `claim status` answer is the claim-status probe's: the standing
+//! claim's identity, or an empty verdict while no claim stands.
+//! `fenced` errors carry the same attribution block after their detail
+//! text. One block names the standing claim: a flags byte whose bit 0
+//! marks a following `u64` owner token and whose bit 1 marks a following
+//! monitor endpoint in the encoding above. A block naming neither is not
+//! written at all — an unclaimed device and a verdict from a build
+//! predating the attribution are both the shorter shape.
 //!
 //! ## The `sim-cyclic` kind
 //!
@@ -145,7 +164,9 @@
 //! Error codes: `0x01` unknown register (`u16 register`), `0x02` kind
 //! mismatch (`u16 register`, `u8 expected kind`, found value bytes),
 //! `0x03` invalid request (`u16 detail length`, UTF-8 detail), `0x04`
-//! fenced (`u16 detail length`, UTF-8 detail). A malformed request
+//! fenced (`u16 detail length`, UTF-8 detail, then the optional
+//! attribution block naming the standing claim's owner and declared
+//! monitor). A malformed request
 //! payload is answered with an `invalid_request` error — the
 //! connection stays live — while a frame violating the length bound
 //! ends the connection.
@@ -166,7 +187,7 @@
 //! claim it met left untouched. On this protocol a standing claim
 //! always has live holders, so the refused ask is exactly the
 //! live-incumbent verdict the born-active startup contract refuses
-//! startup on. While a
+//! startup on, and that refusal names the incumbent it met. While a
 //! claim stands, `write_register` and `step` from an attachment not
 //! holding it answer the `fenced` error — surfaced through
 //! [`BusDriver`] as `IoError::Fenced` on the addressed point and
@@ -174,11 +195,50 @@
 //! census, and quality injection stay open to every attachment. An
 //! unclaimed device stays open to all, the pre-claim behavior.
 //!
+//! Every claim carries the same introspection surface the
+//! `dcs-sim-net` plant protocol already arbitrates on, so the
+//! field-claim contract reads this transport the way it reads that one:
+//!
+//! - **Attributed verdicts.** Each claim may declare the claimant's
+//!   monitor endpoint, which the server records on the claim. Every
+//!   `fenced` verdict — a refused conditional claim, a fenced write,
+//!   step, or image exchange — then names the standing claim's owner
+//!   token and that declared monitor, so a superseded owner's
+//!   `field_claim_lost` record attributes the preemption to a named
+//!   claimant and its tracking path can re-join the successor the
+//!   field's own arbitration vouches for. [`BusDriver::fenced_by`] and
+//!   [`BusDriver::claimed_monitor`] read those verdicts back.
+//! - **Claim-status probe.** `probe_writer` answers the standing
+//!   claim's identity without touching it, or an unclaimed verdict
+//!   naming neither — on this protocol the open, pre-claim state every
+//!   attachment may still write through, not the plant protocol's
+//!   fail-closed one. A launched controller's startup can ask it before
+//!   it claims, and a peer can report it per scan: the probe asserts,
+//!   joins, and releases nothing.
+//! - **Conditional re-arm.** `ensure_writer` binds this attachment to
+//!   the claim for its recorded token while the device stands unclaimed
+//!   or already names it, refusing `fenced` while a different owner
+//!   stands: the grant a re-attached owner re-arms with, and the grant
+//!   a fencing-loss reclaim asks, since a claim on this protocol always
+//!   has live holders.
+//!
+//! The declaration resolves a wildcard IP to the claiming connection's
+//! proven source, keeping the declared port: a claim bound to `0.0.0.0`
+//! — the container default — must never hand a fenced peer an address it
+//! would dial as its own loopback.
+//!
 //! The claim is bound to the attachments holding it: `release_writer`
 //! drops the requesting connection's hold — a no-op when it holds
 //! nothing — and a connection's drop releases it likewise, the last
 //! release freeing the field so a dead owner's claim cannot fence a
-//! promoted peer's. Where the claim cannot be held — an attachment
+//! promoted peer's. `ensure_writer` is `claim_writer`'s conditional
+//! counterpart: granted — binding the requesting attachment as a
+//! holder — only while the field is unclaimed or the standing claim
+//! already names `owner`, refused `fenced` while a different owner
+//! stands. It is the grant a re-attached field owner re-arms its
+//! dropped claim with, so a restart or link loss cannot preempt the
+//! claim another owner took during the outage. Where the claim cannot
+//! be held — an attachment
 //! whose link is down holds nothing — the field-claim failure refuses
 //! the promotion as `SwitchError::FieldClaimFailed`, and a field kind
 //! that cannot arbitrate at all keeps automatic self-promotion
@@ -192,8 +252,14 @@
 //! `IoError::InvalidValue` — refused locally, like the kind check, so a
 //! value the bank cannot represent is a caller error rather than a
 //! link fault — and a fenced-out write as
-//! `IoError::Fenced` — the first failure drops the connection
-//! for good, and [`BusDriver`] reports that link health through
+//! `IoError::Fenced`. A failed exchange drops the connection — a late
+//! answer could desync the request/response pairing — but not the
+//! driver: the next access re-attaches lazily, spacing contact
+//! attempts so a device restart or brief stall degrades scans to
+//! `Disconnected` only while the endpoint stays unanswerable, and a
+//! recorded writer claim re-arms through `ensure_writer` on the
+//! re-attach rather than preempting a successor. [`BusDriver`] reports
+//! that link health through
 //! `IoDriver::diagnostics` for the telemetry snapshot's I/O-health
 //! section. The
 //! `dcs-sim-bus-device` binary in this crate serves one model-declared
@@ -214,7 +280,7 @@ mod protocol;
 mod server;
 
 pub use bank::{BankError, DynamicsError, RegisterBank, RegisterDecl};
-pub use client::{BusDriver, LinkError, PointRegister};
+pub use client::{BusDriver, ClaimStatus, LinkError, PointRegister};
 pub use cyclic::{CyclicBusDriver, CyclicPoint};
 pub use params::{
     CYCLIC_DEVICE_KIND, ChannelRegister, CyclicDeviceParameters, DEVICE_KIND, DeviceParameters,

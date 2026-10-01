@@ -14,7 +14,7 @@ use dcs_core::{Quality, QualityReason, Sample, Tick, Value, ValueKind};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{self, BufReader, Read};
-use std::net::TcpStream;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 
 /// The maximum payload size of one protocol frame in bytes, length
 /// prefix excluded.
@@ -35,6 +35,8 @@ const OP_CLEAR_QUALITY: u8 = 0x08;
 const OP_EXCHANGE: u8 = 0x09;
 const OP_SCRIPT_EXCHANGE: u8 = 0x0a;
 const OP_CLAIM_WRITER_UNLESS_HELD: u8 = 0x0b;
+const OP_ENSURE_WRITER: u8 = 0x0c;
+const OP_PROBE_WRITER: u8 = 0x0d;
 
 // Response variant tags.
 const RESP_SAMPLE: u8 = 0x01;
@@ -44,6 +46,19 @@ const RESP_STEPPED: u8 = 0x04;
 const RESP_ERROR: u8 = 0x05;
 const RESP_DONE: u8 = 0x06;
 const RESP_EXCHANGED: u8 = 0x07;
+const RESP_CLAIM_STATUS: u8 = 0x08;
+
+// Attribution flags on the block a `fenced` verdict and a `claim_status`
+// answer carry after their fixed fields: bit 0 marks the standing
+// owner's token, bit 1 the monitor endpoint it declared. The block is
+// written only when at least one is present, so a verdict that names
+// neither stays byte-for-byte the pre-attribution shape.
+const CLAIM_OWNER: u8 = 0x01;
+const CLAIM_MONITOR: u8 = 0x02;
+
+// Address-family tags inside an encoded monitor endpoint.
+const ADDR_IPV4: u8 = 0x04;
+const ADDR_IPV6: u8 = 0x06;
 
 // Scripted exchange-outcome tags on the wire, in `ExchangeOutcome`
 // declaration order.
@@ -135,9 +150,27 @@ pub enum BusRequest {
     /// attachment not holding it are refused; reads,
     /// `list_registers`, and quality injection stay open to every
     /// attachment.
+    ///
+    /// `monitor` is the claimant's monitor endpoint, declared so a peer
+    /// the claim preempts can find the successor's tracking surface:
+    /// the fencing verdicts this claim produces carry it back, and the
+    /// demoted peer's tracking path can then resolve the
+    /// field-arbitrated owner where no announced hint could ever prove
+    /// itself. The device records the declaration on the claim, and a
+    /// later declaration under the same token replaces it — the owner's
+    /// monitor rebinds with its claim — while an undeclared claim
+    /// joining a standing one keeps the declaration its owner already
+    /// made. `None` — the default on requests predating the field, and
+    /// every tool's claim — leaves the verdicts naming no monitor. A
+    /// wildcard IP declares the claimant's bind address, which no peer
+    /// can dial, so the server stores the claiming connection's proven
+    /// source IP with the declared port in its place.
     ClaimWriter {
         /// The ownership token the claim asserts.
         owner: u64,
+        /// The claimant's declared monitor endpoint — see above.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<SocketAddr>,
     },
     /// Takes the device's write-ownership claim for `owner` — the
     /// conditional counterpart of [`BusRequest::ClaimWriter`] a
@@ -146,7 +179,10 @@ pub enum BusRequest {
     /// `owner` — the requesting attachment then joining the claim's
     /// holders exactly as `ClaimWriter` joins them — and refused
     /// [`BusError::Fenced`] while a *different* owner's claim stands,
-    /// the claim it met left untouched: no preemption, no join.
+    /// the claim it met left untouched: no preemption, no join. The
+    /// refusal names that claim's owner token and declared monitor, so
+    /// the launched run's refusal record attributes the incumbent it
+    /// met instead of recording an anonymous fence.
     ///
     /// A standing claim on this protocol always has live holders —
     /// the claim is bound to its attachments, the last drop freeing
@@ -156,15 +192,61 @@ pub enum BusRequest {
     /// with the incumbent's and must not preempt it. The deliberate
     /// takeover — a promotion's claim — stays unconditional and uses
     /// `ClaimWriter`.
+    ///
+    /// `monitor` carries the same declaration [`BusRequest::ClaimWriter`]'s
+    /// does: a granted conditional claim is still the device's owner,
+    /// so the verdicts it later produces name this monitor to the
+    /// peers it supersedes.
     ClaimWriterUnlessHeld {
         /// The ownership token the conditional claim asserts.
         owner: u64,
+        /// The claimant's declared monitor endpoint — see
+        /// [`BusRequest::ClaimWriter`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<SocketAddr>,
     },
     /// Releases this attachment's hold on the write-ownership claim —
     /// the explicit half of the claim's release rule; the other is the
     /// connection dropping. Releasing a claim the attachment does not
     /// hold is a no-op.
     ReleaseWriter,
+    /// The conditional counterpart of [`BusRequest::ClaimWriter`] —
+    /// the grant a re-attached field owner re-arms its dropped claim
+    /// with: takes the write-ownership claim under `owner`, binding
+    /// this attachment as a holder, while the field is unclaimed or
+    /// the standing claim already names `owner`. Refused
+    /// [`BusError::Fenced`] while a *different* owner stands — a
+    /// re-attaching attachment never preempts the claim another
+    /// owner took during its outage — the refusal naming that claim's
+    /// owner and declared monitor exactly as
+    /// [`BusRequest::ClaimWriterUnlessHeld`]'s refusal does. The grant
+    /// is safe for a driver to re-assert lazily on reconnect.
+    ///
+    /// `monitor` carries the same declaration [`BusRequest::ClaimWriter`]'s
+    /// does: a claim rebuilt across a device restart keeps naming
+    /// where its owner serves.
+    EnsureWriter {
+        /// The ownership token the re-arm asserts.
+        owner: u64,
+        /// The claimant's declared monitor endpoint — see
+        /// [`BusRequest::ClaimWriter`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<SocketAddr>,
+    },
+    /// The read-only half of the write-ownership claim — the
+    /// claim-status observation a peer reports through its role surface
+    /// and the startup live-holder probe a launched controller asks
+    /// before it claims. The answer is the standing claim's identity:
+    /// [`BusResponse::ClaimStatus`] naming the owner token it asserts
+    /// and the monitor endpoint it declared, or the same verdict with
+    /// both `None` while no claim stands at all — on this protocol the
+    /// device's open, pre-claim state every attachment may still write
+    /// through.
+    ///
+    /// The probe asserts, joins, and releases nothing — an observation
+    /// cannot seize the field it reports, so reporting an unclaimed
+    /// device leaves it exactly as open as it found it.
+    ProbeWriter,
     /// Stamps `register`'s stored sample with `quality` — the inject
     /// half of the quality-override pair, this protocol's analogue of
     /// `dcs-sim-net`'s `inject_fault` carrying a quality fault. The
@@ -327,9 +409,28 @@ pub enum BusResponse {
     },
     /// Answer to [`BusRequest::ClaimWriter`],
     /// [`BusRequest::ClaimWriterUnlessHeld`],
-    /// [`BusRequest::ReleaseWriter`], [`BusRequest::InjectQuality`],
-    /// and [`BusRequest::ClearQuality`]: the request applied.
+    /// [`BusRequest::ReleaseWriter`], [`BusRequest::EnsureWriter`],
+    /// [`BusRequest::InjectQuality`], and
+    /// [`BusRequest::ClearQuality`]: the request applied.
     Done,
+    /// Answer to [`BusRequest::ProbeWriter`]: the standing claim's
+    /// identity — the owner token it asserts and the monitor endpoint it
+    /// declared, the two halves the plant protocol's fencing verdicts
+    /// carry. Both are `None` while no claim stands, which on this
+    /// protocol is the device's open pre-claim state rather than a
+    /// closed field: reads and writes alike still pass. The probe
+    /// asserts nothing, so an answer never changes what it reports.
+    ClaimStatus {
+        /// The standing claim's owner token, or `None` while no claim
+        /// stands.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<u64>,
+        /// The monitor endpoint the standing claim's owner declared —
+        /// the tracking surface a superseded peer re-joins on. `None`
+        /// when the claim declared none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<SocketAddr>,
+    },
     /// The request failed; `error` says why.
     Error {
         /// The failure the server reported.
@@ -379,9 +480,26 @@ pub enum BusError {
     /// surfaces this as the point's
     /// [`IoError::Fenced`](dcs_core::IoError::Fenced), the same named
     /// failure a fenced plant-protocol write produces.
+    ///
+    /// The verdict names the standing claim: `owner` is the owner token
+    /// the device now serves — who fenced this attachment — and
+    /// `monitor` the endpoint that claim declared, so the superseded
+    /// owner's durable audit attributes the preemption to a named
+    /// claimant and its tracking path can re-join the field's own
+    /// successor. Both are `None` only while no claim stands, which no
+    /// field-mutating refusal on this protocol reports — and on the wire
+    /// from a server predating the attribution block, whose verdicts
+    /// carry `detail` alone.
     Fenced {
         /// Why the request was refused.
         detail: String,
+        /// The standing claim's owner token: who the device serves
+        /// instead of this attachment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<u64>,
+        /// The monitor endpoint the standing claim's owner declared.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<SocketAddr>,
     },
 }
 
@@ -400,7 +518,22 @@ impl fmt::Display for BusError {
                 "register {register} is declared {expected:?}, found {found:?}"
             ),
             Self::InvalidRequest { detail } => write!(f, "invalid request: {detail}"),
-            Self::Fenced { detail } => write!(f, "fenced: {detail}"),
+            Self::Fenced {
+                detail,
+                owner,
+                monitor,
+            } => {
+                write!(f, "fenced: {detail}")?;
+                match (owner, monitor) {
+                    (None, None) => Ok(()),
+                    (owner, monitor) => write!(
+                        f,
+                        " (owner token {}, monitor {})",
+                        owner.map_or_else(|| "none".to_string(), |o| o.to_string()),
+                        monitor.map_or_else(|| "none".to_string(), |m| m.to_string()),
+                    ),
+                }
+            }
         }
     }
 }
@@ -531,6 +664,59 @@ impl<'a> Reader<'a> {
         String::from_utf8(self.take(length)?.to_vec()).ok()
     }
 
+    /// One declared monitor endpoint: its address family's tag, the
+    /// address bytes, then the port.
+    fn address(&mut self) -> Option<SocketAddr> {
+        let (ip, port) = match self.u8()? {
+            ADDR_IPV4 => {
+                let octets: [u8; 4] = self.take(4)?.try_into().unwrap();
+                (IpAddr::V4(Ipv4Addr::from(octets)), self.u16()?)
+            }
+            ADDR_IPV6 => {
+                let octets: [u8; 16] = self.take(16)?.try_into().unwrap();
+                (IpAddr::V6(Ipv6Addr::from(octets)), self.u16()?)
+            }
+            _ => return None,
+        };
+        Some(SocketAddr::new(ip, port))
+    }
+
+    /// The optional monitor block a claim request carries after its
+    /// owner token: `None` once the payload is exhausted — what every
+    /// request from a build predating the field sends, and every
+    /// undeclared claim since.
+    fn monitor(&mut self) -> Option<Option<SocketAddr>> {
+        if self.done() {
+            return Some(None);
+        }
+        Some(Some(self.address()?))
+    }
+
+    /// The optional attribution block a fencing verdict carries after
+    /// its diagnostic text: the standing claim's owner token and the
+    /// monitor endpoint it declared. Absent bytes mean neither — the
+    /// pre-attribution verdict shape.
+    fn attribution(&mut self) -> Option<(Option<u64>, Option<SocketAddr>)> {
+        if self.done() {
+            return Some((None, None));
+        }
+        let flags = self.u8()?;
+        if flags & !(CLAIM_OWNER | CLAIM_MONITOR) != 0 {
+            return None;
+        }
+        let owner = if flags & CLAIM_OWNER != 0 {
+            Some(self.u64()?)
+        } else {
+            None
+        };
+        let monitor = if flags & CLAIM_MONITOR != 0 {
+            Some(self.address()?)
+        } else {
+            None
+        };
+        Some((owner, monitor))
+    }
+
     /// One scripted [`ExchangeOutcome`].
     fn outcome(&mut self) -> Option<ExchangeOutcome> {
         Some(match self.u8()? {
@@ -610,6 +796,57 @@ fn push_sample(out: &mut Vec<u8>, sample: Sample) {
     push_quality(out, sample.quality);
 }
 
+/// Appends a claim's declared monitor endpoint — family tag, address
+/// bytes, then the port.
+fn push_address(out: &mut Vec<u8>, address: SocketAddr) {
+    match address.ip() {
+        IpAddr::V4(v4) => {
+            out.push(ADDR_IPV4);
+            out.extend_from_slice(&v4.octets());
+        }
+        IpAddr::V6(v6) => {
+            out.push(ADDR_IPV6);
+            out.extend_from_slice(&v6.octets());
+        }
+    }
+    out.extend_from_slice(&address.port().to_be_bytes());
+}
+
+/// Appends a claim request's monitor declaration. A claim that declares
+/// no monitor appends nothing at all: the request stays byte-for-byte
+/// the shape a build predating the field sent, so an undeclared claim
+/// against an older device server is unchanged. The decoder reads the
+/// block only when the payload carries more bytes.
+fn push_monitor(out: &mut Vec<u8>, monitor: Option<SocketAddr>) {
+    if let Some(address) = monitor {
+        push_address(out, address);
+    }
+}
+
+/// Appends the attribution block naming the standing claim: the owner
+/// token, the monitor endpoint it declared, or both. Like the monitor
+/// declaration, a verdict naming neither appends nothing — the
+/// pre-attribution shape every earlier build's fenced answers carried.
+fn push_attribution(out: &mut Vec<u8>, owner: Option<u64>, monitor: Option<SocketAddr>) {
+    if owner.is_none() && monitor.is_none() {
+        return;
+    }
+    let mut flags = 0;
+    if owner.is_some() {
+        flags |= CLAIM_OWNER;
+    }
+    if monitor.is_some() {
+        flags |= CLAIM_MONITOR;
+    }
+    out.push(flags);
+    if let Some(owner) = owner {
+        out.extend_from_slice(&owner.to_be_bytes());
+    }
+    if let Some(address) = monitor {
+        push_address(out, address);
+    }
+}
+
 /// Frames `body`: the two-byte length prefix plus the payload.
 fn frame(body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(body.len() + 2);
@@ -636,15 +873,23 @@ pub(crate) fn encode_request(request: &BusRequest) -> Vec<u8> {
             body.push(OP_STEP);
             body.extend_from_slice(&dt.to_be_bytes());
         }
-        BusRequest::ClaimWriter { owner } => {
+        BusRequest::ClaimWriter { owner, monitor } => {
             body.push(OP_CLAIM_WRITER);
             body.extend_from_slice(&owner.to_be_bytes());
+            push_monitor(&mut body, *monitor);
         }
-        BusRequest::ClaimWriterUnlessHeld { owner } => {
+        BusRequest::ClaimWriterUnlessHeld { owner, monitor } => {
             body.push(OP_CLAIM_WRITER_UNLESS_HELD);
             body.extend_from_slice(&owner.to_be_bytes());
+            push_monitor(&mut body, *monitor);
         }
         BusRequest::ReleaseWriter => body.push(OP_RELEASE_WRITER),
+        BusRequest::EnsureWriter { owner, monitor } => {
+            body.push(OP_ENSURE_WRITER);
+            body.extend_from_slice(&owner.to_be_bytes());
+            push_monitor(&mut body, *monitor);
+        }
+        BusRequest::ProbeWriter => body.push(OP_PROBE_WRITER),
         BusRequest::InjectQuality { register, quality } => {
             body.push(OP_INJECT_QUALITY);
             body.extend_from_slice(&register.to_be_bytes());
@@ -728,6 +973,10 @@ pub(crate) fn encode_response(response: &BusResponse) -> Vec<u8> {
             }
         }
         BusResponse::Done => body.push(RESP_DONE),
+        BusResponse::ClaimStatus { owner, monitor } => {
+            body.push(RESP_CLAIM_STATUS);
+            push_attribution(&mut body, *owner, *monitor);
+        }
         BusResponse::Error { error } => {
             body.push(RESP_ERROR);
             match error {
@@ -750,10 +999,15 @@ pub(crate) fn encode_response(response: &BusResponse) -> Vec<u8> {
                     body.extend_from_slice(&(detail.len() as u16).to_be_bytes());
                     body.extend_from_slice(detail.as_bytes());
                 }
-                BusError::Fenced { detail } => {
+                BusError::Fenced {
+                    detail,
+                    owner,
+                    monitor,
+                } => {
                     body.push(ERR_FENCED);
                     body.extend_from_slice(&(detail.len() as u16).to_be_bytes());
                     body.extend_from_slice(detail.as_bytes());
+                    push_attribution(&mut body, *owner, *monitor);
                 }
             }
         }
@@ -785,13 +1039,23 @@ pub(crate) fn decode_request(body: &[u8]) -> Result<BusRequest, String> {
         OP_STEP => BusRequest::Step {
             dt: f64::from_be_bytes(reader.take(8).ok_or_else(short)?.try_into().unwrap()),
         },
-        OP_CLAIM_WRITER => BusRequest::ClaimWriter {
-            owner: reader.u64().ok_or_else(short)?,
-        },
-        OP_CLAIM_WRITER_UNLESS_HELD => BusRequest::ClaimWriterUnlessHeld {
-            owner: reader.u64().ok_or_else(short)?,
-        },
+        OP_CLAIM_WRITER => {
+            let owner = reader.u64().ok_or_else(short)?;
+            let monitor = reader.monitor().ok_or_else(short)?;
+            BusRequest::ClaimWriter { owner, monitor }
+        }
+        OP_CLAIM_WRITER_UNLESS_HELD => {
+            let owner = reader.u64().ok_or_else(short)?;
+            let monitor = reader.monitor().ok_or_else(short)?;
+            BusRequest::ClaimWriterUnlessHeld { owner, monitor }
+        }
         OP_RELEASE_WRITER => BusRequest::ReleaseWriter,
+        OP_ENSURE_WRITER => {
+            let owner = reader.u64().ok_or_else(short)?;
+            let monitor = reader.monitor().ok_or_else(short)?;
+            BusRequest::EnsureWriter { owner, monitor }
+        }
+        OP_PROBE_WRITER => BusRequest::ProbeWriter,
         OP_INJECT_QUALITY => BusRequest::InjectQuality {
             register: reader.u16().ok_or_else(short)?,
             quality: reader.quality().ok_or_else(short)?,
@@ -871,6 +1135,10 @@ pub(crate) fn decode_response(body: &[u8]) -> Result<BusResponse, String> {
             BusResponse::Exchanged { registers, late }
         }
         RESP_DONE => BusResponse::Done,
+        RESP_CLAIM_STATUS => {
+            let (owner, monitor) = reader.attribution().ok_or_else(short)?;
+            BusResponse::ClaimStatus { owner, monitor }
+        }
         RESP_ERROR => {
             let error = match reader.u8().ok_or_else(short)? {
                 ERR_UNKNOWN_REGISTER => BusError::UnknownRegister {
@@ -884,9 +1152,15 @@ pub(crate) fn decode_response(body: &[u8]) -> Result<BusResponse, String> {
                 ERR_INVALID_REQUEST => BusError::InvalidRequest {
                     detail: reader.text().ok_or_else(short)?,
                 },
-                ERR_FENCED => BusError::Fenced {
-                    detail: reader.text().ok_or_else(short)?,
-                },
+                ERR_FENCED => {
+                    let detail = reader.text().ok_or_else(short)?;
+                    let (owner, monitor) = reader.attribution().ok_or_else(short)?;
+                    BusError::Fenced {
+                        detail,
+                        owner,
+                        monitor,
+                    }
+                }
                 code => return Err(format!("unknown error code {code:#04x}")),
             };
             BusResponse::Error { error }
@@ -937,9 +1211,32 @@ mod tests {
             },
             BusRequest::ListRegisters,
             BusRequest::Step { dt: 0.1 },
-            BusRequest::ClaimWriter { owner: 42 },
-            BusRequest::ClaimWriterUnlessHeld { owner: 43 },
+            BusRequest::ClaimWriter {
+                owner: 42,
+                monitor: None,
+            },
+            BusRequest::ClaimWriter {
+                owner: 42,
+                monitor: Some("127.0.0.1:4190".parse().unwrap()),
+            },
+            BusRequest::ClaimWriterUnlessHeld {
+                owner: 43,
+                monitor: None,
+            },
+            BusRequest::ClaimWriterUnlessHeld {
+                owner: 43,
+                monitor: Some("[::1]:4191".parse().unwrap()),
+            },
             BusRequest::ReleaseWriter,
+            BusRequest::EnsureWriter {
+                owner: 7,
+                monitor: None,
+            },
+            BusRequest::EnsureWriter {
+                owner: 7,
+                monitor: Some("127.0.0.1:4190".parse().unwrap()),
+            },
+            BusRequest::ProbeWriter,
             BusRequest::InjectQuality {
                 register: 4,
                 quality: Quality::Bad(QualityReason::DeviceFault),
@@ -994,8 +1291,44 @@ mod tests {
             r#"{"op":"list_registers"}"#
         );
         assert_eq!(
-            serde_json::to_string(&BusRequest::ClaimWriter { owner: 42 }).unwrap(),
+            serde_json::to_string(&BusRequest::ClaimWriter {
+                owner: 42,
+                monitor: None
+            })
+            .unwrap(),
             r#"{"op":"claim_writer","owner":42}"#
+        );
+        // A claim declaring its monitor carries it on the wire: the
+        // successors this claim's verdicts name find its tracking
+        // surface there.
+        assert_eq!(
+            serde_json::to_string(&BusRequest::ClaimWriter {
+                owner: 42,
+                monitor: Some("127.0.0.1:4190".parse().unwrap()),
+            })
+            .unwrap(),
+            r#"{"op":"claim_writer","owner":42,"monitor":"127.0.0.1:4190"}"#
+        );
+        // The pre-field wire shapes still decode: a claim carrying no
+        // monitor reads back undeclared, exactly as an earlier build's
+        // request sent it.
+        assert_eq!(
+            serde_json::from_str::<BusRequest>(r#"{"op":"claim_writer","owner":42}"#).unwrap(),
+            BusRequest::ClaimWriter {
+                owner: 42,
+                monitor: None
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<BusRequest>(r#"{"op":"ensure_writer","owner":7}"#).unwrap(),
+            BusRequest::EnsureWriter {
+                owner: 7,
+                monitor: None
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&BusRequest::ProbeWriter).unwrap(),
+            r#"{"op":"probe_writer"}"#
         );
         assert_eq!(
             serde_json::to_string(&BusRequest::ReleaseWriter).unwrap(),
@@ -1016,20 +1349,77 @@ mod tests {
             r#"{"op":"step","dt":0.5}"#
         );
         // A claim is tag plus the eight-byte owner token — and its
-        // conditional counterpart encodes the same way under its own
-        // tag.
+        // conditional counterparts encode the same way under their
+        // own tags.
         assert_eq!(
-            encode_request(&BusRequest::ClaimWriter { owner: 0x0102 }),
+            encode_request(&BusRequest::ClaimWriter {
+                owner: 0x0102,
+                monitor: None
+            }),
             vec![0, 9, 0x05, 0, 0, 0, 0, 0, 0, 1, 2]
         );
         assert_eq!(
-            encode_request(&BusRequest::ClaimWriterUnlessHeld { owner: 0x0102 }),
+            encode_request(&BusRequest::ClaimWriterUnlessHeld {
+                owner: 0x0102,
+                monitor: None
+            }),
             vec![0, 9, 0x0b, 0, 0, 0, 0, 0, 0, 1, 2]
         );
         assert_eq!(
-            serde_json::to_string(&BusRequest::ClaimWriterUnlessHeld { owner: 42 }).unwrap(),
+            serde_json::to_string(&BusRequest::ClaimWriterUnlessHeld {
+                owner: 42,
+                monitor: None
+            })
+            .unwrap(),
             r#"{"op":"claim_writer_unless_held","owner":42}"#
         );
+        assert_eq!(
+            encode_request(&BusRequest::EnsureWriter {
+                owner: 0x0102,
+                monitor: None
+            }),
+            vec![0, 9, 0x0c, 0, 0, 0, 0, 0, 0, 1, 2]
+        );
+        assert_eq!(
+            serde_json::to_string(&BusRequest::EnsureWriter {
+                owner: 42,
+                monitor: None
+            })
+            .unwrap(),
+            r#"{"op":"ensure_writer","owner":42}"#
+        );
+        // A claim declaring a monitor appends the address block after
+        // the owner token: family tag 0x04, four address octets, then
+        // the port. An undeclared claim appends nothing.
+        assert_eq!(
+            encode_request(&BusRequest::ClaimWriter {
+                owner: 0x0102,
+                monitor: Some("127.0.0.1:4190".parse().unwrap()),
+            }),
+            [
+                &[0, 16, 0x05, 0, 0, 0, 0, 0, 0, 1, 2][..],
+                &[0x04, 127, 0, 0, 1][..],
+                &4190u16.to_be_bytes()[..],
+            ]
+            .concat()
+        );
+        // An IPv6 declaration is family tag 0x06 plus sixteen octets.
+        assert_eq!(
+            encode_request(&BusRequest::EnsureWriter {
+                owner: 1,
+                monitor: Some("[::1]:4191".parse().unwrap()),
+            }),
+            [
+                &[0, 28, 0x0c, 0, 0, 0, 0, 0, 0, 0, 1][..],
+                &[0x06][..],
+                &[0u8; 15][..],
+                &[1][..],
+                &4191u16.to_be_bytes()[..],
+            ]
+            .concat()
+        );
+        // The claim-status probe is a bare tag.
+        assert_eq!(encode_request(&BusRequest::ProbeWriter), vec![0, 1, 0x0d]);
         assert_eq!(
             serde_json::to_string(&BusRequest::InjectQuality {
                 register: 4,
@@ -1183,6 +1573,18 @@ mod tests {
                 },
             },
             BusResponse::Done,
+            BusResponse::ClaimStatus {
+                owner: None,
+                monitor: None,
+            },
+            BusResponse::ClaimStatus {
+                owner: Some(7),
+                monitor: None,
+            },
+            BusResponse::ClaimStatus {
+                owner: Some(7),
+                monitor: Some("127.0.0.1:4190".parse().unwrap()),
+            },
             BusResponse::Error {
                 error: BusError::InvalidRequest {
                     detail: "bad tag".to_string(),
@@ -1191,6 +1593,17 @@ mod tests {
             BusResponse::Error {
                 error: BusError::Fenced {
                     detail: "another attachment owns register writes".to_string(),
+                    owner: Some(9),
+                    monitor: Some("127.0.0.1:4190".parse().unwrap()),
+                },
+            },
+            // The pre-attribution fenced verdict: what a server predating
+            // the attribution block answers, still decodable.
+            BusResponse::Error {
+                error: BusError::Fenced {
+                    detail: "another attachment owns register writes".to_string(),
+                    owner: None,
+                    monitor: None,
                 },
             },
             BusResponse::Exchanged {
@@ -1221,14 +1634,51 @@ mod tests {
             serde_json::to_string(&BusResponse::Done).unwrap(),
             r#"{"result":"done"}"#
         );
+        // The fenced verdict's spelling is unchanged when it names no
+        // claimant — the shape every earlier build's answer carried.
         assert_eq!(
             serde_json::to_string(&BusResponse::Error {
                 error: BusError::Fenced {
                     detail: "another attachment owns register writes".to_string(),
+                    owner: None,
+                    monitor: None,
                 },
             })
             .unwrap(),
             r#"{"result":"error","error":{"kind":"fenced","detail":"another attachment owns register writes"}}"#
+        );
+        // A verdict naming the standing claim adds the two attribution
+        // fields: the claimant the audit names and the successor's
+        // monitor the tracking path re-joins on.
+        assert_eq!(
+            serde_json::to_string(&BusResponse::Error {
+                error: BusError::Fenced {
+                    detail: "a live attachment holds the device's write-ownership claim"
+                        .to_string(),
+                    owner: Some(9),
+                    monitor: Some("10.0.0.5:4190".parse().unwrap()),
+                },
+            })
+            .unwrap(),
+            r#"{"result":"error","error":{"kind":"fenced","detail":"a live attachment holds the device's write-ownership claim","owner":9,"monitor":"10.0.0.5:4190"}}"#
+        );
+        // The claim-status answer names the standing claim, or an
+        // unclaimed device as naming neither.
+        assert_eq!(
+            serde_json::to_string(&BusResponse::ClaimStatus {
+                owner: None,
+                monitor: None,
+            })
+            .unwrap(),
+            r#"{"result":"claim_status"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&BusResponse::ClaimStatus {
+                owner: Some(7),
+                monitor: Some("127.0.0.1:4190".parse().unwrap()),
+            })
+            .unwrap(),
+            r#"{"result":"claim_status","owner":7,"monitor":"127.0.0.1:4190"}"#
         );
         assert_eq!(
             serde_json::to_string(&BusResponse::Error {
@@ -1261,6 +1711,68 @@ mod tests {
                 0, 20, 0x01, 0x02, 255, 255, 255, 255, 255, 255, 255, 253, 0, 0, 0, 0, 0, 0, 0, 9,
                 0x02, 0x02,
             ]
+        );
+        // A claim-status answer is its tag plus the attribution block:
+        // flags bit 0 marks the owner token, bit 1 the declared
+        // monitor. An unclaimed device names neither, so the block is
+        // not written at all — the decoder reads the exhausted payload
+        // as an unclaimed answer — and a claim that declared no monitor
+        // carries only the owner.
+        assert_eq!(
+            encode_response(&BusResponse::ClaimStatus {
+                owner: None,
+                monitor: None,
+            }),
+            vec![0, 1, 0x08]
+        );
+        assert_eq!(
+            encode_response(&BusResponse::ClaimStatus {
+                owner: Some(7),
+                monitor: None,
+            }),
+            vec![0, 10, 0x08, 0x01, 0, 0, 0, 0, 0, 0, 0, 7]
+        );
+        assert_eq!(
+            encode_response(&BusResponse::ClaimStatus {
+                owner: Some(7),
+                monitor: Some("127.0.0.1:4190".parse().unwrap()),
+            }),
+            [
+                &[0, 17, 0x08, 0x03][..],
+                &7u64.to_be_bytes()[..],
+                &[0x04, 127, 0, 0, 1][..],
+                &4190u16.to_be_bytes()[..],
+            ]
+            .concat()
+        );
+        // A fenced verdict appends the same block after its detail
+        // text — and writes nothing at all when it names no claimant,
+        // so an unattributed refusal stays the pre-attribution shape.
+        assert_eq!(
+            encode_response(&BusResponse::Error {
+                error: BusError::Fenced {
+                    detail: "held".to_string(),
+                    owner: None,
+                    monitor: None,
+                },
+            }),
+            vec![0, 8, 0x05, 0x04, 0, 4, b'h', b'e', b'l', b'd']
+        );
+        assert_eq!(
+            encode_response(&BusResponse::Error {
+                error: BusError::Fenced {
+                    detail: "held".to_string(),
+                    owner: Some(9),
+                    monitor: Some("10.0.0.5:4190".parse().unwrap()),
+                },
+            }),
+            [
+                &[0, 24, 0x05, 0x04, 0, 4, b'h', b'e', b'l', b'd', 0x03][..],
+                &9u64.to_be_bytes()[..],
+                &[0x04, 10, 0, 0, 5][..],
+                &4190u16.to_be_bytes()[..],
+            ]
+            .concat()
         );
         // An exchanged answer is tag, the flags byte, then the census —
         // flag bit 0 carries the scripted late mark.
@@ -1306,6 +1818,11 @@ mod tests {
             &[0xff][..],                            // unknown request tag
             &[0x01, 0][..],                         // read, truncated address
             &[0x05, 0, 0][..],                      // claim, truncated owner
+            &[0x05, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0x09][..], // claim, unknown address family
+            &[0x05, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0x04, 127][..], // claim, truncated address
+            &[0x0b, 0, 0][..],                      // conditional claim, truncated owner
+            &[0x0c, 0, 0, 0, 0, 0, 0, 0, 0, 2][..], // ensure, truncated owner
+            &[0x0d, 0][..],                         // trailing byte after probe
             &[0x06, 0][..],                         // trailing byte after release
             &[0x07, 0][..],                         // inject, truncated register
             &[0x07, 0, 4][..],                      // inject, missing quality
@@ -1329,10 +1846,17 @@ mod tests {
             &[0x05, 0x09][..],    // unknown error code
             &[0x04, 0][..],       // stepped, truncated tick
             &[0x05, 0x04, 0][..], // fenced error, truncated detail
-            &[0x06, 0][..],       // trailing byte after done
-            &[0x07][..],          // exchanged, missing flags
-            &[0x07, 0x09][..],    // exchanged, unknown flag bits
-            &[0x07, 0][..],       // exchanged, missing count
+            // A fenced verdict whose attribution block names an owner
+            // it does not carry.
+            &[0x05, 0x04, 0, 1, b'x', 0x01, 0, 0][..],
+            // An unknown attribution flag bit.
+            &[0x05, 0x04, 0, 1, b'x', 0x04][..],
+            &[0x08, 0x01][..], // claim status, truncated owner token
+            &[0x08, 0x03, 0, 0, 0, 0, 0, 0, 0, 1][..], // claim status, truncated monitor
+            &[0x06, 0][..],    // trailing byte after done
+            &[0x07][..],       // exchanged, missing flags
+            &[0x07, 0x09][..], // exchanged, unknown flag bits
+            &[0x07, 0][..],    // exchanged, missing count
             &[0x07, 0, 0, 1][..], // exchanged, missing register entry
             // Sample carrying value and tick but no quality.
             &[0x01, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0][..],
