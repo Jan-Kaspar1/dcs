@@ -409,8 +409,7 @@ def _judge_deferred(record, note):
         failed('refusal-journaled', 'the deferred settle never '
                'journaled startup_claim_refused — the pending state '
                'has no durable verdict record')
-    if token is not None and journal.get('claimants') not in \
-            (None, [token]):
+    if token is not None and journal.get('claimants') != [token]:
         failed('refusal-claimant', 'the refusal\'s observed claimant '
                'is not the incumbent\'s token ' + str(token) + ': '
                + json.dumps(journal.get('claimants')))
@@ -433,8 +432,7 @@ def _judge_deferred(record, note):
     if not journal.get('refusal_journaled'):
         failed('declared-journaled', 'the declared seat\'s deferred '
                'settle never journaled startup_claim_refused')
-    if token is not None and journal.get('claimants') not in \
-            (None, [token]):
+    if token is not None and journal.get('claimants') != [token]:
         failed('declared-claimant', 'the declared seat\'s observed '
                'claimant is not the incumbent\'s token: '
                + json.dumps(journal.get('claimants')))
@@ -596,6 +594,8 @@ def _deferred_self_check():
     expect('refusal-wrong-claimant', lambda record:
            record['journals']['driven']
            .update({'claimants': [424246]}))
+    expect('refusal-unattributed', lambda record:
+           record['journals']['driven'].update({'claimants': []}))
     expect('declared-seat-exits', lambda record:
            record['states']['foreign']
            .update({'running': False, 'exit': 1}))
