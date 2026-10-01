@@ -537,6 +537,62 @@ Implementation order: second, after [daily architecture review](daily-architectu
   closed through the writer lock alone — reports inconclusive;
   the pair leaves on its launch roles.
 
+### Landed 2026-10-01 (monitor-less foreign-claim release leg, #1224/#1167)
+
+- The amended intended-`unsynchronized` bound #1167 recorded is
+  exercised on the deployed rig by scenario leg
+  `2385_foreign_claim_release` — the per-revision lane evidence for the
+  scripted reproduction `field_attested_source.rs`'s
+  `unkeyed_fenced_demote_reclaims_the_released_field` drives, and the
+  one bound the adjacent legs cannot pin: 2350's claim-reclaim proves
+  the released-preemption re-seat, 2380's claim-monitor rendezvous the
+  dialable declared monitor and its journaled adoption, 2370's
+  stranded-standby the same-claim-monitor succession — none asserts
+  that the served un-converged reading covers exactly the monitor-less
+  claim's window and no more.
+- With the pair settled one active plus one tracking standby on the
+  unkeyed posture, a dedicated plant-socket attachment issues
+  `claim_writer` under a foreign token with `controller: false` and no
+  monitor declared — the monitor-less tool claim the shipped
+  `dcs-plant-ctl` does not expose — and holds it. The fenced ex-owner's
+  first write must demote it in place, its serving monitor answering
+  every poll rather than dying; the served journal and the peer's
+  durable `--journal-file` must carry exactly one `field_claim_lost`
+  attributed to the induction token; and the plant's non-mutating
+  claim surface must keep naming that token with no monitor declared.
+- While the monitor-less claim stands the fenced ex-owner must report
+  `standby` and un-converged on every poll of the claim's standing
+  window — `unsynchronized`, or the orphan-tracked cousin `orphaned`
+  for an ex-owner already carrying a verified tracking pin its own
+  journal records — never the clean `tracking` verdict. That window is
+  the claim's own: releasing it must resolve the field through one of
+  the two recorded paths, the ex-owner's loss-marked bound conditional
+  reclaim re-arming its token and walking back `standby → promoting →
+  active` under the `reclaim` origin with the sibling tracking, or a
+  successor's declared monitor adopted with the journaled
+  `tracking_source_adopted`. The resolved claim must name something to
+  track, the field's writes must land again (the watch point's tick
+  advancing past the release-time anchor), the durable journal must
+  open no new `run_boundary`, and the pair must return to its launch
+  roles. A peer still un-converged past the release bound is the
+  permanent strand the bound forbids; a peer reporting clean while the
+  monitor-less claim stands is the same verdict asserted past its
+  window.
+- Named diagnostics are `foreign-claim-release-failed` and
+  `foreign-claim-release-nondeterministic`, with the self-check's
+  `foreign-claim-release-unchecked` covering every planted clause —
+  the peer asserted resolved while stranded past the release, the
+  only-while-claimed verdict asserted while the served monitor reports
+  clean, the orphan-tracked reading with no learned pin behind it, the
+  silent or misattributed loss, the unjournaled re-seat, the durable
+  mirror going silent, the released field naming nothing to track; two
+  consecutive passes produce identical digests; a run whose claim
+  surface, declared monitor, claim-staging lever, claim-owner pins, or
+  journal files are absent, whose pair never settles or is unreachable,
+  or whose pair runs keyed reports inconclusive — the bound names the
+  unkeyed posture, where the announced verify hands a keyed demote
+  `orphaned` instead.
+
 ### Landed 2026-10-01 (sim-bus device server in the lane image set, #1368)
 
 - The sim-bus rig legs stage against the released protocol server: the
