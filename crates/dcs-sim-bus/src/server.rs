@@ -534,6 +534,24 @@ impl BusServer {
         }
     }
 
+    /// Drops every live client connection without stopping the
+    /// server — the link flap a network fault or a device bounce
+    /// produces: every client observes its connection die, re-attaches
+    /// lazily on its next request, and each holder's connection-bound
+    /// writer claim releases as its handler registers the drop. The
+    /// claim does not re-arm on reconnect — a re-attached attachment
+    /// holds nothing until it claims again.
+    ///
+    /// The drop is asynchronous: the sockets close here, but each
+    /// handler frees its claim hold when its blocked `read` notices —
+    /// a caller needing the claim released observes it through a
+    /// request rather than assuming the teardown has completed.
+    pub fn drop_connections(&self) {
+        for (_, client) in self.shared.clients.lock().unwrap().drain() {
+            let _ = client.shutdown(Shutdown::Both);
+        }
+    }
+
     /// Stops a [`serve`](Self::serve) loop running on another thread
     /// and closes every live client connection.
     ///

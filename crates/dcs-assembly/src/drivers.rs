@@ -1142,6 +1142,7 @@ fn sim_cyclic_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError>
     let stepping = Arc::clone(&bus);
     let claiming = Arc::clone(&bus);
     let starting = Arc::clone(&bus);
+    let releasing = Arc::clone(&bus);
     let inspect: Arc<dyn Any + Send + Sync> = bus.clone();
     let device = spec.id.0;
     Ok(DeviceDriver::Backend(DeviceBackend {
@@ -1162,9 +1163,16 @@ fn sim_cyclic_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError>
                     detail: error.to_string(),
                 })
         })),
-        // As `sim-bus`: the claim is bound to the connection, so a
-        // re-attach carries no stale claim to forget.
-        release: None,
+        // The claim itself dies with its connection like `sim-bus`'s,
+        // but the cyclic driver's *pending output image* is recorded
+        // ownership a released owner could wrongly re-assert: it is
+        // retained across fenced exchanges, so a demoted ex-owner
+        // would keep re-presenting its staged outputs — fenced forever
+        // while a successor's claim stands, or publishing onto a freed
+        // field it no longer owns. The release forgets it; the
+        // demoted run's exchanges go census-only, the tracking
+        // standby's shape.
+        release: Some(Arc::new(move || releasing.drop_pending_outputs())),
         // As `sim-bus`: no *unbound* conditional grant exists — or is
         // needed, the claim dying with its connection.
         ensure: None,

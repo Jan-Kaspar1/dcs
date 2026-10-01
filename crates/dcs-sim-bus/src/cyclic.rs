@@ -97,7 +97,9 @@ struct Image {
     /// payload of the next `exchange` request. A completed exchange
     /// clears the registers its census covered; registers a short
     /// exchange withheld stay dirty and are re-presented until they
-    /// publish.
+    /// publish. [`drop_pending_outputs`](CyclicBusDriver::drop_pending_outputs)
+    /// clears the whole set: the demotion-time release that ends a
+    /// superseded owner's re-presenting loop.
     dirty: BTreeSet<u16>,
     /// Consecutive uncompleted exchanges — compared against the
     /// declared `exchange_miss_threshold` on read.
@@ -168,7 +170,11 @@ struct Image {
 /// restore is the writer claim — claim holds bind to their
 /// connection, so a dropped link releases them and output-bearing
 /// exchanges then answer the `fenced` verdict until
-/// [`claim_writer`](Self::claim_writer) runs again.
+/// [`claim_writer`](Self::claim_writer) runs again. The verdict is the
+/// executor's claim-loss signal — the demotion it forces ends the
+/// fenced-exchange loop through
+/// [`drop_pending_outputs`](Self::drop_pending_outputs), the release
+/// hook `dcs-assembly` wires for the `sim-cyclic` backend.
 ///
 /// Like `BusDriver`, the driver is field-observing —
 /// `capture_state` keeps its `None` default — and [`Sync`] through
@@ -509,6 +515,23 @@ impl CyclicBusDriver {
             BusResponse::Error { error } => Err(refused(error)),
             _ => Err(self.protocol_violation()),
         }
+    }
+
+    /// Forgets every staged-but-unpublished output — the demotion-time
+    /// counterpart of the staged image's retention. The staged image
+    /// deliberately survives a failed or refused exchange, so a
+    /// superseded field owner otherwise keeps re-presenting its last
+    /// owning scans' outputs on every later exchange: fenced forever
+    /// while a successor's claim stands — each refusal another counted
+    /// miss until reads escalate — or silently publishing onto the
+    /// field the moment the standing claim frees. A peer that just
+    /// demoted owns nothing to publish, so its release hook drops the
+    /// pending image here; exchanges then run census-only — the
+    /// tracking standby's shape — until a write under a fresh claim
+    /// stages again. The held input image is untouched and keeps
+    /// latching.
+    pub fn drop_pending_outputs(&self) {
+        self.image.lock().unwrap().dirty.clear();
     }
 
     /// Stamps `register`'s stored sample with `quality` —

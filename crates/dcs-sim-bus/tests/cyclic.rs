@@ -10,10 +10,11 @@
 
 use dcs_core::{
     Command, CyclicIoDriver, Direction, ExchangeDiagnostics, IoDriver, IoError, LinkState, PointId,
-    Quality, QualityReason, Sample, Tick, Value, ValueKind,
+    Quality, QualityReason, Role, Sample, StandbySync, SwitchOrigin, Tick, Value, ValueKind,
 };
 use dcs_runtime::{
-    Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, PointMap, StepError, WriteGate,
+    Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap, StepError,
+    WriteGate,
 };
 use dcs_sim_bus::{
     BusDriver, BusServer, CyclicBusDriver, CyclicPoint, ExchangeOutcome, LinkError, PointRegister,
@@ -775,5 +776,135 @@ fn the_executor_runs_the_exchange_at_the_boundary_over_the_wire() {
         assert_eq!(exchange.attempted, 4);
         assert_eq!(exchange.succeeded, 2);
         assert_eq!(exchange.last_exchange_tick, Some(Tick(2)));
+    });
+}
+
+// ── Fencing-loss demotion over the cyclic surface ───────────────────
+
+/// The QA link-flap reproduction (the `sim-cyclic` fenced-exchange
+/// finding): the connection-bound writer claim dies with the dropped
+/// connection, the reconnected ex-owner's output-bearing exchanges
+/// answer `Fenced` at the attribution point — and the verdict must
+/// demote the superseded owner exactly as a fenced point write does,
+/// so a promoted peer never leaves a second controller reporting
+/// `active`.
+///
+/// Two `Peer`s over `CyclicBusDriver` attachments play the redundant
+/// pair, wired the way `dcs-assembly`/`dcs-controller` wire the claim
+/// hooks: the claim is the field's arbitration, and the release
+/// forgets the pending output image a demoted owner would otherwise
+/// keep re-presenting into the fence.
+#[test]
+fn a_link_flap_fenced_exchange_demotes_the_ex_owner() {
+    with_server(|server, addr| {
+        const OWNER_A: u64 = 1;
+        const OWNER_B: u64 = 2;
+        let components = || -> Vec<Box<dyn Component>> {
+            vec![Box::new(WriteOnce {
+                output: PointId(20),
+                value: 9.0,
+                done: false,
+            })]
+        };
+
+        // CA — the field owner: the claim taken under its token at
+        // activation, two scans staging then publishing its output.
+        let a_driver = driver(addr);
+        let a_gate = WriteGate::closed(&a_driver);
+        let mut a = Peer::active(
+            Executor::new(&a_gate, point_map(), components()).unwrap(),
+            Some(&a_gate),
+        )
+        .with_field_claim(|| {
+            a_driver
+                .claim_writer(OWNER_A)
+                .map_err(|error| error.to_string())
+        })
+        .with_field_release(|| a_driver.drop_pending_outputs());
+        a.activate().unwrap();
+        a.scan();
+        a.scan();
+        assert_eq!(a.role(), Role::Active);
+        assert_eq!(server.bank().read(9).unwrap().value, Value::Float(9.0));
+
+        // CB — the tracking standby on the same field, converged on
+        // the owner's checkpoint.
+        let b_driver = driver(addr);
+        let b_gate = WriteGate::closed(&b_driver);
+        let mut b = Peer::standby(
+            Executor::new(&b_gate, point_map(), components()).unwrap(),
+            Some(&b_gate),
+        )
+        .with_field_claim(|| {
+            b_driver
+                .claim_writer(OWNER_B)
+                .map_err(|error| error.to_string())
+        })
+        .with_field_release(|| b_driver.drop_pending_outputs());
+        b.scan();
+        b.track_once(|| Ok(a.checkpoint()));
+        assert!(matches!(b.sync_state(), StandbySync::Tracking { .. }));
+
+        // The link flap: every client connection drops, and the
+        // connection-bound claim releases with its dead holders.
+        server.drop_connections();
+
+        // Each driver's next request re-attaches lazily: the first
+        // exchange meets the dead socket — an ordinary transport miss,
+        // not fencing, since nobody holds the claim — and nothing
+        // silently re-arms it.
+        a.scan();
+        b.scan();
+        assert_eq!(a.role(), Role::Active);
+        assert!(a.take_fencing_losses().is_empty());
+
+        // The standby promotes on the freed field — its claim lands on
+        // the reconnected attachment — and settles `active` on its
+        // first owning scan. For the window until CA's next scan the
+        // field legitimately reports one owner superseded but not yet
+        // observed gone: CA's demotion is what ends it, inside its
+        // next scan.
+        b.promote().unwrap();
+        b.scan();
+        assert_eq!(b.role(), Role::Active);
+
+        // CA's next scan presents the outputs its write phase keeps
+        // staging — on a reconnected attachment holding no claim, the
+        // field answers `Fenced` at the attribution point, and the
+        // claim-loss mark demotes the ex-owner in place. The loss is
+        // journaled unattributed: the verdict named no claimant.
+        a.scan();
+        assert_eq!(a.role(), Role::Demoting);
+        let losses = a.take_fencing_losses();
+        assert_eq!(losses.len(), 1, "one fencing loss per held claim");
+        assert_eq!(losses[0].point, PointId(10));
+        assert_eq!(losses[0].claimant, None);
+
+        // The quiesced settle scan completes the demotion: the gate
+        // is closed and the release hook dropped the pending output
+        // image, so the demoted run's exchange runs census-only —
+        // completing again instead of re-presenting into the fence.
+        a.scan();
+        assert_eq!(a.role(), Role::Standby);
+        assert_eq!(a.sync_state(), &StandbySync::Unsynchronized);
+
+        // The invariant QA saw violated: after promotion exactly one
+        // peer reports `active`. The journaled transitions name the
+        // fencing verdict, not an unattributed operator request.
+        assert_eq!(b.role(), Role::Active);
+        assert_eq!(
+            a.take_role_changes()
+                .iter()
+                .map(|change| change.origin)
+                .collect::<Vec<_>>(),
+            vec![SwitchOrigin::Fenced, SwitchOrigin::Fenced]
+        );
+        // And the demoted attachment's link is healthy again — a
+        // census-only exchange completes rather than fencing forever.
+        assert_eq!(
+            a_driver.diagnostics().unwrap().link,
+            LinkState::Connected,
+            "the demoted run's exchanges must go census-only, not keep fencing"
+        );
     });
 }
