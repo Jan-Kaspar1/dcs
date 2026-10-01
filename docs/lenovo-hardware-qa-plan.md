@@ -563,6 +563,43 @@ Implementation order: second, after [daily architecture review](daily-architectu
   An enabler for the sim-bus rig legs (#1355/#1356/#1357); a leg
   needing the server itself to misbehave may still stage a double.
 
+### Landed 2026-10-01 (sim-cyclic fencing-loss demotion leg, #1357)
+
+- The sim-cyclic fencing-loss demotion contract — the per-revision
+  lane evidence for the single-writer/one-active invariant
+  WW-FND-002 requires, over the claim protocol #1352's fix
+  establishes — is exercised on the deployed rig by scenario leg
+  `2470_sim_cyclic_fencing_loss_demote`. The leg stages the lane's
+  `dcs-sim-bus-device` server on the run config's
+  `sim_bus_device.cyclic_model` document (the block carries one
+  fixture per register-protocol model the legs serve), launches a
+  controller pair onto the staged `sim-cyclic` device on the
+  driven/foreign born seats — a register-protocol model carries its
+  device address in its parameters, so the pair needs no `--remote`
+  — and severs every attachment's control connection with a device
+  restart, the rig-durable link flap that releases the
+  connection-bound claim to nobody. POST /promote on the tracking
+  member then takes the claim, so the ex-owner's next staged
+  exchange meets the fence: the leg asserts the demotion through
+  the named path — served role walking `demoting` to `standby`, the
+  durable `--journal-file` carrying `role_changed` with origin
+  `fenced` beside exactly one `field_claim_lost` attributed to the
+  promoted peer's owner token — inside the documented bound, with
+  never two peers reporting `role:active` at any poll. The promoted
+  owner's exchanges must keep completing with the claim held, the
+  demoted peer's go census-only once its staged image releases, and
+  the pair reconverges to its launch roles; the deployed pair is
+  framed undisturbed before and after.
+- Named diagnostics are `cyclic-fencing-loss-failed` and
+  `cyclic-fencing-loss-nondeterministic`, with the self-check's
+  `cyclic-fencing-loss-unchecked`; two passes produce identical
+  digests. A run staging no device server, no `cyclic_model`, a
+  staged model whose served device is not `sim-cyclic` or declares
+  no output channel, a pair that never settles — or the recorded
+  defect signature itself, the ex-owner whose io_health never names
+  a fenced exchange and who stays active beside its promoted peer —
+  reports inconclusive; the pair leaves on its launch roles.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,
