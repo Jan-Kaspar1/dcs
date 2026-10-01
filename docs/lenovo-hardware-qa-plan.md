@@ -563,6 +563,57 @@ Implementation order: second, after [daily architecture review](daily-architectu
   An enabler for the sim-bus rig legs (#1355/#1356/#1357); a leg
   needing the server itself to misbehave may still stage a double.
 
+### Landed 2026-10-01 (sim-bus born-active claim refusal leg, #1356)
+
+- The born-active startup-claim refusal now has per-revision lane
+  evidence over a sim-bus field, not only over the sim-tcp plant: leg
+  `2480_sim_bus_startup_claim_refusal` stages the lane's shipped
+  `dcs-sim-bus-device`, launches a first controller onto it and
+  asserts it takes the field's write-ownership claim, then stages a
+  second born-active declaring the same model with no `--peer` and
+  asserts it exits nonzero inside the documented bound carrying the
+  live-holder verdict — the sim-tcp refusal reproduced on the register
+  protocol, which the conditional `claim_writer_unless_held` grant
+  makes possible there, since a bus claim dies with its last holder's
+  link and a standing claim is therefore always a live incumbent to
+  name. A `--standby` launch in the same shape is the positive
+  control: it must converge `tracking` behind the incumbent with its
+  command gate closed and no tracking-source refusal journaled — the
+  arm the defect orphaned. The incumbent's claim and role must be
+  undisturbed throughout: no claim-owner flip, no fenced demotion
+  journaled on it, its scan still moving. Named diagnostics
+  `sim-bus-claim-refusal-failed` and
+  `sim-bus-claim-refusal-nondeterministic`, with
+  `sim-bus-claim-refusal-unchecked` covering the planted negatives;
+  two consecutive passes produce identical digests; a rig with no
+  staged device server, no pinned `--owner-token` for the incumbent
+  seat, an unsettled deployed pair, or a staged revision predating the
+  contract — the second born-active claiming the field and going
+  active — reports inconclusive. Each pass ends with the three born
+  seats and the device server removed, and the sweep is audited back
+  over the rig rather than assumed: each seat's presence read through
+  the read-only state lever, the device server's own removal error,
+  and the deployed pair framed once more with the leg's claim gone.
+  A seat or a device server that outlived the sweep is a claim the
+  legs behind this one would inherit, so it reports
+  `sim-bus-claim-refusal-nondeterministic` instead of leaving them a
+  dirty rig; the control's closed gate is read the same way, an
+  unreadable SignalIndex leaving the leg with nothing to submit
+  reported as an unread surface rather than a gate the control
+  crossed.
+- The leg rides the born-seat launcher's own field seam rather than
+  adding one: `start_born_controller(seat, remote, document=)` mounts
+  a staged model of the leg's choosing in place of the run's own, and
+  a `remote` of None launches with no `--remote` attachment at all —
+  the shape a `sim-bus`/`sim-cyclic` model needs, since the device
+  carries its address in its parameters. This leg is the second user
+  of the seam #1357's leg landed, and the return value's `model` is
+  what lets it evidence that both ends of the register protocol read
+  one declaration: the device server serves the document the seat
+  mounted. The leg runs after `2470` and before the revision legs,
+  sharing the driven/foreign born seats and the device server with it
+  and sweeping both behind itself.
+
 ### Landed 2026-10-01 (holderless-claim reclaim recovery leg, #1260)
 
 - The holderless-claim reclaim recovery contract — the continuity

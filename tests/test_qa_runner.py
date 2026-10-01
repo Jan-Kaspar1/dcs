@@ -2525,6 +2525,62 @@ class BornActiveActionTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self._launch(peer='foreign', standby='revised')
 
+    def test_a_document_addressed_launch_carries_no_remote(self):
+        # The sim-bus rig legs point a seat at a field the staged
+        # document declares: no --remote at all, and that document
+        # mounted in place of the run's sim-tcp model, so both ends of
+        # the register protocol read one declaration.
+        bus_model = self.run_dir / 'sim-bus' / 'model.json'
+        bus_model.parent.mkdir(parents=True, exist_ok=True)
+        bus_model.write_text(json.dumps({'version': 1}))
+        calls, events, info = [], [], []
+
+        def docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', docker):
+            info = runner.start_born_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'driven', None,
+                lambda event, detail=None: events.append(
+                    (event, detail)), standby='revised',
+                document=bus_model)
+        launch = self._run(calls)
+        self.assertNotIn('--remote', launch)
+        self.assertIn(str(bus_model) + ':/model/plant.json:ro', launch)
+        self.assertNotIn(str(self.model) + ':/model/plant.json:ro',
+                         launch)
+        # The launch role is otherwise the rig shape unchanged: the
+        # --standby target resolved to the seat's bridge monitor and
+        # the seat's own claim-token pin rides along.
+        index = launch.index('--standby')
+        self.assertEqual(launch[index + 1],
+                         'dcs-hw-qa-1-c:'
+                         + str(runner.BORN_MONITOR_PORT))
+        index = launch.index('--owner-token')
+        self.assertEqual(launch[index + 1],
+                         str(self.cfg['plant_owner_tokens']['driven']))
+        self.assertIsNone(info['remote'])
+        # The return carries the document actually mounted, so a leg
+        # staging against a device server can evidence that both ends
+        # read the one declaration it staged.
+        self.assertEqual(info['model'], str(bus_model))
+        self.assertEqual(
+            events[0][1],
+            'launch dcs-hw-qa-1-d on ' + str(bus_model)
+            + ' --standby dcs-hw-qa-1-c:' + str(runner.BORN_MONITOR_PORT)
+            + ' --owner-token '
+            + str(self.cfg['plant_owner_tokens']['driven']))
+
+    def test_a_launch_with_neither_remote_nor_document_rejected(self):
+        with self.assertRaises(RuntimeError) as caught:
+            runner.start_born_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'driven', None, lambda event, detail=None: None)
+        self.assertIn('staged document of its own',
+                      str(caught.exception))
+
     def test_unknown_seat_rejected(self):
         with self.assertRaises(RuntimeError):
             self._launch(seat='active')
@@ -2666,6 +2722,9 @@ class BornActiveActionTests(unittest.TestCase):
             calls.append(args)
             return Result('')
 
+        bus_model = self.run_dir / 'sim-bus' / 'model.json'
+        bus_model.parent.mkdir(parents=True, exist_ok=True)
+        bus_model.write_text(json.dumps({'version': 1}))
         with patch.object(runner, 'docker', docker):
             ctx = runner._scenario_ctx(
                 self.cfg, self._record(), self.src, self.run_dir,
@@ -2687,6 +2746,10 @@ class BornActiveActionTests(unittest.TestCase):
             ctx['stop_born_controller']('driven')
             ctx['stop_born_field']()
             state = ctx['born_controller_state']('driven')
+            # The same lever takes a document-addressed launch: the
+            # caller names the document to mount and omits the remote.
+            bus = ctx['start_born_controller'](
+                'revised', None, document=bus_model)
         self.assertEqual(launched['container'], 'dcs-hw-qa-1-d')
         launch = next(c for c in calls
                       if c[0] == 'run' and 'dcs-hw-qa-1-d' in c)
@@ -2694,6 +2757,13 @@ class BornActiveActionTests(unittest.TestCase):
         self.assertEqual(launch[index + 1],
                          'dcs-hw-qa-1-c:'
                          + str(runner.BORN_MONITOR_PORT))
+        self.assertIsNone(bus['remote'])
+        self.assertEqual(bus['model'], str(bus_model))
+        bus_launch = next(c for c in calls
+                          if c[0] == 'run' and 'dcs-hw-qa-1-c' in c)
+        self.assertNotIn('--remote', bus_launch)
+        self.assertIn(str(bus_model) + ':/model/plant.json:ro',
+                      bus_launch)
         self.assertFalse(state['running'])
 
 

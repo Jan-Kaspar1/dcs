@@ -3113,7 +3113,8 @@ def start_born_controller(cfg, record, run_dir, model, seat, remote,
     startup-failure leg's per-class launcher: runs a controller on one
     of the labeled scenario seats (`revised`/`foreign`/`driven` — the
     run's third-controller containers 'c'/'foreign'/'d') bound to
-    `remote`, the scratch field's sim-serve address.
+    `remote`, the scratch field's sim-serve address, or — with
+    `remote` None — to whatever field the mounted `document` declares.
 
     `peer` and `standby` name the tracking wiring the launch carries:
     `peer` launches a born-active declaring its pair member — the
@@ -3141,14 +3142,19 @@ def start_born_controller(cfg, record, run_dir, model, seat, remote,
     a pair there exercises the real server of the revision under test.
 
     The container carries the run's managed and run labels, mounts the
-    mounted model read-only, publishes its monitor on the seat's
-    recorded port, and carries the seat's pinned --owner-token plus the
-    run's --pair-token. The launch is recorded on the run's action
-    timeline; a docker failure raises so the calling scenario reports
-    the launch never completed. Returns {'container', 'seat', 'address',
-    'remote', 'peer', 'standby', 'monitor'} — `address` is the
-    rig-bridge monitor endpoint a peer's tracking declaration dials,
-    `monitor` the published host-loopback URL the scenario reads.
+    given `document` (or the run's own `model`) read-only, publishes
+    its monitor on the seat's recorded port, and carries the seat's
+    pinned --owner-token plus the run's --pair-token. The launch is
+    recorded on the run's action timeline; a docker failure raises so
+    the calling scenario reports the launch never completed. Returns
+    {'container', 'seat', 'address', 'remote', 'peer', 'standby',
+    'model', 'monitor'} — `address` is the rig-bridge monitor
+    endpoint a peer's tracking declaration dials, `monitor` the
+    published host-loopback URL the scenario reads, `model` the
+    document actually mounted, which a leg stages against a
+    register-protocol server needs as its own evidence that both ends
+    read one declaration, and `remote` None on the document-addressed
+    launch.
     """
     run_id, sha = record['run_id'], record['attempted_sha']
     if peer is not None and standby is not None:
@@ -3220,7 +3226,7 @@ def start_born_controller(cfg, record, run_dir, model, seat, remote,
     return {'container': container, 'seat': seat,
             'address': container + ':' + str(BORN_MONITOR_PORT),
             'remote': remote, 'peer': peer_flag,
-            'standby': standby_flag,
+            'standby': standby_flag, 'model': str(mounted),
             'monitor': 'http://127.0.0.1:' + str(cfg[seat + '_port'])}
 
 
