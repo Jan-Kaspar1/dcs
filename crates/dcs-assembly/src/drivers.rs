@@ -1017,6 +1017,10 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
     let ensuring = Arc::clone(&bus);
     let starting = Arc::clone(&bus);
     let reclaiming = Arc::clone(&bus);
+    let probing = Arc::clone(&bus);
+    let attributing = Arc::clone(&bus);
+    let declaring = Arc::clone(&bus);
+    let claimed = Arc::clone(&bus);
     let inspect: Arc<dyn Any + Send + Sync> = bus.clone();
     let device = spec.id.0;
     Ok(DeviceDriver::Backend(DeviceBackend {
@@ -1080,9 +1084,22 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                 }),
             }
         })),
-        // No read-only claim observation — the device protocol has no
-        // probe request, so the run keeps its last observed verdict.
-        probe: None,
+        // The claim's observational counterpart: the device server's
+        // `probe_writer` — the standing claim's identity, reported as
+        // the verdict a mutation from this attachment would meet,
+        // without mutating. The probe asserts, joins, and releases
+        // nothing, so a peer may ask every scan; an unclaimed answer
+        // names the device's open pre-claim state rather than a closed
+        // field, which is what `Held`/`Unclaimed` report here.
+        probe: Some(Arc::new(move || {
+            probing
+                .probe_writer()
+                .map(|status| status.claim())
+                .map_err(|error| StepError::Backend {
+                    backend: format!("device {device}"),
+                    detail: error.to_string(),
+                })
+        })),
         // The fencing-loss reclaim: `ensure_writer` is already the
         // bound conditional grant the reclaim asks — a claim that has
         // no live holders cannot stand on this protocol, so "a
@@ -1098,10 +1115,24 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                 }),
             }
         })),
-        // The device's fencing verdict names no claimant.
-        fenced_by: None,
-        declare_monitor: None,
-        claimed_monitor: None,
+        // The claimant attribution: the owner token the device server's
+        // last fencing verdict named for this attachment — the claimant
+        // a superseded field owner's `field_claim_lost` journal record
+        // attributes the preemption to, read from the verdict itself
+        // rather than guessed.
+        fenced_by: Some(Arc::new(move || attributing.fenced_by())),
+        // The monitor declaration this owner's claims carry — the
+        // device server records it on the claim, so the peers the claim
+        // fences learn where the successor serves checkpoints from the
+        // field's own arbitration.
+        declare_monitor: Some(Arc::new(move |monitor| {
+            declaring.set_claim_monitor(monitor);
+        })),
+        // The field-arbitrated successor: the monitor endpoint the
+        // standing claim declared, as this attachment's fencing
+        // verdicts recorded it — the tracking surface the field itself
+        // hands a demoted peer.
+        claimed_monitor: Some(Arc::new(move || claimed.claimed_monitor())),
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -1176,6 +1207,10 @@ fn sim_cyclic_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError>
     let claiming = Arc::clone(&bus);
     let starting = Arc::clone(&bus);
     let releasing = Arc::clone(&bus);
+    let probing = Arc::clone(&bus);
+    let attributing = Arc::clone(&bus);
+    let declaring = Arc::clone(&bus);
+    let claimed = Arc::clone(&bus);
     let inspect: Arc<dyn Any + Send + Sync> = bus.clone();
     let device = spec.id.0;
     Ok(DeviceDriver::Backend(DeviceBackend {
@@ -1228,14 +1263,37 @@ fn sim_cyclic_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError>
                 }),
             }
         })),
-        // No read-only claim observation either.
-        probe: None,
-        // No bound conditional re-grant and no claimant attribution —
-        // the claim dies with its connection.
+        // The claim's observational counterpart: the device server's
+        // `probe_writer` — the standing claim's identity as the verdict
+        // a mutation from this attachment would meet, without
+        // mutating, so a tracking standby can report the field's claim
+        // every scan.
+        probe: Some(Arc::new(move || {
+            probing
+                .probe_writer()
+                .map(|status| status.claim())
+                .map_err(|error| StepError::Backend {
+                    backend: format!("device {device}"),
+                    detail: error.to_string(),
+                })
+        })),
+        // No bound conditional re-grant: the claim dies with its
+        // connection, so a released attachment has nothing to re-arm.
         reclaim: None,
-        fenced_by: None,
-        declare_monitor: None,
-        claimed_monitor: None,
+        // The claimant attribution: a cyclic attachment meets the
+        // fenced verdict at the exchange rather than at a point write,
+        // and the verdict names the standing claim — the claimant the
+        // ex-owner's `field_claim_lost` record attributes the
+        // preemption to.
+        fenced_by: Some(Arc::new(move || attributing.fenced_by())),
+        // The monitor declaration this owner's claims carry — where the
+        // successor the field's arbitration names serves checkpoints.
+        declare_monitor: Some(Arc::new(move |monitor| {
+            declaring.set_claim_monitor(monitor);
+        })),
+        // The field-arbitrated successor: the standing claim's declared
+        // monitor, as this attachment's fencing verdicts recorded it.
+        claimed_monitor: Some(Arc::new(move || claimed.claimed_monitor())),
         inspect: Some(inspect),
         field_facing: true,
     }))
