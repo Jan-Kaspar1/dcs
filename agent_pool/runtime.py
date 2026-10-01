@@ -39,7 +39,7 @@ def is_alive(metadata):
 
 
 class Runtime:
-    def __init__(self, pool_root, state_root, repository, devin='devin', opencode='opencode', timeout_seconds=7200):
+    def __init__(self, pool_root, state_root, repository, devin='devin', opencode='opencode', timeout_seconds=7200, launch_spacing_seconds=0):
         self.pool_root = Path(pool_root).resolve()
         self.state_root = Path(state_root).resolve()
         self.repository = repository
@@ -49,6 +49,7 @@ class Runtime:
         self.stall_seconds = 1200
         self.error_stall_seconds = 180
         self.timeout_seconds = timeout_seconds
+        self.launch_spacing_seconds = launch_spacing_seconds
         self.pool_root.mkdir(parents=True, exist_ok=True)
         self.state_root.mkdir(parents=True, exist_ok=True)
         self._children = {}
@@ -124,6 +125,15 @@ class Runtime:
                 'receipt': str(invocation / 'receipt.json'), 'log': str(invocation / 'output.log'),
                 'metadata': str(invocation / 'process.json')}
         atomic_json(invocation / 'spec.json', spec)
+        # The supervisor is the sole launcher. Persist the last start so a
+        # restart cannot turn queued new work, repairs and retries into a burst.
+        spacing_path = self.state_root / 'last-spawn.json'
+        if self.launch_spacing_seconds:
+            last = json.loads(spacing_path.read_text()) if spacing_path.exists() else 0
+            delay = min(self.launch_spacing_seconds,
+                        max(0, last + self.launch_spacing_seconds - time.time()))
+            if delay:
+                time.sleep(delay)
         process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()),
                                     '--runner', str(invocation / 'spec.json')],
                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -132,6 +142,7 @@ class Runtime:
         metadata = {**spec, 'pid': process.pid, 'identity': process_identity(process.pid),
                     'started_at': time.time(), 'invocation': str(invocation)}
         atomic_json(invocation / 'owner.json', metadata)
+        atomic_json(spacing_path, metadata['started_at'])
         return metadata
 
     def clone_owned(self, path):

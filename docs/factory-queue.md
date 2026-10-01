@@ -99,3 +99,15 @@ exhaustion, publication capacity, queue repair and factory absence. Full reposit
 verification and installer preflight are required before rollout. A live recovery
 probe, useful completion and post-change merges establish rollout results; tests
 alone do not establish sustained 50/day throughput.
+
+## Session start pacing
+
+Factory mode spaces every managed session start by at least five seconds,
+including fresh work, resumed work, repairs and background sessions. Set
+`factory.launch_spacing_seconds` to a number from 0 through 30 (default 5);
+zero disables pacing for comparison. A durable timestamp preserves the gap
+across supervisor restarts. Concurrency remains bounded separately at four;
+spacing changes admission bursts, not provider account limits or reset times.
+Provider errors still trigger the existing recovery policy. This is an
+experiment motivated by successful staggered desktop sessions; it does not
+prove that launch bursts explain all observed rate-limit errors.
