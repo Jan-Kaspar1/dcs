@@ -918,7 +918,7 @@ fn a_link_flap_fenced_exchange_demotes_the_ex_owner() {
         a.scan();
         b.scan();
         assert_eq!(a.role(), Role::Active);
-        assert!(a.take_fencing_losses().is_empty());
+        assert!(a.drain_pending().fencing_losses().is_empty());
 
         // The standby promotes on the freed field — its claim lands on
         // the reconnected attachment — and settles `active` on its
@@ -937,10 +937,18 @@ fn a_link_flap_fenced_exchange_demotes_the_ex_owner() {
         // journaled unattributed: the verdict named no claimant.
         a.scan();
         assert_eq!(a.role(), Role::Demoting);
-        let losses = a.take_fencing_losses();
+        let drained = a.drain_pending();
+        let losses = drained.fencing_losses();
         assert_eq!(losses.len(), 1, "one fencing loss per held claim");
         assert_eq!(losses[0].point, PointId(10));
         assert_eq!(losses[0].claimant, None);
+        // The one drain takes the demotion the loss drove too — the
+        // walked role changes accumulate across the path's drains.
+        let mut walked: Vec<SwitchOrigin> = drained
+            .role_changes()
+            .iter()
+            .map(|change| change.origin)
+            .collect();
 
         // The quiesced settle scan completes the demotion: the gate
         // is closed and the release hook dropped the pending output
@@ -954,13 +962,13 @@ fn a_link_flap_fenced_exchange_demotes_the_ex_owner() {
         // peer reports `active`. The journaled transitions name the
         // fencing verdict, not an unattributed operator request.
         assert_eq!(b.role(), Role::Active);
-        assert_eq!(
-            a.take_role_changes()
+        walked.extend(
+            a.drain_pending()
+                .role_changes()
                 .iter()
-                .map(|change| change.origin)
-                .collect::<Vec<_>>(),
-            vec![SwitchOrigin::Fenced, SwitchOrigin::Fenced]
+                .map(|change| change.origin),
         );
+        assert_eq!(walked, vec![SwitchOrigin::Fenced, SwitchOrigin::Fenced]);
         // And the demoted attachment's link is healthy again — a
         // census-only exchange completes rather than fencing forever.
         assert_eq!(

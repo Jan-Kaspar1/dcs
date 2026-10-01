@@ -994,8 +994,9 @@ pub struct Executor<'d> {
     /// promotion — the run that took the field still numbers the
     /// ticks it minted waiting. Captures stamp it as
     /// [`Checkpoint::stream_tick`], so the line's stream position —
-    /// not any one run's numbering — stays the comparable currency
-    /// line-membership checks are written in.
+    /// not any one run's numbering — stays the currency the document's
+    /// own consistency check and every downstream declaration are
+    /// written in.
     stream_lead: u64,
 }
 

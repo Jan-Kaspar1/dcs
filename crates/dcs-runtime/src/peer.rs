@@ -197,6 +197,20 @@
 //! preempt-and-release landing between the peer's own writes is thereby
 //! attributed even when it never fenced one — the episode the
 //! probe-only observation would otherwise absorb without a trace.
+//!
+//! Every one of those queued records leaves through a single
+//! producer-owned drain: [`drain_pending`](Peer::drain_pending) takes
+//! all of them at once as a [`PeerEvents`] set whose
+//! [`PeerEvent`] variants are the peer's closed transition vocabulary.
+//! A consumer iterates the set and matches every variant, so the
+//! producer's coverage is a compile-time fact at every consumer rather
+//! than a convention each consumer re-enumerates: a transition kind
+//! the peer starts queueing is a non-exhaustive-match error at the
+//! journal and the recorderless shell alike, instead of a record that
+//! silently never reaches either. That is the named-evidence journal
+//! guarantee's build-time half — the durable record a consumer owes
+//! for everything the peer observed, closed under the peer's own
+//! additions.
 
 use crate::checkpoint::{Checkpoint, RestoreError, SUPPORTED_FORMAT_VERSIONS};
 use crate::divergence::{
@@ -362,7 +376,7 @@ pub struct Peer<'d> {
     /// ask answered `Ok(false)` inside a scan, where no activation
     /// result reaches the run's caller to settle. `Some` once — the
     /// ask never re-issues after a verdict — until
-    /// [`take_startup_refusal`](Self::take_startup_refusal) drains it
+    /// [`drain_startup_refusal`](Self::drain_startup_refusal) takes it
     /// for the shell's disposition, the identical one the
     /// activation-time answer takes. `activate`'s own refusal returns
     /// through the [`Activation`] result instead, so the latch only
@@ -888,6 +902,279 @@ pub struct SourceRestart {
     pub resumed_at: Tick,
 }
 
+/// One queued transition record, drained from a [`Peer`] by
+/// [`drain_pending`](Peer::drain_pending): the producer's own account of
+/// what changed since the consumer's last drain.
+///
+/// The enum is the drain's closed vocabulary. A consumer iterates the
+/// drained [`PeerEvents`] and matches every variant, so a transition
+/// kind the producer queues and a consumer does not name is a
+/// non-exhaustive-match error at that consumer rather than a record
+/// that silently never reaches the journal — the missed-drain class a
+/// hand-enumerated list of per-kind drain calls cannot catch, and the
+/// one the named-evidence journal guarantee
+/// ([`WW-FND-004`](docs/requirements/water-wastewater.md)) turns from a
+/// runtime gap into a build failure.
+///
+/// The variants are declared, and
+/// [`PeerEvents::into_events`](PeerEvents::into_events) yields them, in
+/// the drain's own category order: the applied-checkpoint evidence
+/// first (a divergence, its resolution, a model-boundary crossing, an
+/// orphan detection), then the claim-domain evidence the peer
+/// gathered while responding (a fenced-out claim, a landed re-arm, an
+/// observed foreign owner, a refused startup grant), then the stream
+/// and switch evidence (a regressed source, a refused promotion), then
+/// the reported transition itself, then the command settlements that
+/// transition carried.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PeerEvent {
+    /// A staged field `Out` image the applied checkpoint's tick
+    /// contradicts — the divergence detection, carrying the run tick
+    /// the apply landed on.
+    Divergence(DivergenceReport),
+    /// A `Diverged` → `Tracking` transition — the resolution, carrying
+    /// the applied tick and the same-position comparison it stands on.
+    Resolution(ResolutionReport),
+    /// A pulled checkpoint crossed the rolling model boundary — the
+    /// crossing's carryover report.
+    Reinitialization(CarryoverReport),
+    /// The tracked line reported no field owner — the orphan detection,
+    /// carrying the tick the orphaned apply landed at.
+    Orphan(OrphanReport),
+    /// The field's single-writer claim was preempted while this peer
+    /// owned the field — the loss, with the claimant the field's own
+    /// arbitration named where it named one.
+    FencingLoss(FencingLoss),
+    /// The orphan cycle's conditional re-arm landed — who re-took the
+    /// claim the orphan detection alone cannot attribute.
+    ClaimRearm(ClaimRearm),
+    /// A refused conditional claim probe met a standing foreign owner —
+    /// the observed-claimant record, one per distinct claimant.
+    ClaimObservation(ClaimObservation),
+    /// The pending born-active's deferred startup grant met the
+    /// field's refusal — the durable record that the pending state's
+    /// settle happened. The run's disposition is the shell's, carried
+    /// by the separate [`startup_refusal`](Peer::startup_refusal) latch.
+    StartupRefusal(StartupRefusal),
+    /// The tracked checkpoint stream regressed across a generation
+    /// boundary — the resync this record names.
+    SourceRestart(SourceRestart),
+    /// An armed failover self-promotion was refused at the miss
+    /// boundary — one per distinct refusal cause a refused streak
+    /// produces.
+    PromotionRefusal(PromotionRefusal),
+    /// A reported-role transition — the tick it is attributed to, the
+    /// roles before and after, and the switch's attribution.
+    RoleChange(RoleChange),
+    /// A pending command a checkpoint adoption abandoned, settled
+    /// `Rejected` carrying [`CommandError::Superseded`] — paired with
+    /// its absolute submission index, the identity the settle journal's
+    /// dedup keys on.
+    SupersededCommand {
+        /// The abandoned admission's absolute submission index — the
+        /// settle's dedup identity, so a repeat drain of the same
+        /// adjudication never re-journals it.
+        index: u64,
+        /// The terminal receipt the adoption rewrote.
+        receipt: CommandReceipt,
+    },
+    /// A point-state change a checkpoint adoption made that no settled
+    /// receipt in the merged log accounts for — a force-set change or a
+    /// held-value revert — `Applied` at the landing tick with `actor`
+    /// naming the adopting checkpoint.
+    AdoptionReceipt(CommandReceipt),
+}
+
+/// Everything a [`Peer`] queued for its consumer since the last
+/// [`drain_pending`](Peer::drain_pending) — one drained set covering
+/// every pending transition queue.
+///
+/// Consumers iterate the whole set (`for event in peer.drain_pending()`)
+/// and match every [`PeerEvent`] variant, which is what makes the
+/// producer's coverage a compile-time fact at every consumer; the
+/// per-kind accessors are for the readers that want one category out of
+/// a drained set — a test asserting on the reported transitions alone —
+/// and read the set without consuming it, so reading two kinds of one
+/// drain cannot silently drop the other.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PeerEvents {
+    divergences: Vec<DivergenceReport>,
+    resolutions: Vec<ResolutionReport>,
+    reinits: Vec<CarryoverReport>,
+    orphans: Vec<OrphanReport>,
+    fencing: Vec<FencingLoss>,
+    rearms: Vec<ClaimRearm>,
+    observations: Vec<ClaimObservation>,
+    startup_refusals: Vec<StartupRefusal>,
+    restarts: Vec<SourceRestart>,
+    promotion_refusals: Vec<PromotionRefusal>,
+    changes: Vec<RoleChange>,
+    superseded: Vec<(u64, CommandReceipt)>,
+    adoption_receipts: Vec<CommandReceipt>,
+}
+
+impl PeerEvents {
+    /// Every drained record, one per kind the producer queued, in the
+    /// drain's category order — the sequence a consumer iterating the
+    /// set hands to its recorder or logger.
+    pub fn into_events(self) -> Vec<PeerEvent> {
+        let PeerEvents {
+            divergences,
+            resolutions,
+            reinits,
+            orphans,
+            fencing,
+            rearms,
+            observations,
+            startup_refusals,
+            restarts,
+            promotion_refusals,
+            changes,
+            superseded,
+            adoption_receipts,
+        } = self;
+        let mut events = Vec::with_capacity(
+            divergences.len()
+                + resolutions.len()
+                + reinits.len()
+                + orphans.len()
+                + fencing.len()
+                + rearms.len()
+                + observations.len()
+                + startup_refusals.len()
+                + restarts.len()
+                + promotion_refusals.len()
+                + changes.len()
+                + superseded.len()
+                + adoption_receipts.len(),
+        );
+        events.extend(divergences.into_iter().map(PeerEvent::Divergence));
+        events.extend(resolutions.into_iter().map(PeerEvent::Resolution));
+        events.extend(reinits.into_iter().map(PeerEvent::Reinitialization));
+        events.extend(orphans.into_iter().map(PeerEvent::Orphan));
+        events.extend(fencing.into_iter().map(PeerEvent::FencingLoss));
+        events.extend(rearms.into_iter().map(PeerEvent::ClaimRearm));
+        events.extend(observations.into_iter().map(PeerEvent::ClaimObservation));
+        events.extend(startup_refusals.into_iter().map(PeerEvent::StartupRefusal));
+        events.extend(restarts.into_iter().map(PeerEvent::SourceRestart));
+        events.extend(
+            promotion_refusals
+                .into_iter()
+                .map(PeerEvent::PromotionRefusal),
+        );
+        events.extend(changes.into_iter().map(PeerEvent::RoleChange));
+        events.extend(
+            superseded
+                .into_iter()
+                .map(|(index, receipt)| PeerEvent::SupersededCommand { index, receipt }),
+        );
+        events.extend(
+            adoption_receipts
+                .into_iter()
+                .map(PeerEvent::AdoptionReceipt),
+        );
+        events
+    }
+
+    /// How many records the drain carried, across every kind.
+    pub fn len(&self) -> usize {
+        self.divergences.len()
+            + self.resolutions.len()
+            + self.reinits.len()
+            + self.orphans.len()
+            + self.fencing.len()
+            + self.rearms.len()
+            + self.observations.len()
+            + self.startup_refusals.len()
+            + self.restarts.len()
+            + self.promotion_refusals.len()
+            + self.changes.len()
+            + self.superseded.len()
+            + self.adoption_receipts.len()
+    }
+
+    /// Whether the drain carried nothing — no queued transition of any
+    /// kind since the consumer's last drain.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The drained divergence detections.
+    pub fn divergences(&self) -> &[DivergenceReport] {
+        &self.divergences
+    }
+
+    /// The drained divergence resolutions.
+    pub fn resolutions(&self) -> &[ResolutionReport] {
+        &self.resolutions
+    }
+
+    /// The drained reinitialization reports.
+    pub fn reinits(&self) -> &[CarryoverReport] {
+        &self.reinits
+    }
+
+    /// The drained orphan detections.
+    pub fn orphans(&self) -> &[OrphanReport] {
+        &self.orphans
+    }
+
+    /// The drained field-claim losses.
+    pub fn fencing_losses(&self) -> &[FencingLoss] {
+        &self.fencing
+    }
+
+    /// The drained landed orphan-cycle re-arms.
+    pub fn claim_rearms(&self) -> &[ClaimRearm] {
+        &self.rearms
+    }
+
+    /// The drained foreign-claim observations.
+    pub fn claim_observations(&self) -> &[ClaimObservation] {
+        &self.observations
+    }
+
+    /// The drained deferred startup-grant refusals.
+    pub fn startup_refusals(&self) -> &[StartupRefusal] {
+        &self.startup_refusals
+    }
+
+    /// The drained tracked-source restarts.
+    pub fn source_restarts(&self) -> &[SourceRestart] {
+        &self.restarts
+    }
+
+    /// The drained refused armed self-promotions.
+    pub fn promotion_refusals(&self) -> &[PromotionRefusal] {
+        &self.promotion_refusals
+    }
+
+    /// The drained reported-role transitions.
+    pub fn role_changes(&self) -> &[RoleChange] {
+        &self.changes
+    }
+
+    /// The drained superseded settlements, each beside the absolute
+    /// submission index the settle journal's dedup keys on.
+    pub fn superseded_commands(&self) -> &[(u64, CommandReceipt)] {
+        &self.superseded
+    }
+
+    /// The drained adoption-audit receipts.
+    pub fn adoption_receipts(&self) -> &[CommandReceipt] {
+        &self.adoption_receipts
+    }
+}
+
+impl IntoIterator for PeerEvents {
+    type Item = PeerEvent;
+    type IntoIter = std::vec::IntoIter<PeerEvent>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_events().into_iter()
+    }
+}
+
 /// The commanded-state element a pulled checkpoint claims that this
 /// run's command audit disproves — [`Peer::unaccounted`]'s named
 /// findings, carried by [`ApplyError::Unaccounted`]. Each is a shape
@@ -1026,8 +1313,8 @@ pub enum Transfer {
 /// logs. The cycle's ordering — the owns-field gate, the pull routing
 /// through [`Peer::transfer`], the heartbeat miss accounting, and the
 /// promote-on-budget sequence — lives in the peer; this report carries
-/// the outcome, and the journaled transitions still drain through the
-/// `take_*` queues.
+/// the outcome, and the journaled transitions still drain through
+/// [`drain_pending`](Peer::drain_pending).
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrackReport {
     /// The peer owns the field — `active` or `promoting` — so the cycle
@@ -2971,7 +3258,8 @@ impl<'d> Peer<'d> {
     /// self-promotion check at this boundary. The [`TrackReport`]
     /// describes what the cycle did, for the caller's logs; transitions
     /// the cycle queued — divergences, reinitializations, role changes —
-    /// still drain through the `take_*` queues for the journal.
+    /// still drain through [`drain_pending`](Peer::drain_pending) for
+    /// the journal.
     ///
     /// The caller's scan cycle waits on `pull`, so a pull that can
     /// block on the network must be bounded or run on a fetch worker —
@@ -3006,7 +3294,7 @@ impl<'d> Peer<'d> {
     /// claim, and the peer promotes the cycle the refusal cause clears.
     /// The episode still journals — one [`PromotionRefusal`] queues per
     /// distinct refusal cause a continuous refused streak produces (see
-    /// [`take_promotion_refusals`](Self::take_promotion_refusals)) — so
+    /// [`PeerEvent::PromotionRefusal`]) — so
     /// the durable record names the attempt a retrying gate makes
     /// without journaling it once per scan.
     pub fn track_once(&mut self, pull: impl FnOnce() -> Result<Checkpoint, String>) -> TrackReport {
@@ -3535,53 +3823,52 @@ impl<'d> Peer<'d> {
         tick
     }
 
-    /// Drains reported-role transitions queued since the last call — for
-    /// the transition journal the monitoring layer records them into.
-    pub fn take_role_changes(&mut self) -> Vec<RoleChange> {
-        std::mem::take(&mut self.pending_changes)
-    }
-
-    /// Drains divergence detections queued since the last call — one
-    /// [`DivergenceReport`] per transition into
-    /// [`StandbySync::Diverged`], each carrying the run tick the
-    /// apply landed on — for the transition journal the monitoring
-    /// layer records them into.
-    pub fn take_divergences(&mut self) -> Vec<DivergenceReport> {
-        std::mem::take(&mut self.pending_divergences)
-    }
-
-    /// Drains divergence resolutions queued since the last call — one
-    /// [`ResolutionReport`] per `Diverged` → [`StandbySync::Tracking`]
-    /// transition, each carrying the applied tick and the same-position
-    /// field comparison the clear stands on — for the transition
-    /// journal the monitoring layer records them into.
-    pub fn take_resolutions(&mut self) -> Vec<ResolutionReport> {
-        std::mem::take(&mut self.pending_resolutions)
-    }
-
-    /// Drains reinitializations queued since the last call — one
-    /// [`CarryoverReport`] per transition into
-    /// [`StandbySync::Reinitialized`] — for the transition journal the
-    /// monitoring layer records them into.
-    pub fn take_reinitializations(&mut self) -> Vec<CarryoverReport> {
-        std::mem::take(&mut self.pending_reinits)
-    }
-
-    /// Drains field-claim losses queued since the last call — one
-    /// [`FencingLoss`] per observed preemption of the claim this peer
-    /// held — for the transition journal the monitoring layer records
-    /// them into.
-    pub fn take_fencing_losses(&mut self) -> Vec<FencingLoss> {
-        std::mem::take(&mut self.pending_fencing)
-    }
-
-    /// Drains foreign-claim observations queued since the last call —
-    /// one [`ClaimObservation`] per distinct standing-owner token a
-    /// refused conditional grant probe named this ownership epoch —
-    /// for the transition journal the monitoring layer records them
-    /// into.
-    pub fn take_claim_observations(&mut self) -> Vec<ClaimObservation> {
-        std::mem::take(&mut self.pending_observations)
+    /// Drains every transition record queued since the last call — the
+    /// producer-owned drain surface the monitoring layer records into
+    /// and a recorderless shell logs.
+    ///
+    /// One call takes all of them: the queued [`RoleChange`]s,
+    /// [`DivergenceReport`]s and [`ResolutionReport`]s,
+    /// [`CarryoverReport`] reinitializations, [`OrphanReport`]s,
+    /// [`FencingLoss`]es, [`ClaimObservation`]s, [`ClaimRearm`]s,
+    /// [`PromotionRefusal`]s, [`StartupRefusal`]s, [`SourceRestart`]s,
+    /// superseded settlements, and adoption receipts alike. A consumer
+    /// iterates the drained [`PeerEvents`] and matches every
+    /// [`PeerEvent`] variant, so a kind queued here and unhandled by a
+    /// consumer is a compile error at that consumer — where the
+    /// per-kind drains this replaces let a newly queued kind land
+    /// silently undrained at every call site, which is the
+    /// missed-drain class the named-evidence journal guarantee exists
+    /// to close.
+    ///
+    /// A drained record is queued evidence, not authoritative state:
+    /// taking it moves no role, gate, or report, so a consumer that
+    /// drops one loses a journal record and nothing else.
+    ///
+    /// One kind is deliberately not here: the deferred startup grant's
+    /// latched refusal verdict is a run-disposition latch rather than
+    /// a queued record — the shell settles the run from it at the
+    /// boundary the verdict answers — so it keeps its own
+    /// [`drain_startup_refusal`](Self::drain_startup_refusal) accessor
+    /// beside the peek. The durable journal entry for the same verdict
+    /// *is* queued and does drain here, as
+    /// [`PeerEvent::StartupRefusal`].
+    pub fn drain_pending(&mut self) -> PeerEvents {
+        PeerEvents {
+            divergences: std::mem::take(&mut self.pending_divergences),
+            resolutions: std::mem::take(&mut self.pending_resolutions),
+            reinits: std::mem::take(&mut self.pending_reinits),
+            orphans: std::mem::take(&mut self.pending_orphans),
+            fencing: std::mem::take(&mut self.pending_fencing),
+            rearms: std::mem::take(&mut self.pending_rearms),
+            observations: std::mem::take(&mut self.pending_observations),
+            startup_refusals: std::mem::take(&mut self.pending_startup_refusals),
+            restarts: std::mem::take(&mut self.pending_restarts),
+            promotion_refusals: std::mem::take(&mut self.pending_refusals),
+            changes: std::mem::take(&mut self.pending_changes),
+            superseded: std::mem::take(&mut self.pending_superseded),
+            adoption_receipts: std::mem::take(&mut self.pending_adoption_receipts),
+        }
     }
 
     /// The deferred startup grant's latched refusal verdict — the
@@ -3589,11 +3876,18 @@ impl<'d> Peer<'d> {
     /// a scan rather than answered from [`activate`](Self::activate):
     /// `Some` after the pending run's re-issued conditional ask met a
     /// live incumbent's `Ok(false)`, until
-    /// [`take_startup_refusal`](Self::take_startup_refusal) drains it
+    /// [`drain_startup_refusal`](Self::drain_startup_refusal) takes it
     /// for the shell's disposition. `None` on every other run — the
     /// activation-time refusal returns through the `Activation`
     /// result, so the latch only ever carries the verdict no caller
     /// could have received.
+    ///
+    /// Not part of [`drain_pending`](Self::drain_pending): the latch
+    /// answers how this run *ends*, which the run's shell decides at
+    /// the boundary the verdict landed, while the drained events answer
+    /// what this run *observed* — the journal's account. The verdict's
+    /// journal entry, [`PeerEvent::StartupRefusal`], drains with the
+    /// rest.
     pub fn startup_refusal(&self) -> Option<&SwitchError> {
         self.startup_refusal.as_ref()
     }
@@ -3606,80 +3900,8 @@ impl<'d> Peer<'d> {
     /// where none was. The peer's reported state needs no settle
     /// here — it already reports the standby the pending stand-down
     /// produced.
-    pub fn take_startup_refusal(&mut self) -> Option<SwitchError> {
+    pub fn drain_startup_refusal(&mut self) -> Option<SwitchError> {
         self.startup_refusal.take()
-    }
-
-    /// Drains deferred startup-grant refusals queued since the last
-    /// call — one [`StartupRefusal`] per run — for the transition
-    /// journal the monitoring layer records them into as
-    /// `startup_claim_refused`: the durable record that the pending
-    /// state's settle happened, on run shapes where the shell's exit
-    /// message cannot reach — a driven run never regains its shell.
-    /// [`activate`](Self::activate)'s own refused verdict queues the
-    /// same record, so the journal names the refusal identically
-    /// whether it answered at activation or at the pending run's
-    /// first answered contact.
-    pub fn take_startup_refusals(&mut self) -> Vec<StartupRefusal> {
-        std::mem::take(&mut self.pending_startup_refusals)
-    }
-
-    /// Drains tracked-source restarts queued since the last call — one
-    /// [`SourceRestart`] per regressed-stream adoption that crossed a
-    /// generation boundary — for the transition journal the monitoring
-    /// layer records them into.
-    pub fn take_source_restarts(&mut self) -> Vec<SourceRestart> {
-        std::mem::take(&mut self.pending_restarts)
-    }
-
-    /// Drains orphan detections queued since the last call — one
-    /// [`OrphanReport`] per transition into [`StandbySync::Orphaned`],
-    /// each carrying the tick the orphaned apply landed at and the
-    /// applied checkpoint's own tick — for the transition journal the
-    /// monitoring layer records them into.
-    pub fn take_orphans(&mut self) -> Vec<OrphanReport> {
-        std::mem::take(&mut self.pending_orphans)
-    }
-
-    /// Drains landed orphan-cycle re-arms queued since the last call —
-    /// one [`ClaimRearm`] per ensure grant after the standing granted
-    /// streak's first — for the transition journal the monitoring
-    /// layer records them into: the durable record of who re-took the
-    /// field's write-ownership claim.
-    pub fn take_claim_rearms(&mut self) -> Vec<ClaimRearm> {
-        std::mem::take(&mut self.pending_rearms)
-    }
-
-    /// Drains refused armed self-promotions queued since the last call —
-    /// one [`PromotionRefusal`] per distinct refusal cause a continuous
-    /// refused streak produced — for the transition journal the
-    /// monitoring layer records them into: a refused attempt leaves no
-    /// [`RoleChange`] of its own, so this queue is what makes the
-    /// episode durable.
-    pub fn take_promotion_refusals(&mut self) -> Vec<PromotionRefusal> {
-        std::mem::take(&mut self.pending_refusals)
-    }
-
-    /// Drains pending-command settlements queued since the last call —
-    /// one [`CommandReceipt`] rewritten to `Rejected` carrying
-    /// [`CommandError::Superseded`] per still-`Accepted` entry a
-    /// checkpoint adoption abandoned, each paired with its absolute
-    /// submission index — for the settle journal the monitoring layer
-    /// records them into through `Recorder::note_settled`, the index
-    /// being what its dedup keys on.
-    pub fn take_superseded_commands(&mut self) -> Vec<(u64, CommandReceipt)> {
-        std::mem::take(&mut self.pending_superseded)
-    }
-
-    /// Drains the adoption-audit receipts queued since the last call —
-    /// one [`CommandReceipt`] per force-set or held-value change a
-    /// checkpoint adoption made that no settled receipt accounts for,
-    /// each `Applied` at the landing tick with `actor` naming the
-    /// adopting checkpoint — for the settle journal the monitoring
-    /// layer records them into through `Recorder::note_settled`,
-    /// beside the superseded settlements.
-    pub fn take_adoption_receipts(&mut self) -> Vec<CommandReceipt> {
-        std::mem::take(&mut self.pending_adoption_receipts)
     }
 
     /// Queues `command` for application at the next scan boundary —
@@ -4027,6 +4249,156 @@ mod tests {
         Executor::new(driver, crate::PointMap::new(), Vec::new()).unwrap()
     }
 
+    /// Every pending queue the producer owns, filled with one record
+    /// each and drained through the single surface: the coverage
+    /// contract the closed vocabulary buys. A queue this test does not
+    /// know about is a queue no consumer's exhaustive match names, so
+    /// adding a variant without draining it fails here and adding a
+    /// queue without a variant fails the consumers' builds.
+    #[test]
+    fn the_ordered_drain_covers_every_pending_queue() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::active(executor(&gate), Some(&gate));
+        let divergence = DivergenceReport {
+            tick: Tick(1),
+            mismatches: Vec::new(),
+        };
+        let resolution = ResolutionReport {
+            tick: Tick(2),
+            compared: Vec::new(),
+        };
+        let reinit = CarryoverReport {
+            from: None,
+            to: None,
+            resumed_at: Tick(3),
+            carried: Vec::new(),
+            carried_outputs: Vec::new(),
+            carried_forces: Vec::new(),
+            dropped: Vec::new(),
+            reinitialized: Vec::new(),
+            reverted_tuning: Vec::new(),
+            initialized: Vec::new(),
+        };
+        let orphan = OrphanReport {
+            tick: Tick(4),
+            aligned: Tick(4),
+        };
+        let loss = FencingLoss {
+            tick: Tick(5),
+            point: PointId(1),
+            claimant: Some(6),
+        };
+        let rearm = ClaimRearm {
+            tick: Tick(7),
+            point: PointId(1),
+        };
+        let observation = ClaimObservation {
+            tick: Tick(8),
+            point: PointId(1),
+            claimant: 9,
+        };
+        let startup = StartupRefusal {
+            tick: Tick(10),
+            error: SwitchError::FieldClaimFailed {
+                detail: "a live peer holds the field".to_string(),
+            },
+        };
+        let restart = SourceRestart {
+            tick: Tick(11),
+            was_aligned: Some(Tick(12)),
+            resumed_at: Tick(13),
+        };
+        let refusal = PromotionRefusal {
+            tick: Tick(14),
+            misses: 3,
+            error: SwitchError::AlreadyActive,
+        };
+        let change = RoleChange {
+            tick: Tick(15),
+            from: Role::Standby,
+            to: Role::Promoting,
+            origin: SwitchOrigin::Failover,
+            actor: None,
+        };
+        let superseded = CommandReceipt {
+            command: Command::WriteValue {
+                point: PointId(1),
+                kind: ValueKind::Float,
+                value: Value::Float(1.0),
+            },
+            outcome: CommandOutcome::Rejected {
+                reason: CommandError::Superseded { point: None },
+            },
+            actor: None,
+            reason: None,
+        };
+        let adopted = CommandReceipt {
+            command: Command::ForcePoint {
+                point: PointId(1),
+                kind: ValueKind::Float,
+                value: Value::Float(2.0),
+            },
+            outcome: CommandOutcome::Applied { tick: Tick(19) },
+            actor: Some("checkpoint:1@19".to_string()),
+            reason: None,
+        };
+        peer.pending_divergences.push(divergence.clone());
+        peer.pending_resolutions.push(resolution.clone());
+        peer.pending_reinits.push(reinit.clone());
+        peer.pending_orphans.push(orphan);
+        peer.pending_fencing.push(loss);
+        peer.pending_rearms.push(rearm);
+        peer.pending_observations.push(observation);
+        peer.pending_startup_refusals.push(startup.clone());
+        peer.pending_restarts.push(restart);
+        peer.pending_refusals.push(refusal.clone());
+        peer.pending_changes.push(change.clone());
+        peer.pending_superseded.push((20, superseded.clone()));
+        peer.pending_adoption_receipts.push(adopted.clone());
+
+        // The whole set, one drain, in the drain's category order: the
+        // applied-checkpoint evidence, then the claim-domain evidence,
+        // then the stream and switch evidence, then the reported
+        // transition, then the settlements it carried.
+        let events = peer.drain_pending().into_events();
+        assert_eq!(
+            events,
+            vec![
+                PeerEvent::Divergence(divergence),
+                PeerEvent::Resolution(resolution),
+                PeerEvent::Reinitialization(reinit),
+                PeerEvent::Orphan(orphan),
+                PeerEvent::FencingLoss(loss),
+                PeerEvent::ClaimRearm(rearm),
+                PeerEvent::ClaimObservation(observation),
+                PeerEvent::StartupRefusal(startup),
+                PeerEvent::SourceRestart(restart),
+                PeerEvent::PromotionRefusal(refusal.clone()),
+                PeerEvent::RoleChange(change.clone()),
+                PeerEvent::SupersededCommand {
+                    index: 20,
+                    receipt: superseded,
+                },
+                PeerEvent::AdoptionReceipt(adopted),
+            ],
+            "every pending queue must drain as one of its kind's events"
+        );
+        // The drain emptied all of them: a second drain carries
+        // nothing, so no record is journaled twice and none is stranded.
+        assert!(peer.drain_pending().is_empty());
+        // The per-kind accessors read the same drained set, one kind
+        // each — the readers that want a single category out of it.
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::active(executor(&gate), Some(&gate));
+        peer.pending_changes.push(change.clone());
+        peer.pending_fencing.push(loss);
+        let events = peer.drain_pending();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events.role_changes(), vec![change]);
+    }
+
     #[test]
     fn promotion_requires_a_converged_standby() {
         let driver = StubDriver::new(PointId(1), Value::Float(0.0));
@@ -4086,7 +4458,7 @@ mod tests {
         // The queued transitions journal both halves of the switch —
         // an unattributed request here.
         assert_eq!(
-            peer.take_role_changes(),
+            peer.drain_pending().role_changes(),
             vec![
                 RoleChange {
                     tick: Tick(7),
@@ -4127,7 +4499,7 @@ mod tests {
         peer.scan();
 
         assert_eq!(
-            peer.take_role_changes(),
+            peer.drain_pending().role_changes(),
             vec![
                 RoleChange {
                     tick: Tick(7),
@@ -4157,7 +4529,7 @@ mod tests {
         peer.scan();
 
         assert_eq!(
-            peer.take_role_changes(),
+            peer.drain_pending().role_changes(),
             vec![
                 RoleChange {
                     tick: Tick(0),
@@ -4282,7 +4654,7 @@ mod tests {
                 report: Box::new(report.clone())
             }
         );
-        assert_eq!(peer.take_reinitializations(), vec![report]);
+        assert_eq!(peer.drain_pending().reinits(), vec![report]);
 
         // Refresh pulls keep the crossing current without re-journaling
         // the transition.
@@ -4291,7 +4663,7 @@ mod tests {
             peer.sync_state(),
             StandbySync::Reinitialized { .. }
         ));
-        assert!(peer.take_reinitializations().is_empty());
+        assert!(peer.drain_pending().reinits().is_empty());
     }
 
     #[test]
@@ -4644,15 +5016,17 @@ mod tests {
                 sync: StandbySync::Unsynchronized
             })
         );
-        let observations = peer.take_claim_observations();
+        let drained = peer.drain_pending();
+        let observations = drained.claim_observations();
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].claimant, 77);
         assert_eq!(observations[0].point, OUTPUT);
 
         // The refused verdict latched for the shell — the same
         // `FieldClaimFailed` the activation-time answer carries — and
-        // queued once for the journal at the scan's tick.
-        let refusals = peer.take_startup_refusals();
+        // queued once for the journal at the scan's tick, in the same
+        // drained set as the observed claimant that attributes it.
+        let refusals = drained.startup_refusals();
         assert_eq!(refusals.len(), 1);
         assert_eq!(refusals[0].tick, peer.tick());
         let Some(SwitchError::FieldClaimFailed { detail }) = peer.startup_refusal() else {
@@ -4663,9 +5037,12 @@ mod tests {
         };
         assert_eq!(&refusals[0].error, peer.startup_refusal().unwrap());
         assert!(detail.contains("live peer") && detail.contains("standby"));
-        assert_eq!(peer.take_startup_refusal(), Some(refusals[0].error.clone()));
-        assert_eq!(peer.take_startup_refusal(), None);
-        assert!(peer.take_startup_refusals().is_empty());
+        assert_eq!(
+            peer.drain_startup_refusal(),
+            Some(refusals[0].error.clone())
+        );
+        assert_eq!(peer.drain_startup_refusal(), None);
+        assert!(peer.drain_pending().startup_refusals().is_empty());
 
         // The verdict ended the ask: later scans answer the field but
         // never re-issue the conditional grant.
@@ -4710,10 +5087,16 @@ mod tests {
             Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
             Some(&gate),
         );
+        // The walked role transitions, accumulated across every drain so
+        // each assertion reads the whole walk while each drain still
+        // takes the whole set — the one drain, one kind-read shape.
+        let mut walked: Vec<RoleChange> = Vec::new();
         peer.activate().unwrap();
         peer.scan();
         assert_eq!(field.value(OUTPUT), Value::Float(1.0));
-        assert!(peer.take_fencing_losses().is_empty());
+        let drained = peer.drain_pending();
+        assert!(drained.fencing_losses().is_empty());
+        walked.extend(drained.role_changes().iter().cloned());
 
         // Another attachment took the claim: the next write is fenced.
         // The scan completes degraded — the boundary counted the fenced
@@ -4731,8 +5114,11 @@ mod tests {
                 error: IoError::Fenced(OUTPUT),
             })
         );
+        // One drained set carries the fenced scan's whole account: the
+        // claim loss and the demotion it drove, cause before effect.
+        let drained = peer.drain_pending();
         assert_eq!(
-            peer.take_fencing_losses(),
+            drained.fencing_losses(),
             vec![FencingLoss {
                 tick: Tick(2),
                 point: OUTPUT,
@@ -4744,7 +5130,7 @@ mod tests {
         assert!(!gate.is_open());
         assert!(!peer.owns_field());
         assert_eq!(
-            peer.take_role_changes(),
+            drained.role_changes(),
             vec![RoleChange {
                 tick: Tick(2),
                 from: Role::Active,
@@ -4753,6 +5139,7 @@ mod tests {
                 actor: None,
             }]
         );
+        walked.extend(drained.role_changes().iter().cloned());
 
         // The next scan's write is quiesced at the closed gate — it
         // never reaches the field — and the completed scan settles the
@@ -4765,9 +5152,10 @@ mod tests {
             Value::Float(1.0),
             "a demoted peer's writes must not reach the field"
         );
-        assert!(peer.take_fencing_losses().is_empty());
+        let drained = peer.drain_pending();
+        assert!(drained.fencing_losses().is_empty());
         assert_eq!(
-            peer.take_role_changes(),
+            drained.role_changes(),
             vec![RoleChange {
                 tick: Tick(3),
                 from: Role::Demoting,
@@ -4776,6 +5164,7 @@ mod tests {
                 actor: None,
             }]
         );
+        walked.extend(drained.role_changes().iter().cloned());
 
         // The loss reports once per held claim: re-converged and
         // re-promoted, a second preemption queues a second loss and
@@ -4785,19 +5174,38 @@ mod tests {
         peer.promote().unwrap();
         assert!(gate.is_open());
         assert_eq!(peer.scan(), Tick(4));
+        let drained = peer.drain_pending();
         assert_eq!(
-            peer.take_fencing_losses(),
+            drained.fencing_losses(),
             vec![FencingLoss {
                 tick: Tick(4),
                 point: OUTPUT,
                 claimant: None,
             }]
         );
+        walked.extend(drained.role_changes().iter().cloned());
         assert_eq!(peer.scan(), Tick(5));
         assert_eq!(peer.role(), Role::Standby);
+        let drained = peer.drain_pending();
+        assert!(drained.fencing_losses().is_empty());
+        walked.extend(drained.role_changes().iter().cloned());
         assert_eq!(
-            peer.take_role_changes(),
+            walked,
             vec![
+                RoleChange {
+                    tick: Tick(2),
+                    from: Role::Active,
+                    to: Role::Demoting,
+                    origin: SwitchOrigin::Fenced,
+                    actor: None,
+                },
+                RoleChange {
+                    tick: Tick(3),
+                    from: Role::Demoting,
+                    to: Role::Standby,
+                    origin: SwitchOrigin::Fenced,
+                    actor: None,
+                },
                 RoleChange {
                     tick: Tick(3),
                     from: Role::Standby,
@@ -4854,6 +5262,10 @@ mod tests {
         .with_field_probe(|| Ok(claim.probe()))
         .with_field_claimant(|_| claim.holder())
         .with_field_reclaim(|| Ok(claim.ensure(OWNER)));
+        // The walked role transitions, accumulated across every drain so
+        // the final assertion reads the whole walk while each drain
+        // still takes the whole set.
+        let mut walked: Vec<RoleChange> = Vec::new();
         peer.activate().unwrap();
         assert_eq!(peer.scan(), Tick(1));
         assert_eq!(claim.holder(), Some(OWNER));
@@ -4865,14 +5277,16 @@ mod tests {
         claim.claim(FOREIGN);
         fenced.armed.store(true, Ordering::Relaxed);
         assert_eq!(peer.scan(), Tick(2));
+        let drained = peer.drain_pending();
         assert_eq!(
-            peer.take_fencing_losses(),
+            drained.fencing_losses(),
             vec![FencingLoss {
                 tick: Tick(2),
                 point: OUTPUT,
                 claimant: Some(FOREIGN),
             }]
         );
+        walked.extend(drained.role_changes().iter().cloned());
         assert_eq!(peer.role(), Role::Demoting);
 
         // While the preemptor's claim still stands the reclaim probe
@@ -4910,9 +5324,11 @@ mod tests {
             Value::Float(1.0),
             "the reclaimed owner's writes must pass the claim it re-took"
         );
-        assert!(peer.take_fencing_losses().is_empty());
+        let drained = peer.drain_pending();
+        assert!(drained.fencing_losses().is_empty());
+        walked.extend(drained.role_changes().iter().cloned());
         assert_eq!(
-            peer.take_role_changes(),
+            walked,
             vec![
                 RoleChange {
                     tick: Tick(2),
@@ -4979,6 +5395,10 @@ mod tests {
         .with_field_claimant(|_| claim.holder())
         .with_field_reclaim(|| Ok(claim.ensure(OWNER)))
         .with_claim_observer(|| claim.holder().into_iter().collect());
+        // The walked role transitions, accumulated across every drain so
+        // the final assertion reads the whole walk while each drain
+        // still takes the whole set.
+        let mut walked: Vec<RoleChange> = Vec::new();
         peer.activate().unwrap();
         assert_eq!(peer.scan(), Tick(1));
         assert_eq!(claim.holder(), Some(OWNER));
@@ -4990,22 +5410,26 @@ mod tests {
         claim.claim(FOREIGN);
         fenced.armed.store(true, Ordering::Relaxed);
         assert_eq!(peer.scan(), Tick(2));
+        let drained = peer.drain_pending();
         assert_eq!(
-            peer.take_fencing_losses(),
+            drained.fencing_losses(),
             vec![FencingLoss {
                 tick: Tick(2),
                 point: OUTPUT,
                 claimant: Some(FOREIGN),
             }]
         );
+        walked.extend(drained.role_changes().iter().cloned());
         assert_eq!(peer.scan(), Tick(3));
         assert_eq!(peer.role(), Role::Standby);
         assert_eq!(peer.scan(), Tick(4));
         assert_eq!(claim.holder(), Some(FOREIGN));
+        let drained = peer.drain_pending();
         assert!(
-            peer.take_claim_observations().is_empty(),
+            drained.claim_observations().is_empty(),
             "the claimant the loss entry attributed is not re-journaled"
         );
+        walked.extend(drained.role_changes().iter().cloned());
 
         // The ex-owner reconverges on the tracked line's ownerless
         // verdict — the orphaned pull leaves the loss mark armed and
@@ -5023,7 +5447,9 @@ mod tests {
             TrackReport::Applied(Transfer::Applied)
         );
         assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
-        assert!(peer.take_claim_observations().is_empty());
+        let drained = peer.drain_pending();
+        assert!(drained.claim_observations().is_empty());
+        walked.extend(drained.role_changes().iter().cloned());
 
         // The preemptor released and a *different* foreign attachment
         // took the claim before the probe ran again: this refusal names
@@ -5032,19 +5458,23 @@ mod tests {
         claim.release();
         claim.claim(SECOND);
         assert_eq!(peer.scan(), Tick(5));
+        let drained = peer.drain_pending();
         assert_eq!(
-            peer.take_claim_observations(),
+            drained.claim_observations(),
             vec![ClaimObservation {
                 tick: Tick(5),
                 point: OUTPUT,
                 claimant: SECOND,
             }]
         );
+        walked.extend(drained.role_changes().iter().cloned());
 
         // The standing second claim journals once: repeat refusals
         // queue nothing further while its token stands.
         assert_eq!(peer.scan(), Tick(6));
-        assert!(peer.take_claim_observations().is_empty());
+        let drained = peer.drain_pending();
+        assert!(drained.claim_observations().is_empty());
+        walked.extend(drained.role_changes().iter().cloned());
 
         // The second claimant's release lets the next reclaim grant:
         // the role changes walk the peer back `promoting` → `active`,
@@ -5058,8 +5488,9 @@ mod tests {
         assert_eq!(claim.holder(), Some(OWNER));
         assert_eq!(peer.scan(), Tick(8));
         assert_eq!(peer.role(), Role::Active);
+        walked.extend(peer.drain_pending().role_changes().iter().cloned());
         assert_eq!(
-            peer.take_role_changes(),
+            walked,
             vec![
                 RoleChange {
                     tick: Tick(2),
@@ -5405,7 +5836,7 @@ mod tests {
 
         peer.apply(&successor.checkpoint()).unwrap();
         assert!(
-            peer.take_superseded_commands().is_empty(),
+            peer.drain_pending().superseded_commands().is_empty(),
             "a carried admission never settles superseded beside the line's applied"
         );
         assert_eq!(peer.receipts(), successor.receipts());
@@ -5542,7 +5973,7 @@ mod tests {
             standby.sync_state(),
             &StandbySync::Tracking { aligned: Tick(4) }
         );
-        assert_eq!(standby.take_divergences(), vec![]);
+        assert_eq!(standby.drain_pending().divergences(), vec![]);
         assert!(matches!(
             standby.report().sync,
             Some(StandbySync::Tracking { .. })
@@ -5569,7 +6000,7 @@ mod tests {
         };
         assert_eq!(standby.report().sync, Some(diverged.clone()));
         assert_eq!(
-            standby.take_divergences(),
+            standby.drain_pending().divergences(),
             vec![DivergenceReport {
                 tick: Tick(6),
                 mismatches: vec![Divergence {
@@ -5598,7 +6029,7 @@ mod tests {
         cycle(&mut active, &mut standby);
         assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
         assert_eq!(
-            standby.take_resolutions(),
+            standby.drain_pending().resolutions(),
             vec![],
             "still diverged — nothing resolved yet"
         );
@@ -5611,7 +6042,7 @@ mod tests {
         // to the compared tick and carrying the compared-point evidence
         // — both sides' values now agreeing.
         assert_eq!(
-            standby.take_resolutions(),
+            standby.drain_pending().resolutions(),
             vec![ResolutionReport {
                 tick: Tick(8),
                 compared: vec![Divergence {
@@ -5680,7 +6111,7 @@ mod tests {
         };
         assert_eq!(standby.sync_state(), &diverged);
         assert_eq!(
-            standby.take_divergences(),
+            standby.drain_pending().divergences(),
             vec![DivergenceReport {
                 tick: Tick(5),
                 mismatches: vec![Divergence {
@@ -5690,7 +6121,7 @@ mod tests {
                 }],
             }]
         );
-        assert!(standby.take_resolutions().is_empty());
+        assert!(standby.drain_pending().resolutions().is_empty());
         assert_eq!(
             standby.promote(),
             Err(SwitchError::NotConverged {
@@ -5716,7 +6147,7 @@ mod tests {
         // the miss counts toward failover, the verdict still stands.
         standby.note_transfer_failed("fetch from active: refused");
         assert_eq!(standby.sync_state(), &diverged);
-        assert!(standby.take_resolutions().is_empty());
+        assert!(standby.drain_pending().resolutions().is_empty());
 
         // (2) The faulted-reads repro: a fresh same-tick checkpoint
         // lands, so the comparison runs — but the field read of the
@@ -5734,7 +6165,7 @@ mod tests {
             })
         );
         assert!(!gate.is_open());
-        assert!(standby.take_resolutions().is_empty());
+        assert!(standby.drain_pending().resolutions().is_empty());
 
         // (3) Only a fresh same-tick comparison whose field reads all
         // succeeded and matched clears the verdict — (4) journaled as
@@ -5749,7 +6180,7 @@ mod tests {
             &StandbySync::Tracking { aligned: Tick(7) }
         );
         assert_eq!(
-            standby.take_resolutions(),
+            standby.drain_pending().resolutions(),
             vec![ResolutionReport {
                 // The apply held the run's clock at its own tick — the
                 // journal and history attribution domain never rewinds
@@ -5814,7 +6245,7 @@ mod tests {
             }],
         };
         assert_eq!(standby.sync_state(), &diverged);
-        standby.take_divergences();
+        standby.drain_pending().divergences();
 
         // The active's next scan overwrote the skew — the field carries
         // its write again — and the diverged peer's promote runs its
@@ -5841,7 +6272,7 @@ mod tests {
             &StandbySync::Tracking { aligned: Tick(6) }
         );
         assert_eq!(
-            standby.take_resolutions(),
+            standby.drain_pending().resolutions(),
             vec![ResolutionReport {
                 tick: Tick(6),
                 compared: vec![Divergence {
@@ -5887,7 +6318,7 @@ mod tests {
         standby.scan();
         cycle(&mut active, &mut standby);
         assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
-        assert_eq!(standby.take_divergences().len(), 1);
+        assert_eq!(standby.drain_pending().divergences().len(), 1);
 
         // The detecting apply consumed the staged image; two active
         // scans before the next apply leave no staged image whose tick
@@ -5897,7 +6328,7 @@ mod tests {
         active.scan();
         standby.apply(&active.checkpoint()).unwrap();
         assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
-        assert!(standby.take_resolutions().is_empty());
+        assert!(standby.drain_pending().resolutions().is_empty());
         assert!(matches!(
             standby.promote(),
             Err(SwitchError::NotConverged {
@@ -5934,7 +6365,7 @@ mod tests {
         standby.scan();
         cycle(&mut active, &mut standby);
         assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
-        standby.take_divergences();
+        standby.drain_pending().divergences();
 
         // The promote path's boundary pull: its apply would clear the
         // diverged state evidence-free, but the restored verdict keeps
@@ -5943,7 +6374,7 @@ mod tests {
         active.scan();
         standby.final_sync(|| Ok(active.checkpoint()));
         assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
-        assert_eq!(standby.take_resolutions(), vec![]);
+        assert_eq!(standby.drain_pending().resolutions(), vec![]);
         assert!(matches!(
             standby.promote(),
             Err(SwitchError::NotConverged {
@@ -6208,9 +6639,9 @@ mod tests {
             None,
             "reporting an unclaimed field must not seize it"
         );
-        assert!(peer.take_role_changes().is_empty());
-        assert!(peer.take_fencing_losses().is_empty());
-        assert!(peer.take_orphans().is_empty());
+        assert!(peer.drain_pending().role_changes().is_empty());
+        assert!(peer.drain_pending().fencing_losses().is_empty());
+        assert!(peer.drain_pending().orphans().is_empty());
     }
 
     /// `held` is the answer a standing owner gives — the fenced
@@ -6508,7 +6939,7 @@ mod tests {
         }
         assert!(gate.is_open());
         assert_eq!(
-            peer.take_role_changes(),
+            peer.drain_pending().role_changes(),
             vec![RoleChange {
                 tick: Tick(3),
                 from: Role::Standby,
@@ -6543,9 +6974,10 @@ mod tests {
         peer.self_promote().unwrap();
         peer.scan();
 
-        let changes = peer.take_role_changes();
+        let drained = peer.drain_pending();
+        let changes = drained.role_changes();
         assert_eq!(changes.len(), 2);
-        for change in &changes {
+        for change in changes {
             assert_eq!(change.origin, SwitchOrigin::Failover);
             assert_eq!(change.actor, None);
         }
@@ -6573,7 +7005,7 @@ mod tests {
         peer.promote_as(Some("operator-7".to_string())).unwrap();
         peer.scan();
 
-        for change in peer.take_role_changes() {
+        for change in peer.drain_pending().role_changes() {
             assert_eq!(change.origin, SwitchOrigin::Request);
             assert_eq!(change.actor.as_deref(), Some("operator-7"));
         }
@@ -6604,7 +7036,7 @@ mod tests {
         }
         assert_eq!(peer.role(), Role::Standby);
         assert!(!gate.is_open());
-        assert!(peer.take_role_changes().is_empty());
+        assert!(peer.drain_pending().role_changes().is_empty());
     }
 
     /// The durable-trace half of a fired-but-refused gate: the armed
@@ -6629,7 +7061,7 @@ mod tests {
         let report = peer.track_once(|| Err("b".to_string()));
         assert!(matches!(report, TrackReport::PromotionRefused { .. }));
         assert_eq!(
-            peer.take_promotion_refusals(),
+            peer.drain_pending().promotion_refusals(),
             vec![PromotionRefusal {
                 tick: peer.tick(),
                 misses: 2,
@@ -6644,7 +7076,7 @@ mod tests {
         // another refusal record.
         let report = peer.track_once(|| Err("c".to_string()));
         assert!(matches!(report, TrackReport::Missed { .. }));
-        assert!(peer.take_promotion_refusals().is_empty());
+        assert!(peer.drain_pending().promotion_refusals().is_empty());
     }
 
     /// A field-owning peer runs no pull and no failover check — the
@@ -6705,7 +7137,7 @@ mod tests {
         assert_eq!(peer.aligned_tick(), Some(Tick(5)));
         assert_eq!(peer.missed_transfers(), 1);
         assert_eq!(
-            peer.take_orphans(),
+            peer.drain_pending().orphans(),
             vec![OrphanReport {
                 tick: Tick(5),
                 aligned: Tick(5),
@@ -6719,7 +7151,7 @@ mod tests {
         next.source_owns_field = Some(false);
         peer.apply(&next).unwrap();
         assert_eq!(peer.missed_transfers(), 2);
-        assert!(peer.take_orphans().is_empty());
+        assert!(peer.drain_pending().orphans().is_empty());
     }
 
     /// The QA finding `field-orphaned-journal-flood`: a peer pinned on
@@ -6754,7 +7186,7 @@ mod tests {
             peer.sync_state(),
             &StandbySync::Orphaned { aligned: Tick(5) }
         );
-        assert_eq!(peer.take_orphans().len(), 1);
+        assert_eq!(peer.drain_pending().orphans().len(), 1);
 
         // The pull cadence's in-flight cycles count misses between the
         // completed pulls; neither the miss nor the re-landed identical
@@ -6773,7 +7205,7 @@ mod tests {
             ));
         }
         assert!(
-            peer.take_orphans().is_empty(),
+            peer.drain_pending().orphans().is_empty(),
             "the one orphan episode journals once, not once per pull"
         );
     }
@@ -6980,7 +7412,7 @@ mod tests {
         standby.scan();
         cycle(&mut active, &mut standby);
         assert!(matches!(standby.sync_state(), StandbySync::Diverged { .. }));
-        standby.take_divergences();
+        standby.drain_pending().divergences();
         assert!(matches!(
             standby.promote(),
             Err(SwitchError::NotConverged {
@@ -7004,8 +7436,8 @@ mod tests {
                 aligned: orphaned.tick,
             }
         );
-        assert_eq!(standby.take_orphans().len(), 1);
-        assert!(standby.take_resolutions().is_empty());
+        assert_eq!(standby.drain_pending().orphans().len(), 1);
+        assert!(standby.drain_pending().resolutions().is_empty());
         standby.promote().unwrap();
         assert!(gate.is_open());
     }
@@ -7093,7 +7525,7 @@ mod tests {
         peer.scan();
         assert_eq!(*field.lock().unwrap(), None);
         assert_eq!(peer.role(), Role::Standby);
-        assert!(peer.take_claim_rearms().is_empty());
+        assert!(peer.drain_pending().claim_rearms().is_empty());
 
         // The tracked line's checkpoint reports no field owner: the
         // orphan cycle probes the ensure, which re-arms the released
@@ -7112,7 +7544,7 @@ mod tests {
         assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
         assert_eq!(*field.lock().unwrap(), Some(7));
         assert_eq!(
-            peer.take_claim_rearms(),
+            peer.drain_pending().claim_rearms(),
             vec![ClaimRearm {
                 tick: Tick(9),
                 point: OUTPUT,
@@ -7127,17 +7559,17 @@ mod tests {
         // landing: the granted streak deduplicates the record.
         peer.track_once(|| Ok(checkpoint.clone()));
         peer.track_once(|| Ok(checkpoint.clone()));
-        assert!(peer.take_claim_rearms().is_empty());
+        assert!(peer.drain_pending().claim_rearms().is_empty());
 
         // A different owner between landings resets the streak: the
         // next grant is a new landing and journals again.
         *field.lock().unwrap() = Some(99);
         peer.track_once(|| Ok(checkpoint.clone()));
-        assert!(peer.take_claim_rearms().is_empty());
+        assert!(peer.drain_pending().claim_rearms().is_empty());
         *field.lock().unwrap() = None;
         peer.track_once(|| Ok(checkpoint));
         assert_eq!(*field.lock().unwrap(), Some(7));
-        assert_eq!(peer.take_claim_rearms().len(), 1);
+        assert_eq!(peer.drain_pending().claim_rearms().len(), 1);
     }
 
     /// The demotion the orphan cycle's re-arm must not undo — the QA
@@ -7219,7 +7651,7 @@ mod tests {
             !probed.load(Ordering::Relaxed),
             "the yielded mark must skip the orphan-cycle ensure"
         );
-        assert!(peer.take_claim_rearms().is_empty());
+        assert!(peer.drain_pending().claim_rearms().is_empty());
         assert_eq!(peer.role(), Role::Standby);
 
         // The mark is no lifetime ban: the re-promoted run's fresh
@@ -7242,7 +7674,7 @@ mod tests {
         peer.track_once(|| Ok(orphaned));
         assert!(probed.load(Ordering::Relaxed));
         assert_eq!(*field.lock().unwrap(), Some(7));
-        assert_eq!(peer.take_claim_rearms().len(), 1);
+        assert_eq!(peer.drain_pending().claim_rearms().len(), 1);
     }
 
     /// The stand-down is not the arm's end: a fencing-demoted ex-owner
@@ -7329,7 +7761,7 @@ mod tests {
         peer.track_once(|| Ok(orphaned));
         assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
         assert_eq!(claim.holder(), Some(OWNER));
-        assert_eq!(peer.take_claim_rearms().len(), 1);
+        assert_eq!(peer.drain_pending().claim_rearms().len(), 1);
         fenced.armed.store(false, Ordering::Relaxed);
         assert_eq!(peer.scan(), Tick(14));
         assert_eq!(peer.role(), Role::Promoting);
@@ -7420,7 +7852,7 @@ mod tests {
         assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
         assert_eq!(*field.lock().unwrap(), Some(99));
         assert_eq!(peer.role(), Role::Standby);
-        assert!(peer.take_claim_rearms().is_empty());
+        assert!(peer.drain_pending().claim_rearms().is_empty());
     }
 
     /// The audit half of the orphan probe's refusal: a foreign
@@ -7473,7 +7905,7 @@ mod tests {
         peer.scan();
         peer.scan();
         assert_eq!(peer.role(), Role::Standby);
-        assert!(peer.take_claim_observations().is_empty());
+        assert!(peer.drain_pending().claim_observations().is_empty());
 
         // A foreign claim_writer takes the field the demotion
         // released — landing between the run's own writes, so no
@@ -7493,7 +7925,7 @@ mod tests {
         // is the run's own — tracking adopted the stream's tick 9.
         peer.track_once(|| Ok(checkpoint.clone()));
         assert_eq!(
-            peer.take_claim_observations(),
+            peer.drain_pending().claim_observations(),
             vec![ClaimObservation {
                 tick: Tick(9),
                 point: OUTPUT,
@@ -7505,14 +7937,14 @@ mod tests {
         // orphaned pulls refuse against it, nothing further queues.
         peer.track_once(|| Ok(checkpoint.clone()));
         peer.track_once(|| Ok(checkpoint.clone()));
-        assert!(peer.take_claim_observations().is_empty());
+        assert!(peer.drain_pending().claim_observations().is_empty());
 
         // The claim changing hands is a new episode: the next refusal
         // names a token the run has not journaled and records it too.
         *field.lock().unwrap() = Some(55);
         peer.track_once(|| Ok(checkpoint));
         assert_eq!(
-            peer.take_claim_observations(),
+            peer.drain_pending().claim_observations(),
             vec![ClaimObservation {
                 tick: Tick(9),
                 point: OUTPUT,
@@ -7567,7 +7999,7 @@ mod tests {
         assert!(claimed.load(Ordering::Relaxed));
         assert!(gate.is_open());
         assert_eq!(
-            peer.take_role_changes(),
+            peer.drain_pending().role_changes(),
             vec![RoleChange {
                 tick: Tick(4),
                 from: Role::Standby,
@@ -7630,7 +8062,8 @@ mod tests {
             }
             other => panic!("a live incumbent must refuse the failover, got {other:?}"),
         }
-        let refusals = peer.take_promotion_refusals();
+        let refused = peer.drain_pending();
+        let refusals = refused.promotion_refusals();
         assert_eq!(refusals.len(), 1, "the refused attempt must journal");
         assert_eq!(refusals[0].misses, 2);
         assert!(matches!(
@@ -7659,7 +8092,7 @@ mod tests {
             );
         }
         assert!(
-            peer.take_promotion_refusals().is_empty(),
+            peer.drain_pending().promotion_refusals().is_empty(),
             "a standing refusal cause journals once, not once per retried cycle"
         );
         assert_eq!(
@@ -7687,7 +8120,7 @@ mod tests {
         assert!(gate.is_open());
         peer.scan();
         assert_eq!(peer.role(), Role::Active);
-        for change in peer.take_role_changes() {
+        for change in peer.drain_pending().role_changes() {
             assert_eq!(change.origin, SwitchOrigin::Failover);
             assert_eq!(change.actor, None);
         }
@@ -7746,7 +8179,8 @@ mod tests {
             peer.track_once(|| Ok(checkpoint)),
             TrackReport::PromotionRefused { .. }
         ));
-        let refusals = peer.take_promotion_refusals();
+        let refused = peer.drain_pending();
+        let refusals = refused.promotion_refusals();
         assert_eq!(refusals.len(), 2);
         assert_eq!(refusals[0].misses, 2);
         assert_eq!(refusals[1].misses, 3);
@@ -7774,7 +8208,8 @@ mod tests {
             peer.track_once(|| Ok(checkpoint)),
             TrackReport::PromotionRefused { .. }
         ));
-        let refusals = peer.take_promotion_refusals();
+        let refused = peer.drain_pending();
+        let refusals = refused.promotion_refusals();
         assert_eq!(refusals.len(), 1, "the new episode journals fresh");
         assert_eq!(refusals[0].misses, 2);
 
@@ -8285,7 +8720,7 @@ mod tests {
             &StandbySync::Tracking { aligned: Tick(1) }
         );
         assert_eq!(
-            peer.take_source_restarts(),
+            peer.drain_pending().source_restarts(),
             vec![SourceRestart {
                 tick: Tick(9),
                 was_aligned: Some(Tick(7)),
@@ -8304,7 +8739,7 @@ mod tests {
         assert_eq!(peer.aligned_tick(), Some(Tick(2)));
         peer.scan();
         assert_eq!(peer.tick(), Tick(10));
-        assert!(peer.take_source_restarts().is_empty());
+        assert!(peer.drain_pending().source_restarts().is_empty());
 
         // A second cold start regresses the stream again: another
         // named report, and the apply lands at the run's tick again.
@@ -8314,7 +8749,7 @@ mod tests {
         peer.apply(&again.checkpoint()).unwrap();
         assert_eq!(peer.tick(), Tick(10));
         assert_eq!(
-            peer.take_source_restarts(),
+            peer.drain_pending().source_restarts(),
             vec![SourceRestart {
                 tick: Tick(10),
                 was_aligned: Some(Tick(2)),
@@ -8333,7 +8768,7 @@ mod tests {
         again.run(1);
         peer.apply(&again.checkpoint()).unwrap();
         assert_eq!(peer.tick(), Tick(13));
-        assert!(peer.take_source_restarts().is_empty());
+        assert!(peer.drain_pending().source_restarts().is_empty());
     }
 
     /// The demoted-peer half of the finding — the driven-failover
@@ -8365,7 +8800,7 @@ mod tests {
         assert_eq!(peer.tick(), Tick(6));
         assert_eq!(peer.aligned_tick(), Some(Tick(1)));
         assert_eq!(
-            peer.take_source_restarts(),
+            peer.drain_pending().source_restarts(),
             vec![SourceRestart {
                 tick: Tick(6),
                 was_aligned: None,
@@ -8409,7 +8844,7 @@ mod tests {
         peer.apply(&source.checkpoint()).unwrap();
         assert_eq!(peer.tick(), Tick(3));
         assert_eq!(peer.aligned_tick(), Some(Tick(2)));
-        assert!(peer.take_source_restarts().is_empty());
+        assert!(peer.drain_pending().source_restarts().is_empty());
     }
 
     /// The generation check's other half on the same shape: the
@@ -8438,7 +8873,7 @@ mod tests {
         assert_eq!(peer.tick(), Tick(3));
         assert_eq!(peer.aligned_tick(), Some(Tick(1)));
         assert_eq!(
-            peer.take_source_restarts(),
+            peer.drain_pending().source_restarts(),
             vec![SourceRestart {
                 tick: Tick(3),
                 was_aligned: None,
@@ -8487,7 +8922,7 @@ mod tests {
         peer.apply(&source.checkpoint()).unwrap();
         assert_eq!(peer.tick(), Tick(6));
         assert_eq!(peer.aligned_tick(), Some(Tick(5)));
-        assert!(peer.take_source_restarts().is_empty());
+        assert!(peer.drain_pending().source_restarts().is_empty());
 
         // Each later checkpoint lands under the live lead — the apply
         // keeps holding the run's clock while the stream lags — and
@@ -8502,7 +8937,7 @@ mod tests {
         peer.apply(&source.checkpoint()).unwrap();
         assert_eq!(peer.tick(), Tick(8));
         assert_eq!(peer.aligned_tick(), Some(Tick(8)));
-        assert!(peer.take_source_restarts().is_empty());
+        assert!(peer.drain_pending().source_restarts().is_empty());
     }
 
     /// QA finding `mutual-tracking-regressed-offset-ratchets-run-tick`:
@@ -8542,12 +8977,12 @@ mod tests {
         let mut cold_a = executor(&cold_driver_a);
         cold_a.run(1);
         a.apply(&cold_a.checkpoint()).unwrap();
-        assert_eq!(a.take_source_restarts().len(), 1);
+        assert_eq!(a.drain_pending().source_restarts().len(), 1);
         let cold_driver_b = StubDriver::new(PointId(1), Value::Float(0.0));
         let mut cold_b = executor(&cold_driver_b);
         cold_b.run(1);
         b.apply(&cold_b.checkpoint()).unwrap();
-        assert_eq!(b.take_source_restarts().len(), 1);
+        assert_eq!(b.drain_pending().source_restarts().len(), 1);
 
         // The mutual cycle resumes. Without the offset's re-evaluation
         // each apply lands at the peer's served tick plus the standing
@@ -8669,7 +9104,8 @@ mod tests {
         peer.demote().unwrap();
         peer.apply(&source.checkpoint()).unwrap();
         assert_eq!(peer.receipts(), source.receipts());
-        let superseded = peer.take_superseded_commands();
+        let drained = peer.drain_pending();
+        let superseded = drained.superseded_commands();
         assert_eq!(superseded.len(), 1, "{superseded:?}");
         assert_eq!(superseded[0].0, 0);
         assert_eq!(superseded[0].1.command, Clocked::bump(7));
@@ -8680,7 +9116,7 @@ mod tests {
             }
         );
         // The drain empties — one settlement per orphan, journaled once.
-        assert!(peer.take_superseded_commands().is_empty());
+        assert!(peer.drain_pending().superseded_commands().is_empty());
         // No strays: the superseded command never re-queues, so the
         // demoted run's next scan applies nothing for it — the count
         // stays the adopted line's own bump, never the orphan's — and
@@ -8690,7 +9126,7 @@ mod tests {
         assert_eq!(Clocked::count(&peer.checkpoint()), Value::Int(3));
         peer.apply(&source.checkpoint()).unwrap();
         peer.scan();
-        assert!(peer.take_superseded_commands().is_empty());
+        assert!(peer.drain_pending().superseded_commands().is_empty());
         assert_eq!(peer.receipts(), source.receipts());
         assert_eq!(Clocked::count(&peer.checkpoint()), Value::Int(3));
     }
@@ -8783,7 +9219,8 @@ mod tests {
         // `Rejected`/`Superseded` and queues for the journal rather
         // than evaporating as the line's carry.
         peer.apply(&source.checkpoint()).unwrap();
-        let superseded = peer.take_superseded_commands();
+        let drained = peer.drain_pending();
+        let superseded = drained.superseded_commands();
         assert_eq!(superseded.len(), 4, "{superseded:?}");
         for (position, (index, receipt)) in superseded.iter().enumerate() {
             assert_eq!(*index, 4 + position as u64);
@@ -8800,7 +9237,7 @@ mod tests {
         }
         // The drain empties — one settlement per abandoned admission,
         // journaled once.
-        assert!(peer.take_superseded_commands().is_empty());
+        assert!(peer.drain_pending().superseded_commands().is_empty());
         // The merged log is the line's one audit — the successor's own
         // receipts at those indices, none actor `batch-b` — and
         // `attempts` never regressed below the receipts this run ever
@@ -8821,7 +9258,7 @@ mod tests {
         // demoted run applies nothing for them.
         peer.scan();
         peer.apply(&source.checkpoint()).unwrap();
-        assert!(peer.take_superseded_commands().is_empty());
+        assert!(peer.drain_pending().superseded_commands().is_empty());
         assert_eq!(peer.snapshot().command_queue.attempts, attempts);
     }
 
@@ -8864,7 +9301,7 @@ mod tests {
         // settled `superseded` — nothing journals, and the checkpoint
         // this peer still serves keeps offering it.
         peer.apply(&source.checkpoint()).unwrap();
-        assert!(peer.take_superseded_commands().is_empty());
+        assert!(peer.drain_pending().superseded_commands().is_empty());
         assert_eq!(peer.receipt_base(), 0);
         assert_eq!(peer.receipts().len(), 1);
         assert!(matches!(
@@ -8895,7 +9332,7 @@ mod tests {
         // verdict: the receipt settles `applied` — the one terminal
         // outcome, with no `superseded` ever journaled beside it.
         peer.apply(&source.checkpoint()).unwrap();
-        assert!(peer.take_superseded_commands().is_empty());
+        assert!(peer.drain_pending().superseded_commands().is_empty());
         assert_eq!(peer.receipts(), source.receipts());
         assert_eq!(
             peer.receipts()[0].outcome,
@@ -8946,7 +9383,7 @@ mod tests {
         // `Applied` the line never ordered — and it settles once at
         // the promoted run's first field-owning scan.
         peer.apply(&source.checkpoint()).unwrap();
-        assert!(peer.take_superseded_commands().is_empty());
+        assert!(peer.drain_pending().superseded_commands().is_empty());
         assert_eq!(peer.receipts(), source.receipts());
         assert!(matches!(
             peer.receipts()[0].outcome,
@@ -8958,7 +9395,7 @@ mod tests {
             CommandOutcome::Accepted { .. }
         ));
         assert_eq!(Clocked::count(&peer.checkpoint()), Value::Int(0));
-        assert!(peer.take_superseded_commands().is_empty());
+        assert!(peer.drain_pending().superseded_commands().is_empty());
 
         peer.promote().unwrap();
         peer.scan();
@@ -9026,7 +9463,7 @@ mod tests {
             CommandOutcome::Applied { .. }
         ));
         assert_eq!(Clocked::count(&peer.checkpoint()), Value::Int(7));
-        assert!(peer.take_superseded_commands().is_empty());
+        assert!(peer.drain_pending().superseded_commands().is_empty());
     }
 
     /// The finding's deferred-apply half: a fresh standby adopting the
@@ -9078,7 +9515,7 @@ mod tests {
         probe.scan();
         assert_eq!(probe.receipts(), peer.receipts());
         assert_eq!(Clocked::count(&probe.checkpoint()), Value::Int(7));
-        assert!(probe.take_superseded_commands().is_empty());
+        assert!(probe.drain_pending().superseded_commands().is_empty());
     }
 
     /// QA finding `quiesced-standby-scan-settles-adopted-pending-commands`
@@ -9137,7 +9574,7 @@ mod tests {
             standby.receipts()[0].outcome,
             CommandOutcome::Accepted { .. }
         ));
-        assert!(standby.take_superseded_commands().is_empty());
+        assert!(standby.drain_pending().superseded_commands().is_empty());
         assert_eq!(
             standby.executor().sample(point).map(|sample| sample.value),
             Some(Value::Float(0.0))
@@ -9228,7 +9665,7 @@ mod tests {
         // journaled release: the resurrection never happens, so the
         // audit queues nothing.
         assert!(restarted.executor().forces().is_empty());
-        assert!(restarted.take_adoption_receipts().is_empty());
+        assert!(restarted.drain_pending().adoption_receipts().is_empty());
 
         // And the scan reports the field's live value at `Good`
         // quality — the silent `Substituted` return is the defect.
@@ -9280,7 +9717,7 @@ mod tests {
 
         assert_eq!(b.executor().forces()[&POINT], Value::Float(5.0));
         assert_eq!(
-            b.take_adoption_receipts(),
+            b.drain_pending().adoption_receipts(),
             vec![CommandReceipt {
                 command: Command::ForcePoint {
                     point: POINT,
@@ -9293,7 +9730,7 @@ mod tests {
             }]
         );
         // The drain empties — one audit receipt per unbacked change.
-        assert!(b.take_adoption_receipts().is_empty());
+        assert!(b.drain_pending().adoption_receipts().is_empty());
     }
 
     /// The mirror image: an adoption that *drops* a standing force the
@@ -9329,7 +9766,7 @@ mod tests {
         // The backed adoption: the checkpoint's own force receipt
         // explains the stood-up force — nothing queues.
         b.apply(&forced).unwrap();
-        assert!(b.take_adoption_receipts().is_empty());
+        assert!(b.drain_pending().adoption_receipts().is_empty());
 
         // The receipted release: the fresher checkpoint's `unforce`
         // verdict explains the empty force set — nothing queues.
@@ -9337,7 +9774,7 @@ mod tests {
         a.scan();
         b.apply(&a.checkpoint()).unwrap();
         assert!(b.executor().forces().is_empty());
-        assert!(b.take_adoption_receipts().is_empty());
+        assert!(b.drain_pending().adoption_receipts().is_empty());
 
         // The unbacked drop: a peer whose covered log still shows the
         // force standing adopts a checkpoint whose force set drops it
@@ -9350,14 +9787,14 @@ mod tests {
             Some(&c_gate),
         );
         c.apply(&forced).unwrap();
-        assert!(c.take_adoption_receipts().is_empty());
+        assert!(c.drain_pending().adoption_receipts().is_empty());
         let mut dropped = forced.clone();
         dropped.tick = Tick(2);
         dropped.forces.clear();
         c.apply(&dropped).unwrap();
         assert!(c.executor().forces().is_empty());
         assert_eq!(
-            c.take_adoption_receipts(),
+            c.drain_pending().adoption_receipts(),
             vec![CommandReceipt {
                 command: Command::UnforcePoint { point: POINT },
                 outcome: CommandOutcome::Applied { tick: Tick(2) },
@@ -9621,7 +10058,7 @@ mod tests {
         // The unbacked force claim is the adoption audit's to name —
         // the receiptless change journals naming the source.
         assert!(
-            !owner.take_adoption_receipts().is_empty(),
+            !owner.drain_pending().adoption_receipts().is_empty(),
             "a receiptless force adoption journals its source"
         );
         assert_eq!(
@@ -9725,7 +10162,7 @@ mod tests {
         // — the durable journal answers "who rolled the command
         // back" even though the merged log carried no verdict.
         assert_eq!(
-            b.take_adoption_receipts(),
+            b.drain_pending().adoption_receipts(),
             vec![CommandReceipt {
                 command: write(false),
                 outcome: CommandOutcome::Applied { tick: Tick(3) },
@@ -9733,7 +10170,7 @@ mod tests {
                 reason: None,
             }]
         );
-        assert!(b.take_adoption_receipts().is_empty());
+        assert!(b.drain_pending().adoption_receipts().is_empty());
 
         // The consistent half: adopting the receipted line itself —
         // whose merged log's newest settled write already produces
@@ -9744,7 +10181,7 @@ mod tests {
             b.executor().sample(POINT).map(|sample| sample.value),
             Some(Value::Bool(true))
         );
-        assert!(b.take_adoption_receipts().is_empty());
+        assert!(b.drain_pending().adoption_receipts().is_empty());
     }
 
     /// The finding's own shape (#865): the rejoining peer never
@@ -9820,7 +10257,7 @@ mod tests {
             Some(Value::Bool(false))
         );
         assert_eq!(
-            b.take_adoption_receipts(),
+            b.drain_pending().adoption_receipts(),
             vec![CommandReceipt {
                 command: write(false),
                 outcome: CommandOutcome::Applied { tick: Tick(4) },
@@ -9828,6 +10265,6 @@ mod tests {
                 reason: None,
             }]
         );
-        assert!(b.take_adoption_receipts().is_empty());
+        assert!(b.drain_pending().adoption_receipts().is_empty());
     }
 }
