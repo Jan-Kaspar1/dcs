@@ -23,6 +23,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "\\wsl.localhost\Ubuntu-
 
 This registers `DCS Local Devin Agents` for the current user's next login, replacing a task with that name. Its WSL foreground process starts and waits for the service. Registration is not proof of login recovery: verify the task after a real subsequent login. Windows sleep or shutdown interrupts execution; process receipts and repository work remain available for reconciliation afterward.
 
+## Completion-first production queue
+
+The `factory` configuration selects the durable completion-first queue with four
+inference worker slots, eight preserved workspaces, worker-owned recovery probes,
+and provider waiting that cannot exhaust a valid issue. Planning and architecture
+review run only when productive demand is empty. See [queue design, activation and
+rollback](factory-queue.md). `status.factory` separates actual workers, delivery
+backlog, provider waits, rolling 24-hour merges and the goal. Absence of `factory`
+retains the legacy behavior described below.
+
 ## Daily controls
 
 ```sh

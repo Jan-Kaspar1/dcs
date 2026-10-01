@@ -74,6 +74,15 @@ def load(path=None):
         raise ValueError('model_caps references unpermitted models: ' + ', '.join(unknown))
     config['model_caps'] = caps
     config['scheduler'] = scheduler(config.get('scheduler'))
+    factory = config.get('factory')
+    if factory is not None:
+        if not isinstance(factory, dict):
+            raise ValueError('factory must be an object')
+        for key in ('worker_slots', 'workspace_slots', 'daily_merge_goal'):
+            if type(factory.get(key)) is not int or factory[key] < 1:
+                raise ValueError('factory.' + key + ' must be a positive integer')
+        if factory['workspace_slots'] < factory['worker_slots']:
+            raise ValueError('factory.workspace_slots must cover worker_slots')
     config.setdefault('required_checks', DEFAULT_CHECKS)
     if config['required_checks'] != DEFAULT_CHECKS:
         raise ValueError('Required CI checks cannot be weakened in active configuration')
