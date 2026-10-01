@@ -563,6 +563,57 @@ Implementation order: second, after [daily architecture review](daily-architectu
   An enabler for the sim-bus rig legs (#1355/#1356/#1357); a leg
   needing the server itself to misbehave may still stage a double.
 
+### Landed 2026-10-01 (sim-bus born-active claim refusal leg, #1356)
+
+- The born-active startup-claim refusal now has per-revision lane
+  evidence over a sim-bus field, not only over the sim-tcp plant: leg
+  `2480_sim_bus_startup_claim_refusal` stages the lane's shipped
+  `dcs-sim-bus-device`, launches a first controller onto it and
+  asserts it takes the field's write-ownership claim, then stages a
+  second born-active declaring the same model with no `--peer` and
+  asserts it exits nonzero inside the documented bound carrying the
+  live-holder verdict — the sim-tcp refusal reproduced on the register
+  protocol, which the conditional `claim_writer_unless_held` grant
+  makes possible there, since a bus claim dies with its last holder's
+  link and a standing claim is therefore always a live incumbent to
+  name. A `--standby` launch in the same shape is the positive
+  control: it must converge `tracking` behind the incumbent with its
+  command gate closed and no tracking-source refusal journaled — the
+  arm the defect orphaned. The incumbent's claim and role must be
+  undisturbed throughout: no claim-owner flip, no fenced demotion
+  journaled on it, its scan still moving. Named diagnostics
+  `sim-bus-claim-refusal-failed` and
+  `sim-bus-claim-refusal-nondeterministic`, with
+  `sim-bus-claim-refusal-unchecked` covering the planted negatives;
+  two consecutive passes produce identical digests; a rig with no
+  staged device server, no pinned `--owner-token` for the incumbent
+  seat, an unsettled deployed pair, or a staged revision predating the
+  contract — the second born-active claiming the field and going
+  active — reports inconclusive. Each pass ends with the three born
+  seats and the device server removed, and the sweep is audited back
+  over the rig rather than assumed: each seat's presence read through
+  the read-only state lever, the device server's own removal error,
+  and the deployed pair framed once more with the leg's claim gone.
+  A seat or a device server that outlived the sweep is a claim the
+  legs behind this one would inherit, so it reports
+  `sim-bus-claim-refusal-nondeterministic` instead of leaving them a
+  dirty rig; the control's closed gate is read the same way, an
+  unreadable SignalIndex leaving the leg with nothing to submit
+  reported as an unread surface rather than a gate the control
+  crossed.
+- The leg rides the born-seat launcher's own field seam rather than
+  adding one: `start_born_controller(seat, remote, document=)` mounts
+  a staged model of the leg's choosing in place of the run's own, and
+  a `remote` of None launches with no `--remote` attachment at all —
+  the shape a `sim-bus`/`sim-cyclic` model needs, since the device
+  carries its address in its parameters. This leg is the second user
+  of the seam #1357's leg landed, and the return value's `model` is
+  what lets it evidence that both ends of the register protocol read
+  one declaration: the device server serves the document the seat
+  mounted. The leg runs after `2470` and before the revision legs,
+  sharing the driven/foreign born seats and the device server with it
+  and sweeping both behind itself.
+
 ### Landed 2026-10-01 (holderless-claim reclaim recovery leg, #1260)
 
 - The holderless-claim reclaim recovery contract — the continuity
@@ -658,6 +709,74 @@ Implementation order: second, after [daily architecture review](daily-architectu
   defect signature itself, the ex-owner whose io_health never names
   a fenced exchange and who stays active beside its promoted peer —
   reports inconclusive; the pair leaves on its launch roles.
+
+### Landed 2026-10-01 (sim-bus driver lazy-reattach leg, #1355)
+
+- The point-wise `BusDriver`'s lazy-reattach contract — #1351's fix
+  serving WW-LCM-001's continuity clause and the health model's rule
+  that a field communication fault is a transient, retriable event —
+  is exercised per revision by scenario leg
+  `3560_sim_bus_driver_reattach`. `dcs-sim-bus`'s `BusDriver` and
+  `dcs-sim-net`'s `RemoteDriver` implement their recovery
+  independently, so a rig with no register-mapped device says
+  nothing about this one; the leg stages the subject through the
+  lane's `sim_bus_device` seam — `start_sim_bus_device` launches the
+  revision's own shipped `dcs-sim-bus-device` binary on the rig
+  bridge, serving the run config's bus model with a `timeout_ms`
+  stamped under the leg's ~2 s stall so a frozen device times out
+  mid-exchange and the driver has a failed exchange to recover from.
+  A controller pair is born-launched onto the `driven`/`foreign`
+  seats with the staged document mounted and no `--remote` — a
+  register-protocol model carries its device address in its
+  parameters — so each member's serving monitor is the leg's window
+  on its own driver's health. The pre-fix defect dropped the
+  point-wise driver's stream on the first failed exchange and
+  answered `Disconnected` for the life of the process: the active's
+  scanning `communication_fault` values never cleared and the
+  standby stayed unpromotable, because a promotion must claim the
+  device and the claim request rode a dead link. The leg drives
+  both outage classes the finding records — (a) the device server
+  restarted under the pair, returning with its claim table empty so
+  the owner must re-attach *and* re-arm, and (b) the device frozen
+  ~2 s then thawed through the lane's `freeze_sim_bus_device`/
+  `thaw_sim_bus_device` levers, a transient unanswerable window with
+  nothing dying — and through each member's serving monitor asserts
+  the healthy baseline carries a connected link and no standing
+  `last_error`; the outage is counted in the served `io_health` —
+  the boundary counters moved over the baseline with the fault
+  stamped — and the first serve reporting the link `connected`
+  after the outage already carries the cleared standing record, the
+  reset failure streak, and the kept cumulative history and recorded
+  fault, with the served tick and scan cadence resumed without
+  rewinding past the running peak, which would be a controller
+  restart rather than a driver recovery; the pair's launch roles
+  hold throughout; and `POST /promote` on the converged standby must
+  answer inside its own bound once the backend is back — the
+  promotion path's device claim riding the recovered link — after
+  which the launch roles are restored by promoting the original
+  owner back. The re-attach is fast by design, so the window in
+  which the link is observably down is about one re-attach interval
+  wide and no poll can prove it caught it: the stall class, whose
+  freeze the leg owns, therefore *holds* the device down past the
+  documented stall until every member has surfaced the outage as
+  `disconnected` with the severing failure named, and only that
+  class gates on the transient — the restart class lets the device
+  return on its own schedule and witnesses an outage that fell
+  between two polls through the moved counters instead.
+- Named diagnostics are `sim-bus-reattach-failed` and
+  `sim-bus-reattach-nondeterministic`, with the self-check's
+  `sim-bus-reattach-unchecked` covering the planted lingering
+  record, standing streak, reset history, uncounted outage, and held
+  tick; both outage classes run twice with identical digests; a run
+  context carrying no `sim_bus_device` device-server seam or born-
+  controller levers, a rig whose device or pair never answers, a
+  device that never serves again after a restart, a pair that never
+  settles tracking, a staging lever that never completes, a restore
+  the leg cannot classify, and a staged revision whose served
+  `io_health` cannot express the driver's diagnostics and
+  failed-exchange accounting — every build, until #1351's fix lands
+  — report inconclusive; the rig leaves on its launch roles with
+  the staged born seats and device container torn down.
 
 ## Outcome
 

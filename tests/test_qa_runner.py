@@ -1441,7 +1441,9 @@ class DcsCtlBuildTests(unittest.TestCase):
                           self._fake_docker(
                               [], binaries=('dcs-controller',
                                             'dcs-plant-server',
-                                            'dcs-plant-ctl'))):
+                                            'dcs-plant-ctl',
+                                            'dcs-forge',
+                                            'dcs-sim-bus-device'))):
             with self.assertRaises(RuntimeError):
                 runner._build_images(self.src, self.cfg, self.run_dir,
                                      lambda e, d=None: None, 'qa-1')
@@ -1528,7 +1530,9 @@ class PlantCtlShipTests(unittest.TestCase):
                           self._fake_docker(
                               [], binaries=('dcs-controller',
                                             'dcs-plant-server',
-                                            'dcs-ctl'))):
+                                            'dcs-ctl',
+                                            'dcs-forge',
+                                            'dcs-sim-bus-device'))):
             with self.assertRaises(RuntimeError):
                 runner._build_images(self.src, self.cfg, self.run_dir,
                                      lambda e, d=None: None, 'qa-1')
@@ -2521,6 +2525,62 @@ class BornActiveActionTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self._launch(peer='foreign', standby='revised')
 
+    def test_a_document_addressed_launch_carries_no_remote(self):
+        # The sim-bus rig legs point a seat at a field the staged
+        # document declares: no --remote at all, and that document
+        # mounted in place of the run's sim-tcp model, so both ends of
+        # the register protocol read one declaration.
+        bus_model = self.run_dir / 'sim-bus' / 'model.json'
+        bus_model.parent.mkdir(parents=True, exist_ok=True)
+        bus_model.write_text(json.dumps({'version': 1}))
+        calls, events, info = [], [], []
+
+        def docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', docker):
+            info = runner.start_born_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'driven', None,
+                lambda event, detail=None: events.append(
+                    (event, detail)), standby='revised',
+                document=bus_model)
+        launch = self._run(calls)
+        self.assertNotIn('--remote', launch)
+        self.assertIn(str(bus_model) + ':/model/plant.json:ro', launch)
+        self.assertNotIn(str(self.model) + ':/model/plant.json:ro',
+                         launch)
+        # The launch role is otherwise the rig shape unchanged: the
+        # --standby target resolved to the seat's bridge monitor and
+        # the seat's own claim-token pin rides along.
+        index = launch.index('--standby')
+        self.assertEqual(launch[index + 1],
+                         'dcs-hw-qa-1-c:'
+                         + str(runner.BORN_MONITOR_PORT))
+        index = launch.index('--owner-token')
+        self.assertEqual(launch[index + 1],
+                         str(self.cfg['plant_owner_tokens']['driven']))
+        self.assertIsNone(info['remote'])
+        # The return carries the document actually mounted, so a leg
+        # staging against a device server can evidence that both ends
+        # read the one declaration it staged.
+        self.assertEqual(info['model'], str(bus_model))
+        self.assertEqual(
+            events[0][1],
+            'launch dcs-hw-qa-1-d on ' + str(bus_model)
+            + ' --standby dcs-hw-qa-1-c:' + str(runner.BORN_MONITOR_PORT)
+            + ' --owner-token '
+            + str(self.cfg['plant_owner_tokens']['driven']))
+
+    def test_a_launch_with_neither_remote_nor_document_rejected(self):
+        with self.assertRaises(RuntimeError) as caught:
+            runner.start_born_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'driven', None, lambda event, detail=None: None)
+        self.assertIn('staged document of its own',
+                      str(caught.exception))
+
     def test_unknown_seat_rejected(self):
         with self.assertRaises(RuntimeError):
             self._launch(seat='active')
@@ -2662,6 +2722,9 @@ class BornActiveActionTests(unittest.TestCase):
             calls.append(args)
             return Result('')
 
+        bus_model = self.run_dir / 'sim-bus' / 'model.json'
+        bus_model.parent.mkdir(parents=True, exist_ok=True)
+        bus_model.write_text(json.dumps({'version': 1}))
         with patch.object(runner, 'docker', docker):
             ctx = runner._scenario_ctx(
                 self.cfg, self._record(), self.src, self.run_dir,
@@ -2683,6 +2746,10 @@ class BornActiveActionTests(unittest.TestCase):
             ctx['stop_born_controller']('driven')
             ctx['stop_born_field']()
             state = ctx['born_controller_state']('driven')
+            # The same lever takes a document-addressed launch: the
+            # caller names the document to mount and omits the remote.
+            bus = ctx['start_born_controller'](
+                'revised', None, document=bus_model)
         self.assertEqual(launched['container'], 'dcs-hw-qa-1-d')
         launch = next(c for c in calls
                       if c[0] == 'run' and 'dcs-hw-qa-1-d' in c)
@@ -2690,6 +2757,13 @@ class BornActiveActionTests(unittest.TestCase):
         self.assertEqual(launch[index + 1],
                          'dcs-hw-qa-1-c:'
                          + str(runner.BORN_MONITOR_PORT))
+        self.assertIsNone(bus['remote'])
+        self.assertEqual(bus['model'], str(bus_model))
+        bus_launch = next(c for c in calls
+                          if c[0] == 'run' and 'dcs-hw-qa-1-c' in c)
+        self.assertNotIn('--remote', bus_launch)
+        self.assertIn(str(bus_model) + ':/model/plant.json:ro',
+                      bus_launch)
         self.assertFalse(state['running'])
 
 
@@ -3001,6 +3075,14 @@ class SimBusDeviceImageTests(unittest.TestCase):
             if args[0] == 'logs':
                 return Result(self.serving)
             if args[0] == 'inspect':
+                # Per-template answers: the readiness/serving reads
+                # scope the log check to the running lifetime, and a
+                # paused container reports not-serving.
+                template = str(args)
+                if 'StartedAt' in template:
+                    return Result('2026-10-01T12:00:00Z')
+                if 'Paused' in template:
+                    return Result('false')
                 return Result('true')
             return Result('')
         return fake_docker
@@ -3317,6 +3399,125 @@ class SimBusDeviceImageTests(unittest.TestCase):
         self.assertIn('--entrypoint', launch)
         self.assertIn('dcs-sim-bus-device', launch)
         self.assertEqual(calls[-1], ('rm', '-f', 'dcs-hw-qa-1-bus'))
+
+    def test_timeout_ms_stamps_the_staged_document(self):
+        # The reattach leg's stall has to produce a failed exchange:
+        # the driver's declared per-request timeout must sit under the
+        # ~2 s freeze, and the fixtures' five-second default would not —
+        # so the launch stamps it onto the document both ends read.
+        with patch.object(runner, 'docker',
+                          self._serving_docker([])):
+            info = runner.start_sim_bus_device(
+                self.cfg, self._record(), self.run_dir,
+                lambda e, d=None: None, timeout_ms=1500)
+        staged = json.loads(Path(info['model']).read_text())
+        device = next(d for d in staged['devices'] if d['id'] == 1)
+        self.assertEqual(device['parameters']['timeout_ms'], 1500)
+        self.assertEqual(device['parameters']['address'],
+                         info['address'])
+
+    def test_no_timeout_ms_leaves_the_declared_timeout(self):
+        with patch.object(runner, 'docker',
+                          self._serving_docker([])):
+            info = runner.start_sim_bus_device(
+                self.cfg, self._record(), self.run_dir,
+                lambda e, d=None: None)
+        staged = json.loads(Path(info['model']).read_text())
+        device = next(d for d in staged['devices'] if d['id'] == 1)
+        self.assertNotIn('timeout_ms', device['parameters'])
+
+    def test_a_non_integer_timeout_ms_fails_before_launch(self):
+        calls = []
+        for timeout_ms in ('1500', -1, 1.5, True):
+            with self.subTest(timeout_ms=timeout_ms):
+                with patch.object(runner, 'docker',
+                                  self._serving_docker(calls)):
+                    with self.assertRaises(RuntimeError) as caught:
+                        runner.start_sim_bus_device(
+                            self.cfg, self._record(), self.run_dir,
+                            lambda e, d=None: None,
+                            timeout_ms=timeout_ms)
+                self.assertIn('timeout_ms', str(caught.exception))
+        self.assertEqual(calls, [])
+
+    def test_freeze_and_thaw_hold_and_resume_the_device(self):
+        # The stall half of the reattach contract: docker pause holds
+        # the attachments' sockets open and unanswered without anything
+        # dying; docker unpause resumes the same process — the field's
+        # state and claims survive, unlike a restart.
+        calls, events = [], []
+        with patch.object(runner, 'docker',
+                          self._serving_docker(calls)):
+            runner.freeze_sim_bus_device(
+                'qa-1', lambda event, detail=None: events.append(event))
+            runner.thaw_sim_bus_device(
+                'qa-1', lambda event, detail=None: events.append(event))
+        self.assertIn(('pause', 'dcs-hw-qa-1-bus'), calls)
+        self.assertIn(('unpause', 'dcs-hw-qa-1-bus'), calls)
+        self.assertEqual(events, ['sim-bus-freeze', 'sim-bus-frozen',
+                                  'sim-bus-thaw', 'sim-bus-thawed'])
+
+    def test_serving_reports_the_current_lifetime_only(self):
+        # The leg's field-reachability probe: true only while the
+        # container is unpaused and the running process's own log —
+        # scoped to its StartedAt — carries the bound-address report.
+        calls = []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            if args[0] == 'inspect' and 'StartedAt' in str(args):
+                return Result('2026-10-01T12:00:00Z')
+            if args[0] == 'inspect' and 'Paused' in str(args):
+                return Result('false')
+            if args[0] == 'logs':
+                return Result(self.serving)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            self.assertTrue(runner.sim_bus_device_serving('qa-1', 1))
+        self.assertTrue(any(c[0] == 'logs' and '--since' in c
+                            for c in calls))
+
+    def test_serving_is_false_on_a_frozen_or_dead_device(self):
+        # A frozen container holds the sockets but answers nothing, and
+        # a dead one has no running lifetime: both report not-serving,
+        # so a stalled field never reads as a driver defect.
+        for paused, started, logs in (('true', 'T', self.serving),
+                                      ('false', '', ''),
+                                      ('false', 'T', 'no bind yet')):
+            def fake_docker(*args, timeout=120, check=True,
+                            paused=paused, started=started, logs=logs):
+                if args[0] == 'inspect' and 'StartedAt' in str(args):
+                    return Result(started)
+                if args[0] == 'inspect' and 'Paused' in str(args):
+                    return Result(paused)
+                if args[0] == 'logs':
+                    return Result(logs)
+                return Result('')
+
+            with self.subTest(paused=paused, started=started):
+                with patch.object(runner, 'docker', fake_docker):
+                    self.assertFalse(
+                        runner.sim_bus_device_serving('qa-1', 1))
+
+    def test_scenario_ctx_carries_the_stall_levers(self):
+        calls = []
+        with patch.object(runner, 'docker',
+                          self._serving_docker(calls)):
+            ctx = runner._scenario_ctx(
+                self.cfg, self._record(), self.src, self.run_dir,
+                self.run_dir / 'evidence', 0,
+                lambda e, d=None: None)
+            info = ctx['start_sim_bus_device'](timeout_ms=1500)
+            ctx['freeze_sim_bus_device']()
+            ctx['thaw_sim_bus_device']()
+            serving = ctx['sim_bus_device_serving'](info['device'])
+        staged = json.loads(Path(info['model']).read_text())
+        device = next(d for d in staged['devices'] if d['id'] == 1)
+        self.assertEqual(device['parameters']['timeout_ms'], 1500)
+        self.assertIn(('pause', 'dcs-hw-qa-1-bus'), calls)
+        self.assertIn(('unpause', 'dcs-hw-qa-1-bus'), calls)
+        self.assertTrue(serving)
 
     @unittest.skipUnless(
         SIM_BUS_DEVICE_BIN, 'the shipped dcs-sim-bus-device binary is '
