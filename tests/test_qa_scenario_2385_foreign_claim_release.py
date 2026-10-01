@@ -1,4 +1,4 @@
-"""The 2390_foreign_claim_release leg's scenario unit coverage —
+"""The 2385_foreign_claim_release leg's scenario unit coverage —
 the feed fakes and TestCase classes for
 scenario_foreign_claim_release, in the
 tests/test_qa_scenario_NNNN_<slug>.py split layout (#940). The

@@ -541,7 +541,7 @@ Implementation order: second, after [daily architecture review](daily-architectu
 
 - The amended intended-`unsynchronized` bound #1167 recorded is
   exercised on the deployed rig by scenario leg
-  `2390_foreign_claim_release` — the per-revision lane evidence for the
+  `2385_foreign_claim_release` — the per-revision lane evidence for the
   scripted reproduction `field_attested_source.rs`'s
   `unkeyed_fenced_demote_reclaims_the_released_field` drives, and the
   one bound the adjacent legs cannot pin: 2350's claim-reclaim proves
