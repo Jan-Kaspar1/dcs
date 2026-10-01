@@ -474,6 +474,22 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(redispatches[0]['delay'],
                          {'source':'retry-after','seconds':120})
 
+    def test_quota_requeue_hint_is_bounded_by_the_cooldown_ceiling(self):
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        self.kill_worker('Rate limit exceeded. Retry-After: 999999')
+        rec = s.state.get('recovery:1')
+        self.assertEqual(rec['requeue']['source'],'retry-after')
+        self.assertEqual(rec['requeue']['seconds'], s.admission.hint_ceiling)
+
+    def test_bare_retry_prose_never_arms_a_quota_requeue(self):
+        """#1366: an agent's own retry prose is not a provider quota event."""
+        s=self.supervisor
+        s.dispatch(self.github.items)
+        self.kill_worker('test failed: flaky endpoint, will retry after 30 seconds')
+        self.assertFalse(s.state.get('retry:1'))
+        self.assertEqual(s.admission.summary()['groups']['swe-2-high']['mode'],'normal')
+
     def test_quota_requeue_budget_exhaustion_still_parks(self):
         s=self.supervisor
         s.admission.max_quota_requeues = 1
