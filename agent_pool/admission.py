@@ -197,7 +197,8 @@ class Admission:
                         and now - group['window_start'] >= self.quiet):
                     self.db.execute('UPDATE admission_groups SET target=?,window_start=?,useful=0,loaded=NULL WHERE grp=?',
                                     (min(self.groups[name]['ceiling'], group['target'] + 1), now, name))
-            self.db.execute('INSERT INTO admission_leases(owner,model,grps,clone,probe,granted,updated) VALUES(?,?,?,?,?,?,?)',
+            self.db.execute('INSERT INTO admission_leases(owner,model,grps,clone,probe,granted,'
+                            'updated) VALUES(?,?,?,?,?,?,?)',
                             (owner, model, json.dumps(names), clone, int(probe_grant), now, now))
             self.db.commit()
             return True

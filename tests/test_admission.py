@@ -1,9 +1,10 @@
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
 from agent_pool.admission import Admission, classify
-from agent_pool.state import State
+from agent_pool.state import MIGRATIONS, State
 from agent_pool.config import scheduler
 
 
@@ -216,9 +217,13 @@ class AdmissionTests(unittest.TestCase):
         self.now += 3599
         self.assertFalse(self.a.reserve('next', 'swe-2-high', 'next', 5))
         self.now += 1
-        self.assertTrue(self.a.reserve('next', 'swe-2-high', 'next', 5))
+        fresh = self.start('fresh-probe')
         self.assertFalse(self.a.reserve('second', 'swe-2-high', 'second', 5))
         self.assertEqual(self.a.summary()['groups']['swe']['mode'], 'probing')
+        # Ordering newer feedback above the probe never strands the group: the
+        # newer episode's own probe still reopens it.
+        self.a.finish('fresh-probe', fresh, 'success')
+        self.assertEqual(self.a.summary()['groups']['swe']['mode'], 'normal')
 
     def test_probe_success_keeps_a_reset_recorded_in_its_grant_tick(self):
         stale, probe = self._inflight_probe(advance=10)
@@ -236,6 +241,53 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(groups['mode'], 'normal')
         self.assertIsNone(groups['cooldown_until'])
         self.assertTrue(self.a.reserve('next', 'swe-2-high', 'next', 5))
+
+    def test_probe_lease_predating_the_ordering_column_cannot_unblock(self):
+        stale, probe = self._inflight_probe()
+        # A deployment upgraded with a probe in flight keeps that lease at the
+        # migration default; with no grant to order against, its success may not
+        # lift anything the group recorded afterwards.
+        self.state.db.execute('UPDATE admission_leases SET granted=0 WHERE owner=?', ('probe',))
+        self.a.finish('L1', stale, 'auth')
+        self.a.finish('probe', probe, 'success')
+        self.assertEqual(self.a.summary()['groups']['swe']['mode'], 'blocked')
+
+
+class ProbeOrderingMigrationTests(unittest.TestCase):
+    def test_existing_database_gains_the_probe_ordering_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'state.db'
+            legacy = sqlite3.connect(str(path))
+            legacy.executescript(''.join(MIGRATIONS[:5]) + 'PRAGMA user_version=5;')
+            legacy.execute("INSERT INTO admission_groups(grp,target,mode,cooldown_len) "
+                           "VALUES('swe',4,'probing',10)")
+            legacy.execute("INSERT INTO admission_leases(owner,model,grps,probe,updated) "
+                           "VALUES('P','swe-2-high','[\"swe\"]',1,99)")
+            legacy.commit()
+            legacy.close()
+
+            state = State(path)
+            self.assertEqual(state.db.execute('PRAGMA user_version').fetchone()[0], len(MIGRATIONS))
+            state.db.execute('UPDATE admission_groups SET congested_at=120 WHERE grp=?', ('swe',))
+            state.db.commit()
+            a = Admission(state, {'scheduler': {'cooldown_seconds': 10}},
+                          clock=lambda: 130, jitter=lambda: 0)
+            # The lease predates the column, so its grant cannot be ordered and
+            # its success may not lift the block's group back into dispatch.
+            a.finish('P', {'invocation': 'P-run'}, 'success')
+            self.assertEqual(state.db.execute('SELECT mode FROM admission_groups WHERE grp=?',
+                                             ('swe',)).fetchone()['mode'], 'probing')
+            state.db.execute('PRAGMA user_version=5')
+            state.close()
+
+            # The step re-applies to a database that already carries the
+            # columns, as an interrupted upgrade would find it.
+            reopened = State(path)
+            self.assertEqual(reopened.db.execute('PRAGMA user_version').fetchone()[0], len(MIGRATIONS))
+            self.assertEqual(reopened.db.execute(
+                "SELECT COUNT(*) FROM pragma_table_info('admission_leases') "
+                "WHERE name='granted'").fetchone()[0], 1)
+            reopened.close()
 
 
 if __name__ == '__main__':
