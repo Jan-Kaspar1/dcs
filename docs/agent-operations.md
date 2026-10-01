@@ -23,6 +23,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "\\wsl.localhost\Ubuntu-
 
 This registers `DCS Local Devin Agents` for the current user's next login, replacing a task with that name. Its WSL foreground process starts and waits for the service. Registration is not proof of login recovery: verify the task after a real subsequent login. Windows sleep or shutdown interrupts execution; process receipts and repository work remain available for reconciliation afterward.
 
+## Completion-first production queue
+
+The `factory` configuration selects the durable completion-first queue with four
+inference worker slots, eight preserved workspaces, worker-owned recovery probes,
+and provider waiting that cannot exhaust a valid issue. Planning and architecture
+review run only when productive demand is empty. See [queue design, activation and
+rollback](factory-queue.md). `status.factory` separates actual workers, delivery
+backlog, provider waits, rolling 24-hour merges and the goal. Absence of `factory`
+retains the legacy behavior described below.
+
 ## Daily controls
 
 ```sh
@@ -74,10 +84,10 @@ Every managed invocation — worker, retry, repair, planner, and reviewer — mu
 
 Models are grouped into quota groups — sets of models sharing one provider budget. Without an explicit `scheduler` config section, one group is derived per unique entry in `models`, seeded from `model_caps` (uncapped models start at four slots). Provider feedback is scoped to the affected group:
 
-- A rate-limit or provider-outage receipt cools down only that group (bounded exponential cooldown, honoring a `Retry-After` hint); other groups keep dispatching, and retries migrate to any group with capacity instead of dying again on the throttled model. Recovery reopens with a single probe session, never a retry wave.
+- A rate-limit or provider-outage receipt cools down only that group (bounded exponential cooldown, honoring a `Retry-After` hint or Devin's stated "Your limit will reset in …" duration in hours/minutes/seconds); other groups keep dispatching, and retries migrate to any group with capacity instead of dying again on the throttled model. Recovery reopens with a single probe session, never a retry wave.
 - Authentication and credit failures block the group until `dcs-agents admission reset <group>` after the credential problem is resolved; sleeping cannot fix them, so they are never auto-retried.
-- A quota-killed job is requeued automatically once per failed invocation, bounded by `scheduler.max_quota_requeues` (default 4). The armed retry holds for a bounded delay before it may dispatch — the provider's `Retry-After` where the receipt carried one, else `scheduler.quota_requeue_delay_seconds` (default 900) — so the redispatch lands past the quota window's reset instead of dying at once and burning the bounded budget; the redispatch ledger row records which delay applied. The bound scopes to one congestion episode: when a spent budget's covering quota group still reports a live congestion lifecycle, the park only holds until the group is back to normal with `quiet_seconds` elapsed since its congestion window last restarted, then one retry re-arms with a fresh episode budget and a `quiet-window` delay source on the redispatch row. Quiet-window resets are bounded per issue by `scheduler.max_quota_requeue_resets` (default 2); a job that spends its budget while no covering group reports a live episode — or after the reset bound — stays parked permanently with the exhaustion logged. Ordinary task failures stay blocked for operator `retry`.
-- Group targets adapt: halved on a congestion event (floor 1), and raised by one only after a `quiet_seconds` window that contained both refused demand and a verified useful completion, up to `ceiling`. A new congestion event restarts the window.
+- A quota-killed job is requeued automatically once per failed invocation, bounded by `scheduler.max_quota_requeues` (default 4). The armed retry holds for a bounded delay before it may dispatch — the provider's `Retry-After` or parsed Devin reset duration where the receipt carried one, else `scheduler.quota_requeue_delay_seconds` (default 900) — so the redispatch lands past the quota window's reset instead of dying at once and burning the bounded budget; the redispatch ledger row records which delay applied. The bound scopes to one congestion episode: when a spent budget's covering quota group still reports a live congestion lifecycle, the park only holds until the group is back to normal with `quiet_seconds` elapsed since its congestion window last restarted, then one retry re-arms with a fresh episode budget and a `quiet-window` delay source on the redispatch row. Quiet-window resets are bounded per issue by `scheduler.max_quota_requeue_resets` (default 2); a job that spends its budget while no covering group reports a live episode — or after the reset bound — stays parked permanently with the exhaustion logged. Ordinary task failures stay blocked for operator `retry`.
+- Group targets adapt: halved on a congestion event (floor `minimum`, default 1; must be an integer between 1 and `initial`), and raised by one only after a `quiet_seconds` window that contained both refused demand and a verified useful completion, up to `ceiling`. A new congestion event restarts the window. The configured floor preserves the recovery target, not permission to bypass cooldown or the single-probe gate; a successful probe restores normal admission at that target.
 
 Provider-error visibility differs by backend: Devin writes failures into the invocation log directly, but opencode emits provider failures as `stream error` events in its own log while the process itself stays silent — a rate-limited stream otherwise freezes until the hard timeout. OpenCode invocations therefore spawn with `--print-logs` (mirroring those events into `output.log`) and carry a runner stall watchdog: no log writes for `stall_seconds` (default 1200) triggers a descendant check — the runner samples the child's process group and /proc descendants for utime+stime progress over a bounded interval, and CPU progress extends the stall window instead of killing, so a quiet `cargo` or `verify.py` build phase survives while a quiet and idle tree is still declared hung. A genuine stall receipt's error records the sampled process tree (pid/comm per member) and the log tail position for blocked-job triage. A tail ending in a provider `stream error` fails after `error_stall_seconds` (default 180) regardless of CPU activity — that fast path is unchanged. The probe is Linux-only; off Linux it is a no-op and silence past `stall_seconds` kills as before. A timeout receipt whose tail carries a `stream error` still classifies as rate/endpoint — the freeze is scoped cooldown evidence, not a generic timeout.
 
@@ -85,7 +95,7 @@ Prompt transport differs by backend: Devin receives the durable prompt file via 
 
 Interrupted sessions are resumed rather than restarted: a retry launch passes `--resume <id>` for Devin sessions and `--session <id>` for opencode sessions, using the session id captured after each invocation (`devin list` filtered by checkout; the opencode `session` table matched by invocation-key title). A stored id that the backend reports missing is cleared so the next retry starts fresh.
 
-`dcs-agents admission` prints group targets, modes, active leases, and deduplicated outcome counts; `dcs-agents admission reset <group>` clears a blocked or cooling group. An optional `scheduler` section in `config.json` defines named groups (`models`, `initial`, `ceiling`, `external_slots` for consumers outside the pool) plus `quiet_seconds`, `cooldown_seconds`, and `max_cooldown_seconds`. Global `pause` remains the manual and integrity control and still gates all admission.
+`dcs-agents admission` prints group targets, modes, active leases, and deduplicated outcome counts; `dcs-agents admission reset <group>` clears a blocked or cooling group. An optional `scheduler` section in `config.json` defines named groups (`models`, `initial`, optional `minimum`, `ceiling`, `external_slots` for consumers outside the pool) plus `quiet_seconds`, `cooldown_seconds`, and `max_cooldown_seconds`. Global `pause` remains the manual and integrity control and still gates all admission.
 
 ## Architecture review lane
 
@@ -152,3 +162,19 @@ Before calling rollout complete, record a real issue-to-PR-to-CI-to-merge-to-clo
 # Git ownership and permissions
 
 Workers edit and test files; the supervisor stages and commits completed edits before publishing. This ownership remains explicit even with full Devin tool access. Permission rejections, including those accompanied by a zero exit status, block the issue and preserve its workspace. Initial smart-mode restrictions were replaced with user-authorized full tool access after live validation.
+
+### Space Bunny free worker lane (verified 2026-10-01)
+
+`opencode/space-bunny-free` is an explicitly permitted no-cost backend. Verified
+zero input/output/cache prices in the installed OpenCode model catalog and the
+[OpenCode Zen pricing page](https://opencode.ai/docs/zen/). OpenRouter also lists
+[Space Bunny Alpha](https://openrouter.ai/stealth/space-bunny-alpha) as free;
+these routes are separate providers, not evidence of unlimited concurrency.
+
+A direct read/write probe and eight staggered sessions passed on the Zen route.
+OpenCode 1.18.31 can resolve a new session from inherited PWD rather than the
+process checkout. The runner therefore passes `run --dir <checkout>` explicitly
+for every new or resumed OpenCode session. The actual client failed the input
+probe without this argument and passed with it; a process-boundary regression
+protects the external CLI directory contract. Retain five-second launch spacing
+and bounded admission; keep heavy Rust verification behind its four build slots.

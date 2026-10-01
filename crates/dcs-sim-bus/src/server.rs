@@ -400,6 +400,29 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> Option<Bus
             release_claim(&shared.writer, connection);
             BusResponse::Done
         }
+        BusRequest::EnsureWriter { owner } => {
+            // The conditional grant a re-attached field owner re-arms
+            // its dropped claim with: granted while the field is
+            // unclaimed or the standing claim already names the token —
+            // binding this connection as a holder like a fresh claim —
+            // and refused while a *different* owner stands, so a
+            // re-attaching attachment never preempts the claim another
+            // owner took during its outage.
+            let mut writer = shared.writer.lock().unwrap();
+            match writer.as_mut() {
+                Some(claim) if claim.owner == owner => {
+                    claim.holders.insert(connection);
+                }
+                Some(_) => return Some(fenced_out()),
+                None => {
+                    *writer = Some(WriterClaim {
+                        owner,
+                        holders: HashSet::from([connection]),
+                    });
+                }
+            }
+            BusResponse::Done
+        }
         // Quality injection is development tooling, not field
         // ownership: like reads and the census it is never fenced, so
         // a scripted rig can fault a register while a controller pair
@@ -439,8 +462,11 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> Option<Bus
 /// conditional counterpart the born-active startup claim asks:
 /// refused `Fenced` while a different owner's claim stands — which on
 /// this protocol is exactly a live incumbent, the claim dying with
-/// its last holder — granted otherwise. The claim is bound to its
-/// attachments: it
+/// its last holder — granted otherwise. [`BusRequest::EnsureWriter`]
+/// is the same conditional grant a re-attached owner re-arms with:
+/// granted only while the field is unclaimed or already names the
+/// token, never preempting a different owner's standing claim. The
+/// claim is bound to its attachments: it
 /// releases on the holder's disconnect or
 /// [`BusRequest::ReleaseWriter`], the last release reopening the field.
 ///
@@ -531,6 +557,24 @@ impl BusServer {
                     thread::sleep(std::time::Duration::from_millis(1));
                 }
             }
+        }
+    }
+
+    /// Drops every live client connection without stopping the
+    /// server — the link flap a network fault or a device bounce
+    /// produces: every client observes its connection die, re-attaches
+    /// lazily on its next request, and each holder's connection-bound
+    /// writer claim releases as its handler registers the drop. The
+    /// claim does not re-arm on reconnect — a re-attached attachment
+    /// holds nothing until it claims again.
+    ///
+    /// The drop is asynchronous: the sockets close here, but each
+    /// handler frees its claim hold when its blocked `read` notices —
+    /// a caller needing the claim released observes it through a
+    /// request rather than assuming the teardown has completed.
+    pub fn drop_connections(&self) {
+        for (_, client) in self.shared.clients.lock().unwrap().drain() {
+            let _ = client.shutdown(Shutdown::Both);
         }
     }
 

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from agent_pool.admission import Admission, classify
 from agent_pool.state import State
+from agent_pool.config import scheduler
 
 
 class AdmissionTests(unittest.TestCase):
@@ -87,6 +88,39 @@ class AdmissionTests(unittest.TestCase):
         self.start('next')
         self.assertEqual(self.a.summary()['groups']['swe']['target'], 1)
 
+    def test_configured_floor_recovers_capacity_after_quota_probe(self):
+        self.config['scheduler']['groups']['swe'].update(initial=4, minimum=3)
+        # Start four sessions, then a real quota receipt enters cooldown.
+        metas = [self.start(str(i)) for i in range(4)]
+        self.a.finish('0', metas[0], 'rate')
+        self.assertEqual(self.a.summary()['groups']['swe']['target'], 3)
+        for i in range(1, 4):
+            self.a.finish(str(i), metas[i], 'success')
+        self.assertFalse(self.a.reserve('waiting', 'swe-2-high', 'waiting', 5))
+        self.now += 10
+        probe = self.start('probe')
+        self.assertFalse(self.a.reserve('second-probe', 'swe-2-high', 'second-probe', 5))
+        self.a.finish('probe', probe, 'success')
+        self.a.useful(probe)
+        for i in range(3):
+            self.start('recovered-' + str(i))
+        self.assertFalse(self.a.reserve('fourth', 'swe-2-high', 'fourth', 5))
+        self.now += 60
+        self.a.finish('recovered-0', {'invocation': 'recovered-0-run'}, 'success')
+        self.start('fourth')
+        self.assertEqual(self.a.summary()['groups']['swe']['target'], 4)
+
+    def test_group_minimum_configuration_rejects_invalid_bounds(self):
+        self.config['scheduler']['groups'].pop('muse')
+        group = self.config['scheduler']['groups']['swe']
+        for value in (0, -1, 3, 1.5, True, None):
+            with self.subTest(value=value):
+                group['minimum'] = value
+                with self.assertRaises(ValueError):
+                    scheduler(self.config['scheduler'])
+        group['minimum'] = 2
+        scheduler(self.config['scheduler'])
+
     def test_parent_group_and_external_headroom(self):
         self.config['scheduler']['groups']['account'] = {
             'models': ['swe-2-high', 'opencode/muse'], 'initial': 2, 'ceiling': 3,
@@ -99,6 +133,31 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(classify({'status': 'timeout', 'exit_code': -15}, 'rate limit')[0], 'timeout')
         self.assertEqual(classify({'exit_code': 1}, 'Rate limit exceeded. Retry-After: 300'), ('rate', 300))
         self.assertEqual(classify({'exit_code': 0}, 'test verifies rate limit handling')[0], 'success')
+
+    def test_provider_reset_message_gates_until_the_stated_window(self):
+        message = 'Reached free model rate limit. Your limit will reset in 1 hour 34 minutes.'
+        meta = self.start('limited')
+        category, delay = classify({'exit_code': 1}, message)
+        self.a.finish('limited', meta, category, retry_after=delay)
+        self.now += 34 * 60
+        self.assertFalse(self.a.reserve('early', 'swe-2-high', 'early', 5))
+        self.now += 60 * 60
+        self.start('probe')
+
+    def test_provider_reset_duration_formats_and_explicit_header_precedence(self):
+        cases = [('39 minutes', 2340), ('1 hour 34 minutes', 5640),
+                 ('2 hours', 7200), ('17 seconds', 17),
+                 ('1 hour 2 minutes 3 seconds', 3723), ('0 seconds', 1)]
+        for duration, seconds in cases:
+            message = 'Reached free model rate limit. Your limit will reset in ' + duration + '.'
+            with self.subTest(duration=duration):
+                self.assertEqual(classify({'exit_code': 1}, message), ('rate', seconds))
+        message = 'Reached free model rate limit. Your limit will reset in 39 minutes. Retry-After: 60'
+        self.assertEqual(classify({'exit_code': 1}, message), ('rate', 60))
+        self.assertEqual(classify({'exit_code': 0}, message), ('success', None))
+        self.assertEqual(classify({'exit_code': 1}, 'Rate limit. Your limit will reset in tomorrow.'), ('rate', None))
+        stream = 'stream error: Reached free model rate limit. Your limit will reset in 17 seconds.'
+        self.assertEqual(classify({'status': 'timeout'}, stream), ('rate', 17))
 
     def test_timeout_with_provider_stream_error_scopes_cooldown(self):
         tail = 'level=ERROR message="stream error" error.error="AI_APICallError: Rate limit exceeded"'

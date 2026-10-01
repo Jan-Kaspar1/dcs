@@ -537,6 +537,32 @@ Implementation order: second, after [daily architecture review](daily-architectu
   closed through the writer lock alone — reports inconclusive;
   the pair leaves on its launch roles.
 
+### Landed 2026-10-01 (sim-bus device server in the lane image set, #1368)
+
+- The sim-bus rig legs stage against the released protocol server: the
+  bounded builder adds `-p dcs-sim-bus --bin dcs-sim-bus-device` to
+  its compile set and the ship map carries that binary into the
+  controller image beside `dcs-controller`, so a leg launches the
+  real register-protocol server out of the revision under test —
+  the `dcs-plant-ctl` precedent #654 recorded for the plant image,
+  and the `dcs-forge --entrypoint` precedent on the same image —
+  instead of a disposable in-session server or a Python
+  reimplementation of the wire protocol. The two reported digests,
+  the controller entrypoint, and the host-side `dcs-ctl` seam are
+  unchanged; a dedicated bus image would have changed the digest set.
+- The `sim_bus_device` config block names the device the server
+  serves, its bridge port, and the bus model declaring it;
+  `endpoint_placement` records it `bridge` like the probe field,
+  since no host socket is reachable from the rig. The launch stages
+  the fixture inside the run directory with that device's
+  `__BUS_ADDR__` placeholder bound to the device container's bridge
+  name, mounts it into a controller-image container run under
+  `--entrypoint dcs-sim-bus-device`, waits for the server's own
+  bound-address report, and returns the bridge address and the staged
+  document a leg mounts into the controller it points at the field.
+  An enabler for the sim-bus rig legs (#1355/#1356/#1357); a leg
+  needing the server itself to misbehave may still stage a double.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,

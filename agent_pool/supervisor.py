@@ -47,14 +47,18 @@ class Supervisor:
         self.config = config
         self.root = Path(config['state_root'])
         self.root.mkdir(parents=True, exist_ok=True)
-        self.state = State(self.root / 'state.sqlite3')
+        self.state = State(self.root / 'state.sqlite3', capacity=(config.get('factory') or {}).get('workspace_slots'))
         self.github = GitHub(config['repository'])
-        self.runtime = Runtime(Path(config['pool_root']), self.root, config['repository'], timeout_seconds=config['timeout_seconds'])
+        self.runtime = Runtime(Path(config['pool_root']), self.root, config['repository'], timeout_seconds=config['timeout_seconds'],
+                               launch_spacing_seconds=(config['factory'].get('launch_spacing_seconds', 5)
+                                                       if config.get('factory') else 0))
         self.models = config.get('models') or ['swe-2-high']
         self.model_caps = config.get('model_caps') or {}
         self.admission = Admission(self.state, config)
         self.clock = time.time
         self.stopping = False
+        from .factory import Factory
+        self.factory = Factory(self) if config.get("factory") else None
 
     def model_for(self, worker):
         """Assign each worker clone a stable slot in the configured model list."""
@@ -115,6 +119,8 @@ Repair context: {repair}
 
     def admit_worker(self, issue, candidates):
         """First free worker whose quota group grants an inference lease."""
+        if self.factory and self.factory.worker_slots_used() >= self.config['factory']['worker_slots']:
+            return None
         for worker in candidates:
             if self.admission.reserve('job:' + str(issue), self.model_for(worker), worker,
                                       self.state.capacity()):
@@ -136,6 +142,7 @@ Repair context: {repair}
                'quota_requeues': previous.get('quota_requeues', 0),
                'quota_requeue_resets': previous.get('quota_requeue_resets', 0),
                'quota_episode': previous.get('quota_episode'),
+               'provider_wait': previous.get('provider_wait'),
                'requeue': previous.get('requeue'), 'updated': time.time()}
         try:
             if not rec['branch']:
@@ -285,6 +292,8 @@ Repair context: {repair}
     def recover_job(self, job, rec, active, issue):
         """Restore or recreate the preserved workspace, then relaunch once."""
         number = job['issue']
+        if self.factory and self.factory.worker_slots_used() >= self.config['factory']['worker_slots']:
+            return False
         if rec.get('work') is None:
             detail = rec.get('detail') or 'preserved-work state could not be established'
             self.state.update_job(number, error='Recovery uncertain: ' + detail)
@@ -348,13 +357,15 @@ Repair context: {repair}
             self.admission.release(owner)
             self.state.update_job(number, error='Retry rejected: repair budget exhausted')
             return False
+        if self.factory and cause == 'quota-requeue':
+            self.state.update_job(number, repairs=job['repairs'])
         try:
             self.launch(self.state.job(number), issue, repair)
         except Exception as exc:
             self.log('Retry #' + str(number) + ': launch after recovery failed - ' + str(exc))
             return False
         rec.update(phase='done', target_clone=str(target), requeue=None,
-                   quota_episode=None)
+                   quota_episode=None, provider_wait=None)
         self.state.set('recovery:' + str(number), rec)
         self.state.set('retry:' + str(number), False)
         outcome = 'restored preserved work' if rec['work'] else 'fresh start'
@@ -463,6 +474,9 @@ Repair context: {repair}
         return [line.strip() for line in str(out or '').splitlines() if line.strip()]
 
     def repair(self, job, issue, reason, cause, detail=None):
+        if self.factory:
+            self.factory.defer_repair(job, reason, cause, detail)
+            return
         if self.state.paused():
             return
         owner = 'job:' + str(job['issue'])
@@ -503,6 +517,17 @@ Repair context: {repair}
         number = job['issue']
         rec = self.state.get('recovery:' + str(number)) or {}
         used = rec.get('quota_requeues', 0)
+        if self.factory:
+            delay = retry_after if retry_after is not None else self.admission.quota_requeue_delay
+            rec.update(provider_wait={'category': category, 'since': self.clock()},
+                       quota_episode=None, quota_requeues=used + 1,
+                       requeue={'not_before': self.clock() + delay,
+                                'source': 'retry-after' if retry_after is not None else 'default',
+                                'seconds': delay})
+            self.state.set('recovery:' + str(number), rec)
+            self.state.set('retry:' + str(number), 'quota-requeue')
+            self.log(f'#{number} waiting for provider after {category}; retry in {delay}s')
+            return
         if used >= self.admission.max_quota_requeues:
             resets = rec.get('quota_requeue_resets', 0)
             episode = self.congested_groups(job)
@@ -587,6 +612,8 @@ Repair context: {repair}
     def reconcile_workers(self, issues):
         by_number = {i['number']: i for i in issues}
         for job in self.state.jobs(('working',)):
+            if self.factory and self.state.get('repair:' + str(job['issue'])):
+                continue
             issue = by_number.get(job['issue'])
             if not issue:
                 self.block(job, 'Issue is missing from reconciled GitHub inventory')
@@ -629,11 +656,21 @@ Repair context: {repair}
                                                   key=metadata.get('key'))
                 if session:
                     self.state.update_job(job['issue'], session=session)
+            if self.factory:
+                self.state.set('delivery:' + str(job['issue']), {'invocation': metadata.get('invocation')})
+                self.admission.finish(owner, metadata, 'success')
             try:
                 self.publish(job, issue)
                 self.admission.finish(owner, metadata, 'success')
-            except GitHubError:
-                # Preserve successful receipt so publishing is retried after API recovery.
+                if self.factory:
+                    self.state.set('delivery:' + str(job['issue']), None)
+                    self.admission.useful({'invocation': metadata.get('invocation')})
+            except GitHubError as exc:
+                # The receipt and workspace survive API outages. Other workers
+                # must still release their completed inference leases.
+                if self.factory:
+                    self.state.update_job(job['issue'], error='Publication deferred: ' + str(exc)[:500])
+                    continue
                 raise
             except Exception as exc:
                 # Any other publish-path failure (wrong branch, unclean result,
@@ -667,11 +704,13 @@ Repair context: {repair}
                 self.runtime.terminate(record)
                 self.state.integrity('Stopped unowned local invocation: ' + str(record.get('invocation')))
 
-    def integrate(self, issues):
+    def integrate(self, issues, only=None):
         if self.state.paused():
             return
         by_number = {i['number']: i for i in issues}
         for job in self.state.jobs(('pr-open',)):
+            if only is not None and job['issue'] != only:
+                continue
             pr = self.github.pr(job['pr'])
             if pr.get('merged'):
                 if self.github.issue(job['issue']).get('state', '').upper() == 'CLOSED':
@@ -683,6 +722,8 @@ Repair context: {repair}
                 return
             if pr.get('state', '').upper() == 'CLOSED':
                 self.block(job, 'Pull request closed without merging')
+                continue
+            if self.factory and self.state.get('repair:' + str(job['issue'])):
                 continue
             clone = Path(job['clone'])
             self.runtime.run_git(clone, 'fetch', 'origin')
@@ -888,7 +929,7 @@ Repair context: {repair}
                                   protected={run_id})
         self.log(f'Review {run_id} {status}: {summary}')
 
-    def review(self, issues, prs):
+    def review(self, issues, prs, allow_launch=True):
         """Drive the daily architecture review lane."""
         cfg = review_lane.settings(self.config)
         current = self.state.get('reviewer')
@@ -915,7 +956,7 @@ Repair context: {repair}
         if stale:
             self.state.finish_review(stale['run_id'], 'inconclusive',
                                      error='Review launch interrupted before invocation record')
-        if not cfg['enabled'] or self.state.paused():
+        if not allow_launch or not cfg['enabled'] or self.state.paused():
             return
         if self.slots_used() >= self.state.capacity():
             return
@@ -1059,7 +1100,7 @@ Repair context: {repair}
                                     self.state.get('review:active_improvement'))
         return sum(row['reason'] == 'ready' for row in rows)
 
-    def planner(self, issues, prs):
+    def planner(self, issues, prs, allow_launch=True):
         current = self.state.get('planner')
         if current:
             receipt = self.runtime.poll(current['process'])
@@ -1141,6 +1182,8 @@ Repair context: {repair}
             self.apply_dispositions(pending.get('dispositions', []), pending['issues'], issues, created)
             self.state.set('pending_proposal', None)
             return
+        if not allow_launch:
+            return
         now = time.time()
         last = self.state.get('last_plan', 0)
         frontier = self.ready_frontier(issues)
@@ -1217,13 +1260,15 @@ Repair context: {repair}
         self.state.set('area_allocation', areas.Allocation.from_inventory(
             issues, self.state.jobs()).summary())
 
-    def retries(self, issues):
+    def retries(self, issues, only=None):
         if self.state.paused():
             return
         by_number = {i['number']: i for i in issues}
         now = self.clock()
         for job in self.state.jobs(('blocked',)):
-            if job['issue'] not in by_number:
+            if only is not None and job['issue'] != only:
+                continue
+            if job['issue'] not in by_number or (self.factory and by_number[job['issue']].get('state') != 'OPEN'):
                 continue
             flag = self.state.get('retry:' + str(job['issue']))
             rec = self.state.get('recovery:' + str(job['issue']))
@@ -1243,7 +1288,7 @@ Repair context: {repair}
                 continue
             self.recover_job(job, rec, active, by_number[job['issue']])
 
-    def dispatch(self, issues):
+    def dispatch(self, issues, only=None):
         if self.state.paused():
             return
         self.refresh_improvements(issues)
@@ -1262,7 +1307,7 @@ Repair context: {repair}
                         issue['number'])
             except (ValueError, KeyError):
                 return 4, float('inf'), issue['number']
-        candidates = list(issues)
+        candidates = [i for i in issues if only is None or i['number'] == only]
         while candidates:
             issue = min(candidates, key=rank)
             candidates.remove(issue)
@@ -1320,17 +1365,22 @@ Repair context: {repair}
                     try:
                         issues = self.github.issues(state='all')
                         prs = self.github.prs()
-                        self.reconcile_workers(issues)
-                        self.integrate(issues)
-                        self.review(issues, prs)
-                        self.planner(issues, prs)
-                        self.retries(issues)
-                        self.dispatch(issues)
-                        self.mirror(issues)
-                        self.qa(issues)
-                        self.state.set('last_error', None)
+                        if self.factory:
+                            self.factory.advance(issues, prs)
+                        else:
+                            self.reconcile_workers(issues)
+                            self.integrate(issues)
+                            self.review(issues, prs)
+                            self.planner(issues, prs)
+                            self.retries(issues)
+                            self.dispatch(issues)
+                            self.mirror(issues)
+                            self.qa(issues)
+                            self.state.set('last_error', None)
                         delay = self.config['poll_seconds']
                     except Exception as exc:
+                        if self.factory:
+                            self.factory.offline()
                         self.log(type(exc).__name__ + ': ' + str(exc))
                         self.state.set('last_error', str(exc))
                         if any(word in str(exc).lower() for word in ('authentication', 'quota', 'unauthorized', 'http 401')):

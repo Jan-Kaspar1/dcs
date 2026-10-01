@@ -32,6 +32,26 @@ ENDPOINT_WORDS = ('endpoint is unavailable', 'unexpected server error',
 RETRY_AFTER = re.compile(r'retry[-_ ]?after[^0-9]{0,10}(\d{1,6})', re.IGNORECASE)
 
 
+RESET_AFTER = re.compile(
+    r'your limit will reset in\s+(\d{1,4}\s*(?:hours?|minutes?|seconds?)'
+    r'(?:[,\s]+(?:and\s+)?\d{1,4}\s*(?:hours?|minutes?|seconds?)){0,2})',
+    re.IGNORECASE)
+
+
+def _retry_delay(tail):
+    hint = RETRY_AFTER.search(tail)
+    if hint:
+        return int(hint.group(1))
+    resets = list(RESET_AFTER.finditer(tail))
+    if not resets:
+        return None
+    parts = re.findall(r'(\d+)\s*(hours?|minutes?|seconds?)', resets[-1].group(1), re.IGNORECASE)
+    seconds = sum(int(value) * (3600 if unit.lower().startswith('hour') else
+                               60 if unit.lower().startswith('minute') else 1)
+                  for value, unit in parts)
+    return max(1, seconds)
+
+
 def classify(receipt, text):
     """Categorize a finished invocation for quota-group feedback.
 
@@ -48,7 +68,7 @@ def classify(receipt, text):
         tail = (text or '')[-16000:].lower()
         if 'stream error' in tail:
             if any(word in tail for word in RATE_WORDS):
-                return 'rate', None
+                return 'rate', _retry_delay(tail)
             if any(word in tail for word in ENDPOINT_WORDS):
                 return 'endpoint', None
         return 'timeout', None
@@ -56,8 +76,7 @@ def classify(receipt, text):
     if code == 0:
         return 'success', None
     tail = (text or '')[-16000:].lower()
-    hint = RETRY_AFTER.search(tail)
-    retry_after = int(hint.group(1)) if hint else None
+    retry_after = _retry_delay(tail)
     if any(word in tail for word in AUTH_WORDS):
         return 'auth', None
     if any(word in tail for word in CREDIT_WORDS):
@@ -223,7 +242,8 @@ class Admission:
                         cooldown_until = now + (retry_after or group['cooldown_len']) + self.jitter()
                         self.db.execute('UPDATE admission_groups SET target=?,mode=?,cooldown_until=?,'
                                         'window_start=?,useful=0,loaded=NULL WHERE grp=?',
-                                        (max(1, math.ceil(group['target'] / 2)), 'probing',
+                                        (max(self.groups[name].get('minimum', 1),
+                                             math.ceil(group['target'] / 2)), 'probing',
                                          cooldown_until, now, name))
                     else:
                         length = retry_after or group['cooldown_len'] or self.cooldown
