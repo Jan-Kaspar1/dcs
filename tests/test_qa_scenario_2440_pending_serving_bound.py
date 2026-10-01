@@ -23,7 +23,10 @@ resolvable but nothing listening — where the same set must answer
 inside the instant bound. Every transition keys off the leg's
 lever calls so two passes emit identical digests; the fault flags
 stage each named defect, each nondeterministic surface, and each
-pre-contract shape the leg inconcludes on."""
+pre-contract shape the leg inconcludes on — including the served
+null last_scan_age_ms a run reports before its first completed scan,
+which the leg must read as the run's own start-up window rather than
+a revision predating the liveness contract."""
 import unittest
 
 from qa_scenario_support import *  # noqa: F401,F403 — the shared seam
@@ -52,6 +55,7 @@ EXPECTED_CASES = frozenset({
     'PendingServingBoundTests.test_refused_contrast_stalls_fails',
     'PendingServingBoundTests.test_pending_exit_is_inconclusive',
     'PendingServingBoundTests.test_health_unshaped_is_inconclusive',
+    'PendingServingBoundTests.test_pre_first_scan_stamp_still_passes',
     'PendingServingBoundTests.test_unpause_failure_is_inconclusive',
     'PendingServingBoundTests.test_departed_mid_window_is_inconclusive',
     'PendingServingBoundTests.test_refused_departure_is_inconclusive',
@@ -112,6 +116,7 @@ class ServingFeed:
         self.seat = None         # the born launch's run state
         self.moved = False       # the pair's post-thaw disturbance
         self.role_reads = 0      # /role reads served on the seat
+        self.health_reads = 0    # /health reads served on the seat
         self.calls = []
         # Staging failures.
         self.stage_fails = False        # start_born_field raises
@@ -131,6 +136,8 @@ class ServingFeed:
                                         # reads + unbounded scan age
         self.health_unshaped = False    # /health predates the bounded
                                         # liveness report
+        self.pre_scan_stamp = False     # /health answers null until the
+                                        # seat's first completed scan
         # The contract defect doctors.
         self.queued_scan = False        # lock calls queue ~N_channels
                                         # timeouts behind the wedged
@@ -331,11 +338,17 @@ class ServingFeed:
         if (method, route) == ('GET', '/role'):
             return 200, self._seat_role()
         if (method, route) == ('GET', '/health'):
+            self.health_reads += 1
             if self.health_unshaped:
                 return 200, {'live': True, 'role': 'standby',
                              'tick': seat['tick']}
             age = 90000 if (self.defect_signature
                             or self.age_unbounded) else 120
+            # A run that has not completed a scan yet serves the
+            # stamp null — the documented shape before the first
+            # completion, never a pre-contract revision.
+            if self.pre_scan_stamp and self.health_reads < 3:
+                age = None
             return 200, {
                 'live': True,
                 'role': 'active' if seat['owns'] else 'standby',
@@ -689,6 +702,23 @@ class PendingServingBoundTests(unittest.TestCase):
         self.assertEqual(record['outcome'], 'inconclusive', record)
         self.assertIn('predates', record.get('detail', ''))
         report.validate_scenario(record)
+
+    def test_pre_first_scan_stamp_still_passes(self):
+        # A run that has not completed a scan yet answers /health with a
+        # null last_scan_age_ms — the served shape before the first
+        # completion. The leg must read that as the run's own start-up
+        # window, never as a revision predating the liveness contract:
+        # only a run whose /health answers never carry the stamp at all
+        # inconcludes.
+        self.feed.pre_scan_stamp = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'passed', record)
+        report.validate_scenario(record)
+        ages = [read.get('last_scan_age_ms') for read in
+                self._pass(1)['frozen']['reads']
+                if read['path'] == '/health']
+        self.assertIn(None, ages)
+        self.assertTrue(any(isinstance(age, int) for age in ages))
 
     def test_unpause_failure_is_inconclusive(self):
         self.feed.unpause_fails = True

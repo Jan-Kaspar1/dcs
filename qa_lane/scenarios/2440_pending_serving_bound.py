@@ -76,14 +76,17 @@ RUNS_BEFORE = frozenset({'scenario_incompatible_revision',
 # unread state verdict, a moved or wedged deployed pair, or two passes
 # whose digests diverge. A staged revision predating the contract — the
 # pending launch exiting on the frozen or refused field, the pending
-# surface never serving while the container stands, the bounded-
-# liveness report absent — or showing the recorded defect signature
-# (the tick frozen at 0 while the lock-taking reads starve or the
-# served scan age runs unbounded) reports inconclusive. The unchecked-
-# diagnostic self-check replays the judge over planted negatives —
-# bounded serving asserted while a lock-taking endpoint queues
-# ~N_channels timeouts behind the wedged pending scan among them — and
-# reports pending-serving-bound-unchecked for any that slip through.
+# surface never serving while the container stands, no /health answer
+# carrying the bounded liveness report at all (a run that has not
+# completed a scan yet serves the stamp null, which is the documented
+# shape before the first completion, not a pre-contract revision) — or
+# showing the recorded defect signature (the tick frozen at 0 while the
+# lock-taking reads starve or the served scan age runs unbounded) reports
+# inconclusive. The unchecked-diagnostic self-check replays the judge
+# over planted negatives — bounded serving asserted while a lock-taking
+# endpoint queues ~N_channels timeouts behind the wedged pending scan
+# among them — and reports pending-serving-bound-unchecked for any that
+# slip through.
 
 SEAT = 'driven'          # the labeled born seat the leg launches on
 FIELD_TIMEOUT = 5.0      # RemoteDriver::DEFAULT_TIMEOUT — one exchange
@@ -219,14 +222,21 @@ def _pend_probe(base, method, path, bound, body=None):
 
 def _pend_health(read):
     """The /health answer is the bounded HealthReport the contract
-    serves — live, role, tick, and a completed scan's stamp — else the
-    staged run predates the liveness contract and cannot be read."""
+    serves — live, role, tick, and the completed-scan stamp field. A
+    run that has not completed a scan yet serves that stamp null, the
+    documented shape before the first completion, so only a run that
+    never carries the field at all is read as a pre-contract
+    revision."""
+    if 'last_scan_age_ms' not in read:
+        return False
+    stamp = read['last_scan_age_ms']
     return read.get('live') is True \
         and isinstance(read.get('role'), str) \
         and isinstance(read.get('tick'), int) \
         and not isinstance(read.get('tick'), bool) \
-        and isinstance(read.get('last_scan_age_ms'), int) \
-        and not isinstance(read.get('last_scan_age_ms'), bool)
+        and (stamp is None
+             or (isinstance(stamp, int)
+                 and not isinstance(stamp, bool)))
 
 
 def _pend_state(ctx, seat):
@@ -384,11 +394,11 @@ def _pend_pre_contract(frozen):
     """The staged revision's pre-contract signature, or None when the
     record is the judge's to read. Narrow by contract: only the
     recorded pre-contract shapes inconclude — the pending launch
-    exiting on the frozen field, a monitor predating the bounded
-    liveness contract, or the recorded defect itself — the tick frozen
-    at 0 while the lock-taking reads starve or the served scan age
-    runs unbounded. A frozen tick with a bounded monitor surface is
-    not the defect: it is a failure the judge names."""
+    exiting on the frozen field, a monitor whose /health answers never
+    carried the bounded liveness report, or the recorded defect itself
+    — the tick frozen at 0 while the lock-taking reads starve or the
+    served scan age runs unbounded. A frozen tick with a bounded monitor
+    surface is not the defect: it is a failure the judge names."""
     if frozen.get('departed'):
         return ('the labeled born-active exited rather than standing '
                 'pending on the frozen field — the staged revision '
@@ -399,8 +409,8 @@ def _pend_pre_contract(frozen):
         return None
     health = [read for read in answered if read.get('path')
               == '/health']
-    if health and not all(_pend_health(read) for read in health):
-        return ('the pending seat\'s /health answer is not the '
+    if health and not any(_pend_health(read) for read in health):
+        return ('the pending seat\'s /health answers never carried the '
                 'bounded HealthReport — the staged revision predates '
                 'the liveness contract the leg reads through')
     views = frozen.get('views') or []
