@@ -170,7 +170,8 @@ class _HolderlessMember:
         self.orphaned_logged = False
         self.rearmed = None       # the claim object the re-arm
                                   # journal dedupes on
-        self.observed = set()     # distinct refused-probe claimants
+        self.observed = set()     # the claimants this ownership epoch
+                                  # already journaled
         self.pending_origin = None
         self.dead = False
         self.supersedes = 0
@@ -191,10 +192,15 @@ class HolderlessPairFeed:
     miss-budgeted failover grant, and the loss-marked bound reclaim —
     refused while a different owner's claim has live holders,
     granted over an unclaimed, same-owner, or holderless claim.
-    Every journaled event mirrors into the --journal-file paths the
-    leg's durable audit reads. The doctor flags stage each named
-    defect, including the pre-fix shape (`defect_reclaim`: the arm
-    scoped to the loss mark and the grant refusing any standing
+    Every granted claim ends in a gate lift: the fencing-loss mark
+    re-arms and the observation dedup clears, and the fenced write's
+    loss record seeds the epoch's dedup with the claimant it already
+    attributed — so the claimant a peer only ever probed journals a
+    `field_claim_observed` record while the fenced peer never repeats
+    its own. Every journaled event mirrors into the --journal-file
+    paths the leg's durable audit reads. The doctor flags stage each
+    named defect, including the pre-fix shape (`defect_reclaim`: the
+    arm scoped to the loss mark and the grant refusing any standing
     different owner — the ensure-semantics probe that wedged)."""
 
     TOKENS = {'active': 424243, 'standby': 424244}
@@ -214,8 +220,6 @@ class HolderlessPairFeed:
                            controller=True, yielded=False,
                            holders={'active'})
         self.members = {'ctrl-a': self.a, 'ctrl-b': self.b}
-        self.failover_budget = 120   # --auto-promote misses: far
-                                     # past the leg's window
         # The durable half: journal_files maps ctx keys to the
         # runner's --journal-file paths.
         self.journal_paths = {}
@@ -258,6 +262,33 @@ class HolderlessPairFeed:
         self.b_never_retracks = False  # ctrl-b never reconverges —
                                        # the restore never lands
         self._island_seen = False
+
+    def _granted(self, member):
+        """The gate lift every granted claim ends in: a fresh
+        ownership epoch — the fencing-loss mark re-arms, and the
+        observation dedup clears, so a claimant a later refused probe
+        names is a new episode rather than the one the loss record
+        already attributed."""
+        member.fencing_lost = False
+        member.yielded = False
+        member.observed = set()
+        member.was_owner = True
+
+    @property
+    def failover_budget(self):
+        """The armed --auto-promote budget, in served scans. The rig's
+        budget is 120 misses against the lane's own scan cadence —
+        minutes of controller time, far outside the leg's resolution
+        watch, so the orphan budget's rescue can never be what unwedges
+        the holderless placeholder the watch exists to observe (the
+        wedge the finding recorded, minutes before an operator
+        promote). This stub's scan rides the leg's own poll rather than
+        a scan timer, so the budget is sized from the watch's poll
+        count instead: the whole episode's watches over, so the rescue
+        stays outside at whatever cadence the leg runs."""
+        polls = int(scenarios.HOLDERLESS_RESOLVE
+                    / scenarios.HOLDERLESS_POLL)
+        return polls * 64 + 1024
 
     def _journal(self, member, event):
         """One journaled record — the served journal plus the durable
@@ -308,6 +339,12 @@ class HolderlessPairFeed:
             if not self.unattributed_loss:
                 loss['claimant'] = 0xDEAD if self.wrong_claimant \
                     else claim.get('owner')
+                # The loss record already attributes this claimant's
+                # episode, so it seeds the epoch's observation dedup:
+                # the reclaim probes the same standing claim refuses
+                # queue no second record.
+                if loss['claimant'] is not None:
+                    member.observed.add(loss['claimant'])
             self._journal(member, {'field_claim_lost': loss})
         never_demotes = self.a_never_demotes if member is self.a \
             else self.b_never_demotes
@@ -417,7 +454,7 @@ class HolderlessPairFeed:
                     'holders': {member.key},
                     'monitor': member.declared,
                     'controller': True, 'yielded': False}
-                member.fencing_lost = False
+                self._granted(member)
                 member.role = 'promoting'
                 member.pending_origin = 'failover'
                 self._journal(member, {'role_changed': {
@@ -453,8 +490,7 @@ class HolderlessPairFeed:
                 'owner': member.token, 'holders': holders,
                 'monitor': member.declared,
                 'controller': True, 'yielded': False}
-        member.fencing_lost = False
-        member.yielded = False
+        self._granted(member)
         member.role = 'promoting'
         member.pending_origin = 'reclaim'
         self._journal(member, {'role_changed': {
@@ -535,9 +571,7 @@ class HolderlessPairFeed:
                     'holders': {member.key},
                     'monitor': member.declared,
                     'controller': True, 'yielded': False}
-                member.was_owner = True
-                member.fencing_lost = False
-                member.yielded = False
+                self._granted(member)
                 member.role = 'promoting'
                 member.sync = 'unsynchronized'
                 member.pending_origin = 'request'
@@ -656,14 +690,32 @@ class HolderlessClaimRecoveryTests(unittest.TestCase):
             self.assertIs(request.get('controller'), False)
             self.assertIsNone(request.get('monitor'))
         # The recovery's re-grant ran the bound reclaim — never an
-        # operator promote — once per pass.
-        reclaims = [entry for member in (self.feed.a, self.feed.b)
+        # operator promote — on the fenced peer once per pass; the
+        # restore's deliberate hand-back then leaves the claim yielded
+        # and holderless, which the other ex-owner's own bound reclaim
+        # takes as the pair returns to its launch layout.
+        reclaims = {
+            member.key: [change.get('origin')
+                         for entry in member.journal
+                         for change in
+                         [entry['event'].get('role_changed') or {}]
+                         if change.get('to') == 'promoting'
+                         and change.get('origin') == 'reclaim']
+            for member in (self.feed.a, self.feed.b)}
+        self.assertEqual(['reclaim'] * 2, reclaims['standby'])
+        self.assertEqual(['reclaim'] * 2, reclaims['active'])
+        # The operator promote is the staging lever alone — one per pass:
+        # the restore's hand-back demotes the recovered peer, which
+        # leaves its claim yielded and holderless, so the launch
+        # owner takes it back through its own bound reclaim.
+        self.assertEqual(
+            2, len([change
+                    for member in (self.feed.a, self.feed.b)
                     for entry in member.journal
                     for change in
                     [entry['event'].get('role_changed') or {}]
-                    if change.get('origin') == 'reclaim'
-                    and change.get('to') == 'promoting']
-        self.assertEqual(2, len(reclaims))
+                    if change.get('to') == 'promoting'
+                    and change.get('origin') == 'request']))
 
     def test_wedged_reclaim_reports_failed(self):
         # The defect build's shape: the bound reclaim arms on the

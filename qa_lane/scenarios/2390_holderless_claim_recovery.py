@@ -823,7 +823,9 @@ def _judge_holderless(record, note):
                        'attribution contract')
             elif promoted[-1] != 'reclaim':
                 failed('walk', 'the recovery walk journals origin '
-                       + json.dumps(promoted[-1:])[:120] + ' — not '
+                       + json.dumps(promoted[-1:])[:120] + ' — the '
+                       'holderless placeholder wedged the designated '
+                       'path and this origin unwedged it instead of '
                        'the bound fencing-loss reclaim the contract '
                        'names (an orphan failover\'s preempt is the '
                        'budget rescue, not the designated path)')
@@ -879,16 +881,44 @@ def _judge_holderless(record, note):
     observed = record.get('observed') or {}
     if 'observed' in record:
         for name in ('owner', 'peer'):
-            claimants = observed.get(name)
-            if claimants is None:
+            if observed.get(name) is None:
                 nondet('observed', 'the ' + name + ' peer\'s '
                        'served-journal read dropped — the refused-'
                        'probe audit never landed')
-            elif HOLDERLESS_FOREIGN_1 not in claimants:
-                failed('observed', 'the ' + name + ' peer journaled '
-                       'no field_claim_observed naming the held '
-                       'foreign claimant — the refused probes went '
-                       'unrecorded: ' + json.dumps(claimants)[:200])
+        # The refused-probe audit is the observation epoch's: the
+        # fenced peer's own field_claim_lost already attributed the
+        # held claimant and seeded its dedup, so the record naming
+        # that token must come from the peer that only ever probed it
+        # — and the fenced side must not repeat the attribution it
+        # already holds. Which side is which is the record's own loss
+        # audit; where no loss record names the claimant the pair's
+        # union must name it once.
+        fenced = None
+        for name, bodies in (('owner', record.get('owner_loss')),
+                             ('peer', record.get('marked_loss'))):
+            if bodies and any(
+                    (body or {}).get('claimant') == HOLDERLESS_FOREIGN_1
+                    for body in bodies):
+                fenced = name
+        named = [name for name in ('owner', 'peer')
+                 if HOLDERLESS_FOREIGN_1 in (observed.get(name) or [])]
+        if fenced is not None and fenced in named:
+            failed('observed', 'the ' + fenced + ' peer journaled '
+                   'field_claim_observed naming the held foreign '
+                   'claimant its own field_claim_lost already '
+                   'attributed — one episode recorded twice')
+        probed = None if fenced is None else (
+            'peer' if fenced == 'owner' else 'owner')
+        if probed is not None and probed not in named:
+            failed('observed', 'the ' + probed + ' peer journaled no '
+                   'field_claim_observed naming the held foreign '
+                   'claimant — the refused probes went unrecorded: '
+                   + json.dumps(observed)[:200])
+        elif probed is None and not named:
+            failed('observed', 'neither peer journaled a '
+                   'field_claim_observed naming the held foreign '
+                   'claimant — the episode went unrecorded: '
+                   + json.dumps(observed)[:200])
     durable = record.get('durable') or {}
     if 'durable' in record:
         for name in ('owner', 'peer'):
@@ -1031,7 +1061,7 @@ def _holderless_self_check():
             'loser_moves': [('active', 'demoting', 'fenced'),
                             ('demoting', 'standby', 'fenced')],
             'observed': {'owner': [foreign_1],
-                         'peer': [foreign_1, owner_token]},
+                         'peer': [owner_token]},
             'reconverged': True,
             'writes': {'anchor': 41, 'landed': True},
             'final_probe': fenced(peer_token),
@@ -1164,7 +1194,13 @@ def _holderless_self_check():
                          'error': {'kind': 'unclaimed'}}}))
     # The journal evidence.
     expect('observed-silent', lambda record:
-           record['observed'].update({'peer': []}))
+           record['observed'].update({'owner': []}))
+    expect('observed-unclaimed', lambda record:
+           record['observed'].update({'owner': [], 'peer': []}))
+    # The fenced peer's own loss record already attributed the held
+    # claimant — a second record repeats one episode.
+    expect('observed-duplicated', lambda record:
+           record['observed'].update({'peer': [owner_token, foreign_1]}))
     expect('durable-absent', lambda record:
            record['durable'].update(
                {'peer': ['field_claim_lost', 'role_changed']}))
@@ -1280,6 +1316,36 @@ def scenario_holderless_claim_recovery(ctx):
             return case.finish(
                 'inconclusive', 'the pair is unreachable — monitor '
                 'endpoints ' + active + ' and ' + standby)
+        # The field's claim surface first, the sibling legs' order: a
+        # field standing open, an unreadable probe, or a verdict
+        # naming no owner is the rig's own shape, and it must be read
+        # before the pair's posture is judged — a field with no
+        # standing claim answers every later write unfenced, so the
+        # baseline scans demote the launch owner into an orphan island
+        # this leg would then read as a recovery failure it never
+        # staged.
+        baseline = _claim_probe(ctx)
+        if baseline is None:
+            return case.finish(
+                'inconclusive', 'the plant\u2019s claim surface '
+                'answered no probe — the leg cannot read the '
+                'standing claim')
+        if not _fenced(baseline):
+            return case.finish(
+                'inconclusive', 'the field held no standing writer '
+                'claim at pass start — the claim surface is absent '
+                'or the field is open: ' + str(baseline)[:200])
+        if _probe_owner(baseline) is None:
+            return case.finish(
+                'inconclusive', 'the fencing verdict names no '
+                'standing owner — the rig predates the '
+                'loss-attribution contract: '
+                + json.dumps(baseline)[:300])
+        if _probe_monitor(baseline) is None:
+            return case.finish(
+                'inconclusive', 'the claim surface names no '
+                'declared monitor — the staged run predates the '
+                'field-arbitrated monitor contract')
         owner = _pair_active(ctx)
         if owner is None:
             return case.finish(
@@ -1298,6 +1364,12 @@ def scenario_holderless_claim_recovery(ctx):
                 'inconclusive', 'the pair never settled on its '
                 'launch layout — the unconfigured peer must hold '
                 'the field for the episode the leg stages')
+        if _probe_owner(baseline) != tokens[owner]:
+            return case.finish(
+                'inconclusive', 'the standing claim names '
+                + str(_probe_owner(baseline)) + ' — the launch '
+                'owner\u2019s token ' + str(tokens[owner])
+                + ' was expected')
         peer = 'standby'
         if wait_for(lambda: _tracking_standby(ctx, peer) or None,
                     time.monotonic() + HOLDERLESS_SETTLE,
@@ -1316,34 +1388,6 @@ def scenario_holderless_claim_recovery(ctx):
                 'inconclusive', 'the pair serves a checkpoint '
                 'document without the field-ownership stamps — the '
                 'rig predates the field-arbitrated contract')
-        baseline = _claim_probe(ctx)
-        if baseline is None:
-            return case.finish(
-                'inconclusive', 'the plant\u2019s claim surface '
-                'answered no probe — the leg cannot read the '
-                'standing claim')
-        if not _fenced(baseline):
-            return case.finish(
-                'inconclusive', 'the claim surface answered no '
-                'fenced verdict — the field is open or the claim '
-                'read surface is absent: ' + str(baseline)[:200])
-        if _probe_owner(baseline) is None:
-            return case.finish(
-                'inconclusive', 'the fencing verdict names no '
-                'standing owner — the rig predates the '
-                'loss-attribution contract: '
-                + json.dumps(baseline)[:300])
-        if _probe_owner(baseline) != tokens[owner]:
-            return case.finish(
-                'inconclusive', 'the standing claim names '
-                + str(_probe_owner(baseline)) + ' — the launch '
-                'owner\u2019s token ' + str(tokens[owner])
-                + ' was expected')
-        if _probe_monitor(baseline) is None:
-            return case.finish(
-                'inconclusive', 'the claim surface names no '
-                'declared monitor — the staged run predates the '
-                'field-arbitrated monitor contract')
         case.observe('settled baseline: ' + owner + ' owns the '
                      'field under ' + str(tokens[owner])
                      + ' and ' + peer + ' tracks it')
