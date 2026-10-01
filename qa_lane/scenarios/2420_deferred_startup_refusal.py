@@ -161,24 +161,31 @@ def _seat_evidence(ctx, seat):
 
 def _wait_tracking(ctx, seat, deadline=None):
     """The seat's report once it serves standby/tracking, else the
-    last report (or None) when the bound passed."""
-    return wait_for(
-        lambda: (lambda report: report if _tracking(report)
-                 else None)(_seat_role(ctx, seat)),
-        deadline or time.monotonic() + DEFER_SETTLE,
-        interval=DEFER_POLL)
+    last report (or None) when the bound passed — an unconverged seat's
+    own served surface is the evidence of what it reported instead."""
+    latest = []
+    wait_for(lambda: (lambda report: latest.append(report) or
+                      (report if _tracking(report) else None))
+             (_seat_role(ctx, seat)),
+             deadline or time.monotonic() + DEFER_SETTLE,
+             interval=DEFER_POLL)
+    return latest[-1] if latest else None
 
 
 def _wait_exit(ctx, seat, deadline=None):
     """The seat container's process verdict once it is no longer
-    running, else its last state when the bound passed."""
-    return wait_for(
-        lambda: (lambda state: state
-                 if state is not None
-                 and (state.get('absent') or not state.get('running'))
-                 else None)(_seat_state(ctx, seat)),
-        deadline or time.monotonic() + DEFER_SETTLE,
-        interval=DEFER_POLL)
+    running, else the last state when the bound passed — a seat that
+    kept running past the bound must be audited as still running, so
+    the last verdict read is kept rather than the last accepted one."""
+    latest = []
+    wait_for(lambda: (lambda state: latest.append(state) or
+                      (state if state is not None
+                       and (state.get('absent')
+                            or not state.get('running')) else None))
+             (_seat_state(ctx, seat)),
+             deadline or time.monotonic() + DEFER_SETTLE,
+             interval=DEFER_POLL)
+    return latest[-1] if latest else None
 
 
 def _watch_pending(ctx):
@@ -380,9 +387,9 @@ def _judge_deferred(record, note):
     elif refused.get('running'):
         if journal.get('refusal_journaled'):
             failed('refused-stranded', 'the deferred-refused pairless '
-                   'run kept standing after its refusal journaled — '
-                   'the peerless standby wedge the contract exists to '
-                   'prevent')
+                   'run kept standing as a stranded, unpaired standby '
+                   'after its refusal journaled — the peerless standby '
+                   'wedge the contract exists to prevent')
         else:
             failed('refused-unsettled', 'the deferred grant never '
                    'landed a verdict on the thawed field — the pending '
