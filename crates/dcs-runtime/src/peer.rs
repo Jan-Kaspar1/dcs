@@ -1050,24 +1050,12 @@ impl PeerEvents {
         );
         events.extend(divergences.into_iter().map(PeerEvent::Divergence));
         events.extend(resolutions.into_iter().map(PeerEvent::Resolution));
-        events.extend(
-            reinits
-                .into_iter()
-                .map(PeerEvent::Reinitialization),
-        );
+        events.extend(reinits.into_iter().map(PeerEvent::Reinitialization));
         events.extend(orphans.into_iter().map(PeerEvent::Orphan));
         events.extend(fencing.into_iter().map(PeerEvent::FencingLoss));
         events.extend(rearms.into_iter().map(PeerEvent::ClaimRearm));
-        events.extend(
-            observations
-                .into_iter()
-                .map(PeerEvent::ClaimObservation),
-        );
-        events.extend(
-            startup_refusals
-                .into_iter()
-                .map(PeerEvent::StartupRefusal),
-        );
+        events.extend(observations.into_iter().map(PeerEvent::ClaimObservation));
+        events.extend(startup_refusals.into_iter().map(PeerEvent::StartupRefusal));
         events.extend(restarts.into_iter().map(PeerEvent::SourceRestart));
         events.extend(
             promotion_refusals
@@ -1075,9 +1063,11 @@ impl PeerEvents {
                 .map(PeerEvent::PromotionRefusal),
         );
         events.extend(changes.into_iter().map(PeerEvent::RoleChange));
-        events.extend(superseded.into_iter().map(|(index, receipt)| {
-            PeerEvent::SupersededCommand { index, receipt }
-        }));
+        events.extend(
+            superseded
+                .into_iter()
+                .map(|(index, receipt)| PeerEvent::SupersededCommand { index, receipt }),
+        );
         events.extend(
             adoption_receipts
                 .into_iter()
@@ -5092,10 +5082,16 @@ mod tests {
             Executor::new(&gate, loop_map(), vec![Box::new(PassThrough)]).unwrap(),
             Some(&gate),
         );
+        // The walked role transitions, accumulated across every drain so
+        // each assertion reads the whole walk while each drain still
+        // takes the whole set — the one drain, one kind-read shape.
+        let mut walked: Vec<RoleChange> = Vec::new();
         peer.activate().unwrap();
         peer.scan();
         assert_eq!(field.value(OUTPUT), Value::Float(1.0));
-        assert!(peer.drain_pending().fencing_losses().is_empty());
+        let drained = peer.drain_pending();
+        assert!(drained.fencing_losses().is_empty());
+        walked.extend(drained.role_changes().iter().cloned());
 
         // Another attachment took the claim: the next write is fenced.
         // The scan completes degraded — the boundary counted the fenced
@@ -5138,6 +5134,7 @@ mod tests {
                 actor: None,
             }]
         );
+        walked.extend(drained.role_changes().iter().cloned());
 
         // The next scan's write is quiesced at the closed gate — it
         // never reaches the field — and the completed scan settles the
@@ -5162,6 +5159,7 @@ mod tests {
                 actor: None,
             }]
         );
+        walked.extend(drained.role_changes().iter().cloned());
 
         // The loss reports once per held claim: re-converged and
         // re-promoted, a second preemption queues a second loss and
@@ -5180,11 +5178,29 @@ mod tests {
                 claimant: None,
             }]
         );
+        walked.extend(drained.role_changes().iter().cloned());
         assert_eq!(peer.scan(), Tick(5));
         assert_eq!(peer.role(), Role::Standby);
+        let drained = peer.drain_pending();
+        assert!(drained.fencing_losses().is_empty());
+        walked.extend(drained.role_changes().iter().cloned());
         assert_eq!(
-            drained.role_changes(),
+            walked,
             vec![
+                RoleChange {
+                    tick: Tick(2),
+                    from: Role::Active,
+                    to: Role::Demoting,
+                    origin: SwitchOrigin::Fenced,
+                    actor: None,
+                },
+                RoleChange {
+                    tick: Tick(3),
+                    from: Role::Demoting,
+                    to: Role::Standby,
+                    origin: SwitchOrigin::Fenced,
+                    actor: None,
+                },
                 RoleChange {
                     tick: Tick(3),
                     from: Role::Standby,
@@ -5241,6 +5257,10 @@ mod tests {
         .with_field_probe(|| Ok(claim.probe()))
         .with_field_claimant(|_| claim.holder())
         .with_field_reclaim(|| Ok(claim.ensure(OWNER)));
+        // The walked role transitions, accumulated across every drain so
+        // the final assertion reads the whole walk while each drain
+        // still takes the whole set.
+        let mut walked: Vec<RoleChange> = Vec::new();
         peer.activate().unwrap();
         assert_eq!(peer.scan(), Tick(1));
         assert_eq!(claim.holder(), Some(OWNER));
@@ -5252,14 +5272,16 @@ mod tests {
         claim.claim(FOREIGN);
         fenced.armed.store(true, Ordering::Relaxed);
         assert_eq!(peer.scan(), Tick(2));
+        let drained = peer.drain_pending();
         assert_eq!(
-            peer.drain_pending().fencing_losses(),
+            drained.fencing_losses(),
             vec![FencingLoss {
                 tick: Tick(2),
                 point: OUTPUT,
                 claimant: Some(FOREIGN),
             }]
         );
+        walked.extend(drained.role_changes().iter().cloned());
         assert_eq!(peer.role(), Role::Demoting);
 
         // While the preemptor's claim still stands the reclaim probe
@@ -5299,8 +5321,9 @@ mod tests {
         );
         let drained = peer.drain_pending();
         assert!(drained.fencing_losses().is_empty());
+        walked.extend(drained.role_changes().iter().cloned());
         assert_eq!(
-            drained.role_changes(),
+            walked,
             vec![
                 RoleChange {
                     tick: Tick(2),
@@ -5367,6 +5390,10 @@ mod tests {
         .with_field_claimant(|_| claim.holder())
         .with_field_reclaim(|| Ok(claim.ensure(OWNER)))
         .with_claim_observer(|| claim.holder().into_iter().collect());
+        // The walked role transitions, accumulated across every drain so
+        // the final assertion reads the whole walk while each drain
+        // still takes the whole set.
+        let mut walked: Vec<RoleChange> = Vec::new();
         peer.activate().unwrap();
         assert_eq!(peer.scan(), Tick(1));
         assert_eq!(claim.holder(), Some(OWNER));
@@ -5378,22 +5405,26 @@ mod tests {
         claim.claim(FOREIGN);
         fenced.armed.store(true, Ordering::Relaxed);
         assert_eq!(peer.scan(), Tick(2));
+        let drained = peer.drain_pending();
         assert_eq!(
-            peer.drain_pending().fencing_losses(),
+            drained.fencing_losses(),
             vec![FencingLoss {
                 tick: Tick(2),
                 point: OUTPUT,
                 claimant: Some(FOREIGN),
             }]
         );
+        walked.extend(drained.role_changes().iter().cloned());
         assert_eq!(peer.scan(), Tick(3));
         assert_eq!(peer.role(), Role::Standby);
         assert_eq!(peer.scan(), Tick(4));
         assert_eq!(claim.holder(), Some(FOREIGN));
+        let drained = peer.drain_pending();
         assert!(
-            peer.drain_pending().claim_observations().is_empty(),
+            drained.claim_observations().is_empty(),
             "the claimant the loss entry attributed is not re-journaled"
         );
+        walked.extend(drained.role_changes().iter().cloned());
 
         // The ex-owner reconverges on the tracked line's ownerless
         // verdict — the orphaned pull leaves the loss mark armed and
@@ -5411,7 +5442,9 @@ mod tests {
             TrackReport::Applied(Transfer::Applied)
         );
         assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
-        assert!(peer.drain_pending().claim_observations().is_empty());
+        let drained = peer.drain_pending();
+        assert!(drained.claim_observations().is_empty());
+        walked.extend(drained.role_changes().iter().cloned());
 
         // The preemptor released and a *different* foreign attachment
         // took the claim before the probe ran again: this refusal names
@@ -5420,19 +5453,23 @@ mod tests {
         claim.release();
         claim.claim(SECOND);
         assert_eq!(peer.scan(), Tick(5));
+        let drained = peer.drain_pending();
         assert_eq!(
-            peer.drain_pending().claim_observations(),
+            drained.claim_observations(),
             vec![ClaimObservation {
                 tick: Tick(5),
                 point: OUTPUT,
                 claimant: SECOND,
             }]
         );
+        walked.extend(drained.role_changes().iter().cloned());
 
         // The standing second claim journals once: repeat refusals
         // queue nothing further while its token stands.
         assert_eq!(peer.scan(), Tick(6));
-        assert!(peer.drain_pending().claim_observations().is_empty());
+        let drained = peer.drain_pending();
+        assert!(drained.claim_observations().is_empty());
+        walked.extend(drained.role_changes().iter().cloned());
 
         // The second claimant's release lets the next reclaim grant:
         // the role changes walk the peer back `promoting` → `active`,
@@ -5446,8 +5483,9 @@ mod tests {
         assert_eq!(claim.holder(), Some(OWNER));
         assert_eq!(peer.scan(), Tick(8));
         assert_eq!(peer.role(), Role::Active);
+        walked.extend(peer.drain_pending().role_changes().iter().cloned());
         assert_eq!(
-            peer.drain_pending().role_changes(),
+            walked,
             vec![
                 RoleChange {
                     tick: Tick(2),
