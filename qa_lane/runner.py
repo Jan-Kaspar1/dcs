@@ -932,7 +932,7 @@ def _build_images(src, cfg, run_dir, timeline, run_id):
            '-e', 'CARGO_HOME=/cargo',
            '-e', 'CARGO_TARGET_DIR=/work/target',
            cfg['builder_image'], 'bash', '-c',
-'cd /src && cargo build --release --locked '
+           'cd /src && cargo build --release --locked '
             '-p dcs-controller -p dcs-plant -p dcs-sim-net '
             '-p dcs-sim-bus '
             '&& cargo build --release --locked '
