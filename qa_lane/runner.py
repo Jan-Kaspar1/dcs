@@ -2713,7 +2713,10 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
     answers on 'revised' once launched, the checkpoint-negotiation
     case's foreign peer on 'foreign', the dead-peer-latency case's
     driven standby on 'driven'), the published plant-protocol
-    endpoint, the run config's pinned plant-writer owner token per
+    endpoint, the pair's own plant as a rig-bridge `--remote` address
+    a born launch dials when a leg stages against the pair's field
+    rather than a scratch one, the run config's pinned plant-writer
+    owner token per
     endpoint key — the pair's and every third peer's — the run's
     evidence dir and deadline, the runner-owned
     controller restart/cold-restart/relaunch, plant stop/start,
