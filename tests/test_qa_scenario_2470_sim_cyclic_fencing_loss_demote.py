@@ -44,6 +44,7 @@ EXPECTED_CASES = frozenset({
     'CyclicFencingLossTests.test_ex_owner_exit_fails',
     'CyclicFencingLossTests.test_pre_contract_revision_is_inconclusive',
     'CyclicFencingLossTests.test_absent_field_is_inconclusive',
+    'CyclicFencingLossTests.test_absent_cyclic_model_is_inconclusive',
     'CyclicFencingLossTests.test_non_cyclic_field_is_inconclusive',
     'CyclicFencingLossTests.test_field_without_outputs_is_inconclusive',
     'CyclicFencingLossTests.test_unsettled_pair_is_inconclusive',
@@ -75,6 +76,11 @@ CYCLIC_MODEL = {
                      'do1': {'direction': 'out', 'value_type': 'bool'}},
         'parameters': {'address': 'dcs-hw-qa-1-bus:9005',
                        'exchange_miss_threshold': 3}}]}
+
+# The src-relative fixture path the run config's sim_bus_device block
+# names for the cyclic model — the leg reads it off the spec and hands
+# it to the server launch.
+CYCLIC_MODEL_FIXTURE = 'crates/dcs-demo/fixtures/cyclic_stub.json'
 
 
 def _model_document(kind, outputs):
@@ -173,10 +179,13 @@ class CyclicFeed:
 
     # --- the runner's register-protocol levers, faked ---------------
 
-    def start_device(self):
-        self.calls.append(('start_sim_bus_device',))
+    def start_device(self, fixture=None):
+        self.calls.append(('start_sim_bus_device', fixture))
         if self.stage_fails:
             raise RuntimeError('docker run failed: name in use')
+        assert fixture == CYCLIC_MODEL_FIXTURE, \
+            'the leg stages the spec\'s cyclic_model, got ' \
+            + repr(fixture)
         self._stage_model()
         self.field = 'serving'
         # The deployed pair's disturbance lands with the leg's own
@@ -383,15 +392,15 @@ class CyclicFeed:
         """The seat's served io_health in the wire shape the leg
         normalizes: the boundary counters, the transport's link
         verdict, the cyclic exchange counters, and the most recent
-        boundary failure's named error — `Fenced` once the field
-        refused this run's image, `Disconnected` while only the
+        boundary failure's named error — `fenced` once the field
+        refused this run's image, `disconnected` while only the
         transport is down."""
         peer = self.seats.get(seat)
         if peer is None:
             return None
         error = None
         if peer['failed']:
-            error = 'Fenced' if peer['fenced'] else 'Disconnected'
+            error = 'fenced' if peer['fenced'] else 'disconnected'
         return {
             'failed_exchanges': peer['failed'], 'failed_writes': 0,
             'consecutive_failures': peer['streak'],
@@ -499,7 +508,8 @@ class CyclicFencingLossTests(unittest.TestCase):
                 'driven': 'http://ctrl-d:5',
                 'foreign': 'http://ctrl-foreign:6',
                 'evidence_dir': str(self.evidence),
-                'sim_bus_device': {'device': 1, 'port': 9005},
+                'sim_bus_device': {'device': 1, 'port': 9005,
+                                   'cyclic_model': CYCLIC_MODEL_FIXTURE},
                 'start_sim_bus_device': feed.start_device,
                 'restart_sim_bus_device': feed.restart_device,
                 'stop_sim_bus_device': feed.stop_device,
@@ -718,6 +728,20 @@ class CyclicFencingLossTests(unittest.TestCase):
         record = self.run_scenario(ctx)
         self.assertEqual(record['outcome'], 'inconclusive', record)
         self.assertIn('no sim-bus device server', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_absent_cyclic_model_is_inconclusive(self):
+        # The spec's device server stages but names no cyclic model —
+        # the leg declines before a container exists rather than
+        # fencing whatever the default fixture declares.
+        ctx = self._ctx()
+        del ctx['sim_bus_device']['cyclic_model']
+        record = self.run_scenario(ctx)
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('cyclic_model', record.get('detail', ''))
+        # The pass's teardown sweep still runs; nothing was staged.
+        self.assertNotIn('start_sim_bus_device',
+                         [call[0] for call in self.feed.calls])
         report.validate_scenario(record)
 
     def test_non_cyclic_field_is_inconclusive(self):

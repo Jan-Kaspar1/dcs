@@ -135,8 +135,8 @@ def _cyclic_io(snapshot):
     """The io_health half the fencing contract reads, normalized: the
     boundary counters, the transport's link verdict, the cyclic exchange
     counters, and the named driver error the most recent boundary
-    failure reported — `Fenced` is the contract's evidence that the
-    field refused this run's image exchange, `Disconnected`/`Timeout`
+    failure reported — `fenced` is the contract's evidence that the
+    field refused this run's image exchange, `disconnected`/`timeout`
     the transport verdict a fenced exchange used to be translated into.
     None while the read has not answered."""
     if not isinstance(snapshot, dict):
@@ -148,7 +148,10 @@ def _cyclic_io(snapshot):
     exchange = driver.get('exchange') or {}
     error = (health.get('last_error') or {}).get('error')
     if isinstance(error, dict) and error:
-        error = next(iter(error))
+        # The IoError variant's wire name — snake_case on the served
+        # contract; normalized so a producer emitting the legacy
+        # PascalCase spelling reads the same.
+        error = str(next(iter(error))).lower()
     return {
         'failed_exchanges': health.get('failed_exchanges'),
         'failed_writes': health.get('failed_writes'),
@@ -164,7 +167,7 @@ def _cyclic_fenced(io_views):
     """Whether any sampled io_health named a fenced exchange — the
     contract's own evidence that the field refused this run's staged
     image rather than a transport it could not reach."""
-    return any((view or {}).get('error') == 'Fenced'
+    return any((view or {}).get('error') == 'fenced'
                for view in io_views or [])
 
 
@@ -278,19 +281,25 @@ def _cyclic_pair_held(record):
 
 
 def _cyclic_field(ctx):
-    """Stage the lane's register-protocol device server and prove the
-    model it serves is the field this contract is about: the run
-    config's staged device declared `sim-cyclic`, with an output channel
-    the scan's staged image publishes — a device with no outputs stages
-    nothing, and an empty image is never fenced. Returns the launch
-    dict, or the inconclusive reason as a string. A launch that raises
-    is no inconclusive reason but a refused staging call: it propagates
-    so the pass records it as the instability it is."""
+    """Stage the lane's register-protocol device server on its cyclic
+    model and prove the field it serves is the one this contract is
+    about: the staged device declared `sim-cyclic`, with an output
+    channel the scan's staged image publishes — a device with no
+    outputs stages nothing, and an empty image is never fenced.
+    Returns the launch dict, or the inconclusive reason as a string. A
+    launch that raises is no inconclusive reason but a refused staging
+    call: it propagates so the pass records it as the instability it
+    is."""
     spec = ctx.get('sim_bus_device')
     if not spec:
         return ('the run config stages no sim-bus device server — this '
                 'leg needs the lane\'s register-protocol field')
-    field = ctx['start_sim_bus_device']()
+    cyclic = spec.get('cyclic_model')
+    if not cyclic:
+        return ('the run config\'s sim_bus_device block stages no '
+                'cyclic_model — the fixture declaring the '
+                + CYCLIC_KIND + ' device this leg\'s field must be')
+    field = ctx['start_sim_bus_device'](cyclic)
     document = field.get('model')
     try:
         model = json.loads(Path(document).read_text())
@@ -303,7 +312,7 @@ def _cyclic_field(ctx):
             return ('the staged field serves device '
                     + str(spec.get('device')) + ' as '
                     + repr(declared.get('kind')) + ' — point '
-                    'sim_bus_device.model_fixture at a model declaring a '
+                    'sim_bus_device.cyclic_model at a model declaring a '
                     + CYCLIC_KIND + ' device for this leg')
         outputs = [name for name, channel
                    in (declared.get('channels') or {}).items()
@@ -749,7 +758,7 @@ def _cyclic_pass(ctx, number, launch):
             record['owner_state'] = state
         polls = record['watch']['polls']
         fenced = [poll for poll in polls
-                  if (poll.get('owner_io') or {}).get('error') == 'Fenced']
+                  if (poll.get('owner_io') or {}).get('error') == 'fenced']
         record['journal']['fenced_io'] = (fenced[0].get('owner_io')
                                           if fenced else None)
         try:
@@ -807,10 +816,10 @@ def _cyclic_self_check():
     def clean_record():
         polls = [{'owner': 'active', 'peer': 'promoting', 'active': 0},
                  {'owner': 'demoting', 'peer': 'active', 'active': 1,
-                  'owner_io': io(12, 'Fenced', 1),
+                  'owner_io': io(12, 'fenced', 1),
                   'peer_io': io(24, None, 0)},
                  {'owner': 'standby', 'peer': 'active', 'active': 1,
-                  'owner_io': io(40, 'Fenced', 1),
+                  'owner_io': io(40, 'fenced', 1),
                   'peer_io': io(60, None, 0)}]
         return {'pass': 1,
                 'launch_roles': {'owner': 'active', 'peer': 'standby'},

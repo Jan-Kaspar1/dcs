@@ -196,6 +196,13 @@ DEFAULT_CONFIG = {
         'device': 1,
         'port': 9005,
         'model_fixture': 'crates/dcs-demo/fixtures/two_kinds_bus.json',
+        # The sim-cyclic document the fencing-loss demotion leg stages
+        # on the same server — the register protocol arbitrates both
+        # kinds, so one device block names a fixture per model the
+        # lane's legs serve; absent, a leg needing the cyclic device
+        # reports the capability missing rather than fencing a
+        # point-wise field.
+        'cyclic_model': 'crates/dcs-demo/fixtures/wago_rig_cyclic.json',
     },
     # The rig bridge-to-host reachability rule the qax-20260922-001,
     # qax-20260922-005, and qax-20260923-001 exploration runs
@@ -1249,10 +1256,15 @@ def _sim_bus_device(cfg):
         raise RuntimeError('sim_bus_device device/port must be int '
                            '1..65535: '
                            + json.dumps(bad, sort_keys=True))
-    if not isinstance(spec['model_fixture'], str) \
-            or not spec['model_fixture']:
-        raise RuntimeError('sim_bus_device model_fixture must name a '
-                           'fixture path')
+    # model_fixture is required; the other model keys are optional —
+    # a spec may name one fixture per register-protocol model a leg
+    # stages (cyclic_model for the sim-cyclic field), each a path into
+    # the revision's own tree.
+    for key in ('model_fixture', 'cyclic_model'):
+        if key in spec and (not isinstance(spec[key], str)
+                            or not spec[key]):
+            raise RuntimeError('sim_bus_device ' + key + ' must name '
+                               'a fixture path')
     return dict(spec)
 
 
@@ -2663,7 +2675,7 @@ def _stage_bus_model(model, out_path, device, address):
                        + ' declares no device ' + str(device))
 
 
-def start_sim_bus_device(cfg, record, run_dir, timeline):
+def start_sim_bus_device(cfg, record, run_dir, timeline, fixture=None):
     """The scenario-callable sim-bus device server: the run's labeled
     rig-bridge container running the shipped `dcs-sim-bus-device`
     binary out of the controller image under `--entrypoint`, serving the
@@ -2677,6 +2689,14 @@ def start_sim_bus_device(cfg, record, run_dir, timeline):
     address bound to this container's bridge name, and the leg mounts
     that same staged document into the controller it launches, so both
     ends read one declaration.
+
+    `fixture` overrides the staged document — a src-relative model
+    path the run config names beside `model_fixture` (the
+    `cyclic_model` key holds the `sim-cyclic` document the
+    fencing-loss demotion leg stages). The server serves either
+    register-protocol kind, so one block carries a fixture per model
+    the lane's legs need; a path the revision's tree does not carry
+    fails before a container exists, naming the missing fixture.
 
     The launch refuses unless the run config records the endpoint
     'bridge' — the host egress policy makes a host socket unreachable
@@ -2710,7 +2730,12 @@ def start_sim_bus_device(cfg, record, run_dir, timeline):
     # The fixture comes from the revision under test's own extracted
     # tree — src/<attempted sha>/ — beside every other lane fixture,
     # so the served model is the revision's, not the lane's.
-    model = Path(cfg['src_dir']) / sha / spec['model_fixture']
+    rel = spec['model_fixture'] if fixture is None else fixture
+    if not isinstance(rel, str) or not rel:
+        raise RuntimeError('the sim-bus device server was asked to '
+                           'stage a model fixture that names no path: '
+                           + repr(fixture))
+    model = Path(cfg['src_dir']) / sha / rel
     if not model.is_file():
         raise RuntimeError('sim-bus model fixture missing: ' + str(model))
     container = 'dcs-hw-' + run_id + '-bus'
@@ -2754,11 +2779,19 @@ def _await_bus_server(container, device, timeline, label):
     resume: after a `docker restart` the process re-announces on a fresh
     log, which is exactly the report that says the register protocol is
     answering again.
+
+    Container logs survive a restart — the previous lifetime's
+    announcement would satisfy the check before the fresh process even
+    binds — so the read is scoped to the current lifetime's StartedAt:
+    only lines the running process wrote count.
     """
+    started = docker('inspect', '-f', '{{.State.StartedAt}}', container,
+                     check=False).stdout.strip()
+    since = ('--since', started) if started else ()
     serving = 'serving device ' + str(device) + ' on'
     deadline = time.monotonic() + SIM_BUS_BIND_GRACE
     while True:
-        logs = docker('logs', container, check=False)
+        logs = docker('logs', *since, container, check=False)
         report = (logs.stdout or '') + (logs.stderr or '')
         if serving in report:
             break
@@ -3351,16 +3384,19 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         # The lane's sim-bus device server (#1368) — the shipped
         # dcs-sim-bus-device binary out of the controller image,
         # serving the run config's bus model on the rig bridge. The
-        # launch returns the bridge address the rig's sim-bus
-        # attachments dial and the staged document a leg mounts into
-        # the controller it points at the field; stop_sim_bus_device
-        # kills the register protocol outright for a leg's
+        # launch's `fixture` selects which spec-named document the
+        # server stages (None → model_fixture; the fencing-loss leg's
+        # cyclic_model names the sim-cyclic one); it returns the
+        # bridge address the rig's attachments dial and the staged
+        # document a leg mounts into the controller it points at the
+        # field; stop_sim_bus_device kills the register protocol
+        # outright for a leg's
         # device-outage induction; restart_sim_bus_device severs every
         # attachment's control connection while the same server comes
         # back — the fencing-loss legs' link flap, which releases the
         # connection-bound claim with its dead holders.
-        'start_sim_bus_device': lambda: start_sim_bus_device(
-            cfg, record, run_dir, timeline),
+        'start_sim_bus_device': lambda fixture=None: start_sim_bus_device(
+            cfg, record, run_dir, timeline, fixture=fixture),
         'restart_sim_bus_device': lambda: restart_sim_bus_device(
             cfg, run_id, run_dir, timeline),
         'stop_sim_bus_device': lambda: stop_sim_bus_device(
