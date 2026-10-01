@@ -934,13 +934,16 @@ pub struct Executor<'d> {
     /// plant's plant ticks, say) cannot strand the verdict. Run-local
     /// observation state: checkpoints neither carry nor reset it.
     freshness: HashMap<PointId, Freshness>,
-    /// The first point whose output write the shared field fenced —
-    /// answered [`IoError::Fenced`] — during the most recent scan:
-    /// `None` before the first scan and on scans with no fenced write.
-    /// A scan product like `emitted`: cleared when the next scan starts
-    /// and by a checkpoint apply, which converges the run to a line that
-    /// did not see the abandoned scan's fencing. [`Peer`](crate::Peer)
-    /// reads it to journal the claim loss a degraded scan still carries.
+    /// The first point the shared field fenced during the most recent
+    /// scan — answered [`IoError::Fenced`] — whether the refusal named
+    /// a per-point output write or the cyclic exchange's whole staged
+    /// image (the exchange attributes its verdict to a point for just
+    /// this purpose): `None` before the first scan and on scans with
+    /// no fenced mutation. A scan product like `emitted`: cleared when
+    /// the next scan starts and by a checkpoint apply, which converges
+    /// the run to a line that did not see the abandoned scan's
+    /// fencing. [`Peer`](crate::Peer) reads it to journal the claim
+    /// loss a degraded scan still carries.
     fenced_write: Option<PointId>,
     /// The rollback records for the commands the most recent command
     /// boundary applied — one [`BoundaryUndo`] per staged effect, in
@@ -1283,12 +1286,17 @@ impl<'d> Executor<'d> {
         self.tick
     }
 
-    /// The first point the last scan's output phase saw the shared field
-    /// fence — the write answered [`IoError::Fenced`], meaning the claim
-    /// this run held was preempted — or `None` when no write was fenced.
-    /// The scan degrades and completes either way; this marker is how a
-    /// field-owning [`Peer`](crate::Peer) tells the claim loss apart from
-    /// ordinary field trouble so it can journal it once per held claim.
+    /// The first point the last scan's field-mutating boundary saw the
+    /// shared field fence — a per-point write answering
+    /// [`IoError::Fenced`], or a cyclic exchange refused the same way
+    /// (a connection-bound claim dies with a dropped link, so a
+    /// re-attached cyclic driver meets the fenced verdict on its next
+    /// output-bearing exchange rather than on any `write`) — meaning
+    /// the claim this run held was preempted, or `None` when nothing
+    /// was fenced. The scan degrades and completes either way; this
+    /// marker is how a field-owning [`Peer`](crate::Peer) tells the
+    /// claim loss apart from ordinary field trouble so it can journal
+    /// it once per held claim.
     pub fn fenced_write(&self) -> Option<PointId> {
         self.fenced_write
     }
@@ -3385,6 +3393,16 @@ impl<'d> Executor<'d> {
     /// `exchange_miss_threshold` escalates its reads to ordinary
     /// per-point failures. A driver without a cyclic surface skips the
     /// phase entirely.
+    ///
+    /// A *fenced* exchange carries a second reading beside the counted
+    /// failure: the field's writer arbitration refused the boundary
+    /// because the write-ownership claim this run held is gone —
+    /// claimed by a promoted peer, or released when the claim-bound
+    /// connection dropped. The cyclic surface carries no per-point
+    /// write verdicts, so the exchange's own [`IoError::Fenced`] is the
+    /// claim-loss signal and lands in `fenced_write` exactly as a
+    /// fenced `write` lands there — the demotion [`Peer`](crate::Peer)
+    /// runs is the same one a fenced point write forces.
     fn exchange_image(&mut self, tick: Tick) {
         let Some(cyclic) = self.cyclic else {
             return;
@@ -3392,6 +3410,11 @@ impl<'d> Executor<'d> {
         match cyclic.exchange(tick) {
             Ok(()) => self.io_health.consecutive_failures = 0,
             Err(error) => {
+                if self.fenced_write.is_none()
+                    && let IoError::Fenced(point) = error
+                {
+                    self.fenced_write = Some(point);
+                }
                 self.io_health.failed_exchanges += 1;
                 self.io_health.consecutive_failures += 1;
                 self.io_health.last_error = Some(IoFault {
@@ -9040,6 +9063,11 @@ mod tests {
         /// The exchange did not complete: nothing publishes or latches,
         /// the staged output image is retained, and the miss counts.
         Failed,
+        /// The field's writer arbitration refused the exchange: like a
+        /// `Failed` nothing moves and the staged image is retained —
+        /// but the boundary error is [`IoError::Fenced`], the
+        /// claim-loss verdict a fenced point write would carry.
+        Fenced,
     }
 
     /// A scripted [`CyclicIoDriver`] stub proving the cyclic exchange
@@ -9292,6 +9320,18 @@ mod tests {
                     state.misses += 1;
                     state.last_error = Some("the exchange did not complete".to_string());
                     Err(IoError::Disconnected(
+                        *self.points.keys().min().expect("nonempty image"),
+                    ))
+                }
+                Exchange::Fenced => {
+                    // The claim-loss verdict — the same "nothing moved,
+                    // image retained" miss shape, but named `Fenced` so
+                    // the boundary marks the lost claim instead of a
+                    // transport failure.
+                    state.misses += 1;
+                    state.last_error =
+                        Some("exchange refused: another attachment owns writes".to_string());
+                    Err(IoError::Fenced(
                         *self.points.keys().min().expect("nonempty image"),
                     ))
                 }
@@ -9743,6 +9783,72 @@ mod tests {
         assert_eq!(
             driver.exchange_counters().attempted,
             driver.transport_calls()
+        );
+    }
+
+    #[test]
+    fn cyclic_fenced_exchange_marks_the_claim_loss_like_a_fenced_write() {
+        // The cyclic surface carries no per-point write verdicts — a
+        // fenced field refuses the whole exchange. The boundary must
+        // still land the claim-loss mark `Peer` demotes on, exactly as
+        // a fenced output write lands it: the ex-owner of a
+        // connection-bound claim — gone with the link flap — learns it
+        // is superseded here, not at a `write` that never transports.
+        let driver = CyclicStub::new(
+            &[(10, 1), (20, 1)],
+            3,
+            &[Exchange::Complete, Exchange::Fenced, Exchange::Complete],
+        );
+        let map = PointMap::new()
+            .with_point(PointId(10), Direction::In, ValueKind::Float)
+            .with_point(PointId(20), Direction::Out, ValueKind::Float);
+        let mut executor = Executor::new(
+            &driver,
+            map,
+            vec![Box::new(WriteOnce {
+                output: PointId(20),
+                value: 9.0,
+                done: false,
+            })],
+        )
+        .unwrap();
+
+        executor.scan();
+        assert_eq!(executor.fenced_write(), None);
+        assert_eq!(
+            driver.field_sample(20),
+            Some(Sample::good(Value::Float(0.0), Tick::ZERO))
+        );
+
+        // Scan 2's exchange meets the field's fencing verdict: the
+        // staged image stays unpublished, the boundary counts its one
+        // failure — and the claim-loss mark names the attribution
+        // point the driver reported.
+        executor.scan();
+        assert_eq!(executor.fenced_write(), Some(PointId(10)));
+        let health = &executor.snapshot().io_health;
+        assert_eq!(health.failed_exchanges, 1);
+        assert_eq!(
+            health.last_error,
+            Some(IoFault {
+                tick: Tick(2),
+                point: PointId(10),
+                direction: Direction::In,
+                error: IoError::Fenced(PointId(10)),
+            })
+        );
+        assert_eq!(
+            driver.field_sample(20),
+            Some(Sample::good(Value::Float(0.0), Tick::ZERO)),
+            "a fenced exchange publishes nothing"
+        );
+
+        // The mark is a scan product: a clean exchange clears it.
+        executor.scan();
+        assert_eq!(executor.fenced_write(), None);
+        assert_eq!(
+            driver.field_sample(20),
+            Some(Sample::good(Value::Float(9.0), Tick(3)))
         );
     }
 

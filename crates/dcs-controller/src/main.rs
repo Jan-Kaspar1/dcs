@@ -170,6 +170,14 @@
 //! the old active first — keeps exactly one peer writing the field.
 //! A standby-local `SimDriver` needs no gate: its plant is a private
 //! tracking copy every checkpoint's driver section resynchronizes.
+//! Whichever flag names the tracking source, it must be a different
+//! instance: a `--standby` or `--peer` target that resolves to this
+//! instance's own `--listen` socket is a usage error at launch — the
+//! run's own checkpoint can never carry a peer's field ownership (a
+//! standby's own document always stamps `source_owns_field:false`,
+//! which the apply counts as a heartbeat miss), so the self-addressed
+//! standby would cover no peer while an armed one promoted itself on
+//! its own misses.
 //!
 //! Demotion is the launch asymmetry the follow-peer half of the
 //! tracking contract closes: a launched active never named a peer —
@@ -331,7 +339,7 @@ use dcs_monitor::{
     TrackTarget,
 };
 use dcs_runtime::{
-    Activation, Checkpoint, Executor, Peer, TrackReport, WriteGate, mint_generation,
+    Activation, Checkpoint, Executor, Peer, PeerEvent, TrackReport, WriteGate, mint_generation,
 };
 use dcs_sim_net::{ClaimGrant, RemoteDriver, RemoteError};
 use std::net::SocketAddr;
@@ -830,7 +838,8 @@ fn settle_activation(
             Ok(())
         }
         Ok(Activation::Refused { error }) => Err(format!(
-            "{error} — no --peer was declared, so there is no pair to rejoin"
+            "{error} — no --peer was declared, so there is no pair to rejoin: \
+             relaunch with --standby ADDRESS to track the field's live owner"
         )),
         Err(error) => Err(format!("{error}")),
     }
@@ -971,13 +980,16 @@ controller scan.
                   the peer down with its name in the routine
                   mid-failover condition, degrades tracking as pull
                   misses the name's later answer reconverges; it is
-                  never a startup error
+                  never a startup error. ADDR must name a different
+                  instance, though: a target resolving to this
+                  instance's own --listen socket is a usage error
   --peer ADDR     run as the active, but name the peer's monitoring
                   address this instance tracks if it is later demoted
                   — so a demoted active reconverges and stays
                   promotable; degrades like --standby when the name
                   does not resolve. Mutually exclusive with --standby;
-                  requires --listen
+                  requires --listen, and like --standby must name a
+                  different instance than that socket
   --revised       declare this instance's model a deliberate revision of
                   the run's previous one. On a --standby peer a pulled
                   checkpoint whose model fingerprint differs crosses the
@@ -1307,6 +1319,38 @@ impl Options {
                 }
             }
         }
+        // A tracking source must name a different instance. Pointed at
+        // this instance's own --listen socket, every pull returns the
+        // run's own checkpoint — which a standby's document always
+        // stamps source_owns_field:false — so each apply scores a
+        // heartbeat miss: an unarmed run reports standby covering no
+        // peer forever, and an armed one manufactures a failover
+        // against itself at every budget
+        // (self-tracking-standby-never-refused). The comparison
+        // resolves both spellings — an equal socket, a wildcard listen
+        // reached through any of this host's addresses (a container's
+        // own DNS name resolves to its bridge IP, not loopback), and a
+        // wildcard target the loopback stack answers all refuse at
+        // parse, like the persistence aliases above. A target that
+        // does not resolve stays the documented degraded source — the
+        // pull-miss contract, never a startup error — since it cannot
+        // be shown to be this instance.
+        if let Some(listen_addr) = listen.as_deref() {
+            for (flag, target) in [("--standby", &standby), ("--peer", &peer)] {
+                let Some(target) = target.as_deref() else {
+                    continue;
+                };
+                if let Some(socket) = own_monitor_socket(listen_addr, target) {
+                    return Err(format!(
+                        "{flag} {target} resolves to this instance's own --listen \
+                         socket {socket}: the tracking source must be a different \
+                         instance — a run pulling its own checkpoints tracks no \
+                         peer, and an armed standby self-promotes on the heartbeat \
+                         misses its own non-owning documents score"
+                    ));
+                }
+            }
+        }
         Ok(Self {
             model,
             check,
@@ -1386,6 +1430,73 @@ fn fold_components(path: PathBuf) -> PathBuf {
         }
     }
     folded
+}
+
+/// The `listen` socket a connection to `target` would reach — `Some`
+/// when a `--standby`/`--peer` target names this instance's own
+/// monitor, the misconfiguration the self-tracking check refuses at
+/// parse. Both spellings resolve through `ToSocketAddrs` and every
+/// resolved pair is tested, so a name answering with several
+/// addresses is judged on all of them. A name that does not resolve
+/// yields `None`: an unresolvable tracking target is the documented
+/// degraded source — a pull miss per cycle, never a startup error —
+/// and it cannot be shown to be this instance anyway.
+fn own_monitor_socket(listen: &str, target: &str) -> Option<SocketAddr> {
+    use std::net::ToSocketAddrs;
+    let resolve_all = |addr: &str| -> Vec<SocketAddr> {
+        addr.to_socket_addrs()
+            .map(|resolved| resolved.collect())
+            .unwrap_or_default()
+    };
+    let listens = resolve_all(listen);
+    for target in resolve_all(target) {
+        for listen in &listens {
+            if socket_reaches(target, *listen) {
+                return Some(*listen);
+            }
+        }
+    }
+    None
+}
+
+/// Whether a connection dialed to `target` lands on `listen` — the
+/// reachability half of the self-tracking check, on already-resolved
+/// addresses. The ports must match; then the socket is shared when
+/// the addresses are equal, when `listen` is a wildcard every local
+/// address reaches, or when `target` is a wildcard — a wildcard dial
+/// lands on the loopback stack, so it reaches only a listener bound
+/// on loopback or everywhere.
+fn socket_reaches(target: SocketAddr, listen: SocketAddr) -> bool {
+    if target.port() != listen.port() {
+        return false;
+    }
+    // The canonical form folds an IPv4-mapped IPv6 address to its IPv4
+    // counterpart, so `[::ffff:127.0.0.1]` spells loopback — and the
+    // wildcard arm below lets a dual-stack `[::]` listener answer an
+    // IPv4-local dial.
+    let target_ip = target.ip().to_canonical();
+    let listen_ip = listen.ip().to_canonical();
+    if target_ip == listen_ip {
+        return true;
+    }
+    if listen_ip.is_unspecified() {
+        return ip_is_local(target_ip);
+    }
+    target_ip.is_unspecified() && listen_ip.is_loopback()
+}
+
+/// Whether `ip` is one of this host's own addresses: loopback and the
+/// unspecified address outright, anything else by probing it with a
+/// bind — an ephemeral listen on `ip` succeeds only when the address
+/// is assigned to a local interface. The probe is what the
+/// self-addressed deployment needs: a standby pointed at its own
+/// container DNS name resolves to the container's bridge IP, not
+/// loopback.
+fn ip_is_local(ip: std::net::IpAddr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() {
+        return true;
+    }
+    std::net::TcpListener::bind(SocketAddr::new(ip, 0)).is_ok()
 }
 
 fn fail(message: impl std::fmt::Display) -> ExitCode {
@@ -1904,7 +2015,7 @@ fn main() -> ExitCode {
         // the activation-time answer takes: a declared pair keeps the
         // run (the handler left the run serving), a pairless run ends
         // the launch the verdict refused.
-        if let Some(error) = monitor.take_startup_refusal()
+        if let Some(error) = monitor.drain_startup_refusal()
             && let Err(error) = settle_activation(
                 Ok(Activation::Refused { error }),
                 &driver,
@@ -1976,13 +2087,22 @@ fn main() -> ExitCode {
                 // pulls — the serving peer could not track this one
                 // back anyway, since a monitorless standby serves no
                 // checkpoint endpoint.
-                let mut puller = CheckpointPuller::for_target(target.clone(), None, None);
+                //
+                // The puller is rebuilt on demand rather than held for
+                // the run's life: a run that owns the field drops it, so
+                // a checkpoint fetched before it took the field cannot
+                // land after it, and the first demoted cycle binds a
+                // fresh one.
+                let mut puller: Option<CheckpointPuller> = None;
                 let peer = std::cell::RefCell::new(peer);
                 let state_sink = open_state_sink(&options);
                 let step = || driver.step(dt, peer.borrow().owns_field());
                 scan_loop(
                     || {
                         let mut peer = peer.borrow_mut();
+                        if peer.owns_field() {
+                            puller = None;
+                        }
                         // The same tracking cycle the monitored loop
                         // runs through `track_cycle`, here directly on
                         // the peer; without a recorder the transition
@@ -1990,104 +2110,106 @@ fn main() -> ExitCode {
                         // consumes the fetch worker's latest result —
                         // the network wait itself runs off the scan
                         // cycle's critical path.
-                        let report = peer.track_once(|| puller.poll());
+                        let report = peer.track_once(|| {
+                            puller
+                                .get_or_insert_with(|| {
+                                    CheckpointPuller::for_target(target.clone(), None, None)
+                                })
+                                .poll()
+                        });
                         report_tracking(&report, &target);
-                        for divergence in peer.take_divergences() {
-                            eprintln!(
-                                "standby: staged outputs diverged from the field at tick {}: {:?}",
-                                divergence.tick.0, divergence.mismatches
-                            );
-                        }
-                        for resolution in peer.take_resolutions() {
-                            eprintln!(
-                                "standby: divergence resolved at tick {} — compared {:?}",
-                                resolution.tick.0, resolution.compared
-                            );
-                        }
-                        for reinitialized in peer.take_reinitializations() {
-                            eprintln!("standby: {reinitialized}");
-                        }
-                        for orphan in peer.take_orphans() {
-                            eprintln!(
-                                "standby: the tracked line has no field owner — orphaned at tick {} (aligned to {})",
-                                orphan.tick.0, orphan.aligned.0
-                            );
-                        }
-                        for rearm in peer.take_claim_rearms() {
-                            eprintln!(
-                                "standby: field write-ownership claim re-armed under this run's token at tick {} (point {:?})",
-                                rearm.tick.0, rearm.point
-                            );
-                        }
-                        for observation in peer.take_claim_observations() {
-                            eprintln!(
-                                "standby: field write-ownership claim observed standing under foreign owner token {} at tick {} (point {:?})",
-                                observation.claimant, observation.tick.0, observation.point
-                            );
-                        }
-                        for restart in peer.take_source_restarts() {
-                            eprintln!(
-                                "standby: checkpoint stream regressed at tick {} — the source restarted or was replaced; resumed from its tick {} (was aligned to {:?})",
-                                restart.tick.0,
-                                restart.resumed_at.0,
-                                restart.was_aligned.map(|tick| tick.0)
-                            );
-                        }
-                        for refusal in peer.take_promotion_refusals() {
-                            eprintln!(
-                                "standby: armed self-promotion refused at tick {} (misses {}) — {}; the gate stays armed while convergence stands",
-                                refusal.tick.0, refusal.misses, refusal.error
-                            );
-                        }
-                        for change in peer.take_role_changes() {
-                            eprintln!(
-                                "standby: role {} -> {} at tick {}",
-                                change.from, change.to, change.tick.0
-                            );
-                        }
-                        for (_index, receipt) in peer.take_superseded_commands() {
-                            eprintln!(
-                                "standby: pending command superseded at tick {}: {:?}",
-                                peer.tick().0,
-                                receipt.command
-                            );
-                        }
-                        for receipt in peer.take_adoption_receipts() {
-                            eprintln!(
-                                "standby: checkpoint adoption changed receipted state at tick {}: {:?} (actor {:?})",
-                                peer.tick().0,
-                                receipt.command,
-                                receipt.actor
-                            );
+                        // Without a recorder the transition queues
+                        // drain into the log instead. One drain, one
+                        // match: the tracking cycle's whole account, in
+                        // the producer's category order — the order this
+                        // loop logged them in by hand.
+                        let tick = peer.tick();
+                        for event in peer.drain_pending() {
+                            match event {
+                                PeerEvent::Divergence(divergence) => eprintln!(
+                                    "standby: staged outputs diverged from the field at tick {}: {:?}",
+                                    divergence.tick.0, divergence.mismatches
+                                ),
+                                PeerEvent::Resolution(resolution) => eprintln!(
+                                    "standby: divergence resolved at tick {} — compared {:?}",
+                                    resolution.tick.0, resolution.compared
+                                ),
+                                PeerEvent::Reinitialization(reinitialized) => {
+                                    eprintln!("standby: {reinitialized}");
+                                }
+                                PeerEvent::Orphan(orphan) => eprintln!(
+                                    "standby: the tracked line has no field owner — orphaned at tick {} (aligned to {})",
+                                    orphan.tick.0, orphan.aligned.0
+                                ),
+                                PeerEvent::ClaimRearm(rearm) => eprintln!(
+                                    "standby: field write-ownership claim re-armed under this run's token at tick {} (point {:?})",
+                                    rearm.tick.0, rearm.point
+                                ),
+                                PeerEvent::ClaimObservation(observation) => eprintln!(
+                                    "standby: field write-ownership claim observed standing under foreign owner token {} at tick {} (point {:?})",
+                                    observation.claimant, observation.tick.0, observation.point
+                                ),
+                                PeerEvent::SourceRestart(restart) => eprintln!(
+                                    "standby: checkpoint stream regressed at tick {} — the source restarted or was replaced; resumed from its tick {} (was aligned to {:?})",
+                                    restart.tick.0,
+                                    restart.resumed_at.0,
+                                    restart.was_aligned.map(|tick| tick.0)
+                                ),
+                                PeerEvent::PromotionRefusal(refusal) => eprintln!(
+                                    "standby: armed self-promotion refused at tick {} (misses {}) — {}; the gate stays armed while convergence stands",
+                                    refusal.tick.0, refusal.misses, refusal.error
+                                ),
+                                PeerEvent::RoleChange(change) => eprintln!(
+                                    "standby: role {} -> {} at tick {}",
+                                    change.from, change.to, change.tick.0
+                                ),
+                                PeerEvent::SupersededCommand { receipt, .. } => eprintln!(
+                                    "standby: pending command superseded at tick {}: {:?}",
+                                    tick.0, receipt.command
+                                ),
+                                PeerEvent::AdoptionReceipt(receipt) => eprintln!(
+                                    "standby: checkpoint adoption changed receipted state at tick {}: {:?} (actor {:?})",
+                                    tick.0, receipt.command, receipt.actor
+                                ),
+                                PeerEvent::FencingLoss(_) | PeerEvent::StartupRefusal(_) => {}
+                            }
                         }
                         let scanned = peer.scan();
                         // Transitions the scan itself produced — a
                         // fenced write's claim loss and the demotion it
                         // drove — log at the boundary they happened,
                         // not a cycle late.
-                        for change in peer.take_role_changes() {
-                            eprintln!(
-                                "standby: role {} -> {} at tick {}",
-                                change.from, change.to, change.tick.0
-                            );
-                        }
-                        for loss in peer.take_fencing_losses() {
-                            match loss.claimant {
-                                Some(claimant) => eprintln!(
-                                    "standby: field write-ownership claim lost at tick {}: {:?} fenced, preempted by owner token {claimant}",
-                                    loss.tick.0, loss.point
+                        for event in peer.drain_pending() {
+                            match event {
+                                PeerEvent::RoleChange(change) => eprintln!(
+                                    "standby: role {} -> {} at tick {}",
+                                    change.from, change.to, change.tick.0
                                 ),
-                                None => eprintln!(
-                                    "standby: field write-ownership claim lost at tick {}: {:?} fenced",
-                                    loss.tick.0, loss.point
+                                PeerEvent::FencingLoss(loss) => match loss.claimant {
+                                    Some(claimant) => eprintln!(
+                                        "standby: field write-ownership claim lost at tick {}: {:?} fenced, preempted by owner token {claimant}",
+                                        loss.tick.0, loss.point
+                                    ),
+                                    None => eprintln!(
+                                        "standby: field write-ownership claim lost at tick {}: {:?} fenced",
+                                        loss.tick.0, loss.point
+                                    ),
+                                },
+                                PeerEvent::ClaimObservation(observation) => eprintln!(
+                                    "standby: field write-ownership claim observed standing under foreign owner token {} at tick {} (point {:?})",
+                                    observation.claimant, observation.tick.0, observation.point
                                 ),
+                                PeerEvent::Divergence(_)
+                                | PeerEvent::Resolution(_)
+                                | PeerEvent::Reinitialization(_)
+                                | PeerEvent::Orphan(_)
+                                | PeerEvent::ClaimRearm(_)
+                                | PeerEvent::StartupRefusal(_)
+                                | PeerEvent::SourceRestart(_)
+                                | PeerEvent::PromotionRefusal(_)
+                                | PeerEvent::SupersededCommand { .. }
+                                | PeerEvent::AdoptionReceipt(_) => {}
                             }
-                        }
-                        for observation in peer.take_claim_observations() {
-                            eprintln!(
-                                "standby: field write-ownership claim observed standing under foreign owner token {} at tick {} (point {:?})",
-                                observation.claimant, observation.tick.0, observation.point
-                            );
                         }
                         Ok(scanned)
                     },
@@ -2204,29 +2326,42 @@ fn main() -> ExitCode {
                     || {
                         let mut peer = peer.borrow_mut();
                         let scanned = peer.scan();
-                        for loss in peer.take_fencing_losses() {
-                            match loss.claimant {
-                                Some(claimant) => eprintln!(
-                                    "field write-ownership claim lost at tick {}: {:?} fenced, preempted by owner token {claimant}",
-                                    loss.tick.0, loss.point
+                        // One drain, one match: the scan's whole
+                        // account — the fenced write's claim loss and
+                        // the demotion it drove, the foreign owner the
+                        // reclaim probe met, and the reported role walk
+                        // — in the producer's category order.
+                        for event in peer.drain_pending() {
+                            match event {
+                                PeerEvent::FencingLoss(loss) => match loss.claimant {
+                                    Some(claimant) => eprintln!(
+                                        "field write-ownership claim lost at tick {}: {:?} fenced, preempted by owner token {claimant}",
+                                        loss.tick.0, loss.point
+                                    ),
+                                    None => eprintln!(
+                                        "field write-ownership claim lost at tick {}: {:?} fenced",
+                                        loss.tick.0, loss.point
+                                    ),
+                                },
+                                PeerEvent::ClaimObservation(observation) => eprintln!(
+                                    "field write-ownership claim observed standing under foreign owner token {} at tick {} (point {:?})",
+                                    observation.claimant, observation.tick.0, observation.point
                                 ),
-                                None => eprintln!(
-                                    "field write-ownership claim lost at tick {}: {:?} fenced",
-                                    loss.tick.0, loss.point
+                                PeerEvent::RoleChange(change) => eprintln!(
+                                    "role {} -> {} at tick {}",
+                                    change.from, change.to, change.tick.0
                                 ),
+                                PeerEvent::Divergence(_)
+                                | PeerEvent::Resolution(_)
+                                | PeerEvent::Reinitialization(_)
+                                | PeerEvent::Orphan(_)
+                                | PeerEvent::ClaimRearm(_)
+                                | PeerEvent::StartupRefusal(_)
+                                | PeerEvent::SourceRestart(_)
+                                | PeerEvent::PromotionRefusal(_)
+                                | PeerEvent::SupersededCommand { .. }
+                                | PeerEvent::AdoptionReceipt(_) => {}
                             }
-                        }
-                        for observation in peer.take_claim_observations() {
-                            eprintln!(
-                                "field write-ownership claim observed standing under foreign owner token {} at tick {} (point {:?})",
-                                observation.claimant, observation.tick.0, observation.point
-                            );
-                        }
-                        for change in peer.take_role_changes() {
-                            eprintln!(
-                                "role {} -> {} at tick {}",
-                                change.from, change.to, change.tick.0
-                            );
                         }
                         // A deferred startup-claim refusal settling
                         // inside this scan is the born-active
@@ -2236,7 +2371,7 @@ fn main() -> ExitCode {
                         // served and `--peer` requires `--listen`, so
                         // none was declared and the refusal ends the
                         // launch.
-                        if let Some(error) = peer.take_startup_refusal() {
+                        if let Some(error) = peer.drain_startup_refusal() {
                             settle_activation(
                                 Ok(Activation::Refused { error }),
                                 &driver,
@@ -2283,7 +2418,9 @@ fn main() -> ExitCode {
 /// unreachable peer's do, and the next successful resolution tracks
 /// again without a respawn. A
 /// field-owning cycle's [`Monitor::track_cycle`] short-circuits before
-/// the pull, so the puller's fetch thread idles until a demotion.
+/// the pull, and the cycle drops the puller with the ownership, so a
+/// checkpoint fetched before this run took the field cannot land after
+/// it; the first demoted cycle binds a fresh one.
 ///
 /// The scan's completion can settle the deferred startup grant: a
 /// pending born-active's re-issued conditional ask meeting a live
@@ -2302,26 +2439,39 @@ fn tracked_cycle(
     owner: u64,
     options: &Options,
 ) -> Result<Tick, String> {
+    let owns_field = monitor.owns_field();
     if let Some(source) = monitor.verified_tracking_source() {
-        if puller.as_ref().map(|(bound, _)| bound) != Some(&source) {
-            let announce = Some(monitor.local_addr());
-            // A source a keyed run adopted through an announced
-            // demotion must keep proving every checkpoint it serves —
-            // an endpoint that only replays or fabricates this line's
-            // documents feeds the demoted peer nothing. A configured
-            // source — or an unkeyed run — pulls unproven, as before.
-            let fresh = CheckpointPuller::for_target(
-                source.clone(),
-                announce,
-                monitor.pull_proof_key(&source),
-            );
-            *puller = Some((source.clone(), fresh));
+        if owns_field {
+            // A run that owns the field pulls nothing, and this is the
+            // boundary where the puller's answers stop being applicable:
+            // a checkpoint fetched before this run took the field must
+            // not land after it, rewinding the run to a tick it already
+            // passed. The puller goes with the ownership — its worker
+            // thread ends there, and the first demoted cycle binds a
+            // fresh one holding no answer from before the promotion.
+            *puller = None;
+        } else {
+            if puller.as_ref().map(|(bound, _)| bound) != Some(&source) {
+                let announce = Some(monitor.local_addr());
+                // A source a keyed run adopted through an announced
+                // demotion must keep proving every checkpoint it serves
+                // — an endpoint that only replays or fabricates this
+                // line's documents feeds the demoted peer nothing. A
+                // configured source — or an unkeyed run — pulls
+                // unproven, as before.
+                let fresh = CheckpointPuller::for_target(
+                    source.clone(),
+                    announce,
+                    monitor.pull_proof_key(&source),
+                );
+                *puller = Some((source.clone(), fresh));
+            }
+            let report = monitor.track_cycle(|| puller.as_mut().unwrap().1.poll());
+            report_tracking(&report, &source);
         }
-        let report = monitor.track_cycle(|| puller.as_mut().unwrap().1.poll());
-        report_tracking(&report, &source);
     }
     let tick = monitor.paced_scan();
-    if let Some(error) = monitor.take_startup_refusal() {
+    if let Some(error) = monitor.drain_startup_refusal() {
         settle_activation(
             Ok(Activation::Refused { error }),
             driver,
@@ -2816,6 +2966,76 @@ mod tests {
         ]);
         Options::parse(args).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Finding `self-tracking-standby-never-refused`: a `--standby` or
+    /// `--peer` target resolving to this instance's own `--listen`
+    /// socket pulled its own checkpoint stream — every apply scoring
+    /// the heartbeat miss a standby's `source_owns_field:false`
+    /// document always carries — so the unarmed run reported standby
+    /// covering no peer forever, and the armed one self-promoted
+    /// against itself at every budget. `Options::parse` refuses the
+    /// self-addressed source naming both flags, under every spelling
+    /// that reaches the own socket.
+    #[test]
+    fn self_addressed_tracking_source_fails_option_parsing() {
+        let base = [
+            "model.json".to_string(),
+            "--scan-ms".to_string(),
+            "100".to_string(),
+        ];
+        let parse = |listen: &str, flag: &str, target: &str| {
+            Options::parse(base.iter().cloned().chain([
+                "--listen".to_string(),
+                listen.to_string(),
+                flag.to_string(),
+                target.to_string(),
+            ]))
+        };
+
+        for (flag, listen, target) in [
+            // The reported spelling: a wildcard listen, a loopback
+            // target.
+            ("--standby", "0.0.0.0:28080", "127.0.0.1:28080"),
+            // The identical spelling.
+            ("--standby", "127.0.0.1:28081", "127.0.0.1:28081"),
+            // A resolved-equal name.
+            ("--standby", "127.0.0.1:28082", "localhost:28082"),
+            // A wildcard target dials into the loopback listener.
+            ("--standby", "127.0.0.1:28083", "0.0.0.0:28083"),
+            // A wildcard listener answers a dial to any local address
+            // on the port — the IPv6 wildcard included.
+            ("--standby", "[::]:28084", "127.0.0.1:28084"),
+            // The demotion-tracking flag refuses the same way.
+            ("--peer", "0.0.0.0:28085", "127.0.0.1:28085"),
+            ("--peer", "127.0.0.1:28086", "localhost:28086"),
+        ] {
+            let error = match parse(listen, flag, target) {
+                Ok(_) => {
+                    panic!("{flag} {target} against --listen {listen} must fail parsing")
+                }
+                Err(error) => error,
+            };
+            assert!(
+                error.contains(flag) && error.contains("--listen"),
+                "{flag} {target} against --listen {listen}: {error}"
+            );
+        }
+
+        // The supported deployments still parse: a same-host pair is a
+        // different port on the same address, a remote peer a
+        // non-local one — and the wildcard spellings are one-sided.
+        for (flag, listen, target) in [
+            ("--standby", "0.0.0.0:28080", "127.0.0.1:28087"),
+            ("--standby", "127.0.0.1:28080", "127.0.0.1:28087"),
+            ("--peer", "127.0.0.1:28080", "127.0.0.1:28087"),
+            ("--standby", "0.0.0.0:28080", "192.0.2.1:28080"),
+            ("--standby", "127.0.0.1:28080", "0.0.0.0:28087"),
+        ] {
+            if let Err(error) = parse(listen, flag, target) {
+                panic!("{flag} {target} against --listen {listen} must parse: {error}");
+            }
+        }
     }
 
     #[test]
