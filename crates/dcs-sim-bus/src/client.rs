@@ -12,9 +12,9 @@ use dcs_core::{
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{BufReader, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// One logical point's mapping onto a device register.
 ///
@@ -42,14 +42,15 @@ pub struct PointRegister {
 #[derive(Debug, Clone, PartialEq)]
 pub enum LinkError {
     /// There is no live connection to the device server: the link
-    /// failed mid-request or the driver already dropped it. A dead
-    /// driver does not reconnect — attaching again means connecting a
-    /// new `BusDriver`.
+    /// failed mid-request, the driver already dropped it, or the
+    /// latest re-attach found the endpoint unanswerable. A dead link
+    /// is not a dead driver — the next access re-attaches lazily, so
+    /// the failure reads "not answerable now", never "dead for good".
     Disconnected,
     /// The server did not answer within the driver's configured
     /// timeout. The connection is dropped — a late answer would desync
-    /// the request/response pairing — so later requests report
-    /// `Disconnected` rather than risk reading a stale response.
+    /// the request/response pairing — and the next request re-attaches
+    /// on a fresh stream rather than risk reading a stale response.
     Timeout,
     /// The server refused the request itself — a payload that does not
     /// decode as a [`BusRequest`]. `detail` is the server's diagnostic
@@ -130,10 +131,143 @@ pub(crate) fn refused(error: BusError) -> LinkError {
     }
 }
 
-/// The connection behind [`BusDriver`]'s lock: `Some` while the link is
-/// live, `None` after the first failed exchange.
+/// The connection behind [`BusDriver`]'s lock: `Some` while the link
+/// is live, `None` after a failed exchange — the next request lazily
+/// re-attaches — plus the re-attach bookkeeping and the link-level
+/// failure record [`IoDriver::diagnostics`] reports.
 struct Connection {
     stream: Option<BufReader<TcpStream>>,
+    /// The writer token a successful `claim_writer` recorded —
+    /// re-asserted through `ensure_writer` on every re-attach, so a
+    /// device restart's dropped claim re-arms for the same owner.
+    /// `None` on an attachment that never claimed, released its claim
+    /// at demotion, or watched the field's verdict show a different
+    /// owner standing.
+    owner: Option<u64>,
+    /// The earliest instant the next re-attach may run: a failed attach
+    /// — or a failed exchange, which counts as the window's attempt —
+    /// backs the next attempt off by
+    /// [`REATTACH_INTERVAL`](BusDriver::REATTACH_INTERVAL), so a dead
+    /// endpoint costs one connect attempt per interval rather than one
+    /// per point's access.
+    retry_at: Instant,
+    /// The most recent transport- or protocol-level failure. The
+    /// failure that severed the link stays recorded — the
+    /// `Disconnected`s every later access reports are its consequence,
+    /// not new failures — and the first successful exchange clears it,
+    /// so the health surface reports the standing failure while it
+    /// stands and nothing once it clears.
+    last_failure: Option<LinkError>,
+}
+
+impl Connection {
+    /// Re-establishes the link and re-arms the recorded writer claim —
+    /// the [`BusRequest::EnsureWriter`] grant a reconnecting field
+    /// owner asserts so a device restart's dropped claim re-arms for
+    /// the same owner rather than preempting whichever attachment
+    /// claimed during the outage. A `fenced` answer keeps the fresh
+    /// link but forgets the recorded owner: the field already serves a
+    /// different claim, and this attachment's mutations will fence
+    /// honestly against it. Any other failed attach drops the stream
+    /// and backs the next attempt off.
+    fn reattach(&mut self, addresses: &[SocketAddr], timeout: Duration) {
+        let mut stream = match connect_stream(addresses, timeout) {
+            Ok(stream) => BufReader::new(stream),
+            Err(_) => {
+                self.retry_at = Instant::now() + BusDriver::REATTACH_INTERVAL;
+                return;
+            }
+        };
+        if let Some(owner) = self.owner {
+            match exchange(&mut stream, &BusRequest::EnsureWriter { owner }) {
+                Ok(BusResponse::Done) => {}
+                Ok(BusResponse::Error {
+                    error: BusError::Fenced { .. },
+                }) => {
+                    self.owner = None;
+                }
+                Ok(_) => {
+                    self.last_failure = Some(LinkError::Disconnected);
+                    self.retry_at = Instant::now() + BusDriver::REATTACH_INTERVAL;
+                    return;
+                }
+                Err(error) => {
+                    self.last_failure = Some(error);
+                    self.retry_at = Instant::now() + BusDriver::REATTACH_INTERVAL;
+                    return;
+                }
+            }
+        }
+        self.stream = Some(stream);
+    }
+
+    /// Runs `request` on the live link, keeping the connection's
+    /// failure bookkeeping: a successful exchange clears the standing
+    /// failure; a `fenced` answer forgets the recorded writer token —
+    /// the field's standing claim names another owner, so the
+    /// attachment holds nothing left to re-assert; and a failed
+    /// exchange drops the link — the response stream's position is
+    /// unknown afterward — and counts as the window's re-attach
+    /// attempt.
+    fn exchange_on(&mut self, request: &BusRequest) -> Result<BusResponse, LinkError> {
+        let Some(stream) = self.stream.as_mut() else {
+            return Err(LinkError::Disconnected);
+        };
+        match exchange(stream, request) {
+            Ok(response) => {
+                if matches!(
+                    response,
+                    BusResponse::Error {
+                        error: BusError::Fenced { .. }
+                    }
+                ) {
+                    self.owner = None;
+                }
+                self.last_failure = None;
+                Ok(response)
+            }
+            Err(error) => {
+                self.stream = None;
+                self.retry_at = Instant::now() + BusDriver::REATTACH_INTERVAL;
+                self.last_failure = Some(error.clone());
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Connects a stream to the first answering of `addresses` with the
+/// driver's request semantics — the timeouts and `nodelay` every
+/// connection carries.
+pub(crate) fn connect_stream(
+    addresses: &[SocketAddr],
+    timeout: Duration,
+) -> std::io::Result<TcpStream> {
+    let mut failure = std::io::Error::new(std::io::ErrorKind::NotFound, "no device server address");
+    for &address in addresses {
+        let attempt = loop {
+            match TcpStream::connect_timeout(&address, timeout) {
+                // An interrupted connect attempt is abandoned with its
+                // socket and retried fresh — a caught signal (e.g. a
+                // spawned helper's `SIGCHLD`) is not a reachability
+                // verdict on the address.
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                other => break other,
+            }
+        };
+        match attempt {
+            Ok(stream) => {
+                stream.set_read_timeout(Some(timeout))?;
+                stream.set_write_timeout(Some(timeout))?;
+                // Requests are small and answered immediately;
+                // coalescing delays would only add latency.
+                stream.set_nodelay(true)?;
+                return Ok(stream);
+            }
+            Err(error) => failure = error,
+        }
+    }
+    Err(failure)
 }
 
 /// Writes the request frame and reads the response frame on `stream`,
@@ -199,32 +333,64 @@ pub(crate) fn exchange(
 /// wrong value kind is [`IoError::TypeMismatch`] likewise. On the wire,
 /// any failed exchange — broken pipe, closed connection, timed-out or
 /// oversized response, undecodable answer — drops the connection, is
-/// recorded for [`last_failure`](Self::last_failure), and every later
-/// access fails fast with `Disconnected`. A timed-out response could
+/// recorded for [`last_failure`](Self::last_failure), and the *next*
+/// access re-attaches lazily: a device outage degrades every access to
+/// `Disconnected` while it lasts rather than killing the driver for
+/// good, and a device that returns — a restarted server on its bound
+/// address — is served by the same `BusDriver`. Contact attempts are
+/// bounded to one per [`REATTACH_INTERVAL`](Self::REATTACH_INTERVAL):
+/// a dead endpoint costs each access burst one refused connect rather
+/// than one connect-timeout per point, and an endpoint that completes
+/// the handshake but never answers — a frozen or blackholed peer —
+/// costs one timed-out exchange per interval rather than one per
+/// request, so a scan's burst of accesses stalls once near the request
+/// timeout instead of once per point. A timed-out response could
 /// arrive after the fact and pair with a later request, so the driver
 /// never reuses a suspect link. `BusDriver` is [`Sync`] through its
 /// internal locks, like the driver contract expects.
 ///
+/// An attachment that claimed the device —
+/// [`claim_writer`](Self::claim_writer) — records the token, and every
+/// re-attach re-asserts it through [`BusRequest::EnsureWriter`] before
+/// the pending request runs: a device restart or link drop releases
+/// the claim server-side, so the owner re-arms it — conditionally,
+/// never preempting a different claim another attachment took during
+/// the outage. A `fenced` verdict — on the re-arm or on any mutating
+/// request — forgets the recorded token, and
+/// [`release_claim`](Self::release_claim) drops it at demotion, so
+/// only an attachment the field still owes ownership re-arms.
+///
 /// Diagnostics: [`IoDriver::diagnostics`] reports the link as
-/// [`LinkState::Disconnected`] once a failed exchange dropped the
-/// connection — the named link degradation a dead device server
-/// produces — with the last transport failure's description. That
+/// [`LinkState::Disconnected`] while no live connection stands — a
+/// dead or unanswerable device server, including the span between a
+/// severed link's drop and its re-attach — with the last transport
+/// failure's description, which the first successful exchange after
+/// recovery clears so the surface describes the link as it is. That
 /// surface is link health, distinct from the per-point [`IoError`]s
 /// `read`/`write` return: every point's read failing with
 /// `Disconnected` and the link reporting `disconnected` are the same
 /// event told at the two levels the telemetry contract keeps separate.
 pub struct BusDriver {
+    /// The resolved server addresses, retried in order on re-attach.
+    addresses: Vec<SocketAddr>,
+    /// The per-request timeout — applied to each request's write and
+    /// response wait and to each re-attach's connect attempt.
+    timeout: Duration,
     connection: Mutex<Connection>,
     /// Point → register mapping plus the point's declared kind.
     points: HashMap<PointId, PointRegister>,
-    /// The last transport failure, for the link-health surface.
-    last_failure: Mutex<Option<LinkError>>,
 }
 
 impl BusDriver {
     /// The request timeout [`connect`](Self::connect) applies to each
     /// request's write and response wait — five seconds.
     pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// The minimum spacing between re-attach attempts — one second:
+    /// long enough that a dead endpoint does not stall every point's
+    /// access on its own connect timeout, short enough that a returned
+    /// device is re-served inside a few scan cycles.
+    pub const REATTACH_INTERVAL: Duration = Duration::from_secs(1);
 
     /// Connects to the device server at `addr` with the
     /// [`DEFAULT_TIMEOUT`](Self::DEFAULT_TIMEOUT) request timeout,
@@ -235,7 +401,9 @@ impl BusDriver {
     }
 
     /// Connects with an explicit `timeout` applied to each request's
-    /// write and to the wait for its response.
+    /// write, to the wait for its response, and to later re-attach
+    /// attempts. `addr` resolves once, at connect; a re-attach retries
+    /// the same resolved addresses.
     ///
     /// A refused or unreachable address fails here with the `io::Error`
     /// from the connect, before any point is involved; once connected,
@@ -246,43 +414,43 @@ impl BusDriver {
         timeout: Duration,
         points: &[PointRegister],
     ) -> std::io::Result<Self> {
-        let stream = loop {
-            match TcpStream::connect(&addr) {
-                // An interrupted connect attempt is abandoned with its
-                // socket and retried fresh — a caught signal (e.g. a
-                // spawned helper's `SIGCHLD`) is not a reachability
-                // verdict on the address.
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                other => break other?,
-            }
-        };
-        stream.set_read_timeout(Some(timeout))?;
-        stream.set_write_timeout(Some(timeout))?;
-        // Requests are small and answered immediately; coalescing delays
-        // would only add latency.
-        stream.set_nodelay(true)?;
+        let addresses: Vec<SocketAddr> = addr.to_socket_addrs()?.collect();
+        if addresses.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "the device server address resolves to nothing",
+            ));
+        }
+        let stream = connect_stream(&addresses, timeout)?;
         Ok(Self {
+            addresses,
+            timeout,
             connection: Mutex::new(Connection {
                 stream: Some(BufReader::new(stream)),
+                owner: None,
+                retry_at: Instant::now(),
+                last_failure: None,
             }),
             points: points
                 .iter()
                 .map(|mapping| (mapping.point, *mapping))
                 .collect(),
-            last_failure: Mutex::new(None),
         })
     }
 
-    /// Whether the link to the server is still live — `false` after the
-    /// first failed exchange, permanently.
+    /// Whether the link to the server is live — `false` between a
+    /// failed request's drop and the next request's re-attach.
     pub fn connected(&self) -> bool {
         self.connection.lock().unwrap().stream.is_some()
     }
 
-    /// The transport failure that ended the link, if one has occurred —
-    /// the link-health data a driver-diagnostics surface reports.
+    /// The transport failure last recorded on the link, if one stands
+    /// — the link-health data a driver-diagnostics surface reports.
+    /// The first successful exchange after a failure clears it, so the
+    /// report names the standing failure while it stands and nothing
+    /// once it clears.
     pub fn last_failure(&self) -> Option<LinkError> {
-        self.last_failure.lock().unwrap().clone()
+        self.connection.lock().unwrap().last_failure.clone()
     }
 
     /// Advances the device server's bank one tick of `dt` time units —
@@ -318,9 +486,51 @@ impl BusDriver {
     /// point's [`IoError::Fenced`] and a `step` answers
     /// [`LinkError::Fenced`]; reads, the register census, and quality
     /// injection stay open to every attachment.
+    ///
+    /// The granted token is recorded on the attachment: every later
+    /// re-attach re-asserts it through
+    /// [`BusRequest::EnsureWriter`], re-arming the claim a link drop or
+    /// device restart released without preempting a different owner.
+    /// [`release_claim`](Self::release_claim) forgets it — the
+    /// demotion path's half of the rule that only the field's owner
+    /// re-arms.
+    ///
+    /// The ask rides the claim path's
+    /// [`claim_request`](Self::claim_request): a link that died
+    /// unexercised — a promotion's first touch of an idle attachment —
+    /// replays once on a fresh link rather than refusing a recovered
+    /// field.
     pub fn claim_writer(&self, owner: u64) -> Result<(), LinkError> {
-        match self.request(&BusRequest::ClaimWriter { owner })? {
-            BusResponse::Done => Ok(()),
+        match self.claim_request(&BusRequest::ClaimWriter { owner })? {
+            BusResponse::Done => {
+                self.connection.lock().unwrap().owner = Some(owner);
+                Ok(())
+            }
+            BusResponse::Error { error } => Err(refused(error)),
+            _ => Err(self.protocol_violation()),
+        }
+    }
+
+    /// The conditional counterpart of [`claim_writer`](Self::claim_writer):
+    /// takes the claim for `owner` — binding this attachment as a
+    /// holder — while the field is unclaimed or the standing claim
+    /// already names `owner`. Refused [`LinkError::Fenced`] while a
+    /// *different* owner stands: a re-attached or superseded
+    /// attachment cannot re-arm past the claim another owner took
+    /// during its outage.
+    ///
+    /// A granted token is recorded exactly as `claim_writer` records
+    /// it — every later re-attach re-asserts it; a refused one is
+    /// forgotten, since the field's standing claim belongs to another
+    /// owner and this attachment holds nothing to re-assert. Like the
+    /// claim, the ask rides [`claim_request`](Self::claim_request) — a
+    /// link that died unexercised replays once on a fresh attachment.
+    pub fn ensure_writer(&self, owner: u64) -> Result<(), LinkError> {
+        match self.claim_request(&BusRequest::EnsureWriter { owner })? {
+            BusResponse::Done => {
+                self.connection.lock().unwrap().owner = Some(owner);
+                Ok(())
+            }
             BusResponse::Error { error } => Err(refused(error)),
             _ => Err(self.protocol_violation()),
         }
@@ -342,12 +552,34 @@ impl BusDriver {
     /// prove its resumed state is current with the incumbent's and
     /// must not preempt it. The deliberate takeover — a promotion's
     /// claim — stays unconditional: it calls `claim_writer`.
+    ///
+    /// A granted token is recorded exactly as `claim_writer` records
+    /// it — every later re-attach re-asserts it — and the ask rides
+    /// [`claim_request`](Self::claim_request): a link that died
+    /// unexercised — an orphaned peer's claim on an idle attachment —
+    /// replays once on a fresh link rather than refusing a recovered
+    /// field.
     pub fn claim_writer_unless_held(&self, owner: u64) -> Result<(), LinkError> {
-        match self.request(&BusRequest::ClaimWriterUnlessHeld { owner })? {
-            BusResponse::Done => Ok(()),
+        match self.claim_request(&BusRequest::ClaimWriterUnlessHeld { owner })? {
+            BusResponse::Done => {
+                self.connection.lock().unwrap().owner = Some(owner);
+                Ok(())
+            }
             BusResponse::Error { error } => Err(refused(error)),
             _ => Err(self.protocol_violation()),
         }
+    }
+
+    /// Forgets the recorded writer claim — the demotion counterpart of
+    /// [`claim_writer`](Self::claim_writer): the demoted peer's write
+    /// gate is already closed, and without this its next re-attach
+    /// would re-assert a claim the field's new owner has taken, racing
+    /// it when a restarted device's claim table comes back empty. The
+    /// forget is local only — the field's standing claim is the
+    /// server's to arbitrate, and a released attachment's mutations
+    /// stay fenced against it.
+    pub fn release_claim(&self) {
+        self.connection.lock().unwrap().owner = None;
     }
 
     /// Stamps `register`'s stored sample with `quality` —
@@ -386,8 +618,18 @@ impl BusDriver {
     /// the explicit half of the claim's release rule; the other is the
     /// connection dropping. Releasing a claim this attachment does not
     /// hold is a no-op.
+    ///
+    /// The recorded token is forgotten whether the release lands or
+    /// not: a failed exchange already severed the link, and
+    /// re-asserting a claim the caller meant to hand back is the
+    /// stale-token race [`release_claim`](Self::release_claim) exists
+    /// to close. The ask rides [`claim_request`](Self::claim_request)
+    /// — a demotion landing on a link that died unexercised replays
+    /// the release on the fresh attachment, freeing the field's claim
+    /// rather than leaving it to the dead link's holder bookkeeping.
     pub fn release_writer(&self) -> Result<(), LinkError> {
-        match self.request(&BusRequest::ReleaseWriter)? {
+        self.connection.lock().unwrap().owner = None;
+        match self.claim_request(&BusRequest::ReleaseWriter)? {
             BusResponse::Done => Ok(()),
             BusResponse::Error { error } => Err(refused(error)),
             _ => Err(self.protocol_violation()),
@@ -415,7 +657,19 @@ impl BusDriver {
     /// request that produced it. Any failed exchange drops the
     /// connection and is recorded as the driver's last transport
     /// failure: the response stream's position is unknown afterward,
-    /// and a later read could pick up a stale answer.
+    /// and a later read could pick up a stale answer. The drop is the
+    /// link's, not the driver's — the next `request` re-attaches
+    /// lazily, spacing contact attempts by
+    /// [`REATTACH_INTERVAL`](Self::REATTACH_INTERVAL) so a dead endpoint
+    /// costs a burst of accesses one refused connect rather than one
+    /// connect-timeout each.
+    ///
+    /// A re-attach that lands while the attachment records a writer
+    /// claim first re-asserts it with [`BusRequest::EnsureWriter`] —
+    /// a `fenced` re-arm keeps the fresh link but forgets the recorded
+    /// token, and a `fenced` answer to `request` itself forgets it
+    /// likewise: the field's standing claim names another owner, so
+    /// this attachment holds nothing left to re-assert.
     ///
     /// The caller matches the [`BusResponse`] against its request. A
     /// [`BusResponse::Error`] is the server's reported refusal — a
@@ -425,27 +679,58 @@ impl BusDriver {
     /// trusted, exactly as after a failed exchange.
     pub fn request(&self, request: &BusRequest) -> Result<BusResponse, LinkError> {
         let mut connection = self.connection.lock().unwrap();
-        let Some(stream) = connection.stream.as_mut() else {
-            return Err(LinkError::Disconnected);
-        };
-        match exchange(stream, request) {
-            Ok(response) => Ok(response),
-            Err(error) => {
-                connection.stream = None;
-                *self.last_failure.lock().unwrap() = Some(error.clone());
-                Err(error)
+        if connection.stream.is_none() {
+            if Instant::now() < connection.retry_at {
+                return Err(LinkError::Disconnected);
             }
+            connection.reattach(&self.addresses, self.timeout);
+        }
+        connection.exchange_on(request)
+    }
+
+    /// The claim family's `request`: [`request`](Self::request)'s
+    /// windowed laziness plus one replay for the corpse case — an
+    /// attachment whose link died unexercised still reports a live
+    /// stream, nothing having touched it since the outage, so a
+    /// lifecycle ask like a promotion's claim would otherwise spend
+    /// itself discovering the drop and refuse a recovered field. The
+    /// ask replays once on a fresh link: every claim operation is
+    /// replay-safe — where the severed link's copy was delivered, the
+    /// grant or release it produced is the same verdict the replay
+    /// lands — while a still-dead endpoint refuses the replay's
+    /// re-attach exactly as it refused the first ask. The replay is
+    /// bounded to asks that rode a stream the driver already held: a
+    /// failure on a link this call just attached is the endpoint's
+    /// genuine answer, not a corpse.
+    fn claim_request(&self, request: &BusRequest) -> Result<BusResponse, LinkError> {
+        let mut connection = self.connection.lock().unwrap();
+        let held_stream = connection.stream.is_some();
+        if connection.stream.is_none() {
+            if Instant::now() < connection.retry_at {
+                return Err(LinkError::Disconnected);
+            }
+            connection.reattach(&self.addresses, self.timeout);
+        }
+        match connection.exchange_on(request) {
+            Err(_) if held_stream => {
+                connection.reattach(&self.addresses, self.timeout);
+                connection.exchange_on(request)
+            }
+            other => other,
         }
     }
 
     /// Drops the connection and reports the peer as gone: an answer
     /// that decodes but does not correspond to the request means the
     /// peer is not a device server, and the link can no longer be
-    /// trusted.
+    /// trusted. The next request re-attaches after the interval, as
+    /// after any failed exchange.
     fn protocol_violation(&self) -> LinkError {
-        self.connection.lock().unwrap().stream = None;
+        let mut connection = self.connection.lock().unwrap();
+        connection.stream = None;
+        connection.retry_at = Instant::now() + BusDriver::REATTACH_INTERVAL;
         let error = LinkError::Disconnected;
-        *self.last_failure.lock().unwrap() = Some(error.clone());
+        connection.last_failure = Some(error.clone());
         error
     }
 }
@@ -518,9 +803,10 @@ impl IoDriver for BusDriver {
     }
 
     /// The link's transport-level health for the snapshot's I/O-health
-    /// section: `disconnected` once a failed exchange severed the
-    /// connection — permanently, since the driver never reconnects —
-    /// plus the last transport failure's description.
+    /// section: `disconnected` while no live connection stands — the
+    /// span between a severed link's drop and its re-attach, or a dead
+    /// endpoint's outage — plus the last transport failure's
+    /// description, which the first exchange after re-attach clears.
     fn diagnostics(&self) -> Option<DriverDiagnostics> {
         Some(DriverDiagnostics {
             link: if self.connected() {

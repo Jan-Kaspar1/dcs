@@ -632,7 +632,11 @@ A factory returns one of two `DeviceDriver` contributions:
   when the peer gives up ownership so the backend forgets any recorded
   claim token it would otherwise re-assert on a reconnect. `sim-tcp`
   installs `RemoteDriver::release_claim` for exactly that — a demoted
-  attachment must not race the new owner back onto a restarted plant.
+  attachment must not race the new owner back onto a restarted plant —
+  and `sim-bus` installs `BusDriver::release_writer` on the same
+  contract: its point-wise driver re-attaches lazily and re-arms the
+  recorded token on re-attach, so the release is what stands a demotion
+  down.
   `ensure` is an optional `EnsureHook`
   (`Fn(u64) -> Result<bool, dcs_assembly::StepError>`) — the conditional
   counterpart of `claim` the orphan cycle probes: while a demoted
@@ -640,9 +644,11 @@ A factory returns one of two `DeviceDriver` contributions:
   `FanoutDriver::ensure_field_writer` runs it to re-arm the claim under
   the owner's token only where the field stands unclaimed or already
   names that token, never preempting a standing owner. `sim-tcp`
-  installs the plant server's `ensure_writer`; a kind whose claim dies
-  with its connection — `sim-bus`, `sim-cyclic` — leaves it `None`, its
-  arbitration carrying no conditional grant to probe.
+  installs the plant server's `ensure_writer`, and `sim-bus` installs
+  `BusDriver::ensure_writer` — the register protocol's conditional
+  grant, which a re-attaching driver also runs to re-arm a recorded
+  claim; `sim-cyclic` leaves it `None`, its claim dying with the
+  connection and carrying no conditional grant to probe.
   `startup_claim` is an optional `StartupClaimHook`
   (`Fn(u64) -> Result<bool, dcs_assembly::StepError>`) — the
   launched-controller counterpart of `claim` a started active's
@@ -689,10 +695,12 @@ A factory returns one of two `DeviceDriver` contributions:
   preempts a standing claim (decision 105). Unlike `ensure` the grant
   binds the probing attachment to the claim's holders, because the
   peer's gate lifts on it and its writes must pass the arbitration it
-  re-took. `sim-tcp` installs the plant server's `reclaim_writer`; a
-  kind without a bound conditional grant leaves it `None` and the
-  demoted peer keeps the pre-hook wedge — an operator's promote
-  unwedges.
+  re-took. `sim-tcp` installs the plant server's `reclaim_writer`, and
+  `sim-bus` installs its `ensure_writer` — on the register protocol a
+  claim stands only while a holder holds it, so the bound conditional
+  grant and the unbound one are the same ask; a kind without a bound
+  conditional grant leaves it `None` and the demoted peer keeps the
+  pre-hook wedge — an operator's promote unwedges.
   `fenced_by` is an optional `FencedByHook` (`Fn() -> Option<u64>`) —
   the claimant attribution the field-ownership audit reads:
   `FanoutDriver::fencing_claimant(point)` asks it for the owner token

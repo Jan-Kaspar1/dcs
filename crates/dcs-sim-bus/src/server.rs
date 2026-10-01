@@ -400,6 +400,29 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> Option<Bus
             release_claim(&shared.writer, connection);
             BusResponse::Done
         }
+        BusRequest::EnsureWriter { owner } => {
+            // The conditional grant a re-attached field owner re-arms
+            // its dropped claim with: granted while the field is
+            // unclaimed or the standing claim already names the token —
+            // binding this connection as a holder like a fresh claim —
+            // and refused while a *different* owner stands, so a
+            // re-attaching attachment never preempts the claim another
+            // owner took during its outage.
+            let mut writer = shared.writer.lock().unwrap();
+            match writer.as_mut() {
+                Some(claim) if claim.owner == owner => {
+                    claim.holders.insert(connection);
+                }
+                Some(_) => return Some(fenced_out()),
+                None => {
+                    *writer = Some(WriterClaim {
+                        owner,
+                        holders: HashSet::from([connection]),
+                    });
+                }
+            }
+            BusResponse::Done
+        }
         // Quality injection is development tooling, not field
         // ownership: like reads and the census it is never fenced, so
         // a scripted rig can fault a register while a controller pair
@@ -439,8 +462,11 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> Option<Bus
 /// conditional counterpart the born-active startup claim asks:
 /// refused `Fenced` while a different owner's claim stands — which on
 /// this protocol is exactly a live incumbent, the claim dying with
-/// its last holder — granted otherwise. The claim is bound to its
-/// attachments: it
+/// its last holder — granted otherwise. [`BusRequest::EnsureWriter`]
+/// is the same conditional grant a re-attached owner re-arms with:
+/// granted only while the field is unclaimed or already names the
+/// token, never preempting a different owner's standing claim. The
+/// claim is bound to its attachments: it
 /// releases on the holder's disconnect or
 /// [`BusRequest::ReleaseWriter`], the last release reopening the field.
 ///
