@@ -4394,6 +4394,12 @@ fn a_demoted_ex_owner_rejoins_a_successor_carrying_the_outage_lead() {
 /// adoption converges `tracking`.
 #[test]
 fn a_demoted_ex_owner_rejoins_a_faster_paced_successor() {
+    // The retired `MAX_ANNOUNCED_AHEAD` window the staging must
+    // overshoot: the defect's refusal fired on divergence past this
+    // many ticks between the prober's own declared position and the
+    // pulled one, and nothing may refuse at it any more.
+    const RETIRED_AHEAD: u64 = 32;
+
     // The reproduction's ctrl-a: the launched field owner with no
     // configured tracking source, driven over a fencing front so the
     // successor's claim preempts its writes mid-run — no `POST
@@ -4479,7 +4485,7 @@ fn a_demoted_ex_owner_rejoins_a_faster_paced_successor() {
         .unwrap_or(successor.tick)
         .min(successor.tick);
     assert!(
-        pulled_position.0 > own_position.0 + 32,
+        pulled_position.0 > own_position.0 + RETIRED_AHEAD,
         "the successor's declared stream position leads the detached \
          prober's own past the old skew bound — the refusal the defect \
          made permanent: {successor:?} vs {own:?}"

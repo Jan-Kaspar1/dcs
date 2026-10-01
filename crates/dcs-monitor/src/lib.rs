@@ -5467,9 +5467,9 @@ mod tests {
         // keyed `line_proof` and the command audit at the call sites,
         // never in a positional bound this run's own clock cannot
         // supply.
-        let mut forged = checkpoint();
-        forged.tick = Tick(99999);
-        assert_eq!(verify_announced_checkpoint(&forged, &own), Ok(()));
+        let mut far_ahead = checkpoint();
+        far_ahead.tick = Tick(99999);
+        assert_eq!(verify_announced_checkpoint(&far_ahead, &own), Ok(()));
         // The QA finding
         // `tracking-verify-own-tick-ahead-bound-permanent-strand`: a
         // successor whose paced clock accrued a source-outage lead
@@ -5486,8 +5486,10 @@ mod tests {
         assert_eq!(verify_announced_checkpoint(&led, &led_own), Ok(()));
         // The new finding's shape verbatim: the faster successor's
         // declared stream position runs genuinely ahead of the
-        // detached prober's own — same generation, honestly declared
-        // — and verifies rather than refusing `Ahead` forever.
+        // detached prober's own — same generation, honestly declared,
+        // and one tick past the retired thirty-two-tick window where
+        // the defect's refusal fired — and verifies rather than
+        // refusing `Ahead` forever.
         let mut runaway = checkpoint();
         runaway.tick = Tick(own.tick.0 + 700);
         runaway.stream_tick = Some(Tick(own.tick.0 + 33));
@@ -5588,7 +5590,8 @@ mod tests {
         // `skew-bound-strands-slower-cadence-ex-owner`'s reproduction
         // shape: the promoted successor's declared stream position
         // runs genuinely ahead of the detached prober's own — same
-        // generation, honestly declared, simply faster-paced — and
+        // generation, honestly declared, simply faster-paced, one
+        // tick past the retired thirty-two-tick window — and
         // verifies: the prober's own stream position is no
         // line-membership reference, so no skew bound may compare
         // against it.
