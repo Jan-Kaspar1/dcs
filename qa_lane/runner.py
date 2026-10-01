@@ -905,7 +905,7 @@ def _build_images(src, cfg, run_dir, timeline, run_id):
            '-v', str(work) + ':/work',
            '-e', 'CARGO_HOME=/cargo',
            '-e', 'CARGO_TARGET_DIR=/work/target',
-cfg['builder_image'], 'bash', '-c',
+           cfg['builder_image'], 'bash', '-c',
             'cd /src && cargo build --release --locked '
             '-p dcs-controller -p dcs-plant -p dcs-sim-net '
             '&& cargo build --release --locked '
@@ -2651,9 +2651,14 @@ def _stage_bus_model(model, out_path, device, address):
                                + ' placeholder the lane binds')
         parameters['address'] = address
         declared['parameters'] = parameters
-        Path(out_path).write_text(
+        staged = Path(out_path)
+        staged.write_text(
             json.dumps(document, indent=1, sort_keys=True) + '\n')
-        return str(out_path)
+        # Both ends read the file as the image's uid-10001 process, so
+        # the staged document is world-readable whatever umask the lane
+        # user runs under.
+        staged.chmod(0o644)
+        return str(staged)
     raise RuntimeError('the sim-bus model fixture ' + str(model)
                        + ' declares no device ' + str(device))
 
@@ -2702,7 +2707,10 @@ def start_sim_bus_device(cfg, record, run_dir, timeline):
                            + ' but the register protocol is rig-dialed '
                            '— a host socket is unreachable from the '
                            'rig')
-    model = Path(cfg['src_dir']) / spec['model_fixture']
+    # The fixture comes from the revision under test's own extracted
+    # tree — src/<attempted sha>/ — beside every other lane fixture,
+    # so the served model is the revision's, not the lane's.
+    model = Path(cfg['src_dir']) / sha / spec['model_fixture']
     if not model.is_file():
         raise RuntimeError('sim-bus model fixture missing: ' + str(model))
     container = 'dcs-hw-' + run_id + '-bus'
@@ -2748,13 +2756,6 @@ def start_sim_bus_device(cfg, record, run_dir, timeline):
              'on ' + address)
     return {'container': container, 'address': address, 'port': port,
             'device': spec['device'], 'model': staged}
-
-
-def src_model(cfg, spec):
-    """The staged sim-bus device block's model fixture path under the
-    run's extracted source — the revision under test's own copy, beside
-    every other lane fixture."""
-    return Path(cfg['src_dir']) / str(spec['model_fixture'])
 
 
 def stop_sim_bus_device(run_id, timeline):
@@ -3094,7 +3095,8 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
     tool's docker-exec invocation, the run config's recorded endpoint
     placements and the
     run's rig bridge name — the placement rule a scenario attachment
-    follows when it needs an endpoint a rig peer must dial — the
+    follows when it needs an endpoint a rig peer must dial — the lane's
+    sim-bus device server's launch/teardown (#1368) — the
     drain-stall tracer lever the durable-history leg's parked-writer
     induction drives (None where the runner admits no tracer) — and the
     host-side
@@ -3259,6 +3261,18 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
             start_forge_endpoint(cfg, record, run_dir, document,
                                  owner, timeline, keyed),
         'stop_forge': lambda: stop_forge_endpoint(run_id, timeline),
+        # The lane's sim-bus device server (#1368) — the shipped
+        # dcs-sim-bus-device binary out of the controller image,
+        # serving the run config's bus model on the rig bridge. The
+        # launch returns the bridge address the rig's sim-bus
+        # attachments dial and the staged document a leg mounts into
+        # the controller it points at the field; stop_sim_bus_device
+        # kills the register protocol outright for a leg's
+        # device-outage induction.
+        'start_sim_bus_device': lambda: start_sim_bus_device(
+            cfg, record, run_dir, timeline),
+        'stop_sim_bus_device': lambda: stop_sim_bus_device(
+            run_id, timeline),
         'state_files': {key: str(_controller_dir(run_dir, peer)
                                  / 'state.json')
                         for key, peer in names.items()},
