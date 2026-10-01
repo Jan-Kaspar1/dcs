@@ -15,17 +15,17 @@
 //! and station-attributed or unattributable short exchanges — over the
 //! real transport, against the real server.
 //!
-//! Connection handling differs from `BusDriver`'s deliberately: a
-//! cyclic device is expected to ride out a missed exchange — the held
-//! image degrades gracefully across scans — so a dropped connection
-//! reconnects lazily at the next boundary rather than killing the
-//! driver for good. Reconnecting does not re-assert a held writer
-//! claim: the claim binds to the attachment that took it, so a link
-//! that drops loses it, and taking the field back goes through
+//! Connection handling: like `BusDriver`, a dropped connection
+//! reconnects lazily at the next request rather than killing the
+//! driver for good — a cyclic device is expected to ride out a missed
+//! exchange, the held image degrading gracefully across scans. Unlike
+//! `BusDriver`, reconnecting does not re-assert a held writer claim:
+//! the claim binds to the attachment that took it, so a link that
+//! drops loses it, and taking the field back goes through
 //! [`claim_writer`](Self::claim_writer) again — the same deliberate
 //! act the promotion path runs, never a silent re-arm.
 
-use crate::client::{LinkError, exchange as roundtrip, refused};
+use crate::client::{LinkError, connect_stream, exchange as roundtrip, refused};
 use crate::protocol::{BusRequest, BusResponse, ExchangeOutcome, RegisterInfo, RegisterWrite};
 use dcs_core::{
     CyclicIoDriver, Direction, DriverDiagnostics, ExchangeDiagnostics, IoDriver, IoError,
@@ -161,14 +161,14 @@ struct Image {
 /// - a `late` answer counts `missed_deadlines` while otherwise
 ///   completing normally.
 ///
-/// The connection the first `exchange` drops is not the end: unlike
-/// the point-wise `BusDriver`, a dead connection reconnects lazily on
-/// the next request, so a scripted missed exchange is a recoverable
-/// miss rather than a permanent sever. What a reconnect does not
-/// restore is the writer claim — claim holds bind to their
-/// connection, so a dropped link releases them and output-bearing
-/// exchanges then answer the `fenced` verdict until
-/// [`claim_writer`](Self::claim_writer) runs again.
+/// The connection the first `exchange` drops is not the end: a dead
+/// connection reconnects lazily on the next request, so a scripted
+/// missed exchange is a recoverable miss rather than a permanent
+/// sever. What a reconnect does not restore — where the point-wise
+/// `BusDriver` re-arms its recorded token — is the writer claim:
+/// claim holds bind to their connection, so a dropped link releases
+/// them and output-bearing exchanges then answer the `fenced` verdict
+/// until [`claim_writer`](Self::claim_writer) runs again.
 ///
 /// Like `BusDriver`, the driver is field-observing —
 /// `capture_state` keeps its `None` default — and [`Sync`] through
@@ -692,35 +692,6 @@ impl CyclicBusDriver {
         image.dirty.retain(|register| missing.contains(register));
         Ok(())
     }
-}
-
-/// Connects a stream to the first answering of `addresses` with the
-/// driver's request semantics — the timeouts and `nodelay` a
-/// [`BusDriver`](crate::BusDriver) connection carries.
-fn connect_stream(addresses: &[SocketAddr], timeout: Duration) -> io::Result<TcpStream> {
-    let mut failure = io::Error::new(io::ErrorKind::NotFound, "no device server address");
-    for &address in addresses {
-        let attempt = loop {
-            match TcpStream::connect_timeout(&address, timeout) {
-                // An interrupted connect attempt is abandoned with its
-                // socket and retried fresh — a caught signal (e.g. a
-                // spawned helper's `SIGCHLD`) is not a reachability
-                // verdict on the address.
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                other => break other,
-            }
-        };
-        match attempt {
-            Ok(stream) => {
-                stream.set_read_timeout(Some(timeout))?;
-                stream.set_write_timeout(Some(timeout))?;
-                stream.set_nodelay(true)?;
-                return Ok(stream);
-            }
-            Err(error) => failure = error,
-        }
-    }
-    Err(failure)
 }
 
 /// A register's value before anything stages it — the kind's zero.
