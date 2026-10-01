@@ -537,6 +537,69 @@ Implementation order: second, after [daily architecture review](daily-architectu
   closed through the writer lock alone — reports inconclusive;
   the pair leaves on its launch roles.
 
+### Landed 2026-10-01 (sim-bus device server in the lane image set, #1368)
+
+- The sim-bus rig legs stage against the released protocol server: the
+  bounded builder adds `-p dcs-sim-bus --bin dcs-sim-bus-device` to
+  its compile set and the ship map carries that binary into the
+  controller image beside `dcs-controller`, so a leg launches the
+  real register-protocol server out of the revision under test —
+  the `dcs-plant-ctl` precedent #654 recorded for the plant image,
+  and the `dcs-forge --entrypoint` precedent on the same image —
+  instead of a disposable in-session server or a Python
+  reimplementation of the wire protocol. The two reported digests,
+  the controller entrypoint, and the host-side `dcs-ctl` seam are
+  unchanged; a dedicated bus image would have changed the digest set.
+- The `sim_bus_device` config block names the device the server
+  serves, its bridge port, and the bus model declaring it;
+  `endpoint_placement` records it `bridge` like the probe field,
+  since no host socket is reachable from the rig. The launch stages
+  the fixture inside the run directory with that device's
+  `__BUS_ADDR__` placeholder bound to the device container's bridge
+  name, mounts it into a controller-image container run under
+  `--entrypoint dcs-sim-bus-device`, waits for the server's own
+  bound-address report, and returns the bridge address and the staged
+  document a leg mounts into the controller it points at the field.
+  An enabler for the sim-bus rig legs (#1355/#1356/#1357); a leg
+  needing the server itself to misbehave may still stage a double.
+
+### Landed 2026-10-01 (sim-cyclic fencing-loss demotion leg, #1357)
+
+- The sim-cyclic fencing-loss demotion contract — the per-revision
+  lane evidence for the single-writer/one-active invariant
+  WW-FND-002 requires, over the claim protocol #1352's fix
+  establishes — is exercised on the deployed rig by scenario leg
+  `2470_sim_cyclic_fencing_loss_demote`. The leg stages the lane's
+  `dcs-sim-bus-device` server on the run config's
+  `sim_bus_device.cyclic_model` document (the block carries one
+  fixture per register-protocol model the legs serve), launches a
+  controller pair onto the staged `sim-cyclic` device on the
+  driven/foreign born seats — a register-protocol model carries its
+  device address in its parameters, so the pair needs no `--remote`
+  — and severs every attachment's control connection with a device
+  restart, the rig-durable link flap that releases the
+  connection-bound claim to nobody. POST /promote on the tracking
+  member then takes the claim, so the ex-owner's next staged
+  exchange meets the fence: the leg asserts the demotion through
+  the named path — served role walking `demoting` to `standby`, the
+  durable `--journal-file` carrying `role_changed` with origin
+  `fenced` beside exactly one `field_claim_lost` attributed to the
+  promoted peer's owner token — inside the documented bound, with
+  never two peers reporting `role:active` at any poll. The promoted
+  owner's exchanges must keep completing with the claim held, the
+  demoted peer's go census-only once its staged image releases, and
+  the pair reconverges to its launch roles; the deployed pair is
+  framed undisturbed before and after.
+- Named diagnostics are `cyclic-fencing-loss-failed` and
+  `cyclic-fencing-loss-nondeterministic`, with the self-check's
+  `cyclic-fencing-loss-unchecked`; two passes produce identical
+  digests. A run staging no device server, no `cyclic_model`, a
+  staged model whose served device is not `sim-cyclic` or declares
+  no output channel, a pair that never settles — or the recorded
+  defect signature itself, the ex-owner whose io_health never names
+  a fenced exchange and who stays active beside its promoted peer —
+  reports inconclusive; the pair leaves on its launch roles.
+
 ### Landed 2026-10-01 (sim-bus driver lazy-reattach leg, #1355)
 
 - The point-wise `BusDriver`'s lazy-reattach contract — #1351's fix
@@ -546,17 +609,17 @@ Implementation order: second, after [daily architecture review](daily-architectu
   `3560_sim_bus_driver_reattach`. `dcs-sim-bus`'s `BusDriver` and
   `dcs-sim-net`'s `RemoteDriver` implement their recovery
   independently, so a rig with no register-mapped device says
-  nothing about this one; the new `bus_rig` run-config block stages
-  the subject — a `dcs-sim-bus-device` server (the revision's own
-  shipped binary under `--entrypoint`, bridge-placed and rig-dialed,
-  its census read through the shipped `dcs-sim-bus-ctl` exec'd
-  inside the container's netns) plus a redundant controller pair
-  bound to the derived register model, publishing two monitors on
-  host loopback, carrying their own distinct `--owner-token` pins
-  and shared `--pair-token`, and attaching to no `--remote` plant.
-  The rig's declared `timeout_ms` sits under the leg's ~2 s stall
-  so a frozen device times out mid-exchange and the driver has a
-  failed exchange to recover from. The pre-fix defect dropped the
+  nothing about this one; the leg stages the subject through the
+  lane's `sim_bus_device` seam — `start_sim_bus_device` launches the
+  revision's own shipped `dcs-sim-bus-device` binary on the rig
+  bridge, serving the run config's bus model with a `timeout_ms`
+  stamped under the leg's ~2 s stall so a frozen device times out
+  mid-exchange and the driver has a failed exchange to recover from.
+  A controller pair is born-launched onto the `driven`/`foreign`
+  seats with the staged document mounted and no `--remote` — a
+  register-protocol model carries its device address in its
+  parameters — so each member's serving monitor is the leg's window
+  on its own driver's health. The pre-fix defect dropped the
   point-wise driver's stream on the first failed exchange and
   answered `Disconnected` for the life of the process: the active's
   scanning `communication_fault` values never cleared and the
@@ -565,9 +628,10 @@ Implementation order: second, after [daily architecture review](daily-architectu
   both outage classes the finding records — (a) the device server
   restarted under the pair, returning with its claim table empty so
   the owner must re-attach *and* re-arm, and (b) the device frozen
-  ~2 s then thawed, a transient unanswerable window with nothing
-  dying — and through each member's serving monitor asserts the
-  healthy baseline carries a connected link and no standing
+  ~2 s then thawed through the lane's `freeze_sim_bus_device`/
+  `thaw_sim_bus_device` levers, a transient unanswerable window with
+  nothing dying — and through each member's serving monitor asserts
+  the healthy baseline carries a connected link and no standing
   `last_error`; the outage is counted in the served `io_health` —
   the boundary counters moved over the baseline with the fault
   stamped — and the first serve reporting the link `connected`
@@ -594,14 +658,15 @@ Implementation order: second, after [daily architecture review](daily-architectu
   `sim-bus-reattach-unchecked` covering the planted lingering
   record, standing streak, reset history, uncounted outage, and held
   tick; both outage classes run twice with identical digests; a run
-  context carrying no register-mapped field rig, a rig whose device
-  or pair never answers, a pair that never settles tracking, a
-  staging lever that never completes, a restart whose device never
-  serves again, a restore the leg cannot classify, and a staged
-  revision whose served `io_health` cannot express the driver's
-  diagnostics and failed-exchange accounting — every build, until
-  #1351's fix lands — report inconclusive; the rig leaves on its
-  launch roles.
+  context carrying no `sim_bus_device` device-server seam or born-
+  controller levers, a rig whose device or pair never answers, a
+  device that never serves again after a restart, a pair that never
+  settles tracking, a staging lever that never completes, a restore
+  the leg cannot classify, and a staged revision whose served
+  `io_health` cannot express the driver's diagnostics and
+  failed-exchange accounting — every build, until #1351's fix lands
+  — report inconclusive; the rig leaves on its launch roles with
+  the staged born seats and device container torn down.
 
 ## Outcome
 

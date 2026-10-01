@@ -5,11 +5,13 @@ EXPECTED_CASES pins this module's contribution to the suite's case
 coverage so a dropped case fails the discovery check in
 tests/test_qa_scenario_modules.py.
 
-The feed stages the leg's shape: bus-a owns the rig's register-mapped
-device while bus-b tracks; the restart/freeze/thaw/device_ctl levers
-replace the runner's docker actions, and every /snapshot read on a
-member is one completed scan whose io_health carries the point-wise
-driver's diagnostics — the link disconnected with the severing failure
+The feed stages the leg's shape: the lane's sim-bus device server is
+staged through the run context's sim_bus_device levers, a controller
+pair is born-launched onto the driven/foreign seats with the staged
+document, and the restart/freeze/thaw/serving levers replace the
+runner's docker actions — every /snapshot read on a member is one
+completed scan whose io_health carries the point-wise driver's
+diagnostics: the link disconnected with the severing failure
 named in last_error while the device is out, the first exchange after
 re-attach clearing the standing record — the #1351 contract the leg
 exists to prove. Doctor flags stage each named defect, each
@@ -55,11 +57,30 @@ EXPECTED_CASES = frozenset({
 })
 
 
+# The register-mapped model the fake device launch stages — the same
+# shape the run config's sim_bus_device block names: one `sim-bus`
+# device carrying the placeholder the lane binds, so the leg's
+# staged-document read finds its subject.
+BUS_MODEL = {
+    'version': 1,
+    'devices': [{'id': 1, 'kind': 'sim-bus',
+                 'parameters': {'address': '__BUS_ADDR__',
+                                'registers': {'level_raw': 0}},
+                 'channels': {'level_raw': {'direction': 'in',
+                                            'value_type': 'float'}}}],
+    'io_points': [
+        {'id': 10, 'direction': 'in', 'value_type': 'float',
+         'channel': {'device': 1, 'name': 'level_raw'}}],
+    'signals': [], 'components': [], 'connections': []}
+
+
 class BusFeed:
     """A stubbed register-field rig for the sim-bus driver-reattach
-    scenario. bus-a owns the device; bus-b is the tracking standby.
-    `restart`/`freeze`/`thaw`/`ctl` replace the subject's device levers
-    — the runner's docker actions — and flip `device_up`/`link_ok`.
+    scenario. The driven seat owns the device; the foreign seat is the
+    tracking standby. `start_device`/`restart`/`freeze`/`thaw`/
+    `serving` replace the runner's sim-bus device levers and the born
+    launches stand the seats' containers up — flipping
+    `device_up`/`link_ok`.
     A restart leaves the device unanswered for a fixed number of
     monitor reads before it re-binds; once the device serves again the
     link re-attaches after REATTACH_DELAY reads — the lazy-reattach
@@ -72,6 +93,7 @@ class BusFeed:
     state the issue calls out."""
 
     HOSTS = {'ctrl-a:3': 'active', 'ctrl-b:4': 'standby'}
+    SEATS = {'driven': 'http://ctrl-a:3', 'foreign': 'http://ctrl-b:4'}
     LINK_ERROR = 'register exchange timed out'
     REATTACH_DELAY = 2     # reads between the device's return and the
                          # link reporting connected again
@@ -81,7 +103,8 @@ class BusFeed:
                            # the link must stay severed for a full
                            # poll round to surface on both members
 
-    def __init__(self):
+    def __init__(self, tmp=None):
+        self.tmp = tmp or tempfile.mkdtemp()
         self.tick = 0
         self.reads = 0            # /snapshot reads served
         self.device_up = True
@@ -119,12 +142,54 @@ class BusFeed:
         self.aborts_recovery = False  # ... or during the recovery watch
         self.promote_status = None   # the promote probe answers non-200
         self.restore_status = None   # the restore promote answers non-200
+        # The staging fakes' call records.
+        self.staged = []             # start_sim_bus_device kwargs
+        self.born = []               # start_born_controller calls
+        self.stopped = []            # teardown order: seats, device
+        self.stage_raises = False    # the device launch itself fails
+        self.launch_raises = False   # the born launch never runs
 
-    # The runner's device levers — replace the subject's
-    # restart_device/freeze_device/thaw_device/device_ctl. The
+    # The runner's sim-bus device levers — replace the ctx's
+    # start/restart/stop/freeze/thaw/sim_bus_device_serving. The
     # severing failure is named by the failed scan, never by the
     # lever itself: a pause or a restart severs the socket, and the
     # driver learns of it on its next exchange.
+    def start_device(self, fixture=None, timeout_ms=None):
+        self.staged.append({'fixture': fixture,
+                            'timeout_ms': timeout_ms})
+        if self.stage_raises:
+            raise RuntimeError('docker run failed')
+        self.device_up = True
+        self.link_ok = True
+        document = Path(self.tmp) / 'sim-bus' / 'model.json'
+        document.parent.mkdir(parents=True, exist_ok=True)
+        staged = json.loads(json.dumps(BUS_MODEL))
+        device = staged['devices'][0]
+        device['parameters']['address'] = 'dcs-hw-qa-1-bus:9005'
+        if timeout_ms is not None:
+            device['parameters']['timeout_ms'] = timeout_ms
+        document.write_text(json.dumps(staged) + '\n')
+        return {'container': 'dcs-hw-qa-1-bus',
+                'address': 'dcs-hw-qa-1-bus:9005', 'port': 9005,
+                'device': 1, 'model': str(document)}
+
+    def stop_device(self):
+        self.stopped.append('device')
+        self.device_up = False
+        self.link_ok = False
+
+    def start_born(self, seat, remote, peer=None, standby=None,
+                   document=None):
+        self.born.append({'seat': seat, 'remote': remote,
+                          'peer': peer, 'standby': standby,
+                          'document': document})
+        if self.launch_raises:
+            raise RuntimeError('docker run failed')
+        return {'seat': seat, 'monitor': self.SEATS[seat]}
+
+    def stop_born(self, seat):
+        self.stopped.append(seat)
+
     def restart(self):
         self.calls.append('restart')
         if self.restart_raises:
@@ -156,15 +221,9 @@ class BusFeed:
         if not self.link_stuck:
             self.reattach_at = self.reads + self.STALL_DELAY
 
-    def ctl(self, *args):
+    def serving(self, device):
         if self.ctl_raises:
-            raise RuntimeError('docker exec failed')
-        serving = self.device_up and (
-            self.returns_at is None or self.reads >= self.returns_at)
-        return _ctl_process({'registers': []} if serving
-                            else None, returncode=0 if serving else 1)
-
-    def _serving(self):
+            raise RuntimeError('docker inspect failed')
         return self.device_up and (
             self.returns_at is None or self.reads >= self.returns_at)
 
@@ -283,7 +342,7 @@ class BusDriverReattachTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.evidence = Path(self.tmp.name) / 'evidence'
         self.evidence.mkdir()
-        self.feed = BusFeed()
+        self.feed = BusFeed(self.tmp.name)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -292,14 +351,31 @@ class BusDriverReattachTests(unittest.TestCase):
         feed = feed or self.feed
         return {'active': 'http://deployed-a:1',
                 'standby': 'http://deployed-b:2',
+                'driven': feed.SEATS['driven'],
+                'foreign': feed.SEATS['foreign'],
                 'evidence_dir': str(self.evidence),
-                'bus': {'active': 'http://ctrl-a:3',
-                        'standby': 'http://ctrl-b:4',
-                        'device_port': 9010,
-                        'device_ctl': feed.ctl,
-                        'restart_device': feed.restart,
-                        'freeze_device': feed.freeze,
-                        'thaw_device': feed.thaw}}
+                'sim_bus_device': {'device': 1, 'port': 9005,
+                                   'model_fixture': 'bus.json',
+                                   'cyclic_model': 'cyclic.json'},
+                'start_sim_bus_device': feed.start_device,
+                'restart_sim_bus_device': feed.restart,
+                'stop_sim_bus_device': feed.stop_device,
+                'freeze_sim_bus_device': feed.freeze,
+                'thaw_sim_bus_device': feed.thaw,
+                'sim_bus_device_serving': feed.serving,
+                'start_born_controller': feed.start_born,
+                'stop_born_controller': feed.stop_born}
+
+    def _subject(self, ctx):
+        """The subject shape the staged run builds — the seats' monitor
+        URLs under their launch-role names plus the ctx's device
+        levers."""
+        return {'active': ctx['driven'], 'standby': ctx['foreign'],
+                'device': ctx['sim_bus_device']['device'],
+                'restart_device': ctx['restart_sim_bus_device'],
+                'freeze_device': ctx['freeze_sim_bus_device'],
+                'thaw_device': ctx['thaw_sim_bus_device'],
+                'device_serving': ctx['sim_bus_device_serving']}
 
     def run_scenario(self, ctx=None, feed=None):
         feed = feed or self.feed
@@ -320,7 +396,7 @@ class BusDriverReattachTests(unittest.TestCase):
         """One outage class through the leg's own driver, for the
         assertions a whole-run verdict cannot isolate."""
         feed = feed or self.feed
-        subject = (ctx or self._ctx(feed))['bus']
+        ctx = ctx or self._ctx(feed)
         with patch.object(scenarios, 'http_json', feed.http_json), \
                 patch.object(scenarios, 'BUS_REATTACH_BOUND', 0.5), \
                 patch.object(scenarios, 'BUS_REATTACH_DEGRADE', 0.5), \
@@ -329,7 +405,7 @@ class BusDriverReattachTests(unittest.TestCase):
                 patch.object(scenarios, 'BUS_REATTACH_STALL', 0.001), \
                 patch.object(scenarios, 'BUS_REATTACH_POLL', 0.001):
             return scenarios._bus_outage(
-                ctx or self._ctx(feed), subject, 'active', 'standby',
+                ctx, self._subject(ctx), 'active', 'standby',
                 leg, 1)
 
     def test_registered(self):
@@ -348,6 +424,30 @@ class BusDriverReattachTests(unittest.TestCase):
         self.assertEqual(record['outcome'], 'passed', record)
         self.assertEqual(self.feed.calls,
                          ['restart', 'freeze', 'thaw'] * 2)
+        # The staging: the device server launched with the leg's
+        # per-request timeout stamped, the pair born-launched onto the
+        # driven/foreign seats with the staged document and no
+        # --remote, and the run's teardown removed seats and device.
+        self.assertEqual(len(self.feed.staged), 1)
+        self.assertEqual(self.feed.staged[0]['timeout_ms'],
+                         scenarios.BUS_FIELD_TIMEOUT)
+        self.assertEqual(
+            [call['seat'] for call in self.feed.born],
+            ['driven', 'foreign'])
+        self.assertIsNone(self.feed.born[0]['remote'])
+        self.assertEqual(self.feed.born[0]['peer'], 'foreign')
+        self.assertEqual(self.feed.born[1]['standby'], 'driven')
+        self.assertTrue(all(
+            call['document'].endswith('sim-bus/model.json')
+            for call in self.feed.born))
+        staged = json.loads(
+            Path(self.feed.born[0]['document']).read_text())
+        device = staged['devices'][0]
+        self.assertEqual(device['kind'], 'sim-bus')
+        self.assertEqual(device['parameters']['timeout_ms'],
+                         scenarios.BUS_FIELD_TIMEOUT)
+        self.assertEqual(self.feed.stopped,
+                         ['driven', 'foreign', 'device'])
         report.validate_scenario(record)
         for entry in record['evidence']:
             self.assertTrue((self.evidence.parent
@@ -418,7 +518,7 @@ class BusDriverReattachTests(unittest.TestCase):
         self.addCleanup(tmp2.cleanup)
         evidence2 = Path(tmp2.name) / 'evidence'
         evidence2.mkdir()
-        feed2 = BusFeed()
+        feed2 = BusFeed(tmp2.name)
         ctx2 = self._ctx(feed2)
         ctx2['evidence_dir'] = str(evidence2)
         record2 = self.run_scenario(ctx2, feed2)
@@ -603,19 +703,19 @@ class BusDriverReattachTests(unittest.TestCase):
 
     def test_no_subject_is_inconclusive(self):
         ctx = self._ctx()
-        ctx['bus'] = None
+        ctx['sim_bus_device'] = None
         record = self.run_scenario(ctx)
         self.assertEqual(record['outcome'], 'inconclusive', record)
-        self.assertIn('no register-mapped field rig',
+        self.assertIn('stages no sim-bus device server',
                       record['detail'])
         report.validate_scenario(record)
 
     def test_missing_lever_is_inconclusive(self):
         ctx = self._ctx()
-        del ctx['bus']['freeze_device']
+        ctx['freeze_sim_bus_device'] = None
         record = self.run_scenario(ctx)
         self.assertEqual(record['outcome'], 'inconclusive', record)
-        self.assertIn('freeze_device', record['detail'])
+        self.assertIn('freeze_sim_bus_device', record['detail'])
         report.validate_scenario(record)
 
     def test_unreachable_rig_is_inconclusive(self):
@@ -669,8 +769,25 @@ class BusDriverReattachTests(unittest.TestCase):
         report.validate_scenario(record)
 
     def test_failed_staging_is_inconclusive(self):
-        self.feed.restart_raises = True
+        # Each staging seam, refused: the device-server launch, the
+        # born pair launch, and the restart lever mid-outage — all rig
+        # states the contract cannot answer for.
+        self.feed.stage_raises = True
         record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('never staged', record['detail'])
+        report.validate_scenario(record)
+
+        feed = BusFeed(self.tmp.name)
+        feed.launch_raises = True
+        record = self.run_scenario(self._ctx(feed), feed)
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('pair launch never ran', record['detail'])
+        report.validate_scenario(record)
+
+        feed = BusFeed(self.tmp.name)
+        feed.restart_raises = True
+        record = self.run_scenario(self._ctx(feed), feed)
         self.assertEqual(record['outcome'], 'inconclusive', record)
         self.assertIn('staging lever never completed',
                       record['detail'])

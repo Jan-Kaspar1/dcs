@@ -1810,8 +1810,9 @@ fn an_unclaimed_window_does_not_demote_the_standing_owner() {
         // again under the standing token.
         peer.scan();
         assert_eq!(peer.role(), Role::Active);
-        assert!(peer.take_fencing_losses().is_empty());
-        assert!(peer.take_role_changes().is_empty());
+        let drained = peer.drain_pending();
+        assert!(drained.fencing_losses().is_empty());
+        assert!(drained.role_changes().is_empty());
 
         // The write landed on the shared field under the re-armed claim.
         let probe = RemoteDriver::connect(addr).unwrap();
@@ -1931,7 +1932,7 @@ fn an_orphaned_ex_owners_rearm_holds_no_live_holder_and_stays_preemptable() {
         assert_eq!(a_peer.role(), Role::Demoting);
         a_peer.scan();
         assert_eq!(a_peer.role(), Role::Standby);
-        assert_eq!(a_peer.take_fencing_losses().len(), 1);
+        assert_eq!(a_peer.drain_pending().fencing_losses().len(), 1);
         interposer.release_writer().unwrap();
 
         let probe = RemoteDriver::connect(addr).unwrap();
@@ -2208,7 +2209,7 @@ fn an_orphan_failover_regrant_rearms_the_live_incumbent_refusal() {
         c.step(0.1).unwrap();
         c_peer.scan();
         assert_eq!(c_peer.role(), Role::Active);
-        assert_eq!(c_peer.take_fencing_losses().len(), 0);
+        assert_eq!(c_peer.drain_pending().fencing_losses().len(), 0);
         // The refused restartee holds no claim — its own mutations
         // fence against the incumbent's standing claim.
         assert_eq!(a2.step(0.1), Err(RemoteError::Fenced));
@@ -2518,7 +2519,7 @@ fn the_fencing_loss_reclaim_preempts_the_orphan_placeholder() {
         assert_eq!(b_peer.role(), Role::Demoting);
         b_peer.scan();
         assert_eq!(b_peer.role(), Role::Standby);
-        assert_eq!(b_peer.take_fencing_losses().len(), 1);
+        assert_eq!(b_peer.drain_pending().fencing_losses().len(), 1);
 
         // While the tool's claim stands *held*, the reclaim refuses
         // every scan — the never-preempts-a-live-holder half of the
@@ -2563,7 +2564,8 @@ fn the_fencing_loss_reclaim_preempts_the_orphan_placeholder() {
         b_peer.track_once(|| Ok(a_peer.checkpoint()));
         assert_eq!(
             b_peer
-                .take_claim_observations()
+                .drain_pending()
+                .claim_observations()
                 .iter()
                 .map(|observation| observation.claimant)
                 .collect::<Vec<_>>(),

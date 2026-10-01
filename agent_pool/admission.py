@@ -12,6 +12,15 @@ cools down only the models sharing that provider budget, other groups
 keep dispatching, and recovery reopens with a single probe session
 instead of a retry wave. Authentication and credit failures block the
 group until an explicit operator reset — sleeping cannot fix them.
+
+Provider delay hints are read in the provider's own units and bounded by
+the cooldown ceiling, and a hint never classifies a receipt: only a quota
+signal does. An agent's own prose or a test fixture quoting 'retry after
+N' therefore cannot mint a group-wide rate event.
+
+Provider feedback is ordered against a lease's grant, so a probe only
+lifts the group state that existed when it was granted; a block or a
+provider reset duration recorded while it was in flight stands.
 """
 import json
 import math
@@ -29,7 +38,28 @@ ENDPOINT_WORDS = ('endpoint is unavailable', 'unexpected server error',
                   'internal server error', 'bad gateway', 'service unavailable',
                   'connection refused', 'econnrefused', 'http 500', 'http 502',
                   'http 503', 'http 504')
-RETRY_AFTER = re.compile(r'retry[-_ ]?after[^0-9]{0,10}(\d{1,6})', re.IGNORECASE)
+
+# Honored hint shapes carry their own unit: a header-shaped field
+# ('Retry-After: 300', 'retry_after=300', '"retryAfter": 45',
+# '"retryAfterMs": 5000') or Devin's stated reset sentence. Free-form prose
+# ('please retry after 5 minutes') is provider text only inside a quota
+# context — see `_retry_delay`. An unknown unit is not guessed.
+HINT_UNITS = {'': 1, 's': 1, 'sec': 1, 'secs': 1, 'second': 1, 'seconds': 1,
+              'ms': 0.001, 'millisecond': 0.001, 'milliseconds': 0.001,
+              'm': 60, 'min': 60, 'mins': 60, 'minute': 60, 'minutes': 60,
+              'h': 3600, 'hr': 3600, 'hrs': 3600, 'hour': 3600, 'hours': 3600}
+# The scheduler.max_cooldown_seconds default, and the platform ceiling for a
+# provider-claimed duration: parsed hints are clamped to `max(configured
+# max_cooldown_seconds, this)` so a bogus claim cannot park a group for days
+# while a real quota window is still honored whole.
+MAX_HINT_DELAY = 7200
+# The `after` token must end the field name, so `retryAfterMs` and
+# `retry_after_ms` are read as millisecond fields, not as delta-seconds.
+RETRY_AFTER = re.compile(
+    r'retry[-_ ]?after([-_ ]?ms)?(?![\w-])["\']?\s*[:=]\s*"?(\d{1,9})\s*([a-z]*)',
+    re.IGNORECASE)
+RETRY_AFTER_PROSE = re.compile(
+    r'retry[-_ ]?after(?![\w-])\s+"?(\d{1,9})\s*([a-z]*)', re.IGNORECASE)
 
 
 RESET_AFTER = re.compile(
@@ -38,10 +68,51 @@ RESET_AFTER = re.compile(
     re.IGNORECASE)
 
 
-def _retry_delay(tail):
-    hint = RETRY_AFTER.search(tail)
-    if hint:
-        return int(hint.group(1))
+def _clamp(seconds, cap):
+    """Bound one delay to `cap`; an absent hint stays absent."""
+    if seconds is None:
+        return None
+    return min(max(1, math.ceil(seconds)), max(1, int(cap)))
+
+
+def _hint_seconds(value, unit, scale=1):
+    """Seconds for one parsed hint, or None when its unit is not one we read."""
+    factor = HINT_UNITS.get((unit or '').lower())
+    return None if factor is None else int(value) * factor * scale
+
+
+def _quota_signal(tail):
+    """True when the tail carries a real quota signal, not just a delay hint.
+
+    The stated reset window counts: it is the provider naming its own quota
+    period, so a receipt whose only rate evidence is that sentence is a rate
+    event rather than an ordinary failure.
+    """
+    return (any(word in tail for word in RATE_WORDS)
+            or RESET_AFTER.search(tail) is not None)
+
+
+def _retry_delay(tail, max_delay=MAX_HINT_DELAY, rate_context=False):
+    """Honored provider delay in seconds, or None.
+
+    Precedence is the explicit header field, then prose, then Devin's stated
+    reset sentence. Prose is free-form agent text — an assertion about a flaky
+    test says as much about retries as the provider does — so it is read only
+    where the tail also carries a quota signal. Every parsed delay is clamped
+    to `max_delay`, so a claimed duration cannot park a group for days.
+    """
+    header = RETRY_AFTER.search(tail)
+    if header:
+        delay = _hint_seconds(header.group(2), header.group(3),
+                              0.001 if header.group(1) else 1)
+        if delay is not None:
+            return _clamp(delay, max_delay)
+    if rate_context:
+        prose = RETRY_AFTER_PROSE.search(tail)
+        if prose:
+            delay = _hint_seconds(prose.group(1), prose.group(2))
+            if delay is not None:
+                return _clamp(delay, max_delay)
     resets = list(RESET_AFTER.finditer(tail))
     if not resets:
         return None
@@ -49,10 +120,10 @@ def _retry_delay(tail):
     seconds = sum(int(value) * (3600 if unit.lower().startswith('hour') else
                                60 if unit.lower().startswith('minute') else 1)
                   for value, unit in parts)
-    return max(1, seconds)
+    return _clamp(max(1, seconds), max_delay)
 
 
-def classify(receipt, text):
+def classify(receipt, text, max_delay=MAX_HINT_DELAY):
     """Categorize a finished invocation for quota-group feedback.
 
     Returns (category, retry_after_seconds). Provider signals in the
@@ -62,13 +133,18 @@ def classify(receipt, text):
     carries a provider 'stream error' event — opencode freezes after a
     rate-limited stream and the runner's timeout then masks the real
     cause, so that specific event still scopes the cooldown.
+
+    A delay hint scales an already-classified congestion event; it never
+    classifies one, so a hint quoted in agent output or a test fixture
+    cannot become a group rate event. Honored hints keep the provider's
+    unit and are clamped to `max_delay`, the cooldown ceiling.
     """
     receipt = receipt or {}
     if receipt.get('status') == 'timeout':
         tail = (text or '')[-16000:].lower()
         if 'stream error' in tail:
-            if any(word in tail for word in RATE_WORDS):
-                return 'rate', _retry_delay(tail)
+            if _quota_signal(tail):
+                return 'rate', _retry_delay(tail, max_delay, True)
             if any(word in tail for word in ENDPOINT_WORDS):
                 return 'endpoint', None
         return 'timeout', None
@@ -76,12 +152,13 @@ def classify(receipt, text):
     if code == 0:
         return 'success', None
     tail = (text or '')[-16000:].lower()
-    retry_after = _retry_delay(tail)
     if any(word in tail for word in AUTH_WORDS):
         return 'auth', None
     if any(word in tail for word in CREDIT_WORDS):
         return 'credits', None
-    if any(word in tail for word in RATE_WORDS) or retry_after is not None:
+    rate = _quota_signal(tail)
+    retry_after = _retry_delay(tail, max_delay, rate)
+    if rate:
         return 'rate', retry_after
     if any(word in tail for word in ENDPOINT_WORDS):
         return 'endpoint', retry_after
@@ -100,6 +177,11 @@ class Admission:
         self.quiet = sched.get('quiet_seconds', 2700)
         self.cooldown = sched.get('cooldown_seconds', 600)
         self.max_cooldown = sched.get('max_cooldown_seconds', 7200)
+        # scheduler.max_cooldown_seconds bounds the exponential cooldown; a
+        # provider-claimed window is honored up to that ceiling but never below
+        # the platform default, because a quota window is real work avoidance
+        # while a mis-scaled claim is not.
+        self.hint_ceiling = max(self.max_cooldown, MAX_HINT_DELAY)
         self.max_quota_requeues = sched.get('max_quota_requeues', 4)
         self.max_quota_requeue_resets = sched.get('max_quota_requeue_resets', 2)
         self.quota_requeue_delay = sched.get('quota_requeue_delay_seconds', 900)
@@ -135,7 +217,8 @@ class Admission:
                         'VALUES(?,?,?,?,0,0)', (name, cfg['initial'], 'normal', self.cooldown))
         return {'grp': name, 'target': cfg['initial'], 'mode': 'normal',
                 'cooldown_until': None, 'cooldown_len': self.cooldown,
-                'window_start': 0, 'loaded': None, 'useful': 0}
+                'window_start': 0, 'loaded': None, 'useful': 0,
+                'congested_at': None}
 
     def _active(self, name, probe=None):
         query = "SELECT COUNT(*) FROM admission_leases WHERE instr(grps, ?)"
@@ -193,8 +276,9 @@ class Admission:
                         and now - group['window_start'] >= self.quiet):
                     self.db.execute('UPDATE admission_groups SET target=?,window_start=?,useful=0,loaded=NULL WHERE grp=?',
                                     (min(self.groups[name]['ceiling'], group['target'] + 1), now, name))
-            self.db.execute('INSERT INTO admission_leases(owner,model,grps,clone,probe,updated) VALUES(?,?,?,?,?,?)',
-                            (owner, model, json.dumps(names), clone, int(probe_grant), now))
+            self.db.execute('INSERT INTO admission_leases(owner,model,grps,clone,probe,granted,'
+                            'updated) VALUES(?,?,?,?,?,?,?)',
+                            (owner, model, json.dumps(names), clone, int(probe_grant), now, now))
             self.db.commit()
             return True
         except Exception:
@@ -211,9 +295,15 @@ class Admission:
         """Record one deduplicated outcome and release the inference lease.
 
         A repeated report for the same invocation never spends another
-        penalty: congestion episodes decrease the group target once.
+        penalty: congestion episodes decrease the group target once. A
+        provider-hinted delay is bounded by the cooldown ceiling here, so a
+        claimed duration sizes one cooldown and cannot park the group. A
+        probe lease only lifts the group state that existed when it was
+        granted — a block or a provider reset recorded after that grant
+        is the newer truth and outlives the probe's success.
         """
         now = self.clock()
+        retry_after = _clamp(retry_after, self.hint_ceiling)
         try:
             self._tx()
             lease = self.db.execute('SELECT * FROM admission_leases WHERE owner=?', (owner,)).fetchone()
@@ -241,27 +331,45 @@ class Admission:
                     if group['mode'] == 'normal':
                         cooldown_until = now + (retry_after or group['cooldown_len']) + self.jitter()
                         self.db.execute('UPDATE admission_groups SET target=?,mode=?,cooldown_until=?,'
-                                        'window_start=?,useful=0,loaded=NULL WHERE grp=?',
+                                        'window_start=?,congested_at=?,useful=0,loaded=NULL WHERE grp=?',
                                         (max(self.groups[name].get('minimum', 1),
                                              math.ceil(group['target'] / 2)), 'probing',
-                                         cooldown_until, now, name))
+                                         cooldown_until, now, now, name))
                     else:
                         length = retry_after or group['cooldown_len'] or self.cooldown
                         cooldown_until = max(group['cooldown_until'] or 0, now + length + self.jitter())
                         new_len = group['cooldown_len']
                         if lease and lease['probe']:
                             new_len = min(self.max_cooldown, max(new_len, self.cooldown) * 2)
-                        self.db.execute('UPDATE admission_groups SET cooldown_until=?,cooldown_len=? WHERE grp=?',
-                                        (cooldown_until, new_len, name))
+                        self.db.execute('UPDATE admission_groups SET cooldown_until=?,cooldown_len=?,'
+                                        'congested_at=? WHERE grp=?',
+                                        (cooldown_until, new_len, now, name))
                 elif category in ('auth', 'credits'):
-                    self.db.execute("UPDATE admission_groups SET mode='blocked',cooldown_until=NULL WHERE grp=?", (name,))
+                    self.db.execute("UPDATE admission_groups SET mode='blocked',cooldown_until=NULL,"
+                                    'congested_at=? WHERE grp=?', (now, name))
                 elif category == 'success' and lease and lease['probe']:
-                    self.db.execute("UPDATE admission_groups SET mode='normal',cooldown_until=NULL,cooldown_len=? WHERE grp=?",
-                                    (self.cooldown, name))
+                    if not self._outranked(group, lease):
+                        self.db.execute("UPDATE admission_groups SET mode='normal',cooldown_until=NULL,"
+                                        'cooldown_len=?,congested_at=NULL WHERE grp=?',
+                                        (self.cooldown, name))
             self.db.commit()
         except Exception:
             self.db.rollback()
             raise
+
+    @staticmethod
+    def _outranked(group, lease):
+        """True when newer provider feedback outranks this probe's success.
+
+        A blocked group is never auto-retried, so only an operator reset can
+        open it. Otherwise the probe may lift exactly the episode it was
+        granted for: congestion recorded at or after the grant belongs to a
+        later report and keeps its cooldown.
+        """
+        if group['mode'] == 'blocked':
+            return True
+        return (group['congested_at'] is not None
+                and group['congested_at'] >= (lease['granted'] or 0))
 
     def useful(self, meta):
         """Credit a verified useful completion to its quota groups' growth window."""
@@ -297,7 +405,7 @@ class Admission:
             self._tx()
             self._group(name)
             self.db.execute("UPDATE admission_groups SET mode='normal',cooldown_until=NULL,cooldown_len=?,"
-                            'window_start=?,useful=0,loaded=NULL WHERE grp=?',
+                            'window_start=?,congested_at=NULL,useful=0,loaded=NULL WHERE grp=?',
                             (self.cooldown, self.clock(), name))
             self.db.commit()
         except Exception:

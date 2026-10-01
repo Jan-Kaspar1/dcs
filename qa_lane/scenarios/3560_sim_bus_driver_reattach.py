@@ -3,14 +3,14 @@ the scenario schedule; see qa_lane/scenarios/__init__.py for the
 ordering rule and the shared seam."""
 from .common import *
 
-# Ordering: the reattach leg runs on its own staged rig — a
-# `dcs-sim-bus-device` server plus a controller pair bound to it
-# (ctx['bus']) — and never touches the deployed pair, the probe
-# pair's plant, or any shared field, claim token, or runner-owned
-# file. Nothing it stages can contaminate an earlier case, and the
-# cases behind it find the rig exactly as they left it, so the leg
-# needs no window of its own.
-RUNS_AFTER = frozenset({'scenario_remote_driver_recovery'})
+# Ordering: the reattach leg stages its own pair on the lane's
+# register-protocol device, so it needs the born seats the earlier
+# legs hold — the fencing-loss demotion leg's driven/foreign pair —
+# and it must be done before the scan-batch leg claims the driven
+# seat again.
+RUNS_AFTER = frozenset({'scenario_remote_driver_recovery',
+                        'scenario_sim_cyclic_fencing_loss_demote'})
+RUNS_BEFORE = frozenset({'scenario_scan_batch_bound'})
 
 # --------------------------------------------------------------------
 # The point-wise BusDriver's lazy-reattach contract — the per-revision
@@ -76,12 +76,22 @@ RUNS_AFTER = frozenset({'scenario_remote_driver_recovery'})
 # the standing record lingering, the streak standing, the counted
 # history reset, the outage uncounted, the tick held at the baseline —
 # and any it lets through reports sim-bus-reattach-unchecked. A run
-# context carrying no register-mapped field rig, a rig whose device
-# or pair never answers, a pair that never settles tracking, a
-# staging lever that never completes, a restart whose device never
-# serves again, a restore the leg cannot classify, and a staged
-# revision whose served surface cannot express the contract at all
-# report inconclusive.
+# context carrying no sim-bus device-server seam or no born-controller
+# levers, a rig whose device or pair never answers, a pair that never
+# settles tracking, a staging lever that never completes, a restart
+# whose device never serves again, a restore the leg cannot classify,
+# and a staged revision whose served surface cannot express the
+# contract at all report inconclusive.
+
+OWNER_SEAT = 'driven'      # the born seat launched field-active
+PEER_SEAT = 'foreign'      # the born seat launched as the tracking member
+BUS_KIND = 'sim-bus'       # the device kind this contract is about
+# The per-request timeout the leg stamps onto the staged document:
+# under the ~2 s stall, so a frozen device times out mid-exchange and
+# the driver has a failed exchange to recover from — the fixtures'
+# device-agnostic five-second default would sit longer than the
+# outage.
+BUS_FIELD_TIMEOUT = 1500
 
 # The documented recovery bound: the fix's REATTACH_INTERVAL (one
 # second) plus one request timeout and the restarted device server's
@@ -116,21 +126,22 @@ def _driver_health(snapshot):
 
 
 def _device_serving(subject):
-    """Whether the rig's register device answers its own census right
+    """Whether the rig's register device reports itself serving right
     now — the device-side half of the outage classification, asked
-    through the shipped field tool exec'd inside the device's own
-    container. True, False, or None when the subject carries no
-    device-tool seam to ask with.
+    through the runner's serving lever: the server's own bound-address
+    announcement scoped to its running lifetime. True, False, or None
+    when the subject carries no serving seam to ask with.
 
-    Never asked while the device is frozen: an exec into a paused
-    container is not an answer the leg can wait on, so a refused or
-    hanging census there would classify a driver that behaved
-    correctly. Every call site runs after the restore."""
+    Never asked while the device is frozen: a paused container's log
+    still carries its announcement, so the lever answers False on the
+    frozen state itself — every call site runs after the restore."""
+    probe = subject.get('device_serving')
+    if probe is None:
+        return None
     try:
-        answer = subject['device_ctl']('list')
+        return bool(probe(subject['device']))
     except Exception:
         return None
-    return getattr(answer, 'returncode', 1) == 0
 
 
 def _counted(health):
@@ -707,6 +718,58 @@ def _bus_promote_probe(ctx, subject, owner, tracker):
     return record
 
 
+def _bus_field(ctx):
+    """Stage the lane's register-protocol device server on its point-
+    wise model and prove the field it serves is the one this contract
+    is about: the staged device declared `sim-bus` — the driver's own
+    kind; a `sim-cyclic` fixture would exercise the cyclic driver's
+    separate recovery and say nothing here. The staged document gets
+    the leg's per-request timeout stamped onto it, so the stall
+    class's freeze produces a failed exchange to recover from.
+    Returns the launch dict, or the inconclusive reason as a string. A
+    launch that raises is no inconclusive reason but a refused staging
+    call: it propagates so the pass records it as the instability it
+    is."""
+    spec = ctx.get('sim_bus_device')
+    if not spec:
+        return ('the run config stages no sim-bus device server — this '
+                'leg needs the lane\'s register-protocol field')
+    field = ctx['start_sim_bus_device'](timeout_ms=BUS_FIELD_TIMEOUT)
+    document = field.get('model')
+    try:
+        model = json.loads(Path(document).read_text())
+    except (OSError, ValueError, TypeError) as exc:
+        return 'the staged device model is unreadable: ' + str(exc)[:200]
+    for declared in model.get('devices') or []:
+        if declared.get('id') != spec.get('device'):
+            continue
+        if declared.get('kind') != BUS_KIND:
+            return ('the staged field serves device '
+                    + str(spec.get('device')) + ' as '
+                    + repr(declared.get('kind')) + ' — point '
+                    'sim_bus_device.model_fixture at a model declaring '
+                    'a ' + BUS_KIND + ' device for this leg')
+        return field
+    return 'the staged device model declares no device ' \
+        + str(spec.get('device'))
+
+
+def _bus_teardown(ctx):
+    """Best-effort teardown: both launched seats and the device
+    server — a clean run leaves nothing standing, and an aborted one
+    gets the same sweep so the legs behind this one find their seats
+    free."""
+    for seat in (OWNER_SEAT, PEER_SEAT):
+        try:
+            ctx['stop_born_controller'](seat)
+        except Exception:
+            pass
+    try:
+        ctx['stop_sim_bus_device']()
+    except Exception:
+        pass
+
+
 def scenario_sim_bus_driver_reattach(ctx):
     """Sever the rig's register-mapped device twice over — a device
     restart and a ~2 s stall — with a controller pair attached, and
@@ -740,18 +803,70 @@ def scenario_sim_bus_driver_reattach(ctx):
                 'back — a second pass over both classes reproducing '
                 'the digests exactly')
     try:
-        subject = ctx.get('bus')
-        if subject is None:
-            return case.finish('inconclusive', 'the run context stages '
-                               'no register-mapped field rig — the '
-                               'lane carries no sim-bus device for the '
-                               'driver-reattach contract')
-        for lever in ('restart_device', 'freeze_device', 'thaw_device',
-                      'device_ctl'):
-            if subject.get(lever) is None:
-                return case.finish('inconclusive', 'the register-mapped '
-                                   'field subject carries no '
-                                   + lever + ' lever')
+        missing = [key for key in ('start_sim_bus_device',
+                                   'restart_sim_bus_device',
+                                   'stop_sim_bus_device',
+                                   'freeze_sim_bus_device',
+                                   'thaw_sim_bus_device',
+                                   'sim_bus_device_serving',
+                                   'start_born_controller',
+                                   'stop_born_controller')
+                   if ctx.get(key) is None]
+        if missing:
+            return case.finish('inconclusive',
+                               'the run context carries no '
+                               'register-protocol staging levers: '
+                               + ', '.join(missing))
+        absent = [seat for seat in (OWNER_SEAT, PEER_SEAT)
+                  if not ctx.get(seat)]
+        if absent:
+            return case.finish('inconclusive', 'the run context carries '
+                               'no published monitor for the leg\'s '
+                               'seats: ' + ', '.join(absent))
+        try:
+            field = _bus_field(ctx)
+        except Exception as exc:
+            return case.finish('inconclusive', 'the device server '
+                               'never staged: ' + str(exc)[:250])
+        if isinstance(field, str):
+            return case.finish('inconclusive', field)
+        try:
+            # The staged pair: the owner seat born-active declaring
+            # its pair member, the peer seat tracking it — a
+            # register-protocol model carries its device address in
+            # its parameters, so the pair needs no --remote.
+            ctx['start_born_controller'](OWNER_SEAT, None,
+                                         document=field['model'],
+                                         peer=PEER_SEAT)
+            ctx['start_born_controller'](PEER_SEAT, None,
+                                         document=field['model'],
+                                         standby=OWNER_SEAT)
+        except Exception as exc:
+            return case.finish('inconclusive', 'the pair launch never '
+                               'ran: ' + str(exc)[:250])
+        try:
+            subject = {'active': ctx[OWNER_SEAT],
+                       'standby': ctx[PEER_SEAT],
+                       'device': field['device'],
+                       'restart_device': ctx['restart_sim_bus_device'],
+                       'freeze_device': ctx['freeze_sim_bus_device'],
+                       'thaw_device': ctx['thaw_sim_bus_device'],
+                       'device_serving': ctx['sim_bus_device_serving']}
+            verdict = _bus_reattach_run(ctx, case, subject)
+        finally:
+            _bus_teardown(ctx)
+        return verdict
+    except Exception as exc:
+        return case.finish('inconclusive', str(exc))
+
+
+def _bus_reattach_run(ctx, case, subject):
+    """The leg's body once the rig is staged: settle the launched pair,
+    drive both outage classes twice through `_bus_outage`, compare the
+    normalized digests, run the unchecked self-check, and probe the
+    promotion path on the converged standby — returning the case's
+    finished record."""
+    try:
         owner = wait_for(lambda: _bus_owner(ctx, subject),
                          time.monotonic() + BUS_REATTACH_SETTLE,
                          interval=BUS_REATTACH_POLL)

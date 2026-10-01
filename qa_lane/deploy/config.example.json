@@ -40,15 +40,11 @@
   "model_fixture": "crates/dcs-demo/fixtures/pump_station.json",
   "dynamics_fixture": "qa_lane/fixtures/probe_dynamics.json"
  },
- "bus_rig": {
-  "pair_token": "dcs-qa-bus",
-  "active_port": 18088,
-  "standby_port": 18089,
-  "device_port": 9010,
-  "model_fixture": "crates/dcs-assembly/fixtures/mixed_bus.json",
-  "device_id": 2,
-  "timeout_ms": 1500,
-  "owner_tokens": {"active": 424251, "standby": 424252}
+ "sim_bus_device": {
+  "device": 1,
+  "port": 9005,
+  "model_fixture": "crates/dcs-demo/fixtures/two_kinds_bus.json",
+  "cyclic_model": "crates/dcs-demo/fixtures/wago_rig_cyclic.json"
  },
  "git_dir": "/srv/dcs-hwtest/repo.git",
  "exploration_enabled": false,
