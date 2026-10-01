@@ -614,6 +614,65 @@ Implementation order: second, after [daily architecture review](daily-architectu
   sharing the driven/foreign born seats and the device server with it
   and sweeping both behind itself.
 
+### Landed 2026-10-01 (holderless-claim reclaim recovery leg, #1260)
+
+- The holderless-claim reclaim recovery contract — the continuity
+  clause behind #1255's bound `reclaim_writer` grant, serving
+  WW-LCM-001 — is exercised on the deployed pair by scenario leg
+  `2390_holderless_claim_recovery`, the per-revision lane evidence
+  that a standing claim with zero holders is the dead-owner shape
+  the reclaim exists to preempt and that the fencing-loss peer's
+  bound grant never refuses it forever. The defect the leg stages is
+  the one the shipped unkeyed pair recorded: two successive
+  ex-owners orphaned — the launch owner demoted by the standby's
+  operator `POST /promote`, the successor fenced by a foreign tool
+  claim — then the field's freeing racing both peers' unbound orphan
+  probes so the winner left a holderless claim standing under the
+  cleared peer's stale token, and the pre-fix bound re-grant refusing
+  that placeholder on every scan while the placeholder fenced the
+  field. The pair lost all field ownership for minutes until an
+  operator promoted.
+- With the pair settled and tracking the leg posts `/promote` on the
+  standby so the active demotes and re-joins tracking with its loss
+  mark cleared (the first ex-owner), drives a scenario attachment's
+  `claim_writer` through the lane's claim-aware seam under a foreign
+  tool token so the promoted owner is fenced and demotes orphaned
+  with its loss mark standing (the second ex-owner), and reads both
+  peers until they report the orphan island. The held foreign claim
+  must refuse every conditional path for the window's rounds. A
+  second attachment's `claim_writer` plus `release_writer` then frees
+  the field while a staged unbound `ensure_writer` — the orphan
+  cycle's own probe shape — raises the cleared ex-owner's holderless
+  placeholder. From there no operator call and no restart: the
+  loss-marked peer's bound reclaim must take that placeholder inside
+  the resolution bound, the winner's journaled walk carrying
+  `origin: reclaim` and never `request`, its writes landing through
+  the re-seated claim, and the pair reconverging to exactly one
+  active plus one tracking standby.
+- Every stage is audited through both peers' serving monitors, the
+  `probe_writer` claim surface, and the bind-mounted
+  `--journal-file` mirrors: the attributed `field_claim_lost` on each
+  ex-owner (the promote's successor token on the first, the foreign
+  token on the second), the `field_orphaned` transitions, the
+  refused probes' `field_claim_observed` claimant records, the
+  loser's quiet journal, and the durable kinds each mirror holds. The
+  doctored negative the leg must refuse is a pair *asserted*
+  recovered — the fenced peer's monitor reporting `role=active` while
+  `probe_writer` still names the cleared ex-owner's holderless claim
+  and both peers stay orphaned. The orphan budget's own recorded
+  `claim_writer_unless_held` rescue is the broken reclaim's symptom,
+  never an alternative success, so a rig whose `--auto-promote`
+  budget would fire inside the resolution watch reports inconclusive.
+- Named diagnostics are `holderless-reclaim-failed` and
+  `holderless-reclaim-nondeterministic`, with the self-check's
+  `holderless-reclaim-unchecked` covering the planted asserted
+  recovery, the planted wedge, and the planted operator-origin
+  recovery; two consecutive passes produce identical digests; a run
+  whose served surfaces predate the contract (no `probe_writer` claim
+  surface, no owner/monitor attribution on the fencing verdicts, no
+  pinned owner tokens, no `plant_ctl` seam, no per-controller journal
+  mounts) reports inconclusive; the pair leaves on its launch roles.
+
 ### Landed 2026-10-01 (sim-cyclic fencing-loss demotion leg, #1357)
 
 - The sim-cyclic fencing-loss demotion contract — the per-revision
