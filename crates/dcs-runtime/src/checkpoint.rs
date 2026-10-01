@@ -37,13 +37,15 @@
 //! clock keeps counting through every source outage it survives while
 //! the pulled stream stands still, so its run tick accrues a permanent
 //! lead the stamp declares — and that survives promotion, where the
-//! run's numbering leads the line's position ever after. The
-//! line-membership bounds a demoted or orphaned peer verifies a pulled
-//! document against are written in that declared stream position, not
-//! either run's raw tick: run ticks are not synchronized to the line,
-//! so only the stream position distinguishes an honest outage lead —
-//! same generation, same fingerprint, same line — from a foreign
-//! stream forging the line's identity at a far-ahead tick. The
+//! run's numbering leads the line's position ever after. The one
+//! positional check a demoted or orphaned peer's verification of a
+//! pulled document keeps is the document's own consistency — an
+//! honest declaration never exceeds the `tick` it rides — since run
+//! ticks are not synchronized to the line and a detached prober's
+//! positions advance at its own scan cadence: no bound against the
+//! prober's own position can tell an honest outage lead or a simply
+//! faster-paced successor — same generation, same fingerprint, same
+//! line — from a foreign stream forging the line's identity. The
 //! `source_owns_field` stamp — set by
 //! the serving peer, absent on a bare executor's capture — lets a
 //! tracking peer name the mutual-standby wedge: a checkpoint applied
@@ -189,12 +191,11 @@ pub struct Checkpoint {
     /// pulled stream stands still, so its run tick accrues a permanent
     /// lead over the line — a lead that survives promotion: the run
     /// that took the field still numbers the ticks it minted waiting.
-    /// Without this stamp, a demoted peer comparing the successor's
-    /// document against its own numbering cannot tell that honest
-    /// lead — same generation, same fingerprint, same line — from a
-    /// foreign stream forging this line's identity at a far-ahead
-    /// tick, and the line-membership bound strands the legitimate
-    /// rejoin. `Some` only while the lead exists; `None` — every
+    /// Without this stamp, a run applying the successor's document
+    /// could not carry the line's position forward — the successor's
+    /// captures would re-locate the line at its own run tick and every
+    /// downstream declaration would inherit the error. `Some` only
+    /// while the lead exists; `None` — every
     /// checkpoint a lead-free or pre-field build captured — means the
     /// captured `tick` *is* the stream position, the only answer a
     /// run without the declared lead can honestly give.
