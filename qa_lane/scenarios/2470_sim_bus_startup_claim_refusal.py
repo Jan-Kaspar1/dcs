@@ -66,10 +66,11 @@ RUNS_BEFORE = frozenset({'scenario_incompatible_revision',
 # no `field_claim_lost` and no fenced `active → standby` demotion. The
 # deployed pair never enters the staging — the leg's device server is
 # a different container on a different claim token, and the rig's
-# launched roles are asserted undisturbed before and after every pass.
-# Each pass ends with the rig swept: the three seats and the device
-# server removed, so the claim state and the launch roles the legs
-# behind this one find are the ones the rig started from. Two
+# launched roles are asserted undisturbed before, after, and once the
+# leg's own seats are gone. Each pass ends with the rig swept: the
+# three seats and the device server removed, and the sweep itself is
+# audited back over the rig — a born seat or a device server that
+# outlived it is a claim the legs behind this one would inherit. Two
 # consecutive passes must produce identical outcome digests.
 #
 # Named diagnostics: sim-bus-claim-refusal-failed tags the contract
@@ -82,18 +83,20 @@ RUNS_BEFORE = frozenset({'scenario_incompatible_revision',
 # incumbent's token, a `--standby` control that orphans — converging
 # then journaling a tracking-source refusal — or that promotes onto
 # the field behind a live incumbent or admits a command behind its
-# closed gate, a moved pair — while
+# closed gate — while
 # sim-bus-claim-refusal-nondeterministic tags the instability the
-# contract does not answer for — refused staging calls, a starved
+# contract does not answer for: refused staging calls, a starved
 # watch or monitor, an unread verdict, a control that never converges,
-# a moved or wedged deployed pair, or two passes whose digests
-# diverge. A rig that cannot stage the leg — no device server, no
-# born-seat staging levers, no settled deployed pair — and a staged
-# revision predating the contract, whose second born-active claims
-# the bus field and goes active with no named verdict, report
-# inconclusive. The unchecked-diagnostic self-check replays the judge
-# over planted negatives and reports sim-bus-claim-refusal-unchecked
-# for any that slip through.
+# a control whose SignalIndex never named the point its closed gate
+# had to refuse, a moved or wedged deployed pair, a rig the sweep did
+# not restore, or two passes whose digests diverge. A rig that cannot
+# stage the leg — no device server, no born-seat staging levers, no
+# pinned claim token for the incumbent seat, no settled deployed pair
+# — and a staged revision predating the contract, whose second
+# born-active claims the bus field and goes active with no named
+# verdict, report inconclusive. The unchecked-diagnostic self-check
+# replays the judge over planted negatives and reports
+# sim-bus-claim-refusal-unchecked for any that slip through.
 
 BUS_SETTLE = 45    # bound on each launch settling and the refusal wait
 BUS_POLL = 0.4     # cadence polling a seat's verdict mid-stage
@@ -370,24 +373,29 @@ def _bus_control(ctx, model):
 def _bus_pair_held(record):
     """The deployed pair's undisturbed verdict: the owner still active
     and advancing its scan across the leg's bus staging, the peer still
-    a tracking standby — before and after alike."""
+    a tracking standby — in every framing the record carries, the
+    `before` and `after` of the staging and the `final` one the leg
+    reads once its own seats are gone."""
     launch = record.get('launch') or {}
     roles = record.get('roles') or {}
     owner, peer = launch.get('owner'), launch.get('peer')
-    before = roles.get('before') or {}
-    after = roles.get('after') or {}
-    for view in (before, after):
+    tick = None
+    for phase in ('before', 'after', 'final'):
+        view = roles.get(phase)
+        if view is None:
+            continue
         if (view.get(owner) or {}).get('role') != 'active':
             return False
         seen = view.get(peer) or {}
         if seen.get('role') != 'standby' \
                 or seen.get('tracking') is not True:
             return False
-    tick0 = (before.get(owner) or {}).get('tick')
-    tick1 = (after.get(owner) or {}).get('tick')
-    return isinstance(tick0, int) and not isinstance(tick0, bool) \
-        and isinstance(tick1, int) and not isinstance(tick1, bool) \
-        and tick1 > tick0
+        seen_tick = (view.get(owner) or {}).get('tick')
+        if not isinstance(seen_tick, int) or isinstance(seen_tick, bool) \
+                or (tick is not None and seen_tick <= tick):
+            return False
+        tick = seen_tick
+    return tick is not None
 
 
 def _bus_incumbent_held(incumbent):
@@ -413,15 +421,14 @@ def _bus_incumbent_held(incumbent):
 def _bus_control_holds(control):
     """The --standby control stayed what it declared across the watch:
     a tracking standby the whole way, never promoting onto the field
-    behind a live incumbent, and never crossing its closed command
-    gate. Its served `field_claim` reads `held` throughout — that is
-    the live incumbent's claim observed, not one of its own — so the
-    ownership evidence is its role and its gate, not that field."""
+    behind a live incumbent. Its served `field_claim` reads `held`
+    throughout — that is the live incumbent's claim observed, not one
+    of its own — so the ownership evidence is its role, read apart from
+    the closed command gate the judge audits on its own."""
     watch = control.get('watch') or []
     if not watch:
         return False
-    return all(view.get('role') == 'standby' for view in watch) \
-        and control.get('refused_command') == 'not_active'
+    return all(view.get('role') == 'standby' for view in watch)
 
 
 def _bus_verdict_audit(verdict):
@@ -554,16 +561,43 @@ def _judge_bus(record, note):
             if not _bus_control_holds(control):
                 failed('control-promoted', 'the control left the '
                        'tracking posture it declared — a role it '
-                       'cannot hold behind a live incumbent, or a '
-                       'command its closed gate admitted: '
-                       + json.dumps({'watch': watch,
-                                     'refused': control.get(
-                                         'refused_command')})[:300])
+                       'cannot hold behind a live incumbent: '
+                       + json.dumps(watch)[:300])
+            elif control.get('command_point') is None:
+                # The gate's evidence is unreadable, not crossed: a
+                # SignalIndex that never named a writable bool
+                # in-point leaves the leg nothing to submit, which is
+                # the rig's staging surface rather than the control's
+                # declared posture.
+                nondet('control-signals', 'the control\'s SignalIndex '
+                       'never named a writable bool in-point — the '
+                       'closed gate\'s served evidence could not be '
+                       'read')
+            elif control.get('refused_command') != 'not_active':
+                failed('control-admitted-a-command', 'the control '
+                       'crossed its closed command gate — a tracking '
+                       'standby must receipt the write not_active: '
+                       + json.dumps({'point': control.get(
+                           'command_point'),
+                           'verdict': control.get(
+                               'refused_command')})[:300])
 
     if not _bus_pair_held(record):
         nondet('pair-disturbed', 'the deployed pair moved or wedged '
                'across the bus staging: '
                + json.dumps(record.get('roles'), sort_keys=True)[:300])
+
+    rig = record.get('rig') or {}
+    seats = rig.get('seats') or {}
+    standing = sorted(seat for seat, absent in seats.items()
+                      if absent is not True)
+    if standing or rig.get('device_error'):
+        nondet('rig-not-restored', 'the leg left the rig\'s claim state '
+               'standing — a seat or the device server outlived the '
+               'sweep the legs behind this one inherit: '
+               + json.dumps({'standing': standing,
+                             'device': rig.get('device_error')},
+                            sort_keys=True)[:300])
 
 
 def _bus_digest(record, violations):
@@ -594,9 +628,11 @@ def _bus_digest(record, violations):
         'control': 'tracks-nothing-owned'
             if clean('control-stage', 'control-watch',
                      'control-launch', 'control-promoted',
+                     'control-signals', 'control-admitted-a-command',
                      'control-orphan-refusal')
             else 'defect',
-        'pair': 'held' if clean('pair-disturbed') else 'disturbed'}
+        'pair': 'held' if clean('pair-disturbed') else 'disturbed',
+        'rig': 'restored' if clean('rig-not-restored') else 'dirty'}
 
 
 def _bus_pass(ctx, number, launch):
@@ -604,10 +640,12 @@ def _bus_pass(ctx, number, launch):
     roles, stage the device server, launch the first controller and
     read its claim, stage the second launch and read its verdict and
     the incumbent's fate across the refusal, run the --standby
-    control, then frame the pair again."""
+    control, then frame the pair again. The `final` framing and the
+    rig's restoration read belong to the caller: they only mean
+    anything once the sweep has run."""
     record = {'pass': number, 'launch': dict(launch), 'roles': {},
               'field': {}, 'incumbent': {}, 'refused': {},
-              'control': {}}
+              'control': {}, 'rig': {}}
     owner, peer = launch['owner'], launch['peer']
     record['roles']['before'] = {
         name: _bus_role(ctx, ctx[name]) for name in (owner, peer)}
@@ -720,6 +758,10 @@ def _bus_self_check():
                             'refused_command': 'not_active',
                             'source_refusals': []},
                 'incumbent_token': 424243,
+                'rig': {'seats': {INCUMBENT_SEAT: True,
+                                  REFUSED_SEAT: True,
+                                  CONTROL_SEAT: True},
+                        'device_error': None},
                 'roles': {
                     'before': {
                         'active': {'role': 'active', 'tick': 10,
@@ -730,6 +772,11 @@ def _bus_self_check():
                         'active': {'role': 'active', 'tick': 12,
                                    'tracking': False},
                         'standby': {'role': 'standby', 'tick': 12,
+                                    'tracking': True}},
+                    'final': {
+                        'active': {'role': 'active', 'tick': 14,
+                                   'tracking': False},
+                        'standby': {'role': 'standby', 'tick': 14,
                                     'tracking': True}}}}
 
     def audit(record):
@@ -791,7 +838,10 @@ def _bus_self_check():
            r['control'].update(refused_command=None))
     # The instability shapes must report nondeterministic: refused
     # staging calls, a starved watch or monitor, an unread verdict, a
-    # control that never converges, a moved pair.
+    # control that never converges, a gate whose evidence never
+    # arrived, a moved pair, a rig left standing.
+    expect('control-signals-unreadable', lambda r:
+           r['control'].update(command_point=None), NONDET)
     expect('device-stage-refused', lambda r:
            r.update(stage_error='docker run failed'), NONDET)
     expect('incumbent-launch-refused', lambda r:
@@ -828,6 +878,16 @@ def _bus_self_check():
            NONDET)
     expect('pair-scan-wedged', lambda r:
            r['roles']['after']['active'].update(tick=10), NONDET)
+    expect('pair-final-owner-moved', lambda r:
+           r['roles']['final']['active'].update(role='standby'), NONDET)
+    expect('pair-final-scan-wedged', lambda r:
+           r['roles']['final']['active'].update(tick=12), NONDET)
+    expect('rig-left-standing', lambda r:
+           r['rig']['seats'].update({CONTROL_SEAT: False}), NONDET)
+    expect('rig-presence-unreadable', lambda r:
+           r['rig']['seats'].update({INCUMBENT_SEAT: None}), NONDET)
+    expect('device-server-still-serving', lambda r:
+           r['rig'].update(device_error='device is busy'), NONDET)
     return slipped
 
 
@@ -835,7 +895,11 @@ def _bus_teardown(ctx):
     """Best-effort teardown: the leg's three seats and the device
     server — a clean pass leaves nothing standing and the rig's claim
     state free, and an aborted pass gets the same sweep so the legs
-    behind this one see free seats and a free device-server name."""
+    behind this one see free seats and a free device-server name.
+    Returns the device server's own removal error, or None when it
+    came down: the one half of the claim state the read-only state
+    lever cannot confirm, since the device container is not a born
+    seat."""
     lever = ctx.get('stop_born_controller')
     if lever is not None:
         for seat in (INCUMBENT_SEAT, REFUSED_SEAT, CONTROL_SEAT):
@@ -844,10 +908,24 @@ def _bus_teardown(ctx):
             except Exception:
                 pass
     try:
-        if ctx.get('stop_sim_bus_device') is not None:
-            ctx['stop_sim_bus_device']()
-    except Exception:
-        pass
+        if ctx.get('stop_sim_bus_device') is None:
+            return None
+        ctx['stop_sim_bus_device']()
+    except Exception as exc:
+        return str(exc)[:200]
+    return None
+
+
+def _bus_rig_state(ctx, device_error):
+    """The rig's claim state after the sweep: every born seat's own
+    presence read back through the read-only state lever — a seat
+    still standing is a claim the legs behind this one would inherit —
+    beside the device server's removal error. `absent` None is a read
+    the lever could not answer, never a seat proven gone."""
+    return {'seats': {seat: (_bus_state(ctx, seat) or {}).get('absent')
+                      for seat in (INCUMBENT_SEAT, REFUSED_SEAT,
+                                   CONTROL_SEAT)},
+            'device_error': device_error}
 
 
 def scenario_sim_bus_startup_claim_refusal(ctx):
@@ -874,8 +952,10 @@ def scenario_sim_bus_startup_claim_refusal(ctx):
         'moving scan with no fenced demotion journaled, a --standby '
         'launch in the same shape converges tracking while owning '
         'nothing and journaling no tracking-source refusal, the rig\'s '
-        'claim state and launch roles are restored, and two passes '
-        'produce identical digests')
+        'claim state and launch roles are restored — audited back over '
+        'the swept rig, a seat or device server that outlived the '
+        'sweep fails the leg — and two passes produce identical '
+        'digests')
     try:
         missing = [key for key in ('start_sim_bus_device',
                                    'stop_sim_bus_device',
@@ -900,6 +980,12 @@ def scenario_sim_bus_startup_claim_refusal(ctx):
                                'no per-seat journal files — the durable '
                                'half of the audit cannot run')
         tokens = ctx.get('plant_owner') or {}
+        if not tokens.get(INCUMBENT_SEAT):
+            return case.finish('inconclusive', 'the run context records '
+                               'no pinned --owner-token for the '
+                               'incumbent seat — the refusal\'s '
+                               'attributed claimant cannot be audited '
+                               'against a live holder')
         deadline = time.monotonic() + BUS_SETTLE
         owner = wait_for(lambda: _pair_active(ctx), deadline,
                          interval=BUS_POLL)
@@ -941,15 +1027,27 @@ def scenario_sim_bus_startup_claim_refusal(ctx):
                 # the legs behind this one start on a free claim state
                 # and free seats, and the launch roles they find are
                 # the ones the rig started from.
-                _bus_teardown(ctx)
+                device_error = _bus_teardown(ctx)
+            # The restoration audit, read back over the swept rig: the
+            # seats' own presence and the pair's launch roles once the
+            # leg's claim is gone.
+            record['rig'] = _bus_rig_state(ctx, device_error)
+            record['roles']['final'] = {
+                name: _bus_role(ctx, ctx[name]) for name in (owner, peer)}
             if record.get('unstaged'):
                 return case.finish(
                     'inconclusive', record['stage_error'])
             record['incumbent_token'] = tokens.get(INCUMBENT_SEAT)
-            if not record.get('inconclusive'):
+            # A pass the leg declines to judge gets no digest: the
+            # determinism contract is over audited passes, and a
+            # pseudo-digest on a pre-contract record would read as a
+            # verdict the leg refused to reach.
+            if record.get('inconclusive'):
+                digest = None
+            else:
                 _judge_bus(record, note)
-            digest = _bus_digest(record, violations)
-            record['digest'] = dict(digest)
+                digest = _bus_digest(record, violations)
+                record['digest'] = dict(digest)
             record['violations'] = {
                 key: diagnostic
                 for key, (diagnostic, _) in violations.items()}
@@ -964,7 +1062,9 @@ def scenario_sim_bus_startup_claim_refusal(ctx):
                           'the incumbent\'s claim posture, the refused '
                           'launch\'s exit and journaled attribution, '
                           'the --standby control\'s convergence, the '
-                          'pair framing, and the normalized digest')
+                          'deployed pair\'s before/after/final framing, '
+                          'the swept rig\'s restoration read, and the '
+                          'normalized digest')
             if record.get('inconclusive'):
                 return case.finish('inconclusive',
                                    record['inconclusive'])

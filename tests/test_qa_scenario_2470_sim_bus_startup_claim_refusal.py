@@ -35,12 +35,17 @@ EXPECTED_CASES = frozenset({
     'SimBusClaimRefusalTests.test_journal_unread_is_nondeterministic',
     'SimBusClaimRefusalTests.test_control_never_converged_is_nondeterministic',
     'SimBusClaimRefusalTests.test_control_watch_starved_is_nondeterministic',
+    'SimBusClaimRefusalTests.test_control_signals_unread_is_nondeterministic',
     'SimBusClaimRefusalTests.test_pair_disturbance_is_nondeterministic',
     'SimBusClaimRefusalTests.test_pair_wedge_is_nondeterministic',
+    'SimBusClaimRefusalTests.test_pair_moves_after_sweep_is_nondeterministic',
+    'SimBusClaimRefusalTests.test_rig_left_standing_is_nondeterministic',
+    'SimBusClaimRefusalTests.test_device_left_serving_is_nondeterministic',
     'SimBusClaimRefusalTests.test_diverging_digests_fail',
     'SimBusClaimRefusalTests.test_predates_contract_is_inconclusive',
     'SimBusClaimRefusalTests.test_unstaged_device_is_inconclusive',
     'SimBusClaimRefusalTests.test_missing_seams_are_inconclusive',
+    'SimBusClaimRefusalTests.test_unpinned_token_is_inconclusive',
     'SimBusClaimRefusalTests.test_unreachable_rig_is_inconclusive',
     'SimBusClaimRefusalTests.test_unsettled_pair_is_inconclusive',
     'SimBusClaimRefusalTests.test_unchecked_self_check_fails',
@@ -116,8 +121,14 @@ class BusFeed:
         self.unstaged = False          # the rig stages no device server
         self.pair_moves = False        # the standby reports active
         self.pair_wedged = False       # the owner's tick freezes
+        self.pair_moves_after_sweep = False  # the pair moves once the
+        # leg's own claim is gone — the launch roles it must restore
         self.unsettled_pair = False    # the standby never tracks
         self.silent_rig = False        # every endpoint refuses
+        self.teardown_keeps = frozenset()   # seats that outlive the
+        # sweep — the rig's claim state the legs behind inherit
+        self.device_stop_fails = False  # the device server survives
+        self.sweeps = 0                # completed teardown sweeps
 
     # --- the durable journal the audit reads ------------------------
 
@@ -154,6 +165,9 @@ class BusFeed:
 
     def stop_device(self):
         self.calls.append(('stop_sim_bus_device',))
+        if self.device_stop_fails:
+            raise RuntimeError('docker rm failed: device is busy')
+        self.sweeps += 1
         self.device = None
         self.claim = None
 
@@ -267,6 +281,8 @@ class BusFeed:
 
     def stop_controller(self, seat):
         self.calls.append(('stop_born_controller', seat))
+        if seat in self.teardown_keeps:
+            return          # a seat the sweep could not remove
         if self.claim == seat:
             self.claim = None
             if self.seats.get(seat):
@@ -296,7 +312,8 @@ class BusFeed:
                 self.tick += 1
             return {'role': 'active', 'tick': self.tick,
                     'field_claim': 'held'}
-        if self.pair_moves and reads > 1:
+        if (self.pair_moves and reads > 1) \
+                or (self.pair_moves_after_sweep and self.sweeps):
             return {'role': 'active', 'tick': self.tick,
                     'field_claim': 'held'}
         report = {'role': 'standby', 'tick': self.tick}
@@ -470,11 +487,22 @@ class SimBusClaimRefusalTests(unittest.TestCase):
         self.assertTrue(first['control']['converged'])
         self.assertEqual(first['control']['refused_command'], 'not_active')
         self.assertEqual(first['control']['source_refusals'], [])
+        # The sweep is audited back over the rig: every born seat
+        # proven gone, the device server's own removal clean, and the
+        # deployed pair's launch roles undisturbed in the framing the
+        # leg reads once its claim is gone.
+        self.assertEqual(first['rig'],
+                         {'seats': {'revised': True, 'foreign': True,
+                                    'driven': True},
+                          'device_error': None})
+        self.assertEqual(first['roles']['final']['active']['role'],
+                         'active')
+        self.assertIs(first['roles']['final']['standby']['tracking'], True)
         self.assertEqual(
             first['digest'],
             {'incumbent': 'holds-and-scans', 'refused': 'exits-named',
              'audit': 'attributed', 'control': 'tracks-nothing-owned',
-             'pair': 'held'})
+             'pair': 'held', 'rig': 'restored'})
         self.assertEqual(first['digest'], self._pass(2)['digest'])
         # Every pass ends torn down — the three seats and the device
         # server removed, so the rig's claim state is free and the
@@ -707,6 +735,18 @@ class SimBusClaimRefusalTests(unittest.TestCase):
                       record.get('detail', ''))
         report.validate_scenario(record)
 
+    def test_control_signals_unread_is_nondeterministic(self):
+        # The control's SignalIndex never named a writable bool
+        # in-point, so the leg had nothing to submit at the closed
+        # gate — an unread surface, never a crossed one.
+        self.feed.control_signals = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('sim-bus-claim-refusal-nondeterministic',
+                      record.get('detail', ''))
+        self.assertIsNone(self._pass(1)['control']['command_point'])
+        report.validate_scenario(record)
+
     def test_pair_disturbance_is_nondeterministic(self):
         self.feed.pair_moves = True
         record = self.run_scenario()
@@ -723,6 +763,43 @@ class SimBusClaimRefusalTests(unittest.TestCase):
                       record.get('detail', ''))
         report.validate_scenario(record)
 
+    def test_pair_moves_after_sweep_is_nondeterministic(self):
+        # The deployed pair holds across the staging and moves only
+        # once the leg's own claim is gone — the launch roles the leg
+        # owes the rig behind it.
+        self.feed.pair_moves_after_sweep = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('sim-bus-claim-refusal-nondeterministic',
+                      record.get('detail', ''))
+        self.assertEqual(self._pass(1)['roles']['after']['standby']
+                         ['role'], 'standby')
+        self.assertEqual(self._pass(1)['roles']['final']['standby']
+                         ['role'], 'active')
+        report.validate_scenario(record)
+
+    def test_rig_left_standing_is_nondeterministic(self):
+        # A born seat the sweep could not remove is a claim the legs
+        # behind this one would inherit.
+        self.feed.teardown_keeps = frozenset({'driven'})
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('sim-bus-claim-refusal-nondeterministic',
+                      record.get('detail', ''))
+        self.assertIs(self._pass(1)['rig']['seats']['driven'], False)
+        report.validate_scenario(record)
+
+    def test_device_left_serving_is_nondeterministic(self):
+        # The device server's own removal failed: the register
+        # protocol outlives the sweep under the leg's device name.
+        self.feed.device_stop_fails = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('sim-bus-claim-refusal-nondeterministic',
+                      record.get('detail', ''))
+        self.assertIsNotNone(self._pass(1)['rig']['device_error'])
+        report.validate_scenario(record)
+
     def test_diverging_digests_fail(self):
         # Both passes audit clean, yet their normalized digests differ —
         # the determinism contract's own failure, staged at the digest
@@ -730,10 +807,10 @@ class SimBusClaimRefusalTests(unittest.TestCase):
         digests = iter([
             {'incumbent': 'holds-and-scans', 'refused': 'exits-named',
              'audit': 'attributed', 'control': 'tracks-nothing-owned',
-             'pair': 'held'},
+             'pair': 'held', 'rig': 'restored'},
             {'incumbent': 'holds-and-scans', 'refused': 'exits-named',
              'audit': 'attributed', 'control': 'defect',
-             'pair': 'held'}])
+             'pair': 'held', 'rig': 'restored'}])
         with patch.object(scenarios, '_bus_digest',
                           lambda record, violations: next(digests)):
             record = self.run_scenario()
@@ -754,6 +831,11 @@ class SimBusClaimRefusalTests(unittest.TestCase):
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'inconclusive', record)
         self.assertIn('predates', record.get('detail', ''))
+        # The pass is recorded without a digest: the leg declined to
+        # judge it, so publishing a verdict set would misreport it.
+        self.assertNotIn('digest', self._pass(1))
+        self.assertEqual(self._pass(1)['refused']['disposition'],
+                         'claimed')
         report.validate_scenario(record)
 
     def test_unstaged_device_is_inconclusive(self):
@@ -775,6 +857,20 @@ class SimBusClaimRefusalTests(unittest.TestCase):
         record = self.run_scenario(ctx)
         self.assertEqual(record['outcome'], 'inconclusive', record)
         self.assertIn('sim-bus staging', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unpinned_token_is_inconclusive(self):
+        # No pinned --owner-token for the incumbent seat: the
+        # refusal's attributed claimant could not be audited against a
+        # live holder, so the leg declines rather than passing an
+        # unaudited attribution.
+        ctx = self._ctx()
+        ctx['plant_owner'] = {'revised': None, 'foreign': 424244,
+                              'driven': 424245}
+        record = self.run_scenario(ctx)
+        self.assertEqual(record['outcome'], 'inconclusive', record)
+        self.assertIn('--owner-token', record.get('detail', ''))
+        self.assertEqual(self.feed.calls, [])
         report.validate_scenario(record)
 
     def test_unreachable_rig_is_inconclusive(self):

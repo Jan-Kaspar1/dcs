@@ -585,12 +585,21 @@ Implementation order: second, after [daily architecture review](daily-architectu
   `sim-bus-claim-refusal-nondeterministic`, with
   `sim-bus-claim-refusal-unchecked` covering the planted negatives;
   two consecutive passes produce identical digests; a rig with no
-  staged device server, an unsettled deployed pair, or a staged
-  revision predating the contract — the second born-active claiming
-  the field and going active — reports inconclusive. Each pass ends
-  with the three born seats and the device server removed, so the
-  rig's claim state and launch roles are restored for the legs behind
-  it.
+  staged device server, no pinned `--owner-token` for the incumbent
+  seat, an unsettled deployed pair, or a staged revision predating the
+  contract — the second born-active claiming the field and going
+  active — reports inconclusive. Each pass ends with the three born
+  seats and the device server removed, and the sweep is audited back
+  over the rig rather than assumed: each seat's presence read through
+  the read-only state lever, the device server's own removal error,
+  and the deployed pair framed once more with the leg's claim gone.
+  A seat or a device server that outlived the sweep is a claim the
+  legs behind this one would inherit, so it reports
+  `sim-bus-claim-refusal-nondeterministic` instead of leaving them a
+  dirty rig; the control's closed gate is read the same way, an
+  unreadable SignalIndex leaving the leg with nothing to submit
+  reported as an unread surface rather than a gate the control
+  crossed.
 - The leg needed one lane-contract extension: the born-seat launcher
   takes a model-addressed launch, `start_born_controller(seat,
   remote=None, model=<document>)`, which runs with no `--remote` and

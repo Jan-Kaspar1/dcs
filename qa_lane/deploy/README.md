@@ -262,9 +262,15 @@ a first controller takes the device's write-ownership claim, a second
 born-active declaring no `--peer` must exit nonzero naming the
 live-holder refusal rather than preempting the incumbent, and a
 `--standby` launch in the same shape converges behind it. A rig whose
-`sim_bus_device` is null, or whose monitor ports carry no born seats,
+`sim_bus_device` is null, whose monitor ports carry no born seats, or
+whose `plant_owner_tokens` pin nothing for the leg's incumbent seat,
 reports that leg inconclusive rather than staging against an endpoint
-it was never granted.
+it was never granted or auditing a claimant it cannot attribute. The
+leg sweeps its three seats and the device server at the end of every
+pass and reads the rig back afterwards — a seat's presence through
+`born_controller_state`, the device server's own removal error, the
+deployed pair framed once more — so a leftover claim surfaces as a
+failed leg instead of an inherited one.
 
 ## Storage bound and retention
 
