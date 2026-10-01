@@ -34,11 +34,8 @@ const OP_INJECT_QUALITY: u8 = 0x07;
 const OP_CLEAR_QUALITY: u8 = 0x08;
 const OP_EXCHANGE: u8 = 0x09;
 const OP_SCRIPT_EXCHANGE: u8 = 0x0a;
-<<<<<<< HEAD
-const OP_ENSURE_WRITER: u8 = 0x0b;
-=======
 const OP_CLAIM_WRITER_UNLESS_HELD: u8 = 0x0b;
->>>>>>> origin/main
+const OP_ENSURE_WRITER: u8 = 0x0c;
 
 // Response variant tags.
 const RESP_SAMPLE: u8 = 0x01;
@@ -1040,34 +1037,28 @@ mod tests {
             serde_json::to_string(&BusRequest::Step { dt: 0.5 }).unwrap(),
             r#"{"op":"step","dt":0.5}"#
         );
-<<<<<<< HEAD
-        // A claim is tag plus the eight-byte owner token — and so is
-        // its conditional ensure counterpart.
-=======
         // A claim is tag plus the eight-byte owner token — and its
-        // conditional counterpart encodes the same way under its own
-        // tag.
->>>>>>> origin/main
+        // conditional counterparts encode the same way under their
+        // own tags.
         assert_eq!(
             encode_request(&BusRequest::ClaimWriter { owner: 0x0102 }),
             vec![0, 9, 0x05, 0, 0, 0, 0, 0, 0, 1, 2]
         );
         assert_eq!(
-<<<<<<< HEAD
-            encode_request(&BusRequest::EnsureWriter { owner: 0x0102 }),
-            vec![0, 9, 0x0b, 0, 0, 0, 0, 0, 0, 1, 2]
-        );
-        assert_eq!(
-            serde_json::to_string(&BusRequest::EnsureWriter { owner: 42 }).unwrap(),
-            r#"{"op":"ensure_writer","owner":42}"#
-=======
             encode_request(&BusRequest::ClaimWriterUnlessHeld { owner: 0x0102 }),
             vec![0, 9, 0x0b, 0, 0, 0, 0, 0, 0, 1, 2]
         );
         assert_eq!(
             serde_json::to_string(&BusRequest::ClaimWriterUnlessHeld { owner: 42 }).unwrap(),
             r#"{"op":"claim_writer_unless_held","owner":42}"#
->>>>>>> origin/main
+        );
+        assert_eq!(
+            encode_request(&BusRequest::EnsureWriter { owner: 0x0102 }),
+            vec![0, 9, 0x0c, 0, 0, 0, 0, 0, 0, 1, 2]
+        );
+        assert_eq!(
+            serde_json::to_string(&BusRequest::EnsureWriter { owner: 42 }).unwrap(),
+            r#"{"op":"ensure_writer","owner":42}"#
         );
         assert_eq!(
             serde_json::to_string(&BusRequest::InjectQuality {

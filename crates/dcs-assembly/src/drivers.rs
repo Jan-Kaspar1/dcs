@@ -1010,14 +1010,10 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
     let bus = Arc::new(bus);
     let stepping = Arc::clone(&bus);
     let claiming = Arc::clone(&bus);
-<<<<<<< HEAD
     let releasing = Arc::clone(&bus);
     let ensuring = Arc::clone(&bus);
     let starting = Arc::clone(&bus);
     let reclaiming = Arc::clone(&bus);
-=======
-    let starting = Arc::clone(&bus);
->>>>>>> origin/main
     let inspect: Arc<dyn Any + Send + Sync> = bus.clone();
     let device = spec.id.0;
     Ok(DeviceDriver::Backend(DeviceBackend {
@@ -1038,7 +1034,6 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                     detail: error.to_string(),
                 })
         })),
-<<<<<<< HEAD
         // The claim's demotion counterpart: the attachment drops its
         // hold on the field's claim — freeing it when it held the last
         // — and forgets its recorded token, so a re-attach never
@@ -1063,18 +1058,24 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                 detail: error.to_string(),
             }),
         })),
-        // The claim's startup counterpart: the same conditional grant —
-        // on this protocol a standing claim always has a live holder,
-        // so `ensure_writer`'s refusal while a different owner stands
-        // is exactly "a live incumbent holds the field", while a dead
-        // owner's claim has already freed itself.
-        startup_claim: Some(Arc::new(move |owner| match starting.ensure_writer(owner) {
-            Ok(()) => Ok(true),
-            Err(LinkError::Fenced) => Ok(false),
-            Err(error) => Err(StepError::Backend {
-                backend: format!("device {device}"),
-                detail: error.to_string(),
-            }),
+        // The claim's startup counterpart: the device server's
+        // conditional `claim_writer_unless_held` grant — a launched
+        // controller takes the field while it stands unclaimed or
+        // already names its token, refusing (`Fenced` → `Ok(false)`)
+        // while a different owner's claim stands. A standing claim on
+        // this protocol always has live holders — the claim dies with
+        // its last holder's connection — so the refused ask is exactly
+        // the live-incumbent verdict the born-active contract refuses
+        // startup on.
+        startup_claim: Some(Arc::new(move |owner| {
+            match starting.claim_writer_unless_held(owner) {
+                Ok(()) => Ok(true),
+                Err(LinkError::Fenced) => Ok(false),
+                Err(error) => Err(StepError::Backend {
+                    backend: format!("device {device}"),
+                    detail: error.to_string(),
+                }),
+            }
         })),
         // No read-only claim observation — the device protocol has no
         // probe request, so the run keeps its last observed verdict.
@@ -1095,44 +1096,6 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
             }
         })),
         // The device's fencing verdict names no claimant.
-=======
-        // The device claim dies with its connection, so a re-attach
-        // never re-asserts it — there is nothing to forget.
-        release: None,
-        // The device's claim protocol has no unbound conditional
-        // grant — and needs none: the claim dying with its connection
-        // frees the field on the peer's death, so no dead token ever
-        // fences it.
-        ensure: None,
-        // The claim's startup counterpart: the device server's
-        // conditional `claim_writer_unless_held` grant — a launched
-        // controller takes the field while it stands unclaimed or
-        // already names its token, refusing (`Fenced` → `Ok(false)`)
-        // while a different owner's claim stands. A standing claim on
-        // this protocol always has live holders — the claim dies with
-        // its last holder's connection — so the refused ask is exactly
-        // the live-incumbent verdict the born-active contract refuses
-        // startup on.
-        startup_claim: Some(Arc::new(move |owner| {
-            match starting.claim_writer_unless_held(owner) {
-                Ok(()) => Ok(true),
-                Err(LinkError::Fenced) => Ok(false),
-                Err(error) => Err(StepError::Backend {
-                    backend: format!("device {device}"),
-                    detail: error.to_string(),
-                }),
-            }
-        })),
-        // Nor a read-only claim observation — the device claim binds
-        // to the connection, so "unclaimed" never outlives a holder's
-        // link and there is no probe to ask.
-        probe: None,
-        // No reclaim path — a claim that dies with its connection
-        // leaves no holderless claim standing for a re-grant to
-        // preempt — and the device's fencing verdict names no
-        // claimant.
-        reclaim: None,
->>>>>>> origin/main
         fenced_by: None,
         declare_monitor: None,
         claimed_monitor: None,
@@ -1233,28 +1196,17 @@ fn sim_cyclic_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError>
         // that connection — a re-attach never re-arms it, so there is
         // no recorded token for a release hook to forget.
         release: None,
-<<<<<<< HEAD
-        // The cyclic protocol has no conditional grant op, and a claim
-        // that dies with its connection leaves nothing to re-arm.
+        // No *unbound* conditional grant (`ensure`) — and none needed:
+        // a claim that dies with its connection leaves nothing to
+        // re-arm.
         ensure: None,
-        // No live-holder query for the startup claim either; the
-        // startup path falls back to the unconditional grant.
-        startup_claim: None,
-        // No read-only claim observation either.
-        probe: None,
-        // No bound conditional grant and no claimant attribution — the
-        // claim dies with its connection.
-=======
-        // As `sim-bus`: no *unbound* conditional grant exists — or is
-        // needed, the claim dying with its connection.
-        ensure: None,
-        // As `sim-bus`: the device server's conditional
-        // `claim_writer_unless_held` grant — a launched controller
-        // takes the field while it stands unclaimed or already names
-        // its token, refusing while a different owner's claim stands;
-        // on this protocol a standing claim always has live holders,
-        // so the refusal is the live-incumbent verdict the
-        // born-active contract asks for.
+        // The claim's startup counterpart: the device server's
+        // conditional `claim_writer_unless_held` grant — a launched
+        // controller takes the field while it stands unclaimed or
+        // already names its token, refusing while a different owner's
+        // claim stands; on this protocol a standing claim always has
+        // live holders, so the refusal is the live-incumbent verdict
+        // the born-active contract asks for.
         startup_claim: Some(Arc::new(move |owner| {
             match starting.claim_writer_unless_held(owner) {
                 Ok(()) => Ok(true),
@@ -1265,12 +1217,10 @@ fn sim_cyclic_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError>
                 }),
             }
         })),
-        // As `sim-bus`: no read-only claim observation either.
+        // No read-only claim observation either.
         probe: None,
-        // As `sim-bus`: no reclaim path — the claim dies with its
-        // connection, leaving no holderless claim a re-grant could
-        // preempt — and no claimant attribution.
->>>>>>> origin/main
+        // No bound conditional re-grant and no claimant attribution —
+        // the claim dies with its connection.
         reclaim: None,
         fenced_by: None,
         declare_monitor: None,

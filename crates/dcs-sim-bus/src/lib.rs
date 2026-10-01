@@ -37,11 +37,8 @@
 //! | `0x08` | clear quality | `u16 register` |
 //! | `0x09` | exchange | `u16 count`, then per staged output `u16 register`, `u8 kind`, value bytes |
 //! | `0x0a` | script exchange | `u16 count`, then outcome entries |
-<<<<<<< HEAD
-//! | `0x0b` | ensure writer | `u64 owner` |
-=======
 //! | `0x0b` | claim writer unless held | `u64 owner` |
->>>>>>> origin/main
+//! | `0x0c` | ensure writer | `u64 owner` |
 //!
 //! A scripted exchange outcome's first byte is `0x01` complete, `0x02`
 //! miss, `0x03` late, `0x04` short-station (`u16` name length, UTF-8

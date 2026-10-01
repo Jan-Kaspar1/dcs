@@ -458,20 +458,15 @@ fn dispatch(shared: &Shared, connection: u64, request: BusRequest) -> Option<Bus
 /// write claim to the requesting attachment — preempting whichever
 /// owner held it — and while a claim stands, `write_register` and
 /// `step` from an attachment not holding it answer
-<<<<<<< HEAD
-/// [`BusError::Fenced`]. [`BusRequest::EnsureWriter`] is the
-/// conditional counterpart a re-attached owner re-arms with: granted
-/// only while the field is unclaimed or already names the token,
-/// never preempting a different owner's standing claim. The claim is
-/// bound to its attachments: it
-=======
 /// [`BusError::Fenced`]. [`BusRequest::ClaimWriterUnlessHeld`] is the
 /// conditional counterpart the born-active startup claim asks:
 /// refused `Fenced` while a different owner's claim stands — which on
 /// this protocol is exactly a live incumbent, the claim dying with
-/// its last holder — granted otherwise. The claim is bound to its
-/// attachments: it
->>>>>>> origin/main
+/// its last holder — granted otherwise. [`BusRequest::EnsureWriter`]
+/// is the same conditional grant a re-attached owner re-arms with:
+/// granted only while the field is unclaimed or already names the
+/// token, never preempting a different owner's standing claim. The
+/// claim is bound to its attachments: it
 /// releases on the holder's disconnect or
 /// [`BusRequest::ReleaseWriter`], the last release reopening the field.
 ///

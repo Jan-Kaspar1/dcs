@@ -511,7 +511,6 @@ impl BusDriver {
         }
     }
 
-<<<<<<< HEAD
     /// The conditional counterpart of [`claim_writer`](Self::claim_writer):
     /// takes the claim for `owner` — binding this attachment as a
     /// holder — while the field is unclaimed or the standing claim
@@ -532,7 +531,11 @@ impl BusDriver {
                 self.connection.lock().unwrap().owner = Some(owner);
                 Ok(())
             }
-=======
+            BusResponse::Error { error } => Err(refused(error)),
+            _ => Err(self.protocol_violation()),
+        }
+    }
+
     /// The conditional counterpart of [`claim_writer`](Self::claim_writer)
     /// — the grant a launched controller's startup claim asks. Takes
     /// the claim for `owner` where the device stands unclaimed or the
@@ -549,16 +552,24 @@ impl BusDriver {
     /// prove its resumed state is current with the incumbent's and
     /// must not preempt it. The deliberate takeover — a promotion's
     /// claim — stays unconditional: it calls `claim_writer`.
+    ///
+    /// A granted token is recorded exactly as `claim_writer` records
+    /// it — every later re-attach re-asserts it — and the ask rides
+    /// [`claim_request`](Self::claim_request): a link that died
+    /// unexercised — an orphaned peer's claim on an idle attachment —
+    /// replays once on a fresh link rather than refusing a recovered
+    /// field.
     pub fn claim_writer_unless_held(&self, owner: u64) -> Result<(), LinkError> {
-        match self.request(&BusRequest::ClaimWriterUnlessHeld { owner })? {
-            BusResponse::Done => Ok(()),
->>>>>>> origin/main
+        match self.claim_request(&BusRequest::ClaimWriterUnlessHeld { owner })? {
+            BusResponse::Done => {
+                self.connection.lock().unwrap().owner = Some(owner);
+                Ok(())
+            }
             BusResponse::Error { error } => Err(refused(error)),
             _ => Err(self.protocol_violation()),
         }
     }
 
-<<<<<<< HEAD
     /// Forgets the recorded writer claim — the demotion counterpart of
     /// [`claim_writer`](Self::claim_writer): the demoted peer's write
     /// gate is already closed, and without this its next re-attach
@@ -571,8 +582,6 @@ impl BusDriver {
         self.connection.lock().unwrap().owner = None;
     }
 
-=======
->>>>>>> origin/main
     /// Stamps `register`'s stored sample with `quality` —
     /// [`BusRequest::InjectQuality`], the register protocol's analogue
     /// of `dcs-sim-net`'s `RemoteDriver::inject_fault` carrying a
