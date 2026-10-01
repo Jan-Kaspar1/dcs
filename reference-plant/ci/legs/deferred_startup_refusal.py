@@ -2,35 +2,37 @@
 """The deferred-startup-refusal leg for the reference plant — the
 consumer-side proof that the #1301 deferred startup-claim refusal
 contract (decision 103's deferred-timing half, the
-`deferred-startup-claim-refusal-strands-unpaired-standby` finding,
-where the rig's `claim-refused-undeclared` class meets its verdict at
-activation) holds on the manifest-declared
-redundant pair (WW-ENG-003, WW-LCM-001): a born-active launched with
-no `--peer`/`--standby` whose conditional startup grant is refused at
-the first *answered* field contact — not at activation — exits nonzero
-naming the refusal and the `--standby` remedy rather than stranding a
-peerless standby beside the healthy pair.
+`deferred-startup-claim-refusal-strands-unpaired-standby` finding)
+holds on the manifest-declared redundant pair (WW-ENG-003,
+WW-LCM-001): a born-active launched with no `--peer`/`--standby`
+whose conditional startup grant is refused at the first *answered*
+field contact — not at activation — exits nonzero naming the refusal
+and the `--standby` remedy rather than stranding a peerless standby
+beside the healthy pair.
 
 The born-active-failure leg (`ci/legs/born_active_failure.py`) exercises
 the contract's other classes — the unreachable field completing its
 grant, the declared pair's refusal rejoining `tracking`, the
 verdict-free claim holding pending — each launched where its verdict
 is known at activation or lands granted. This leg isolates the
-deferred half the rig's finding names: the grant met no verdict at
-activation — the pending surface the contract already records — and
-the field's first answered contact delivered the live incumbent's
-refusal, the `Ok(false)` landing inside a scan no activation result
-could leave. The run:
+deferred half the rig's finding names: the rig's
+`claim-refused-undeclared` class with the field answering at
+activation, where here the grant met no verdict at activation — the
+pending surface the contract already records — and the field's first
+answered contact delivered the live incumbent's refusal, the
+`Ok(false)` landing inside a scan no activation result could leave.
+The run:
 
 - converges the manifest-declared pair through the pair rig's
   driven-tick loop — the incumbent's live claim the third launch's
   conditional grant must refuse against;
 - launches a third controller born-active on the pair's launch shape
   — `dcs-controller --driven --remote` under the pair harness's spawn
-  lever — but pairless: no `--peer`, no `--standby`, the unkeyed
-  deployment's duplicate-launch shape. Its `--remote` names an address
-  nothing serves, so the activation ask produces no verdict and the
-  run stands pending behind the served standby surface;
+  lever — but pairless: no `--peer`, no `--standby`, the duplicate
+  launch the manifest's unkeyed declaration admits beside the settled
+  pair. Its `--remote` names an address nothing serves, so the
+  activation ask produces no verdict and the run stands pending behind
+  the served standby surface;
 - stands a byte-shuttle relay where the pending run's remote points,
   forwarding to the deployed pair's live plant — the first answered
   field contact. The deferred grant re-issues inside a driven scan,
@@ -78,7 +80,6 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.error
 import urllib.request
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -310,7 +311,7 @@ def deferred_startup_refusal_pass(args, tamper):
             "the manifest declares no standby pair — the "
             "deferred-startup-refusal leg has nothing to exercise"
         )
-    _manifest, duty_decl, standby_decl = declared
+    _manifest, _duty_decl, _standby_decl = declared
     digest_entries, evidence, failures = [], {}, []
     rig = None
     relay = None
@@ -411,7 +412,7 @@ def deferred_startup_refusal_pass(args, tamper):
                 break
             try:
                 status, body = pair.request(f"{url}/scan", {"scans": 1})
-            except urllib.error.URLError:
+            except Exception:
                 # The run's monitor is down — the exit the contract
                 # calls for, or a crash the exit assertions name.
                 break
@@ -431,7 +432,17 @@ def deferred_startup_refusal_pass(args, tamper):
         ):
             marks["contact"] = "refusal-answered"
         elif refusal_answer is not None:
+            # The field answered and the verdict was not the
+            # incumbent's refusal — the contract's deferred class is
+            # the refusal landing at first contact, so another verdict
+            # is not what this leg exercises.
             marks["contact"] = "answered-other"
+            failures.append(
+                "the first answered contact returned "
+                f"{str(refusal_answer)[:200]} — the deferred grant's "
+                "verdict was not the incumbent's write-ownership "
+                "refusal"
+            )
         else:
             marks["contact"] = "unobserved"
         tail = ""
@@ -506,9 +517,10 @@ def deferred_startup_refusal_pass(args, tamper):
                     "never followed the latched refusal"
                 )
                 raise Abort
-            if any(
-                "field_claim_observed" in event for event in events
-            ) or report.get("field_claim") == "held":
+            if not failures and (
+                any("field_claim_observed" in event for event in events)
+                or report.get("field_claim") == "held"
+            ):
                 raise Inconclusive(
                     "the pinned release predates the deferred "
                     "startup-refusal disposition",
@@ -518,6 +530,8 @@ def deferred_startup_refusal_pass(args, tamper):
                     "pairless run kept standing pending past the "
                     "documented bound: the strand the contract closed",
                 )
+            if failures:
+                raise Abort
             failures.append(
                 "the pending run's deferred grant never produced a "
                 "verdict — the answered contact carried neither a "
@@ -545,10 +559,11 @@ def deferred_startup_refusal_pass(args, tamper):
             raise Abort
         digest_entries.append({"phase": "refusal", **marks})
 
-        # Phase 4 — the restore: the refused process gone, the relay
-        # down, the deployed pair resting on its launch roles — the
-        # field owner active, the declared standby tracking it — for
-        # the legs behind this one.
+        # Phase 4 — the restore: the refused launch has ended and the
+        # deployed pair rests on its launch roles — the field owner
+        # active, the declared standby tracking it — for the legs
+        # behind this one. The relay and the refused process are
+        # released in the run's own teardown below.
         for _ in range(SETTLE_TICKS):
             rig.tick(standby_url, duty_url, failures)
         if not driver_recovery.roles_hold(
