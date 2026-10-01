@@ -1,12 +1,12 @@
 {
-  "dcs_release": "v0.5.0",
+  "dcs_release": "v0.7.0",
   "images": {
-    "controller": "dcs-controller:v0.5.0",
-    "plant_server": "dcs-plant-server:v0.5.0"
+    "controller": "dcs-controller:v0.7.0",
+    "plant_server": "dcs-plant-server:v0.7.0"
   },
   "model": {
     "path": "model/plant.json",
-    "fingerprint": "7cf7191a15428da6"
+    "fingerprint": "530e2d4ff6c60a16"
   },
   "dynamics": {
     "path": "model/dynamics.json",
@@ -20,7 +20,8 @@
       "name": "ctrl-a",
       "listen": "0.0.0.0:8080",
       "state_file": "/var/tmp/state.json",
-      "journal_file": "/var/tmp/journal.jsonl"
+      "journal_file": "/var/tmp/journal.jsonl",
+      "history_file": "/var/tmp/history.jsonl"
     },
     {
       "name": "ctrl-b",
@@ -28,7 +29,8 @@
       "standby": "ctrl-a:8080",
       "failover_budget": 3,
       "state_file": "/var/tmp/state.json",
-      "journal_file": "/var/tmp/journal.jsonl"
+      "journal_file": "/var/tmp/journal.jsonl",
+      "history_file": "/var/tmp/history.jsonl"
     }
   ],
   "topology": {

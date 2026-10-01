@@ -12,8 +12,11 @@
 //! owes (dropping its live reader drains the remainder, the same
 //! unbounded wait) — a heartbeat lane for the pair-liveness reads,
 //! `GET /health`, `GET /checkpoint`, and `GET /role`, a control lane
-//! for the bodiless
-//! switchover POSTs, `POST /promote` and `POST /demote`, and a
+//! for the switchover POSTs `POST /promote` and `POST /demote` — bare
+//! or carrying the small attributed body, which arrives already
+//! buffered under tiny_http's eager-read bound, so a client-paced
+//! wait can never reach it; a switch request still owing the client
+//! body bytes takes the submission lane's quarantine instead — and a
 //! serving lane for everything else. A client that stalls mid-body
 //! pins at most the command worker or the small submission pool, so
 //! request-body traffic can never impersonate a dead active. The
@@ -562,12 +565,12 @@ use dcs_core::{
 };
 use dcs_model::SignalIndex;
 use dcs_runtime::{
-    ApplyError, Checkpoint, Executor, Peer, SUPPORTED_FORMAT_VERSIONS, TrackReport, Transfer,
-    mint_generation,
+    ApplyError, Checkpoint, Executor, Peer, PeerEvent, SUPPORTED_FORMAT_VERSIONS, TrackReport,
+    Transfer, mint_generation,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::io::{self, Cursor, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::mpsc;
@@ -680,6 +683,27 @@ const SCAN_REFUSED_WHEN_PACED: &str = "refused: scans are paced to wall-clock ti
 /// heartbeat miss.
 const CHECKPOINT_PULL_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// How long an outstanding fetch may run before the puller treats its
+/// worker as unable to answer and rebinds a fresh one — several pull
+/// bounds, so a fetch that is merely slow (a large document over a slow
+/// link, every one of its reads inside its own bound) keeps the worker
+/// it is making progress on, while a fetch wedged on the one wait no
+/// bound covers — a configured name whose resolution never answers —
+/// is replaced instead of stranding the pull path for the life of the
+/// process.
+///
+/// The reported [`PullMiss::Stalled`] stage names the stall from the
+/// first bound out; this is the point at which the pull path stops
+/// waiting on it and moves.
+const CHECKPOINT_PULL_STALL: Duration = Duration::from_secs(4);
+
+/// How many wedged fetch workers one puller may retire before it
+/// reports the stall without rebinding again. A retired worker holds
+/// its thread until the fetch it is stuck in resolves, so the
+/// replacement is bounded rather than a leak; a fetch that lands clears
+/// the count, since it proves the path answers again.
+const MAX_RETIRED_PULL_WORKERS: usize = 2;
+
 /// The bound a durability-attesting answer gives the journal sink's
 /// writer — how long a mutating request or a `GET /journal` waits for
 /// the drain to take every queued record before answering anyway.
@@ -700,16 +724,24 @@ const JOURNAL_DRAIN_WAIT: Duration = Duration::from_secs(30);
 /// trail silently.
 const STATE_DRAIN_WAIT: Duration = crate::state_file::STATE_DRAIN_WAIT;
 
-/// How far ahead of this run's own tick a checkpoint pulled to verify
-/// an announced demotion hint may serve: a successor tracking this run
-/// applies this run's checkpoints and scans alongside it, so it can
+/// How far ahead of the line's stream position a checkpoint pulled to
+/// verify an announced demotion hint, a claimed source, or an orphan
+/// resolution may serve: a successor tracking this line applies its
+/// checkpoints and scans alongside it, so its stream position can
 /// honestly sit a few ticks ahead — but a same-generation stream far
-/// ahead of the run's tick is not this line's continuation. It is the
-/// signature of a forged or foreign stream served from an
-/// attacker-chosen endpoint, and the demotion refuses it rather than
-/// moving the run onto it. Thirty-two ticks is a short skew window at
-/// any deployed scan period — far beyond the lockstep drift of a real
-/// tracking peer, far below any forgery worth serving.
+/// ahead of the line's position is not this line's continuation. It
+/// is the signature of a forged or foreign stream served from an
+/// attacker-chosen endpoint, and the verification refuses it rather
+/// than moving the run onto it. The comparison runs on each
+/// document's declared [`stream position`](Checkpoint::stream_tick),
+/// not the probing run's own paced tick: a tracking peer's run clock
+/// accrues a permanent lead over the stream for every source outage
+/// it survives, so run ticks are not synchronized to the line and
+/// only the declared stream position locates the document in the
+/// domain the line's generation began in. Thirty-two ticks is a
+/// short skew window at any deployed scan period — far beyond the
+/// lockstep drift of a real tracking peer, far below any forgery
+/// worth serving.
 const MAX_ANNOUNCED_AHEAD: u64 = 32;
 
 /// How many announced follow-peer hints the tracking-source contract
@@ -722,15 +754,24 @@ const MAX_ANNOUNCED_AHEAD: u64 = 32;
 /// a handful of peers.
 const MAX_ANNOUNCED: usize = 8;
 
-/// How long the tracking path waits before re-probing an announced
-/// hint set a verify pass already refused — the involuntary path's
-/// re-probe bound: a peer demoted mid-run with only unproven hints
-/// re-verifies when the set changes — a new announce lands or the
-/// order shifts — or once this much wall time has passed, so a dead
-/// or hostile set cannot stall every scan cycle on a bounded pull
-/// burst while a hint that recovers still earns a fresh probe inside
-/// a bounded window.
+/// How long the tracking path waits before re-probing endpoints a
+/// verify pass already refused — the re-probe bound shared by the
+/// involuntary path's announced hint set, the claim's declared
+/// monitor, and the orphan-resolution probe's candidate set: a peer
+/// demoted mid-run with only unproven hints re-verifies when the set
+/// changes — a new announce lands or the order shifts — or once this
+/// much wall time has passed, so a dead or hostile set cannot stall
+/// every scan cycle on a bounded pull burst while an endpoint that
+/// recovers still earns a fresh probe inside a bounded window.
 const ANNOUNCED_VERIFY_RETRY: Duration = Duration::from_secs(4);
+
+/// How many distinct `(source, reason)` adoption-refusal signatures
+/// one tracking epoch journals — the dedup bound behind
+/// [`Monitor::note_source_refusal`]: each stands as durable audit
+/// while a flooding adversary minting fresh reasons per probe cannot
+/// grow the journal unboundedly. The set clears on every landed
+/// adoption, so a re-strand audits its refusals fresh.
+const MAX_REFUSAL_SIGNATURES: usize = 64;
 
 /// How many consecutive produced-nothing pulls a learned tracking pin
 /// — the orphan probe's `resolved` owner or the verified `adopted`
@@ -856,6 +897,18 @@ const LANE_QUEUE_DEPTH: usize = 64;
 /// byte is read, and the read itself is `take`-bounded so a chunked or
 /// understated body cannot grow the buffer past the cap either.
 const MAX_REQUEST_BODY: u64 = 64 * 1024;
+
+/// tiny_http's eager-read bound: a request whose declared
+/// `Content-Length` fits under it arrives at routing with the body
+/// already buffered — read inside `new_request` on the connection
+/// task — so no handler read or dropped-reader drain can ever wait on
+/// the client for it. The attributed switch body is a
+/// [`SwitchRequest`] of tens of bytes, always under the bound; the
+/// control lane takes it on that proof. Only a `Content-Length`
+/// request earns the eager path: a chunked stream, an
+/// `Expect: 100-continue` handshake, or a connection upgrade leaves
+/// the reader live on the socket at any size.
+const EAGER_BODY_LIMIT: usize = 1024;
 
 /// The bound on the scans one `POST /scan` request may ask for — the
 /// unbounded-batch fix (#1203). The externally paced contract is that
@@ -1075,6 +1128,24 @@ pub struct Monitor<'d> {
     /// a dead announced hint falls back within. Outside `shared`:
     /// request-path bookkeeping like `announced_verify`.
     claimed_verify: Mutex<Option<ClaimedVerify>>,
+    /// The last orphan-resolution probe pass's bookkeeping — the
+    /// candidate set probed, in probe order, and the wall-clock time
+    /// the pass ran. `track_cycle` runs the probe on every orphaned
+    /// apply, so an unrecorded failure would re-dial every dead
+    /// candidate — the standing claim's declared monitor first — once
+    /// per scan, one [`CHECKPOINT_PULL_TIMEOUT`] each: the paced
+    /// cadence collapses under the burst while a foreign claim stands
+    /// (the QA finding
+    /// `orphan-resolution-dead-claimed-monitor-stalls-scan`). A failed
+    /// pass is remembered here so the next cycle's resolution
+    /// re-probes only a changed set — a fresh claim declaration, a
+    /// moved owner stamp, a new announcer — or the same one after
+    /// [`ANNOUNCED_VERIFY_RETRY`] elapses, the same bound a dead
+    /// declared monitor falls back within on the claimed path. A pass
+    /// that resolves a candidate clears the record: the set proved an
+    /// owner. Outside `shared`: pull-path bookkeeping like
+    /// `claimed_verify`.
+    resolve_verify: Mutex<Option<ResolveVerify>>,
     /// The tracking source a verified announced demotion pinned — the
     /// endpoint `POST /demote` proved serves this run's continuation
     /// under the pair's key and journaled as the adopted source. The
@@ -1139,6 +1210,15 @@ pub struct Monitor<'d> {
     /// line's field ownership lives. Serve-time bookkeeping like
     /// `announced`; a field owner stamps itself and never reads this.
     line_owner: Mutex<Option<SocketAddr>>,
+    /// The adoption-refusal signatures this run's tracking path has
+    /// already journaled — (endpoint, reason) pairs, one
+    /// `tracking_source_refused` entry each, so a persistently
+    /// refusing successor the resolution re-probes every cycle audits
+    /// once rather than flooding the journal — and never silently.
+    /// Cleared when a source adoption lands: a new tracking epoch can
+    /// meet the same refusal fresh. Outside `shared`: pull-path
+    /// bookkeeping like `pin_misses`.
+    refused: Mutex<BTreeSet<(SocketAddr, String)>>,
     /// This run's half of the pair's shared tracking secret — the key
     /// [`with_pair_key`](Self::with_pair_key) installs from
     /// dcs-controller's `--pair-token`. A `GET /checkpoint?prove=<nonce>`
@@ -1184,6 +1264,19 @@ struct AnnouncedVerify {
 struct ClaimedVerify {
     /// The declared monitor endpoint the pass pulled.
     monitor: SocketAddr,
+    /// When the pass ran.
+    at: Instant,
+}
+
+/// One orphan-resolution probe pass's bookkeeping — the candidate set
+/// probed, in probe order, and the wall-clock time the pass ran. The
+/// tracking path re-probes only a changed set or one whose pass aged
+/// past [`ANNOUNCED_VERIFY_RETRY`], so a dead claimed monitor or
+/// announced hint costs one bounded pull per window rather than one
+/// per scan.
+struct ResolveVerify {
+    /// The candidate set the pass probed, in probe order.
+    candidates: Vec<SocketAddr>,
     /// When the pass ran.
     at: Instant,
 }
@@ -1285,6 +1378,12 @@ impl<'d> Monitor<'d> {
         signals: SignalIndex,
         config: MonitorConfig,
     ) -> io::Result<Self> {
+        // The three persistence paths must be distinct files — the
+        // bind refuses the aliased configuration the controller's
+        // option parse already refuses on its flags, so a
+        // programmatically assembled `MonitorConfig` cannot smuggle it
+        // in either (finding state-file-alias-clobbers-append-durable-files).
+        config.check_persistence_paths()?;
         // The state-file sink's writer spawns at bind beside the
         // recorder's journal drain — its shared counters stamp every
         // publication's `state_sink` section from the bind-time read
@@ -1322,11 +1421,13 @@ impl<'d> Monitor<'d> {
             announced: Mutex::new(VecDeque::new()),
             announced_verify: Mutex::new(None),
             claimed_verify: Mutex::new(None),
+            resolve_verify: Mutex::new(None),
             adopted: Mutex::new(None),
             resolved: Mutex::new(None),
             pulling: Mutex::new(None),
             pin_misses: Mutex::new(None),
             line_owner: Mutex::new(None),
+            refused: Mutex::new(BTreeSet::new()),
             pair_key: None,
         })
     }
@@ -1540,19 +1641,26 @@ impl<'d> Monitor<'d> {
     /// appended to the executor's log in submission order, so the lane
     /// drains through one worker and queues [`command_lane_depth`]
     /// deep — enough to hold the whole pipelined wave the contract's
-    /// flood shape can send before a response returns. [`submission`]
-    /// next — requests that can hold a worker on a client-paced body
+    /// flood shape can send before a response returns. [`role_change`]
+    /// next — the switchover POSTs split on [`buffered_body`]: one
+    /// whose body is already off the wire — the bare request, and the
+    /// attributed `{"actor":…}` body that always fits tiny_http's
+    /// eager-read bound — takes the control lane's
+    /// [`CONTROL_WORKERS`], keeping the incident-time actuation
+    /// guarantee for the operator's declared-identity form; one still
+    /// owing the client body bytes takes the submission lane instead.
+    /// [`submission`] next — the remaining requests that can hold a
+    /// worker on a client-paced body
     /// wait (`POST /scan`, plus any request still carrying a body the
     /// client owes, whose dropped reader drains the rest the same
     /// way) go to the submission lane's [`SUBMIT_WORKERS`] workers,
     /// whatever their path: a stalled-body `GET /checkpoint` must not
-    /// pin a heartbeat worker either, nor a bodied `POST /promote` a
-    /// control one. Bodiless pair-liveness reads — `GET /health`,
+    /// pin a heartbeat worker either. Bodiless pair-liveness reads —
+    /// `GET /health`,
     /// `GET /checkpoint`, `GET /role` — go to the heartbeat lane's
     /// [`HEARTBEAT_WORKERS`]
-    /// workers, and the bodiless switchover POSTs — `POST /promote`,
-    /// `POST /demote` — to the control lane's [`CONTROL_WORKERS`];
-    /// everything else goes to the serving lane's [`SERVE_WORKERS`].
+    /// workers; everything else goes to the serving lane's
+    /// [`SERVE_WORKERS`].
     ///
     /// The split exists because serving holds two waits no handler can
     /// bound: the body read and the response write — tiny_http exposes
@@ -1621,12 +1729,25 @@ impl<'d> Monitor<'d> {
                         }
                         continue;
                     }
-                    let lane = if submission(&request) {
+                    let lane = if role_change(&request) {
+                        // A switchover request splits on whether its
+                        // body can still wait on the client: the bare
+                        // request and the attributed `{"actor":…}` body
+                        // — always inside tiny_http's eager-read bound —
+                        // arrive already buffered and keep the control
+                        // lane's incident-time guarantee, while one
+                        // still owing the client body bytes takes the
+                        // submission lane's quarantine like every other
+                        // body wait.
+                        if buffered_body(&request) {
+                            &control
+                        } else {
+                            &submissions
+                        }
+                    } else if submission(&request) {
                         &submissions
                     } else if pair_liveness(&request) {
                         &heartbeat
-                    } else if role_change(&request) {
-                        &control
                     } else {
                         &served
                     };
@@ -1741,6 +1862,28 @@ impl<'d> Monitor<'d> {
         for _ in 0..SERVE_WORKERS {
             self.server.unblock();
         }
+    }
+
+    /// The deferred startup grant's latched refusal verdict, drained —
+    /// [`Peer::drain_startup_refusal`](dcs_runtime::Peer::drain_startup_refusal)
+    /// under the shared lock. `Some` once per run: a scan settled the
+    /// pending born-active's conditional ask into the deferred half of
+    /// the [`Activation::Refused`](dcs_runtime::Activation::Refused)
+    /// verdict, which no activation result can carry to the run's
+    /// shell. The caller disposes of it under the identical contract
+    /// the activation-time answer takes — rejoin the declared pair, or
+    /// exit where none was declared. A driven run's serve loop stands
+    /// down when that verdict lands pairless so the shell settles it;
+    /// a paced loop drains it inside its own scan cycle.
+    ///
+    /// The one accessor outside [`Peer::drain_pending`](dcs_runtime::Peer::drain_pending),
+    /// and deliberately so: the latch answers how this run *ends*, which
+    /// the run's shell decides at the boundary the verdict answers, while
+    /// the drained events answer what the run *observed* — the journal's
+    /// account. The verdict's journal entry is queued and does drain with
+    /// the rest.
+    pub fn drain_startup_refusal(&self) -> Option<SwitchError> {
+        self.shared.lock().unwrap().peer.drain_startup_refusal()
     }
 
     /// Runs one executor scan through the shared lock, records it, and
@@ -1969,19 +2112,50 @@ impl<'d> Monitor<'d> {
     /// standing owner. Where the conditional startup grant is installed
     /// the claim preempts a dead owner's standing claim but refuses a
     /// *live* incumbent's, so a stale restart cannot silently roll back
-    /// state the incumbent receipted. The refusal is the peer's own
-    /// [`SwitchError`](dcs_core::SwitchError): a claim the field refuses
-    /// fails the start with `FieldClaimFailed`, and a peer that is not a
-    /// launched active with `NotActive`.
-    pub fn activate(&self) -> Result<(), dcs_core::SwitchError> {
+    /// state the incumbent receipted.
+    ///
+    /// The answer is the startup's settled [`Activation`], with the
+    /// stand-down a refusal or an inconclusive ask already run inside
+    /// the peer — `Granted` owns the field, `Pending` waits on the
+    /// deferred grant behind the served standby surface, `Refused`
+    /// carries the `FieldClaimFailed` the caller's disposition decides
+    /// (rejoin a declared pair, or exit undeclared), and the refusal's
+    /// observed claimant plus the settled role transition journal here
+    /// before the caller learns them. `Err` is the launch-defect half —
+    /// a peer that is not a launched active, or the unconditional
+    /// claim's own failure — still fatal.
+    pub fn activate(&self) -> Result<dcs_runtime::Activation, dcs_core::SwitchError> {
         let mut shared = self.shared.lock().unwrap();
         let Shared { peer, recorder, .. } = &mut *shared;
-        peer.activate()?;
-        for change in peer.take_role_changes() {
-            recorder.note_role_change(&change);
+        let activation = peer.activate()?;
+        // One drain, one match: the activation's whole account. The
+        // kinds this path does not expect are named and dropped rather
+        // than left queued for a later site — an activation queues
+        // nothing else, and a kind that did arrive has its own producer
+        // and its own journal site.
+        for event in peer.drain_pending() {
+            match event {
+                PeerEvent::ClaimObservation(observation) => {
+                    recorder.note_claim_observed(observation);
+                }
+                PeerEvent::StartupRefusal(refusal) => {
+                    recorder.note_startup_claim_refused(refusal);
+                }
+                PeerEvent::RoleChange(change) => recorder.note_role_change(&change),
+                PeerEvent::Divergence(_)
+                | PeerEvent::Resolution(_)
+                | PeerEvent::Reinitialization(_)
+                | PeerEvent::Orphan(_)
+                | PeerEvent::FencingLoss(_)
+                | PeerEvent::ClaimRearm(_)
+                | PeerEvent::SourceRestart(_)
+                | PeerEvent::PromotionRefusal(_)
+                | PeerEvent::SupersededCommand { .. }
+                | PeerEvent::AdoptionReceipt(_) => {}
+            }
         }
         self.store.sync_liveness(peer.report());
-        Ok(())
+        Ok(activation)
     }
 
     /// Applies a checkpoint pulled from the active peer — the standby's
@@ -1998,23 +2172,32 @@ impl<'d> Monitor<'d> {
         let mut shared = self.shared.lock().unwrap();
         let Shared { peer, recorder, .. } = &mut *shared;
         let result = peer.apply(checkpoint);
-        for report in peer.take_divergences() {
-            recorder.note_divergence(report.tick, report.mismatches);
-        }
-        for resolution in peer.take_resolutions() {
-            recorder.note_resolution(resolution);
-        }
-        for orphan in peer.take_orphans() {
-            recorder.note_field_orphaned(orphan);
-        }
-        for restart in peer.take_source_restarts() {
-            recorder.note_source_restart(restart);
-        }
-        for (index, receipt) in peer.take_superseded_commands() {
-            recorder.note_settled(Some(index), receipt, peer.tick());
-        }
-        for receipt in peer.take_adoption_receipts() {
-            recorder.note_settled(None, receipt, peer.tick());
+        let tick = peer.tick();
+        // One drain, one match — the applied checkpoint's whole
+        // account, in the producer's category order, which is the
+        // order this path journaled them in by hand.
+        for event in peer.drain_pending() {
+            match event {
+                PeerEvent::Divergence(report) => {
+                    recorder.note_divergence(report.tick, report.mismatches);
+                }
+                PeerEvent::Resolution(resolution) => recorder.note_resolution(resolution),
+                PeerEvent::Orphan(orphan) => recorder.note_field_orphaned(orphan),
+                PeerEvent::SourceRestart(restart) => recorder.note_source_restart(restart),
+                PeerEvent::SupersededCommand { index, receipt } => {
+                    recorder.note_settled(Some(index), receipt, tick);
+                }
+                PeerEvent::AdoptionReceipt(receipt) => {
+                    recorder.note_settled(None, receipt, tick);
+                }
+                PeerEvent::Reinitialization(_)
+                | PeerEvent::FencingLoss(_)
+                | PeerEvent::ClaimRearm(_)
+                | PeerEvent::ClaimObservation(_)
+                | PeerEvent::StartupRefusal(_)
+                | PeerEvent::PromotionRefusal(_)
+                | PeerEvent::RoleChange(_) => {}
+            }
         }
         // An adopted checkpoint carries the active's receipt log —
         // refresh the store's mirror so `GET /receipts` stays current
@@ -2039,26 +2222,33 @@ impl<'d> Monitor<'d> {
         let mut shared = self.shared.lock().unwrap();
         let Shared { peer, recorder, .. } = &mut *shared;
         let result = peer.transfer(checkpoint);
-        for report in peer.take_divergences() {
-            recorder.note_divergence(report.tick, report.mismatches);
-        }
-        for resolution in peer.take_resolutions() {
-            recorder.note_resolution(resolution);
-        }
-        for report in peer.take_reinitializations() {
-            recorder.note_reinitialized(report);
-        }
-        for orphan in peer.take_orphans() {
-            recorder.note_field_orphaned(orphan);
-        }
-        for restart in peer.take_source_restarts() {
-            recorder.note_source_restart(restart);
-        }
-        for (index, receipt) in peer.take_superseded_commands() {
-            recorder.note_settled(Some(index), receipt, peer.tick());
-        }
-        for receipt in peer.take_adoption_receipts() {
-            recorder.note_settled(None, receipt, peer.tick());
+        let tick = peer.tick();
+        // The transfer's own drain, one match: the same applied-checkpoint
+        // account the plain apply journals, plus the model-boundary
+        // crossing a rolling revision adds, in the producer's category
+        // order.
+        for event in peer.drain_pending() {
+            match event {
+                PeerEvent::Divergence(report) => {
+                    recorder.note_divergence(report.tick, report.mismatches);
+                }
+                PeerEvent::Resolution(resolution) => recorder.note_resolution(resolution),
+                PeerEvent::Reinitialization(report) => recorder.note_reinitialized(report),
+                PeerEvent::Orphan(orphan) => recorder.note_field_orphaned(orphan),
+                PeerEvent::SourceRestart(restart) => recorder.note_source_restart(restart),
+                PeerEvent::SupersededCommand { index, receipt } => {
+                    recorder.note_settled(Some(index), receipt, tick);
+                }
+                PeerEvent::AdoptionReceipt(receipt) => {
+                    recorder.note_settled(None, receipt, tick);
+                }
+                PeerEvent::FencingLoss(_)
+                | PeerEvent::ClaimRearm(_)
+                | PeerEvent::ClaimObservation(_)
+                | PeerEvent::StartupRefusal(_)
+                | PeerEvent::PromotionRefusal(_)
+                | PeerEvent::RoleChange(_) => {}
+            }
         }
         self.store.sync_receipts(peer.receipts());
         self.store.sync_liveness(peer.report());
@@ -2086,6 +2276,31 @@ impl<'d> Monitor<'d> {
         let mut shared = self.shared.lock().unwrap();
         shared.peer.note_transfer_failed(detail);
         self.store.sync_liveness(shared.peer.report());
+    }
+
+    /// Journals a tracking-source probe's refusal of the endpoint it
+    /// verified against — `source`'s served checkpoint failed the
+    /// line-membership bar — once per distinct `(source, reason)`
+    /// signature per tracking epoch: a demoted or orphaned peer
+    /// re-probes the standing refusal every cycle, and the durable
+    /// record should name it once, not once per scan, while a source
+    /// adoption clears the epoch so a re-strand audits fresh. Past
+    /// [`MAX_REFUSAL_SIGNATURES`] distinct signatures the epoch's
+    /// audit stops recording new reasons rather than letting a
+    /// rotating forgery flood the journal.
+    fn note_source_refusal(&self, source: SocketAddr, detail: String) {
+        {
+            let mut refused = self.refused.lock().unwrap();
+            if refused.len() >= MAX_REFUSAL_SIGNATURES || !refused.insert((source, detail.clone()))
+            {
+                return;
+            }
+        }
+        let mut shared = self.shared.lock().unwrap();
+        let tick = shared.peer.tick();
+        shared
+            .recorder
+            .note_tracking_source_refused(tick, source, detail);
     }
 
     /// Runs the standby's per-scan tracking cycle — the paced loop's
@@ -2245,8 +2460,24 @@ impl<'d> Monitor<'d> {
         let mut shared = self.shared.lock().unwrap();
         let Shared { peer, recorder, .. } = &mut *shared;
         peer.self_promote()?;
-        for change in peer.take_role_changes() {
-            recorder.note_role_change(&change);
+        // One drain, one match: the failover walk's reported transition,
+        // with the refusal a refused streak queues beside it.
+        for event in peer.drain_pending() {
+            match event {
+                PeerEvent::RoleChange(change) => recorder.note_role_change(&change),
+                PeerEvent::PromotionRefusal(refusal) => recorder.note_promotion_refused(refusal),
+                PeerEvent::Divergence(_)
+                | PeerEvent::Resolution(_)
+                | PeerEvent::Reinitialization(_)
+                | PeerEvent::Orphan(_)
+                | PeerEvent::FencingLoss(_)
+                | PeerEvent::ClaimRearm(_)
+                | PeerEvent::ClaimObservation(_)
+                | PeerEvent::StartupRefusal(_)
+                | PeerEvent::SourceRestart(_)
+                | PeerEvent::SupersededCommand { .. }
+                | PeerEvent::AdoptionReceipt(_) => {}
+            }
         }
         let report = peer.report();
         self.store.sync_liveness(report.clone());
@@ -2281,6 +2512,14 @@ impl<'d> Monitor<'d> {
         // scan re-queues the carried receipt rather than losing the
         // command unaudited. The wait runs below, off the lock.
         let mut admission = None;
+        // The deferred startup refusal's pairless disposition: a
+        // `POST /scan` whose scan settled the pending born-active's
+        // refused conditional grant on a run that declared no pair.
+        // The request still answers the refusal — the durable-record
+        // waits below run first — then the serve loop stands down so
+        // the run's shell settles the latched verdict as the exit the
+        // activation-time answer would already have taken.
+        let mut terminal = false;
         let response = match (method, path) {
             (Method::Get, "/") | (Method::Get, "/index.html") => html(PAGE),
             (Method::Get, "/signals") => json(200, &self.signals),
@@ -2562,6 +2801,29 @@ impl<'d> Monitor<'d> {
                         // out.
                         let mut shared = self.shared.lock().unwrap();
                         scan_and_record(&mut shared, &self.store);
+                        // A deferred startup grant's refusal settling
+                        // inside this scan is the born-active
+                        // contract's `Refused` verdict arriving
+                        // mid-run, with no activation result to carry
+                        // it. A run whose pair was declared keeps
+                        // standing — the standby surface the pending
+                        // stand-down reported is the rejoin the
+                        // contract prescribes, and the drained verdict
+                        // needs no further settle — while a pairless
+                        // run has nothing to rejoin: the verdict stays
+                        // latched for the shell, the batch ends on the
+                        // refusal's answer, and the serve loop stands
+                        // down for the run's exit.
+                        if shared.peer.startup_refusal().is_some() {
+                            if self.configured_source().is_some() {
+                                shared.peer.drain_startup_refusal();
+                            } else {
+                                failure =
+                                    shared.peer.startup_refusal().map(|error| error.to_string());
+                                terminal = true;
+                                break;
+                            }
+                        }
                         if let Some(after_scan) = &self.driven.after_scan
                             && let Err(error) = after_scan(&shared.peer)
                         {
@@ -2631,6 +2893,9 @@ impl<'d> Monitor<'d> {
         // A dropped client connection makes respond fail; the request is
         // already handled, so the error is ignored.
         let _ = request.respond(response);
+        if terminal {
+            self.shutdown();
+        }
     }
 
     /// `POST /promote` (`promote` true) or `POST /demote` (`false`):
@@ -2703,26 +2968,33 @@ impl<'d> Monitor<'d> {
         let result = if promote {
             if let Some(pulled) = pulled {
                 peer.final_sync(|| pulled);
-                for divergence in peer.take_divergences() {
-                    recorder.note_divergence(divergence.tick, divergence.mismatches);
-                }
-                for resolution in peer.take_resolutions() {
-                    recorder.note_resolution(resolution);
-                }
-                for report in peer.take_reinitializations() {
-                    recorder.note_reinitialized(report);
-                }
-                for orphan in peer.take_orphans() {
-                    recorder.note_field_orphaned(orphan);
-                }
-                for restart in peer.take_source_restarts() {
-                    recorder.note_source_restart(restart);
-                }
-                for (index, receipt) in peer.take_superseded_commands() {
-                    recorder.note_settled(Some(index), receipt, peer.tick());
-                }
-                for receipt in peer.take_adoption_receipts() {
-                    recorder.note_settled(None, receipt, peer.tick());
+                let tick = peer.tick();
+                // The final sync's applied-checkpoint drain, one match:
+                // the transfer's account in the producer's category
+                // order, ahead of the role change the promotion below
+                // walks.
+                for event in peer.drain_pending() {
+                    match event {
+                        PeerEvent::Divergence(report) => {
+                            recorder.note_divergence(report.tick, report.mismatches);
+                        }
+                        PeerEvent::Resolution(resolution) => recorder.note_resolution(resolution),
+                        PeerEvent::Reinitialization(report) => recorder.note_reinitialized(report),
+                        PeerEvent::Orphan(orphan) => recorder.note_field_orphaned(orphan),
+                        PeerEvent::SourceRestart(restart) => recorder.note_source_restart(restart),
+                        PeerEvent::SupersededCommand { index, receipt } => {
+                            recorder.note_settled(Some(index), receipt, tick);
+                        }
+                        PeerEvent::AdoptionReceipt(receipt) => {
+                            recorder.note_settled(None, receipt, tick);
+                        }
+                        PeerEvent::FencingLoss(_)
+                        | PeerEvent::ClaimRearm(_)
+                        | PeerEvent::ClaimObservation(_)
+                        | PeerEvent::StartupRefusal(_)
+                        | PeerEvent::PromotionRefusal(_)
+                        | PeerEvent::RoleChange(_) => {}
+                    }
                 }
                 self.store.sync_receipts(peer.receipts());
                 self.store.sync_liveness(peer.report());
@@ -2754,6 +3026,7 @@ impl<'d> Monitor<'d> {
                 Some(source) if self.announced.lock().unwrap().contains(&source) => {
                     recorder.note_tracking_source(peer.tick(), source);
                     *self.adopted.lock().unwrap() = Some(source);
+                    self.refused.lock().unwrap().clear();
                     peer.demote_as(actor)
                 }
                 _ => Err(SwitchError::NoTrackingSource),
@@ -2763,8 +3036,24 @@ impl<'d> Monitor<'d> {
         };
         match result {
             Ok(()) => {
-                for change in peer.take_role_changes() {
-                    recorder.note_role_change(&change);
+                // The switch's own drain, one match: the role walk the
+                // promotion or demotion just reported.
+                for event in peer.drain_pending() {
+                    match event {
+                        PeerEvent::RoleChange(change) => recorder.note_role_change(&change),
+                        PeerEvent::Divergence(_)
+                        | PeerEvent::Resolution(_)
+                        | PeerEvent::Reinitialization(_)
+                        | PeerEvent::Orphan(_)
+                        | PeerEvent::FencingLoss(_)
+                        | PeerEvent::ClaimRearm(_)
+                        | PeerEvent::ClaimObservation(_)
+                        | PeerEvent::StartupRefusal(_)
+                        | PeerEvent::SourceRestart(_)
+                        | PeerEvent::PromotionRefusal(_)
+                        | PeerEvent::SupersededCommand { .. }
+                        | PeerEvent::AdoptionReceipt(_) => {}
+                    }
                 }
                 self.store.sync_liveness(peer.report());
                 json(200, &peer.report())
@@ -2962,26 +3251,49 @@ impl<'d> Monitor<'d> {
             // run's own document back — never a successor — and on
             // the involuntary path the demoted run's own standby
             // document would pass the continuation checks, wedging
-            // the peer onto pulling itself.
+            // the peer onto pulling itself. The refusal journals once
+            // per signature like the rest — a hint that can never
+            // prove succession is the same auditable refusal.
             if hint == self.local_addr() {
+                self.note_source_refusal(hint, "the hint names this run's own monitor".to_string());
                 continue;
             }
             let pulled = match MonitorClient::with_timeout(hint, CHECKPOINT_PULL_TIMEOUT)
                 .checkpoint_tracking(None, nonce)
             {
                 Ok(pulled) => pulled,
-                Err(_) => continue,
+                // An unanswered pull refuses the adoption like any
+                // served refusal — journaled once per signature, so a
+                // set of dead hints strands auditably, not silently.
+                Err(error) => {
+                    self.note_source_refusal(
+                        hint,
+                        format!("the verify pull produced no checkpoint: {error}"),
+                    );
+                    continue;
+                }
             };
-            if !self.proven(&pulled, nonce)
-                || verify_announced_checkpoint(&pulled, own).is_err()
-                || self
-                    .shared
-                    .lock()
-                    .unwrap()
-                    .peer
-                    .unaccounted(&pulled)
-                    .is_some()
-            {
+            // Every refusal class journals once per signature: the
+            // hinted endpoint that answers but cannot prove this
+            // line's continuation is the strand the announced contract
+            // exists to refuse — and it refuses auditably.
+            if !self.proven(&pulled, nonce) {
+                self.note_source_refusal(
+                    hint,
+                    "the pull's line proof did not verify under the pair key".to_string(),
+                );
+                continue;
+            }
+            if let Err(reason) = verify_announced_checkpoint(&pulled, own) {
+                self.note_source_refusal(hint, reason.to_string());
+                continue;
+            }
+            // `unaccounted` runs under the shared lock, so its answer
+            // binds and releases before the refusal journals — the
+            // note takes `shared` itself.
+            let unaccounted = self.shared.lock().unwrap().peer.unaccounted(&pulled);
+            if let Some(detail) = unaccounted {
+                self.note_source_refusal(hint, detail.to_string());
                 continue;
             }
             if pulled.source_owns_field == Some(true) {
@@ -3072,6 +3384,7 @@ impl<'d> Monitor<'d> {
             recorder.note_tracking_source(peer.tick(), source);
             drop(shared);
             *self.adopted.lock().unwrap() = Some(source);
+            self.refused.lock().unwrap().clear();
             return Some(source);
         }
         // No hint proved this run's continuation — but a successor
@@ -3127,8 +3440,14 @@ impl<'d> Monitor<'d> {
         // The verdict could name this monitor itself — a stale
         // record the field supplanted with a fresher claim would
         // only ever serve this run's own standby document back,
-        // which can never prove succession.
+        // which can never prove succession. The self-name journals
+        // like a served refusal: a verdict that never updates is the
+        // same permanent strand, and it must not sit silent.
         if claimed == self.local_addr() {
+            self.note_source_refusal(
+                claimed,
+                "the standing claim declares this run's own monitor".to_string(),
+            );
             return None;
         }
         // A wildcard declaration is a bind address, not a dialable
@@ -3141,6 +3460,10 @@ impl<'d> Monitor<'d> {
         // pull, and it spends no retry window so the first routable
         // verdict verifies on the next pass.
         if claimed.ip().is_unspecified() {
+            self.note_source_refusal(
+                claimed,
+                "the claim's declared monitor is undialable".to_string(),
+            );
             return None;
         }
         {
@@ -3157,10 +3480,36 @@ impl<'d> Monitor<'d> {
             at: Instant::now(),
         });
         let nonce = self.pair_key.map(|_| mint_generation());
-        let pulled = MonitorClient::with_timeout(claimed, CHECKPOINT_PULL_TIMEOUT)
+        // A declared monitor that does not answer refuses the
+        // adoption as surely as one the checks refuse — journaled
+        // once per signature, so a dead claimed endpoint leaves the
+        // strand auditable rather than silent.
+        let pulled = match MonitorClient::with_timeout(claimed, CHECKPOINT_PULL_TIMEOUT)
             .checkpoint_tracking(None, nonce)
-            .ok()?;
-        if verify_owner_checkpoint(&pulled, &own).is_err() || !self.proven(&pulled, nonce) {
+        {
+            Ok(pulled) => pulled,
+            Err(error) => {
+                self.note_source_refusal(
+                    claimed,
+                    format!("the claim's declared monitor answered no checkpoint: {error}"),
+                );
+                return None;
+            }
+        };
+        // A serving endpoint the line-membership or proof checks
+        // refuse is the strand the adoption exists to close, so the
+        // refusal journals once per signature — a permanently
+        // unacceptable successor is durable audit, never journal
+        // silence.
+        if let Err(reason) = verify_owner_checkpoint(&pulled, &own) {
+            self.note_source_refusal(claimed, reason.to_string());
+            return None;
+        }
+        if !self.proven(&pulled, nonce) {
+            self.note_source_refusal(
+                claimed,
+                "the pull's line proof did not verify under the pair key".to_string(),
+            );
             return None;
         }
         // Pin only while nothing proven stands — a promotion or an
@@ -3175,6 +3524,7 @@ impl<'d> Monitor<'d> {
         recorder.note_tracking_source(peer.tick(), claimed);
         drop(shared);
         *self.adopted.lock().unwrap() = Some(claimed);
+        self.refused.lock().unwrap().clear();
         Some(claimed)
     }
 
@@ -3197,6 +3547,16 @@ impl<'d> Monitor<'d> {
     /// any prior resolution rather than pinning a guess. Returns the
     /// tracking target after resolution, or `None` when the line named
     /// no routable owner and nothing resolves.
+    ///
+    /// The probe runs on the scan thread once per orphaned apply, so a
+    /// pass that proves nothing is remembered in `resolve_verify`: a
+    /// later cycle re-probes only when the candidate set changed or
+    /// [`ANNOUNCED_VERIFY_RETRY`] elapsed — the same bound
+    /// [`adopt_claimed_source`](Self::adopt_claimed_source) applies to
+    /// a dead declared endpoint — so a foreign claim's undialable
+    /// declared monitor costs one bounded pull burst per window rather
+    /// than one per scan (the QA finding
+    /// `orphan-resolution-dead-claimed-monitor-stalls-scan`).
     pub fn resolve_tracking_source(&self) -> Option<SocketAddr> {
         let (own, claimed) = {
             let shared = self.shared.lock().unwrap();
@@ -3260,37 +3620,95 @@ impl<'d> Monitor<'d> {
         };
         extra.retain(|hint| !candidates.contains(hint) && Some(*hint) != tracked_addr);
         candidates.extend(extra);
+        // A candidate set a probe pass already refused earns a fresh
+        // pass only when the set changed — a fresh claim declaration,
+        // a moved owner stamp, a new or reordered announcer — or once
+        // [`ANNOUNCED_VERIFY_RETRY`] ages the record out: every
+        // candidate's bounded pull is paid once per window rather than
+        // once per orphaned scan. The recorded pass already cleared
+        // `resolved`, and this probe is its only writer, so the cached
+        // verdict still carries the line's no-owner answer.
+        {
+            let last = self.resolve_verify.lock().unwrap();
+            if let Some(last) = &*last
+                && last.candidates == candidates
+                && last.at.elapsed() < ANNOUNCED_VERIFY_RETRY
+            {
+                return None;
+            }
+        }
         let nonce = self.pair_key.map(|_| mint_generation());
-        for candidate in candidates {
+        for &candidate in &candidates {
+            // A candidate naming this run's own monitor can never
+            // prove succession — journaled once per signature like
+            // the served refusals.
             if candidate == self.local_addr() {
+                self.note_source_refusal(
+                    candidate,
+                    "the candidate names this run's own monitor".to_string(),
+                );
                 continue;
             }
             let pulled = match MonitorClient::with_timeout(candidate, CHECKPOINT_PULL_TIMEOUT)
                 .checkpoint_tracking(None, nonce)
             {
                 Ok(pulled) => pulled,
-                Err(_) => continue,
-            };
-            if verify_owner_checkpoint(&pulled, &own).is_ok() && self.proven(&pulled, nonce) {
-                // Pin only while the peer still owns no field — a
-                // promotion landing mid-probe already answered where
-                // the pulls go — and journal the re-target exactly
-                // like the announced- and claimed-source adoptions:
-                // the resolved pin carries the same pull-target
-                // authority, outranking the configured tracking
-                // source, so the durable audit records where the
-                // orphaned peer moved its pulls.
-                let mut shared = self.shared.lock().unwrap();
-                if shared.peer.owns_field() {
-                    return None;
+                // The unanswered candidate is the same refusal class
+                // as a refused document — journaled once per
+                // signature, so a strand on dead endpoints audits.
+                Err(error) => {
+                    self.note_source_refusal(
+                        candidate,
+                        format!("the resolution pull produced no checkpoint: {error}"),
+                    );
+                    continue;
                 }
-                let Shared { peer, recorder, .. } = &mut *shared;
-                recorder.note_tracking_source(peer.tick(), candidate);
-                drop(shared);
-                *self.resolved.lock().unwrap() = Some(candidate);
-                return Some(candidate);
+            };
+            match verify_owner_checkpoint(&pulled, &own) {
+                // A refused candidate re-probes on every orphaned
+                // cycle while it stands — the strand that names no
+                // endpoint is the silent one, so each distinct
+                // refusal journals once.
+                Err(reason) => {
+                    self.note_source_refusal(candidate, reason.to_string());
+                    continue;
+                }
+                Ok(()) if !self.proven(&pulled, nonce) => {
+                    self.note_source_refusal(
+                        candidate,
+                        "the pull's line proof did not verify under the pair key".to_string(),
+                    );
+                    continue;
+                }
+                _ => {}
             }
+            // Pin only while the peer still owns no field — a
+            // promotion landing mid-probe already answered where
+            // the pulls go — and journal the re-target exactly
+            // like the announced- and claimed-source adoptions:
+            // the resolved pin carries the same pull-target
+            // authority, outranking the configured tracking
+            // source, so the durable audit records where the
+            // orphaned peer moved its pulls.
+            let mut shared = self.shared.lock().unwrap();
+            if shared.peer.owns_field() {
+                return None;
+            }
+            let Shared { peer, recorder, .. } = &mut *shared;
+            recorder.note_tracking_source(peer.tick(), candidate);
+            drop(shared);
+            // The set proved an owner — the failure record no
+            // longer describes it, so a later orphaned cycle on
+            // the same candidates probes fresh.
+            *self.resolve_verify.lock().unwrap() = None;
+            *self.resolved.lock().unwrap() = Some(candidate);
+            self.refused.lock().unwrap().clear();
+            return Some(candidate);
         }
+        *self.resolve_verify.lock().unwrap() = Some(ResolveVerify {
+            candidates,
+            at: Instant::now(),
+        });
         *self.resolved.lock().unwrap() = None;
         None
     }
@@ -3322,12 +3740,16 @@ fn command_request(request: &Request) -> bool {
 }
 
 /// Whether the request can hold a worker on a client-paced wait —
-/// the routing [`Monitor::serve`] applies. Two request shapes can:
+/// the routing [`Monitor::serve`] applies after the switchover POSTs
+/// split off through [`role_change`] (a switch request still owing
+/// client body bytes lands here too, on the quarantine side of its
+/// split). Two request shapes can:
 ///
-/// - `POST /command` and `POST /scan`, the only handlers that read a
-///   request body: tiny_http hands them the body still on the socket,
-///   and a client that stalls mid-body holds the reader as long as it
-///   cares to.
+/// - `POST /command` and `POST /scan`, the only body-reading handlers
+///   left on this routing step — `POST /promote` and `POST /demote`
+///   already routed — plus tiny_http hands them the body still on the
+///   socket whenever it passed the eager buffer, and a client that
+///   stalls mid-body holds the reader as long as it cares to.
 /// - Any request still owing the client body bytes, whatever its
 ///   path: a declared `Content-Length` past the library's small eager
 ///   buffer leaves the remainder on a live reader whose drop drains
@@ -3371,14 +3793,19 @@ fn pair_liveness(request: &Request) -> bool {
 }
 
 /// Whether the request is a switchover action — `POST /promote` or
-/// `POST /demote` — [`Monitor::serve`]'s routing step after
-/// [`pair_liveness`]. Role changes are the pair's control-plane
+/// `POST /demote` — [`Monitor::serve`]'s routing step ahead of
+/// [`submission`]. Role changes are the pair's control-plane
 /// actuation, not bulk reads: they take the dedicated control lane so
 /// an operator's promote or demote — issued during an incident,
 /// exactly when consoles wedge — never queues behind serving workers
-/// pinned by undrained responses. Only bodiless ones reach this
-/// routing: a switchover request still owing the client body bytes
-/// already went to the submission lane, where its drain quarantine
+/// pinned by undrained responses or submission workers pinned by a
+/// dead client's owed body. That guarantee extends to the attributed
+/// shape: a [`SwitchRequest`] `{"actor":…}` body is tens of bytes, so
+/// [`buffered_body`] proves it arrived already read and it rides the
+/// control lane beside the bare request. A switchover request whose
+/// body could still wait on the client — a longer declared body, a
+/// chunked or `Expect`-deferred one, a connection upgrade — takes the
+/// submission lane instead, where its read or drain quarantine
 /// belongs. The query string is ignored.
 fn role_change(request: &Request) -> bool {
     request.method() == &Method::Post
@@ -3386,6 +3813,44 @@ fn role_change(request: &Request) -> bool {
             request.url().split('?').next(),
             Some("/promote") | Some("/demote")
         )
+}
+
+/// Whether the request's body is already off the wire — the second
+/// half of [`Monitor::serve`]'s switchover routing, deciding which
+/// lane a [`role_change`] request takes. tiny_http reads a declared
+/// `Content-Length` of at most [`EAGER_BODY_LIMIT`] eagerly while
+/// assembling the request, on the connection task before the request
+/// ever reaches routing: such a body is a buffered cursor here, and a
+/// request declaring none carries an empty reader the same way, so no
+/// body read or dropped-reader drain on this lane can ever wait on
+/// the client. Every other shape still owes client-paced bytes — a
+/// declared body past the bound, an `Expect: 100-continue` handshake
+/// (which holds even a small declared body live on the socket), a
+/// chunked stream, or a connection upgrade — and stays on the
+/// submission lane's quarantine.
+///
+/// The header tests below mirror tiny_http's own `new_request`
+/// predicates exactly — its upgrade test is a case-insensitive
+/// substring match on the `Connection` value, not a token match —
+/// because this function's verdict is only sound when it agrees with
+/// the reader shape the request was actually built with: a `lazy`
+/// answer here must cover every request tiny_http handed a live
+/// socket reader.
+fn buffered_body(request: &Request) -> bool {
+    let lazy = request.headers().iter().any(|header| {
+        header.field.equiv("Transfer-Encoding")
+            || header.field.equiv("Expect")
+            || (header.field.equiv("Connection")
+                && header
+                    .value
+                    .as_str()
+                    .to_ascii_lowercase()
+                    .contains("upgrade"))
+    });
+    !lazy
+        && request
+            .body_length()
+            .is_none_or(|length| length <= EAGER_BODY_LIMIT)
 }
 
 /// One lane's bounded request queue — [`Monitor::serve`]'s dispatcher
@@ -3603,49 +4068,55 @@ fn track_and_record(
 ) -> TrackReport {
     let Shared { peer, recorder, .. } = shared;
     let report = peer.track_once(pull);
-    for divergence in peer.take_divergences() {
-        recorder.note_divergence(divergence.tick, divergence.mismatches);
-    }
-    for resolution in peer.take_resolutions() {
-        recorder.note_resolution(resolution);
-    }
-    for report in peer.take_reinitializations() {
-        recorder.note_reinitialized(report);
-    }
-    for orphan in peer.take_orphans() {
-        recorder.note_field_orphaned(orphan);
-    }
-    // A foreign owner the orphan cycle's re-arm probe just met —
-    // the claimant token the refusal named — journals beside the
-    // orphan record it answered, once per distinct claimant.
-    for observation in peer.take_claim_observations() {
-        recorder.note_claim_observed(observation);
-    }
-    for restart in peer.take_source_restarts() {
-        recorder.note_source_restart(restart);
-    }
-    // A self-promotion the boundary refused — a live incumbent's
-    // standing claim, a transient claim ask, a voided proof — leaves
-    // no role change of its own, so the journal takes it here, one
-    // entry per distinct refusal cause the streak produced.
-    for refusal in peer.take_promotion_refusals() {
-        recorder.note_promotion_refused(refusal);
-    }
-    for change in peer.take_role_changes() {
-        recorder.note_role_change(&change);
-    }
-    // Pending commands an adopted checkpoint abandoned — the demoted
-    // run's suspended queue the tracked line never carried — settle
-    // `superseded` here rather than vanishing from the audit.
-    for (index, receipt) in peer.take_superseded_commands() {
-        recorder.note_settled(Some(index), receipt, peer.tick());
-    }
-    // Force-set and held-value changes the adoption authored beyond
-    // the receipted log — a re-stood or dropped force, or a reverted
-    // receipted write, no settled verdict backs — journal here, each
-    // receipt's actor naming the adopting checkpoint.
-    for receipt in peer.take_adoption_receipts() {
-        recorder.note_settled(None, receipt, peer.tick());
+    let tick = peer.tick();
+    // The tracking cycle's drain, one match: the whole account of the
+    // pull, the orphan cycle's claim evidence, the refused
+    // self-promotion, the role walk, and the settlements the adoption
+    // carried — in the producer's category order, which is the order
+    // this path journaled them in by hand.
+    for event in peer.drain_pending() {
+        match event {
+            PeerEvent::Divergence(report) => {
+                recorder.note_divergence(report.tick, report.mismatches);
+            }
+            PeerEvent::Resolution(resolution) => recorder.note_resolution(resolution),
+            PeerEvent::Reinitialization(report) => recorder.note_reinitialized(report),
+            PeerEvent::Orphan(orphan) => recorder.note_field_orphaned(orphan),
+            // An orphan-cycle re-arm that actually landed the claim —
+            // the record naming who re-took the field the orphan
+            // detection alone cannot attribute — journals beside the
+            // orphan record too.
+            PeerEvent::ClaimRearm(rearm) => recorder.note_claim_rearmed(rearm),
+            // A foreign owner the orphan cycle's re-arm probe just met
+            // — the claimant token the refusal named — journals beside
+            // the orphan record it answered, once per distinct claimant.
+            PeerEvent::ClaimObservation(observation) => {
+                recorder.note_claim_observed(observation);
+            }
+            PeerEvent::SourceRestart(restart) => recorder.note_source_restart(restart),
+            // A self-promotion the boundary refused — a live incumbent's
+            // standing claim, a transient claim ask, a voided proof —
+            // leaves no role change of its own, so the journal takes it
+            // here, one entry per distinct refusal cause the streak
+            // produced.
+            PeerEvent::PromotionRefusal(refusal) => recorder.note_promotion_refused(refusal),
+            PeerEvent::RoleChange(change) => recorder.note_role_change(&change),
+            // Pending commands an adopted checkpoint abandoned — the
+            // demoted run's suspended queue the tracked line never
+            // carried — settle `superseded` here rather than vanishing
+            // from the audit. Force-set and held-value changes the
+            // adoption authored beyond the receipted log — a re-stood
+            // or dropped force, or a reverted receipted write, no
+            // settled verdict backs — journal here too, each receipt's
+            // actor naming the adopting checkpoint.
+            PeerEvent::SupersededCommand { index, receipt } => {
+                recorder.note_settled(Some(index), receipt, tick);
+            }
+            PeerEvent::AdoptionReceipt(receipt) => {
+                recorder.note_settled(None, receipt, tick);
+            }
+            PeerEvent::FencingLoss(_) | PeerEvent::StartupRefusal(_) => {}
+        }
     }
     store.sync_receipts(peer.receipts());
     // The cycle's apply, miss accounting, or a self-promotion moved
@@ -3666,23 +4137,40 @@ fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Tick {
     let Shared { peer, recorder, .. } = shared;
     let tick = peer.scan();
     let snapshot = recorder.record_scan(peer.executor(), tick);
-    // A field write the plant fenced — the claim this owner held was
-    // preempted — completed the scan degraded and demoted the peer
-    // inside it rather than failing it: the claim loss and the role
-    // transition it drove journal beside the scan's own events, cause
-    // before effect, beside the `io_health` fault the boundary
-    // already counted.
-    for loss in peer.take_fencing_losses() {
-        recorder.note_field_claim_lost(loss.tick, loss.point, loss.claimant);
-    }
-    // A foreign owner the fencing-loss reclaim probe just met —
-    // the claimant token the refusal named — journals beside the
-    // scan's own events, once per distinct claimant.
-    for observation in peer.take_claim_observations() {
-        recorder.note_claim_observed(observation);
-    }
-    for change in peer.take_role_changes() {
-        recorder.note_role_change(&change);
+    // The scan's drain, one match, beside the scan's own events: a field
+    // write the plant fenced — the claim this owner held was preempted
+    // — completed the scan degraded and demoted the peer inside it
+    // rather than failing it, so the claim loss and the role transition
+    // it drove journal here, cause before effect, beside the
+    // `io_health` fault the boundary already counted; the foreign owner
+    // the reclaim probe met journals beside them, once per distinct
+    // claimant; and a deferred startup grant's refusal — the pending
+    // born-active's re-issued ask answered mid-scan — records the
+    // settled verdict once, the entry that makes the pending state's
+    // terminal settle durable on run shapes whose shell never regains
+    // control.
+    for event in peer.drain_pending() {
+        match event {
+            PeerEvent::FencingLoss(loss) => {
+                recorder.note_field_claim_lost(loss.tick, loss.point, loss.claimant);
+            }
+            PeerEvent::ClaimObservation(observation) => {
+                recorder.note_claim_observed(observation);
+            }
+            PeerEvent::StartupRefusal(refusal) => {
+                recorder.note_startup_claim_refused(refusal);
+            }
+            PeerEvent::RoleChange(change) => recorder.note_role_change(&change),
+            PeerEvent::Divergence(_)
+            | PeerEvent::Resolution(_)
+            | PeerEvent::Reinitialization(_)
+            | PeerEvent::Orphan(_)
+            | PeerEvent::ClaimRearm(_)
+            | PeerEvent::SourceRestart(_)
+            | PeerEvent::PromotionRefusal(_)
+            | PeerEvent::SupersededCommand { .. }
+            | PeerEvent::AdoptionReceipt(_) => {}
+        }
     }
     store.publish(tick, snapshot, peer.receipts());
     // The scan's wall-clock completion stamp — `GET /health`'s
@@ -3811,6 +4299,21 @@ pub fn line_proof(key: u64, nonce: u64, checkpoint: &Checkpoint) -> u64 {
     u64::from_le_bytes(digest[..8].try_into().unwrap())
 }
 
+/// The position a checkpoint document occupies in the tracked line's
+/// origin tick domain — the currency the announced/owner skew bound is
+/// written in. `stream_tick` is the serving run's declaration of where
+/// its capture lands in the domain the line's generation began in;
+/// absent — a lead-free run or a pre-field capture — the document's
+/// own `tick` is the only position it can claim. A document declaring
+/// a position past its own tick is nonsense and reads as lead-free:
+/// the bound stays written against `tick`, the stricter answer.
+fn stream_position(checkpoint: &Checkpoint) -> Tick {
+    checkpoint
+        .stream_tick
+        .unwrap_or(checkpoint.tick)
+        .min(checkpoint.tick)
+}
+
 /// Why a checkpoint pulled to verify an announced demotion hint is
 /// not this run's continuation — [`verify_announced_checkpoint`]'s
 /// named refusals. Each means the announced endpoint serves a stream
@@ -3834,16 +4337,16 @@ enum AnnouncedCheckpointError {
     /// against this run's unidentified one, is not the tracked
     /// continuation.
     ForeignGeneration,
-    /// The pulled checkpoint's tick runs more than
+    /// The pulled checkpoint's stream position runs more than
     /// [`MAX_ANNOUNCED_AHEAD`] past this run's own: a successor
-    /// tracking this run sits only a few ticks ahead of it, so a
-    /// same-generation stream that far ahead is not this line's
+    /// tracking this line sits only a few stream ticks ahead of it,
+    /// so a same-generation stream that far ahead is not this line's
     /// continuation — it is a forged or foreign tick domain wearing
     /// this line's identity.
     Ahead {
-        /// The tick the pulled checkpoint claims.
+        /// The stream position the pulled checkpoint claims.
         pulled: Tick,
-        /// This run's own tick when the hint was verified.
+        /// This run's stream position when the pull was verified.
         own: Tick,
     },
     /// The pulled checkpoint claims its source owns the field — the
@@ -3872,6 +4375,35 @@ enum AnnouncedCheckpointError {
     /// would pin the demoted peer onto another subordinate of the
     /// same stale island.
     NotOwner,
+}
+
+impl std::fmt::Display for AnnouncedCheckpointError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnreadableVersion { found } => {
+                write!(formatter, "unreadable checkpoint format version {found}")
+            }
+            Self::ForeignGeneration => {
+                write!(
+                    formatter,
+                    "the pulled checkpoint names a foreign generation"
+                )
+            }
+            Self::Ahead { pulled, own } => write!(
+                formatter,
+                "the pulled checkpoint's stream position {} leads the line's {} \
+                 past the announced skew bound",
+                pulled.0, own.0
+            ),
+            Self::OwnDocument { pulled, own } => write!(
+                formatter,
+                "the pulled field-owning checkpoint at {} is not ahead of this \
+                 run's {} — the replayable own-document shape",
+                pulled.0, own.0
+            ),
+            Self::NotOwner => write!(formatter, "the pulled checkpoint does not claim the field"),
+        }
+    }
 }
 
 /// Whether one checkpoint pulled from an announced demotion hint
@@ -3918,10 +4450,18 @@ fn verify_announced_checkpoint(
     if pulled.generation != own.generation {
         return Err(AnnouncedCheckpointError::ForeignGeneration);
     }
-    if pulled.tick.0 > own.tick.0.saturating_add(MAX_ANNOUNCED_AHEAD) {
+    // The skew bound compares stream positions, not run ticks: each
+    // side's declared position in the line's origin domain is the
+    // comparable currency — a successor whose paced clock accrued an
+    // outage lead keeps the honest stream position it serves, while a
+    // foreign document without that declaration keeps the run tick it
+    // claims as its position.
+    let pulled_stream = stream_position(pulled);
+    let own_stream = stream_position(own);
+    if pulled_stream.0 > own_stream.0.saturating_add(MAX_ANNOUNCED_AHEAD) {
         return Err(AnnouncedCheckpointError::Ahead {
-            pulled: pulled.tick,
-            own: own.tick,
+            pulled: pulled_stream,
+            own: own_stream,
         });
     }
     if pulled.source_owns_field == Some(true) && pulled.tick.0 <= own.tick.0 {
@@ -3957,10 +4497,16 @@ fn verify_owner_checkpoint(
     if pulled.generation != own.generation {
         return Err(AnnouncedCheckpointError::ForeignGeneration);
     }
-    if pulled.tick.0 > own.tick.0.saturating_add(MAX_ANNOUNCED_AHEAD) {
+    // As in `verify_announced_checkpoint`: the skew bound compares
+    // each document's declared stream position — the probing run's own
+    // paced tick carries whatever outage lead it survived and is no
+    // line-membership reference.
+    let pulled_stream = stream_position(pulled);
+    let own_stream = stream_position(own);
+    if pulled_stream.0 > own_stream.0.saturating_add(MAX_ANNOUNCED_AHEAD) {
         return Err(AnnouncedCheckpointError::Ahead {
-            pulled: pulled.tick,
-            own: own.tick,
+            pulled: pulled_stream,
+            own: own_stream,
         });
     }
     if pulled.source_owns_field != Some(true) {
@@ -4095,6 +4641,107 @@ fn json<T: Serialize + ?Sized>(status: u16, value: &T) -> Response<Cursor<Vec<u8
         )
 }
 
+/// Why one tracking cycle's pull produced no checkpoint.
+///
+/// Every stage is a property of the cycle that observed it, never a
+/// detail carried forward from an earlier one: a transient failure
+/// names itself for as long as it is the most recent thing the worker
+/// reported and never past the point that condition could still
+/// describe the endpoint. That is what keeps a single early failure —
+/// the one refused read a standby's first pull against a source still
+/// coming up produces — from standing as the run's permanent tracking
+/// verdict while the same source answers every later fetch.
+///
+/// The stages also separate the pull path's own waits, which is the
+/// observation the QA finding `pending-source-pull-latches-egain`
+/// needed and could not get from a rig: whether a produced-nothing
+/// cycle is waiting on the name, on a fetch still inside its bound, on
+/// one that has outrun it, or on a document this cycle discarded, is
+/// the difference between an endpoint that is away and a pull path that
+/// has stopped taking what the endpoint serves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PullMiss {
+    /// The cycle's fetch is still outstanding and still inside the
+    /// bound it fetches under.
+    InFlight,
+    /// The cycle's fetch is still outstanding past
+    /// [`CHECKPOINT_PULL_TIMEOUT`] — the worker's own bound, so a
+    /// resolution or a connection the worker cannot finish will not
+    /// answer inside the window the endpoint is measured in. The miss is
+    /// reported as the stall it is: the standby's budget keeps counting,
+    /// and the detail no longer replays whatever the endpoint last said.
+    /// A stall that also outruns [`CHECKPOINT_PULL_STALL`] costs the
+    /// worker and the puller binds a fresh one, so the stage is a
+    /// recovery rather than a verdict.
+    Stalled,
+    /// The cycle's fetch completed and its document went stale before
+    /// the cycle could take it — a document that waited longer than the
+    /// puller's own cadence accounts for, so it is dropped rather than
+    /// applied. The next fetch reconverges fresh; the stage names the
+    /// discard, never an earlier fetch's error.
+    Stale,
+    /// The configured name did not resolve for this cycle's fetch — the
+    /// detail is the resolution failure, the one wait inside a fetch
+    /// that no connect bound covers.
+    Unresolved(String),
+    /// The cycle's fetch resolved with this error: the endpoint
+    /// refused, the read ran out of its bound, or the answer failed the
+    /// pair's line proof. The detail is the worker's own, prefixed with
+    /// the pull target.
+    Refused(String),
+    /// The fetch worker is gone — its thread ended, so no request this
+    /// puller arms can complete.
+    WorkerGone,
+}
+
+impl PullMiss {
+    /// The `degraded` detail this miss reports — the named stage, so
+    /// the served `sync` states which of the pull path's waits a
+    /// produced-nothing cycle is actually in.
+    pub fn detail(&self, target: &TrackTarget) -> String {
+        match self {
+            Self::Refused(detail) => detail.clone(),
+            Self::Unresolved(detail) => format!("fetch from {target}: {detail}"),
+            Self::InFlight => {
+                format!("fetch from {target}: checkpoint pull still in flight")
+            }
+            Self::Stalled => format!(
+                "fetch from {target}: the checkpoint fetch is stalled — the pull \
+                 worker has not answered within its bound"
+            ),
+            Self::Stale => format!(
+                "fetch from {target}: the fetched checkpoint went stale before this \
+                 cycle could take it"
+            ),
+            Self::WorkerGone => {
+                format!("fetch from {target}: the pull worker is gone")
+            }
+        }
+    }
+}
+
+/// How far one fetch got before it answered — the stage the *worker*
+/// reached, kept apart from the outcome so an unresolved name is never
+/// reported as an endpoint refusal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FetchStage {
+    /// The name resolved and the request ran: the outcome is the
+    /// endpoint's document or its own error.
+    Reached,
+    /// The configured name did not resolve this cycle, so no request ran.
+    Unresolved,
+}
+
+/// One completed fetch: when the worker finished it, how far it got,
+/// and what it produced.
+struct Completed {
+    /// When the fetch resolved — the instant a document's wait is
+    /// measured from when the cycle comes to take it.
+    at: Instant,
+    stage: FetchStage,
+    result: Result<Checkpoint, String>,
+}
+
 /// A tracking standby's checkpoint-fetch worker: performs the
 /// pull-per-scan-cycle resync on its own thread so the network wait —
 /// connect, transfer, or a peer that never answers — is never part of
@@ -4108,33 +4755,65 @@ fn json<T: Serialize + ?Sized>(status: u16, value: &T) -> Response<Cursor<Vec<u8
 /// non-blocking, it consumes the latest completed fetch and requests
 /// the next, answering `Ok(checkpoint)` when a fetch produced one
 /// since the previous poll and `Err` otherwise — the fetch's own
-/// error detail, or the still-in-flight state while it runs. A cycle
-/// whose pull has not yet produced a checkpoint is a heartbeat miss
-/// exactly like a refused one, so the failover budget keeps measuring
-/// wall time — budget × scan period — instead of fetch latency: an
-/// active that cannot serve a checkpoint within the window is declared
-/// lost on the same cadence a refused connect would be.
+/// error detail, or the named stage ([`PullMiss`]) while it runs. A
+/// cycle whose pull has not yet produced a checkpoint is a heartbeat
+/// miss exactly like a refused one, so the failover budget keeps
+/// measuring wall time — budget × scan period — instead of fetch
+/// latency: an active that cannot serve a checkpoint within the window
+/// is declared lost on the same cadence a refused connect would be.
 ///
 /// Feed `poll` to [`Monitor::track_cycle`] or
 /// [`Peer::track_once`](dcs_runtime::Peer::track_once) as the `pull`.
-/// A field-owning peer's cycle never invokes it, so fetching idles on
-/// promotion and resumes on demotion; dropping the puller ends the
-/// worker thread once its in-flight fetch resolves.
+/// A field-owning peer's cycle never invokes it, so a caller that
+/// promotes drops the puller there and binds a fresh one on demotion:
+/// the worker thread ends with it, and no answer fetched before the
+/// promotion can land after it.
+///
+/// Nothing a puller learns outlives the condition that produced it. A
+/// failure names itself only while it is the most recent thing the
+/// worker reported — a landed document clears it, and so does a fetch
+/// that has outrun its bound — so the one refused read a standby's
+/// first pull against a source still coming up produces cannot stand as
+/// the run's tracking verdict once that source serves (the QA finding
+/// `pending-source-pull-latches-egain`). A document the cycle finds too
+/// old to apply is measured against the puller's own cadence rather
+/// than a fixed bound, and a fetch wedged past [`CHECKPOINT_PULL_STALL`]
+/// costs its worker rather than the run's convergence.
 pub struct CheckpointPuller {
     /// The pull target — the active's monitor address, or a configured
     /// [`TrackTarget::Name`] each fetch resolves anew.
     target: TrackTarget,
+    /// The address each fetch announces as `?peer=`, or none.
+    announce: Option<SocketAddr>,
+    /// The pair's key each fetch proves its answer under, or none.
+    proof_key: Option<u64>,
     /// Wakes the worker for one fetch; a send arms `pending`.
     requests: mpsc::Sender<()>,
-    /// Completed fetches with their completion instant, consumed by
-    /// [`poll`](Self::poll).
-    results: mpsc::Receiver<(Instant, Result<Checkpoint, String>)>,
+    /// Completed fetches, consumed by [`poll`](Self::poll).
+    results: mpsc::Receiver<Completed>,
     /// A fetch request is outstanding — sent and not yet consumed.
     pending: bool,
-    /// The last completed fetch's error, kept so a cycle polling while
-    /// a fetch is still in flight reports the most recent real detail
-    /// rather than only the in-flight state.
-    last_error: Option<String>,
+    /// When the outstanding request was armed, so a fetch that has
+    /// outrun [`CHECKPOINT_PULL_TIMEOUT`] is reported as the stall it
+    /// is instead of as the previous fetch's error.
+    armed: Option<Instant>,
+    /// The last completed fetch's stage and error, kept so a cycle
+    /// polling while the next fetch is still inside its bound reports
+    /// the most recent real detail rather than only the in-flight
+    /// state — and dropped the moment a fetch produces a document or
+    /// the outstanding one overruns its bound, so it can never stand
+    /// as this run's tracking verdict.
+    last_error: Option<(FetchStage, String)>,
+    /// When the previous cycle polled, so the puller can measure its own
+    /// cadence — see [`staleness`](Self::staleness).
+    last_poll: Option<Instant>,
+    /// The longest interval two consecutive polls have been apart, the
+    /// cadence a completed fetch's wait is measured against.
+    cadence: Duration,
+    /// How many wedged fetch workers this puller has retired — the
+    /// bound [`MAX_RETIRED_PULL_WORKERS`] places on rebinding, cleared
+    /// by a fetch that lands.
+    retired: usize,
 }
 
 impl CheckpointPuller {
@@ -4172,96 +4851,263 @@ impl CheckpointPuller {
         announce: Option<SocketAddr>,
         proof_key: Option<u64>,
     ) -> Self {
-        let (requests, request_rx) = mpsc::channel::<()>();
-        let (result_tx, results) = mpsc::channel();
-        let worker = target.clone();
-        std::thread::spawn(move || {
-            // One fetch per request; the channels closing — the puller
-            // dropped — ends the loop. A named target's resolution runs
-            // here per fetch — inside the worker like the network wait
-            // itself, never on the scan cycle's critical path.
-            while request_rx.recv().is_ok() {
-                let nonce = proof_key.map(|_| mint_generation());
-                let pulled = worker
-                    .resolve()
-                    .and_then(|active| {
-                        MonitorClient::with_timeout(active, CHECKPOINT_PULL_TIMEOUT)
-                            .checkpoint_tracking(announce, nonce)
-                            .map_err(|error| error.to_string())
-                    })
-                    .map_err(|detail| format!("fetch from {worker}: {detail}"))
-                    .and_then(|checkpoint| match (proof_key, nonce) {
-                        (Some(key), Some(nonce))
-                            if checkpoint.line_proof
-                                != Some(line_proof(key, nonce, &checkpoint)) =>
-                        {
-                            Err(format!(
-                                "fetch from {worker}: checkpoint carried no valid line proof"
-                            ))
-                        }
-                        _ => Ok(checkpoint),
-                    });
-                if result_tx.send((Instant::now(), pulled)).is_err() {
-                    return;
-                }
-            }
-        });
+        let (requests, results) = spawn_worker(&target, announce, proof_key);
         Self {
             target,
+            announce,
+            proof_key,
             requests,
             results,
             pending: false,
+            armed: None,
             last_error: None,
+            last_poll: None,
+            cadence: CHECKPOINT_PULL_TIMEOUT,
+            retired: 0,
         }
+    }
+
+    /// Retires this puller's fetch worker and binds a fresh one, so a
+    /// worker that cannot finish the fetch it took does not decide what
+    /// every later cycle reports.
+    ///
+    /// The retired worker keeps its thread until the fetch it is stuck
+    /// in resolves — nothing can preempt a blocking read — but its
+    /// channels go with it, so the answer it eventually produces is
+    /// never consumed and its thread ends there. The bound on how often
+    /// this happens is [`MAX_RETIRED_PULL_WORKERS`], and a fetch that
+    /// lands clears the count.
+    fn rebind_worker(&mut self) {
+        let (requests, results) = spawn_worker(&self.target, self.announce, self.proof_key);
+        self.requests = requests;
+        self.results = results;
+        self.pending = false;
+        self.armed = None;
+        self.retired += 1;
+    }
+
+    /// The wall-clock age a completed fetch's document must still be
+    /// under when a cycle comes to take it — twice the longest gap two
+    /// consecutive polls have been apart, never below the pull bound.
+    ///
+    /// The measurement is the puller's own cadence, not a constant
+    /// standing in for one. A deployed standby's period is whatever its
+    /// `--scan-ms` says, and a scan cycle that overruns — a contended
+    /// executor, the orphan probe's own bounded pulls, a host under
+    /// load — stretches the gap between two polls without anything
+    /// having gone wrong with the fetch. Against a fixed bound a period
+    /// past that bound, or a single cycle that overran it, made *every*
+    /// completed document too old to apply: the puller discarded each
+    /// one, so the peer never converged, and — the latch the QA finding
+    /// `pending-source-pull-latches-egain` recorded — the discard
+    /// reported the earliest fetch's error on every cycle after it,
+    /// naming a read that ran out of its bound against a source whose
+    /// pending window had long since closed, for the life of the
+    /// process. The bound follows the cadence instead, so a document is
+    /// stale only when its wait is one the cadence cannot account for.
+    ///
+    /// The measurement resets once a completed document has been acted
+    /// on, so a stretched cycle costs at most that one document: the
+    /// run's convergence is never traded for a stretch the run has
+    /// already absorbed.
+    ///
+    /// What is left is the case the bound exists for: polls pause while
+    /// the peer owns the field, and a document captured before a
+    /// promotion must not land after it — rewinding the run to a tick it
+    /// already passed. A caller that promotes closes the pause itself: a
+    /// field-owning cycle drops the puller, and the fresh one the run
+    /// binds on demotion holds no answer from before the promotion.
+    fn staleness(&self) -> Duration {
+        self.cadence.max(CHECKPOINT_PULL_TIMEOUT) * 2
     }
 
     /// The tracking cycle's pull, once per scan: consumes the latest
     /// completed fetch — `Ok` applies it, `Err` counts the cycle's
     /// heartbeat miss — and requests the next when none is
-    /// outstanding. A fetch still in flight answers `Err` carrying the
-    /// last completed fetch's error, or the in-flight state when no
-    /// fetch has finished yet; the miss is honest either way — this
-    /// cycle produced no checkpoint.
-    ///
-    /// A completed result older than [`CHECKPOINT_PULL_TIMEOUT`] is
-    /// discarded as stale rather than applied: polls pause while the
-    /// peer owns the field, and a checkpoint captured before a
-    /// promotion would otherwise land long after its fetch — rewinding
-    /// the run to a tick it already passed. Discarding it simply
-    /// counts the cycle's miss; the next fetch reconverges fresh.
+    /// outstanding.
     pub fn poll(&mut self) -> Result<Checkpoint, String> {
-        let mut latest = None;
-        while let Ok(result) = self.results.try_recv() {
-            self.pending = false;
-            if let Err(detail) = &result.1 {
-                self.last_error = Some(detail.clone());
-            }
-            latest = Some(result);
+        self.poll_staged().map_err(|miss| miss.detail(&self.target))
+    }
+
+    /// [`poll`](Self::poll) with the stage the cycle reached kept
+    /// machine-readable — the same outcome a consumer acts on, and the
+    /// observation a regression or an operator reads to tell the pull
+    /// path's waits apart: the fetch's own error when it resolved, the
+    /// name that did not answer, the in-flight state while a fetch is
+    /// still inside its bound, the stall once one has outrun that bound,
+    /// the stale-discard for a document that waited past the puller's
+    /// cadence, and the gone worker that can no longer answer at all.
+    /// The miss is honest either way — this cycle produced no
+    /// checkpoint — and no stage carries a detail forward from an
+    /// earlier cycle: the state a puller reports is the state the fetch
+    /// it is waiting on is actually in.
+    pub fn poll_staged(&mut self) -> Result<Checkpoint, PullMiss> {
+        let now = Instant::now();
+        if let Some(previous) = self.last_poll.replace(now) {
+            self.cadence = self.cadence.max(now.duration_since(previous));
         }
-        // A result is fresh only while its fetch could still have
-        // completed inside the pull bound.
-        if let Some((completed, _)) = &latest
-            && completed.elapsed() > CHECKPOINT_PULL_TIMEOUT
-        {
-            latest = None;
+        let mut latest = None;
+        while let Ok(completed) = self.results.try_recv() {
+            self.pending = false;
+            self.armed = None;
+            latest = Some(completed);
         }
         if !self.pending {
             if self.requests.send(()).is_err() {
-                return Err(format!(
-                    "fetch from {}: the pull worker is gone",
-                    self.target
-                ));
+                return Err(PullMiss::WorkerGone);
             }
             self.pending = true;
+            self.armed = Some(now);
         }
-        latest.map(|(_, result)| result).unwrap_or_else(|| {
-            Err(self.last_error.clone().unwrap_or_else(|| {
-                format!(
-                    "fetch from {}: checkpoint pull still in flight",
-                    self.target
-                )
-            }))
-        })
+        match latest {
+            // A produced document is the only result the staleness bound
+            // can cost: only it carries state whose landing could rewind
+            // the run, and a resolved failure is already the truth about
+            // the endpoint, however long the cycle that takes it waited.
+            Some(Completed {
+                at,
+                stage: _,
+                result: Ok(checkpoint),
+            }) if at.elapsed() <= self.staleness() => {
+                // The endpoint answered: nothing of the failure that
+                // preceded it still describes it, and the stretch the
+                // cadence measured has been paid for.
+                self.last_error = None;
+                self.cadence = CHECKPOINT_PULL_TIMEOUT;
+                // The path answers again: the retirement budget the
+                // earlier wedged workers spent is restored.
+                self.retired = 0;
+                Ok(checkpoint)
+            }
+            Some(Completed { result: Ok(_), .. }) => {
+                // A document too old to apply is not evidence the
+                // endpoint has gone away — it answered, and this cycle
+                // was merely late. The earlier failure goes with it, so
+                // a stretched cadence cannot stand the pending window's
+                // verdict back up on the cycles the next fetch has not
+                // answered yet.
+                self.last_error = None;
+                self.cadence = CHECKPOINT_PULL_TIMEOUT;
+                Err(PullMiss::Stale)
+            }
+            Some(Completed {
+                stage,
+                result: Err(detail),
+                ..
+            }) => {
+                let miss = staged_miss(stage, &detail);
+                self.last_error = Some((stage, detail));
+                Err(miss)
+            }
+            // Nothing completed this cycle: the fetch this cycle's
+            // predecessor armed is still outstanding. While it is inside
+            // the bound it fetches under, the most recent thing the
+            // worker actually reported is the honest detail; past that
+            // bound the fetch cannot be expected to answer at all, and an
+            // earlier error says nothing about the endpoint now.
+            None => {
+                let waited = self.armed.map(|armed| armed.elapsed());
+                match waited {
+                    // Past the stall bound the worker is not coming back
+                    // with this fetch: a fresh one takes the next
+                    // request, so a wedged fetch cannot stand as this
+                    // run's pull path for the life of the process. The
+                    // budget bounds how often a run may do this — a
+                    // fetch that lands restores it.
+                    Some(waited) if waited > CHECKPOINT_PULL_STALL => {
+                        self.last_error = None;
+                        if self.retired < MAX_RETIRED_PULL_WORKERS {
+                            self.rebind_worker();
+                        }
+                        Err(PullMiss::Stalled)
+                    }
+                    // Past the pull bound but inside the stall bound,
+                    // the fetch is simply not answering: the miss is
+                    // reported as the stall it is, and whatever the
+                    // endpoint last said stops describing it.
+                    Some(waited) if waited > CHECKPOINT_PULL_TIMEOUT => {
+                        self.last_error = None;
+                        Err(PullMiss::Stalled)
+                    }
+                    // Inside the bound it fetches under, the outstanding
+                    // fetch is still the honest answer: the most recent
+                    // thing the worker reported, or the state it is in.
+                    Some(_) => Err(match &self.last_error {
+                        Some((stage, detail)) => staged_miss(*stage, detail),
+                        None => PullMiss::InFlight,
+                    }),
+                    None => Err(PullMiss::InFlight),
+                }
+            }
+        }
+    }
+}
+
+/// Spawns one fetch worker for `target` — the request/result channels
+/// a [`CheckpointPuller`] arms and consumes.
+///
+/// The worker runs one fetch at a time and only when a cycle asked for
+/// one — the documented cadence stays one pull per cycle, never a
+/// free-running poll hammering the serving peer. A named target's
+/// resolution runs here per fetch, inside the worker like the network
+/// wait itself, never on the scan cycle's critical path.
+fn spawn_worker(
+    target: &TrackTarget,
+    announce: Option<SocketAddr>,
+    proof_key: Option<u64>,
+) -> (mpsc::Sender<()>, mpsc::Receiver<Completed>) {
+    let (requests, request_rx) = mpsc::channel::<()>();
+    let (result_tx, results) = mpsc::channel();
+    let worker = target.clone();
+    std::thread::spawn(move || {
+        // One fetch per request; the channels closing — the puller
+        // dropped, or this worker retired for a fetch it could not
+        // finish — ends the loop.
+        while request_rx.recv().is_ok() {
+            let nonce = proof_key.map(|_| mint_generation());
+            let (stage, pulled) = match worker.resolve() {
+                Ok(active) => (
+                    FetchStage::Reached,
+                    MonitorClient::with_timeout(active, CHECKPOINT_PULL_TIMEOUT)
+                        .checkpoint_tracking(announce, nonce)
+                        .map_err(|error| error.to_string()),
+                ),
+                // No request ran: the name itself did not answer, which
+                // is a stage of its own and not an endpoint that refused
+                // this cycle's fetch.
+                Err(detail) => (FetchStage::Unresolved, Err(detail)),
+            };
+            let pulled = pulled
+                .map_err(|detail| format!("fetch from {worker}: {detail}"))
+                .and_then(|checkpoint| match (proof_key, nonce) {
+                    (Some(key), Some(nonce))
+                        if checkpoint.line_proof != Some(line_proof(key, nonce, &checkpoint)) =>
+                    {
+                        Err(format!(
+                            "fetch from {worker}: checkpoint carried no valid line proof"
+                        ))
+                    }
+                    _ => Ok(checkpoint),
+                });
+            let completed = Completed {
+                at: Instant::now(),
+                stage,
+                result: pulled,
+            };
+            if result_tx.send(completed).is_err() {
+                return;
+            }
+        }
+    });
+    (requests, results)
+}
+
+/// The miss naming how far the fetch that produced `detail` got — the
+/// name that did not answer, or the endpoint that refused.
+fn staged_miss(stage: FetchStage, detail: &str) -> PullMiss {
+    match stage {
+        FetchStage::Reached => PullMiss::Refused(detail.to_owned()),
+        FetchStage::Unresolved => PullMiss::Unresolved(detail.to_owned()),
     }
 }
 
@@ -4952,6 +5798,7 @@ mod tests {
             generation: Some(11),
             anchor: None,
             tick: Tick(100),
+            stream_tick: None,
             components: Default::default(),
             driver: None,
             outputs: Default::default(),
@@ -5049,6 +5896,40 @@ mod tests {
             verify_announced_checkpoint(&just_past, &own),
             Err(AnnouncedCheckpointError::Ahead { .. })
         ));
+        // The QA finding
+        // `tracking-verify-own-tick-ahead-bound-permanent-strand`: the
+        // bound compares declared stream positions, not run ticks. A
+        // successor whose paced clock accrued a source-outage lead
+        // serves `tick` arbitrarily far ahead while its `stream_tick`
+        // honestly locates the line's position — and verifies; a
+        // probed run whose own clock carries a lead declares it the
+        // same way, so neither side's outage history moves the line's
+        // reference. The *declared* stream position is still bounded:
+        // a stream_tick past the window is the same forgery shape,
+        // and a declaration ahead of the document's own tick is
+        // nonsense — the run tick stays the strictest claim it can
+        // make.
+        let mut led = checkpoint();
+        led.tick = Tick(own.tick.0 + 700);
+        led.stream_tick = Some(Tick(own.tick.0 + 4));
+        assert_eq!(verify_announced_checkpoint(&led, &own), Ok(()));
+        let mut led_own = checkpoint();
+        led_own.stream_tick = Some(Tick(own.tick.0 - 10));
+        assert_eq!(verify_announced_checkpoint(&led, &led_own), Ok(()));
+        let mut runaway = checkpoint();
+        runaway.tick = Tick(own.tick.0 + 700);
+        runaway.stream_tick = Some(Tick(own.tick.0 + MAX_ANNOUNCED_AHEAD + 1));
+        assert!(matches!(
+            verify_announced_checkpoint(&runaway, &own),
+            Err(AnnouncedCheckpointError::Ahead { .. })
+        ));
+        let mut nonsense = checkpoint();
+        nonsense.tick = Tick(own.tick.0 + MAX_ANNOUNCED_AHEAD + 1);
+        nonsense.stream_tick = Some(Tick(nonsense.tick.0 + 100));
+        assert!(matches!(
+            verify_announced_checkpoint(&nonsense, &own),
+            Err(AnnouncedCheckpointError::Ahead { .. })
+        ));
         // A foreign generation — a restarted or unrelated stream, and
         // an identified stream against this run's unidentified one —
         // and an unreadable format are refusals too.
@@ -5086,6 +5967,7 @@ mod tests {
             generation: Some(11),
             anchor: None,
             tick: Tick(100),
+            stream_tick: None,
             components: Default::default(),
             driver: None,
             outputs: Default::default(),
@@ -5114,6 +5996,29 @@ mod tests {
         ahead.source_owns_field = Some(true);
         ahead.tick = Tick(own.tick.0 + MAX_ANNOUNCED_AHEAD);
         assert_eq!(verify_owner_checkpoint(&ahead, &own), Ok(()));
+        // The QA finding
+        // `tracking-verify-own-tick-ahead-bound-permanent-strand`'s
+        // reproduction shape: the promoted successor's paced clock
+        // carries the standby's accrued source-outage lead — `tick`
+        // arbitrarily far past the bound — while its declared
+        // `stream_tick` honestly locates the line's position. The
+        // bound compares stream positions, so the legitimate owner
+        // verifies and the demoted ex-owner rejoins.
+        let mut successor = checkpoint();
+        successor.source_owns_field = Some(true);
+        successor.tick = Tick(own.tick.0 + 700);
+        successor.stream_tick = Some(Tick(own.tick.0 + 5));
+        assert_eq!(verify_owner_checkpoint(&successor, &own), Ok(()));
+        // A declared stream position itself past the bound is the
+        // same forgery shape the unmarked runaway is — refused.
+        let mut declared_runaway = checkpoint();
+        declared_runaway.source_owns_field = Some(true);
+        declared_runaway.tick = Tick(own.tick.0 + 700);
+        declared_runaway.stream_tick = Some(Tick(own.tick.0 + MAX_ANNOUNCED_AHEAD + 1));
+        assert!(matches!(
+            verify_owner_checkpoint(&declared_runaway, &own),
+            Err(AnnouncedCheckpointError::Ahead { .. })
+        ));
 
         // The reproduction's shape: a sibling standby's checkpoint —
         // this line's continuation stamped `source_owns_field: false`

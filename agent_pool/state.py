@@ -74,7 +74,8 @@ REDISPATCH_CAUSES = frozenset(('worker-failure', 'quota-requeue'))
 
 
 class State:
-    def __init__(self, path):
+    def __init__(self, path, capacity=None):
+        self.workspace_capacity = capacity
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(path), timeout=30)
         self.db.row_factory = sqlite3.Row
@@ -195,6 +196,8 @@ class State:
         self.pause(reason)
 
     def capacity(self):
+        if self.workspace_capacity is not None:
+            return self.workspace_capacity
         merges = self.get('merges', 0)
         return 20 if merges >= 15 else 10 if merges >= 5 else 5
 

@@ -207,6 +207,19 @@ fn foreign_claim_release_lets_the_demoted_ex_owner_reclaim() {
         Role::Promoting,
         "the released field must let the demoted ex-owner reclaim"
     );
+    // The orphan cycle's unbound ensure landed first in that same
+    // cycle — the released field stood unclaimed when the orphaned
+    // pull applied — and a landed re-arm is durable: the journal
+    // names it once, beside the orphan record the landing answered.
+    let journal = active.journal(0).unwrap();
+    assert_eq!(
+        journal
+            .iter()
+            .filter(|entry| matches!(entry.event, JournalEvent::FieldClaimRearmed { .. }))
+            .count(),
+        1,
+        "a landed orphan-cycle re-arm must journal exactly once: {journal:?}"
+    );
     assert!(
         matches!(field.ensure_writer(FOREIGN), Err(RemoteError::Fenced)),
         "the reclaimed claim must fence the foreign attachment"

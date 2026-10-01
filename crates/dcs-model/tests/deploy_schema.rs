@@ -99,9 +99,11 @@ fn recorded_release_deploy_schema_matches_the_emitted_output() {
     // docs/releases/<tag>/deploy-manifest.schema.json` whenever the
     // emitted schema legitimately changes — and update the record's
     // published sha256 with it while the tag is pending. `v0.3.0`'s,
-    // `v0.4.0`'s, and `v0.5.0`'s tags are pending, so their artifacts
-    // and published sha256s are still pinned — identical, the
-    // emission having not moved since `v0.3.0`'s recorded commit.
+    // `v0.4.0`'s, `v0.5.0`'s, `v0.6.0`'s, and `v0.7.0`'s tags are
+    // pending, so their artifacts and published sha256s are still
+    // pinned — identical across the five records, the emission having
+    // moved once since `v0.3.0`'s recorded commit with #1282's
+    // additive-optional `history_file` controller field.
     let output = run_deploy_schema_subcommand();
     assert!(
         output.status.success(),
@@ -111,15 +113,23 @@ fn recorded_release_deploy_schema_matches_the_emitted_output() {
     for (path, recorded_sha256) in [
         (
             "docs/releases/v0.3.0/deploy-manifest.schema.json",
-            Some("b43dadc6cf3455cb26b20ab1656137e892f0609387b9dbedfc3291716afd1005"),
+            Some("980430ca8725af997a7b5063f00d2a9663fe4619ca00a542917bde24f270cfa9"),
         ),
         (
             "docs/releases/v0.4.0/deploy-manifest.schema.json",
-            Some("b43dadc6cf3455cb26b20ab1656137e892f0609387b9dbedfc3291716afd1005"),
+            Some("980430ca8725af997a7b5063f00d2a9663fe4619ca00a542917bde24f270cfa9"),
         ),
         (
             "docs/releases/v0.5.0/deploy-manifest.schema.json",
-            Some("b43dadc6cf3455cb26b20ab1656137e892f0609387b9dbedfc3291716afd1005"),
+            Some("980430ca8725af997a7b5063f00d2a9663fe4619ca00a542917bde24f270cfa9"),
+        ),
+        (
+            "docs/releases/v0.6.0/deploy-manifest.schema.json",
+            Some("980430ca8725af997a7b5063f00d2a9663fe4619ca00a542917bde24f270cfa9"),
+        ),
+        (
+            "docs/releases/v0.7.0/deploy-manifest.schema.json",
+            Some("980430ca8725af997a7b5063f00d2a9663fe4619ca00a542917bde24f270cfa9"),
         ),
     ] {
         let recorded = std::fs::read(workspace_root().join(path)).unwrap_or_else(|error| {
@@ -170,12 +180,15 @@ fn deploy_schema_validates_the_documented_optional_variants() {
     // express, so the rig check's `rig-mismatch` is its rejection.
     let validator = validator();
 
-    // persistence-omitted: both per-controller durability fields dropped.
+    // persistence-omitted: all three per-controller durability fields
+    // dropped — a manifest written before `history_file` existed
+    // validates unchanged (the field is additive-optional).
     let mut omitted = reference_manifest();
     for controller in omitted["controllers"].as_array_mut().unwrap() {
         let entry = controller.as_object_mut().unwrap();
         entry.remove("state_file");
         entry.remove("journal_file");
+        entry.remove("history_file");
     }
 
     // topology-declared: the checked-in manifest declares `station`;
@@ -193,14 +206,16 @@ fn deploy_schema_validates_the_documented_optional_variants() {
             "name": "ctrl-c",
             "listen": "0.0.0.0:8082",
             "state_file": "/var/tmp/state.json",
-            "journal_file": "/var/tmp/journal.jsonl"
+            "journal_file": "/var/tmp/journal.jsonl",
+            "history_file": "/var/tmp/history.jsonl"
         }),
         serde_json::json!({
             "name": "ctrl-d",
             "listen": "0.0.0.0:8083",
             "standby": "ctrl-c:8082",
             "state_file": "/var/tmp/state.json",
-            "journal_file": "/var/tmp/journal.jsonl"
+            "journal_file": "/var/tmp/journal.jsonl",
+            "history_file": "/var/tmp/history.jsonl"
         }),
     ]);
     multi["topology"]["pairs"]
@@ -268,6 +283,15 @@ fn deploy_schema_rejects_malformed_documents_with_named_paths() {
         mutated(&|d| {
             d["controllers"][1]["standby"] = serde_json::json!("ctrl-a");
         }),
+        // A wrong-typed `history_file` — the durable store's path is
+        // a string under the same convention `journal_file` sets.
+        mutated(&|d| {
+            d["controllers"][0]["history_file"] = serde_json::json!(7);
+        }),
+        // An empty `history_file` — the path shape's `minLength` bound.
+        mutated(&|d| {
+            d["controllers"][0]["history_file"] = serde_json::json!("");
+        }),
         // An empty controller set — the deployment declares nothing.
         mutated(&|d| {
             d["controllers"] = serde_json::json!([]);
@@ -310,6 +334,21 @@ fn deploy_schema_rejects_malformed_documents_with_named_paths() {
     assert!(
         diagnostics.iter().any(|path| path == "/model/fingerprint"),
         "no diagnostic names the malformed fingerprint: {diagnostics:?}"
+    );
+
+    // The same named-path diagnostic for the mistyped `history_file`.
+    let document = mutated(&|d| {
+        d["controllers"][0]["history_file"] = serde_json::json!(7);
+    });
+    let diagnostics: Vec<String> = validator
+        .iter_errors(&document)
+        .map(|error| error.instance_path().to_string())
+        .collect();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|path| path == "/controllers/0/history_file"),
+        "no diagnostic names the mistyped history_file: {diagnostics:?}"
     );
 }
 

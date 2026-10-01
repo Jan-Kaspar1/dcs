@@ -79,7 +79,8 @@
 #                wiring, the standby's optional failover_budget
 #                declaration carried as its --auto-promote flag, and
 #                the optional per-controller persistence
-#                paths (state_file/journal_file) backed by writable
+#                paths (state_file/journal_file/history_file) backed
+#                by writable
 #                mounts and flags, the declared topology
 #                section's pairs — the checked-in manifest naming
 #                the deployed pair under topology.pairs, each pair
@@ -99,7 +100,8 @@
 #   restart      the restart-recovery leg (WW-LCM-001's
 #                lone-controller clause): the field-owning controller
 #                runs the deterministic scenario on the
-#                manifest-declared --state-file/--journal-file flags
+#                manifest-declared
+#                --state-file/--journal-file/--history-file flags
 #                pointed at runner-owned scratch paths, is stopped at
 #                a leg boundary, and relaunches onto the same files —
 #                the resumed run must continue at the persisted tick
@@ -184,21 +186,30 @@
 #                workspace-side proof substitutes a file:// stand-in and
 #                rewrites this repository's Cargo.toml to match.
 #   DCS_REV      the pinned revision (default: the release tag this
-#                repository's manifest records — v0.5.0, resolving to
+#                repository's manifest records — v0.7.0, resolving to
 #                the recorded commit whose tooling serves the interface
 #                registry, declared commands and their live availability
 #                verdicts, and routed emitted events the surface stage
 #                proves, beside the pair and receipt contracts the legs
-#                exercise and the corrected claim/tracking/failover
-#                arbitration and bounded-liveness contracts the mirror
-#                legs gate on).
+#                exercise, the corrected claim/tracking/failover
+#                arbitration and bounded-liveness contracts, the
+#                tracking-source rediscovery, driven-scan bound,
+#                status-line label, history backfill, born-active
+#                startup-failure, and durable process-history contracts,
+#                and the demote released-claim hand-back,
+#                persistence-path distinctness, deferred startup-claim
+#                refusal, and remote correspondence-gate contracts the
+#                mirror legs gate on).
 #   DCS_UPGRADE_REV
 #                the earlier compatible revision the upgrade stage
 #                materializes the tree at before repinning to $DCS_REV
 #                (default: the previous release's recorded rev — the
-#                v0.4.0 commit — so the stage proves the v0.4.0 → v0.5.0
-#                crossing the manifest names; the workspace-side proof
-#                seeds its stand-in remote to serve it).
+#                v0.6.0 publish commit, the first release line whose
+#                builder API carries the composition's declared
+#                recording duties — so the stage proves the recorded
+#                rev → tag half of the v0.6.0 → v0.7.0 crossing the
+#                manifest names; the workspace-side proof seeds its
+#                stand-in remote to serve it).
 #   DCS_UPGRADE  set to 0 to skip the upgrade stage — the stage's own
 #                repinned re-run uses this internally.
 #   DCS_TOOLS    a directory holding prebuilt `dcs-model`,
@@ -227,8 +238,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DCS_REMOTE="${DCS_REMOTE:-https://github.com/Jan-Kaspar1/dcs.git}"
-DCS_REV="${DCS_REV:-v0.5.0}"
-DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-720fe0a12de8b13956524ba0d1e79daaeb507d1d}"
+DCS_REV="${DCS_REV:-v0.7.0}"
+DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-b0580bff9df23e009abdce15c241c4711c64a9c2}"
 DCS_TOOLS="${DCS_TOOLS:-}"
 DCS_RECORD_DIR="${DCS_RECORD_DIR:-}"
 TOOLS=""
@@ -487,6 +498,10 @@ if case == "missing-required":
     del document["model"]["fingerprint"]
 elif case == "mistyped-field":
     document["controllers"][1]["failover_budget"] = "high"
+elif case == "mistyped-history-file":
+    # The durable-history mount is a path field — a non-string value
+    # violates its shape the same way a mistyped journal_file would.
+    document["controllers"][0]["history_file"] = 7
 elif case == "undeclared-field":
     # The pair's shared tracking secret is a deployment secret the
     # manifest shape deliberately never records.
@@ -531,7 +546,8 @@ PY
         || fail "schema-mismatch-unchecked: the dynamics document's $1 case did not report schema-mismatch: $out"
     echo "  dynamics $1 refused: schema-mismatch"
 }
-for case in missing-required mistyped-field undeclared-field; do
+for case in missing-required mistyped-field mistyped-history-file \
+        undeclared-field; do
     manifest_case "$case"
 done
 for case in missing-required mistyped-field undeclared-element; do
@@ -768,7 +784,8 @@ python3 ci/overview_url.py
 # scratch copies so the checked-in pair stays pristine: each must
 # report rig-mismatch — a declared path missing its mount or flag, a
 # flag or writable mount the manifest does not declare, a persistence
-# mount left read-only — while the fields omitted outright (with their
+# mount left read-only, one controller's journal_file aliased with its
+# state_file — while the fields omitted outright (with their
 # mounts and flags) stay a valid deployment. The same harness proves
 # the checked-in manifest's declared topology section — the deployed
 # pair named under `topology.pairs`: the declaration validates under
@@ -809,6 +826,15 @@ elif case == "persistence-flag-divergence":
     # ctrl-a's --journal-file argument diverges from the manifest.
     compose = compose.replace(
         "- /var/tmp/journal.jsonl", "- /var/tmp/other.jsonl", 1)
+elif case == "persistence-history-flag-divergence":
+    # ctrl-a's --history-file argument diverges from the manifest.
+    compose = compose.replace(
+        "- /var/tmp/history.jsonl", "- /var/tmp/other.jsonl", 1)
+elif case == "persistence-history-flag-missing":
+    # ctrl-a keeps its declared history_file while the rig
+    # definition drops the --history-file flag.
+    compose = compose.replace(
+        "      - --history-file\n      - /var/tmp/history.jsonl\n", "", 1)
 elif case == "persistence-mount-read-only":
     compose = compose.replace(
         "ctrl-a-data:/var/tmp", "ctrl-a-data:/var/tmp:ro", 1)
@@ -817,6 +843,12 @@ elif case == "undeclared-persistence-flag":
     # field — an undeclared flag.
     document = json.loads(manifest)
     del document["controllers"][0]["journal_file"]
+    manifest = json.dumps(document, indent=2)
+elif case == "undeclared-history-flag":
+    # ctrl-a keeps its --history-file while the manifest drops the
+    # field — an undeclared flag.
+    document = json.loads(manifest)
+    del document["controllers"][0]["history_file"]
     manifest = json.dumps(document, indent=2)
 elif case == "undeclared-writable-mount":
     # ctrl-a gains writable storage the manifest declares nothing
@@ -849,19 +881,33 @@ elif case == "failover-wrong-peer":
     document["controllers"][0]["failover_budget"] = \
         document["controllers"][1].pop("failover_budget")
     manifest = json.dumps(document, indent=2)
+elif case == "persistence-aliased-paths":
+    # ctrl-a's journal_file aliases its state_file — the checkpoint's
+    # write-then-rename would orphan the append writer's descriptor
+    # (finding state-file-alias-clobbers-append-durable-files). The
+    # flag follows the field so flag/field parity still holds and the
+    # only divergence is the alias itself.
+    document = json.loads(manifest)
+    document["controllers"][0]["journal_file"] = "/var/tmp/state.json"
+    manifest = json.dumps(document, indent=2)
+    compose = compose.replace(
+        "- /var/tmp/journal.jsonl", "- /var/tmp/state.json", 1)
 elif case == "persistence-omitted":
-    # Both fields omitted together with their flags and mounts — the
-    # optional deployment a consumer without durable storage declares.
+    # All three fields omitted together with their flags and mounts —
+    # the optional deployment a consumer without durable storage
+    # declares.
     document = json.loads(manifest)
     for controller in document["controllers"]:
         controller.pop("state_file", None)
         controller.pop("journal_file", None)
+        controller.pop("history_file", None)
     manifest = json.dumps(document, indent=2)
     for line in (
         "      - ctrl-a-data:/var/tmp\n",
         "      - ctrl-b-data:/var/tmp\n",
         "      - --state-file\n      - /var/tmp/state.json\n",
         "      - --journal-file\n      - /var/tmp/journal.jsonl\n",
+        "      - --history-file\n      - /var/tmp/history.jsonl\n",
     ):
         compose = compose.replace(line, "")
 elif case == "topology-declared":
@@ -888,6 +934,7 @@ elif case == "topology-multi-pair":
             "listen": "0.0.0.0:8082",
             "state_file": "/var/tmp/state.json",
             "journal_file": "/var/tmp/journal.jsonl",
+            "history_file": "/var/tmp/history.jsonl",
         },
         {
             "name": "ctrl-d",
@@ -895,6 +942,7 @@ elif case == "topology-multi-pair":
             "standby": "ctrl-c:8082",
             "state_file": "/var/tmp/state.json",
             "journal_file": "/var/tmp/journal.jsonl",
+            "history_file": "/var/tmp/history.jsonl",
         },
     ]
     document["topology"] = {
@@ -937,6 +985,7 @@ elif case == "undeployable-second-duty":
             "listen": "0.0.0.0:8082",
             "state_file": "/var/tmp/state.json",
             "journal_file": "/var/tmp/journal.jsonl",
+            "history_file": "/var/tmp/history.jsonl",
         }
     )
     manifest = json.dumps(document, indent=2)
@@ -1019,10 +1068,14 @@ PY
 }
 
 for divergence in persistence-mount-divergence persistence-flag-divergence \
+        persistence-history-flag-divergence \
+        persistence-history-flag-missing \
         persistence-mount-read-only undeclared-persistence-flag \
+        undeclared-history-flag \
         undeclared-writable-mount failover-flag-missing \
         failover-flag-undeclared failover-wrong-peer \
-        persistence-omitted topology-declared topology-multi-pair \
+        persistence-aliased-paths persistence-omitted \
+        topology-declared topology-multi-pair \
         undeployable-second-duty topology-undeclared-member \
         topology-shared-member topology-external-standby \
         topology-two-standbys topology-unwired-pair; do

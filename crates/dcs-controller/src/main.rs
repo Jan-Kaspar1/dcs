@@ -128,7 +128,13 @@
 //! would interleave duplicate `seq`s into an un-replayable record —
 //! exits nonzero naming the file and the conflict, while a dead
 //! holder's lock releases with its descriptor and a restart
-//! re-acquires it.
+//! re-acquires it. The three persistence paths are distinct files on
+//! pain of a usage error: the checkpoint's write-then-rename cannot
+//! share the append sinks' lock, so an aliased `--state-file` would
+//! orphan the append writer's descriptor on the renamed-away inode —
+//! the durable record landing nowhere the path reaches and the next
+//! startup's strict replay refusing the checkpoint document it finds
+//! instead.
 //!
 //! Redundancy, per the peer-transport and switchover-semantics
 //! decisions: every instance whose driver surface reaches the shared
@@ -164,6 +170,14 @@
 //! the old active first — keeps exactly one peer writing the field.
 //! A standby-local `SimDriver` needs no gate: its plant is a private
 //! tracking copy every checkpoint's driver section resynchronizes.
+//! Whichever flag names the tracking source, it must be a different
+//! instance: a `--standby` or `--peer` target that resolves to this
+//! instance's own `--listen` socket is a usage error at launch — the
+//! run's own checkpoint can never carry a peer's field ownership (a
+//! standby's own document always stamps `source_owns_field:false`,
+//! which the apply counts as a heartbeat miss), so the self-addressed
+//! standby would cover no peer while an armed one promoted itself on
+//! its own misses.
 //!
 //! Demotion is the launch asymmetry the follow-peer half of the
 //! tracking contract closes: a launched active never named a peer —
@@ -316,14 +330,17 @@
 use dcs_assembly::{DriverRegistry, FanoutDriver, StepError, assemble, resolve_drivers};
 use dcs_controller::registry;
 use dcs_core::{
-    CarryoverReport, FieldClaim, IoDriver, PointId, TelemetrySnapshot, Tick, TickAnchor,
+    CarryoverReport, FieldClaim, IoDriver, IoError, PointId, SwitchError, TelemetrySnapshot, Tick,
+    TickAnchor, ValueKind,
 };
 use dcs_model::PlantModel;
 use dcs_monitor::{
     CheckpointPuller, DEFAULT_STATE_DRAIN_CAPACITY, Driven, Monitor, MonitorConfig, StateSink,
     TrackTarget,
 };
-use dcs_runtime::{Checkpoint, Executor, Peer, TrackReport, WriteGate, mint_generation};
+use dcs_runtime::{
+    Activation, Checkpoint, Executor, Peer, PeerEvent, TrackReport, WriteGate, mint_generation,
+};
 use dcs_sim_net::{ClaimGrant, RemoteDriver, RemoteError};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -340,8 +357,17 @@ use std::time::{Duration, Instant};
 enum Driver {
     /// The registry-resolved backends held in this process.
     Local(FanoutDriver),
-    /// A client of a shared plant server.
-    Remote(RemoteDriver),
+    /// A client of a shared plant server — the `--remote` attachment.
+    /// `deferred` holds the declared-point correspondence probes still
+    /// outstanding against it: the launch-time check the `sim-tcp`
+    /// device factory runs eagerly could not complete while the plant
+    /// answered nothing, so the startup claim re-runs them ahead of
+    /// the grant ask — a plant that answers serving a different model
+    /// never lets the claim land.
+    Remote {
+        remote: RemoteDriver,
+        deferred: Mutex<Vec<(PointId, ValueKind)>>,
+    },
 }
 
 impl Driver {
@@ -349,7 +375,7 @@ impl Driver {
     fn io(&self) -> &(dyn IoDriver + Sync) {
         match self {
             Self::Local(fanout) => fanout,
-            Self::Remote(remote) => remote,
+            Self::Remote { remote, .. } => remote,
         }
     }
 
@@ -369,7 +395,7 @@ impl Driver {
         match (self, owns_field) {
             (Self::Local(fanout), true) => degrade_step(fanout.step(dt)),
             (Self::Local(fanout), false) => degrade_step(fanout.step_local(dt)),
-            (Self::Remote(remote), true) => match remote.step(dt) {
+            (Self::Remote { remote, .. }, true) => match remote.step(dt) {
                 Ok(_) => Ok(()),
                 Err(RemoteError::InvalidRequest(detail)) => {
                     Err(format!("plant step failed: {detail}"))
@@ -379,7 +405,7 @@ impl Driver {
                     Ok(())
                 }
             },
-            (Self::Remote(_), false) => Ok(()),
+            (Self::Remote { .. }, false) => Ok(()),
         }
     }
 
@@ -394,7 +420,7 @@ impl Driver {
     /// with it — anyway.
     fn release_claim(&self) {
         match self {
-            Self::Remote(remote) => {
+            Self::Remote { remote, .. } => {
                 let _ = remote.release_writer_keep_claim();
             }
             Self::Local(fanout) => fanout.release_field_claims(),
@@ -406,7 +432,7 @@ impl Driver {
     /// so its write-ownership claim means something.
     fn has_shared_field(&self) -> bool {
         match self {
-            Self::Remote(_) => true,
+            Self::Remote { .. } => true,
             Self::Local(fanout) => fanout.has_field_backend(),
         }
     }
@@ -423,19 +449,28 @@ impl Driver {
     /// defeating the arbitration this claim exists to provide.
     fn claim_writer(&self, owner: u64) -> Result<(), String> {
         match self {
-            Self::Remote(remote) => match remote.claim_writer(owner) {
-                Ok(ClaimGrant::Exclusive) => Ok(()),
-                Ok(ClaimGrant::Shared) => {
-                    eprintln!(
-                        "warning: field write-ownership claim for owner token {owner} is \
-                         shared with another live attachment — expected only for a \
-                         deliberate same-owner attachment; a second controller pinned to \
-                         the same --owner-token defeats single-writer fencing"
-                    );
-                    Ok(())
+            Self::Remote { remote, deferred } => {
+                // The same outstanding correspondence probes gate the
+                // promotion path's unconditional claim: a plant that
+                // could not answer at launch and answers serving a
+                // different model refuses here too.
+                if let Err(detail) = probe_remote_correspondence(remote, deferred) {
+                    return Err(format!("plant write-ownership claim failed: {detail}"));
                 }
-                Err(error) => Err(format!("plant write-ownership claim failed: {error}")),
-            },
+                match remote.claim_writer(owner) {
+                    Ok(ClaimGrant::Exclusive) => Ok(()),
+                    Ok(ClaimGrant::Shared) => {
+                        eprintln!(
+                            "warning: field write-ownership claim for owner token {owner} is \
+                             shared with another live attachment — expected only for a \
+                             deliberate same-owner attachment; a second controller pinned to \
+                             the same --owner-token defeats single-writer fencing"
+                        );
+                        Ok(())
+                    }
+                    Err(error) => Err(format!("plant write-ownership claim failed: {error}")),
+                }
+            }
             Self::Local(fanout) => fanout
                 .claim_field_writer(owner)
                 .map_err(|error| format!("plant write-ownership claim failed: {error}")),
@@ -461,20 +496,29 @@ impl Driver {
     /// holders fall back to the unconditional claim.
     fn claim_writer_unless_held(&self, owner: u64) -> Result<bool, String> {
         match self {
-            Self::Remote(remote) => match remote.claim_writer_unless_held(owner) {
-                Ok(ClaimGrant::Exclusive) => Ok(true),
-                Ok(ClaimGrant::Shared) => {
-                    eprintln!(
-                        "warning: field write-ownership claim for owner token {owner} is \
-                         shared with another live attachment — expected only for a \
-                         deliberate same-owner attachment; a second controller pinned to \
-                         the same --owner-token defeats single-writer fencing"
-                    );
-                    Ok(true)
+            Self::Remote { remote, deferred } => {
+                // The declared-point correspondence probes a launch
+                // against an unreachable plant left outstanding run
+                // ahead of the grant ask — a plant that answers
+                // serving a different model never lets the claim land.
+                if let Err(detail) = probe_remote_correspondence(remote, deferred) {
+                    return Err(format!("plant write-ownership claim failed: {detail}"));
                 }
-                Err(RemoteError::Fenced) => Ok(false),
-                Err(error) => Err(format!("plant write-ownership claim failed: {error}")),
-            },
+                match remote.claim_writer_unless_held(owner) {
+                    Ok(ClaimGrant::Exclusive) => Ok(true),
+                    Ok(ClaimGrant::Shared) => {
+                        eprintln!(
+                            "warning: field write-ownership claim for owner token {owner} is \
+                             shared with another live attachment — expected only for a \
+                             deliberate same-owner attachment; a second controller pinned to \
+                             the same --owner-token defeats single-writer fencing"
+                        );
+                        Ok(true)
+                    }
+                    Err(RemoteError::Fenced) => Ok(false),
+                    Err(error) => Err(format!("plant write-ownership claim failed: {error}")),
+                }
+            }
             Self::Local(fanout) => fanout
                 .claim_field_writer_unless_held(owner)
                 .map_err(|error| format!("plant write-ownership claim failed: {error}")),
@@ -495,7 +539,7 @@ impl Driver {
     /// vacuously.
     fn ensure_writer(&self, owner: u64) -> Result<bool, String> {
         match self {
-            Self::Remote(remote) => match remote.ensure_writer_unbound(owner) {
+            Self::Remote { remote, .. } => match remote.ensure_writer_unbound(owner) {
                 Ok(()) => Ok(true),
                 Err(RemoteError::Fenced) => Ok(false),
                 Err(error) => Err(format!("plant write-ownership re-arm failed: {error}")),
@@ -515,7 +559,7 @@ impl Driver {
     /// observation stands.
     fn probe_field_claim(&self) -> Result<FieldClaim, String> {
         match self {
-            Self::Remote(remote) => remote
+            Self::Remote { remote, .. } => remote
                 .probe_writer()
                 .map_err(|error| format!("plant write-ownership probe failed: {error}")),
             Self::Local(fanout) => fanout
@@ -527,19 +571,25 @@ impl Driver {
     /// The fencing-loss counterpart of [`ensure_writer`](Self::ensure_writer)
     /// — the *bound* conditional re-grant a fencing-demoted ex-owner
     /// probes each scan while its loss mark stands: takes the field's
-    /// write-ownership under `owner` where the field stands unclaimed
-    /// or already names the token — `Ok(true)` — answering `Ok(false)`
-    /// while a different owner stands, so a still-held preemptor's
-    /// claim keeps the field until it releases and the probe never
-    /// preempts. Unlike the orphan cycle's unbound probe the grant
-    /// joins this instance's attachments to the claim's holders — the
-    /// gate the reclaim re-lifts must pass the arbitration it re-took.
-    /// A purely local simulated model has no shared field to claim and
+    /// write-ownership under `owner` where the field stands unclaimed,
+    /// already names the token, or stands under a different owner's
+    /// holderless claim — `Ok(true)` — answering `Ok(false)` only
+    /// while a different owner's claim has live holders, so a
+    /// still-held preemptor's claim keeps the field until it releases
+    /// and the probe never preempts a live attachment. The peer issues
+    /// the ask only where its own scan probe just answered `unclaimed`
+    /// or its standing convergence proof holds — the holderless shapes
+    /// the grant preempts include a merely transport-frozen incumbent's
+    /// claim, so an unconverged ex-owner never preempts a standing
+    /// claim. Unlike the orphan cycle's unbound probe the grant joins
+    /// this instance's attachments to the claim's holders — the gate
+    /// the reclaim re-lifts must pass the arbitration it re-took. A
+    /// purely local simulated model has no shared field to claim and
     /// answers `Ok(true)` vacuously; a fan-out with no reclaim-capable
     /// field backend answers `Ok(false)` — nothing probed.
     fn reclaim_writer(&self, owner: u64) -> Result<bool, String> {
         match self {
-            Self::Remote(remote) => match remote.ensure_writer(owner) {
+            Self::Remote { remote, .. } => match remote.reclaim_writer(owner) {
                 Ok(ClaimGrant::Exclusive) => Ok(true),
                 Ok(ClaimGrant::Shared) => {
                     eprintln!(
@@ -567,7 +617,7 @@ impl Driver {
     /// the rendezvous an unkeyed pair has no other way to prove.
     fn set_claim_monitor(&self, monitor: SocketAddr) {
         match self {
-            Self::Remote(remote) => remote.set_claim_monitor(monitor),
+            Self::Remote { remote, .. } => remote.set_claim_monitor(monitor),
             Self::Local(fanout) => fanout.declare_field_monitor(monitor),
         }
     }
@@ -579,7 +629,7 @@ impl Driver {
     /// verdict has named one.
     fn claimed_monitor(&self) -> Option<SocketAddr> {
         match self {
-            Self::Remote(remote) => remote.claimed_monitor(),
+            Self::Remote { remote, .. } => remote.claimed_monitor(),
             Self::Local(fanout) => fanout.claimed_monitor(),
         }
     }
@@ -592,7 +642,7 @@ impl Driver {
     /// no owner identity — and the loss then records unattributed.
     fn fencing_claimant(&self, point: PointId) -> Option<u64> {
         match self {
-            Self::Remote(remote) => remote.fenced_by(),
+            Self::Remote { remote, .. } => remote.fenced_by(),
             Self::Local(fanout) => fanout.fencing_claimant(point),
         }
     }
@@ -606,7 +656,7 @@ impl Driver {
     /// Empty where no refusal named a claimant.
     fn refused_claimants(&self) -> Vec<u64> {
         match self {
-            Self::Remote(remote) => remote.fenced_by().into_iter().collect(),
+            Self::Remote { remote, .. } => remote.fenced_by().into_iter().collect(),
             Self::Local(fanout) => fanout.refused_claimants(),
         }
     }
@@ -617,7 +667,7 @@ impl Driver {
     /// attachment always arbitrates through the plant server's claim.
     fn unfenced_field_devices(&self) -> Vec<String> {
         match self {
-            Self::Remote(_) => Vec::new(),
+            Self::Remote { .. } => Vec::new(),
             Self::Local(fanout) => fanout
                 .unfenced_field_devices()
                 .iter()
@@ -625,6 +675,98 @@ impl Driver {
                 .collect(),
         }
     }
+}
+
+/// The `--remote` attachment's declared-point correspondence probe —
+/// the same rule the `sim-tcp` device factory applies inside driver
+/// assembly: every channel-bound `io_point` the model declares must be
+/// served by the plant, with the declared value kind, before the
+/// field's write-ownership claim may land. A miswired `--remote`
+/// endpoint — the wrong plant container, stale DNS, a copy-paste
+/// deployment — answers honestly for the points its model does not
+/// serve, so the mismatch is detectable here at launch rather than
+/// surfacing as per-point quality faults under a claimed, active run.
+/// Channel-less internal points are image-carried and probed against
+/// nothing — the plant serves only the field set.
+///
+/// The born-active contract defers only the transport: a plant that
+/// cannot answer at all returns `Disconnected`/`Timeout` on every
+/// probe, so the check returns the full declared set as *outstanding*
+/// — carried on the [`Driver::Remote`] attachment and re-run by the
+/// startup claim's first answered contact — while a plant that answers
+/// but serves a different model is `Err`, a launch failure.
+fn remote_correspondence(
+    remote: &RemoteDriver,
+    model: &PlantModel,
+    addr: SocketAddr,
+) -> Result<Vec<(PointId, ValueKind)>, String> {
+    let declared: Vec<(PointId, ValueKind)> = model
+        .io_points
+        .iter()
+        .filter(|point| point.channel.is_some())
+        .map(|point| (point.id, point.value_type))
+        .collect();
+    for &(point, kind) in &declared {
+        match remote.read(point) {
+            Ok(sample) if sample.value.kind() == kind => {}
+            Ok(sample) => {
+                return Err(format!(
+                    "plant server at {addr} serves io point {} as {:?}, the model declares {:?}",
+                    point.0,
+                    sample.value.kind(),
+                    kind
+                ));
+            }
+            Err(IoError::Disconnected(_) | IoError::Timeout(_)) => {
+                return Ok(declared);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "plant server at {addr} does not serve io point {}: {error}",
+                    point.0
+                ));
+            }
+        }
+    }
+    Ok(Vec::new())
+}
+
+/// The deferred half of [`remote_correspondence`] — the outstanding
+/// probes a launch against an unreachable plant left on the
+/// attachment, re-run ahead of every conditional startup-claim ask
+/// until every declared point answers with the declared kind. `Err`
+/// names the mismatch or the still-unanswerable contact; either way
+/// the grant ask that follows never runs, so a plant serving a foreign
+/// model is never claimed — the probe's own detail is the pending
+/// run's evidence.
+fn probe_remote_correspondence(
+    remote: &RemoteDriver,
+    deferred: &Mutex<Vec<(PointId, ValueKind)>>,
+) -> Result<(), String> {
+    let mut deferred = deferred.lock().unwrap();
+    if deferred.is_empty() {
+        return Ok(());
+    }
+    for &(point, kind) in deferred.iter() {
+        match remote.read(point) {
+            Ok(sample) if sample.value.kind() == kind => {}
+            Ok(sample) => {
+                return Err(format!(
+                    "deferred assembly probe: the plant serves io point {} as {:?}, the model declares {:?}",
+                    point.0,
+                    sample.value.kind(),
+                    kind
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "deferred assembly probe: the plant does not serve io point {point:?}: {error}"
+                ));
+            }
+        }
+    }
+    deferred.clear();
+    Ok(())
 }
 
 /// A local backend step result under the same rule [`Driver::step`]
@@ -653,6 +795,53 @@ fn degrade_step(stepped: Result<(), StepError>) -> Result<(), String> {
 fn report_claim(driver: &Driver, owner: u64) {
     if driver.has_shared_field() {
         eprintln!("field write-ownership claim held under owner token {owner}");
+    }
+}
+
+/// The launched active's startup activation answer under the
+/// born-active startup-failure contract — the disposition every
+/// activation site applies identically. `Ok(())` means the run
+/// continues: `Granted` owns the field, its claim line logged;
+/// `Pending` stands unpaired behind the served standby surface while
+/// the deferred conditional grant retries on each answered field
+/// contact; `Refused` against a declared `--peer` already stands
+/// rejoined as the pair's standby — the field's own verdict keeps
+/// this run honest instead of leaving it an unpaired active. `Err`
+/// carries the launch failure: an undeclared refusal — no pair was
+/// declared to rejoin — a not-launched-active defect, or the
+/// unconditional claim's own failure on a field kind without the
+/// live-holder query.
+fn settle_activation(
+    activation: Result<Activation, SwitchError>,
+    driver: &Driver,
+    owner: u64,
+    declared_peer: bool,
+) -> Result<(), String> {
+    match activation {
+        Ok(Activation::Granted) => {
+            report_claim(driver, owner);
+            Ok(())
+        }
+        Ok(Activation::Pending { detail }) => {
+            eprintln!(
+                "startup: field write-ownership claim produced no verdict ({detail}) — \
+                 the run stands pending: role standby, unsynchronized, write-quiesced, \
+                 while the conditional startup grant retries on each answered field contact"
+            );
+            Ok(())
+        }
+        Ok(Activation::Refused { error }) if declared_peer => {
+            eprintln!(
+                "startup: {error} — the declared pair keeps this run: it stands \
+                 rejoined as standby, tracking the configured --peer"
+            );
+            Ok(())
+        }
+        Ok(Activation::Refused { error }) => Err(format!(
+            "{error} — no --peer was declared, so there is no pair to rejoin: \
+             relaunch with --standby ADDRESS to track the field's live owner"
+        )),
+        Err(error) => Err(format!("{error}")),
     }
 }
 
@@ -791,13 +980,16 @@ controller scan.
                   the peer down with its name in the routine
                   mid-failover condition, degrades tracking as pull
                   misses the name's later answer reconverges; it is
-                  never a startup error
+                  never a startup error. ADDR must name a different
+                  instance, though: a target resolving to this
+                  instance's own --listen socket is a usage error
   --peer ADDR     run as the active, but name the peer's monitoring
                   address this instance tracks if it is later demoted
                   — so a demoted active reconverges and stays
                   promotable; degrades like --standby when the name
                   does not resolve. Mutually exclusive with --standby;
-                  requires --listen
+                  requires --listen, and like --standby must name a
+                  different instance than that socket
   --revised       declare this instance's model a deliberate revision of
                   the run's previous one. On a --standby peer a pulled
                   checkpoint whose model fingerprint differs crosses the
@@ -865,7 +1057,9 @@ controller scan.
                   the reason; a missing file is a cold start. With
                   --revised, a foreign-fingerprint file instead crosses
                   the model boundary under the carryover rule — the lone
-                  controller's scheduled-outage roll
+                  controller's scheduled-outage roll. PATH must be
+                  distinct from --journal-file and --history-file: the
+                  rename would orphan an append writer sharing it
   --journal-file PATH
                   persist the transition journal to PATH — one
                   line-delimited JSON record per journaled entry,
@@ -878,7 +1072,18 @@ controller scan.
                   file is a cold start. The file is single-writer: a
                   second live process on the same PATH exits nonzero
                   naming the writer-lock conflict — never point two
-                  controllers at one journal file. Requires --listen
+                  controllers at one journal file. Requires --listen.
+                  PATH must be distinct from --state-file and
+                  --history-file
+  --history-file PATH
+                  persist the durable process history to PATH — the
+                  declared-record points' samples, run-boundary
+                  markers, and tick-domain seams as line-delimited JSON
+                  records appended through the same bounded-writer
+                  scheme the journal file takes — and replay it at
+                  startup into the served window GET /history/durable
+                  answers from. Requires --listen. PATH must be
+                  distinct from --state-file and --journal-file
   -h, --help      show this text
 
 With neither --ticks nor --scan-ms, a paced run at 100 ms is assumed.
@@ -1081,6 +1286,71 @@ impl Options {
                     .to_string(),
             );
         }
+        // The three persistence paths must be distinct files. The
+        // append sinks' single-writer contract runs on an exclusive
+        // advisory lock the checkpoint sink does not take: its save
+        // is write-then-rename, so an aliased path leaves the append
+        // writer's descriptor on the renamed-away inode — every
+        // durable record lands nowhere reachable while the visible
+        // file reads as checkpoint JSON the next startup's strict
+        // replay refuses (finding
+        // state-file-alias-clobbers-append-durable-files). The
+        // append-append alias already fails closed at the file lock;
+        // this refuses every pair at parse, before either sink opens.
+        let persistence = [
+            ("--state-file", state_file.as_deref()),
+            ("--journal-file", journal_file.as_deref()),
+            ("--history-file", history_file.as_deref()),
+        ];
+        for (index, (flag, path)) in persistence.iter().enumerate() {
+            let Some(path) = *path else { continue };
+            for (other_flag, other_path) in &persistence[index + 1..] {
+                let Some(other_path) = *other_path else {
+                    continue;
+                };
+                if same_persistence_path(path, other_path) {
+                    return Err(format!(
+                        "{flag} and {other_flag} both name {}: the persistence files \
+                         must be distinct paths — the checkpoint's write-then-rename \
+                         orphans an append writer's descriptor, diverting its durable \
+                         record onto an unreachable inode",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        // A tracking source must name a different instance. Pointed at
+        // this instance's own --listen socket, every pull returns the
+        // run's own checkpoint — which a standby's document always
+        // stamps source_owns_field:false — so each apply scores a
+        // heartbeat miss: an unarmed run reports standby covering no
+        // peer forever, and an armed one manufactures a failover
+        // against itself at every budget
+        // (self-tracking-standby-never-refused). The comparison
+        // resolves both spellings — an equal socket, a wildcard listen
+        // reached through any of this host's addresses (a container's
+        // own DNS name resolves to its bridge IP, not loopback), and a
+        // wildcard target the loopback stack answers all refuse at
+        // parse, like the persistence aliases above. A target that
+        // does not resolve stays the documented degraded source — the
+        // pull-miss contract, never a startup error — since it cannot
+        // be shown to be this instance.
+        if let Some(listen_addr) = listen.as_deref() {
+            for (flag, target) in [("--standby", &standby), ("--peer", &peer)] {
+                let Some(target) = target.as_deref() else {
+                    continue;
+                };
+                if let Some(socket) = own_monitor_socket(listen_addr, target) {
+                    return Err(format!(
+                        "{flag} {target} resolves to this instance's own --listen \
+                         socket {socket}: the tracking source must be a different \
+                         instance — a run pulling its own checkpoints tracks no \
+                         peer, and an armed standby self-promotes on the heartbeat \
+                         misses its own non-owning documents score"
+                    ));
+                }
+            }
+        }
         Ok(Self {
             model,
             check,
@@ -1101,6 +1371,132 @@ impl Options {
             pair_token,
         })
     }
+}
+
+/// Whether two configured persistence paths name the same file —
+/// resolved through [`resolve_persistence_path`] so spellings that
+/// differ textually yet land on one file still compare equal.
+fn same_persistence_path(a: &Path, b: &Path) -> bool {
+    resolve_persistence_path(a) == resolve_persistence_path(b)
+}
+
+/// The identity the persistence-path distinctness check compares: the
+/// filesystem's canonical answer for the deepest prefix of `path`
+/// that resolves — catching spellings that differ textually yet name
+/// one file (`./x` beside `x`, a `..` detour, a path through a
+/// symlinked directory) — with the not-yet-existing tail reattached
+/// and its `.`/`..` components folded, so equal spellings still
+/// compare equal before a cold start creates the file.
+fn resolve_persistence_path(path: &Path) -> PathBuf {
+    // Canonicalize the deepest existing ancestor — an absolute path
+    // always bottoms out at the root — then reattach the missing
+    // tail. A relative path no ancestor of which resolves folds into
+    // the working directory textually.
+    let mut tail = Vec::new();
+    let mut cursor = path;
+    let mut resolved = loop {
+        if let Ok(resolved) = std::fs::canonicalize(cursor) {
+            break resolved;
+        }
+        match cursor.components().next_back() {
+            Some(std::path::Component::Normal(name)) => tail.push(name.to_os_string()),
+            Some(std::path::Component::ParentDir) => tail.push("..".into()),
+            _ => {
+                return fold_components(
+                    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
+                );
+            }
+        }
+        cursor = cursor.parent().unwrap_or_else(|| Path::new(""));
+    };
+    for component in tail.iter().rev() {
+        resolved.push(component);
+    }
+    fold_components(resolved)
+}
+
+/// `path` with `.` components dropped and each `..` collapsing the
+/// component before it — the textual half of the path identity the
+/// distinctness check compares.
+fn fold_components(path: PathBuf) -> PathBuf {
+    let mut folded = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                folded.pop();
+            }
+            component => folded.push(component),
+        }
+    }
+    folded
+}
+
+/// The `listen` socket a connection to `target` would reach — `Some`
+/// when a `--standby`/`--peer` target names this instance's own
+/// monitor, the misconfiguration the self-tracking check refuses at
+/// parse. Both spellings resolve through `ToSocketAddrs` and every
+/// resolved pair is tested, so a name answering with several
+/// addresses is judged on all of them. A name that does not resolve
+/// yields `None`: an unresolvable tracking target is the documented
+/// degraded source — a pull miss per cycle, never a startup error —
+/// and it cannot be shown to be this instance anyway.
+fn own_monitor_socket(listen: &str, target: &str) -> Option<SocketAddr> {
+    use std::net::ToSocketAddrs;
+    let resolve_all = |addr: &str| -> Vec<SocketAddr> {
+        addr.to_socket_addrs()
+            .map(|resolved| resolved.collect())
+            .unwrap_or_default()
+    };
+    let listens = resolve_all(listen);
+    for target in resolve_all(target) {
+        for listen in &listens {
+            if socket_reaches(target, *listen) {
+                return Some(*listen);
+            }
+        }
+    }
+    None
+}
+
+/// Whether a connection dialed to `target` lands on `listen` — the
+/// reachability half of the self-tracking check, on already-resolved
+/// addresses. The ports must match; then the socket is shared when
+/// the addresses are equal, when `listen` is a wildcard every local
+/// address reaches, or when `target` is a wildcard — a wildcard dial
+/// lands on the loopback stack, so it reaches only a listener bound
+/// on loopback or everywhere.
+fn socket_reaches(target: SocketAddr, listen: SocketAddr) -> bool {
+    if target.port() != listen.port() {
+        return false;
+    }
+    // The canonical form folds an IPv4-mapped IPv6 address to its IPv4
+    // counterpart, so `[::ffff:127.0.0.1]` spells loopback — and the
+    // wildcard arm below lets a dual-stack `[::]` listener answer an
+    // IPv4-local dial.
+    let target_ip = target.ip().to_canonical();
+    let listen_ip = listen.ip().to_canonical();
+    if target_ip == listen_ip {
+        return true;
+    }
+    if listen_ip.is_unspecified() {
+        return ip_is_local(target_ip);
+    }
+    target_ip.is_unspecified() && listen_ip.is_loopback()
+}
+
+/// Whether `ip` is one of this host's own addresses: loopback and the
+/// unspecified address outright, anything else by probing it with a
+/// bind — an ephemeral listen on `ip` succeeds only when the address
+/// is assigned to a local interface. The probe is what the
+/// self-addressed deployment needs: a standby pointed at its own
+/// container DNS name resolves to the container's bridge IP, not
+/// loopback.
+fn ip_is_local(ip: std::net::IpAddr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() {
+        return true;
+    }
+    std::net::TcpListener::bind(SocketAddr::new(ip, 0)).is_ok()
 }
 
 fn fail(message: impl std::fmt::Display) -> ExitCode {
@@ -1323,12 +1719,34 @@ fn main() -> ExitCode {
                 Ok(addr) => addr,
                 Err(error) => return fail(error),
             };
-            match RemoteDriver::connect(addr) {
+            // The transport half of the attach defers: an unreachable
+            // plant is the born-active contract's unreachable-field
+            // class — the driver assembles link-down and the startup
+            // claim's ask decides the run's disposition, rather than
+            // the attach killing the launch here.
+            let remote = RemoteDriver::connect_deferred(addr, RemoteDriver::DEFAULT_TIMEOUT)
                 // A controller's field attachment claims as a
                 // controller: its write-ownership claims record the
                 // marker a peer's conditional takeover refuses to
                 // preempt while they stand live.
-                Ok(remote) => Driver::Remote(remote.as_controller()),
+                .map(|remote| remote.as_controller());
+            match remote {
+                Ok(remote) => {
+                    // The declared-point correspondence probe the
+                    // `sim-tcp` device factory runs inside assembly —
+                    // a `--remote` endpoint serving a different model
+                    // fails the launch here rather than running as the
+                    // wrong plant's owner, and a plant that cannot
+                    // answer at all leaves the probes outstanding on
+                    // the attachment's deferred startup claim.
+                    match remote_correspondence(&remote, &model, addr) {
+                        Ok(deferred) => Driver::Remote {
+                            remote,
+                            deferred: Mutex::new(deferred),
+                        },
+                        Err(error) => return fail(error),
+                    }
+                }
                 Err(error) => {
                     return fail(format!("cannot connect to plant at {addr}: {error}"));
                 }
@@ -1353,7 +1771,7 @@ fn main() -> ExitCode {
     // backends still see their writes and their private plant keeps
     // tracking.
     let gate = match &driver {
-        Driver::Remote(remote) => Some(WriteGate::closed(remote)),
+        Driver::Remote { remote, .. } => Some(WriteGate::closed(remote)),
         Driver::Local(fanout) if fanout.has_field_backend() => {
             Some(WriteGate::closed_covering(fanout, |point| {
                 fanout.is_field_point(point)
@@ -1574,17 +1992,39 @@ fn main() -> ExitCode {
         // replayed, the monitor bound), so a starter that cannot serve
         // never lands a claim on the field's standing owner. The grant
         // preempts a dead owner's claim but refuses a live incumbent's,
-        // and a refused grant is a named startup failure, not an unfenced
-        // run: the incumbent's receipted state is never silently
-        // reverted by a stale restart.
+        // and every ask it answers settles under the born-active
+        // contract: the grant owns the field, an inconclusive ask
+        // stands pending and retries, and a refusal rejoins the
+        // declared pair or exits — the incumbent's receipted state is
+        // never silently reverted by a stale restart.
         if options.standby.is_none() {
-            if let Err(error) = monitor.activate() {
-                return fail(format!("{error}"));
+            let activation = monitor.activate();
+            if let Err(error) =
+                settle_activation(activation, &driver, owner, options.peer.is_some())
+            {
+                return fail(error);
             }
-            report_claim(&driver, owner);
         }
         eprintln!("listening on {}", monitor.local_addr());
         monitor.serve();
+        // The driven run's serve loop stands down when a `POST /scan`
+        // settles the deferred startup grant's refusal on a pairless
+        // run — the born-active contract's `Refused` verdict arriving
+        // mid-run, latched for the shell since no activation result
+        // can carry it. It drains here for the identical disposition
+        // the activation-time answer takes: a declared pair keeps the
+        // run (the handler left the run serving), a pairless run ends
+        // the launch the verdict refused.
+        if let Some(error) = monitor.drain_startup_refusal()
+            && let Err(error) = settle_activation(
+                Ok(Activation::Refused { error }),
+                &driver,
+                owner,
+                options.peer.is_some(),
+            )
+        {
+            return fail(error);
+        }
         return ExitCode::SUCCESS;
     }
 
@@ -1633,7 +2073,7 @@ fn main() -> ExitCode {
                 let mut puller = None;
                 run_monitored(
                     &monitor,
-                    || tracked_cycle(&monitor, &mut puller),
+                    || tracked_cycle(&monitor, &mut puller, &driver, owner, &options),
                     step,
                     &options,
                     period.unwrap(),
@@ -1647,13 +2087,22 @@ fn main() -> ExitCode {
                 // pulls — the serving peer could not track this one
                 // back anyway, since a monitorless standby serves no
                 // checkpoint endpoint.
-                let mut puller = CheckpointPuller::for_target(target.clone(), None, None);
+                //
+                // The puller is rebuilt on demand rather than held for
+                // the run's life: a run that owns the field drops it, so
+                // a checkpoint fetched before it took the field cannot
+                // land after it, and the first demoted cycle binds a
+                // fresh one.
+                let mut puller: Option<CheckpointPuller> = None;
                 let peer = std::cell::RefCell::new(peer);
                 let state_sink = open_state_sink(&options);
                 let step = || driver.step(dt, peer.borrow().owns_field());
                 scan_loop(
                     || {
                         let mut peer = peer.borrow_mut();
+                        if peer.owns_field() {
+                            puller = None;
+                        }
                         // The same tracking cycle the monitored loop
                         // runs through `track_cycle`, here directly on
                         // the peer; without a recorder the transition
@@ -1661,100 +2110,108 @@ fn main() -> ExitCode {
                         // consumes the fetch worker's latest result —
                         // the network wait itself runs off the scan
                         // cycle's critical path.
-                        let report = peer.track_once(|| puller.poll());
+                        let report = peer.track_once(|| {
+                            puller
+                                .get_or_insert_with(|| {
+                                    CheckpointPuller::for_target(target.clone(), None, None)
+                                })
+                                .poll()
+                        });
                         report_tracking(&report, &target);
-                        for divergence in peer.take_divergences() {
-                            eprintln!(
-                                "standby: staged outputs diverged from the field at tick {}: {:?}",
-                                divergence.tick.0, divergence.mismatches
-                            );
-                        }
-                        for resolution in peer.take_resolutions() {
-                            eprintln!(
-                                "standby: divergence resolved at tick {} — compared {:?}",
-                                resolution.tick.0, resolution.compared
-                            );
-                        }
-                        for reinitialized in peer.take_reinitializations() {
-                            eprintln!("standby: {reinitialized}");
-                        }
-                        for orphan in peer.take_orphans() {
-                            eprintln!(
-                                "standby: the tracked line has no field owner — orphaned at tick {} (aligned to {})",
-                                orphan.tick.0, orphan.aligned.0
-                            );
-                        }
-                        for observation in peer.take_claim_observations() {
-                            eprintln!(
-                                "standby: field write-ownership claim observed standing under foreign owner token {} at tick {} (point {:?})",
-                                observation.claimant, observation.tick.0, observation.point
-                            );
-                        }
-                        for restart in peer.take_source_restarts() {
-                            eprintln!(
-                                "standby: checkpoint stream regressed at tick {} — the source restarted or was replaced; resumed from its tick {} (was aligned to {:?})",
-                                restart.tick.0,
-                                restart.resumed_at.0,
-                                restart.was_aligned.map(|tick| tick.0)
-                            );
-                        }
-                        for refusal in peer.take_promotion_refusals() {
-                            eprintln!(
-                                "standby: armed self-promotion refused at tick {} (misses {}) — {}; the gate stays armed while convergence stands",
-                                refusal.tick.0, refusal.misses, refusal.error
-                            );
-                        }
-                        for change in peer.take_role_changes() {
-                            eprintln!(
-                                "standby: role {} -> {} at tick {}",
-                                change.from, change.to, change.tick.0
-                            );
-                        }
-                        for (_index, receipt) in peer.take_superseded_commands() {
-                            eprintln!(
-                                "standby: pending command superseded at tick {}: {:?}",
-                                peer.tick().0,
-                                receipt.command
-                            );
-                        }
-                        for receipt in peer.take_adoption_receipts() {
-                            eprintln!(
-                                "standby: checkpoint adoption changed receipted state at tick {}: {:?} (actor {:?})",
-                                peer.tick().0,
-                                receipt.command,
-                                receipt.actor
-                            );
+                        // Without a recorder the transition queues
+                        // drain into the log instead. One drain, one
+                        // match: the tracking cycle's whole account, in
+                        // the producer's category order — the order this
+                        // loop logged them in by hand.
+                        let tick = peer.tick();
+                        for event in peer.drain_pending() {
+                            match event {
+                                PeerEvent::Divergence(divergence) => eprintln!(
+                                    "standby: staged outputs diverged from the field at tick {}: {:?}",
+                                    divergence.tick.0, divergence.mismatches
+                                ),
+                                PeerEvent::Resolution(resolution) => eprintln!(
+                                    "standby: divergence resolved at tick {} — compared {:?}",
+                                    resolution.tick.0, resolution.compared
+                                ),
+                                PeerEvent::Reinitialization(reinitialized) => {
+                                    eprintln!("standby: {reinitialized}");
+                                }
+                                PeerEvent::Orphan(orphan) => eprintln!(
+                                    "standby: the tracked line has no field owner — orphaned at tick {} (aligned to {})",
+                                    orphan.tick.0, orphan.aligned.0
+                                ),
+                                PeerEvent::ClaimRearm(rearm) => eprintln!(
+                                    "standby: field write-ownership claim re-armed under this run's token at tick {} (point {:?})",
+                                    rearm.tick.0, rearm.point
+                                ),
+                                PeerEvent::ClaimObservation(observation) => eprintln!(
+                                    "standby: field write-ownership claim observed standing under foreign owner token {} at tick {} (point {:?})",
+                                    observation.claimant, observation.tick.0, observation.point
+                                ),
+                                PeerEvent::SourceRestart(restart) => eprintln!(
+                                    "standby: checkpoint stream regressed at tick {} — the source restarted or was replaced; resumed from its tick {} (was aligned to {:?})",
+                                    restart.tick.0,
+                                    restart.resumed_at.0,
+                                    restart.was_aligned.map(|tick| tick.0)
+                                ),
+                                PeerEvent::PromotionRefusal(refusal) => eprintln!(
+                                    "standby: armed self-promotion refused at tick {} (misses {}) — {}; the gate stays armed while convergence stands",
+                                    refusal.tick.0, refusal.misses, refusal.error
+                                ),
+                                PeerEvent::RoleChange(change) => eprintln!(
+                                    "standby: role {} -> {} at tick {}",
+                                    change.from, change.to, change.tick.0
+                                ),
+                                PeerEvent::SupersededCommand { receipt, .. } => eprintln!(
+                                    "standby: pending command superseded at tick {}: {:?}",
+                                    tick.0, receipt.command
+                                ),
+                                PeerEvent::AdoptionReceipt(receipt) => eprintln!(
+                                    "standby: checkpoint adoption changed receipted state at tick {}: {:?} (actor {:?})",
+                                    tick.0, receipt.command, receipt.actor
+                                ),
+                                PeerEvent::FencingLoss(_) | PeerEvent::StartupRefusal(_) => {}
+                            }
                         }
                         let scanned = peer.scan();
                         // Transitions the scan itself produced — a
                         // fenced write's claim loss and the demotion it
                         // drove — log at the boundary they happened,
                         // not a cycle late.
-                        for change in peer.take_role_changes() {
-                            eprintln!(
-                                "standby: role {} -> {} at tick {}",
-                                change.from, change.to, change.tick.0
-                            );
-                        }
-                        for loss in peer.take_fencing_losses() {
-                            match loss.claimant {
-                                Some(claimant) => eprintln!(
-                                    "standby: field write-ownership claim lost at tick {}: {:?} fenced, preempted by owner token {claimant}",
-                                    loss.tick.0, loss.point
+                        for event in peer.drain_pending() {
+                            match event {
+                                PeerEvent::RoleChange(change) => eprintln!(
+                                    "standby: role {} -> {} at tick {}",
+                                    change.from, change.to, change.tick.0
                                 ),
-                                None => eprintln!(
-                                    "standby: field write-ownership claim lost at tick {}: {:?} fenced",
-                                    loss.tick.0, loss.point
+                                PeerEvent::FencingLoss(loss) => match loss.claimant {
+                                    Some(claimant) => eprintln!(
+                                        "standby: field write-ownership claim lost at tick {}: {:?} fenced, preempted by owner token {claimant}",
+                                        loss.tick.0, loss.point
+                                    ),
+                                    None => eprintln!(
+                                        "standby: field write-ownership claim lost at tick {}: {:?} fenced",
+                                        loss.tick.0, loss.point
+                                    ),
+                                },
+                                PeerEvent::ClaimObservation(observation) => eprintln!(
+                                    "standby: field write-ownership claim observed standing under foreign owner token {} at tick {} (point {:?})",
+                                    observation.claimant, observation.tick.0, observation.point
                                 ),
+                                PeerEvent::Divergence(_)
+                                | PeerEvent::Resolution(_)
+                                | PeerEvent::Reinitialization(_)
+                                | PeerEvent::Orphan(_)
+                                | PeerEvent::ClaimRearm(_)
+                                | PeerEvent::StartupRefusal(_)
+                                | PeerEvent::SourceRestart(_)
+                                | PeerEvent::PromotionRefusal(_)
+                                | PeerEvent::SupersededCommand { .. }
+                                | PeerEvent::AdoptionReceipt(_) => {}
                             }
                         }
-                        for observation in peer.take_claim_observations() {
-                            eprintln!(
-                                "standby: field write-ownership claim observed standing under foreign owner token {} at tick {} (point {:?})",
-                                observation.claimant, observation.tick.0, observation.point
-                            );
-                        }
-                        scanned
+                        Ok(scanned)
                     },
                     || peer.borrow().snapshot(),
                     || persist_state_file(&state_sink, &peer),
@@ -1809,13 +2266,16 @@ fn main() -> ExitCode {
                 // the monitor bound, and the tracking source resolved
                 // or deferred, so a startup that failed earlier left
                 // no stale claim fencing the field's standing owner.
-                // The grant preempts a dead owner's claim but refuses
-                // a live incumbent's — a refused grant is a named
-                // startup failure, not an unfenced run.
-                if let Err(error) = monitor.activate() {
-                    return fail(format!("{error}"));
+                // Every ask it answers settles under the born-active
+                // contract — the grant owns the field, an inconclusive
+                // ask stands pending and retries, a refusal rejoins
+                // the declared pair or exits.
+                let activation = monitor.activate();
+                if let Err(error) =
+                    settle_activation(activation, &driver, owner, options.peer.is_some())
+                {
+                    return fail(error);
                 }
-                report_claim(&driver, owner);
                 // Announce the bound address — with a port of 0 this is the
                 // only way to learn where the monitor listens. Stderr keeps
                 // stdout a pure snapshot stream.
@@ -1829,7 +2289,7 @@ fn main() -> ExitCode {
                 let mut puller = None;
                 run_monitored(
                     &monitor,
-                    || tracked_cycle(&monitor, &mut puller),
+                    || tracked_cycle(&monitor, &mut puller, &driver, owner, &options),
                     step,
                     &options,
                     period.unwrap(),
@@ -1840,13 +2300,18 @@ fn main() -> ExitCode {
                 // conditional-grant sequence the monitored paths defer
                 // to their last startup step: nothing fallible stands
                 // between here and the scan loop, so the claim runs
-                // only now that startup can no longer abort — and a
-                // live incumbent's claim refuses it rather than being
-                // preempted by a stale restart.
-                if let Err(error) = peer.activate() {
-                    return fail(format!("{error}"));
+                // only now that startup can no longer abort. Every ask
+                // it answers settles under the born-active contract —
+                // the grant owns the field, an inconclusive ask stands
+                // pending and retries, a refusal exits: no monitor is
+                // served to rejoin a pair through, and `--peer`
+                // requires `--listen`, so none was declared.
+                let activation = peer.activate();
+                if let Err(error) =
+                    settle_activation(activation, &driver, owner, options.peer.is_some())
+                {
+                    return fail(error);
                 }
-                report_claim(&driver, owner);
                 // The RefCell lets the two loop closures share the peer;
                 // the loop is single-threaded, so the borrows never
                 // overlap. No monitor means no *operator* demotion
@@ -1861,31 +2326,60 @@ fn main() -> ExitCode {
                     || {
                         let mut peer = peer.borrow_mut();
                         let scanned = peer.scan();
-                        for loss in peer.take_fencing_losses() {
-                            match loss.claimant {
-                                Some(claimant) => eprintln!(
-                                    "field write-ownership claim lost at tick {}: {:?} fenced, preempted by owner token {claimant}",
-                                    loss.tick.0, loss.point
+                        // One drain, one match: the scan's whole
+                        // account — the fenced write's claim loss and
+                        // the demotion it drove, the foreign owner the
+                        // reclaim probe met, and the reported role walk
+                        // — in the producer's category order.
+                        for event in peer.drain_pending() {
+                            match event {
+                                PeerEvent::FencingLoss(loss) => match loss.claimant {
+                                    Some(claimant) => eprintln!(
+                                        "field write-ownership claim lost at tick {}: {:?} fenced, preempted by owner token {claimant}",
+                                        loss.tick.0, loss.point
+                                    ),
+                                    None => eprintln!(
+                                        "field write-ownership claim lost at tick {}: {:?} fenced",
+                                        loss.tick.0, loss.point
+                                    ),
+                                },
+                                PeerEvent::ClaimObservation(observation) => eprintln!(
+                                    "field write-ownership claim observed standing under foreign owner token {} at tick {} (point {:?})",
+                                    observation.claimant, observation.tick.0, observation.point
                                 ),
-                                None => eprintln!(
-                                    "field write-ownership claim lost at tick {}: {:?} fenced",
-                                    loss.tick.0, loss.point
+                                PeerEvent::RoleChange(change) => eprintln!(
+                                    "role {} -> {} at tick {}",
+                                    change.from, change.to, change.tick.0
                                 ),
+                                PeerEvent::Divergence(_)
+                                | PeerEvent::Resolution(_)
+                                | PeerEvent::Reinitialization(_)
+                                | PeerEvent::Orphan(_)
+                                | PeerEvent::ClaimRearm(_)
+                                | PeerEvent::StartupRefusal(_)
+                                | PeerEvent::SourceRestart(_)
+                                | PeerEvent::PromotionRefusal(_)
+                                | PeerEvent::SupersededCommand { .. }
+                                | PeerEvent::AdoptionReceipt(_) => {}
                             }
                         }
-                        for observation in peer.take_claim_observations() {
-                            eprintln!(
-                                "field write-ownership claim observed standing under foreign owner token {} at tick {} (point {:?})",
-                                observation.claimant, observation.tick.0, observation.point
-                            );
+                        // A deferred startup-claim refusal settling
+                        // inside this scan is the born-active
+                        // contract's `Refused` verdict arriving
+                        // mid-run — settled exactly as the
+                        // activation-time answer was: no monitor is
+                        // served and `--peer` requires `--listen`, so
+                        // none was declared and the refusal ends the
+                        // launch.
+                        if let Some(error) = peer.drain_startup_refusal() {
+                            settle_activation(
+                                Ok(Activation::Refused { error }),
+                                &driver,
+                                owner,
+                                options.peer.is_some(),
+                            )?;
                         }
-                        for change in peer.take_role_changes() {
-                            eprintln!(
-                                "role {} -> {} at tick {}",
-                                change.from, change.to, change.tick.0
-                            );
-                        }
-                        scanned
+                        Ok(scanned)
                     },
                     || peer.borrow().snapshot(),
                     || persist_state_file(&state_sink, &peer),
@@ -1924,30 +2418,68 @@ fn main() -> ExitCode {
 /// unreachable peer's do, and the next successful resolution tracks
 /// again without a respawn. A
 /// field-owning cycle's [`Monitor::track_cycle`] short-circuits before
-/// the pull, so the puller's fetch thread idles until a demotion.
+/// the pull, and the cycle drops the puller with the ownership, so a
+/// checkpoint fetched before this run took the field cannot land after
+/// it; the first demoted cycle binds a fresh one.
+///
+/// The scan's completion can settle the deferred startup grant: a
+/// pending born-active's re-issued conditional ask meeting a live
+/// incumbent's refusal lands the verdict inside `paced_scan` — the
+/// born-active contract's `Refused` arriving mid-run, where no
+/// activation result remains to carry it to the shell. The latch
+/// drains here for the identical disposition the activation-time
+/// answer took: a declared pair keeps the run standing as its rejoined
+/// standby, while a run launched without one has nothing to rejoin —
+/// the cycle fails and the scan loop ends the launch the verdict
+/// refused, exactly as the boot-time answer would.
 fn tracked_cycle(
     monitor: &Monitor<'_>,
     puller: &mut Option<(TrackTarget, CheckpointPuller)>,
-) -> Tick {
+    driver: &Driver,
+    owner: u64,
+    options: &Options,
+) -> Result<Tick, String> {
+    let owns_field = monitor.owns_field();
     if let Some(source) = monitor.verified_tracking_source() {
-        if puller.as_ref().map(|(bound, _)| bound) != Some(&source) {
-            let announce = Some(monitor.local_addr());
-            // A source a keyed run adopted through an announced
-            // demotion must keep proving every checkpoint it serves —
-            // an endpoint that only replays or fabricates this line's
-            // documents feeds the demoted peer nothing. A configured
-            // source — or an unkeyed run — pulls unproven, as before.
-            let fresh = CheckpointPuller::for_target(
-                source.clone(),
-                announce,
-                monitor.pull_proof_key(&source),
-            );
-            *puller = Some((source.clone(), fresh));
+        if owns_field {
+            // A run that owns the field pulls nothing, and this is the
+            // boundary where the puller's answers stop being applicable:
+            // a checkpoint fetched before this run took the field must
+            // not land after it, rewinding the run to a tick it already
+            // passed. The puller goes with the ownership — its worker
+            // thread ends there, and the first demoted cycle binds a
+            // fresh one holding no answer from before the promotion.
+            *puller = None;
+        } else {
+            if puller.as_ref().map(|(bound, _)| bound) != Some(&source) {
+                let announce = Some(monitor.local_addr());
+                // A source a keyed run adopted through an announced
+                // demotion must keep proving every checkpoint it serves
+                // — an endpoint that only replays or fabricates this
+                // line's documents feeds the demoted peer nothing. A
+                // configured source — or an unkeyed run — pulls
+                // unproven, as before.
+                let fresh = CheckpointPuller::for_target(
+                    source.clone(),
+                    announce,
+                    monitor.pull_proof_key(&source),
+                );
+                *puller = Some((source.clone(), fresh));
+            }
+            let report = monitor.track_cycle(|| puller.as_mut().unwrap().1.poll());
+            report_tracking(&report, &source);
         }
-        let report = monitor.track_cycle(|| puller.as_mut().unwrap().1.poll());
-        report_tracking(&report, &source);
     }
-    monitor.paced_scan()
+    let tick = monitor.paced_scan();
+    if let Some(error) = monitor.drain_startup_refusal() {
+        settle_activation(
+            Ok(Activation::Refused { error }),
+            driver,
+            owner,
+            options.peer.is_some(),
+        )?;
+    }
+    Ok(tick)
 }
 
 /// The standby loop's presentation half of a tracking cycle: logs what
@@ -1988,7 +2520,7 @@ fn report_tracking(report: &TrackReport, source: &TrackTarget) {
 /// the run ends and the scope join completes the graceful close.
 fn run_monitored(
     monitor: &Monitor<'_>,
-    scan: impl FnMut() -> Tick,
+    scan: impl FnMut() -> Result<Tick, String>,
     step: impl Fn() -> Result<(), String>,
     options: &Options,
     period: Duration,
@@ -2219,7 +2751,7 @@ impl SnapshotSink {
 /// wall-clock overrun detection stays out here in the shell and only a
 /// count, not a timestamp, enters the tick domain.
 fn scan_loop(
-    mut scan: impl FnMut() -> Tick,
+    mut scan: impl FnMut() -> Result<Tick, String>,
     snapshot: impl Fn() -> TelemetrySnapshot,
     persist: impl Fn() -> Result<(), String>,
     step: impl Fn() -> Result<(), String>,
@@ -2240,7 +2772,13 @@ fn scan_loop(
         .then(|| SnapshotSink::start(std::io::stdout()));
     loop {
         let started = Instant::now();
-        scan();
+        // A scan cycle can settle a verdict the launch could not have
+        // answered — the deferred startup grant's refusal landing
+        // mid-run ends a pairless run exactly as the activation-time
+        // answer does.
+        if let Err(error) = scan() {
+            return fail(error);
+        }
         if let Err(error) = step() {
             return fail(error);
         }
@@ -2357,6 +2895,146 @@ mod tests {
         while !condition() {
             assert!(started.elapsed() < deadline, "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Finding `state-file-alias-clobbers-append-durable-files`: the
+    /// three persistence paths must be distinct — an aliased
+    /// `--state-file` passed every validation, then the checkpoint's
+    /// write-then-rename orphaned the append writer's descriptor, the
+    /// durable record landing on an unreachable inode while the
+    /// restart's strict replay refused the checkpoint document it
+    /// found. `Options::parse` refuses every aliased pair naming both
+    /// flags, and catches spellings that differ textually yet name
+    /// one file.
+    #[test]
+    fn aliased_persistence_paths_fail_option_parsing() {
+        let dir = std::env::temp_dir().join(format!("dcs-options-alias-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shared = dir.join("shared");
+        let base = [
+            "model.json".to_string(),
+            "--scan-ms".to_string(),
+            "100".to_string(),
+            "--listen".to_string(),
+            "127.0.0.1:0".to_string(),
+        ];
+
+        for (first, second) in [
+            ("--state-file", "--journal-file"),
+            ("--state-file", "--history-file"),
+            ("--journal-file", "--history-file"),
+        ] {
+            let args = base.iter().cloned().chain([
+                first.to_string(),
+                shared.to_str().unwrap().to_string(),
+                second.to_string(),
+                shared.to_str().unwrap().to_string(),
+            ]);
+            let error = match Options::parse(args) {
+                Ok(_) => panic!("{first} aliased with {second} must fail parsing"),
+                Err(error) => error,
+            };
+            assert!(
+                error.contains(first) && error.contains(second) && error.contains("distinct paths"),
+                "{first} and {second}: {error}"
+            );
+        }
+
+        // A `..` detour spelling the same file is the same file —
+        // the check compares resolved paths, not flag strings.
+        let detour = dir.join("sub").join("..").join("shared");
+        let args = base.iter().cloned().chain([
+            "--state-file".to_string(),
+            detour.to_str().unwrap().to_string(),
+            "--history-file".to_string(),
+            shared.to_str().unwrap().to_string(),
+        ]);
+        match Options::parse(args) {
+            Ok(_) => panic!("a `..` detour to the same file must fail parsing"),
+            Err(error) => assert!(error.contains("distinct paths"), "{error}"),
+        }
+
+        // Distinct paths parse.
+        let args = base.iter().cloned().chain([
+            "--state-file".to_string(),
+            dir.join("state.json").to_str().unwrap().to_string(),
+            "--journal-file".to_string(),
+            dir.join("journal.jsonl").to_str().unwrap().to_string(),
+            "--history-file".to_string(),
+            dir.join("history.jsonl").to_str().unwrap().to_string(),
+        ]);
+        Options::parse(args).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Finding `self-tracking-standby-never-refused`: a `--standby` or
+    /// `--peer` target resolving to this instance's own `--listen`
+    /// socket pulled its own checkpoint stream — every apply scoring
+    /// the heartbeat miss a standby's `source_owns_field:false`
+    /// document always carries — so the unarmed run reported standby
+    /// covering no peer forever, and the armed one self-promoted
+    /// against itself at every budget. `Options::parse` refuses the
+    /// self-addressed source naming both flags, under every spelling
+    /// that reaches the own socket.
+    #[test]
+    fn self_addressed_tracking_source_fails_option_parsing() {
+        let base = [
+            "model.json".to_string(),
+            "--scan-ms".to_string(),
+            "100".to_string(),
+        ];
+        let parse = |listen: &str, flag: &str, target: &str| {
+            Options::parse(base.iter().cloned().chain([
+                "--listen".to_string(),
+                listen.to_string(),
+                flag.to_string(),
+                target.to_string(),
+            ]))
+        };
+
+        for (flag, listen, target) in [
+            // The reported spelling: a wildcard listen, a loopback
+            // target.
+            ("--standby", "0.0.0.0:28080", "127.0.0.1:28080"),
+            // The identical spelling.
+            ("--standby", "127.0.0.1:28081", "127.0.0.1:28081"),
+            // A resolved-equal name.
+            ("--standby", "127.0.0.1:28082", "localhost:28082"),
+            // A wildcard target dials into the loopback listener.
+            ("--standby", "127.0.0.1:28083", "0.0.0.0:28083"),
+            // A wildcard listener answers a dial to any local address
+            // on the port — the IPv6 wildcard included.
+            ("--standby", "[::]:28084", "127.0.0.1:28084"),
+            // The demotion-tracking flag refuses the same way.
+            ("--peer", "0.0.0.0:28085", "127.0.0.1:28085"),
+            ("--peer", "127.0.0.1:28086", "localhost:28086"),
+        ] {
+            let error = match parse(listen, flag, target) {
+                Ok(_) => {
+                    panic!("{flag} {target} against --listen {listen} must fail parsing")
+                }
+                Err(error) => error,
+            };
+            assert!(
+                error.contains(flag) && error.contains("--listen"),
+                "{flag} {target} against --listen {listen}: {error}"
+            );
+        }
+
+        // The supported deployments still parse: a same-host pair is a
+        // different port on the same address, a remote peer a
+        // non-local one — and the wildcard spellings are one-sided.
+        for (flag, listen, target) in [
+            ("--standby", "0.0.0.0:28080", "127.0.0.1:28087"),
+            ("--standby", "127.0.0.1:28080", "127.0.0.1:28087"),
+            ("--peer", "127.0.0.1:28080", "127.0.0.1:28087"),
+            ("--standby", "0.0.0.0:28080", "192.0.2.1:28080"),
+            ("--standby", "127.0.0.1:28080", "0.0.0.0:28087"),
+        ] {
+            if let Err(error) = parse(listen, flag, target) {
+                panic!("{flag} {target} against --listen {listen} must parse: {error}");
+            }
         }
     }
 

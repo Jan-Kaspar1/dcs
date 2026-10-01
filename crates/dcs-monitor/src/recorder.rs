@@ -45,13 +45,13 @@ use dcs_core::{
     TickAnchor, Value,
 };
 use dcs_runtime::{
-    ClaimObservation, Executor, OrphanReport, PromotionRefusal, ResolutionReport, RoleChange,
-    SourceRestart,
+    ClaimObservation, ClaimRearm, Executor, OrphanReport, PromotionRefusal, ResolutionReport,
+    RoleChange, SourceRestart, StartupRefusal,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Retention bounds for a [`Monitor`](crate::Monitor)'s recorded and
 /// published streams, plus the journal's optional durable sink.
@@ -184,6 +184,111 @@ impl Default for MonitorConfig {
             state_drain_capacity: crate::state_file::DEFAULT_STATE_DRAIN_CAPACITY,
         }
     }
+}
+
+impl MonitorConfig {
+    /// Refuses a config naming one file for two of the three
+    /// persistence sinks — the same refusal the controller's option
+    /// parse applies to its flags, held at the bind so a
+    /// programmatically assembled `MonitorConfig` cannot build the
+    /// misconfiguration either. The append sinks' single-writer
+    /// advisory lock cannot cover the state sink: its checkpoint
+    /// lands by write-then-rename, so an aliased path detaches the
+    /// append writer's descriptor from the path — the durable record
+    /// landing on an orphaned inode while the visible file reads as
+    /// checkpoint JSON the next startup's strict replay refuses
+    /// (finding state-file-alias-clobbers-append-durable-files). The
+    /// journal/history alias already fails closed at the file lock
+    /// when the second sink opens; naming every pair here fails the
+    /// bind before any sink opens.
+    pub(crate) fn check_persistence_paths(&self) -> io::Result<()> {
+        let configured = [
+            ("state_file", self.state_file.as_deref()),
+            ("journal_file", self.journal_file.as_deref()),
+            ("history_file", self.history_file.as_deref()),
+        ];
+        for (index, (field, path)) in configured.iter().enumerate() {
+            let Some(path) = *path else { continue };
+            for (other_field, other_path) in &configured[index + 1..] {
+                let Some(other_path) = *other_path else {
+                    continue;
+                };
+                if same_persistence_file(path, other_path) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "monitor persistence paths must be distinct files: \
+                             {field} and {other_field} both name {} — the \
+                             checkpoint's write-then-rename orphans an append \
+                             writer's descriptor, diverting its durable record \
+                             onto an unreachable inode",
+                            path.display()
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether two configured persistence paths name the same file —
+/// resolved through [`resolve_persistence_file`] so spellings that
+/// differ textually yet land on one file still compare equal.
+fn same_persistence_file(a: &Path, b: &Path) -> bool {
+    resolve_persistence_file(a) == resolve_persistence_file(b)
+}
+
+/// The identity the persistence-path distinctness check compares: the
+/// filesystem's canonical answer for the deepest prefix of `path`
+/// that resolves — catching spellings that differ textually yet name
+/// one file (`./x` beside `x`, a `..` detour, a path through a
+/// symlinked directory) — with the not-yet-existing tail reattached
+/// and its `.`/`..` components folded, so equal spellings still
+/// compare equal before a cold start creates the file.
+fn resolve_persistence_file(path: &Path) -> PathBuf {
+    // Canonicalize the deepest existing ancestor — an absolute path
+    // always bottoms out at the root — then reattach the missing
+    // tail. A relative path no ancestor of which resolves folds into
+    // the working directory textually.
+    let mut tail = Vec::new();
+    let mut cursor = path;
+    let mut resolved = loop {
+        if let Ok(resolved) = std::fs::canonicalize(cursor) {
+            break resolved;
+        }
+        match cursor.components().next_back() {
+            Some(std::path::Component::Normal(name)) => tail.push(name.to_os_string()),
+            Some(std::path::Component::ParentDir) => tail.push("..".into()),
+            _ => {
+                return fold_components(
+                    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
+                );
+            }
+        }
+        cursor = cursor.parent().unwrap_or_else(|| Path::new(""));
+    };
+    for component in tail.iter().rev() {
+        resolved.push(component);
+    }
+    fold_components(resolved)
+}
+
+/// `path` with `.` components dropped and each `..` collapsing the
+/// component before it — the textual half of the path identity the
+/// distinctness check compares.
+fn fold_components(path: PathBuf) -> PathBuf {
+    let mut folded = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                folded.pop();
+            }
+            component => folded.push(component),
+        }
+    }
+    folded
 }
 
 /// Records bounded per-point history and the transition journal, one scan
@@ -657,6 +762,38 @@ impl Recorder {
         );
     }
 
+    /// Journals a startup-grant refusal — the born-active's conditional
+    /// ask met a live incumbent's claim — attributed to the tick the
+    /// verdict landed on and carrying the named `FieldClaimFailed`. The
+    /// verdict answers at activation or at a pending run's first
+    /// answered field contact; either timing queues the same record,
+    /// so the journal names the refused settle whether the run's shell
+    /// saw it — the driven run's shell never does, making this entry
+    /// the only durable trace that the pending state's settle happened.
+    /// One entry per refused startup grant: the ask never re-issues
+    /// after a verdict.
+    pub(super) fn note_startup_claim_refused(&mut self, refusal: StartupRefusal) {
+        self.push(
+            refusal.tick,
+            JournalEvent::StartupClaimRefused {
+                error: refusal.error,
+            },
+        );
+    }
+
+    /// Journals a landed orphan-cycle re-arm — the conditional ensure
+    /// probe took the field's write-ownership claim back under this
+    /// run's recorded token while the tracked line reported no owner —
+    /// attributed to the run tick the grant landed at, `point` naming
+    /// the field point the claim domain arbitrates through. One entry
+    /// per landing: a standing re-arm's confirming probes journal once.
+    pub(super) fn note_claim_rearmed(&mut self, rearm: ClaimRearm) {
+        self.push(
+            rearm.tick,
+            JournalEvent::FieldClaimRearmed { point: rearm.point },
+        );
+    }
+
     /// Journals an orphan detection — a tracking peer's applied
     /// checkpoint stamped its serving run as owning no field writes,
     /// the mutual-standby wedge — attributed to the tick the orphaned
@@ -712,6 +849,23 @@ impl Recorder {
     /// demotion moved the run onto.
     pub(super) fn note_tracking_source(&mut self, tick: Tick, source: SocketAddr) {
         self.push(tick, JournalEvent::TrackingSourceAdopted { source });
+    }
+
+    /// Journals a refused tracking-source probe — a successor
+    /// candidate's served checkpoint failed the line-membership
+    /// verification — attributed to the run tick the probe ran at and
+    /// naming both the endpoint and the named refusal, so a strand on
+    /// a persistently refusing source is durable audit rather than
+    /// journal silence. Callers dedup per (source, reason) signature —
+    /// the bound on how often one standing refusal journals lives in
+    /// `Monitor::note_source_refusal`, not here.
+    pub(super) fn note_tracking_source_refused(
+        &mut self,
+        tick: Tick,
+        source: SocketAddr,
+        detail: String,
+    ) {
+        self.push(tick, JournalEvent::TrackingSourceRefused { source, detail });
     }
 
     /// Marks the executor's standing state already observed — the

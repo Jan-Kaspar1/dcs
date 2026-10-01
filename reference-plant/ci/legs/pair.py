@@ -9,9 +9,10 @@ definition. This leg runs the declared pair on the released tooling:
 `dcs-plant-server` serves the checked-in model and dynamics while the
 manifest's two controllers run `dcs-controller --driven --remote`, the
 tracking peer's `--standby` flag wired at the controller the manifest
-names and each controller's declared `--state-file`/`--journal-file`
-carried at runner-owned scratch paths — the persistence vocabulary's
-first behavioral, not merely static, exercise. The run:
+names and each controller's declared
+`--state-file`/`--journal-file`/`--history-file` carried at
+runner-owned scratch paths — the persistence vocabulary's first
+behavioral, not merely static, exercise. The run:
 
 - converges the declared standby to `tracking`: each driven tick scans
   the tracking peer first — its `POST /scan` pulling and applying the
@@ -224,6 +225,7 @@ def spawn_peer(
     for field, flag in (
         ("state_file", "--state-file"),
         ("journal_file", "--journal-file"),
+        ("history_file", "--history-file"),
     ):
         if files.get(field) is not None:
             argv += [flag, files[field]]
@@ -408,7 +410,7 @@ def persistence_files(scratch, entry):
         field: os.path.join(root, os.path.basename(entry[field]))
         if entry.get(field)
         else None
-        for field in ("state_file", "journal_file")
+        for field in ("state_file", "journal_file", "history_file")
     }
 
 
@@ -511,14 +513,18 @@ class PairRig:
         latest checkpoint and the peers rest at the same tick with
         identical images — then the role reports, the standby expected
         `tracking` and the field owner `active`. Returns the converge
-        record: `ticks`, the final `owner` snapshot, and both role
+        record: `ticks` (the field owner's), `tracked_ticks` (the
+        tracking peer's own scan ticks — the axis its own recorders
+        attribute to), the final `owner` snapshot, and both role
         reports."""
         ticks = []
+        tracked_ticks = []
         for _ in range(count):
-            _tracked, owner = self.tick(
+            tracked, owner = self.tick(
                 self.standby_url, self.duty_url, failures
             )
             ticks.append(owner["tick"])
+            tracked_ticks.append(tracked["tick"])
         standby_role = get(f"{self.standby_url}/role", "GET /role", failures)
         duty_role = get(f"{self.duty_url}/role", "GET /role", failures)
         sync = standby_role.get("sync")
@@ -538,6 +544,7 @@ class PairRig:
             raise Abort
         return {
             "ticks": ticks,
+            "tracked_ticks": tracked_ticks,
             "owner": owner,
             "duty_role": duty_role,
             "standby_role": standby_role,

@@ -277,6 +277,41 @@ pub enum JournalEvent {
         /// the field's arbitration answered the refusal with.
         claimant: u64,
     },
+    /// The pending born-active's deferred conditional grant met the
+    /// field's refusal — the verdict the boot-time ask would have
+    /// answered at activation, landing instead at the first answered
+    /// field contact of a run that launched pending on a silent
+    /// field. The born-active contract disposes of it identically
+    /// whichever way it arrived — rejoin the declared pair, exit
+    /// where none was declared — and this entry is the durable record
+    /// that the settle happened at all: the
+    /// [`FieldClaimObserved`](Self::FieldClaimObserved) beside it
+    /// attributes *who* refused, this one records that the launch's
+    /// pending state ended under a refusal verdict rather than
+    /// standing on forever. One entry per refused startup grant — the
+    /// ask never re-issues after a verdict — attributed to the scan
+    /// tick the answer landed on.
+    StartupClaimRefused {
+        /// The named refusal the grant met.
+        error: SwitchError,
+    },
+    /// The orphan cycle's conditional ensure probe landed the field's
+    /// write-ownership claim under this run's recorded token — the
+    /// re-arm a demoted ex-owner whose ownership the field took
+    /// asserts while the tracked line reports no owner, granted only
+    /// where the field stood unclaimed or already named the token.
+    /// The durable record of who re-took the claim: the orphan
+    /// transition journals the detection, this entry attributes the
+    /// re-arm it produced — one entry per landing, not one per probe,
+    /// so a standing re-arm journals once however many orphaned pulls
+    /// confirm it. A peer whose own voluntary demotion released the
+    /// claim never lands this probe — the handed-back field belongs
+    /// to the successor's conditional paths, and the yield is what
+    /// they preempt.
+    FieldClaimRearmed {
+        /// The field point the claim domain arbitrates through.
+        point: PointId,
+    },
     /// A tracking peer's applied checkpoint stamped its serving run as
     /// not owning field writes — the checkpoint's `source_owns_field`
     /// stamp — meaning the tracked line has no field owner: the
@@ -285,11 +320,15 @@ pub enum JournalEvent {
     /// to [`StandbySync::Orphaned`](crate::StandbySync) and a peer that
     /// once owned the field re-arms its claim conditionally — granted
     /// only while the field is unclaimed or already names its own
-    /// token, never preempting a standing owner. One entry journals per
-    /// transition into the orphaned state, attributed to the tick the
-    /// orphaned apply landed at; `aligned` carries the applied
-    /// checkpoint's own tick — where the tracked line stood when the
-    /// observation landed.
+    /// token, never preempting a standing owner — unless its own
+    /// voluntary demotion is what released it: the handed-back claim
+    /// is the successor's to take, and the suppressed probe leaves it
+    /// to them. One entry journals per transition into the orphaned
+    /// state, attributed to the tick the orphaned apply landed at;
+    /// `aligned` carries the applied checkpoint's own tick — where the
+    /// tracked line stood when the observation landed. A re-arm the
+    /// cycle actually lands journals as
+    /// [`FieldClaimRearmed`](Self::FieldClaimRearmed) beside it.
     FieldOrphaned {
         /// The applied checkpoint's tick — the tracked line's position.
         aligned: Tick,
@@ -305,6 +344,21 @@ pub enum JournalEvent {
     TrackingSourceAdopted {
         /// The adopted tracking source's monitor address.
         source: SocketAddr,
+    },
+    /// A tracking-source resolution probed an endpoint and refused the
+    /// document it served — the field-arbitrated claimed monitor, an
+    /// orphan-resolution `line_owner`, or a verified announced hint —
+    /// so the strand a refused source would otherwise leave is durable
+    /// audit rather than silence: the entry names the endpoint and the
+    /// named verification refusal. One entry journals per distinct
+    /// (source, reason) signature per tracking epoch — the dedup set
+    /// clears when a source adoption lands, so a persistent refusal
+    /// neither floods the journal nor vanishes from it.
+    TrackingSourceRefused {
+        /// The endpoint whose served checkpoint was refused.
+        source: SocketAddr,
+        /// The named refusal the served document earned.
+        detail: String,
     },
     /// A new process lifetime began — the served form of the journal
     /// file's run-boundary marker. A monitor bound over a journal file
@@ -560,10 +614,18 @@ mod tests {
             JournalEntry {
                 seq: 17,
                 tick: Tick(20),
-                event: JournalEvent::RunBoundary { run: 2 },
+                event: JournalEvent::TrackingSourceRefused {
+                    source: "127.0.0.1:8082".parse().unwrap(),
+                    detail: "the pulled checkpoint's stream position leads the line's".to_string(),
+                },
             },
             JournalEntry {
                 seq: 18,
+                tick: Tick(20),
+                event: JournalEvent::RunBoundary { run: 2 },
+            },
+            JournalEntry {
+                seq: 19,
                 tick: Tick(21),
                 event: JournalEvent::FieldOrphaned { aligned: Tick(20) },
             },
@@ -588,6 +650,7 @@ mod tests {
         assert!(json.contains("\"field_orphaned\""), "{json}");
         assert!(json.contains("\"source_restarted\""), "{json}");
         assert!(json.contains("\"tracking_source_adopted\""), "{json}");
+        assert!(json.contains("\"tracking_source_refused\""), "{json}");
         assert!(json.contains("\"run_boundary\""), "{json}");
         // A `field_claim_lost` entry an older build journaled carried
         // no claimant field; it still decodes, the verdict reading as

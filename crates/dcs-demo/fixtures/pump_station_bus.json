@@ -118,6 +118,9 @@
       "channel": {
         "device": 1,
         "name": "level-primary"
+      },
+      "record": {
+        "every_ticks": 1
       }
     },
     {
@@ -127,6 +130,9 @@
       "channel": {
         "device": 1,
         "name": "level-backup"
+      },
+      "record": {
+        "every_ticks": 1
       }
     },
     {
@@ -136,6 +142,9 @@
       "channel": {
         "device": 1,
         "name": "inflow"
+      },
+      "record": {
+        "every_ticks": 1
       }
     },
     {
@@ -146,7 +155,10 @@
         "device": 1,
         "name": "net-flow"
       },
-      "stale_after_ticks": 5
+      "stale_after_ticks": 5,
+      "record": {
+        "every_ticks": 1
+      }
     },
     {
       "id": 120,

@@ -292,7 +292,8 @@ fn attributed(entry: &JournalEntry, name: &str, points: &BTreeSet<PointId>) -> b
         JournalEvent::QualityChanged { point, .. }
         | JournalEvent::PointChanged { point, .. }
         | JournalEvent::FieldClaimLost { point, .. }
-        | JournalEvent::FieldClaimObserved { point, .. } => points.contains(point),
+        | JournalEvent::FieldClaimObserved { point, .. }
+        | JournalEvent::FieldClaimRearmed { point, .. } => points.contains(point),
         JournalEvent::CommandSettled { receipt } => {
             receipt.command.component() == Some(name)
                 || receipt
@@ -304,12 +305,14 @@ fn attributed(entry: &JournalEntry, name: &str, points: &BTreeSet<PointId>) -> b
         JournalEvent::EventEmitted { event } => event.component == name,
         JournalEvent::RoleChanged { .. }
         | JournalEvent::PromotionRefused { .. }
+        | JournalEvent::StartupClaimRefused { .. }
         | JournalEvent::DivergenceDetected { .. }
         | JournalEvent::DivergenceResolved { .. }
         | JournalEvent::Reinitialized { .. }
         | JournalEvent::FieldOrphaned { .. }
         | JournalEvent::SourceRestarted { .. }
         | JournalEvent::TrackingSourceAdopted { .. }
+        | JournalEvent::TrackingSourceRefused { .. }
         | JournalEvent::RunBoundary { .. } => false,
     }
 }

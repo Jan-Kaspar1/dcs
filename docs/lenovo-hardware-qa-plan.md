@@ -495,6 +495,48 @@ Implementation order: second, after [daily architecture review](daily-architectu
   a pull inside the pending window reports inconclusive; the pair
   leaves on its launch roles.
 
+### Landed 2026-09-30 (persistence-path alias-refusal leg, #1295)
+
+- The persistence-path distinctness startup contract — #1292's fix
+  serving WW-LCM-001's continuity clause — is exercised on the
+  deployed rig by scenario leg
+  `3695_persistence_path_alias_refusal`. `--state-file`,
+  `--journal-file`, and `--history-file` are distinct-file
+  declarations with distinct formats — a write-then-rename
+  checkpoint beside two append-only record streams — and an
+  aliased pair must fail startup by name rather than divert the
+  append stream onto the orphaned inode the observed run produced
+  (a healthy /history/durable writing nowhere reachable, then a
+  crash-loop on restart reading the checkpoint document as a
+  history record). The leg stages each recorded pair through the
+  run context's `admit_persistence` lever — the harness's
+  per-run variant seam for a doctored launch: the run's own
+  controller image in a labeled `--rm` networkless scratch
+  container mounting a per-probe run-dir directory, launched on
+  the rig's pacing shape bounded by `--ticks`. The
+  `--state-file`/`--history-file` and `--state-file`/`--journal-file`
+  aliases must each exit nonzero naming both conflicting flags
+  and the shared path; the `--journal-file`/`--history-file`
+  append-append alias is the standing contrast the finding
+  recorded — every build fails it closed, the named parse refusal
+  replacing the second sink's writer-lock conflict once the
+  contract lands; and the correctly-distinct launch of the same
+  shape must scan its ticks and write each sink's own file. The
+  deployed pair never moves — the scratch containers share no
+  file, port, or field claim with the running members — and no
+  member launch is rebuilt, so the launch configuration stands
+  untouched throughout.
+- Named diagnostics are `persistence-alias-accepted` and
+  `persistence-alias-nondeterministic`, with the self-check's
+  `persistence-alias-unchecked` covering the planted accepted
+  aliases, unnamed refusals, refused control, and disturbed pair;
+  two consecutive passes produce identical digests; a run whose
+  ctx carries no `admit_persistence` lever, whose pair is
+  unreachable or never settles tracking, or whose staged revision
+  predates the contract — the append-append alias still failing
+  closed through the writer lock alone — reports inconclusive;
+  the pair leaves on its launch roles.
+
 ### Landed 2026-10-01 (monitor-less foreign-claim release leg, #1224/#1167)
 
 - The amended intended-`unsynchronized` bound #1167 recorded is
@@ -550,6 +592,32 @@ Implementation order: second, after [daily architecture review](daily-architectu
   or whose pair runs keyed reports inconclusive — the bound names the
   unkeyed posture, where the announced verify hands a keyed demote
   `orphaned` instead.
+
+### Landed 2026-10-01 (sim-bus device server in the lane image set, #1368)
+
+- The sim-bus rig legs stage against the released protocol server: the
+  bounded builder adds `-p dcs-sim-bus --bin dcs-sim-bus-device` to
+  its compile set and the ship map carries that binary into the
+  controller image beside `dcs-controller`, so a leg launches the
+  real register-protocol server out of the revision under test —
+  the `dcs-plant-ctl` precedent #654 recorded for the plant image,
+  and the `dcs-forge --entrypoint` precedent on the same image —
+  instead of a disposable in-session server or a Python
+  reimplementation of the wire protocol. The two reported digests,
+  the controller entrypoint, and the host-side `dcs-ctl` seam are
+  unchanged; a dedicated bus image would have changed the digest set.
+- The `sim_bus_device` config block names the device the server
+  serves, its bridge port, and the bus model declaring it;
+  `endpoint_placement` records it `bridge` like the probe field,
+  since no host socket is reachable from the rig. The launch stages
+  the fixture inside the run directory with that device's
+  `__BUS_ADDR__` placeholder bound to the device container's bridge
+  name, mounts it into a controller-image container run under
+  `--entrypoint dcs-sim-bus-device`, waits for the server's own
+  bound-address report, and returns the bridge address and the staged
+  document a leg mounts into the controller it points at the field.
+  An enabler for the sim-bus rig legs (#1355/#1356/#1357); a leg
+  needing the server itself to misbehave may still stage a double.
 
 ## Outcome
 

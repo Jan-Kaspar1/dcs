@@ -39,7 +39,7 @@ use dcs_sim::{
     SimDriver,
 };
 use dcs_sim_bus::{
-    BusDriver, CyclicBusDriver, CyclicDeviceParameters, CyclicPoint, DeviceParameters,
+    BusDriver, CyclicBusDriver, CyclicDeviceParameters, CyclicPoint, DeviceParameters, LinkError,
     PointRegister,
 };
 use dcs_sim_net::{RemoteDriver, RemoteError};
@@ -62,9 +62,16 @@ use std::time::Duration;
 ///   timeout in milliseconds, defaulting to
 ///   [`RemoteDriver::DEFAULT_TIMEOUT`].
 ///
-/// Any other parameter is rejected. The factory connects eagerly — an
-/// unreachable endpoint or a server that does not serve a declared
-/// point is an assembly failure, not a mid-scan surprise.
+/// Any other parameter is rejected. The factory splits its connect
+/// into the static half — addressing and parameters, validated here —
+/// and the transport half: the socket attach assembles in the
+/// link-down state [`RemoteDriver`] already serves, per the
+/// born-active startup-failure contract, so an unreachable plant no
+/// longer fails driver assembly. A reachable plant still runs its
+/// declared-point probe eagerly — a server that does not serve a
+/// declared point stays an assembly failure — while an unreachable
+/// one defers the same probe to the startup claim's first answered
+/// contact, so a wrong-model plant is never claimed either way.
 pub const SIM_TCP_KIND: &str = "sim-tcp";
 
 /// The scripted simulated device kind: a [`ScriptedDriver`] whose `In`
@@ -324,8 +331,12 @@ pub type ClaimHook = Arc<dyn Fn(u64) -> Result<(), StepError> + Send + Sync>;
 /// per-backend half of [`FanoutDriver::release_field_claims`], run when
 /// this peer demotes: an attachment that gave the field up must not
 /// re-assert a stale claim when a re-attach finds the field's
-/// arbitration reset. `None` on kinds whose claim bookkeeping needs no
-/// forgetting — e.g. `sim-bus`, where a claim dies with its connection.
+/// arbitration reset. `None` on kinds that record no ownership to
+/// forget — e.g. `sim-ethercat`, which arbitrates no claim at all.
+/// What the hook forgets is the kind's own: `sim-tcp` and `sim-bus`
+/// drop their recorded claim token, while `sim-cyclic` — whose claim
+/// dies with its connection — drops the staged-but-unpublished output
+/// image a demoted ex-owner must not keep re-presenting.
 pub type ReleaseHook = Arc<dyn Fn() + Send + Sync>;
 
 /// The conditional counterpart of [`ClaimHook`] — the per-backend half
@@ -342,14 +353,15 @@ pub type EnsureHook = Arc<dyn Fn(u64) -> Result<bool, StepError> + Send + Sync>;
 /// The fencing-loss counterpart of [`EnsureHook`] — the per-backend
 /// half of [`FanoutDriver::reclaim_field_writer`], run while a
 /// fencing-demoted ex-owner's loss mark stands: re-takes the claim
-/// under `owner` only where the field stands unclaimed or already
-/// names the token — `Ok(true)` — refusing `Ok(false)` where a
-/// different owner stands, so a released preemption ends with the
-/// ex-owner holding the claim again and no probe ever preempts.
-/// Unlike `ensure` the grant is *bound*: the reclaiming attachment
-/// joins the claim's holders, because the peer's gate lifts on success
-/// and its writes must pass the claim it just took back. `Err`
-/// reports the backend could not be asked. `None` on kinds whose
+/// under `owner` where the field stands unclaimed, already names the
+/// token, or stands under a different owner's *holderless* claim —
+/// `Ok(true)` — refusing `Ok(false)` only where a different owner's
+/// claim has live holders, so a released preemption ends with the
+/// ex-owner holding the claim again and no probe ever preempts a live
+/// attachment. Unlike `ensure` the grant is *bound*: the reclaiming
+/// attachment joins the claim's holders, because the peer's gate lifts
+/// on success and its writes must pass the claim it just took back.
+/// `Err` reports the backend could not be asked. `None` on kinds whose
 /// arbitration has no bound conditional grant.
 pub type ReclaimHook = Arc<dyn Fn(u64) -> Result<bool, StepError> + Send + Sync>;
 
@@ -454,10 +466,11 @@ pub struct DeviceBackend {
     pub probe: Option<ProbeHook>,
     /// The fencing-loss reclaim — the bound conditional re-grant a
     /// fencing-demoted ex-owner probes each scan while its loss mark
-    /// stands: granted while the field is unclaimed or already names
-    /// the token, refused while a different owner stands, never
-    /// preempting. `None` on kinds whose arbitration has no bound
-    /// conditional grant.
+    /// stands: granted while the field is unclaimed, already names the
+    /// token, or stands under a different owner's holderless claim,
+    /// refused only while a different owner's claim has live holders —
+    /// never preempting a live attachment. `None` on kinds whose
+    /// arbitration has no bound conditional grant.
     pub reclaim: Option<ReclaimHook>,
     /// The claimant-attribution counterpart of `probe` — reports the
     /// owner token the field's arbitration named when it last fenced
@@ -708,7 +721,13 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
             }
         }
     };
-    let remote = RemoteDriver::connect_with_timeout(addresses.as_slice(), timeout)
+    // The transport half of the connect defers per the born-active
+    // startup contract: the driver assembles in the link-down state it
+    // already serves mid-run, so an unreachable plant is the pending
+    // startup class rather than an assembly failure. Addressing
+    // already resolved above — the static half stays eager, and a
+    // name that does not resolve still fails the launch here.
+    let remote = RemoteDriver::connect_deferred(addresses.as_slice(), timeout)
         .map_err(|error| {
             DeviceError::backend(format!(
                 "cannot connect to plant server at {address:?}: {error}"
@@ -722,23 +741,46 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         .as_controller();
     // Probe every declared point: the remote plant must serve it, with
     // the value kind the model declares — a plant configured for a
-    // different model fails here, at assembly, not mid-scan.
+    // different model fails here, at assembly, not mid-scan. The
+    // startup contract defers only the transport: a plant that cannot
+    // answer at all returns `Disconnected`/`Timeout` on every probe,
+    // so the correspondence check moves to the startup claim's first
+    // answered contact — the `deferred` list the claim ask re-runs
+    // until it passes — while a plant that answers but serves a
+    // different model stays an assembly failure.
+    let mut deferred: Vec<(PointId, ValueKind)> = Vec::new();
     for point in &spec.points {
-        let sample = remote.read(point.point).map_err(|error| {
-            DeviceError::backend(format!(
-                "plant server at {address:?} does not serve io point {}: {error}",
-                point.point.0
-            ))
-        })?;
-        if sample.value.kind() != point.kind {
-            return Err(DeviceError::backend(format!(
-                "plant server at {address:?} serves io point {} as {:?}, model declares {:?}",
-                point.point.0,
-                sample.value.kind(),
-                point.kind
-            )));
+        match remote.read(point.point) {
+            Ok(sample) if sample.value.kind() == point.kind => {}
+            Ok(sample) => {
+                return Err(DeviceError::backend(format!(
+                    "plant server at {address:?} serves io point {} as {:?}, model declares {:?}",
+                    point.point.0,
+                    sample.value.kind(),
+                    point.kind
+                )));
+            }
+            Err(IoError::Disconnected(_) | IoError::Timeout(_)) => {
+                deferred = spec
+                    .points
+                    .iter()
+                    .map(|point| (point.point, point.kind))
+                    .collect();
+                break;
+            }
+            Err(error) => {
+                return Err(DeviceError::backend(format!(
+                    "plant server at {address:?} does not serve io point {}: {error}",
+                    point.point.0
+                )));
+            }
         }
     }
+    // The outstanding correspondence probes the claim ask re-runs on
+    // each retry until every declared point answers with the declared
+    // kind — empty when the eager pass already ran, so a connected
+    // plant's claim asks never re-probe.
+    let deferred = Arc::new(Mutex::new(deferred));
     let remote = Arc::new(remote);
     let stepping = Arc::clone(&remote);
     let claiming = Arc::clone(&remote);
@@ -805,8 +847,44 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         // conditional `claim_writer_unless_held` grant — a launched
         // controller takes the field from a dead owner's standing
         // claim but never from a live incumbent, whose newer state a
-        // stale restart would silently roll back.
+        // stale restart would silently roll back. The born-active
+        // contract retries the ask from the pending run on each
+        // answered field contact; an assembly that found the plant
+        // down left its declared-point correspondence probe outstanding
+        // here, run ahead of the grant ask until it passes, so a plant
+        // that answers serving a different model never lets the claim
+        // land — the probe's own detail is the pending run's evidence.
         startup_claim: Some(Arc::new(move |owner| {
+            {
+                let mut deferred = deferred.lock().unwrap();
+                if !deferred.is_empty() {
+                    for &(point, kind) in deferred.iter() {
+                        match starting.read(point) {
+                            Ok(sample) if sample.value.kind() == kind => {}
+                            Ok(sample) => {
+                                return Err(StepError::Backend {
+                                    backend: format!("device {device}"),
+                                    detail: format!(
+                                        "deferred assembly probe: the plant serves io point {} as {:?}, the model declares {:?}",
+                                        point.0,
+                                        sample.value.kind(),
+                                        kind
+                                    ),
+                                });
+                            }
+                            Err(error) => {
+                                return Err(StepError::Backend {
+                                    backend: format!("device {device}"),
+                                    detail: format!(
+                                        "deferred assembly probe: the plant does not serve io point {point:?}: {error}"
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    deferred.clear();
+                }
+            }
             match starting.claim_writer_unless_held(owner) {
                 Ok(_) => Ok(true),
                 Err(RemoteError::Fenced) => Ok(false),
@@ -826,18 +904,20 @@ fn sim_tcp_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                 detail: error.to_string(),
             })
         })),
-        // The fencing-loss reclaim: the plant server's *bound*
-        // `ensure_writer` — a fencing-demoted ex-owner takes its claim
-        // back once the field stands unclaimed or already names its
-        // token, the grant joining this attachment to the holders so
-        // the re-lifted gate's writes pass the claim it re-took. A
-        // different owner's claim refuses it whether held or standing
-        // holderless — the reclaim never preempts, so a foreign claim
-        // that outlives its attachment still wedges the pair as an
-        // operator-promotable state rather than silently handing the
-        // field back over a live arbitration.
+        // The fencing-loss reclaim: the plant server's `reclaim_writer`
+        // — a fencing-demoted ex-owner takes its claim back once the
+        // field stands unclaimed, already names its token, or stands
+        // under a different owner's *holderless* claim — the dead-owner
+        // or orphan-placeholder shape, which protects no live
+        // attachment. The grant joins this attachment to the holders so
+        // the re-lifted gate's writes pass the claim it re-took, and
+        // refuses only while a different owner's claim has live
+        // holders: a still-held claim keeps the field until it
+        // releases, while a holderless one is precisely what the
+        // reclaim exists to clear — refusing it would wedge the pair
+        // behind a claim nobody stands behind.
         reclaim: Some(Arc::new(move |owner| {
-            match reclaiming.ensure_writer(owner) {
+            match reclaiming.reclaim_writer(owner) {
                 Ok(_) => Ok(true),
                 Err(RemoteError::Fenced) => Ok(false),
                 Err(error) => Err(StepError::Backend {
@@ -933,6 +1013,14 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
     let bus = Arc::new(bus);
     let stepping = Arc::clone(&bus);
     let claiming = Arc::clone(&bus);
+    let releasing = Arc::clone(&bus);
+    let ensuring = Arc::clone(&bus);
+    let starting = Arc::clone(&bus);
+    let reclaiming = Arc::clone(&bus);
+    let probing = Arc::clone(&bus);
+    let attributing = Arc::clone(&bus);
+    let declaring = Arc::clone(&bus);
+    let claimed = Arc::clone(&bus);
     let inspect: Arc<dyn Any + Send + Sync> = bus.clone();
     let device = spec.id.0;
     Ok(DeviceDriver::Backend(DeviceBackend {
@@ -953,28 +1041,98 @@ fn sim_bus_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
                     detail: error.to_string(),
                 })
         })),
-        // The device claim dies with its connection, so a re-attach
-        // never re-asserts it — there is nothing to forget.
-        release: None,
-        // The device's claim protocol has no conditional grant — and
-        // needs none: the claim dying with its connection frees the
-        // field on the peer's death, so no dead token ever fences it.
-        ensure: None,
-        // The same protocol has no live-holder query the startup
-        // claim could consult; the startup path falls back to the
-        // unconditional grant.
-        startup_claim: None,
-        // Nor a read-only claim observation — the device claim binds
-        // to the connection, so "unclaimed" never outlives a holder's
-        // link and there is no probe to ask.
-        probe: None,
-        // No bound conditional grant either — a claim that dies with
-        // its connection needs no reclaim path — and the device's
-        // fencing verdict names no claimant.
-        reclaim: None,
-        fenced_by: None,
-        declare_monitor: None,
-        claimed_monitor: None,
+        // The claim's demotion counterpart: the attachment drops its
+        // hold on the field's claim — freeing it when it held the last
+        // — and forgets its recorded token, so a re-attach never
+        // re-asserts a claim the demoted peer gave up. Best-effort: a
+        // dead device's drop already freed the hold.
+        release: Some(Arc::new(move || {
+            let _ = releasing.release_writer();
+        })),
+        // The claim's orphan-cycle counterpart: the device server's
+        // conditional `ensure_writer` grant — the demoted ex-owner's
+        // probe re-arms the claim for the token while the field stands
+        // unclaimed or already names it, `Fenced` while a different
+        // owner stands. The grant is bound — on this protocol a claim
+        // stands only while an attachment holds it, so re-arming
+        // without joining the holders would free the claim the answer
+        // just granted.
+        ensure: Some(Arc::new(move |owner| match ensuring.ensure_writer(owner) {
+            Ok(()) => Ok(true),
+            Err(LinkError::Fenced) => Ok(false),
+            Err(error) => Err(StepError::Backend {
+                backend: format!("device {device}"),
+                detail: error.to_string(),
+            }),
+        })),
+        // The claim's startup counterpart: the device server's
+        // conditional `claim_writer_unless_held` grant — a launched
+        // controller takes the field while it stands unclaimed or
+        // already names its token, refusing (`Fenced` → `Ok(false)`)
+        // while a different owner's claim stands. A standing claim on
+        // this protocol always has live holders — the claim dies with
+        // its last holder's connection — so the refused ask is exactly
+        // the live-incumbent verdict the born-active contract refuses
+        // startup on.
+        startup_claim: Some(Arc::new(move |owner| {
+            match starting.claim_writer_unless_held(owner) {
+                Ok(()) => Ok(true),
+                Err(LinkError::Fenced) => Ok(false),
+                Err(error) => Err(StepError::Backend {
+                    backend: format!("device {device}"),
+                    detail: error.to_string(),
+                }),
+            }
+        })),
+        // The claim's observational counterpart: the device server's
+        // `probe_writer` — the standing claim's identity, reported as
+        // the verdict a mutation from this attachment would meet,
+        // without mutating. The probe asserts, joins, and releases
+        // nothing, so a peer may ask every scan; an unclaimed answer
+        // names the device's open pre-claim state rather than a closed
+        // field, which is what `Held`/`Unclaimed` report here.
+        probe: Some(Arc::new(move || {
+            probing
+                .probe_writer()
+                .map(|status| status.claim())
+                .map_err(|error| StepError::Backend {
+                    backend: format!("device {device}"),
+                    detail: error.to_string(),
+                })
+        })),
+        // The fencing-loss reclaim: `ensure_writer` is already the
+        // bound conditional grant the reclaim asks — a claim that has
+        // no live holders cannot stand on this protocol, so "a
+        // different owner stands" and "a different owner's claim has
+        // live holders" are the same refusal.
+        reclaim: Some(Arc::new(move |owner| {
+            match reclaiming.ensure_writer(owner) {
+                Ok(()) => Ok(true),
+                Err(LinkError::Fenced) => Ok(false),
+                Err(error) => Err(StepError::Backend {
+                    backend: format!("device {device}"),
+                    detail: error.to_string(),
+                }),
+            }
+        })),
+        // The claimant attribution: the owner token the device server's
+        // last fencing verdict named for this attachment — the claimant
+        // a superseded field owner's `field_claim_lost` journal record
+        // attributes the preemption to, read from the verdict itself
+        // rather than guessed.
+        fenced_by: Some(Arc::new(move || attributing.fenced_by())),
+        // The monitor declaration this owner's claims carry — the
+        // device server records it on the claim, so the peers the claim
+        // fences learn where the successor serves checkpoints from the
+        // field's own arbitration.
+        declare_monitor: Some(Arc::new(move |monitor| {
+            declaring.set_claim_monitor(monitor);
+        })),
+        // The field-arbitrated successor: the monitor endpoint the
+        // standing claim declared, as this attachment's fencing
+        // verdicts recorded it — the tracking surface the field itself
+        // hands a demoted peer.
+        claimed_monitor: Some(Arc::new(move || claimed.claimed_monitor())),
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -1047,6 +1205,12 @@ fn sim_cyclic_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError>
     let bus = Arc::new(bus);
     let stepping = Arc::clone(&bus);
     let claiming = Arc::clone(&bus);
+    let starting = Arc::clone(&bus);
+    let releasing = Arc::clone(&bus);
+    let probing = Arc::clone(&bus);
+    let attributing = Arc::clone(&bus);
+    let declaring = Arc::clone(&bus);
+    let claimed = Arc::clone(&bus);
     let inspect: Arc<dyn Any + Send + Sync> = bus.clone();
     let device = spec.id.0;
     Ok(DeviceDriver::Backend(DeviceBackend {
@@ -1067,23 +1231,69 @@ fn sim_cyclic_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError>
                     detail: error.to_string(),
                 })
         })),
-        // As `sim-bus`: the claim is bound to the connection, so a
-        // re-attach carries no stale claim to forget.
-        release: None,
-        // As `sim-bus`: no conditional grant exists — or is needed,
-        // the claim dying with its connection.
+        // The claim binds to the attachment that took it and dies with
+        // that connection — a re-attach never re-arms it, so there is
+        // no recorded token for a release hook to forget. What it must
+        // forget instead is the cyclic driver's *pending output
+        // image*: staged outputs are retained across fenced exchanges
+        // by the cyclic contract, so a demoted ex-owner would keep
+        // re-presenting them — fenced forever while a successor's
+        // claim stands, or publishing onto a freed field it no longer
+        // owns. The release drops them; the demoted run's exchanges go
+        // census-only, the tracking standby's shape.
+        release: Some(Arc::new(move || releasing.drop_pending_outputs())),
+        // No *unbound* conditional grant (`ensure`) — and none needed:
+        // a claim that dies with its connection leaves nothing to
+        // re-arm.
         ensure: None,
-        // As `sim-bus`: no live-holder query for the startup claim;
-        // the startup path falls back to the unconditional grant.
-        startup_claim: None,
-        // As `sim-bus`: no read-only claim observation either.
-        probe: None,
-        // As `sim-bus`: no bound conditional grant and no claimant
-        // attribution — the claim dies with its connection.
+        // The claim's startup counterpart: the device server's
+        // conditional `claim_writer_unless_held` grant — a launched
+        // controller takes the field while it stands unclaimed or
+        // already names its token, refusing while a different owner's
+        // claim stands; on this protocol a standing claim always has
+        // live holders, so the refusal is the live-incumbent verdict
+        // the born-active contract asks for.
+        startup_claim: Some(Arc::new(move |owner| {
+            match starting.claim_writer_unless_held(owner) {
+                Ok(()) => Ok(true),
+                Err(LinkError::Fenced) => Ok(false),
+                Err(error) => Err(StepError::Backend {
+                    backend: format!("device {device}"),
+                    detail: error.to_string(),
+                }),
+            }
+        })),
+        // The claim's observational counterpart: the device server's
+        // `probe_writer` — the standing claim's identity as the verdict
+        // a mutation from this attachment would meet, without
+        // mutating, so a tracking standby can report the field's claim
+        // every scan.
+        probe: Some(Arc::new(move || {
+            probing
+                .probe_writer()
+                .map(|status| status.claim())
+                .map_err(|error| StepError::Backend {
+                    backend: format!("device {device}"),
+                    detail: error.to_string(),
+                })
+        })),
+        // No bound conditional re-grant: the claim dies with its
+        // connection, so a released attachment has nothing to re-arm.
         reclaim: None,
-        fenced_by: None,
-        declare_monitor: None,
-        claimed_monitor: None,
+        // The claimant attribution: a cyclic attachment meets the
+        // fenced verdict at the exchange rather than at a point write,
+        // and the verdict names the standing claim — the claimant the
+        // ex-owner's `field_claim_lost` record attributes the
+        // preemption to.
+        fenced_by: Some(Arc::new(move || attributing.fenced_by())),
+        // The monitor declaration this owner's claims carry — where the
+        // successor the field's arbitration names serves checkpoints.
+        declare_monitor: Some(Arc::new(move |monitor| {
+            declaring.set_claim_monitor(monitor);
+        })),
+        // The field-arbitrated successor: the standing claim's declared
+        // monitor, as this attachment's fencing verdicts recorded it.
+        claimed_monitor: Some(Arc::new(move || claimed.claimed_monitor())),
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -1791,19 +2001,32 @@ impl FanoutDriver {
     /// backends without a startup hook — kinds whose arbitration cannot
     /// distinguish live holders — fall back to the unconditional
     /// [`DeviceBackend::claim`] hook exactly as `claim_field_writer`
-    /// runs it.
+    /// runs it. A refused backend's fencing verdict lands in
+    /// [`refused_claimants`](Self::refused_claimants) exactly as the
+    /// orphan probe's does — the launched run's `field_claim_observed`
+    /// record attributes the incumbent its startup claim met.
     pub fn claim_field_writer_unless_held(&self, owner: u64) -> Result<bool, StepError> {
         let mut held = true;
+        let mut refused = Vec::new();
         for backend in &self.backends {
             if !backend.field_facing {
                 continue;
             }
             if let Some(startup_claim) = &backend.startup_claim {
-                held &= startup_claim(owner)?;
+                match startup_claim(owner)? {
+                    true => {}
+                    false => {
+                        held = false;
+                        if let Some(fenced_by) = &backend.fenced_by {
+                            refused.extend(fenced_by());
+                        }
+                    }
+                }
             } else if let Some(claim) = &backend.claim {
                 claim(owner)?;
             }
         }
+        *self.refusals.lock().unwrap() = refused;
         Ok(held)
     }
 
@@ -1900,19 +2123,21 @@ impl FanoutDriver {
     /// [`ensure_field_writer`](Self::ensure_field_writer) — the *bound*
     /// conditional re-grant a fencing-demoted ex-owner probes each scan
     /// while its loss mark stands: takes the claim under `owner` on
-    /// every field-facing backend that answers, granted only where the
-    /// field stands unclaimed or already names the token — the grant
-    /// joining this attachment to the claim's holders, so the peer's
-    /// re-lifted gate writes pass the claim it just took back.
-    /// `Ok(true)` means the claim stands under `owner` on every probed
-    /// backend; `Ok(false)` that a different owner stands on at least
-    /// one — the reclaim never preempts, so a preemptor's claim that
-    /// outlives its attachment leaves the wedge standing as an
-    /// operator-promotable state — or that no backend can answer a
-    /// conditional grant at all; `Err` that a backend could not be
-    /// asked. Field-facing backends without a reclaim hook are skipped
-    /// exactly as `ensure_field_writer` skips unprobeable kinds. A
-    /// refused backend's fencing verdict lands in
+    /// every field-facing backend that answers, granted where the field
+    /// stands unclaimed, already names the token, or stands under a
+    /// different owner's holderless claim — the dead-owner or
+    /// orphan-placeholder shape the re-grant preempts without
+    /// abandoning a live attachment — the grant joining this
+    /// attachment to the claim's holders, so the peer's re-lifted gate
+    /// writes pass the claim it just took back. `Ok(true)` means the
+    /// claim stands under `owner` on every probed backend; `Ok(false)`
+    /// that a different owner's claim still has live holders on at
+    /// least one — a still-held claim keeps the field until it
+    /// releases — or that no backend can answer a conditional grant at
+    /// all; `Err` that a backend could not be asked. Field-facing
+    /// backends without a reclaim hook are skipped exactly as
+    /// `ensure_field_writer` skips unprobeable kinds. A refused
+    /// backend's fencing verdict lands in
     /// [`refused_claimants`](Self::refused_claimants) exactly as the
     /// orphan probe's does.
     pub fn reclaim_field_writer(&self, owner: u64) -> Result<bool, StepError> {

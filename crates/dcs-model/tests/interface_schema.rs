@@ -84,10 +84,10 @@ fn recorded_release_interface_schema_matches_the_emitted_output() {
     // published sha256 with it while the tag is pending. `v0.2.0`'s
     // tag is cut, so its recorded sha256 pins the tagged emission and
     // the tracked file may legitimately move past it (`None`);
-    // `v0.3.0`'s, `v0.4.0`'s, and `v0.5.0`'s tags are pending, so
-    // their artifacts and published sha256s are still pinned —
-    // identical, the emission having not moved since `v0.3.0`'s
-    // recorded commit.
+    // `v0.3.0`'s, `v0.4.0`'s, `v0.5.0`'s, `v0.6.0`'s, and `v0.7.0`'s
+    // tags are pending, so their artifacts and published sha256s are
+    // still pinned — identical, the emission having not moved since
+    // `v0.3.0`'s recorded commit.
     let output = run_interface_schema_subcommand();
     assert!(
         output.status.success(),
@@ -109,6 +109,14 @@ fn recorded_release_interface_schema_matches_the_emitted_output() {
         ),
         (
             "docs/releases/v0.5.0/block-interfaces.schema.json",
+            Some("ddc00496814a4e8cd0d6ec8a5d9fbb95e83f518dcd927b17a4802f13ac84013a"),
+        ),
+        (
+            "docs/releases/v0.6.0/block-interfaces.schema.json",
+            Some("ddc00496814a4e8cd0d6ec8a5d9fbb95e83f518dcd927b17a4802f13ac84013a"),
+        ),
+        (
+            "docs/releases/v0.7.0/block-interfaces.schema.json",
             Some("ddc00496814a4e8cd0d6ec8a5d9fbb95e83f518dcd927b17a4802f13ac84013a"),
         ),
     ] {

@@ -15,18 +15,20 @@
 //! and station-attributed or unattributable short exchanges — over the
 //! real transport, against the real server.
 //!
-//! Connection handling differs from `BusDriver`'s deliberately: a
-//! cyclic device is expected to ride out a missed exchange — the held
-//! image degrades gracefully across scans — so a dropped connection
-//! reconnects lazily at the next boundary rather than killing the
-//! driver for good. Reconnecting does not re-assert a held writer
-//! claim: the claim binds to the attachment that took it, so a link
-//! that drops loses it, and taking the field back goes through
+//! Connection handling: like `BusDriver`, a dropped connection
+//! reconnects lazily at the next request rather than killing the
+//! driver for good — a cyclic device is expected to ride out a missed
+//! exchange, the held image degrading gracefully across scans. Unlike
+//! `BusDriver`, reconnecting does not re-assert a held writer claim:
+//! the claim binds to the attachment that took it, so a link that
+//! drops loses it, and taking the field back goes through
 //! [`claim_writer`](Self::claim_writer) again — the same deliberate
 //! act the promotion path runs, never a silent re-arm.
 
-use crate::client::{LinkError, exchange as roundtrip, refused};
-use crate::protocol::{BusRequest, BusResponse, ExchangeOutcome, RegisterInfo, RegisterWrite};
+use crate::client::{ClaimStatus, LinkError, connect_stream, exchange as roundtrip, refused};
+use crate::protocol::{
+    BusError, BusRequest, BusResponse, ExchangeOutcome, RegisterInfo, RegisterWrite,
+};
 use dcs_core::{
     CyclicIoDriver, Direction, DriverDiagnostics, ExchangeDiagnostics, IoDriver, IoError,
     LinkState, PointId, Sample, Tick, Value, ValueKind,
@@ -78,6 +80,26 @@ struct ImageSlot {
     station: Option<String>,
 }
 
+/// The claim-introspection state behind its own mutex: what this
+/// attachment declares on the claims it asserts, and what the device's
+/// last fencing verdict named.
+#[derive(Debug, Clone, Copy, Default)]
+struct ClaimState {
+    /// The monitor endpoint this attachment declares on every claim it
+    /// asserts or re-arms — where *this* owner serves checkpoints, so
+    /// the peers its claim fences learn the successor's tracking
+    /// surface from the field's own arbitration. `None` leaves claims
+    /// undeclared: a tool's shape, and every attachment on a build
+    /// predating the declaration.
+    monitor: Option<SocketAddr>,
+    /// The standing claim the device's last fencing verdict named — the
+    /// owner token it asserted and the monitor endpoint that owner
+    /// declared — recorded from the verdict itself, so the audit can
+    /// attribute the preemption and the tracking path can re-join the
+    /// successor the field vouched for.
+    fenced_by: Option<(u64, Option<SocketAddr>)>,
+}
+
 /// The image and exchange state behind the driver's mutex: the two
 /// process images plus the contract's miss, shortfall, and counter
 /// bookkeeping.
@@ -97,7 +119,9 @@ struct Image {
     /// payload of the next `exchange` request. A completed exchange
     /// clears the registers its census covered; registers a short
     /// exchange withheld stay dirty and are re-presented until they
-    /// publish.
+    /// publish. [`drop_pending_outputs`](CyclicBusDriver::drop_pending_outputs)
+    /// clears the whole set: the demotion-time release that ends a
+    /// superseded owner's re-presenting loop.
     dirty: BTreeSet<u16>,
     /// Consecutive uncompleted exchanges — compared against the
     /// declared `exchange_miss_threshold` on read.
@@ -161,14 +185,18 @@ struct Image {
 /// - a `late` answer counts `missed_deadlines` while otherwise
 ///   completing normally.
 ///
-/// The connection the first `exchange` drops is not the end: unlike
-/// the point-wise `BusDriver`, a dead connection reconnects lazily on
-/// the next request, so a scripted missed exchange is a recoverable
-/// miss rather than a permanent sever. What a reconnect does not
-/// restore is the writer claim — claim holds bind to their
-/// connection, so a dropped link releases them and output-bearing
-/// exchanges then answer the `fenced` verdict until
-/// [`claim_writer`](Self::claim_writer) runs again.
+/// The connection the first `exchange` drops is not the end: a dead
+/// connection reconnects lazily on the next request, so a scripted
+/// missed exchange is a recoverable miss rather than a permanent
+/// sever. What a reconnect does not restore — where the point-wise
+/// `BusDriver` re-arms its recorded token — is the writer claim:
+/// claim holds bind to their connection, so a dropped link releases
+/// them and output-bearing exchanges then answer the `fenced` verdict
+/// until [`claim_writer`](Self::claim_writer) runs again. The verdict
+/// is the executor's claim-loss signal — the demotion it forces ends
+/// the fenced-exchange loop through
+/// [`drop_pending_outputs`](Self::drop_pending_outputs), the release
+/// hook `dcs-assembly` wires for the `sim-cyclic` backend.
 ///
 /// Like `BusDriver`, the driver is field-observing —
 /// `capture_state` keeps its `None` default — and [`Sync`] through
@@ -200,6 +228,9 @@ pub struct CyclicBusDriver {
     /// The last transport-level failure, for the link-health surface —
     /// `None` while no request has failed.
     last_failure: Mutex<Option<LinkError>>,
+    /// The claim declaration this attachment carries and the standing
+    /// claim the device's last fencing verdict named.
+    claim: Mutex<ClaimState>,
 }
 
 impl CyclicBusDriver {
@@ -396,6 +427,7 @@ impl CyclicBusDriver {
                 last_error: None,
             }),
             last_failure: Mutex::new(None),
+            claim: Mutex::new(ClaimState::default()),
         })
     }
 
@@ -455,7 +487,7 @@ impl CyclicBusDriver {
     pub fn step(&self, dt: f64) -> Result<Tick, LinkError> {
         match self.request(&BusRequest::Step { dt })? {
             BusResponse::Stepped { tick } => Ok(tick),
-            BusResponse::Error { error } => Err(refused(error)),
+            BusResponse::Error { error } => Err(self.refuse(error)),
             _ => Err(self.protocol_violation()),
         }
     }
@@ -473,11 +505,127 @@ impl CyclicBusDriver {
     /// with the connection holding it, so a link that dropped must
     /// claim again: reconnects never silently re-arm it.
     pub fn claim_writer(&self, owner: u64) -> Result<(), LinkError> {
-        match self.request(&BusRequest::ClaimWriter { owner })? {
+        let monitor = self.claim.lock().unwrap().monitor;
+        match self.request(&BusRequest::ClaimWriter { owner, monitor })? {
             BusResponse::Done => Ok(()),
-            BusResponse::Error { error } => Err(refused(error)),
+            BusResponse::Error { error } => Err(self.refuse(error)),
             _ => Err(self.protocol_violation()),
         }
+    }
+
+    /// The conditional re-arm a field owner asserts for its recorded
+    /// token — the same grant
+    /// [`BusDriver::ensure_writer`](crate::BusDriver::ensure_writer)
+    /// documents, on this protocol's terms: granted, binding this
+    /// attachment as a holder, while the device stands unclaimed or the
+    /// standing claim already names `owner`, and refused
+    /// [`LinkError::Fenced`] while a *different* owner stands — a
+    /// re-attaching or superseded attachment never preempts the claim
+    /// another owner took during its outage.
+    ///
+    /// On this protocol the grant must bind: a claim stands only while
+    /// an attachment holds it, so re-arming a token without joining the
+    /// holders would free the claim the answer just granted. The
+    /// re-armed claim carries this attachment's declared monitor, so a
+    /// claim rebuilt across a device restart keeps naming where its
+    /// owner serves.
+    ///
+    /// The caller records nothing: the claim still dies with the
+    /// connection holding it, so a reconnect that should own the field
+    /// again re-arms explicitly here rather than silently on the next
+    /// request.
+    pub fn ensure_writer(&self, owner: u64) -> Result<(), LinkError> {
+        let monitor = self.claim.lock().unwrap().monitor;
+        match self.request(&BusRequest::EnsureWriter { owner, monitor })? {
+            BusResponse::Done => Ok(()),
+            BusResponse::Error { error } => Err(self.refuse(error)),
+            _ => Err(self.protocol_violation()),
+        }
+    }
+
+    /// The conditional counterpart of [`claim_writer`](Self::claim_writer)
+    /// — the grant a launched controller's startup claim asks, on the
+    /// same terms
+    /// [`BusDriver::claim_writer_unless_held`](crate::BusDriver::claim_writer_unless_held)
+    /// documents: granted while the field stands unclaimed or the
+    /// standing claim already names `owner`, refused
+    /// [`LinkError::Fenced`] while a different owner's claim stands,
+    /// the claim it met left untouched.
+    ///
+    /// The lazy re-attach caveat applies as it does to `claim_writer`:
+    /// a dropped link reconnects for the ask, and a granted claim
+    /// lands on the new connection.
+    pub fn claim_writer_unless_held(&self, owner: u64) -> Result<(), LinkError> {
+        let monitor = self.claim.lock().unwrap().monitor;
+        match self.request(&BusRequest::ClaimWriterUnlessHeld { owner, monitor })? {
+            BusResponse::Done => Ok(()),
+            BusResponse::Error { error } => Err(self.refuse(error)),
+            _ => Err(self.protocol_violation()),
+        }
+    }
+
+    /// The read-only half of the write-ownership claim — the
+    /// claim-status observation a peer reports through its role surface
+    /// and the startup live-holder probe a launched controller asks
+    /// before it claims: the standing claim's owner token and declared
+    /// monitor, or an unclaimed device naming neither. The probe
+    /// asserts, joins, and releases nothing, so an unclaimed answer
+    /// leaves the device exactly as open as it found it and a probe is
+    /// safe to run every scan.
+    pub fn probe_writer(&self) -> Result<ClaimStatus, LinkError> {
+        match self.request(&BusRequest::ProbeWriter)? {
+            BusResponse::ClaimStatus { owner, monitor } => Ok(ClaimStatus { owner, monitor }),
+            BusResponse::Error { error } => Err(self.refuse(error)),
+            _ => Err(self.protocol_violation()),
+        }
+    }
+
+    /// Declares `monitor` as this attachment's tracking surface: every
+    /// write-ownership claim it asserts or re-arms from here on carries
+    /// the address, so the device's fencing verdicts can hand a peer the
+    /// claim preempted the monitor endpoint it should re-join on — the
+    /// field-arbitrated successor an unkeyed pair cannot otherwise
+    /// name. Tool attachments leave it unset: a claim that declares no
+    /// monitor simply hands its victims nothing to track.
+    pub fn set_claim_monitor(&self, monitor: SocketAddr) {
+        self.claim.lock().unwrap().monitor = Some(monitor);
+    }
+
+    /// The owner token the device's standing claim named the last time
+    /// it fenced one of this attachment's requests — the claimant a
+    /// superseded field owner's `field_claim_lost` record attributes
+    /// the preemption to. On the cyclic surface that verdict arrives at
+    /// the exchange rather than at a point write, so this is where the
+    /// controller reads the attribution a fenced image exchange
+    /// carries. `None` while no verdict named one.
+    pub fn fenced_by(&self) -> Option<u64> {
+        self.claim.lock().unwrap().fenced_by.map(|(owner, _)| owner)
+    }
+
+    /// The monitor endpoint the device's standing claim declared the
+    /// last time it fenced one of this attachment's requests — the
+    /// successor's tracking surface a demoted peer re-joins on, named
+    /// by the field's own arbitration. `None` while no verdict has
+    /// named one, including every claim a tool or a pre-field
+    /// attachment raised undeclared.
+    pub fn claimed_monitor(&self) -> Option<SocketAddr> {
+        self.claim
+            .lock()
+            .unwrap()
+            .fenced_by
+            .and_then(|(_, monitor)| monitor)
+    }
+
+    /// Collapses a server-reported refusal, recording the standing
+    /// claim a `fenced` verdict names — the claimant the audit
+    /// attributes the preemption to and the successor's monitor the
+    /// tracking path re-joins on — before mapping the refusal into the
+    /// link vocabulary.
+    fn refuse(&self, error: BusError) -> LinkError {
+        if let BusError::Fenced { owner, monitor, .. } = &error {
+            self.claim.lock().unwrap().fenced_by = owner.map(|owner| (owner, *monitor));
+        }
+        refused(error)
     }
 
     /// Releases this attachment's hold on the write-ownership claim —
@@ -486,9 +634,26 @@ impl CyclicBusDriver {
     pub fn release_writer(&self) -> Result<(), LinkError> {
         match self.request(&BusRequest::ReleaseWriter)? {
             BusResponse::Done => Ok(()),
-            BusResponse::Error { error } => Err(refused(error)),
+            BusResponse::Error { error } => Err(self.refuse(error)),
             _ => Err(self.protocol_violation()),
         }
+    }
+
+    /// Forgets every staged-but-unpublished output — the demotion-time
+    /// counterpart of the staged image's retention. The staged image
+    /// deliberately survives a failed or refused exchange, so a
+    /// superseded field owner otherwise keeps re-presenting its last
+    /// owning scans' outputs on every later exchange: fenced forever
+    /// while a successor's claim stands — each refusal another counted
+    /// miss until reads escalate — or silently publishing onto the
+    /// field the moment the standing claim frees. A peer that just
+    /// demoted owns nothing to publish, so its release hook drops the
+    /// pending image here; exchanges then run census-only — the
+    /// tracking standby's shape — until a write under a fresh claim
+    /// stages again. The held input image is untouched and keeps
+    /// latching.
+    pub fn drop_pending_outputs(&self) {
+        self.image.lock().unwrap().dirty.clear();
     }
 
     /// Stamps `register`'s stored sample with `quality` —
@@ -591,7 +756,7 @@ impl CyclicBusDriver {
         let (served, late) = match response {
             Ok(BusResponse::Exchanged { registers, late }) => (registers, late),
             Ok(BusResponse::Error { error }) => {
-                return Err(self.miss(image, refused(error)));
+                return Err(self.miss(image, self.refuse(error)));
             }
             Ok(_) => {
                 let error = self.protocol_violation();
@@ -672,35 +837,6 @@ impl CyclicBusDriver {
         image.dirty.retain(|register| missing.contains(register));
         Ok(())
     }
-}
-
-/// Connects a stream to the first answering of `addresses` with the
-/// driver's request semantics — the timeouts and `nodelay` a
-/// [`BusDriver`](crate::BusDriver) connection carries.
-fn connect_stream(addresses: &[SocketAddr], timeout: Duration) -> io::Result<TcpStream> {
-    let mut failure = io::Error::new(io::ErrorKind::NotFound, "no device server address");
-    for &address in addresses {
-        let attempt = loop {
-            match TcpStream::connect_timeout(&address, timeout) {
-                // An interrupted connect attempt is abandoned with its
-                // socket and retried fresh — a caught signal (e.g. a
-                // spawned helper's `SIGCHLD`) is not a reachability
-                // verdict on the address.
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                other => break other,
-            }
-        };
-        match attempt {
-            Ok(stream) => {
-                stream.set_read_timeout(Some(timeout))?;
-                stream.set_write_timeout(Some(timeout))?;
-                stream.set_nodelay(true)?;
-                return Ok(stream);
-            }
-            Err(error) => failure = error,
-        }
-    }
-    Err(failure)
 }
 
 /// A register's value before anything stages it — the kind's zero.

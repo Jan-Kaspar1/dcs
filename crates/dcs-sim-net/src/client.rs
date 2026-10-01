@@ -327,10 +327,14 @@ fn exchange(
 /// rather than killing the driver for good, and a plant that returns is
 /// served by the same `RemoteDriver` — the link-loss contract that lets
 /// a field-owning controller ride a plant restart out instead of dying
-/// with the link. Re-attach attempts are bounded to one per
-/// [`REATTACH_INTERVAL`](Self::REATTACH_INTERVAL), so a dead endpoint
-/// costs each access burst one refused connect rather than one
-/// connect-timeout per point. A timed-out response could arrive after
+/// with the link. Contact attempts are bounded to one per
+/// [`REATTACH_INTERVAL`](Self::REATTACH_INTERVAL): a dead endpoint costs
+/// each access burst one refused connect rather than one
+/// connect-timeout per point, and an endpoint that completes the
+/// handshake but never answers — a frozen or blackholed peer — costs
+/// one timed-out exchange per interval rather than one per request, so
+/// a scan's burst of accesses stalls once near the request timeout
+/// instead of once per point. A timed-out response could arrive after
 /// the fact and pair with a later request, so the driver never reuses a
 /// suspect link.
 ///
@@ -418,6 +422,47 @@ impl RemoteDriver {
             connection: Mutex::new(Connection {
                 stream: Some(BufReader::new(stream)),
                 owner: None,
+                retry_at: Instant::now(),
+                last_error: None,
+                fenced_by: None,
+                claim_monitor: None,
+            }),
+            controller: false,
+        })
+    }
+
+    /// As [`connect_with_timeout`](Self::connect_with_timeout) without
+    /// the eager attach: the driver assembles in the link-down state a
+    /// severed link already reports — every access answering
+    /// `Disconnected` while the endpoint stays silent — and the first
+    /// request attaches, the failed re-attach backing off the same
+    /// [`REATTACH_INTERVAL`](Self::REATTACH_INTERVAL) a mid-run loss
+    /// does. `addr` still resolves here, so a malformed or
+    /// unresolvable address fails at construction exactly as the eager
+    /// connect's does.
+    ///
+    /// The born-active startup-failure contract launches behind this
+    /// shape: a controller whose plant cannot be reached at boot must
+    /// not die inside driver assembly — it stands pending, served and
+    /// journaled, and the first answering contact completes what the
+    /// boot could not. Tooling and tests that want the connect-time
+    /// verdict keep the eager constructors.
+    pub fn connect_deferred<A: ToSocketAddrs>(addr: A, timeout: Duration) -> std::io::Result<Self> {
+        let addresses: Vec<SocketAddr> = addr.to_socket_addrs()?.collect();
+        if addresses.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "the plant server address resolves to nothing",
+            ));
+        }
+        Ok(Self {
+            addresses,
+            timeout,
+            connection: Mutex::new(Connection {
+                stream: None,
+                owner: None,
+                // `Instant::now()` — the first request attaches without
+                // waiting out an interval that never ran.
                 retry_at: Instant::now(),
                 last_error: None,
                 fenced_by: None,
@@ -699,6 +744,51 @@ impl RemoteDriver {
         Ok(grant)
     }
 
+    /// The fencing-loss counterpart of the bound
+    /// [`ensure_writer`](Self::ensure_writer) — the conditional
+    /// re-grant a fencing-demoted controller probes each scan while its
+    /// loss mark stands: takes the claim for `owner` while the field is
+    /// unclaimed, the standing claim already names `owner`, or the
+    /// standing claim's holder set is empty — the dead-owner or
+    /// orphan-placeholder shape, whose owner is gone or never bound, so
+    /// the re-grant preempts no live attachment. Refused
+    /// [`RemoteError::Fenced`] only while a *different* owner's claim
+    /// has live holders — held controller claim or held tool claim
+    /// alike: a still-held claim keeps the field until it releases,
+    /// while a holderless claim protects no one and refusing it would
+    /// wedge the redundant pair it was raised to fence (two successive
+    /// ex-owners' unbound `ensure_writer` probes each leave a
+    /// holderless claim standing, and a reclaim that refused them could
+    /// never land).
+    ///
+    /// Unlike the orphan cycle's unbound probe the grant *binds* this
+    /// connection to the claim's holders — the re-lifted gate's writes
+    /// must pass the arbitration it re-took — and records the token on
+    /// the attachment exactly as `ensure_writer` does, so a later
+    /// re-attach re-arms it.
+    pub fn reclaim_writer(&self, owner: u64) -> Result<ClaimGrant, RemoteError> {
+        let monitor = self.connection.lock().unwrap().claim_monitor;
+        let grant = match self.request(&PlantRequest::ReclaimWriter { owner, monitor })? {
+            PlantResponse::Done => ClaimGrant::Exclusive,
+            PlantResponse::ClaimedShared { .. } => ClaimGrant::Shared,
+            PlantResponse::Error { error } => {
+                let error: RemoteError = error.into();
+                if matches!(error, RemoteError::Fenced) {
+                    // A refused re-grant means a different owner stands
+                    // held — forget the recorded token so a later
+                    // re-attach does not re-assert a claim this
+                    // attachment no longer holds, exactly like every
+                    // fenced path.
+                    self.connection.lock().unwrap().owner = None;
+                }
+                return Err(self.fail(error));
+            }
+            _ => return Err(self.protocol_violation()),
+        };
+        self.connection.lock().unwrap().owner = Some(owner);
+        Ok(grant)
+    }
+
     /// The orphan cycle's probe shape of [`ensure_writer`](Self::ensure_writer):
     /// raises or confirms the claim *for* `owner` — while the field is
     /// unclaimed or already names the token — without binding this
@@ -904,10 +994,15 @@ impl RemoteDriver {
     /// connection: the response stream's position is unknown afterward,
     /// and a later read could pick up a stale answer. A dead link reports
     /// `Disconnected` until the next
-    /// [`REATTACH_INTERVAL`](Self::REATTACH_INTERVAL) window opens. A
-    /// completed exchange clears the recorded failure — the health
-    /// surface reports the standing failure while it stands and nothing
-    /// once it clears.
+    /// [`REATTACH_INTERVAL`](Self::REATTACH_INTERVAL) window opens — and
+    /// a failed exchange counts as the window's attempt, so a peer that
+    /// completes the handshake but never answers costs one timed-out
+    /// exchange per interval rather than one per request: a scan's probe
+    /// and point reads against the frozen endpoint pay a single timeout
+    /// between them, keeping every lock-taking caller's wait bounded
+    /// near it. A completed exchange clears the recorded failure — the
+    /// health surface reports the standing failure while it stands and
+    /// nothing once it clears.
     fn request(&self, request: &PlantRequest) -> Result<PlantResponse, RemoteError> {
         let mut connection = self.connection.lock().unwrap();
         if connection.stream.is_none() {
@@ -954,6 +1049,12 @@ impl RemoteDriver {
             Err(error) => {
                 connection.stream = None;
                 connection.last_error = Some(error.to_string());
+                // The failed exchange is this interval's re-attach
+                // attempt — an endpoint that completes the handshake
+                // but never answers otherwise charges every request the
+                // full timeout, and a scan's burst of probes and point
+                // reads would serialize into one stall per point.
+                connection.retry_at = Instant::now() + RemoteDriver::REATTACH_INTERVAL;
                 Err(error)
             }
         }

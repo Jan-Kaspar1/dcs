@@ -14,16 +14,18 @@
 # as `DCS_MODEL_FINGERPRINT` — the identity the standby's checkpoint
 # pulls verify on the wire.
 #
-# The manifest's per-controller `state_file`/`journal_file` fields
-# name each peer's durability paths (decisions 35 and 36): every
-# declared path lands on a writable named volume — `ctrl-a-data` /
-# `ctrl-b-data` mounted at `/var/tmp`, an existing world-writable
-# directory in the released image, so the non-root controller process
-# can create its files on the volume — and rides the invocation's
-# `--state-file`/`--journal-file` flags, so a container restart
-# resumes in place and the operator-action record outlives the
-# process. The model and dynamics mounts stay read-only: deployment
-# inputs are mounted, never written.
+# The manifest's per-controller `state_file`/`journal_file`/
+# `history_file` fields name each peer's durability paths (decisions
+# 35, 36, and 102): every declared path lands on a writable named
+# volume — `ctrl-a-data` / `ctrl-b-data` mounted at `/var/tmp`, an
+# existing world-writable directory in the released image, so the
+# non-root controller process can create its files on the volume —
+# and rides the invocation's `--state-file`/`--journal-file`/
+# `--history-file` flags, so a container restart resumes in place,
+# the operator-action record outlives the process, and the durable
+# process-history store replays into the served window across runs.
+# The model and dynamics mounts stay read-only: deployment inputs
+# are mounted, never written.
 #
 # The manifest's `failover_budget` on the standby entry instantiates
 # as ctrl-b's `--auto-promote` argument — the missed-pull budget at
@@ -52,11 +54,11 @@
 
 name: reference-plant
 
-x-dcs-release: v0.5.0
+x-dcs-release: v0.7.0
 
 services:
   dcs-plant:
-    image: dcs-plant-server:v0.5.0
+    image: dcs-plant-server:v0.7.0
     container_name: dcs-plant
     networks:
       - dcs-rig
@@ -82,7 +84,7 @@ services:
       start_period: 2s
 
   ctrl-a:
-    image: dcs-controller:v0.5.0
+    image: dcs-controller:v0.7.0
     container_name: ctrl-a
     depends_on:
       dcs-plant:
@@ -95,7 +97,7 @@ services:
       - ../model/plant.json:/model/plant.json:ro
       - ctrl-a-data:/var/tmp
     environment:
-      DCS_MODEL_FINGERPRINT: "7cf7191a15428da6"
+      DCS_MODEL_FINGERPRINT: "530e2d4ff6c60a16"
     command:
       - /model/plant.json
       - --remote
@@ -108,11 +110,13 @@ services:
       - /var/tmp/state.json
       - --journal-file
       - /var/tmp/journal.jsonl
+      - --history-file
+      - /var/tmp/history.jsonl
       - --pair-token
       - dcs-reference-pair
 
   ctrl-b:
-    image: dcs-controller:v0.5.0
+    image: dcs-controller:v0.7.0
     container_name: ctrl-b
     depends_on:
       dcs-plant:
@@ -127,7 +131,7 @@ services:
       - ../model/plant.json:/model/plant.json:ro
       - ctrl-b-data:/var/tmp
     environment:
-      DCS_MODEL_FINGERPRINT: "7cf7191a15428da6"
+      DCS_MODEL_FINGERPRINT: "530e2d4ff6c60a16"
     command:
       - /model/plant.json
       - --remote
@@ -144,6 +148,8 @@ services:
       - /var/tmp/state.json
       - --journal-file
       - /var/tmp/journal.jsonl
+      - --history-file
+      - /var/tmp/history.jsonl
       - --pair-token
       - dcs-reference-pair
 
