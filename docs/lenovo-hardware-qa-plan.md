@@ -567,21 +567,22 @@ Implementation order: second, after [daily architecture review](daily-architectu
 
 - The born-active startup-claim refusal now has per-revision lane
   evidence over a sim-bus field, not only over the sim-tcp plant: leg
-  `2470` stages the lane's shipped `dcs-sim-bus-device`, launches a
-  first controller onto it and asserts it takes the field's
-  write-ownership claim, then stages a second born-active declaring
-  the same model with no `--peer` and asserts it exits nonzero inside
-  the documented bound carrying the live-holder verdict — the sim-tcp
-  refusal reproduced on the register protocol, which the conditional
-  `claim_writer_unless_held` grant makes possible there, since a bus
-  claim dies with its last holder's link and a standing claim is
-  therefore always a live incumbent to name. A `--standby` launch in
-  the same shape is the positive control: it must converge `tracking`
-  behind the incumbent with its command gate closed and no
-  tracking-source refusal journaled — the arm the defect orphaned.
-  The incumbent's claim and role must be undisturbed throughout: no
-  claim-owner flip, no fenced demotion journaled on it, its scan
-  still moving. Named diagnostics `sim-bus-claim-refusal-failed` and
+  `2480_sim_bus_startup_claim_refusal` stages the lane's shipped
+  `dcs-sim-bus-device`, launches a first controller onto it and
+  asserts it takes the field's write-ownership claim, then stages a
+  second born-active declaring the same model with no `--peer` and
+  asserts it exits nonzero inside the documented bound carrying the
+  live-holder verdict — the sim-tcp refusal reproduced on the register
+  protocol, which the conditional `claim_writer_unless_held` grant
+  makes possible there, since a bus claim dies with its last holder's
+  link and a standing claim is therefore always a live incumbent to
+  name. A `--standby` launch in the same shape is the positive
+  control: it must converge `tracking` behind the incumbent with its
+  command gate closed and no tracking-source refusal journaled — the
+  arm the defect orphaned. The incumbent's claim and role must be
+  undisturbed throughout: no claim-owner flip, no fenced demotion
+  journaled on it, its scan still moving. Named diagnostics
+  `sim-bus-claim-refusal-failed` and
   `sim-bus-claim-refusal-nondeterministic`, with
   `sim-bus-claim-refusal-unchecked` covering the planted negatives;
   two consecutive passes produce identical digests; a rig with no
@@ -600,18 +601,55 @@ Implementation order: second, after [daily architecture review](daily-architectu
   unreadable SignalIndex leaving the leg with nothing to submit
   reported as an unread surface rather than a gate the control
   crossed.
-- The leg needed one lane-contract extension: the born-seat launcher
-  takes a model-addressed launch, `start_born_controller(seat,
-  remote=None, model=<document>)`, which runs with no `--remote` and
-  mounts the caller's document in place of the run's sim-tcp fixture.
-  That is what points a seat at the device server — the attachment
-  dials the device's declared `address` out of the same staged file
-  the server serves its register map from, so both ends of the
-  register protocol read one declaration. Every other part of the
-  launch — the seat's pinned `--owner-token`, the published monitor,
-  the cold state/journal/history reset, the `--peer`/`--standby`
-  wiring, the refuse-to-replace guard — is the rig's born-seat shape
-  unchanged, so the sim-tcp legs are untouched by the extension.
+- The leg rides the born-seat launcher's own field seam rather than
+  adding one: `start_born_controller(seat, remote, document=)` mounts
+  a staged model of the leg's choosing in place of the run's own, and
+  a `remote` of None launches with no `--remote` attachment at all —
+  the shape a `sim-bus`/`sim-cyclic` model needs, since the device
+  carries its address in its parameters. This leg is the second user
+  of the seam #1357's leg landed, and the return value's `model` is
+  what lets it evidence that both ends of the register protocol read
+  one declaration: the device server serves the document the seat
+  mounted. The leg runs after `2470` and before the revision legs,
+  sharing the driven/foreign born seats and the device server with it
+  and sweeping both behind itself.
+
+### Landed 2026-10-01 (sim-cyclic fencing-loss demotion leg, #1357)
+
+- The sim-cyclic fencing-loss demotion contract — the per-revision
+  lane evidence for the single-writer/one-active invariant
+  WW-FND-002 requires, over the claim protocol #1352's fix
+  establishes — is exercised on the deployed rig by scenario leg
+  `2470_sim_cyclic_fencing_loss_demote`. The leg stages the lane's
+  `dcs-sim-bus-device` server on the run config's
+  `sim_bus_device.cyclic_model` document (the block carries one
+  fixture per register-protocol model the legs serve), launches a
+  controller pair onto the staged `sim-cyclic` device on the
+  driven/foreign born seats — a register-protocol model carries its
+  device address in its parameters, so the pair needs no `--remote`
+  — and severs every attachment's control connection with a device
+  restart, the rig-durable link flap that releases the
+  connection-bound claim to nobody. POST /promote on the tracking
+  member then takes the claim, so the ex-owner's next staged
+  exchange meets the fence: the leg asserts the demotion through
+  the named path — served role walking `demoting` to `standby`, the
+  durable `--journal-file` carrying `role_changed` with origin
+  `fenced` beside exactly one `field_claim_lost` attributed to the
+  promoted peer's owner token — inside the documented bound, with
+  never two peers reporting `role:active` at any poll. The promoted
+  owner's exchanges must keep completing with the claim held, the
+  demoted peer's go census-only once its staged image releases, and
+  the pair reconverges to its launch roles; the deployed pair is
+  framed undisturbed before and after.
+- Named diagnostics are `cyclic-fencing-loss-failed` and
+  `cyclic-fencing-loss-nondeterministic`, with the self-check's
+  `cyclic-fencing-loss-unchecked`; two passes produce identical
+  digests. A run staging no device server, no `cyclic_model`, a
+  staged model whose served device is not `sim-cyclic` or declares
+  no output channel, a pair that never settles — or the recorded
+  defect signature itself, the ex-owner whose io_health never names
+  a fenced exchange and who stays active beside its promoted peer —
+  reports inconclusive; the pair leaves on its launch roles.
 
 ## Outcome
 

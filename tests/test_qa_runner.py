@@ -148,6 +148,32 @@ BUS_MODEL = {
     'connections': [],
 }
 
+# The cyclic counterpart the fencing-loss leg stages through the
+# launch's fixture override: one `sim-cyclic` device declaring its
+# register image as a station map — the `stations` partition the kind
+# requires — on the same placeholder address.
+CYCLIC_BUS_MODEL = {
+    'version': 1,
+    'devices': [{
+        'id': 1,
+        'kind': 'sim-cyclic',
+        'parameters': {'address': '__BUS_ADDR__',
+                       'exchange_miss_threshold': 3,
+                       'stations': {'field': {'di1': 0, 'do1': 1}}},
+        'channels': {'di1': {'direction': 'in', 'value_type': 'bool'},
+                     'do1': {'direction': 'out', 'value_type': 'bool'}},
+    }],
+    'io_points': [
+        {'id': 10, 'direction': 'in', 'value_type': 'bool',
+         'channel': {'device': 1, 'name': 'di1'}},
+        {'id': 20, 'direction': 'out', 'value_type': 'bool',
+         'channel': {'device': 1, 'name': 'do1'}},
+    ],
+    'signals': [],
+    'components': [],
+    'connections': [],
+}
+
 
 class Result:
     def __init__(self, stdout='', returncode=0):
@@ -2478,11 +2504,11 @@ class BornActiveActionTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self._launch(peer='foreign', standby='revised')
 
-    def test_a_model_addressed_launch_carries_no_remote(self):
-        # The sim-bus rig legs point a seat at a field the mounted
-        # document declares: no --remote at all, and the caller's
-        # document mounted in place of the run's sim-tcp fixture, so
-        # both ends of the register protocol read one declaration.
+    def test_a_document_addressed_launch_carries_no_remote(self):
+        # The sim-bus rig legs point a seat at a field the staged
+        # document declares: no --remote at all, and that document
+        # mounted in place of the run's sim-tcp model, so both ends of
+        # the register protocol read one declaration.
         bus_model = self.run_dir / 'sim-bus' / 'model.json'
         bus_model.parent.mkdir(parents=True, exist_ok=True)
         bus_model.write_text(json.dumps({'version': 1}))
@@ -2494,10 +2520,11 @@ class BornActiveActionTests(unittest.TestCase):
 
         with patch.object(runner, 'docker', docker):
             info = runner.start_born_controller(
-                self.cfg, self._record(), self.run_dir, bus_model,
+                self.cfg, self._record(), self.run_dir, self.model,
                 'driven', None,
                 lambda event, detail=None: events.append(
-                    (event, detail)), standby='revised')
+                    (event, detail)), standby='revised',
+                document=bus_model)
         launch = self._run(calls)
         self.assertNotIn('--remote', launch)
         self.assertIn(str(bus_model) + ':/model/plant.json:ro', launch)
@@ -2514,12 +2541,24 @@ class BornActiveActionTests(unittest.TestCase):
         self.assertEqual(launch[index + 1],
                          str(self.cfg['plant_owner_tokens']['driven']))
         self.assertIsNone(info['remote'])
+        # The return carries the document actually mounted, so a leg
+        # staging against a device server can evidence that both ends
+        # read the one declaration it staged.
+        self.assertEqual(info['model'], str(bus_model))
         self.assertEqual(
             events[0][1],
-            'launch dcs-hw-qa-1-d (model-addressed) --standby '
-            'dcs-hw-qa-1-c:' + str(runner.BORN_MONITOR_PORT)
+            'launch dcs-hw-qa-1-d on ' + str(bus_model)
+            + ' --standby dcs-hw-qa-1-c:' + str(runner.BORN_MONITOR_PORT)
             + ' --owner-token '
             + str(self.cfg['plant_owner_tokens']['driven']))
+
+    def test_a_launch_with_neither_remote_nor_document_rejected(self):
+        with self.assertRaises(RuntimeError) as caught:
+            runner.start_born_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'driven', None, lambda event, detail=None: None)
+        self.assertIn('staged document of its own',
+                      str(caught.exception))
 
     def test_unknown_seat_rejected(self):
         with self.assertRaises(RuntimeError):
@@ -2686,9 +2725,10 @@ class BornActiveActionTests(unittest.TestCase):
             ctx['stop_born_controller']('driven')
             ctx['stop_born_field']()
             state = ctx['born_controller_state']('driven')
-            # The same lever takes a model-addressed launch: the
+            # The same lever takes a document-addressed launch: the
             # caller names the document to mount and omits the remote.
-            bus = ctx['start_born_controller']('revised', model=bus_model)
+            bus = ctx['start_born_controller'](
+                'revised', None, document=bus_model)
         self.assertEqual(launched['container'], 'dcs-hw-qa-1-d')
         launch = next(c for c in calls
                       if c[0] == 'run' and 'dcs-hw-qa-1-d' in c)
@@ -3192,6 +3232,8 @@ class SimBusDeviceImageTests(unittest.TestCase):
             ({**self.spec, 'device': 0}, 'device/port must be int'),
             ({key: value for key, value in self.spec.items()
               if key != 'model_fixture'}, 'stages no model_fixture'),
+            ({**self.spec, 'cyclic_model': 9},
+             'cyclic_model must name'),
             ('device-1', 'sim_bus_device must map'),
         ]
         for block, message in cases:
@@ -3232,6 +3274,84 @@ class SimBusDeviceImageTests(unittest.TestCase):
                     'qa-1',
                     lambda event, detail=None: events.append(event))
         self.assertEqual(events, ['sim-bus-stop'])
+
+    def test_a_fixture_override_stages_the_selected_model(self):
+        # The fencing-loss leg's seam: the run config's cyclic_model
+        # names the sim-cyclic document, and the launch stages it on
+        # the same device block — the server serves either
+        # register-protocol kind.
+        cyclic = self.src / 'crates/dcs-demo/fixtures/cyclic.json'
+        cyclic.parent.mkdir(parents=True, exist_ok=True)
+        cyclic.write_text(json.dumps(CYCLIC_BUS_MODEL, indent=1) + '\n')
+        with patch.object(runner, 'docker',
+                          self._serving_docker([])):
+            info = runner.start_sim_bus_device(
+                self.cfg, self._record(), self.run_dir,
+                lambda e, d=None: None,
+                fixture='crates/dcs-demo/fixtures/cyclic.json')
+        staged = json.loads(Path(info['model']).read_text())
+        device = next(d for d in staged['devices'] if d['id'] == 1)
+        self.assertEqual(device['kind'], 'sim-cyclic')
+        self.assertEqual(device['parameters']['address'],
+                         info['address'])
+
+    def test_a_missing_override_fixture_fails_before_launch(self):
+        calls = []
+        with patch.object(runner, 'docker',
+                          self._serving_docker(calls)):
+            with self.assertRaises(RuntimeError) as caught:
+                runner.start_sim_bus_device(
+                    self.cfg, self._record(), self.run_dir,
+                    lambda e, d=None: None,
+                    fixture='crates/dcs-demo/fixtures/absent.json')
+        self.assertIn('fixture missing', str(caught.exception))
+        self.assertEqual(calls, [])
+
+    def test_restart_severs_and_waits_on_the_fresh_lifetime(self):
+        # The fencing-loss leg's sever: docker restart drops every
+        # attachment's control connection and the same server comes
+        # back — the readiness read is scoped to the restarted
+        # process's logs, since the old lifetime's announcement stays
+        # on the container log.
+        calls = []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            if args[0] == 'inspect' and 'StartedAt' in str(args):
+                return Result('2026-10-01T12:00:00Z')
+            if args[0] == 'logs' and '--since' in args:
+                return Result(self.serving)
+            if args[0] == 'logs':
+                # The previous lifetime's announcement — present but
+                # scoped out of the readiness read.
+                return Result(self.serving + '\nstale')
+            if args[0] == 'inspect':
+                return Result('true')
+            return Result('')
+
+        events = []
+        with patch.object(runner, 'docker', fake_docker):
+            info = runner.restart_sim_bus_device(
+                self.cfg, 'qa-1', self.run_dir,
+                lambda e, d=None: events.append(e))
+        self.assertIn(('restart', 'dcs-hw-qa-1-bus'), calls)
+        self.assertTrue(any(c[0] == 'logs' and '--since' in c
+                            for c in calls))
+        self.assertEqual(info['address'], 'dcs-hw-qa-1-bus:9005')
+        self.assertEqual(info['model'],
+                         str(self.run_dir / 'sim-bus' / 'model.json'))
+        self.assertEqual(events, ['sim-bus-sever', 'sim-bus-severed'])
+
+    def test_restart_without_a_staged_server_refuses(self):
+        self.cfg['sim_bus_device'] = None
+        calls = []
+        with patch.object(runner, 'docker',
+                          self._serving_docker(calls)):
+            with self.assertRaises(RuntimeError) as caught:
+                runner.restart_sim_bus_device(
+                    self.cfg, 'qa-1', self.run_dir, lambda e, d=None: None)
+        self.assertIn('nothing to sever', str(caught.exception))
+        self.assertEqual(calls, [])
 
     def test_scenario_ctx_carries_the_device_actions(self):
         calls = []

@@ -57,10 +57,11 @@ class BusFeed:
     """A stubbed rig for the sim-bus born-active claim-refusal leg.
     The deployed pair owns a sim-tcp field and never moves; the lane's
     device server serves the staged bus document, and every seat the
-    leg launches on it carries a model-addressed launch — no `--remote`
-    at all — with the seat's own runner-owned journal file recording
-    the events the audit reads. The incumbent takes the claim and
-    scans; the second born-active declaring no pair exits with the
+    leg launches on it carries a document-addressed launch — no
+    `--remote` at all, the staged document mounted in place of the
+    run's own model — with the seat's own runner-owned journal file
+    recording the events the audit reads. The incumbent takes the claim
+    and scans; the second born-active declaring no pair exits with the
     named refusal; the `--standby` control converges tracking behind
     the incumbent with its gate closed. Every transition keys off the
     leg's lever calls so two passes emit identical evidence; the fault
@@ -171,13 +172,14 @@ class BusFeed:
         self.device = None
         self.claim = None
 
-    def start_controller(self, seat, remote=None, peer=None, standby=None,
-                         model=None):
+    def start_controller(self, seat, remote, peer=None, standby=None,
+                         document=None):
         self.calls.append(('start_born_controller', seat, remote,
-                           peer, standby, model))
-        if remote is not None or model != self.MODEL:
-            raise AssertionError('a bus launch is model-addressed: '
-                                 'remote=%r model=%r' % (remote, model))
+                           peer, standby, document))
+        if remote is not None or document != self.MODEL:
+            raise AssertionError('a bus launch is document-addressed: '
+                                 'remote=%r document=%r'
+                                 % (remote, document))
         if self.launch_fails or (self.incumbent_launch_fails
                                  and seat == 'revised'):
             raise RuntimeError('docker run failed: name in use')

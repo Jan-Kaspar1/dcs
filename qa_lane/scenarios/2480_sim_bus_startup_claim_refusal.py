@@ -5,9 +5,12 @@ from .common import *
 
 # Ordering: the leg stages on the scenario seats 'revised'/'foreign'/
 # 'driven' and the lane's own sim-bus device server — it needs the
-# ownerless-backoff leg's seat released and must be done before the
-# revision legs take the born seats over.
-RUNS_AFTER = frozenset({'scenario_ownerless_remote_backoff'})
+# ownerless-backoff leg's seat released, runs after the sim-cyclic
+# fencing-loss leg that shares the driven/foreign seats and the same
+# device server, and must be done before the revision legs take the
+# born seats over.
+RUNS_AFTER = frozenset({'scenario_ownerless_remote_backoff',
+                        'scenario_sim_cyclic_fencing_loss_demote'})
 RUNS_BEFORE = frozenset({'scenario_incompatible_revision',
                          'scenario_model_revision'})
 
@@ -40,9 +43,10 @@ RUNS_BEFORE = frozenset({'scenario_incompatible_revision',
 # the run config's bus model with the device's `__BUS_ADDR__`
 # placeholder resolved to the device container's bridge name and hands
 # back both the bridge address and the staged document, which the leg
-# mounts into each controller it launches — a model-addressed launch
-# with no `--remote` at all, so both ends of the register protocol read
-# one declaration. The pass then runs the three seats in order:
+# mounts into each controller it launches through the born launcher's
+# `document` seam — a document-addressed launch with no `--remote` at
+# all, so both ends of the register protocol read one declaration. The
+# pass then runs the three seats in order:
 #
 # - the incumbent (`revised`): a born-active declaring no pair over
 #   the unclaimed bus field. Its conditional grant lands and it scans
@@ -212,13 +216,14 @@ def _bus_claimants(ctx, seat):
 
 def _bus_launch(ctx, seat, model, peer=None, standby=None):
     """Launch one controller on the leg's own bus field: the staged
-    document mounted read-only and no `--remote`, so the attachment
+    document mounted in place of the run's own model through the born
+    launcher's `document` seam, and no `--remote`, so the attachment
     dials the device server's bridge address straight out of the
     model. `peer`/`standby` carry the launch shape's tracking wiring;
     neither is the reproduction's second launch."""
     try:
         launched = ctx['start_born_controller'](
-            seat, None, peer=peer, standby=standby, model=model)
+            seat, None, peer=peer, standby=standby, document=model)
     except Exception as exc:
         return {'seat': seat, 'stage_error': str(exc)[:300]}
     return {'seat': seat, 'launch': launched}
