@@ -683,6 +683,27 @@ const SCAN_REFUSED_WHEN_PACED: &str = "refused: scans are paced to wall-clock ti
 /// heartbeat miss.
 const CHECKPOINT_PULL_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// How long an outstanding fetch may run before the puller treats its
+/// worker as unable to answer and rebinds a fresh one — several pull
+/// bounds, so a fetch that is merely slow (a large document over a slow
+/// link, every one of its reads inside its own bound) keeps the worker
+/// it is making progress on, while a fetch wedged on the one wait no
+/// bound covers — a configured name whose resolution never answers —
+/// is replaced instead of stranding the pull path for the life of the
+/// process.
+///
+/// The reported [`PullMiss::Stalled`] stage names the stall from the
+/// first bound out; this is the point at which the pull path stops
+/// waiting on it and moves.
+const CHECKPOINT_PULL_STALL: Duration = Duration::from_secs(4);
+
+/// How many wedged fetch workers one puller may retire before it
+/// reports the stall without rebinding again. A retired worker holds
+/// its thread until the fetch it is stuck in resolves, so the
+/// replacement is bounded rather than a leak; a fetch that lands clears
+/// the count, since it proves the path answers again.
+const MAX_RETIRED_PULL_WORKERS: usize = 2;
+
 /// The bound a durability-attesting answer gives the journal sink's
 /// writer — how long a mutating request or a `GET /journal` waits for
 /// the drain to take every queued record before answering anyway.
@@ -4620,6 +4641,107 @@ fn json<T: Serialize + ?Sized>(status: u16, value: &T) -> Response<Cursor<Vec<u8
         )
 }
 
+/// Why one tracking cycle's pull produced no checkpoint.
+///
+/// Every stage is a property of the cycle that observed it, never a
+/// detail carried forward from an earlier one: a transient failure
+/// names itself for as long as it is the most recent thing the worker
+/// reported and never past the point that condition could still
+/// describe the endpoint. That is what keeps a single early failure —
+/// the one refused read a standby's first pull against a source still
+/// coming up produces — from standing as the run's permanent tracking
+/// verdict while the same source answers every later fetch.
+///
+/// The stages also separate the pull path's own waits, which is the
+/// observation the QA finding `pending-source-pull-latches-egain`
+/// needed and could not get from a rig: whether a produced-nothing
+/// cycle is waiting on the name, on a fetch still inside its bound, on
+/// one that has outrun it, or on a document this cycle discarded, is
+/// the difference between an endpoint that is away and a pull path that
+/// has stopped taking what the endpoint serves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PullMiss {
+    /// The cycle's fetch is still outstanding and still inside the
+    /// bound it fetches under.
+    InFlight,
+    /// The cycle's fetch is still outstanding past
+    /// [`CHECKPOINT_PULL_TIMEOUT`] — the worker's own bound, so a
+    /// resolution or a connection the worker cannot finish will not
+    /// answer inside the window the endpoint is measured in. The miss is
+    /// reported as the stall it is: the standby's budget keeps counting,
+    /// and the detail no longer replays whatever the endpoint last said.
+    /// A stall that also outruns [`CHECKPOINT_PULL_STALL`] costs the
+    /// worker and the puller binds a fresh one, so the stage is a
+    /// recovery rather than a verdict.
+    Stalled,
+    /// The cycle's fetch completed and its document went stale before
+    /// the cycle could take it — a document that waited longer than the
+    /// puller's own cadence accounts for, so it is dropped rather than
+    /// applied. The next fetch reconverges fresh; the stage names the
+    /// discard, never an earlier fetch's error.
+    Stale,
+    /// The configured name did not resolve for this cycle's fetch — the
+    /// detail is the resolution failure, the one wait inside a fetch
+    /// that no connect bound covers.
+    Unresolved(String),
+    /// The cycle's fetch resolved with this error: the endpoint
+    /// refused, the read ran out of its bound, or the answer failed the
+    /// pair's line proof. The detail is the worker's own, prefixed with
+    /// the pull target.
+    Refused(String),
+    /// The fetch worker is gone — its thread ended, so no request this
+    /// puller arms can complete.
+    WorkerGone,
+}
+
+impl PullMiss {
+    /// The `degraded` detail this miss reports — the named stage, so
+    /// the served `sync` states which of the pull path's waits a
+    /// produced-nothing cycle is actually in.
+    pub fn detail(&self, target: &TrackTarget) -> String {
+        match self {
+            Self::Refused(detail) => detail.clone(),
+            Self::Unresolved(detail) => format!("fetch from {target}: {detail}"),
+            Self::InFlight => {
+                format!("fetch from {target}: checkpoint pull still in flight")
+            }
+            Self::Stalled => format!(
+                "fetch from {target}: the checkpoint fetch is stalled — the pull \
+                 worker has not answered within its bound"
+            ),
+            Self::Stale => format!(
+                "fetch from {target}: the fetched checkpoint went stale before this \
+                 cycle could take it"
+            ),
+            Self::WorkerGone => {
+                format!("fetch from {target}: the pull worker is gone")
+            }
+        }
+    }
+}
+
+/// How far one fetch got before it answered — the stage the *worker*
+/// reached, kept apart from the outcome so an unresolved name is never
+/// reported as an endpoint refusal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FetchStage {
+    /// The name resolved and the request ran: the outcome is the
+    /// endpoint's document or its own error.
+    Reached,
+    /// The configured name did not resolve this cycle, so no request ran.
+    Unresolved,
+}
+
+/// One completed fetch: when the worker finished it, how far it got,
+/// and what it produced.
+struct Completed {
+    /// When the fetch resolved — the instant a document's wait is
+    /// measured from when the cycle comes to take it.
+    at: Instant,
+    stage: FetchStage,
+    result: Result<Checkpoint, String>,
+}
+
 /// A tracking standby's checkpoint-fetch worker: performs the
 /// pull-per-scan-cycle resync on its own thread so the network wait —
 /// connect, transfer, or a peer that never answers — is never part of
@@ -4633,33 +4755,65 @@ fn json<T: Serialize + ?Sized>(status: u16, value: &T) -> Response<Cursor<Vec<u8
 /// non-blocking, it consumes the latest completed fetch and requests
 /// the next, answering `Ok(checkpoint)` when a fetch produced one
 /// since the previous poll and `Err` otherwise — the fetch's own
-/// error detail, or the still-in-flight state while it runs. A cycle
-/// whose pull has not yet produced a checkpoint is a heartbeat miss
-/// exactly like a refused one, so the failover budget keeps measuring
-/// wall time — budget × scan period — instead of fetch latency: an
-/// active that cannot serve a checkpoint within the window is declared
-/// lost on the same cadence a refused connect would be.
+/// error detail, or the named stage ([`PullMiss`]) while it runs. A
+/// cycle whose pull has not yet produced a checkpoint is a heartbeat
+/// miss exactly like a refused one, so the failover budget keeps
+/// measuring wall time — budget × scan period — instead of fetch
+/// latency: an active that cannot serve a checkpoint within the window
+/// is declared lost on the same cadence a refused connect would be.
 ///
 /// Feed `poll` to [`Monitor::track_cycle`] or
 /// [`Peer::track_once`](dcs_runtime::Peer::track_once) as the `pull`.
-/// A field-owning peer's cycle never invokes it, so fetching idles on
-/// promotion and resumes on demotion; dropping the puller ends the
-/// worker thread once its in-flight fetch resolves.
+/// A field-owning peer's cycle never invokes it, so a caller that
+/// promotes drops the puller there and binds a fresh one on demotion:
+/// the worker thread ends with it, and no answer fetched before the
+/// promotion can land after it.
+///
+/// Nothing a puller learns outlives the condition that produced it. A
+/// failure names itself only while it is the most recent thing the
+/// worker reported — a landed document clears it, and so does a fetch
+/// that has outrun its bound — so the one refused read a standby's
+/// first pull against a source still coming up produces cannot stand as
+/// the run's tracking verdict once that source serves (the QA finding
+/// `pending-source-pull-latches-egain`). A document the cycle finds too
+/// old to apply is measured against the puller's own cadence rather
+/// than a fixed bound, and a fetch wedged past [`CHECKPOINT_PULL_STALL`]
+/// costs its worker rather than the run's convergence.
 pub struct CheckpointPuller {
     /// The pull target — the active's monitor address, or a configured
     /// [`TrackTarget::Name`] each fetch resolves anew.
     target: TrackTarget,
+    /// The address each fetch announces as `?peer=`, or none.
+    announce: Option<SocketAddr>,
+    /// The pair's key each fetch proves its answer under, or none.
+    proof_key: Option<u64>,
     /// Wakes the worker for one fetch; a send arms `pending`.
     requests: mpsc::Sender<()>,
-    /// Completed fetches with their completion instant, consumed by
-    /// [`poll`](Self::poll).
-    results: mpsc::Receiver<(Instant, Result<Checkpoint, String>)>,
+    /// Completed fetches, consumed by [`poll`](Self::poll).
+    results: mpsc::Receiver<Completed>,
     /// A fetch request is outstanding — sent and not yet consumed.
     pending: bool,
-    /// The last completed fetch's error, kept so a cycle polling while
-    /// a fetch is still in flight reports the most recent real detail
-    /// rather than only the in-flight state.
-    last_error: Option<String>,
+    /// When the outstanding request was armed, so a fetch that has
+    /// outrun [`CHECKPOINT_PULL_TIMEOUT`] is reported as the stall it
+    /// is instead of as the previous fetch's error.
+    armed: Option<Instant>,
+    /// The last completed fetch's stage and error, kept so a cycle
+    /// polling while the next fetch is still inside its bound reports
+    /// the most recent real detail rather than only the in-flight
+    /// state — and dropped the moment a fetch produces a document or
+    /// the outstanding one overruns its bound, so it can never stand
+    /// as this run's tracking verdict.
+    last_error: Option<(FetchStage, String)>,
+    /// When the previous cycle polled, so the puller can measure its own
+    /// cadence — see [`staleness`](Self::staleness).
+    last_poll: Option<Instant>,
+    /// The longest interval two consecutive polls have been apart, the
+    /// cadence a completed fetch's wait is measured against.
+    cadence: Duration,
+    /// How many wedged fetch workers this puller has retired — the
+    /// bound [`MAX_RETIRED_PULL_WORKERS`] places on rebinding, cleared
+    /// by a fetch that lands.
+    retired: usize,
 }
 
 impl CheckpointPuller {
@@ -4697,96 +4851,263 @@ impl CheckpointPuller {
         announce: Option<SocketAddr>,
         proof_key: Option<u64>,
     ) -> Self {
-        let (requests, request_rx) = mpsc::channel::<()>();
-        let (result_tx, results) = mpsc::channel();
-        let worker = target.clone();
-        std::thread::spawn(move || {
-            // One fetch per request; the channels closing — the puller
-            // dropped — ends the loop. A named target's resolution runs
-            // here per fetch — inside the worker like the network wait
-            // itself, never on the scan cycle's critical path.
-            while request_rx.recv().is_ok() {
-                let nonce = proof_key.map(|_| mint_generation());
-                let pulled = worker
-                    .resolve()
-                    .and_then(|active| {
-                        MonitorClient::with_timeout(active, CHECKPOINT_PULL_TIMEOUT)
-                            .checkpoint_tracking(announce, nonce)
-                            .map_err(|error| error.to_string())
-                    })
-                    .map_err(|detail| format!("fetch from {worker}: {detail}"))
-                    .and_then(|checkpoint| match (proof_key, nonce) {
-                        (Some(key), Some(nonce))
-                            if checkpoint.line_proof
-                                != Some(line_proof(key, nonce, &checkpoint)) =>
-                        {
-                            Err(format!(
-                                "fetch from {worker}: checkpoint carried no valid line proof"
-                            ))
-                        }
-                        _ => Ok(checkpoint),
-                    });
-                if result_tx.send((Instant::now(), pulled)).is_err() {
-                    return;
-                }
-            }
-        });
+        let (requests, results) = spawn_worker(&target, announce, proof_key);
         Self {
             target,
+            announce,
+            proof_key,
             requests,
             results,
             pending: false,
+            armed: None,
             last_error: None,
+            last_poll: None,
+            cadence: CHECKPOINT_PULL_TIMEOUT,
+            retired: 0,
         }
+    }
+
+    /// Retires this puller's fetch worker and binds a fresh one, so a
+    /// worker that cannot finish the fetch it took does not decide what
+    /// every later cycle reports.
+    ///
+    /// The retired worker keeps its thread until the fetch it is stuck
+    /// in resolves — nothing can preempt a blocking read — but its
+    /// channels go with it, so the answer it eventually produces is
+    /// never consumed and its thread ends there. The bound on how often
+    /// this happens is [`MAX_RETIRED_PULL_WORKERS`], and a fetch that
+    /// lands clears the count.
+    fn rebind_worker(&mut self) {
+        let (requests, results) = spawn_worker(&self.target, self.announce, self.proof_key);
+        self.requests = requests;
+        self.results = results;
+        self.pending = false;
+        self.armed = None;
+        self.retired += 1;
+    }
+
+    /// The wall-clock age a completed fetch's document must still be
+    /// under when a cycle comes to take it — twice the longest gap two
+    /// consecutive polls have been apart, never below the pull bound.
+    ///
+    /// The measurement is the puller's own cadence, not a constant
+    /// standing in for one. A deployed standby's period is whatever its
+    /// `--scan-ms` says, and a scan cycle that overruns — a contended
+    /// executor, the orphan probe's own bounded pulls, a host under
+    /// load — stretches the gap between two polls without anything
+    /// having gone wrong with the fetch. Against a fixed bound a period
+    /// past that bound, or a single cycle that overran it, made *every*
+    /// completed document too old to apply: the puller discarded each
+    /// one, so the peer never converged, and — the latch the QA finding
+    /// `pending-source-pull-latches-egain` recorded — the discard
+    /// reported the earliest fetch's error on every cycle after it,
+    /// naming a read that ran out of its bound against a source whose
+    /// pending window had long since closed, for the life of the
+    /// process. The bound follows the cadence instead, so a document is
+    /// stale only when its wait is one the cadence cannot account for.
+    ///
+    /// The measurement resets once a completed document has been acted
+    /// on, so a stretched cycle costs at most that one document: the
+    /// run's convergence is never traded for a stretch the run has
+    /// already absorbed.
+    ///
+    /// What is left is the case the bound exists for: polls pause while
+    /// the peer owns the field, and a document captured before a
+    /// promotion must not land after it — rewinding the run to a tick it
+    /// already passed. A caller that promotes closes the pause itself: a
+    /// field-owning cycle drops the puller, and the fresh one the run
+    /// binds on demotion holds no answer from before the promotion.
+    fn staleness(&self) -> Duration {
+        self.cadence.max(CHECKPOINT_PULL_TIMEOUT) * 2
     }
 
     /// The tracking cycle's pull, once per scan: consumes the latest
     /// completed fetch — `Ok` applies it, `Err` counts the cycle's
     /// heartbeat miss — and requests the next when none is
-    /// outstanding. A fetch still in flight answers `Err` carrying the
-    /// last completed fetch's error, or the in-flight state when no
-    /// fetch has finished yet; the miss is honest either way — this
-    /// cycle produced no checkpoint.
-    ///
-    /// A completed result older than [`CHECKPOINT_PULL_TIMEOUT`] is
-    /// discarded as stale rather than applied: polls pause while the
-    /// peer owns the field, and a checkpoint captured before a
-    /// promotion would otherwise land long after its fetch — rewinding
-    /// the run to a tick it already passed. Discarding it simply
-    /// counts the cycle's miss; the next fetch reconverges fresh.
+    /// outstanding.
     pub fn poll(&mut self) -> Result<Checkpoint, String> {
-        let mut latest = None;
-        while let Ok(result) = self.results.try_recv() {
-            self.pending = false;
-            if let Err(detail) = &result.1 {
-                self.last_error = Some(detail.clone());
-            }
-            latest = Some(result);
+        self.poll_staged().map_err(|miss| miss.detail(&self.target))
+    }
+
+    /// [`poll`](Self::poll) with the stage the cycle reached kept
+    /// machine-readable — the same outcome a consumer acts on, and the
+    /// observation a regression or an operator reads to tell the pull
+    /// path's waits apart: the fetch's own error when it resolved, the
+    /// name that did not answer, the in-flight state while a fetch is
+    /// still inside its bound, the stall once one has outrun that bound,
+    /// the stale-discard for a document that waited past the puller's
+    /// cadence, and the gone worker that can no longer answer at all.
+    /// The miss is honest either way — this cycle produced no
+    /// checkpoint — and no stage carries a detail forward from an
+    /// earlier cycle: the state a puller reports is the state the fetch
+    /// it is waiting on is actually in.
+    pub fn poll_staged(&mut self) -> Result<Checkpoint, PullMiss> {
+        let now = Instant::now();
+        if let Some(previous) = self.last_poll.replace(now) {
+            self.cadence = self.cadence.max(now.duration_since(previous));
         }
-        // A result is fresh only while its fetch could still have
-        // completed inside the pull bound.
-        if let Some((completed, _)) = &latest
-            && completed.elapsed() > CHECKPOINT_PULL_TIMEOUT
-        {
-            latest = None;
+        let mut latest = None;
+        while let Ok(completed) = self.results.try_recv() {
+            self.pending = false;
+            self.armed = None;
+            latest = Some(completed);
         }
         if !self.pending {
             if self.requests.send(()).is_err() {
-                return Err(format!(
-                    "fetch from {}: the pull worker is gone",
-                    self.target
-                ));
+                return Err(PullMiss::WorkerGone);
             }
             self.pending = true;
+            self.armed = Some(now);
         }
-        latest.map(|(_, result)| result).unwrap_or_else(|| {
-            Err(self.last_error.clone().unwrap_or_else(|| {
-                format!(
-                    "fetch from {}: checkpoint pull still in flight",
-                    self.target
-                )
-            }))
-        })
+        match latest {
+            // A produced document is the only result the staleness bound
+            // can cost: only it carries state whose landing could rewind
+            // the run, and a resolved failure is already the truth about
+            // the endpoint, however long the cycle that takes it waited.
+            Some(Completed {
+                at,
+                stage: _,
+                result: Ok(checkpoint),
+            }) if at.elapsed() <= self.staleness() => {
+                // The endpoint answered: nothing of the failure that
+                // preceded it still describes it, and the stretch the
+                // cadence measured has been paid for.
+                self.last_error = None;
+                self.cadence = CHECKPOINT_PULL_TIMEOUT;
+                // The path answers again: the retirement budget the
+                // earlier wedged workers spent is restored.
+                self.retired = 0;
+                Ok(checkpoint)
+            }
+            Some(Completed { result: Ok(_), .. }) => {
+                // A document too old to apply is not evidence the
+                // endpoint has gone away — it answered, and this cycle
+                // was merely late. The earlier failure goes with it, so
+                // a stretched cadence cannot stand the pending window's
+                // verdict back up on the cycles the next fetch has not
+                // answered yet.
+                self.last_error = None;
+                self.cadence = CHECKPOINT_PULL_TIMEOUT;
+                Err(PullMiss::Stale)
+            }
+            Some(Completed {
+                stage,
+                result: Err(detail),
+                ..
+            }) => {
+                let miss = staged_miss(stage, &detail);
+                self.last_error = Some((stage, detail));
+                Err(miss)
+            }
+            // Nothing completed this cycle: the fetch this cycle's
+            // predecessor armed is still outstanding. While it is inside
+            // the bound it fetches under, the most recent thing the
+            // worker actually reported is the honest detail; past that
+            // bound the fetch cannot be expected to answer at all, and an
+            // earlier error says nothing about the endpoint now.
+            None => {
+                let waited = self.armed.map(|armed| armed.elapsed());
+                match waited {
+                    // Past the stall bound the worker is not coming back
+                    // with this fetch: a fresh one takes the next
+                    // request, so a wedged fetch cannot stand as this
+                    // run's pull path for the life of the process. The
+                    // budget bounds how often a run may do this — a
+                    // fetch that lands restores it.
+                    Some(waited) if waited > CHECKPOINT_PULL_STALL => {
+                        self.last_error = None;
+                        if self.retired < MAX_RETIRED_PULL_WORKERS {
+                            self.rebind_worker();
+                        }
+                        Err(PullMiss::Stalled)
+                    }
+                    // Past the pull bound but inside the stall bound,
+                    // the fetch is simply not answering: the miss is
+                    // reported as the stall it is, and whatever the
+                    // endpoint last said stops describing it.
+                    Some(waited) if waited > CHECKPOINT_PULL_TIMEOUT => {
+                        self.last_error = None;
+                        Err(PullMiss::Stalled)
+                    }
+                    // Inside the bound it fetches under, the outstanding
+                    // fetch is still the honest answer: the most recent
+                    // thing the worker reported, or the state it is in.
+                    Some(_) => Err(match &self.last_error {
+                        Some((stage, detail)) => staged_miss(*stage, detail),
+                        None => PullMiss::InFlight,
+                    }),
+                    None => Err(PullMiss::InFlight),
+                }
+            }
+        }
+    }
+}
+
+/// Spawns one fetch worker for `target` — the request/result channels
+/// a [`CheckpointPuller`] arms and consumes.
+///
+/// The worker runs one fetch at a time and only when a cycle asked for
+/// one — the documented cadence stays one pull per cycle, never a
+/// free-running poll hammering the serving peer. A named target's
+/// resolution runs here per fetch, inside the worker like the network
+/// wait itself, never on the scan cycle's critical path.
+fn spawn_worker(
+    target: &TrackTarget,
+    announce: Option<SocketAddr>,
+    proof_key: Option<u64>,
+) -> (mpsc::Sender<()>, mpsc::Receiver<Completed>) {
+    let (requests, request_rx) = mpsc::channel::<()>();
+    let (result_tx, results) = mpsc::channel();
+    let worker = target.clone();
+    std::thread::spawn(move || {
+        // One fetch per request; the channels closing — the puller
+        // dropped, or this worker retired for a fetch it could not
+        // finish — ends the loop.
+        while request_rx.recv().is_ok() {
+            let nonce = proof_key.map(|_| mint_generation());
+            let (stage, pulled) = match worker.resolve() {
+                Ok(active) => (
+                    FetchStage::Reached,
+                    MonitorClient::with_timeout(active, CHECKPOINT_PULL_TIMEOUT)
+                        .checkpoint_tracking(announce, nonce)
+                        .map_err(|error| error.to_string()),
+                ),
+                // No request ran: the name itself did not answer, which
+                // is a stage of its own and not an endpoint that refused
+                // this cycle's fetch.
+                Err(detail) => (FetchStage::Unresolved, Err(detail)),
+            };
+            let pulled = pulled
+                .map_err(|detail| format!("fetch from {worker}: {detail}"))
+                .and_then(|checkpoint| match (proof_key, nonce) {
+                    (Some(key), Some(nonce))
+                        if checkpoint.line_proof != Some(line_proof(key, nonce, &checkpoint)) =>
+                    {
+                        Err(format!(
+                            "fetch from {worker}: checkpoint carried no valid line proof"
+                        ))
+                    }
+                    _ => Ok(checkpoint),
+                });
+            let completed = Completed {
+                at: Instant::now(),
+                stage,
+                result: pulled,
+            };
+            if result_tx.send(completed).is_err() {
+                return;
+            }
+        }
+    });
+    (requests, results)
+}
+
+/// The miss naming how far the fetch that produced `detail` got — the
+/// name that did not answer, or the endpoint that refused.
+fn staged_miss(stage: FetchStage, detail: &str) -> PullMiss {
+    match stage {
+        FetchStage::Reached => PullMiss::Refused(detail.to_owned()),
+        FetchStage::Unresolved => PullMiss::Unresolved(detail.to_owned()),
     }
 }
 

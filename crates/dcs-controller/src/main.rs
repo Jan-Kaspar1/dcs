@@ -2087,13 +2087,22 @@ fn main() -> ExitCode {
                 // pulls — the serving peer could not track this one
                 // back anyway, since a monitorless standby serves no
                 // checkpoint endpoint.
-                let mut puller = CheckpointPuller::for_target(target.clone(), None, None);
+                //
+                // The puller is rebuilt on demand rather than held for
+                // the run's life: a run that owns the field drops it, so
+                // a checkpoint fetched before it took the field cannot
+                // land after it, and the first demoted cycle binds a
+                // fresh one.
+                let mut puller: Option<CheckpointPuller> = None;
                 let peer = std::cell::RefCell::new(peer);
                 let state_sink = open_state_sink(&options);
                 let step = || driver.step(dt, peer.borrow().owns_field());
                 scan_loop(
                     || {
                         let mut peer = peer.borrow_mut();
+                        if peer.owns_field() {
+                            puller = None;
+                        }
                         // The same tracking cycle the monitored loop
                         // runs through `track_cycle`, here directly on
                         // the peer; without a recorder the transition
@@ -2101,7 +2110,13 @@ fn main() -> ExitCode {
                         // consumes the fetch worker's latest result —
                         // the network wait itself runs off the scan
                         // cycle's critical path.
-                        let report = peer.track_once(|| puller.poll());
+                        let report = peer.track_once(|| {
+                            puller
+                                .get_or_insert_with(|| {
+                                    CheckpointPuller::for_target(target.clone(), None, None)
+                                })
+                                .poll()
+                        });
                         report_tracking(&report, &target);
                         // Without a recorder the transition queues
                         // drain into the log instead. One drain, one
@@ -2403,7 +2418,9 @@ fn main() -> ExitCode {
 /// unreachable peer's do, and the next successful resolution tracks
 /// again without a respawn. A
 /// field-owning cycle's [`Monitor::track_cycle`] short-circuits before
-/// the pull, so the puller's fetch thread idles until a demotion.
+/// the pull, and the cycle drops the puller with the ownership, so a
+/// checkpoint fetched before this run took the field cannot land after
+/// it; the first demoted cycle binds a fresh one.
 ///
 /// The scan's completion can settle the deferred startup grant: a
 /// pending born-active's re-issued conditional ask meeting a live
@@ -2422,23 +2439,36 @@ fn tracked_cycle(
     owner: u64,
     options: &Options,
 ) -> Result<Tick, String> {
+    let owns_field = monitor.owns_field();
     if let Some(source) = monitor.verified_tracking_source() {
-        if puller.as_ref().map(|(bound, _)| bound) != Some(&source) {
-            let announce = Some(monitor.local_addr());
-            // A source a keyed run adopted through an announced
-            // demotion must keep proving every checkpoint it serves —
-            // an endpoint that only replays or fabricates this line's
-            // documents feeds the demoted peer nothing. A configured
-            // source — or an unkeyed run — pulls unproven, as before.
-            let fresh = CheckpointPuller::for_target(
-                source.clone(),
-                announce,
-                monitor.pull_proof_key(&source),
-            );
-            *puller = Some((source.clone(), fresh));
+        if owns_field {
+            // A run that owns the field pulls nothing, and this is the
+            // boundary where the puller's answers stop being applicable:
+            // a checkpoint fetched before this run took the field must
+            // not land after it, rewinding the run to a tick it already
+            // passed. The puller goes with the ownership — its worker
+            // thread ends there, and the first demoted cycle binds a
+            // fresh one holding no answer from before the promotion.
+            *puller = None;
+        } else {
+            if puller.as_ref().map(|(bound, _)| bound) != Some(&source) {
+                let announce = Some(monitor.local_addr());
+                // A source a keyed run adopted through an announced
+                // demotion must keep proving every checkpoint it serves
+                // — an endpoint that only replays or fabricates this
+                // line's documents feeds the demoted peer nothing. A
+                // configured source — or an unkeyed run — pulls
+                // unproven, as before.
+                let fresh = CheckpointPuller::for_target(
+                    source.clone(),
+                    announce,
+                    monitor.pull_proof_key(&source),
+                );
+                *puller = Some((source.clone(), fresh));
+            }
+            let report = monitor.track_cycle(|| puller.as_mut().unwrap().1.poll());
+            report_tracking(&report, &source);
         }
-        let report = monitor.track_cycle(|| puller.as_mut().unwrap().1.poll());
-        report_tracking(&report, &source);
     }
     let tick = monitor.paced_scan();
     if let Some(error) = monitor.drain_startup_refusal() {
