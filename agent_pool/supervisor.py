@@ -636,7 +636,7 @@ Repair context: {repair}
             if receipt.get('returncode', receipt.get('exit_code', -1)) != 0:
                 log = Path(metadata.get('log', '/nonexistent'))
                 tail = log.read_text(errors='replace')[-12000:] if log.is_file() else ''
-                category, retry_after = classify(receipt, tail)
+                category, retry_after = classify(receipt, tail, self.admission.hint_ceiling)
                 self.admission.finish(owner, metadata, category, retry_after)
                 if job.get('session') and 'session' in tail.lower() and (
                         'not found' in tail.lower() or 'no such' in tail.lower()):
@@ -947,7 +947,7 @@ Repair context: {repair}
             self.state.set('reviewer', None)
             log_path = Path(current['process'].get('log', '/nonexistent'))
             tail = log_path.read_text(errors='replace')[-12000:] if log_path.is_file() else ''
-            category, retry_after = classify(receipt, tail)
+            category, retry_after = classify(receipt, tail, self.admission.hint_ceiling)
             self.admission.finish('reviewer', current['process'], category, retry_after)
             self.ingest_review(current, receipt, cfg, issues)
         if self.state.get('reviewer'):
@@ -1109,7 +1109,7 @@ Repair context: {repair}
             self.state.set('planner', None)
             log_path = Path(current['process'].get('log', '/nonexistent'))
             tail = log_path.read_text(errors='replace')[-12000:] if log_path.is_file() else ''
-            category, retry_after = classify(receipt, tail)
+            category, retry_after = classify(receipt, tail, self.admission.hint_ceiling)
             self.admission.finish('planner', current['process'], category, retry_after)
             if receipt.get('returncode', receipt.get('exit_code', -1)) != 0:
                 self.log('Planner failed: ' + json.dumps(receipt))
