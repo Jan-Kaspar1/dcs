@@ -27,6 +27,8 @@ EXPECTED_CASES = frozenset({
     'BusDriverReattachTests.test_two_runs_produce_identical_digests',
     'BusDriverReattachTests.test_never_reattached_fails',
     'BusDriverReattachTests.test_never_degraded_fails',
+    'BusDriverReattachTests.test_swallowed_diagnostics_fail_the_run',
+    'BusDriverReattachTests.test_outage_between_polls_still_counts',
     'BusDriverReattachTests.test_lingering_error_fails',
     'BusDriverReattachTests.test_streak_standing_fails',
     'BusDriverReattachTests.test_reset_history_fails',
@@ -106,6 +108,8 @@ class BusFeed:
         # The staging and rig-state doctors.
         self.restart_raises = False  # the restart lever itself fails
         self.never_returns = False   # a restart leaves the device dead
+        self.swift = False           # the outage lands entirely
+                                    # between two of the leg's polls
         self.ctl_raises = False      # the device tool cannot be asked
         self.silent_rig = False      # every endpoint refuses
         self.untracked = False       # the standby never tracks
@@ -117,14 +121,26 @@ class BusFeed:
         self.restore_status = None   # the restore promote answers non-200
 
     # The runner's device levers — replace the subject's
-    # restart_device/freeze_device/thaw_device/device_ctl.
+    # restart_device/freeze_device/thaw_device/device_ctl. The
+    # severing failure is named by the failed scan, never by the
+    # lever itself: a pause or a restart severs the socket, and the
+    # driver learns of it on its next exchange.
     def restart(self):
         self.calls.append('restart')
         if self.restart_raises:
             raise RuntimeError('docker restart failed')
+        if self.swift:
+            # A driver faster than the leg's poll cadence: the device
+            # is back and the link re-attached before the leg read
+            # anything, so the only trace of the outage is the
+            # boundary accounting it left behind.
+            self.failed_reads += 5
+            self.failed_writes += 2
+            self.io_fault = {'tick': self.tick, 'point': 11,
+                             'direction': 'in', 'error': {'timeout': 11}}
+            return
         self.device_up = False
         self.link_ok = False
-        self.driver_error = self.LINK_ERROR
         self.returns_at = None if self.never_returns \
             else self.reads + self.RESTART_DELAY
         self.reattach_at = None
@@ -133,7 +149,6 @@ class BusFeed:
         self.calls.append('freeze')
         self.device_up = False
         self.link_ok = False
-        self.driver_error = self.LINK_ERROR
 
     def thaw(self):
         self.calls.append('thaw')
@@ -301,6 +316,22 @@ class BusDriverReattachTests(unittest.TestCase):
     def _evidence(self, name):
         return json.loads((self.evidence / name).read_text())
 
+    def run_leg(self, leg, ctx=None, feed=None):
+        """One outage class through the leg's own driver, for the
+        assertions a whole-run verdict cannot isolate."""
+        feed = feed or self.feed
+        subject = (ctx or self._ctx(feed))['bus']
+        with patch.object(scenarios, 'http_json', feed.http_json), \
+                patch.object(scenarios, 'BUS_REATTACH_BOUND', 0.5), \
+                patch.object(scenarios, 'BUS_REATTACH_DEGRADE', 0.5), \
+                patch.object(scenarios, 'BUS_REATTACH_PROMOTE', 0.5), \
+                patch.object(scenarios, 'BUS_REATTACH_SETTLE', 0.5), \
+                patch.object(scenarios, 'BUS_REATTACH_STALL', 0.001), \
+                patch.object(scenarios, 'BUS_REATTACH_POLL', 0.001):
+            return scenarios._bus_outage(
+                ctx or self._ctx(feed), subject, 'active', 'standby',
+                leg, 1)
+
     def test_registered(self):
         self.assertIn(scenarios.scenario_sim_bus_driver_reattach,
                       scenarios.SCENARIOS)
@@ -321,21 +352,42 @@ class BusDriverReattachTests(unittest.TestCase):
         for entry in record['evidence']:
             self.assertTrue((self.evidence.parent
                              / entry['ref']).exists(), entry)
-        first = self._evidence(
-            'sim-bus-driver-reattach-device-restart-pass-1.json')
-        outage = first['outage'][-1]
-        self.assertEqual(outage['link'], 'disconnected')
-        self.assertEqual(outage['last_error'], BusFeed.LINK_ERROR)
-        self.assertGreater(outage['consecutive'], 0)
-        self.assertTrue(outage['fault'])
-        connected = first['first_connected']
-        for name in ('active', 'standby'):
-            self.assertEqual(connected[name]['driver']['link'],
-                             'connected')
-            self.assertIsNone(connected[name]['driver']['last_error'])
-            self.assertEqual(connected[name]['io_health']
-                             ['consecutive_failures'], 0)
-            self.assertTrue(connected[name]['io_health']['last_error'])
+        stall = self._evidence(
+            'sim-bus-driver-reattach-field-stall-pass-1.json')
+        # The stall class holds the device down until every member
+        # has surfaced the outage, so the degraded trace is a fact
+        # the leg witnessed, not one it raced the re-attach for.
+        self.assertEqual(stall['degraded_members'],
+                         ['active', 'standby'])
+        degraded = stall['degrade_trace'][-1]
+        self.assertEqual(degraded['link'], 'disconnected')
+        self.assertEqual(degraded['last_error'], BusFeed.LINK_ERROR)
+        self.assertGreater(degraded['consecutive'], 0)
+        self.assertTrue(degraded['fault'])
+        self.assertTrue(stall['device_serving'])
+        # Both classes: the first serve reporting the link connected
+        # after the outage carries the cleared record, the reset
+        # streak, and the counted history — the durable contract.
+        for leg in ('device-restart', 'field-stall'):
+            first = self._evidence(
+                'sim-bus-driver-reattach-' + leg + '-pass-1.json')
+            self.assertEqual(
+                first['digest']['recovered'], 're-attached', leg)
+            self.assertEqual(first['digest']['outage'], 'counted', leg)
+            self.assertEqual(first['digest']['cadence'], 'advancing', leg)
+            self.assertEqual(first['digest']['roles'], 'held', leg)
+            for name in ('active', 'standby'):
+                base = first['baseline'][name]
+                connected = first['first_connected'][name]
+                self.assertEqual(connected['driver']['link'],
+                                 'connected', leg)
+                self.assertIsNone(connected['driver']['last_error'], leg)
+                self.assertEqual(connected['io_health']
+                                 ['consecutive_failures'], 0, leg)
+                self.assertTrue(connected['io_health']['last_error'], leg)
+                self.assertGreater(connected['io_health']['failed_reads'],
+                                   base['io_health']['failed_reads'], leg)
+                self.assertGreater(connected['tick'], base['tick'], leg)
         digest = self._evidence('sim-bus-driver-reattach-digest.json')
         for leg in ('device-restart', 'field-stall'):
             self.assertEqual(len(digest['passes'][leg]), 2)
@@ -390,11 +442,51 @@ class BusDriverReattachTests(unittest.TestCase):
         report.validate_scenario(record)
 
     def test_never_degraded_fails(self):
+        # The stall class is the one whose window the leg owns, so it
+        # is the class that can demand the outage be surfaced: the
+        # freeze is held past the documented stall until both members
+        # report it, which no one-second re-attach can outrun.
+        self.feed.healthy_through = True
+        _digest, violations, _evidence = self.run_leg('field-stall')
+        self.assertEqual(sorted(violations), ['never-degraded'])
+        diagnostic, detail = violations['never-degraded']
+        self.assertEqual(diagnostic, 'sim-bus-reattach-failed')
+        self.assertIn('never surfaced', detail)
+        # The lane leaves the device running even on the failed leg.
+        self.assertEqual(self.feed.calls[-1], 'thaw')
+
+    def test_swallowed_diagnostics_fail_the_run(self):
+        # The same doctor through the restart class, whose window the
+        # device sets: the served link claims connected while the
+        # boundary still fails, so the failure streak stands behind a
+        # healthy-looking link.
         self.feed.healthy_through = True
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'failed', record)
-        self.assertIn('never surfaced', record['detail'])
+        self.assertTrue(record['detail'].startswith(
+            'sim-bus-reattach-failed'), record['detail'])
+        self.assertIn('failure streak still stood', record['detail'])
         report.validate_scenario(record)
+
+    def test_outage_between_polls_still_counts(self):
+        # The fix re-attaches on a one-second bound, so a driver can
+        # drop and restore between two of the leg's reads. That is a
+        # recovery the contract permits: the boundary accounting is
+        # the other witness, and the leg must not read the missed
+        # transient as a defect.
+        self.feed.swift = True
+        digest, violations, evidence = self.run_leg('device-restart')
+        self.assertEqual(violations, {})
+        self.assertEqual(digest['recovered'], 're-attached')
+        self.assertEqual(digest['outage'], 'counted')
+        self.assertEqual(evidence['degraded_members'], [])
+        for name in ('active', 'standby'):
+            self.assertIsNone(
+                evidence['first_connected'][name]['driver']['last_error'])
+            self.assertGreater(
+                evidence['first_connected'][name]['io_health']
+                ['failed_reads'],
+                evidence['baseline'][name]['io_health']['failed_reads'])
 
     def test_lingering_error_fails(self):
         self.feed.lingering = True

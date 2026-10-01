@@ -2904,8 +2904,9 @@ def _bus_rig(cfg):
     non-negative integer device id and request timeout, a shared
     --pair-token, and the pair's own two distinct u64 --owner-token
     pins. A duplicated pin would answer the device's single-writer
-    claim as a shared attachment and silently defeat the fencing the
-    rig-reattach leg's promote probe reads.
+    claim as a shared attachment and silently defeat the single-writer
+    arbitration the driver-reattach leg's promote probe rides the
+    recovered link through.
     """
     spec = cfg.get('bus_rig')
     if spec is None:
@@ -3016,8 +3017,11 @@ def _bus_controller_argv(bus, name, prefix):
     in-container `--listen` ports are the standard pair members' 8080
     and 8081 (separate netns, so the numbers repeat across rigs).
     `name='standby'` launches the tracking member: its `--standby`
-    target is the pair's own active on the bridge, with the run's
-    --auto-promote budget. Both members carry the block's shared
+    target is the pair's own active on the bridge, and its
+    --auto-promote budget is generous enough that no member of the
+    reattach rig ever self-promotes out from under the leg — the
+    launch roles the leg asserts are the ones a role change would
+    have to break. Both members carry the block's shared
     --pair-token, so the rig's announced-source posture matches the
     deployed pair's keyed one.
     """

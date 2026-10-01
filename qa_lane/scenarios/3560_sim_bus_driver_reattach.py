@@ -36,23 +36,36 @@ RUNS_AFTER = frozenset({'scenario_remote_driver_recovery'})
 #       rig's declared per-request timeout turns into a failed
 #       exchange the driver has to recover from.
 #
-# Through each member's serving monitor the leg asserts the whole
-# contract, twice per class so the run's own determinism is measured:
-# the healthy baseline carries a connected link and no standing
-# `last_error`; the outage surfaces as `disconnected` with the
-# severing failure named in `last_error` and io_health counting the
-# degraded boundary; the link returns to `connected` inside the
-# documented bound — the fix's one-second `REATTACH_INTERVAL` plus the
-# driver's request timeout and the restarted device's own bind, never
-# a permanent `link:disconnected` — with the first successful
-# exchange clearing the standing record, the failure streak reset, and
-# the cumulative counters and recorded fault keeping the outage's
-# history; the served tick and the scan cadence resume, never rewound
-# past the running peak, which would be a controller restart rather
-# than a driver recovery; the pair's launch roles hold throughout; and
-# once the backend is back, `POST /promote` on the converged standby
-# answers inside its own bound — the promotion path's device claim
-# riding the recovered link — after which the launch roles are
+# The re-attach is fast by design — the fix's one-second
+# `REATTACH_INTERVAL` — so the window in which the link is observably
+# down is roughly one re-attach interval wide, and no poll-based
+# watch can be asked to prove it caught that window. The leg
+# therefore splits what it asserts by what it can hold still. Both
+# classes assert the durable contract, which survives the recovery
+# and is what the issue names: on every member the boundary counters
+# moved over the baseline and the recorded fault is stamped (the
+# outage was counted), and the first serve reporting the link
+# `connected` after the outage already carries the cleared standing
+# record, the reset failure streak, the kept cumulative history, and
+# a served tick advanced past the baseline — never rewound past the
+# running peak, which would be a controller restart rather than a
+# driver recovery. The stall class, whose freeze the leg owns,
+# additionally *holds* the device down until every member has
+# surfaced the outage as `disconnected` with the severing failure
+# named in `last_error` and io_health counting the degraded
+# boundary — so a driver that swallows its own transport diagnostics
+# is caught on a window the leg controls rather than on one it
+# races. The restart class lets the device return on its own
+# schedule and records the transient where the return allows it; a
+# driver fast enough to drop and restore between two of the leg's
+# reads is still a recovery the contract permits, so the moved
+# counters witness that one.
+#
+# The pair's launch roles are watched through both classes, and once
+# the backend is back `POST /promote` on the converged standby must
+# answer inside its own bound — the promotion path's device claim
+# riding the recovered link, so a peer still sealed to a dead driver
+# never becomes promotable — after which the launch roles are
 # restored by promoting the original owner back.
 #
 # Functional misses on the recovery contract name
@@ -61,25 +74,31 @@ RUNS_AFTER = frozenset({'scenario_remote_driver_recovery'})
 # sim-bus-reattach-nondeterministic. The unchecked-diagnostic
 # self-check replays the recovered-link audit over planted negatives —
 # the standing record lingering, the streak standing, the counted
-# history reset, the tick held at the baseline — and any it lets
-# through reports sim-bus-reattach-unchecked. A run context carrying
-# no register-mapped field rig, a rig whose device or pair never
-# answers, a pair that never settles tracking, a staging lever that
-# never completes, and a staged revision whose served surface cannot
-# express the contract at all report inconclusive.
+# history reset, the outage uncounted, the tick held at the baseline —
+# and any it lets through reports sim-bus-reattach-unchecked. A run
+# context carrying no register-mapped field rig, a rig whose device
+# or pair never answers, a pair that never settles tracking, a
+# staging lever that never completes, a restart whose device never
+# serves again, a restore the leg cannot classify, and a staged
+# revision whose served surface cannot express the contract at all
+# report inconclusive.
 
 # The documented recovery bound: the fix's REATTACH_INTERVAL (one
 # second) plus one request timeout and the restarted device server's
 # own bind, with scan-cadence slack — generous where the contract is
 # fast, and well inside the suite's per-scenario budget either way.
 BUS_REATTACH_BOUND = 30
-# The bound on the outage surfacing as a counted degradation, and on
-# the promotion probe answering once the backend is back.
+# The bound on the stall class holding the device down until the
+# outage surfaces on every member, and on the promotion probe
+# answering once the backend is back.
 BUS_REATTACH_DEGRADE = 20
 BUS_REATTACH_PROMOTE = 20
 # The freeze the stall class holds: the ~2 s the finding records, above
 # the rig's declared per-request timeout, so the window produces a
-# failed exchange to recover from rather than a late answer.
+# failed exchange to recover from rather than a late answer. It is the
+# class's floor, not its ceiling — the freeze is held past it until
+# every member has surfaced the outage, so the documented window is
+# the window the leg observes.
 BUS_REATTACH_STALL = 2.0
 BUS_REATTACH_SETTLE = 30    # bound on the pair settling before/after
 BUS_REATTACH_POLL = 0.25     # cadence watching the link mid-outage
@@ -101,12 +120,25 @@ def _device_serving(subject):
     now — the device-side half of the outage classification, asked
     through the shipped field tool exec'd inside the device's own
     container. True, False, or None when the subject carries no
-    device-tool seam to ask with."""
+    device-tool seam to ask with.
+
+    Never asked while the device is frozen: an exec into a paused
+    container is not an answer the leg can wait on, so a refused or
+    hanging census there would classify a driver that behaved
+    correctly. Every call site runs after the restore."""
     try:
         answer = subject['device_ctl']('list')
     except Exception:
         return None
     return getattr(answer, 'returncode', 1) == 0
+
+
+def _counted(health):
+    """The io_health boundary counters summed — the failed-exchange
+    accounting's monotone total, the one part of it a successful
+    exchange never rewinds."""
+    body = health or {}
+    return (body.get('failed_reads') or 0) + (body.get('failed_writes') or 0)
 
 
 def _bus_owner(ctx, subject):
@@ -138,14 +170,25 @@ def _bus_outage(ctx, subject, active, peer, leg, number):
     the outage's normalized verdict, identical across two clean
     passes of the same class; violations is {key: (diagnostic,
     detail)} in first-seen order. Rig states the contract cannot
-    answer for raise for the caller's inconclusive verdict."""
+    answer for raise for the caller's inconclusive verdict.
+
+    What the class can hold still is what it asserts: the stall
+    class keeps the device frozen until every member has surfaced
+    the outage, so its degraded observation is a fact rather than a
+    race with the driver's one-second re-attach; the restart class
+    lets the device return on its own schedule and gates only on the
+    durable accounting."""
     expected = {active: 'active', peer: 'standby'}
     members = (active, peer)
     violations = {}
     evidence = {'leg': leg, 'pass': number}
     peak = {}
-    marks = {'baseline': None, 'outage': None, 'recovered': None,
-             'roles': 'held', 'cadence': 'held'}
+    marks = {'baseline': None, 'degraded': None, 'outage': None,
+             'recovered': None, 'roles': 'held', 'cadence': 'held'}
+    floors = {}
+    ticks = {}
+    severed = set()   # the members whose served link the leg has
+                      # watched report disconnected
     frozen = False
 
     def note(key, diagnostic, detail):
@@ -194,13 +237,16 @@ def _bus_outage(ctx, subject, active, peer, leg, number):
         peak[name] = tick if seen is None else max(seen, tick)
         return True
 
-    def watch(match, bound):
+    def watch(match, bound, hold=None):
         """One watch loop across the outage's two halves: poll each
-        member's snapshot until `match(health, driver)` holds on
-        both, a role moves, a tick rewinds, or `bound` seconds pass.
-        Returns (trace, hits, silent) — hits maps each matched
-        member to its snapshot, silent names the members whose
-        monitor died mid-watch."""
+        member's snapshot until `match(health, driver)` holds on both,
+        a role moves, a tick rewinds, or `bound` seconds pass. `hold`
+        is a monotonic instant the watch waits out even after the
+        match, which is how the stall class keeps the device frozen
+        for the documented window the driver's own re-attach latency
+        would otherwise close. Returns (trace, hits, silent) — hits
+        maps each matched member to its snapshot, silent names the
+        members whose monitor died mid-watch."""
         trace = []
         hits = {}
         silent = set()
@@ -214,8 +260,7 @@ def _bus_outage(ctx, subject, active, peer, leg, number):
                     if name not in hits:
                         silent.add(name)
                     continue
-                if name in silent:
-                    silent.discard(name)
+                silent.discard(name)
                 if not watch_tick(snap, name):
                     return trace, hits, silent
                 health = snap.get('io_health') or {}
@@ -228,23 +273,100 @@ def _bus_outage(ctx, subject, active, peer, leg, number):
                               'failed_reads': health.get('failed_reads'),
                               'failed_writes': health.get('failed_writes'),
                               'fault': health.get('last_error')})
-                if name not in hits and match(health, driver):
+                if name not in hits and match(name, health, driver):
                     hits[name] = snap
-            if len(hits) == len(members):
+            if len(hits) == len(members) and (hold is None
+                                              or time.monotonic() >= hold):
                 break
             if len(silent) == len(members):
                 return trace, hits, silent
             time.sleep(BUS_REATTACH_POLL)
         return trace, hits, silent
 
-    def degraded(health, driver):
+    def degraded(name, health, driver):
+        """The outage surfacing on one member: the severed link, the
+        severing failure named beside it, the boundary streak
+        advancing, and the boundary fault recorded."""
         return driver.get('link') == 'disconnected' \
             and bool(driver.get('last_error')) \
             and (health.get('consecutive_failures') or 0) > 0 \
             and bool(health.get('last_error'))
 
-    def recovered(_health, driver):
-        return driver.get('link') == 'connected'
+    def reattached(name, health, driver):
+        """The recovery watch's per-member match, as a state machine
+        over the outage's own served diagnostics: a member counts as
+        recovered on the first serve reporting the link `connected`
+        after the leg watched it report `disconnected`. A watch that
+        opens while the driver is still severing therefore never
+        matches the healthy serve it started from, which is what
+        makes the matched serve the *first* serve after the outage
+        rather than an arbitrary one.
+
+        A member the leg never watched go down is matched instead by
+        its boundary counters having moved past the baseline — the
+        same serve under the other witness. The fix re-attaches on a
+        one-second bound, so a driver faster than the poll cadence
+        can drop and restore between two of the leg's reads; that is
+        a recovery the contract permits and the leg must not read as
+        a defect."""
+        link = driver.get('link')
+        if link == 'disconnected':
+            severed.add(name)
+            return False
+        if link != 'connected':
+            return False
+        return name in severed or _counted(health) > floors[name]
+
+    def abandoned(*traces):
+        """The no-recovery verdict, classified by the device itself
+        and by what the leg actually watched. A member whose served
+        diagnostics never reported the outage is a driver that does
+        not surface its own transport degradation — named as such
+        rather than as a re-attach that never landed, because the
+        honest reading of a link that never went down is a driver
+        that never said it did. A device answering again with the
+        outage surfaced is the driver's own verdict: the re-attach
+        the fix names did not land inside the documented bound. A
+        device that never served again means the class's restore
+        never landed, and a census the rig cannot answer for is
+        unclassifiable; both raise for the caller's inconclusive
+        verdict."""
+        seen = set(severed)
+        for trace in traces:
+            seen.update(entry['member'] for entry in trace
+                        if entry.get('link') == 'disconnected')
+        serving = _device_serving(subject)
+        evidence['device_serving'] = serving
+        if serving:
+            missing = [name for name in members if name not in seen]
+            if missing:
+                failed('never-degraded',
+                       'the ' + leg + ' never surfaced on the served '
+                       'register-driver diagnostics of '
+                       + ', '.join(missing) + ' — neither a '
+                       'disconnected link nor a moved boundary total '
+                       'while the device answered the leg\'s own '
+                       'census: ' + json.dumps(traces[-1][-2:])[:400])
+            else:
+                failed('never-reattached',
+                       'the register driver never re-attached inside '
+                       'the documented ' + str(BUS_REATTACH_BOUND)
+                       + 's bound after the ' + leg + ' — the served '
+                       'link still reports disconnected while the '
+                       'device answers: '
+                       + json.dumps(traces[-1][-2:])[:400])
+            evidence['digest'] = digest()
+            return evidence['digest'], violations, evidence
+        if serving is None:
+            raise ConnectionError('the register driver never '
+                                  're-attached and the device itself '
+                                  'cannot be asked whether it serves '
+                                  'again — the ' + leg + '\'s restore '
+                                  'is unclassifiable')
+        raise ConnectionError('the register driver never re-attached '
+                              'and the device itself never served '
+                              'again — the ' + leg + '\'s restore '
+                              'never landed')
 
     try:
         # The baseline the outage runs from: the settled healthy serve
@@ -253,7 +375,6 @@ def _bus_outage(ctx, subject, active, peer, leg, number):
         # accounting, or a standing record behind a healthy link is
         # caught here, before any staging runs.
         baseline = {}
-        ticks = {}
         for name in members:
             snap = _try_snapshot(ctx, subject[name])
             health = (snap or {}).get('io_health')
@@ -284,6 +405,7 @@ def _bus_outage(ctx, subject, active, peer, leg, number):
                                       + ' — the rig never presented the '
                                       'healthy baseline')
             ticks[name] = snap.get('tick')
+            floors[name] = _counted(health)
             if driver.get('last_error'):
                 failed('baseline-lingered-' + name,
                        'a standing last_error stands behind ' + name
@@ -297,52 +419,62 @@ def _bus_outage(ctx, subject, active, peer, leg, number):
             return evidence['digest'], violations, evidence
         marks['baseline'] = 'connected-and-clear'
 
-        # The outage: stage the class, then watch the pair degrade.
+        # The staging. The stall class holds the freeze until every
+        # member has surfaced the outage, so the degraded observation
+        # is one the leg witnessed rather than one it raced; the
+        # restart class lets the device return on its own schedule and
+        # records the transient where the return allows it.
+        marks['degraded'] = 'not-gated'
         try:
             if leg == 'device-restart':
                 subject['restart_device']()
             else:
                 subject['freeze_device']()
                 frozen = True
-                time.sleep(BUS_REATTACH_STALL)
+                degrade, hits, silent = watch(
+                    degraded, BUS_REATTACH_DEGRADE,
+                    hold=time.monotonic() + BUS_REATTACH_STALL)
+                evidence['degrade_trace'] = degrade
+                if violations:
+                    evidence['digest'] = digest()
+                    return evidence['digest'], violations, evidence
+                if silent:
+                    failed('monitor-silent-' + sorted(silent)[0],
+                           'the bus pair\'s monitor stopped answering '
+                           'while the device was frozen: '
+                           + ', '.join(sorted(silent))
+                           + ' — the run aborted on field loss')
+                    evidence['digest'] = digest()
+                    return evidence['digest'], violations, evidence
+                if len(hits) < len(members):
+                    failed('never-degraded',
+                           'the ' + leg + ' never surfaced on the '
+                           'served register-driver diagnostics of both '
+                           'members while the leg held the device '
+                           'down — the last trace entries read '
+                           + json.dumps(degrade[-2:])[:400])
+                    evidence['digest'] = digest()
+                    return evidence['digest'], violations, evidence
+                marks['degraded'] = 'link-down-named-counted'
+                severed.update(hits)
                 subject['thaw_device']()
                 frozen = False
+        except ConnectionError:
+            raise
         except Exception as exc:
             raise ConnectionError('the ' + leg + ' staging lever never '
                                   'completed: ' + str(exc)[:300])
 
-        outage, hits, silent = watch(degraded, BUS_REATTACH_DEGRADE)
-        evidence['outage'] = outage
-        evidence['device_serving_mid'] = _device_serving(subject)
-        if violations:
-            evidence['digest'] = digest()
-            return evidence['digest'], violations, evidence
-        if silent:
-            failed('monitor-silent-' + sorted(silent)[0],
-                   'the bus pair\'s monitor stopped answering during '
-                   'the ' + leg + ' outage: ' + ', '.join(sorted(silent))
-                   + ' — the run aborted on field loss')
-            evidence['digest'] = digest()
-            return evidence['digest'], violations, evidence
-        if len(hits) < len(members):
-            failed('never-degraded',
-                   'the ' + leg + ' never surfaced on the served '
-                   'register-driver diagnostics of both members — the '
-                   'last trace entries read '
-                   + json.dumps(outage[-2:])[:400])
-            evidence['digest'] = digest()
-            return evidence['digest'], violations, evidence
-        marks['outage'] = 'link-down-named-counted'
-        outage_health = {name: (hits[name].get('io_health') or {})
-                         for name in hits}
-
-        # The recovery: the first serve reporting the link connected
-        # inside the documented bound must already carry the cleared
-        # record, the reset streak, the kept history, and an advanced
-        # tick — on both members, never one.
-        recovery, hits, silent = watch(recovered, BUS_REATTACH_BOUND)
-        evidence['recovery'] = recovery
-        evidence['device_serving_after'] = _device_serving(subject)
+        # The recovery: the first serve on each member reporting the
+        # link connected after the outage was counted must land inside
+        # the documented bound — on both members, never one.
+        recovery, hits, silent = watch(reattached, BUS_REATTACH_BOUND)
+        evidence['recovery_trace'] = recovery
+        evidence['degraded_members'] = sorted({
+            entry['member'] for entry in
+            evidence.get('degrade_trace', []) + recovery
+            if entry.get('link') == 'disconnected'})
+        evidence['device_serving'] = _device_serving(subject)
         if violations:
             evidence['digest'] = digest()
             return evidence['digest'], violations, evidence
@@ -355,41 +487,22 @@ def _bus_outage(ctx, subject, active, peer, leg, number):
             evidence['digest'] = digest()
             return evidence['digest'], violations, evidence
         if len(hits) < len(members):
-            # The device answering again makes a still-disconnected
-            # link the driver's own verdict: the re-attach the fix
-            # names did not land inside the documented bound.
-            serving = _device_serving(subject)
-            if serving:
-                failed('never-reattached',
-                       'the register driver never re-attached inside '
-                       'the documented ' + str(BUS_REATTACH_BOUND)
-                       + 's bound after the ' + leg + ' — the served '
-                       'link still reports disconnected while the '
-                       'device answers: '
-                       + json.dumps(recovery[-2:])[:400])
-            elif serving is None:
-                raise ConnectionError('the register driver never '
-                                      're-attached and the device '
-                                      'itself cannot be asked whether '
-                                      'it serves again — the ' + leg
-                                      + '\'s restore is unclassifiable')
-            else:
-                raise ConnectionError('the register driver never '
-                                      're-attached and the device '
-                                      'itself never served again — the '
-                                      + leg + '\'s restore never '
-                                      'landed')
-            evidence['digest'] = digest()
-            return evidence['digest'], violations, evidence
+            return abandoned(evidence.get('degrade_trace', []), recovery)
+        marks['outage'] = 'counted'
         marks['recovered'] = 're-attached'
         evidence['first_connected'] = {
             name: {'tick': hits[name].get('tick'),
                    'driver': _driver_health(hits[name]),
                    'io_health': hits[name].get('io_health')}
             for name in members}
+        seen = {name: any(entry.get('fault') for entry in
+                          evidence.get('degrade_trace', []) + recovery
+                          if entry['member'] == name)
+                for name in members}
+        evidence['counted_mid'] = seen
 
-        _bus_reattach_audit(members, hits, outage_health, ticks, leg,
-                            marks, note)
+        _bus_reattach_audit(members, hits, baseline, ticks, leg,
+                            seen, marks, note)
         if not violations and marks['cadence'] != 'stalled':
             marks['cadence'] = 'advancing'
         evidence['digest'] = digest()
@@ -405,23 +518,30 @@ def _bus_outage(ctx, subject, active, peer, leg, number):
                 pass
 
 
-def _bus_reattach_audit(members, hits, outage_health, ticks, leg,
-                      marks, note):
+def _bus_reattach_audit(members, hits, baseline, ticks, leg, seen,
+                        marks, note):
     """The recovered-serve assertions — runnable against planted hits
     in the self-check. `hits` maps each member to the first serve
-    reporting its link connected; the first such serve must already
-    carry the cleared standing record, the reset boundary streak, the
-    kept cumulative history and recorded fault, and a served tick
-    advanced past the baseline — on every member, never one.
-    `note(key, diagnostic, detail)` records each clause the hits
-    violate; a stalled tick also marks the digest's cadence."""
+    reporting its link connected after the outage; the first such
+    serve must already carry the cleared standing record, the reset
+    boundary streak, the kept cumulative history and recorded fault,
+    and a served tick advanced past the baseline — on every member,
+    never one. `baseline` maps each member to the serve the outage
+    ran from, whose counted total is what the recovery must have
+    moved; `seen` names the members whose own watch saw a stamped
+    boundary fault during the outage, which is what separates an
+    accounting that reset what it had counted from one that never
+    saw the outage at all. `note(key, diagnostic, detail)` records
+    each clause the hits violate; a stalled tick also marks the
+    digest's cadence."""
     def failed(key, detail):
         note(key, 'sim-bus-reattach-failed', detail)
 
     for name in members:
         health = hits[name].get('io_health') or {}
         driver = _driver_health(hits[name]) or {}
-        before = outage_health.get(name) or {}
+        before = (baseline.get(name) or {}).get('io_health') or {}
+        counted, was = _counted(health), _counted(before)
         if driver.get('last_error'):
             failed('lingered-' + name,
                    name + '\'s register-driver last_error lingered '
@@ -434,16 +554,21 @@ def _bus_reattach_audit(members, hits, outage_health, ticks, leg,
                    name + '\'s boundary failure streak still stood '
                    'behind the healthy link: '
                    + json.dumps(health)[:300])
-        if (health.get('failed_reads') or 0) \
-                < (before.get('failed_reads') or 0) \
-                or (health.get('failed_writes') or 0) \
-                < (before.get('failed_writes') or 0) \
-                or not health.get('last_error'):
+        if counted < was or (counted == was and seen.get(name)):
+            # The matched serve is the first one past the outage, so a
+            # total back at (or below) the baseline is history the
+            # accounting dropped rather than history it never took.
             failed('history-lost-' + name,
                    name + '\'s counted outage history reset across '
                    'the recovery — the cumulative counters or the '
-                   'recorded fault dropped what they counted: '
-                   + json.dumps(health)[:400])
+                   'recorded fault dropped what they counted before '
+                   'the ' + leg + ': ' + json.dumps(health)[:400])
+        elif counted == was or not health.get('last_error'):
+            failed('never-counted-' + name,
+                   name + '\'s io_health never counted the ' + leg
+                   + ' — the boundary counters stand at the baseline '
+                   'total ' + str(was) + ' and the boundary fault was '
+                   'never recorded: ' + json.dumps(health)[:400])
         if not (hits[name].get('tick') or 0) > (ticks[name] or 0):
             marks['cadence'] = 'stalled'
             failed('cadence-' + name,
@@ -456,10 +581,11 @@ def _bus_reattach_self_check():
     """The leg's unchecked-diagnostic self-test: replay the recovered-
     link audit over each planted negative the contract names — a
     standing last_error behind the restored link, a streak still
-    standing, the counted history reset, the tick held at the
-    baseline — and require each to trip sim-bus-reattach-failed while
-    the clean record trips nothing. Returns the planted case names the
-    audit let through or wrongly named."""
+    standing, the counted history rewound, the outage uncounted, the
+    tick held at the baseline — and require each to trip
+    sim-bus-reattach-failed while the clean record trips nothing.
+    Returns the planted case names the audit let through or wrongly
+    named."""
     def snap(tick, driver_error=None, streak=0, reads=9, writes=2,
              fault='faulted'):
         return {'tick': tick,
@@ -471,24 +597,30 @@ def _bus_reattach_self_check():
                                          'last_error': driver_error}}}
 
     members = ('active', 'standby')
-    outage_health = {name: {'failed_reads': 7, 'failed_writes': 2,
-                            'last_error': {'tick': 5}}
-                     for name in members}
+    baseline = {name: {'io_health': {'failed_reads': 7,
+                                     'failed_writes': 2,
+                                     'last_error': None}}
+                for name in members}
     ticks = {name: 4 for name in members}
     clean = {name: snap(9) for name in members}
-    plants = {'clean': (clean, False),
+    counted = {name: True for name in members}
+    plants = {'clean': (clean, counted, False),
               'lingered': ({**clean, 'active': snap(
-                  9, driver_error='connection reset by peer')}, True),
+                  9, driver_error='connection reset by peer')},
+                  counted, True),
               'streak-stood': ({**clean, 'active': snap(9, streak=3)},
-                               True),
+                               counted, True),
               'history-lost': ({**clean, 'active': snap(
-                  9, reads=0, fault=None)}, True),
-              'cadence': ({**clean, 'active': snap(4)}, True)}
+                  9, reads=0, fault=None)}, counted, True),
+              'never-counted': ({**clean, 'active': snap(
+                  9, reads=7, writes=2, fault=None)},
+                  {**counted, 'active': False}, True),
+              'cadence': ({**clean, 'active': snap(4)}, counted, True)}
     slipped = []
-    for name, (hits, expect) in plants.items():
+    for name, (hits, seen, expect) in plants.items():
         violations = {}
         _bus_reattach_audit(
-            members, hits, outage_health, ticks, 'device-restart',
+            members, hits, baseline, ticks, 'device-restart', seen,
             {'cadence': 'held'},
             lambda key, diagnostic, detail:
                 violations.setdefault(key, (diagnostic, detail)))
@@ -579,32 +711,34 @@ def scenario_sim_bus_driver_reattach(ctx):
     """Sever the rig's register-mapped device twice over — a device
     restart and a ~2 s stall — with a controller pair attached, and
     assert the point-wise BusDriver recovers from both by lazy
-    re-attach: the served link returns to connected inside the
-    documented bound with the standing record cleared, the exchange
-    accounting keeps the outage's history, the scan cadence resumes
-    without a rewind, the launch roles hold, and POST /promote on the
-    converged standby answers inside its bound once the backend is
-    back — each class twice with identical digests, the launch roles
-    restored afterward."""
+    re-attach: each outage is counted in the served io_health and the
+    link returns to connected inside the documented bound with the
+    standing record cleared, the history kept, and the scan cadence
+    resumed without a rewind, the launch roles hold, and POST
+    /promote on the converged standby answers inside its bound once
+    the backend is back — each class twice with identical digests,
+    the launch roles restored afterward."""
     case = Case('sim-bus-driver-reattach',
                 'The point-wise register driver re-attaches after a '
                 'device restart and a brief stall',
                 'with a controller pair settled on the rig\'s '
                 'register-mapped device, a device restart and a ~2 s '
-                'stall each surface the served backend diagnostics as '
-                'disconnected with the severing failure named in '
-                'last_error and io_health counting the degraded '
-                'boundary — the streak advancing, the recorded fault '
-                'stamped; the driver then re-attaches inside the '
-                'documented bound and the first serve reporting the '
-                'link connected already carries the cleared record and '
-                'the reset streak while the cumulative counters and '
-                'the recorded fault keep the outage\'s history, the '
-                'served tick advances without rewinding, the pair\'s '
-                'launch roles hold throughout, and POST /promote on '
-                'the converged standby answers inside its bound once '
-                'the backend is back — a second pass over both classes '
-                'reproducing the digests exactly')
+                'stall each count in the served io_health of both '
+                'members — the boundary counters advanced over the '
+                'baseline and the fault recorded — and the driver '
+                'then re-attaches inside the documented bound, the '
+                'first serve reporting the link connected already '
+                'carrying the cleared record and the reset streak '
+                'while the cumulative counters and the recorded fault '
+                'keep the outage\'s history and the served tick '
+                'advances without rewinding; the stall additionally '
+                'surfaces on both members as disconnected with the '
+                'severing failure named, on a window the leg holds '
+                'the device down for; the pair\'s launch roles hold '
+                'throughout, and POST /promote on the converged '
+                'standby answers inside its bound once the backend is '
+                'back — a second pass over both classes reproducing '
+                'the digests exactly')
     try:
         subject = ctx.get('bus')
         if subject is None:
@@ -648,9 +782,9 @@ def scenario_sim_bus_driver_reattach(ctx):
                     + leg
                     + '-pass-' + str(number) + '.json', evidence)
                 case.evidence('file', ref, leg + ', pass '
-                              + str(number) + ' — the baseline, outage '
-                              'and recovery watches and the normalized '
-                              'digest')
+                              + str(number) + ' — the baseline, the '
+                              'held-freeze and recovery watches and the '
+                              'normalized digest')
                 if violations:
                     broke = any(name == 'sim-bus-reattach-failed'
                                 for name, _ in violations.values())
@@ -663,8 +797,8 @@ def scenario_sim_bus_driver_reattach(ctx):
                             list(violations.values())[:4]))
                 passes.setdefault(leg, []).append(digest)
                 case.observe(leg + ', pass ' + str(number)
-                             + ': degraded, then re-attached inside '
-                             + str(BUS_REATTACH_BOUND) + 's')
+                             + ': outage counted, then re-attached '
+                             'inside ' + str(BUS_REATTACH_BOUND) + 's')
         diverged = {leg: passes[leg] for leg in passes
                     if passes[leg][0] != passes[leg][1]}
         if diverged:

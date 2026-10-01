@@ -177,6 +177,43 @@ same managed/run labels and are reaped by the same teardown and
 reconciliation as the rest of the rig; a probe launch failure is
 an ordinary rig-start failure and leaves no orphaned objects.
 
+## Register-mapped field rig
+
+`dcs-sim-bus`'s `BusDriver` and `dcs-sim-net`'s `RemoteDriver`
+implement their recovery independently, so a rig that stages no
+register-mapped device can say nothing about the point-wise one.
+`bus_rig` stages that subject: the sim-bus driver-reattach leg
+(`3560_sim_bus_driver_reattach`) restarts the device server and
+freezes it, and asserts the driver re-attaches on both.
+
+- `device_port` is the register protocol's port on the rig bridge.
+  `bus_device` records placement `bridge`, so no host port
+  publishes it: the device server runs the revision's own shipped
+  `dcs-sim-bus-device` binary under `--entrypoint`, and both
+  readiness and the leg's own census run through the shipped
+  `dcs-sim-bus-ctl` exec'd inside the container's netns — the same
+  seam `dcs-plant-ctl` gives the deployed pair's plant.
+- `model_fixture` declares the `sim-bus` device (`device_id`) the
+  server serves and the pair assembles. Its declared `address` and
+  `timeout_ms` are per-run facts — the checked-in fixture carries a
+  `__BUS_ADDR__` placeholder and no timeout — so the runner stamps
+  both onto the derived copy it mounts into all three containers.
+  `timeout_ms` is the pair's per-request timeout: the leg's stall
+  class freezes the device for ~2 s, so a frozen device must time
+  out mid-exchange for the driver to have a failed exchange to
+  recover from.
+- `active_port`/`standby_port` publish the bus pair's two monitors
+  on host loopback, and both members carry the block's
+  `--pair-token` with its two distinct `owner_tokens` pins — one
+  controller per token, or the device's single-writer claim could
+  not tell the pair's members apart. The pair attaches to no
+  `--remote` plant: its field is the device's register bank, and
+  the claim arbitration is per-device, so the rig never touches
+  the deployed pair's plant, field, or claim tokens.
+- `bus_rig: null` stages none, and the driver-reattach leg reports
+  inconclusive rather than reading another link's health as this
+  one's.
+
 ## Storage bound and retention
 
 The lane's whole footprint — `src/` archives and extractions,
