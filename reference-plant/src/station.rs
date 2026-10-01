@@ -50,15 +50,31 @@
 //!   twice over — `max_shelve_ticks = 0` and a read-only shelve point,
 //!   so a shelve request answers `NotWritable` at submission — while
 //!   the low-level alarm is the shelvable nuisance case under
-//!   `alarms.low_level_shelve_ticks`. Each pump fault alarm binds its
+//!   `alarms.low_level_shelve_ticks`, and the backup-active alarm is
+//!   the shelvable reason-mandated case under
+//!   `alarms.backup_active_shelve_ticks`: its request point's
+//!   `requires_reason` mark refuses a reasonless shelve at admission,
+//!   so hiding the running-on-backup annunciation always records why.
+//!   Each pump fault alarm binds its
 //!   `oos` to the pump's own maintenance-inhibit point and its
 //!   `suppress` to the delivered copy, so a deliberately offline
 //!   machine's fault stays named without annunciating.
 //! - **Program:** the exercise program — the station's `sequencer`
 //!   instance — steps its declared table while its `run` input holds,
-//!   reporting `step`/`done` and emitting `step_completed` per
-//!   finished step; the kind's declared `advance`/`reset` commands
+//!   reporting `step`/`done` and emitting one declared event per
+//!   retention class: `step_completed` per finished step into the
+//!   bounded history record, `sequence_completed` at the run boundary
+//!   into the durable journal, and `progress` each scan into the
+//!   latest-value view; the kind's declared `advance`/`reset` commands
 //!   pace or restart it through the receipted command path.
+//! - **Recording duty:** the operations record's reportable series —
+//!   both wet-well level measurements, the station flow meters, and
+//!   each pump's run feedback and totalized draw — carry the model's
+//!   declared `record` duty (WW-REP-001's recording clauses, decision
+//!   102): the monitor's durable history file samples each at its
+//!   declared cadence under the declared retention span, the durable
+//!   record outliving the restarts the volatile history window never
+//!   promised to span.
 //!
 //! ## The declared point-id scheme
 //!
@@ -213,6 +229,18 @@ const GATE_OR: i64 = 1;
 /// far outside any measurable span, so only the declared side trips.
 const PARKED_LIMIT: f64 = 1.0e9;
 
+/// The site's declared recording cadence — the durable-history
+/// decision's per-series duty (decision 102): every reportable series
+/// the operations record consumes lands in the `--history-file`
+/// store every `REPORT_RECORD_TICKS` run ticks.
+const REPORT_RECORD_TICKS: u64 = 5;
+/// The site's declared retention for the recorded series, in days —
+/// the deployment-sizing half of the duty (the multi-year regulatory
+/// records term WW-REP-001's retention clauses bind): a downstream
+/// records system sizes, rotates, and archives the durable file
+/// against it; the controller never enforces it.
+const REPORT_RETAIN_DAYS: u64 = 1095;
+
 /// One annunciation tier's class data — the site's alarm vocabulary,
 /// carried as the managed alarms' `priority`/`class`/`response_ticks`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,6 +266,13 @@ pub struct AlarmPolicy {
     /// first. The high-level alarm is never shelvable: bound `0` plus
     /// a read-only request point.
     pub low_level_shelve_ticks: i64,
+    /// The backup-active alarm's `max_shelve_ticks` — the second
+    /// shelvable case's bound. Its request point carries the site's
+    /// reason policy: shelving the running-on-backup annunciation
+    /// demands a declared `reason` on the receipted envelope — the
+    /// `requires_reason` mark refusing a reasonless submission
+    /// `reason_required` at admission.
+    pub backup_active_shelve_ticks: i64,
 }
 
 /// The station's site parameterization — pump count, threshold
@@ -314,6 +349,7 @@ impl SiteConfig {
                     response_ticks: 60,
                 },
                 low_level_shelve_ticks: 8,
+                backup_active_shelve_ticks: 6,
             },
         }
     }
@@ -590,9 +626,9 @@ pub fn lift_station(config: &SiteConfig) -> Result<Station, BuildError> {
         plant.internal_input::<bool>(PointId(carriers::POWER_TRIPPED_IN), false, false);
     // The `none-available` alarm's declared suppression: any pump held
     // in manual is the operator withdrawing it from the group's roster
-    // — "demand stands with no pump available" is then designed state,
-    // not a fault. The carrier keeps reporting truth; the `suppressed`
-    // flag names the withholding.
+    // — no pump available to the group is then designed state, not a
+    // fault. The carrier keeps reporting truth; the `suppressed` flag
+    // names the withholding.
     let any_manual = plant.internal_output::<bool>(PointId(carriers::ANY_MANUAL), false);
     let any_manual_in =
         plant.internal_input::<bool>(PointId(carriers::ANY_MANUAL_IN), false, false);
@@ -880,26 +916,38 @@ pub fn lift_station(config: &SiteConfig) -> Result<Station, BuildError> {
             "lal-alarm",
         ),
     ));
-    // The remaining station alarms declare no lifecycle inputs —
-    // never-shelvable with no shelving surface, never suppressed,
-    // never out of service; their managed status outputs still report.
+    // The backup-active alarm is the site's reason-mandated shelve
+    // case: the running-on-backup annunciation may be shelved under
+    // `alarms.backup_active_shelve_ticks`, but the request point's
+    // `requires_reason` mark makes the shelve's declared reason
+    // mandatory at admission.
     let backup_alarm = plant.add(ManagedBoolLatchingAlarmSpec::new(
-        managed_parameters(equipment, 0),
-        ManagedInputs::default(),
+        managed_parameters(equipment, config.alarms.backup_active_shelve_ticks),
+        ManagedInputs {
+            shelve: true,
+            ..ManagedInputs::default()
+        },
         rationalization(
             "The backup level instrument carries the station unnoticed",
             "Check the primary level instrument",
             "backup-active-alarm",
         ),
     ));
+    // The remaining station alarms declare no lifecycle inputs —
+    // never-shelvable with no shelving surface, never suppressed,
+    // never out of service; their managed status outputs still report.
+    // The none-available alarm's lone declaration is its designed
+    // suppression on the any-manual condition.
     let none_available_alarm = plant.add(ManagedBoolLatchingAlarmSpec::new(
         managed_parameters(equipment, 0),
         ManagedInputs {
             suppress: true,
             ..ManagedInputs::default()
         },
+        // The carrier asserts on availability alone — the consequence
+        // names the empty roster, never a standing demand (#825).
         rationalization(
-            "Demand stands with no pump available to meet it",
+            "No pump is available; the station cannot pump",
             "Restore a pump to service or clear its faults",
             "none-available-alarm",
         ),
@@ -991,10 +1039,18 @@ pub fn lift_station(config: &SiteConfig) -> Result<Station, BuildError> {
         &backup_alarm.managed,
         &backup_alarm.alarm,
         &backup_alarm.unacknowledged,
-        false,
+        true,
         "backup-active",
     );
     plant.connect(backup_active_in, &backup_alarm.input);
+    // The declared reason is mandatory on this shelve alone: the
+    // point's `requires_reason` mark refuses a reasonless request at
+    // admission while the `lal` shelve keeps the voluntary record.
+    plant.requires_reason(
+        backup_active_alarm
+            .shelve
+            .expect("the backup-active alarm declares shelve"),
+    );
     let none_available_alarm_layout = wire_station_alarm(
         &mut plant,
         3,
@@ -1064,7 +1120,8 @@ pub fn lift_station(config: &SiteConfig) -> Result<Station, BuildError> {
 
     // The exercise program — the station's `sequencer` and the kind
     // carrying the declared command/event vocabulary (`advance`,
-    // `reset`, and the kind-emitted `step_completed` event) the
+    // `reset`, and the kind-emitted `step_completed`/`sequence_completed`/
+    // `progress` events, one per retention class) the
     // consumer surface proof exercises. `run` is the writable held
     // request that starts the table; `reset` binds read-only — the
     // declared command is the one-shot path. Each step's declared
@@ -1124,6 +1181,36 @@ pub fn lift_station(config: &SiteConfig) -> Result<Station, BuildError> {
         ),
     ] {
         signal(&mut plant, PointId(point), name, unit, description, "program");
+    }
+
+    // The site's declared recording duty — WW-REP-001's recording
+    // clauses through the durable-history decision's declared-duty
+    // mechanism (decision 102): the reportable series the operations
+    // record is built from — both wet-well level measurements, the
+    // station flow meters, and each pump's run feedback and totalized
+    // draw — sample into the durable history file at the declared
+    // cadence under the declared retention, so the regulatory record
+    // survives the process lifetimes and bounded windows the volatile
+    // history ring never promised to.
+    for point in [
+        points::LEVEL_PRIMARY,
+        points::LEVEL_BACKUP,
+        points::INFLOW,
+        points::NET_FLOW,
+    ] {
+        plant.record_retained(point, REPORT_RECORD_TICKS, REPORT_RETAIN_DAYS);
+    }
+    for index in 0..config.pumps {
+        plant.record_retained(
+            points::run(index),
+            REPORT_RECORD_TICKS,
+            REPORT_RETAIN_DAYS,
+        );
+        plant.record_retained(
+            points::draw(index),
+            REPORT_RECORD_TICKS,
+            REPORT_RETAIN_DAYS,
+        );
     }
 
     let model = plant.build()?;

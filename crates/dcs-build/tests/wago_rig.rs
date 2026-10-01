@@ -330,9 +330,21 @@ fn emitted_documents_validate_lint_and_serde_roundtrip() {
             "{binding:?} emitted document fails validation: {:?}",
             model.validate()
         );
+        // The emitted document's advisories are undeclared
+        // `stale_after_ticks` budgets — freshness stays an opt-in
+        // per-point declaration (decision 45) — plus the one deliberate
+        // `undriven_field_output`: `do2` is bound to its channel and
+        // left unwired so the output holds its declared safe state
+        // (see `WagoRigLayout::do2`). Every other lint class stays
+        // empty.
+        let do2 = format!("io_point {}", points::DO2.0);
         assert!(
-            model.lint().is_empty(),
-            "{binding:?} emitted document has lint findings: {:?}",
+            model.lint().iter().all(|finding| {
+                finding.rule == dcs_model::LintRule::FieldInputWithoutFreshnessBudget
+                    || (finding.rule == dcs_model::LintRule::UndrivenFieldOutput
+                        && finding.element == do2)
+            }),
+            "{binding:?} emitted document has unexpected lint findings: {:?}",
             model.lint()
         );
         let json = serde_json::to_string_pretty(&model).unwrap();

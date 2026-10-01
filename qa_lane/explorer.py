@@ -88,7 +88,12 @@ RIG_MANIFEST = """\
 Simulated rig (mode: simulation). One dcs-plant-server plus a redundant
 dcs-controller pair (active + standby) on this run's dedicated Docker
 bridge; all plant I/O flows through the dcs-sim-net remote simulation
-socket. Approved actions: HTTP requests to the published monitor/command
+socket. The rig may also stage the lane's keyed probe pair: a second
+dcs-plant-server and a second redundant controller pair (probe-active +
+probe-standby) sharing their own --pair-token and their own plant field —
+it exists so the keyed announced-source contract gets exercised while
+the deployed pair runs unkeyed. Approved actions: HTTP requests to the
+published monitor/command
 endpoints, plant-side manipulation offered by the simulation API, restart
 or stop of this run's labeled rig containers, and disposable probes under
 the results directory. No physical channels exist: the Wago rig, EtherCAT
@@ -274,6 +279,16 @@ def build_context(st, record, cfg, run_dir, workspace):
         'plant_sim_socket': '127.0.0.1:%s (dcs-sim-net remote)'
         % cfg['plant_host_port'],
     }
+    probe = runner._probe_pair(cfg)
+    if probe is not None:
+        endpoints.update({
+            'probe_active_monitor': 'http://127.0.0.1:%s'
+            % probe['active_port'],
+            'probe_standby_monitor': 'http://127.0.0.1:%s'
+            % probe['standby_port'],
+            'probe_plant': '(bridge-placed — rig-dialed only, '
+            'no host socket)',
+        })
     return {
         'RUN_ID': record['run_id'],
         'ATTEMPTED_SHA': sha,

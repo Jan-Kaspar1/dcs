@@ -83,7 +83,7 @@ struct ImageSlot {
 /// bookkeeping.
 struct Image {
     /// The held input image: register → sample the last completed
-    /// exchange latched, stamped with that exchange's scan tick — the
+    /// exchange latched, stamped with that exchange's run tick — the
     /// acquisition stamp a point's `stale_after_ticks` budget measures.
     /// Seeded by the connect-time census at `Tick::ZERO`, so before the
     /// first exchange every declared register has a defined — and
@@ -133,7 +133,8 @@ struct Image {
 /// are the same as any point-wise driver's. [`exchange`](CyclicIoDriver::exchange)
 /// is the only call that touches the wire: one `exchange` request
 /// carrying every register staged since the last completed exchange,
-/// its answer latching the input image atomically at the scan tick.
+/// its answer latching the input image atomically at the scan's run
+/// tick.
 /// A command-staged write therefore publishes in the same exchange the
 /// applying scan runs, and a component's scan-`t` write publishes in
 /// scan `t + 1`'s — the contract's documented one-scan actuation
@@ -473,6 +474,26 @@ impl CyclicBusDriver {
     /// claim again: reconnects never silently re-arm it.
     pub fn claim_writer(&self, owner: u64) -> Result<(), LinkError> {
         match self.request(&BusRequest::ClaimWriter { owner })? {
+            BusResponse::Done => Ok(()),
+            BusResponse::Error { error } => Err(refused(error)),
+            _ => Err(self.protocol_violation()),
+        }
+    }
+
+    /// The conditional counterpart of [`claim_writer`](Self::claim_writer)
+    /// — the grant a launched controller's startup claim asks, on the
+    /// same terms
+    /// [`BusDriver::claim_writer_unless_held`](crate::BusDriver::claim_writer_unless_held)
+    /// documents: granted while the field stands unclaimed or the
+    /// standing claim already names `owner`, refused
+    /// [`LinkError::Fenced`] while a different owner's claim stands,
+    /// the claim it met left untouched.
+    ///
+    /// The lazy re-attach caveat applies as it does to `claim_writer`:
+    /// a dropped link reconnects for the ask, and a granted claim
+    /// lands on the new connection.
+    pub fn claim_writer_unless_held(&self, owner: u64) -> Result<(), LinkError> {
+        match self.request(&BusRequest::ClaimWriterUnlessHeld { owner })? {
             BusResponse::Done => Ok(()),
             BusResponse::Error { error } => Err(refused(error)),
             _ => Err(self.protocol_violation()),

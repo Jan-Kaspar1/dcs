@@ -347,6 +347,316 @@ class LifecycleActionTests(unittest.TestCase):
         self.assertEqual(events, ['controller-start'])
 
 
+class RelaunchActionTests(unittest.TestCase):
+    """The scenario-callable flag-doctoring relaunch: `docker rm -f`
+    on the pair member's container, then a fresh `docker run`
+    rebuilding the launch from the run config — same mounts, labels,
+    published port, owner-token pin, failover budget, and pair token —
+    with the tracking-source argument optionally doctored: `--peer`
+    on the launched active (the --standby name an owning run
+    carries), `--standby`'s target on the launched standby."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        for name in ('a', 'b', 'probe-a', 'probe-b'):
+            (self.run_dir / 'controllers' / name).mkdir(parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+        self.model = self.src / self.cfg['model_fixture']
+        self.model.parent.mkdir(parents=True, exist_ok=True)
+        self.model.write_text('{}')
+        self.record = {'run_id': 'qa-1', 'attempted_sha': SHA_A}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _relaunch(self, name='active', track=None, pair='deployed',
+                  docker=None, events=None):
+        calls = []
+        if docker is None:
+            def docker(*args, timeout=120, check=True):
+                calls.append(args)
+                return Result('')
+        seen = events if events is not None else []
+        with patch.object(runner, 'docker', docker):
+            runner.relaunch_controller(
+                self.cfg, self.record, self.run_dir, self.model, name,
+                lambda event, detail=None: seen.append((event, detail)),
+                track, pair)
+        return calls, seen
+
+    def _launch(self, calls, container):
+        return next(c for c in calls
+                    if c[0] == 'run' and container in c)
+
+    def test_rm_then_run_rebuilds_the_active_command(self):
+        calls, events = self._relaunch()
+        self.assertEqual(calls[0], ('rm', '-f', 'dcs-hw-qa-1-a'))
+        launch = self._launch(calls, 'dcs-hw-qa-1-a')
+        self.assertEqual([event for event, _ in events],
+                         ['controller-relaunch',
+                          'controller-relaunched'])
+        self.assertIn('docker rm -f dcs-hw-qa-1-a', events[0][1])
+        # The launch command rebuilt from the run config — the same
+        # command _start_rig launched ctrl-a with, flag-for-flag.
+        index = launch.index('/model/plant.json')
+        self.assertEqual(
+            launch[index:],
+            ('/model/plant.json',
+             '--remote', 'dcs-hw-qa-1-plant:9001',
+             '--owner-token',
+             str(self.cfg['plant_owner_tokens']['active']),
+             '--scan-ms', '100', '--listen', '0.0.0.0:8080',
+             '--state-file', runner.CONTAINER_STATE_FILE,
+             '--journal-file', runner.CONTAINER_JOURNAL_FILE,
+             '--history-file', runner.CONTAINER_HISTORY_FILE,
+             '--pair-token', self.cfg['pair_token']))
+        self.assertNotIn('--peer', launch)
+        self.assertNotIn('--standby', launch)
+        self.assertNotIn('--auto-promote', launch)
+
+    def test_active_relaunch_keeps_mounts_port_labels_and_network(self):
+        calls, _ = self._relaunch()
+        launch = self._launch(calls, 'dcs-hw-qa-1-a')
+        self.assertIn('--network', launch)
+        self.assertIn('dcs-hwtest-qa-1', launch)
+        self.assertIn('127.0.0.1:18080:8080', launch)
+        self.assertIn(str(self.model) + ':/model/plant.json:ro',
+                      launch)
+        directory = self.run_dir / 'controllers' / 'a'
+        self.assertIn(str(directory) + ':'
+                      + runner.CONTAINER_RUN_DIR, launch)
+        self.assertIn('--restart', launch)
+        self.assertIn('no', launch)
+        labels = [launch[i + 1]
+                  for i, arg in enumerate(launch) if arg == '--label']
+        self.assertIn(runner.MANAGED_LABEL + '=1', labels)
+        self.assertIn(runner.RUN_LABEL + '=qa-1', labels)
+        self.assertIn('dcs-hwtest/controller:' + SHA_A, launch)
+
+    def test_doctored_track_becomes_peer_on_the_active(self):
+        calls, events = self._relaunch(
+            track='dcs-peer-down.invalid:8080')
+        launch = self._launch(calls, 'dcs-hw-qa-1-a')
+        index = launch.index('--peer')
+        self.assertEqual(launch[index + 1],
+                         'dcs-peer-down.invalid:8080')
+        self.assertNotIn('--standby', launch)
+        self.assertNotIn('--auto-promote', launch)
+        self.assertIn('--peer dcs-peer-down.invalid:8080',
+                      events[0][1])
+
+    def test_standby_relaunch_replaces_its_standby_target(self):
+        calls, _ = self._relaunch(name='standby',
+                                  track='dcs-peer-down.invalid:8080')
+        self.assertEqual(calls[0], ('rm', '-f', 'dcs-hw-qa-1-b'))
+        launch = self._launch(calls, 'dcs-hw-qa-1-b')
+        index = launch.index('--standby')
+        self.assertEqual(launch[index + 1],
+                         'dcs-peer-down.invalid:8080')
+        index = launch.index('--auto-promote')
+        self.assertEqual(launch[index + 1],
+                         str(self.cfg['failover_misses']))
+        self.assertNotIn('--peer', launch)
+        self.assertIn('127.0.0.1:18081:8081', launch)
+        self.assertIn(str(self.cfg['plant_owner_tokens']['standby']),
+                      launch)
+
+    def test_standby_relaunch_restores_its_launch_target(self):
+        calls, _ = self._relaunch(name='standby')
+        launch = self._launch(calls, 'dcs-hw-qa-1-b')
+        index = launch.index('--standby')
+        self.assertEqual(launch[index + 1], 'dcs-hw-qa-1-a:8080')
+
+    def test_absent_remove_is_tolerated_and_noted(self):
+        recorded = []
+
+        def docker(*args, timeout=120, check=True):
+            recorded.append(args)
+            if args[0] == 'rm':
+                return Result('', returncode=1)
+            return Result('')
+
+        calls, events = self._relaunch(docker=docker)
+        calls = recorded
+        self.assertEqual(calls[0], ('rm', '-f', 'dcs-hw-qa-1-a'))
+        self.assertTrue(any(c[0] == 'run' for c in calls))
+        self.assertIn('already absent', events[1][1])
+
+    def test_failed_run_raises_after_recording_the_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'run' and check:
+                raise RuntimeError('docker run failed: exit 125')
+            return Result('')
+
+        with self.assertRaises(RuntimeError):
+            self._relaunch(docker=raising, events=events)
+        self.assertEqual([event for event, _ in events],
+                         ['controller-relaunch'])
+
+    def test_unknown_endpoint_rejected(self):
+        with self.assertRaises(RuntimeError):
+            self._relaunch(name='driven')
+
+    def test_probe_pair_maps_probe_containers_and_tokens(self):
+        probe = self.cfg['probe_pair']
+        calls, _ = self._relaunch(name='active', pair='probe',
+                                  track='dcs-peer-down.invalid:8080')
+        self.assertEqual(calls[0], ('rm', '-f', 'dcs-hw-qa-1-probe-a'))
+        launch = self._launch(calls, 'dcs-hw-qa-1-probe-a')
+        index = launch.index('--peer')
+        self.assertEqual(launch[index + 1],
+                         'dcs-peer-down.invalid:8080')
+        index = launch.index('--remote')
+        self.assertEqual(launch[index + 1],
+                         'dcs-hw-qa-1-probe-plant:'
+                         + str(probe['plant_port']))
+        index = launch.index('--owner-token')
+        self.assertEqual(launch[index + 1],
+                         str(self.cfg['plant_owner_tokens']
+                            ['probe_active']))
+        index = launch.index('--pair-token')
+        self.assertEqual(launch[index + 1], str(probe['pair_token']))
+        self.assertIn('127.0.0.1:' + str(probe['active_port'])
+                      + ':8080', launch)
+        directory = self.run_dir / 'controllers' / 'probe-a'
+        self.assertIn(str(directory) + ':'
+                      + runner.CONTAINER_RUN_DIR, launch)
+
+    def test_probe_standby_relaunch_restores_probe_target(self):
+        calls, _ = self._relaunch(name='standby', pair='probe')
+        launch = self._launch(calls, 'dcs-hw-qa-1-probe-b')
+        index = launch.index('--standby')
+        self.assertEqual(launch[index + 1], 'dcs-hw-qa-1-probe-a:8080')
+        self.assertIn('127.0.0.1:'
+                      + str(self.cfg['probe_pair']['standby_port'])
+                      + ':8081', launch)
+
+    def test_scenario_ctx_carries_the_relaunch_action(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            ctx = runner._scenario_ctx(
+                self.cfg, self.record, self.src, self.run_dir,
+                self.run_dir / 'evidence', 0,
+                lambda event, detail=None: events.append(event))
+            ctx['relaunch_controller']('standby',
+                                       'dcs-peer-down.invalid:8080')
+            ctx['relaunch_controller']('standby')
+        self.assertEqual(calls[0], ('rm', '-f', 'dcs-hw-qa-1-b'))
+        doctored = self._launch(calls, 'dcs-hw-qa-1-b')
+        index = doctored.index('--standby')
+        self.assertEqual(doctored[index + 1],
+                         'dcs-peer-down.invalid:8080')
+        restored = [c for c in calls if c[0] == 'run'
+                    and 'dcs-hw-qa-1-b' in c][-1]
+        index = restored.index('--standby')
+        self.assertEqual(restored[index + 1], 'dcs-hw-qa-1-a:8080')
+        self.assertIn('controller-relaunch', events)
+        self.assertIn('controller-relaunched', events)
+
+    def test_probe_ctx_carries_the_relaunch_action(self):
+        calls = []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            ctx = runner._scenario_ctx(
+                self.cfg, self.record, self.src, self.run_dir,
+                self.run_dir / 'evidence', 0,
+                lambda e, d=None: None)
+            ctx['probe']['relaunch_controller'](
+                'active', 'dcs-peer-down.invalid:8080')
+        self.assertEqual(calls[0], ('rm', '-f', 'dcs-hw-qa-1-probe-a'))
+        launch = self._launch(calls, 'dcs-hw-qa-1-probe-a')
+        self.assertIn('--peer', launch)
+
+    def test_relaunch_rebuilds_the_members_launch_spec(self):
+        # track=None is constructional: the relaunched argv is the
+        # shared builder's launch spec for the member, byte for byte —
+        # the guarantee that a flag added to the launch spec cannot
+        # silently drop from the restore half.
+        prefix = 'dcs-hw-' + self.record['run_id']
+        for name, container in (('active', prefix + '-a'),
+                                ('standby', prefix + '-b')):
+            calls, _ = self._relaunch(name=name)
+            launch = self._launch(calls, container)
+            index = launch.index('/model/plant.json')
+            self.assertEqual(
+                list(launch[index:]),
+                runner._controller_argv(self.cfg, 'deployed', name,
+                                        prefix), name)
+
+    def test_doctored_relaunch_is_the_spec_plus_its_delta(self):
+        # track=X relaunches the same spec modulo only the doctored
+        # flag: --peer <track> on the active, the --standby target on
+        # the standby.
+        prefix = 'dcs-hw-' + self.record['run_id']
+        track = 'dcs-peer-down.invalid:8080'
+        spec = runner._controller_argv(self.cfg, 'deployed',
+                                       'active', prefix)
+        calls, _ = self._relaunch(name='active', track=track)
+        launch = self._launch(calls, prefix + '-a')
+        index = launch.index('/model/plant.json')
+        at = spec.index('--scan-ms')
+        self.assertEqual(list(launch[index:]),
+                         spec[:at] + ['--peer', track] + spec[at:])
+        spec = runner._controller_argv(self.cfg, 'deployed',
+                                       'standby', prefix)
+        calls, _ = self._relaunch(name='standby', track=track)
+        launch = self._launch(calls, prefix + '-b')
+        index = launch.index('/model/plant.json')
+        expected = list(spec)
+        expected[spec.index('--standby') + 1] = track
+        self.assertEqual(list(launch[index:]), expected)
+
+    def test_spec_change_flows_to_launch_and_relaunch_alike(self):
+        # The structural regression this consolidation removes: a flag
+        # added to the launch spec reaches both the rig's initial
+        # launch and the relaunch's restore with no second edit.
+        real = runner._controller_argv
+
+        def extended(*args, **kwargs):
+            return real(*args, **kwargs) + ['--new-persistence-flag']
+
+        self.cfg['probe_pair'] = None
+        dynamics = self.src / self.cfg['dynamics_fixture']
+        dynamics.parent.mkdir(parents=True, exist_ok=True)
+        dynamics.write_text('{}')
+        calls = []
+
+        class FakeConn:
+            def close(self):
+                pass
+
+        with patch.object(runner, 'docker',
+                          lambda *a, **k: calls.append(a)
+                          or Result('')), \
+                patch.object(runner, '_controller_argv', extended), \
+                patch.object(runner.socket, 'create_connection',
+                             return_value=FakeConn()):
+            runner._start_rig(self.cfg, self.record, self.src,
+                              self.run_dir, lambda e, d=None: None)
+            runner.relaunch_controller(
+                self.cfg, self.record, self.run_dir, self.model,
+                'active', lambda e, d=None: None)
+        launches = [c for c in calls
+                    if c[:4] == ('run', '-d', '--name',
+                                 'dcs-hw-qa-1-a')]
+        self.assertEqual(len(launches), 2)
+        for launch in launches:
+            self.assertIn('--new-persistence-flag', launch)
+
+
 class PlantActionTests(unittest.TestCase):
     """The scenario-callable plant stop/start: the run's shared-plant
     container cycled mid-run, each half recorded on the run's action
@@ -402,6 +712,40 @@ class PlantActionTests(unittest.TestCase):
                     lambda event, detail=None: events.append(event))
         self.assertEqual(events, ['plant-start'])
 
+    def test_pause_and_unpause_recorded_on_timeline(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            timeline = lambda event, detail=None: events.append(
+                (event, detail))
+            runner.pause_plant('qa-1', timeline)
+            runner.unpause_plant('qa-1', timeline)
+        self.assertEqual(
+            calls, [('pause', 'dcs-hw-qa-1-plant'),
+                    ('unpause', 'dcs-hw-qa-1-plant')])
+        self.assertEqual([event for event, _ in events],
+                         ['plant-pause', 'plant-paused',
+                          'plant-unpause', 'plant-unpaused'])
+
+    def test_failed_pause_raises_after_recording_the_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'pause' and check:
+                raise RuntimeError('docker pause failed: no such')
+            return Result('')
+
+        with patch.object(runner, 'docker', raising):
+            with self.assertRaises(RuntimeError):
+                runner.pause_plant(
+                    'qa-1',
+                    lambda event, detail=None: events.append(event))
+        self.assertEqual(events, ['plant-pause'])
+
     def test_scenario_ctx_carries_plant_actions_and_address(self):
         calls, events = [], []
 
@@ -435,8 +779,11 @@ class RigStateFileTests(unittest.TestCase):
         self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
         self.run_dir.mkdir(parents=True)
         self.src = Path(self.cfg['src_dir']) / SHA_A
+        probe = self.cfg['probe_pair']
         for fixture in (self.cfg['model_fixture'],
-                        self.cfg['dynamics_fixture']):
+                        self.cfg['dynamics_fixture'],
+                        probe['model_fixture'],
+                        probe['dynamics_fixture']):
             path = self.src / fixture
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('{}')
@@ -475,6 +822,8 @@ class RigStateFileTests(unittest.TestCase):
             self.assertIn(runner.CONTAINER_STATE_FILE, launch)
             self.assertIn('--journal-file', launch)
             self.assertIn(runner.CONTAINER_JOURNAL_FILE, launch)
+            self.assertIn('--history-file', launch)
+            self.assertIn(runner.CONTAINER_HISTORY_FILE, launch)
 
     def test_standby_launch_arms_the_failover_budget(self):
         # The declared freshness budget presents inside the writer-loss
@@ -523,6 +872,8 @@ class RigStateFileTests(unittest.TestCase):
         for path in ctx['state_files'].values():
             self.assertTrue(Path(path).is_relative_to(self.run_dir))
         for path in ctx['journal_files'].values():
+            self.assertTrue(Path(path).is_relative_to(self.run_dir))
+        for path in ctx['history_files'].values():
             self.assertTrue(Path(path).is_relative_to(self.run_dir))
         self.assertEqual(calls[0][0], 'stop')
         self.assertEqual(calls[1], ('start', 'dcs-hw-qa-1-a'))
@@ -589,6 +940,13 @@ class OwnerTokenPinTests(unittest.TestCase):
         dynamics = self.src / self.cfg['dynamics_fixture']
         dynamics.parent.mkdir(parents=True, exist_ok=True)
         dynamics.write_text('{}')
+        # The staged probe pair's fixtures — the probe block may share
+        # the deployed model path, so only create what's absent.
+        for key in ('model_fixture', 'dynamics_fixture'):
+            path = self.src / self.cfg['probe_pair'][key]
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('{}')
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -844,12 +1202,12 @@ class EndpointPlacementTests(unittest.TestCase):
         self.assertFalse(any(c[0] == 'run' for c in calls))
 
     def test_tracking_source_auth_leg_references_the_note(self):
-        # The tracking-source-auth docstring's forged-checkpoint
-        # server is placed per the recorded rule — 'bridge', never a
-        # host socket the rig cannot reach.
+        # The demote-forged-standby-source docstring's
+        # forged-checkpoint endpoint is placed per the recorded rule
+        # — 'bridge', never a host socket the rig cannot reach.
         doc = scenarios.__doc__
-        auth = doc[doc.index('tracking-source-auth'):]
-        auth = auth[:auth.index('verified source owes')]
+        auth = doc[doc.index('demote-forged-standby-source'):]
+        auth = auth[:auth.index('command-record audit')]
         self.assertIn('endpoint_placement', auth)
         self.assertIn('bridge', auth)
 
@@ -884,7 +1242,8 @@ class DcsCtlBuildTests(unittest.TestCase):
     def _fake_docker(self, calls, binaries=('dcs-controller',
                                             'dcs-plant-server',
                                             'dcs-plant-ctl',
-                                            'dcs-ctl')):
+                                            'dcs-ctl',
+                                            'dcs-forge')):
         def fake_docker(*args, timeout=120, check=True):
             calls.append(args)
             if args[0] == 'run' and 'cargo' in str(args):
@@ -952,7 +1311,8 @@ class PlantCtlShipTests(unittest.TestCase):
     def _fake_docker(self, calls, binaries=('dcs-controller',
                                             'dcs-plant-server',
                                             'dcs-plant-ctl',
-                                            'dcs-ctl')):
+                                            'dcs-ctl',
+                                            'dcs-forge')):
         def fake_docker(*args, timeout=120, check=True):
             calls.append((args, check))
             if args[0] == 'run' and 'cargo' in str(args):
@@ -1090,6 +1450,7 @@ class ModelRevisionActionTests(unittest.TestCase):
                       + ':8082', launch)
         self.assertIn(runner.CONTAINER_STATE_FILE, launch)
         self.assertIn(runner.CONTAINER_JOURNAL_FILE, launch)
+        self.assertIn(runner.CONTAINER_HISTORY_FILE, launch)
         document = str(self.run_dir / 'model-revised.json')
         self.assertIn(document + ':/model/revised.json:ro', launch)
         self.assertIn('/model/revised.json', launch)
@@ -1215,7 +1576,7 @@ class ModelRevisionActionTests(unittest.TestCase):
 
         directory = self.run_dir / 'controllers' / 'c'
         directory.mkdir(parents=True)
-        for artifact in ('state.json', 'journal.jsonl'):
+        for artifact in ('state.json', 'journal.jsonl', 'history.jsonl'):
             (directory / artifact).write_text('stale')
         with patch.object(runner, 'docker', fake_docker), \
                 patch.object(runner, '_revised_peer_role',
@@ -1231,7 +1592,7 @@ class ModelRevisionActionTests(unittest.TestCase):
         self.assertIn('model-revision-replace', events)
         # The runner-owned artifacts reset with the container so the
         # new lifetime starts cold.
-        for artifact in ('state.json', 'journal.jsonl'):
+        for artifact in ('state.json', 'journal.jsonl', 'history.jsonl'):
             self.assertFalse((directory / artifact).exists())
 
     def test_relaunch_refuses_a_field_owning_third(self):
@@ -1393,6 +1754,7 @@ class NegotiationActionTests(unittest.TestCase):
                       + ':8082', launch)
         self.assertIn(runner.CONTAINER_STATE_FILE, launch)
         self.assertIn(runner.CONTAINER_JOURNAL_FILE, launch)
+        self.assertIn(runner.CONTAINER_HISTORY_FILE, launch)
         document = str(self.run_dir / 'model-foreign.json')
         self.assertIn(document + ':/model/foreign.json:ro', launch)
         self.assertIn('/model/foreign.json', launch)
@@ -1552,16 +1914,37 @@ class DrivenActionTests(unittest.TestCase):
         self.assertIn('--driven', launch)
         self.assertNotIn('--scan-ms', launch)
         self.assertNotIn('--revised', launch)
+        # The keyed contract: the run's --pair-token signs the driven
+        # peer's ?prove= answers — the line_proof an islanded peer's
+        # orphan-resolution probe demands of its owner candidate.
+        self.assertIn('--pair-token', launch)
+        self.assertIn(self.cfg['pair_token'], launch)
         self.assertIn('127.0.0.1:' + str(self.cfg['driven_port'])
                       + ':8082', launch)
         self.assertIn(runner.CONTAINER_STATE_FILE, launch)
         self.assertIn(runner.CONTAINER_JOURNAL_FILE, launch)
+        self.assertIn(runner.CONTAINER_HISTORY_FILE, launch)
         self.assertIn(str(self.model) + ':/model/plant.json:ro', launch)
         self.assertIn(str(self.run_dir / 'controllers' / 'd')
                       + ':' + runner.CONTAINER_RUN_DIR, launch)
         self.assertEqual(info['container'], 'dcs-hw-qa-1-d')
         self.assertEqual([event for event, _ in events],
                          ['driven-start', 'driven-up'])
+
+    def test_tokenless_run_launches_unkeyed(self):
+        # An unkeyed run carries no --pair-token — the driven peer's
+        # ?prove= answers then run unsigned like the pair's own.
+        self.cfg['pair_token'] = None
+        calls = []
+        with patch.object(runner, 'docker',
+                          lambda *a, **k: calls.append(a)
+                          or Result('')):
+            runner.start_driven_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'active', lambda e, d=None: None)
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertNotIn('--pair-token', launch)
+        self.assertIn('--driven', launch)
 
     def test_standby_endpoint_standbys_on_ctrl_b(self):
         calls = []
@@ -1646,6 +2029,10 @@ class DrivenActionTests(unittest.TestCase):
         launch = next(c for c in calls if c[0] == 'run')
         self.assertIn('--standby', launch)
         self.assertIn('--driven', launch)
+        # The keyed run hands the launch the pair token the keyed
+        # orphan-resolution probes require.
+        self.assertIn('--pair-token', launch)
+        self.assertIn(self.cfg['pair_token'], launch)
         self.assertEqual(calls[-1],
                          ('rm', '-f', 'dcs-hw-qa-1-d'))
         # The driven peer's state/journal paths sit inside the run dir.
@@ -1653,6 +2040,1076 @@ class DrivenActionTests(unittest.TestCase):
                         .is_relative_to(self.run_dir))
         self.assertTrue(Path(ctx['state_files']['driven'])
                         .is_relative_to(self.run_dir))
+
+
+class BornActiveActionTests(unittest.TestCase):
+    """The born-active startup-failure leg's staging levers: the
+    runner's scratch sim-serve field — 'silent' launches a sleeping
+    placeholder under the field's container name so the address
+    resolves but nothing listens, 'serving' launches the plant server
+    and waits for its listener — and the labeled seat launches that
+    carry --remote plus the class's --peer/--standby wiring, cold by
+    construction (the seat's state/journal/history reset with the
+    launch), refused while the seat reports a field-owning role."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        for name in ('c', 'foreign', 'd'):
+            (self.run_dir / 'controllers' / name).mkdir(
+                parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+        self.model = self.src / self.cfg['model_fixture']
+        self.dynamics = self.src / self.cfg['dynamics_fixture']
+        self.model.parent.mkdir(parents=True, exist_ok=True)
+        self.dynamics.parent.mkdir(parents=True, exist_ok=True)
+        self.model.write_text(json.dumps({'version': 1}))
+        self.dynamics.write_text(json.dumps({}))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _record(self):
+        return {'run_id': 'qa-1', 'attempted_sha': SHA_A}
+
+    def _field(self, mode, docker=None):
+        calls, events = [], []
+        if docker is None:
+            def docker(*args, timeout=120, check=True):
+                calls.append(args)
+                return Result('')
+        with patch.object(runner, 'docker', docker):
+            info = runner.start_born_field(
+                self.cfg, self._record(), self.run_dir, self.model,
+                self.dynamics,
+                lambda event, detail=None: events.append(
+                    (event, detail)), mode)
+        return calls, events, info
+
+    def _launch(self, seat='revised', docker=None, **kw):
+        calls, events = [], []
+        if docker is None:
+            def docker(*args, timeout=120, check=True):
+                calls.append(args)
+                return Result('')
+        with patch.object(runner, 'docker', docker):
+            info = runner.start_born_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                seat, 'dcs-hw-qa-1-born-plant:9003',
+                lambda event, detail=None: events.append(
+                    (event, detail)), **kw)
+        return calls, events, info
+
+    def _run(self, calls):
+        return next(c for c in calls if c[0] == 'run')
+
+    def test_silent_field_launches_placeholder(self):
+        calls, events, info = self._field('silent')
+        self.assertEqual(calls[0],
+                         ('rm', '-f', 'dcs-hw-qa-1-born-plant'))
+        launch = self._run(calls)
+        self.assertIn('dcs-hw-qa-1-born-plant', launch)
+        self.assertIn(runner.MANAGED_LABEL + '=1', launch)
+        self.assertIn(runner.RUN_LABEL + '=qa-1', launch)
+        self.assertIn('dcs-hwtest-qa-1', launch)
+        index = launch.index('--entrypoint')
+        self.assertEqual(launch[index + 1], 'sleep')
+        self.assertEqual(launch[-1], 'infinity')
+        self.assertIn('dcs-hwtest/controller:' + SHA_A, launch)
+        # The unreachable-field induction needs a name that resolves
+        # but serves nothing: no published port, no sim-serve argv.
+        self.assertNotIn('-p', launch)
+        self.assertNotIn('--listen', launch)
+        self.assertEqual(
+            info['remote'],
+            'dcs-hw-qa-1-born-plant:'
+            + str(runner.BORN_FIELD_PORT))
+        self.assertEqual([event for event, _ in events],
+                         ['born-field-start', 'born-field-up'])
+
+    def test_serving_field_launches_plant_and_probes(self):
+        calls, events, info = self._field('serving')
+        launch = self._run(calls)
+        self.assertIn('dcs-hw-qa-1-born-plant', launch)
+        self.assertIn('dcs-hwtest/plant:' + SHA_A, launch)
+        self.assertIn(str(self.model) + ':/model/plant.json:ro',
+                      launch)
+        self.assertIn(str(self.dynamics)
+                      + ':/model/dynamics.json:ro', launch)
+        self.assertIn('0.0.0.0:' + str(runner.BORN_FIELD_PORT), launch)
+        probe = next(c for c in calls if c[0] == 'exec')
+        self.assertEqual(
+            probe,
+            ('exec', 'dcs-hw-qa-1-born-plant', 'dcs-plant-ctl',
+             '127.0.0.1:' + str(runner.BORN_FIELD_PORT), 'list'))
+        self.assertEqual(info['mode'], 'serving')
+
+    def test_foreign_field_serves_the_foreign_fixtures(self):
+        foreign_model = self.src / self.cfg['foreign_model_fixture']
+        foreign_dynamics = (self.src
+                            / self.cfg['foreign_dynamics_fixture'])
+        foreign_model.parent.mkdir(parents=True, exist_ok=True)
+        foreign_dynamics.parent.mkdir(parents=True, exist_ok=True)
+        foreign_model.write_text(json.dumps({'version': 2}))
+        foreign_dynamics.write_text(json.dumps({}))
+        calls, events = [], []
+
+        def docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', docker):
+            ctx = runner._scenario_ctx(
+                self.cfg, self._record(), self.src, self.run_dir,
+                self.run_dir / 'evidence', 0,
+                lambda e, d=None: events.append(e))
+            info = ctx['start_born_field']('foreign')
+        launch = self._run(calls)
+        self.assertIn(str(foreign_model) + ':/model/plant.json:ro',
+                      launch)
+        self.assertIn(str(foreign_dynamics)
+                      + ':/model/dynamics.json:ro', launch)
+        self.assertNotIn(str(self.model) + ':', launch)
+        self.assertEqual(info['mode'], 'foreign')
+        self.assertEqual(info['remote'],
+                         'dcs-hw-qa-1-born-plant:'
+                         + str(runner.BORN_FIELD_PORT))
+        # The foreign field is still a serving listener — the
+        # correspondence refusal needs live claim arbitration — so
+        # the same in-container probe gates the address handoff.
+        probe = next(c for c in calls if c[0] == 'exec')
+        self.assertEqual(
+            probe,
+            ('exec', 'dcs-hw-qa-1-born-plant', 'dcs-plant-ctl',
+             '127.0.0.1:' + str(runner.BORN_FIELD_PORT), 'list'))
+
+    def test_born_field_ctl_execs_the_tool_inside_the_field(self):
+        calls = []
+
+        def docker(*args, timeout=120, check=True):
+            calls.append((args, check))
+            return Result('{"result": "points", "points": []}')
+
+        with patch.object(runner, 'docker', docker):
+            ctx = runner._scenario_ctx(
+                self.cfg, self._record(), self.src, self.run_dir,
+                self.run_dir / 'evidence', 0,
+                lambda e, d=None: None)
+            answer = ctx['born_field_ctl']('list')
+            refused = ctx['born_field_ctl']('step', '0')
+        self.assertEqual(
+            calls,
+            [(('exec', 'dcs-hw-qa-1-born-plant', 'dcs-plant-ctl',
+               '127.0.0.1:' + str(runner.BORN_FIELD_PORT), 'list'),
+              False),
+             (('exec', 'dcs-hw-qa-1-born-plant', 'dcs-plant-ctl',
+               '127.0.0.1:' + str(runner.BORN_FIELD_PORT), 'step', '0'),
+              False)])
+        self.assertEqual(answer.returncode, 0)
+        self.assertEqual(refused.returncode, 0)
+
+    def test_serving_field_retries_until_the_listener_binds(self):
+        polls = []
+
+        def docker(*args, timeout=120, check=True):
+            polls.append(args)
+            if args[0] == 'exec':
+                return Result('', returncode=1 if len(
+                    [p for p in polls if p[0] == 'exec']) < 3 else 0)
+            return Result('')
+
+        self._field('serving', docker=docker)
+        self.assertEqual(
+            len([p for p in polls if p[0] == 'exec']), 3)
+
+    def test_serving_field_never_binding_raises(self):
+        moments = iter((0.0, 0.0, 61.0))
+        fake_time = type('T', (), {
+            'monotonic': staticmethod(lambda: next(moments)),
+            'sleep': staticmethod(lambda seconds: None)})
+
+        def docker(*args, timeout=120, check=True):
+            if args[0] == 'exec':
+                return Result('', returncode=1)
+            return Result('')
+
+        with patch.object(runner, 'time', fake_time):
+            with self.assertRaises(RuntimeError) as caught:
+                self._field('serving', docker=docker)
+        self.assertIn('never bound', str(caught.exception))
+
+    def test_pause_unpause_and_stop_field(self):
+        calls, events = [], []
+
+        def docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        timeline = lambda event, detail=None: events.append(event)
+        with patch.object(runner, 'docker', docker):
+            runner.pause_born_field('qa-1', timeline)
+            runner.unpause_born_field('qa-1', timeline)
+            runner.stop_born_field('qa-1', timeline)
+        self.assertEqual(calls, [
+            ('pause', 'dcs-hw-qa-1-born-plant'),
+            ('unpause', 'dcs-hw-qa-1-born-plant'),
+            ('rm', '-f', 'dcs-hw-qa-1-born-plant')])
+        self.assertEqual(events, [
+            'born-field-pause', 'born-field-paused',
+            'born-field-unpause', 'born-field-unpaused',
+            'born-field-stop', 'born-field-stopped'])
+
+    def test_born_active_launch_carries_remote_peer_and_cold_state(self):
+        calls, events, info = self._launch(peer='foreign')
+        self.assertEqual(calls[0][:3],
+                         ('ps', '-a', '--filter'))
+        launch = self._run(calls)
+        self.assertIn('dcs-hw-qa-1-c', launch)
+        self.assertIn(runner.MANAGED_LABEL + '=1', launch)
+        self.assertIn('dcs-hwtest-qa-1', launch)
+        index = launch.index('--remote')
+        self.assertEqual(launch[index + 1],
+                         'dcs-hw-qa-1-born-plant:'
+                         + str(runner.BORN_FIELD_PORT))
+        index = launch.index('--peer')
+        self.assertEqual(launch[index + 1],
+                         'dcs-hw-qa-1-foreign:'
+                         + str(runner.BORN_MONITOR_PORT))
+        self.assertNotIn('--standby', launch)
+        index = launch.index('--owner-token')
+        self.assertEqual(launch[index + 1],
+                         str(self.cfg['plant_owner_tokens']
+                            ['revised']))
+        index = launch.index('--listen')
+        self.assertEqual(launch[index + 1],
+                         '0.0.0.0:' + str(runner.BORN_MONITOR_PORT))
+        index = launch.index('--scan-ms')
+        self.assertEqual(launch[index + 1], '100')
+        self.assertIn(runner.CONTAINER_STATE_FILE, launch)
+        self.assertIn(runner.CONTAINER_JOURNAL_FILE, launch)
+        self.assertIn(runner.CONTAINER_HISTORY_FILE, launch)
+        self.assertIn('--pair-token', launch)
+        self.assertIn(self.cfg['pair_token'], launch)
+        self.assertIn('--restart', launch)
+        self.assertIn('no', launch)
+        self.assertIn('127.0.0.1:' + str(self.cfg['revised_port'])
+                      + ':' + str(runner.BORN_MONITOR_PORT), launch)
+        directory = self.run_dir / 'controllers' / 'c'
+        self.assertIn(str(directory) + ':'
+                      + runner.CONTAINER_RUN_DIR, launch)
+        self.assertIn(str(self.model) + ':/model/plant.json:ro',
+                      launch)
+        self.assertEqual(info['container'], 'dcs-hw-qa-1-c')
+        self.assertEqual(info['monitor'],
+                         'http://127.0.0.1:'
+                         + str(self.cfg['revised_port']))
+        self.assertEqual([event for event, _ in events],
+                         ['born-start', 'born-up'])
+
+    def test_born_standby_launch_replaces_peer_with_standby(self):
+        calls, _, info = self._launch(seat='foreign',
+                                    standby='revised')
+        launch = self._run(calls)
+        index = launch.index('--standby')
+        self.assertEqual(launch[index + 1],
+                         'dcs-hw-qa-1-c:'
+                         + str(runner.BORN_MONITOR_PORT))
+        self.assertNotIn('--peer', launch)
+        self.assertIn('127.0.0.1:' + str(self.cfg['foreign_port'])
+                      + ':' + str(runner.BORN_MONITOR_PORT), launch)
+        index = launch.index('--owner-token')
+        self.assertEqual(launch[index + 1],
+                         str(self.cfg['plant_owner_tokens']
+                            ['foreign']))
+        self.assertEqual(info['container'], 'dcs-hw-qa-1-foreign')
+
+    def test_verbatim_peer_names_pass_through_undoctored(self):
+        calls, _, _ = self._launch(
+            seat='driven', peer='dcs-born-dead-peer:8082')
+        launch = self._run(calls)
+        index = launch.index('--peer')
+        self.assertEqual(launch[index + 1],
+                         'dcs-born-dead-peer:8082')
+        index = launch.index('--owner-token')
+        self.assertEqual(launch[index + 1],
+                         str(self.cfg['plant_owner_tokens']
+                            ['driven']))
+
+    def test_peer_and_standby_together_rejected(self):
+        with self.assertRaises(RuntimeError):
+            self._launch(peer='foreign', standby='revised')
+
+    def test_unknown_seat_rejected(self):
+        with self.assertRaises(RuntimeError):
+            self._launch(seat='active')
+        with self.assertRaises(RuntimeError):
+            runner.stop_born_controller(
+                'qa-1', 'standby', lambda e, d=None: None)
+
+    def test_seat_replacement_requires_the_role_read(self):
+        def docker(*args, timeout=120, check=True):
+            if args[0] == 'ps':
+                return Result('', returncode=1)
+            return Result('')
+
+        with self.assertRaises(RuntimeError) as caught:
+            self._launch(docker=docker)
+        self.assertIn('cannot prove', str(caught.exception))
+
+    def test_owning_seat_refuses_replacement(self):
+        def docker(*args, timeout=120, check=True):
+            if args[0] == 'ps':
+                return Result('abc123\n')
+            return Result('')
+
+        def urlopen(request, timeout=10):
+            class _Response:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    return False
+
+                def read(self):
+                    return json.dumps({'role': 'active',
+                                       'tick': 9}).encode()
+            return _Response()
+
+        with patch.object(runner, 'docker', docker), \
+                patch.object(runner.urllib.request, 'urlopen',
+                             urlopen):
+            with self.assertRaises(RuntimeError) as caught:
+                runner.start_born_controller(
+                    self.cfg, self._record(), self.run_dir,
+                    self.model, 'revised', 'dcs-hw-qa-1-x:9003',
+                    lambda e, d=None: None)
+        self.assertIn('refuses to replace', str(caught.exception))
+
+    def test_quiet_seat_is_removed_and_relaunched(self):
+        calls = []
+
+        def docker(*args, timeout=120, check=True):
+            calls.append(args)
+            if args[0] == 'ps':
+                return Result('abc123\n')
+            return Result('')
+
+        def urlopen(request, timeout=10):
+            class _Response:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    return False
+
+                def read(self):
+                    return json.dumps({'role': 'standby',
+                                       'sync': 'unsynchronized',
+                                       'tick': 9}).encode()
+            return _Response()
+
+        with patch.object(runner, 'docker', docker), \
+                patch.object(runner.urllib.request, 'urlopen',
+                             urlopen):
+            runner.start_born_controller(
+                self.cfg, self._record(), self.run_dir, self.model,
+                'revised', 'dcs-hw-qa-1-x:9003',
+                lambda e, d=None: None)
+        self.assertIn(('rm', '-f', 'dcs-hw-qa-1-c'), calls)
+        self.assertTrue(any(c[0] == 'run' for c in calls))
+
+    def test_born_launch_resets_the_seat_artifacts(self):
+        directory = self.run_dir / 'controllers' / 'c'
+        for artifact in ('state.json', 'journal.jsonl',
+                         'history.jsonl'):
+            (directory / artifact).write_text('stale\n')
+        self._launch()
+        for artifact in ('state.json', 'journal.jsonl',
+                         'history.jsonl'):
+            self.assertFalse((directory / artifact).exists(),
+                             artifact)
+
+    def test_stop_born_controller_tolerates_absence(self):
+        calls, events = [], []
+
+        def docker(*args, timeout=120, check=True):
+            calls.append(args)
+            if args[0] == 'rm':
+                return Result('no such container', returncode=1)
+            return Result('')
+
+        with patch.object(runner, 'docker', docker):
+            runner.stop_born_controller(
+                'qa-1', 'driven',
+                lambda event, detail=None: events.append(event))
+        self.assertEqual(calls, [('rm', '-f', 'dcs-hw-qa-1-d')])
+        self.assertEqual(events, ['born-stop', 'born-stopped'])
+
+    def test_born_controller_state_reports_the_process_verdict(self):
+        def docker(*args, timeout=120, check=True):
+            if args[0] == 'inspect':
+                return Result('false 1\n')
+            if args[0] == 'logs':
+                result = Result('claim refused; no --peer was declared')
+                result.stderr = ''
+                return result
+            return Result('')
+
+        with patch.object(runner, 'docker', docker):
+            state = runner.born_controller_state('qa-1', 'driven')
+        self.assertFalse(state['running'])
+        self.assertEqual(state['exit'], 1)
+        self.assertFalse(state['absent'])
+        self.assertIn('no --peer was declared', state['logs'])
+
+    def test_born_controller_state_reports_absence(self):
+        def docker(*args, timeout=120, check=True):
+            if args[0] == 'inspect':
+                return Result('no such container', returncode=1)
+            return Result('')
+
+        with patch.object(runner, 'docker', docker):
+            state = runner.born_controller_state('qa-1', 'driven')
+        self.assertFalse(state['running'])
+        self.assertTrue(state['absent'])
+
+    def test_scenario_ctx_carries_the_born_actions(self):
+        calls, events = [], []
+
+        def docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', docker):
+            ctx = runner._scenario_ctx(
+                self.cfg, self._record(), self.src, self.run_dir,
+                self.run_dir / 'evidence', 0,
+                lambda e, d=None: events.append(e))
+            for key in ('start_born_field', 'pause_born_field',
+                        'unpause_born_field', 'stop_born_field',
+                        'start_born_controller', 'stop_born_controller',
+                        'born_controller_state'):
+                self.assertIsNotNone(ctx[key], key)
+            info = ctx['start_born_field']('silent')
+            self.assertEqual(info['remote'],
+                             'dcs-hw-qa-1-born-plant:'
+                             + str(runner.BORN_FIELD_PORT))
+            launched = ctx['start_born_controller'](
+                'driven', info['remote'], peer='revised')
+            ctx['pause_born_field']()
+            ctx['unpause_born_field']()
+            ctx['stop_born_controller']('driven')
+            ctx['stop_born_field']()
+            state = ctx['born_controller_state']('driven')
+        self.assertEqual(launched['container'], 'dcs-hw-qa-1-d')
+        launch = next(c for c in calls
+                      if c[0] == 'run' and 'dcs-hw-qa-1-d' in c)
+        index = launch.index('--peer')
+        self.assertEqual(launch[index + 1],
+                         'dcs-hw-qa-1-c:'
+                         + str(runner.BORN_MONITOR_PORT))
+        self.assertFalse(state['running'])
+
+
+class ForgeEndpointTests(unittest.TestCase):
+    """The scenario-callable forged-checkpoint endpoint: the runner
+    launches the run's labeled rig-bridge container on the shipped
+    dcs-forge binary out of the controller image — announcing itself
+    to the named owner's monitor and serving a staged checkpoint
+    document the leg rewrites between demote calls — and removes the
+    container again for the case's teardown, both halves recorded on
+    the run's action timeline. The keyed posture comes from the run
+    config's --pair-token, the launch refuses a non-bridge placement,
+    and _scenario_ctx hands the actions to the case."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        self.run_dir.mkdir(parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+        self.document = {'format_version': 1,
+                         'generation': 7, 'tick': 42,
+                         'source_owns_field': False}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _record(self):
+        return {'run_id': 'qa-1', 'attempted_sha': SHA_A}
+
+    def test_forge_launches_keyed_on_the_rig_bridge(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            info = runner.start_forge_endpoint(
+                self.cfg, self._record(), self.run_dir, self.document,
+                'active',
+                lambda event, detail=None: events.append(
+                    (event, detail)))
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertIn('dcs-hw-qa-1-forge', launch)
+        self.assertIn(runner.MANAGED_LABEL + '=1', launch)
+        self.assertIn(runner.RUN_LABEL + '=qa-1', launch)
+        # Bridge placement: the run's rig network, no host port.
+        self.assertIn('dcs-hwtest-qa-1', launch)
+        self.assertNotIn('-p', launch)
+        # The shipped binary runs under --entrypoint on the controller
+        # image, serving the staged document and ledgering its hits.
+        self.assertIn('--entrypoint', launch)
+        self.assertIn('dcs-forge', launch)
+        self.assertIn('dcs-hwtest/controller:' + SHA_A, launch)
+        self.assertIn('--listen', launch)
+        self.assertIn('0.0.0.0:' + str(runner.FORGE_PORT), launch)
+        self.assertIn('--document', launch)
+        self.assertIn('/forge/checkpoint.json', launch)
+        self.assertIn('--hits', launch)
+        self.assertIn('/forge/hits.jsonl', launch)
+        # The endpoint announces to the named owner's monitor so its
+        # bridge address is the recorded tracking hint.
+        self.assertIn('--announce', launch)
+        self.assertIn('dcs-hw-qa-1-a:8080', launch)
+        # Keyed: the run's --pair-token signs the ?prove= answers.
+        self.assertIn('--pair-token', launch)
+        self.assertIn(self.cfg['pair_token'], launch)
+        self.assertTrue(info['keyed'])
+        self.assertEqual(info['container'], 'dcs-hw-qa-1-forge')
+        self.assertEqual(info['port'], runner.FORGE_PORT)
+        # The staged document and hits ledger sit inside the run dir.
+        self.assertEqual(json.loads(Path(info['document'])
+                                    .read_text()), self.document)
+        self.assertTrue(Path(info['document'])
+                        .is_relative_to(self.run_dir))
+        self.assertTrue(Path(info['hits'])
+                        .is_relative_to(self.run_dir))
+        self.assertEqual([event for event, _ in events],
+                         ['forge-start', 'forge-up'])
+
+    def test_unkeyed_launch_carries_no_pair_token(self):
+        calls = []
+        with patch.object(runner, 'docker',
+                          lambda *a, **k: calls.append(a)
+                          or Result('')):
+            info = runner.start_forge_endpoint(
+                self.cfg, self._record(), self.run_dir, self.document,
+                'standby', lambda e, d=None: None, keyed=False)
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertNotIn('--pair-token', launch)
+        self.assertIn('dcs-hw-qa-1-b:8081', launch)
+        self.assertFalse(info['keyed'])
+
+    def test_tokenless_run_launches_unkeyed_regardless(self):
+        self.cfg['pair_token'] = None
+        calls = []
+        with patch.object(runner, 'docker',
+                          lambda *a, **k: calls.append(a)
+                          or Result('')):
+            info = runner.start_forge_endpoint(
+                self.cfg, self._record(), self.run_dir, self.document,
+                'active', lambda e, d=None: None)
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertNotIn('--pair-token', launch)
+        self.assertFalse(info['keyed'])
+
+    def test_non_bridge_placement_refuses_the_launch(self):
+        self.cfg['endpoint_placement'] = {
+            **self.cfg['endpoint_placement'], 'forge': 'loopback'}
+        with self.assertRaises(RuntimeError):
+            runner.start_forge_endpoint(
+                self.cfg, self._record(), self.run_dir, self.document,
+                'active', lambda e, d=None: None)
+
+    def test_unknown_endpoint_rejected(self):
+        with self.assertRaises(RuntimeError):
+            runner.start_forge_endpoint(
+                self.cfg, self._record(), self.run_dir, self.document,
+                'forge', lambda e, d=None: None)
+
+    def test_failed_launch_raises_after_recording_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'run' and check:
+                raise RuntimeError('docker run failed: name in use')
+            return Result('')
+
+        with patch.object(runner, 'docker', raising):
+            with self.assertRaises(RuntimeError):
+                runner.start_forge_endpoint(
+                    self.cfg, self._record(), self.run_dir,
+                    self.document, 'active',
+                    lambda event, detail=None: events.append(event))
+        self.assertEqual(events, ['forge-start'])
+
+    def test_stop_removes_the_forge_container(self):
+        calls, events = [], []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            runner.stop_forge_endpoint(
+                'qa-1', lambda event, detail=None: events.append(
+                    (event, detail)))
+        self.assertEqual(calls,
+                         [('rm', '-f', 'dcs-hw-qa-1-forge')])
+        self.assertEqual([event for event, _ in events],
+                         ['forge-stop', 'forge-stopped'])
+
+    def test_failed_teardown_raises_after_recording_attempt(self):
+        events = []
+
+        def raising(*args, timeout=120, check=True):
+            if args[0] == 'rm' and check:
+                raise RuntimeError('docker rm failed: no such')
+            return Result('')
+
+        with patch.object(runner, 'docker', raising):
+            with self.assertRaises(RuntimeError):
+                runner.stop_forge_endpoint(
+                    'qa-1',
+                    lambda event, detail=None: events.append(event))
+        self.assertEqual(events, ['forge-stop'])
+
+    def test_scenario_ctx_carries_forge_actions_and_token(self):
+        calls = []
+        record = self._record()
+        with patch.object(runner, 'docker',
+                          lambda *a, **k: calls.append(a)
+                          or Result('')):
+            ctx = runner._scenario_ctx(
+                self.cfg, record, self.src, self.run_dir,
+                self.run_dir / 'evidence', 0,
+                lambda e, d=None: None)
+            info = ctx['start_forge'](self.document, 'active')
+            ctx['stop_forge']()
+        self.assertEqual(ctx['pair_token'], self.cfg['pair_token'])
+        self.assertEqual(info['container'], 'dcs-hw-qa-1-forge')
+        launch = next(c for c in calls if c[0] == 'run')
+        self.assertIn('--entrypoint', launch)
+        self.assertIn('dcs-forge', launch)
+        self.assertIn('--pair-token', launch)
+        self.assertEqual(calls[-1],
+                         ('rm', '-f', 'dcs-hw-qa-1-forge'))
+
+    def test_controller_image_ships_the_forge_binary(self):
+        calls, events = [], []
+        target = Path(self.cfg['state_dir']) / 'build-cache' \
+            / 'target' / 'release'
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            if args[0] == 'run' and 'cargo' in str(args):
+                target.mkdir(parents=True, exist_ok=True)
+                for binary in ('dcs-controller', 'dcs-plant-server',
+                               'dcs-plant-ctl', 'dcs-ctl', 'dcs-forge'):
+                    (target / binary).write_text('bin')
+            if args[:2] == ('image', 'inspect'):
+                return Result('sha256:' + 'a' * 64)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            runner._build_images(
+                self.src, self.cfg, self.run_dir,
+                lambda event, detail=None: events.append(event),
+                'qa-1')
+        build = next(args for args in calls
+                     if args[0] == 'run' and 'cargo' in str(args))
+        self.assertIn('--bin dcs-forge', build[-1])
+        dockerfile = (self.run_dir / 'image-controller'
+                      / 'Dockerfile').read_text()
+        self.assertIn('COPY dcs-forge /usr/local/bin/dcs-forge',
+                      dockerfile)
+        self.assertIn('ENTRYPOINT ["dcs-controller"]', dockerfile)
+        self.assertTrue(
+            (self.run_dir / 'image-controller' / 'dcs-forge')
+            .is_file())
+        plant = (self.run_dir / 'image-plant'
+                 / 'Dockerfile').read_text()
+        self.assertNotIn('dcs-forge', plant)
+
+    def test_build_fails_loudly_without_the_forge_binary(self):
+        target = Path(self.cfg['state_dir']) / 'build-cache' \
+            / 'target' / 'release'
+
+        def fake_docker(*args, timeout=120, check=True):
+            if args[0] == 'run' and 'cargo' in str(args):
+                target.mkdir(parents=True, exist_ok=True)
+                for binary in ('dcs-controller', 'dcs-plant-server',
+                               'dcs-plant-ctl', 'dcs-ctl'):
+                    (target / binary).write_text('bin')
+            if args[:2] == ('image', 'inspect'):
+                return Result('sha256:' + 'a' * 64)
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            with self.assertRaises(RuntimeError):
+                runner._build_images(self.src, self.cfg, self.run_dir,
+                                     lambda e, d=None: None, 'qa-1')
+
+
+class ProbePairTests(unittest.TestCase):
+    """The lane-staged keyed probe pair (#1058): a second, always-keyed
+    redundant pair bound to its own sim-serve plant, so the keyed
+    announced-source legs exercise the contract per revision while
+    the deployed pair runs whichever posture the run config gives
+    it. The probe plant is bridge-placed with its own declared
+    dynamics and field; the probe controllers share the block's
+    --pair-token, carry the distinct probe_* owner-token pins, and
+    publish their monitors on host loopback; ctx['probe'] hands the
+    keyed legs the pair as their subject."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.probe = self.cfg['probe_pair']
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        self.run_dir.mkdir(parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+        for fixture in (self.cfg['model_fixture'],
+                        self.cfg['dynamics_fixture'],
+                        self.probe['model_fixture'],
+                        self.probe['dynamics_fixture']):
+            path = self.src / fixture
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{}')
+        self.document = {'format_version': 1, 'generation': 7,
+                         'tick': 42, 'source_owns_field': False}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _record(self):
+        return {'run_id': 'qa-1', 'attempted_sha': SHA_A}
+
+    @staticmethod
+    def _docker(calls):
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            return Result('')
+        return fake_docker
+
+    @staticmethod
+    def _launch(calls, container):
+        return next(c for c in calls
+                    if c[0] == 'run' and container in c)
+
+    def _rig(self, calls, events=None):
+        class FakeConn:
+            def close(self):
+                pass
+        with patch.object(runner, 'docker', self._docker(calls)), \
+                patch.object(runner.socket, 'create_connection',
+                             return_value=FakeConn()):
+            runner._start_rig(
+                self.cfg, self._record(), self.src, self.run_dir,
+                lambda e, d=None: events is not None
+                and events.append((e, d)))
+
+    def _ctx(self):
+        return runner._scenario_ctx(
+            self.cfg, self._record(), self.src, self.run_dir,
+            self.run_dir / 'evidence', 0, lambda e, d=None: None)
+
+    def test_start_rig_stages_the_probe_pair_keyed(self):
+        calls, events = [], []
+        self._rig(calls, events)
+        tokens = self.cfg['plant_owner_tokens']
+        # The probe plant: its own sim-serve deployment — the run's
+        # labels and rig bridge, its own dynamics declaration, no
+        # host publish (bridge-placed).
+        plant = self._launch(calls, 'dcs-hw-qa-1-probe-plant')
+        self.assertIn(runner.MANAGED_LABEL + '=1', plant)
+        self.assertIn(runner.RUN_LABEL + '=qa-1', plant)
+        self.assertIn('dcs-hwtest-qa-1', plant)
+        self.assertNotIn('-p', plant)
+        self.assertIn(str(self.src / self.probe['model_fixture'])
+                      + ':/model/plant.json:ro', plant)
+        self.assertIn(str(self.src / self.probe['dynamics_fixture'])
+                      + ':/model/dynamics.json:ro', plant)
+        self.assertIn('--dynamics', plant)
+        self.assertIn('0.0.0.0:' + str(self.probe['plant_port']),
+                      plant)
+        # Readiness runs through the shipped tool inside the probe
+        # plant's own netns — no host port exists to probe.
+        self.assertTrue(any(
+            c[:3] == ('exec', 'dcs-hw-qa-1-probe-plant',
+                      'dcs-plant-ctl')
+            and '127.0.0.1:' + str(self.probe['plant_port']) in c
+            for c in calls))
+        # The keyed pair: shared --pair-token, distinct probe_*
+        # owner-token pins, bound to the probe plant, monitors
+        # published on host loopback, b tracking a.
+        for key, container, publish in (
+                ('probe_active', 'dcs-hw-qa-1-probe-a',
+                 '127.0.0.1:' + str(self.probe['active_port'])
+                 + ':8080'),
+                ('probe_standby', 'dcs-hw-qa-1-probe-b',
+                 '127.0.0.1:' + str(self.probe['standby_port'])
+                 + ':8081')):
+            launch = self._launch(calls, container)
+            self.assertIn(runner.MANAGED_LABEL + '=1', launch)
+            self.assertIn(runner.RUN_LABEL + '=qa-1', launch)
+            self.assertIn(publish, launch)
+            self.assertIn('--pair-token', launch)
+            self.assertIn(self.probe['pair_token'], launch)
+            self.assertIn('--remote', launch)
+            self.assertIn(
+                'dcs-hw-qa-1-probe-plant:'
+                + str(self.probe['plant_port']), launch)
+            self.assertEqual(launch[launch.index('--owner-token') + 1],
+                             str(tokens[key]), key)
+        probe_b = self._launch(calls, 'dcs-hw-qa-1-probe-b')
+        self.assertIn('--standby', probe_b)
+        self.assertIn('dcs-hw-qa-1-probe-a:8080', probe_b)
+        self.assertIn('--auto-promote', probe_b)
+        # The probe pair never touches the deployed pair's field or
+        # claim tokens.
+        for container in ('dcs-hw-qa-1-probe-a',
+                          'dcs-hw-qa-1-probe-b'):
+            launch = self._launch(calls, container)
+            self.assertNotIn(
+                'dcs-hw-qa-1-plant:' + str(self.cfg['plant_port']),
+                launch)
+            for deployed in ('active', 'standby', 'revised',
+                             'foreign', 'driven'):
+                self.assertNotEqual(
+                    launch[launch.index('--owner-token') + 1],
+                    str(tokens[deployed]), deployed)
+        self.assertNotEqual(tokens['probe_active'],
+                            tokens['probe_standby'])
+        self.assertIn('probe-rig-up',
+                      [event for event, _ in events])
+        # Probe controllers' state dirs live under the run dir.
+        self.assertTrue((self.run_dir / 'controllers' / 'probe-a')
+                        .is_dir())
+        self.assertTrue((self.run_dir / 'controllers' / 'probe-b')
+                        .is_dir())
+
+    def test_unkeyed_deployed_pair_still_stages_probe_keyed(self):
+        # The posture split the issue calls for: the deployed pair
+        # launches unkeyed while the probe pair still carries the
+        # shared --pair-token.
+        self.cfg['pair_token'] = None
+        calls = []
+        self._rig(calls)
+        for container in ('dcs-hw-qa-1-a', 'dcs-hw-qa-1-b'):
+            launch = self._launch(calls, container)
+            self.assertNotIn('--pair-token', launch)
+        for container in ('dcs-hw-qa-1-probe-a',
+                          'dcs-hw-qa-1-probe-b'):
+            launch = self._launch(calls, container)
+            self.assertIn('--pair-token', launch)
+            self.assertIn(self.probe['pair_token'], launch)
+        # And the ctx hands the legs the keyed probe subject while
+        # the deployed ctx stays honestly unkeyed.
+        ctx = self._ctx()
+        self.assertIsNone(ctx['pair_token'])
+        self.assertEqual(ctx['probe']['pair_token'],
+                         self.probe['pair_token'])
+        self.assertIs(ctx['probe'],
+                      scenarios._keyed_subject(ctx))
+
+    def test_probe_block_validation_fails_loudly(self):
+        for broken in ({'pair_token': 'x'},
+                       'not-a-mapping',
+                       dict(self.probe, pair_token=None),
+                       dict(self.probe, active_port=0),
+                       dict(self.probe, plant_port='9002'),
+                       dict(self.probe, model_fixture='')):
+            with self.assertRaises(RuntimeError):
+                runner._probe_pair(
+                    {**self.cfg, 'probe_pair': broken})
+        self.assertIsNone(runner._probe_pair(
+            {**self.cfg, 'probe_pair': None}))
+
+    def test_no_probe_block_stages_no_probe_pair(self):
+        self.cfg['probe_pair'] = None
+        calls = []
+        self._rig(calls)
+        launched = [c for c in calls if c[0] == 'run']
+        self.assertEqual(len(launched), 3)
+        self.assertIsNone(self._ctx()['probe'])
+        self.assertIsNone(scenarios._keyed_subject(
+            {'pair_token': None, 'probe': None}))
+
+    def test_probe_endpoints_require_their_recorded_placements(self):
+        # The probe plant is rig-dialed only — a loopback record is
+        # a rig this launch does not build; the probe monitors
+        # publish on host loopback — a bridge record likewise.
+        for key, value in (('probe_plant', 'loopback'),
+                           ('probe_active', 'bridge'),
+                           ('probe_standby', 'bridge'),
+                           ('probe_driven', 'bridge')):
+            self.cfg['endpoint_placement'] = {
+                **self.cfg['endpoint_placement'], key: value}
+            calls = []
+            try:
+                with patch.object(runner, 'docker',
+                                  self._docker(calls)):
+                    with self.assertRaises(RuntimeError) as caught:
+                        runner._start_rig(
+                            self.cfg, self._record(), self.src,
+                            self.run_dir, lambda e, d=None: None)
+            finally:
+                self.cfg['endpoint_placement'] = dict(
+                    runner.DEFAULT_CONFIG['endpoint_placement'])
+            self.assertIn(key, str(caught.exception), key)
+            self.assertFalse(any(c[0] == 'run' for c in calls), key)
+
+    def test_probe_subject_ctx_rebinds_the_run_actions(self):
+        calls = []
+        with patch.object(runner, 'docker', self._docker(calls)):
+            ctx = self._ctx()
+            probe = ctx['probe']
+            self.assertIsNotNone(probe)
+            self.assertEqual(probe['active'],
+                             'http://127.0.0.1:'
+                             + str(self.probe['active_port']))
+            self.assertEqual(probe['standby'],
+                             'http://127.0.0.1:'
+                             + str(self.probe['standby_port']))
+            self.assertEqual(probe['driven'],
+                             'http://127.0.0.1:'
+                             + str(self.probe['driven_port']))
+            # Bridge-placed field: no host-side plant attachment.
+            self.assertIsNone(probe['plant'])
+            self.assertEqual(probe['pair_token'],
+                             self.probe['pair_token'])
+            tokens = self.cfg['plant_owner_tokens']
+            self.assertEqual(
+                probe['plant_owner'],
+                {'active': tokens['probe_active'],
+                 'standby': tokens['probe_standby'],
+                 'driven': tokens['probe_driven']})
+            # Deployed-pair-only actions are absent rather than
+            # rebound onto the wrong pair.
+            for action in ('start_revised', 'start_foreign',
+                           'stop_foreign'):
+                self.assertIsNone(probe[action], action)
+            # The probe pair's own journal/state paths.
+            for key, peer in (('active', 'probe-a'),
+                              ('standby', 'probe-b'),
+                              ('driven', 'probe-d')):
+                self.assertIn('controllers/' + peer,
+                              probe['journal_files'][key], key)
+                self.assertTrue(Path(probe['journal_files'][key])
+                                .is_relative_to(self.run_dir), key)
+                self.assertTrue(Path(probe['state_files'][key])
+                                .is_relative_to(self.run_dir), key)
+                self.assertTrue(Path(probe['history_files'][key])
+                                .is_relative_to(self.run_dir), key)
+            # The lifecycle actions take the probe containers.
+            probe['restart_controller']('standby')
+            probe['stop_plant']()
+            probe['start_plant']()
+            probe['plant_ctl']('list')
+            info = probe['start_driven']('active')
+            probe['stop_driven']()
+            forge = probe['start_forge'](self.document, 'active')
+            probe['stop_forge']()
+        self.assertEqual(calls[0:2],
+                         [('stop', '--time', '2',
+                           'dcs-hw-qa-1-probe-b'),
+                          ('start', 'dcs-hw-qa-1-probe-b')])
+        self.assertEqual(calls[2],
+                         ('stop', '--time', '2',
+                          'dcs-hw-qa-1-probe-plant'))
+        self.assertEqual(calls[3],
+                         ('start', 'dcs-hw-qa-1-probe-plant'))
+        self.assertEqual(
+            calls[4],
+            ('exec', 'dcs-hw-qa-1-probe-plant', 'dcs-plant-ctl',
+             '127.0.0.1:' + str(self.probe['plant_port']), 'list'))
+        self.assertEqual(info['container'], 'dcs-hw-qa-1-probe-d')
+        driven = self._launch(calls, 'dcs-hw-qa-1-probe-d')
+        self.assertIn('dcs-hw-qa-1-probe-a:8080', driven)
+        self.assertIn('dcs-hw-qa-1-probe-plant:'
+                      + str(self.probe['plant_port']), driven)
+        self.assertIn('--pair-token', driven)
+        self.assertIn(self.probe['pair_token'], driven)
+        self.assertIn('127.0.0.1:' + str(self.probe['driven_port'])
+                      + ':8082', driven)
+        forge_launch = self._launch(calls, 'dcs-hw-qa-1-probe-forge')
+        self.assertIn('--announce', forge_launch)
+        self.assertIn('dcs-hw-qa-1-probe-a:8080', forge_launch)
+        self.assertIn('--pair-token', forge_launch)
+        self.assertIn(self.probe['pair_token'], forge_launch)
+        self.assertTrue(forge['keyed'])
+        self.assertEqual(forge['container'], 'dcs-hw-qa-1-probe-forge')
+        self.assertIn('/probe-forge/', forge['document'])
+
+    def test_probe_state_file_mount_lever_uses_probe_endpoints(self):
+        # The declared mount levers map probe endpoint keys: the
+        # probe subject's impede action stages the stall under the
+        # probe controller's own state dir; an endpoint the config
+        # never declared still refuses.
+        self.cfg['state_file_mounts'] = {
+            **self.cfg['state_file_mounts'], 'probe_active': 'fifo'}
+        probe = self._ctx()['probe']
+        self.assertIsNotNone(probe['impede_state_file'])
+        directory = self.run_dir / 'controllers' / 'probe-a'
+        directory.mkdir(parents=True)
+        probe['impede_state_file']('active')
+        self.assertTrue(os.path.exists(
+            str(directory / runner.STATE_FILE_TMP)))
+        with self.assertRaises(RuntimeError) as caught:
+            probe['impede_state_file']('standby')
+        self.assertIn('probe_standby', str(caught.exception))
+
+    def test_keyed_subject_selects_deployed_or_probe(self):
+        # The offline shape the @require-gated legs consume: the
+        # deployed pair while the run config keys it, else the staged
+        # probe pair.
+        ctx = self._ctx()
+        self.assertIs(scenarios._keyed_subject(ctx), ctx)
+        self.cfg['pair_token'] = None
+        ctx = self._ctx()
+        self.assertIs(scenarios._keyed_subject(ctx), ctx['probe'])
+
+    def test_wait_monitor_polls_every_staged_monitor(self):
+        urls = []
+
+        def fake_http(method, url, body=None, timeout=10):
+            urls.append(url)
+            return 200, {'role': 'active'}
+
+        with patch.object(runner.scenarios, 'http_json', fake_http):
+            self.assertTrue(runner._wait_monitor(
+                self.cfg, lambda e, d=None: None))
+        ports = {url.rsplit(':', 1)[1].split('/')[0] for url in urls}
+        self.assertEqual(ports, {str(self.cfg['active_port']),
+                                 str(self.cfg['standby_port']),
+                                 str(self.probe['active_port']),
+                                 str(self.probe['standby_port'])})
+
+    def test_probe_objects_teardown_with_the_rig(self):
+        # Probe containers carry the run labels like the rest of the
+        # rig, so the shared label-driven teardown removes them —
+        # leftovers become cleanup-ledger failures, never orphans.
+        calls = []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            if args[0] == 'ps':
+                return Result('pp1 qa-1\npp2 qa-1\npp3 qa-1\n'
+                              'aaa qa-1\n')
+            if args[:2] == ('network', 'ls'):
+                return Result('nnn qa-1\n')
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
+            failures = runner._teardown_rig(
+                'qa-1', lambda e, d=None: None)
+        self.assertEqual(failures, [])
+        removed = [c for c in calls if c[0] == 'rm']
+        self.assertEqual(len(removed), 4)
 
 
 if __name__ == '__main__':

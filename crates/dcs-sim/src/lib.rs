@@ -61,6 +61,7 @@
 
 mod driver;
 mod map;
+mod schema;
 mod scripted;
 mod state;
 

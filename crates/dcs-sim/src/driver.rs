@@ -8,7 +8,7 @@ use dcs_core::{
     ValueKind,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
 /// A fault injected on a simulated point for diagnostics testing.
@@ -54,7 +54,8 @@ pub struct PointInfo {
     pub point: PointId,
     /// Whether the controller reads (`In`) or writes (`Out`) the point.
     pub direction: Direction,
-    /// The sample readers currently observe.
+    /// The sample readers currently observe — stamped with the plant
+    /// tick that produced it.
     pub sample: Sample,
     /// The fault injected on the point, if any.
     pub fault: Option<Fault>,
@@ -67,7 +68,9 @@ struct PointState {
     /// The binding's direction: whether the controller reads or writes
     /// the point.
     direction: Direction,
-    /// The stored sample: the last write, loopback, or element update.
+    /// The stored sample: the last write, loopback, or element update —
+    /// or, for a bare channel no loopback or element output owns, the
+    /// step's freshness re-stamp.
     sample: Sample,
     /// The active injected fault, if any.
     fault: Option<Fault>,
@@ -306,6 +309,12 @@ struct State {
     points: HashMap<PointId, PointState>,
     loopbacks: Vec<Loopback>,
     elements: Vec<ElementState>,
+    /// The bound points whose stored sample a loopback or element
+    /// output owns — the step's routing and element updates stamp
+    /// them. Every other bound point is a bare channel: nothing writes
+    /// its sample on its own, so the step re-stamps it itself, the way
+    /// a scanned input card refreshes its report every cycle.
+    driven: HashSet<PointId>,
     tick: Tick,
 }
 
@@ -406,6 +415,15 @@ impl SimDriver {
     /// additionally seeded with their element's `initial`.
     pub fn new(map: ChannelMap) -> Result<Self, ConfigError> {
         map.validate()?;
+        // The points the step's own routing and element updates stamp:
+        // loopback destinations and element outputs. Everything else
+        // bound is a bare channel the step re-stamps itself.
+        let driven: HashSet<PointId> = map
+            .loopbacks
+            .iter()
+            .map(|loopback| loopback.input)
+            .chain(map.elements.iter().map(ProcessElement::output))
+            .collect();
         let mut points = HashMap::with_capacity(map.points.len());
         for binding in map.points {
             points.insert(
@@ -457,25 +475,27 @@ impl SimDriver {
                 points,
                 loopbacks: map.loopbacks,
                 elements,
+                driven,
                 tick: Tick::ZERO,
             }),
         })
     }
 
-    /// The driver's current logical tick.
+    /// The driver's current plant tick — the simulated field's step
+    /// counter, a different tick domain from any reading run's.
     pub fn tick(&self) -> Tick {
         self.state.lock().unwrap().tick
     }
 
-    /// Advances the simulation one tick of `dt` time units and returns the
-    /// new tick.
+    /// Advances the simulation one plant tick of `dt` time units and
+    /// returns the new plant tick.
     ///
     /// Each step, in order:
     ///
-    /// 1. the driver's tick counter advances by one;
+    /// 1. the driver's plant-tick counter advances by one;
     /// 2. every [`Loopback`] copies its `Out` point's effective sample —
     ///    value plus any injected quality — onto its paired `In` point,
-    ///    stamped with the new tick;
+    ///    stamped with the new plant tick;
     /// 3. every [`ProcessElement`], in declaration order, reads its input
     ///    points' effective samples and updates its output point: a
     ///    `Good` input advances the element — for a dead-time element,
@@ -491,6 +511,15 @@ impl SimDriver {
     ///    contact included, and propagates its quality to the output
     ///    sample — a `flow_sum` propagating the worst of its inputs'
     ///    qualities — mirroring the contract's quality propagation.
+    /// 4. every bound point no loopback or element output owns — a bare
+    ///    channel — re-stamps its stored sample at the new tick,
+    ///    carrying value and quality forward unchanged. A real input
+    ///    card re-stamps cyclically: freshness means the field side is
+    ///    still scanning, not that the value changed, so a stepping
+    ///    plant keeps a bare point's report changing and a declared
+    ///    `stale_after_ticks` budget on it reads fresh, while a stopped
+    ///    or unstepped plant leaves the report frozen for the budget to
+    ///    age out.
     ///
     /// A `Good`-input step whose arithmetic would drive the element
     /// non-finite — an integrator's `y + u·dt` overflowing, a `flow_sum`
@@ -627,6 +656,18 @@ impl SimDriver {
                 }
             }
         }
+
+        // Bare channels — every bound point no loopback routes onto
+        // and no element output owns — carry their stored value and
+        // quality forward at the new tick: the field re-scanned, so
+        // the served report is fresh even though nothing wrote it.
+        // Only the stamp advances; a fault still lands at the read
+        // boundary through `effective_sample`, never baked in here.
+        for (point, point_state) in &mut state.points {
+            if !state.driven.contains(point) {
+                point_state.sample.tick = tick;
+            }
+        }
         tick
     }
 
@@ -728,11 +769,12 @@ impl IoDriver for SimDriver {
         Ok(())
     }
 
-    /// Captures the simulated field state: the driver tick, every bound
-    /// point's stored sample (value, quality, tick) and injected fault,
-    /// and every process element's accumulator.
+    /// Captures the simulated field state: the driver's plant tick, every
+    /// bound point's stored sample (value, quality, tick) and injected
+    /// fault, and every process element's accumulator.
     ///
-    /// Field names are `tick`, `point.{id}.value` / `.quality` / `.tick`
+    /// Field names are `tick` (the plant tick), `point.{id}.value` /
+    /// `.quality` / `.tick`
     /// / `.fault` (the last only while a fault is active), and
     /// `element.{id}` — a `Float` accumulator for every variant but a
     /// `threshold`, whose standing contact captures as a `Bool` — plus
@@ -971,6 +1013,131 @@ mod tests {
         assert_eq!(sample.value, Value::Float(3.5));
         assert!(sample.quality.is_good());
         assert_eq!(sample.tick, tick);
+    }
+
+    #[test]
+    fn stepping_restamps_bare_channels_while_an_unstepped_driver_holds() {
+        // The scanned-card contract: a bound point no loopback routes
+        // onto and no element output owns carries its stored value and
+        // quality forward at each step's new tick — the field is still
+        // scanning, so the served report changes even though nothing
+        // wrote it. A driver that never steps serves its initial stamp
+        // forever, so a stopped plant's reports age out on a reader's
+        // freshness budget.
+        let map = || {
+            ChannelMap::new()
+                .with_point(float_point(10, Direction::In))
+                .with_point(float_point(20, Direction::Out))
+        };
+        let sim = SimDriver::new(map()).unwrap();
+        let idle = SimDriver::new(map()).unwrap();
+
+        sim.write(PointId(10), Value::Float(2.5)).unwrap();
+        sim.write(PointId(20), Value::Float(7.0)).unwrap();
+        for expected in 1..=3 {
+            let tick = sim.step(0.5);
+            assert_eq!(tick, Tick(expected));
+            // Held values with fresh stamps — `In` and `Out` channels
+            // alike, the bare re-stamp covering both.
+            assert_eq!(
+                sim.read(PointId(10)).unwrap(),
+                Sample::good(Value::Float(2.5), Tick(expected))
+            );
+            assert_eq!(
+                sim.read(PointId(20)).unwrap(),
+                Sample::good(Value::Float(7.0), Tick(expected))
+            );
+            // The unstepped twin's reports never advance.
+            assert_eq!(idle.read(PointId(10)).unwrap().tick, Tick::ZERO);
+            assert_eq!(idle.read(PointId(20)).unwrap().tick, Tick::ZERO);
+        }
+    }
+
+    #[test]
+    fn the_bare_restamp_carries_effective_quality_without_storing_it() {
+        // An injected quality fault rides the re-stamp — the served
+        // sample is the stored value with the fault's quality at the
+        // new tick — without the stamp baking the fault in: clearing
+        // it restores the stored sample's own quality.
+        let sim =
+            SimDriver::new(ChannelMap::new().with_point(float_point(10, Direction::In))).unwrap();
+        sim.write(PointId(10), Value::Float(7.0)).unwrap();
+        let quality = Quality::Uncertain(QualityReason::Substituted);
+        sim.inject_fault(PointId(10), Fault::Quality(quality))
+            .unwrap();
+
+        let tick = sim.step(1.0);
+        assert_eq!(
+            sim.read(PointId(10)).unwrap(),
+            Sample::new(Value::Float(7.0), quality, tick)
+        );
+
+        sim.clear_fault(PointId(10)).unwrap();
+        sim.step(1.0);
+        assert_eq!(
+            sim.read(PointId(10)).unwrap(),
+            Sample::good(Value::Float(7.0), Tick(2))
+        );
+    }
+
+    #[test]
+    fn driven_points_keep_their_own_stamping_under_the_bare_restamp() {
+        // One map, three regimes: the loopback copies its output's
+        // effective sample onto its input at the step tick, the
+        // element output stamps its own update, and the bare points —
+        // the element's own input included — re-stamp their held
+        // samples.
+        let map = ChannelMap::new()
+            .with_point(float_point(10, Direction::In))
+            .with_point(float_point(20, Direction::Out))
+            .with_point(float_point(30, Direction::In))
+            .with_point(float_point(40, Direction::In))
+            .with_loopback(Loopback {
+                output: PointId(20),
+                input: PointId(10),
+            })
+            .with_element(ProcessElement::Integrator(Integrator {
+                input: PointId(30),
+                output: PointId(40),
+                initial: 0.0,
+            }));
+        let sim = SimDriver::new(map).unwrap();
+        sim.write(PointId(20), Value::Float(4.0)).unwrap();
+        sim.write(PointId(30), Value::Float(1.5)).unwrap();
+
+        // First step: the loopback routes 20 onto 10 and the
+        // integrator accumulates onto 40, both stamped with the step
+        // tick, while the bare points re-stamp their held values.
+        assert_eq!(sim.step(1.0), Tick(1));
+        assert_eq!(
+            sim.read(PointId(10)).unwrap(),
+            Sample::good(Value::Float(4.0), Tick(1))
+        );
+        assert_eq!(
+            sim.read(PointId(40)).unwrap(),
+            Sample::good(Value::Float(1.5), Tick(1))
+        );
+        assert_eq!(
+            sim.read(PointId(30)).unwrap(),
+            Sample::good(Value::Float(1.5), Tick(1))
+        );
+
+        // A second step with no writes: the loopback re-copies and the
+        // integrator advances — the driven stamps land exactly as they
+        // always have.
+        assert_eq!(sim.step(1.0), Tick(2));
+        assert_eq!(
+            sim.read(PointId(10)).unwrap(),
+            Sample::good(Value::Float(4.0), Tick(2))
+        );
+        assert_eq!(
+            sim.read(PointId(40)).unwrap(),
+            Sample::good(Value::Float(3.0), Tick(2))
+        );
+        assert_eq!(
+            sim.read(PointId(30)).unwrap(),
+            Sample::good(Value::Float(1.5), Tick(2))
+        );
     }
 
     #[test]
@@ -2489,6 +2656,53 @@ mod tests {
     }
 
     #[test]
+    fn bool_flow_self_point_is_rejected_by_each_leg_kind_check() {
+        // QA finding dynamics-self-point-validation-panics-plant-server:
+        // the gate leg must be Bool and the driven leg Float, so no one
+        // point can fill both. The equality-keyed check let a Bool
+        // self-point merge — the Float `initial` seeded the Bool point
+        // at construction, and the first Good step panicked inside the
+        // driver mutex, poisoning it for every later request.
+        let element = || {
+            ProcessElement::BoolFlow(BoolFlow {
+                input: PointId(1),
+                output: PointId(1),
+                on_rate: -10.0,
+                off_rate: 0.0,
+                initial: 0.0,
+            })
+        };
+
+        // A Bool self-point satisfies the gate leg but fails the
+        // output leg's Float requirement.
+        let map = ChannelMap::new()
+            .with_point(binding(1, Direction::Out, Value::Bool(false)))
+            .with_element(element());
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementPointKind {
+                point: PointId(1),
+                kind: ValueKind::Bool,
+            }
+        );
+        // The driver refuses the map outright — nothing serves to step.
+        assert!(SimDriver::new(map).is_err());
+
+        // A Float self-point fails the gate leg's Bool requirement.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::Out))
+            .with_element(element());
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementGateKind {
+                point: PointId(1),
+                kind: ValueKind::Float,
+            }
+        );
+        assert!(SimDriver::new(map).is_err());
+    }
+
+    #[test]
     fn bool_flow_serde_roundtrips() {
         let map = bool_flow_map(-10.0, 0.5);
         let json = serde_json::to_string(&map).unwrap();
@@ -3233,9 +3447,11 @@ mod tests {
         let sample = contact(&sim);
         assert_eq!(sample.value, Value::Bool(true));
         assert!(sample.quality.is_good());
+        // The stored value stands; the step's bare-channel re-stamp is
+        // the only stamp the served sample carries.
         assert_eq!(
             sim.read(PointId(1)).unwrap(),
-            Sample::good(Value::Float(7.6), Tick::ZERO)
+            Sample::good(Value::Float(7.6), Tick(1))
         );
     }
 
@@ -3362,6 +3578,107 @@ mod tests {
                 kind: ValueKind::Float,
             }
         );
+    }
+
+    #[test]
+    fn threshold_self_point_is_rejected_by_each_leg_kind_check() {
+        // QA finding dynamics-self-point-validation-panics-plant-server:
+        // the input leg must be Float and the contact leg Bool, so no
+        // one point can fill both. The equality-keyed check let a Bool
+        // self-point merge — the first Good step then panicked inside
+        // the driver mutex, poisoning it for every later request.
+        let element = || {
+            ProcessElement::Threshold(Threshold {
+                input: PointId(1),
+                output: PointId(1),
+                on: 8.0,
+                off: 7.5,
+                initial: false,
+            })
+        };
+
+        // A Bool self-point satisfies the contact leg but fails the
+        // input leg's Float requirement.
+        let map = ChannelMap::new()
+            .with_point(binding(1, Direction::In, Value::Bool(false)))
+            .with_element(element());
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementPointKind {
+                point: PointId(1),
+                kind: ValueKind::Bool,
+            }
+        );
+        // The driver refuses the map outright — nothing serves to step.
+        assert!(SimDriver::new(map).is_err());
+
+        // A Float self-point fails the contact leg's Bool requirement.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_element(element());
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementContactKind {
+                point: PointId(1),
+                kind: ValueKind::Float,
+            }
+        );
+        assert!(SimDriver::new(map).is_err());
+    }
+
+    #[test]
+    fn element_driving_an_out_point_is_rejected() {
+        // QA finding dynamics-element-drives-controller-out-point: a
+        // threshold whose contact output named a bool `Out` command
+        // point merged cleanly, then rewrote the operator's command
+        // every step — the wire showed the element's value, never the
+        // commanded one. Elements model field-side physics answering
+        // commands, so the point an element drives must be an `In`
+        // point; the merge now rejects the class.
+        let map = ChannelMap::new()
+            .with_point(float_point(10, Direction::In))
+            .with_point(binding(20, Direction::Out, Value::Bool(false)))
+            .with_element(ProcessElement::Threshold(Threshold {
+                input: PointId(10),
+                output: PointId(20),
+                on: 1.0,
+                off: 0.0,
+                initial: false,
+            }));
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementOutputDirection {
+                point: PointId(20),
+                direction: Direction::Out,
+            }
+        );
+        // The driver refuses the map outright — nothing serves to step.
+        assert!(SimDriver::new(map).is_err());
+
+        // A Float-output element on a Float `Out` point faces the same
+        // rule — the check is direction, not kind.
+        let map = ChannelMap::new()
+            .with_point(float_point(1, Direction::In))
+            .with_point(float_point(2, Direction::Out))
+            .with_element(ProcessElement::Integrator(Integrator {
+                input: PointId(1),
+                output: PointId(2),
+                initial: 0.0,
+            }));
+        assert_eq!(
+            map.validate().unwrap_err(),
+            ConfigError::ElementOutputDirection {
+                point: PointId(2),
+                direction: Direction::Out,
+            }
+        );
+
+        // Reading an `Out` point stays legal — the actuator-wire seam
+        // a `bool_flow` gate or a `scaled_flow` demand answers. The
+        // maps every other element test builds pin this: their command
+        // inputs are `Out` points.
+        assert!(bool_flow_map(-10.0, 0.5).validate().is_ok());
+        assert!(scaled_flow_map(0.5).validate().is_ok());
     }
 
     #[test]

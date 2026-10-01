@@ -59,9 +59,10 @@ release contract in `docs/release-contract.md` (decisions 79–81).
 - **Optional fields** extend the version-1 schema without a version bump
   (decision 3): a document predating a field loads with the field unset,
   and an unset field serializes back without the key. `hardware` and
-  `parameters` on a device, `channel`/`initial`/`writable`/`journaled` on
-  an io_point, and `unit`/`description`/`group` on a signal all follow
-  this convention.
+  `parameters` on a device,
+  `channel`/`initial`/`writable`/`journaled`/`record` on an io_point,
+  and `unit`/`description`/`group` on a signal all follow this
+  convention.
 - The parser ignores keys it does not know, so tool-added annotation
   keys load harmlessly; they are not part of the contract and the
   canonical model document — what `PlantModel::fingerprint` hashes —
@@ -149,8 +150,9 @@ carried by the controller's scan image — decision 14).
 | `channel` | `{"device": <device id>, "name": "<channel>"}` | Optional. Present → a field point: the device must be declared (`ValidationError::UnknownDevice`), the channel must exist on it (`UnknownChannel`), and the point's `direction` and `value_type` must agree with the channel's (`ChannelDirectionMismatch`, `ChannelTypeMismatch`). Absent → an internal point. |
 | `initial` | tagged `Value`, e.g. `{"float": 25.0}` | Optional; required when `channel` is absent (`MissingInitial`), and its variant must equal `value_type` (`InitialKindMismatch`). Forbidden when `channel` is present (`FieldInitial`) — the field owns a bound point's value. |
 | `writable` | bool | Optional; unset means not writable. Valid on `in` points only — `writable` on an `out` point is `ValidationError::WritableOut`. |
-| `stale_after_ticks` | u64 | Optional; unset means no freshness check. Valid on field-bound `in` points only — on an `out` point it is `ValidationError::StaleOut`, on a channel-less internal point `StaleInternal`. |
+| `stale_after_ticks` | u64 | Optional; unset means no freshness check. Valid on field-bound `in` points only — on an `out` point it is `ValidationError::StaleOut`, on a channel-less internal point `StaleInternal`. A field-bound `in` point that leaves it unset is lint `field_input_without_freshness_budget`. |
 | `journaled` | bool | Optional; unset means the point's value transitions stay out of the durable journal. Valid on `bool`/`int` points of either direction — `journaled` on a `float` point is `ValidationError::JournaledFloat`. |
+| `record` | `{"every_ticks": u64, "retain_days": u64?}` | Optional; unset means the point contributes only to the volatile history ring. Declares the point's durable recording duty (decision 102): the monitor's recorder samples its post-scan image into the durable history file every `every_ticks` run ticks. `every_ticks: 0` is `ValidationError::RecordZeroCadence` — a zero cadence would record the full-rate stream the durable record exists to avoid. `retain_days` declares the span the downstream records system must hold; deployment-sizing data the controller never enforces. Valid on any point. |
 
 ### Internal points
 
@@ -254,6 +256,13 @@ varies — simply makes the declaration inert or always-stale; declare
 the field only where the source distinguishes fresh samples from held
 ones.
 
+A channel-bound `in` point that declares no budget is lint
+`field_input_without_freshness_budget`: the stale-data honesty rule
+binds only where the model declares it, so an undeclared field input
+keeps serving a stalled source's last-known value as `Good` and nothing
+else names the omission. The finding is advisory — budgets stay opt-in
+per point — not a validation error.
+
 ### `journaled` and the durable transition record
 
 `journaled` marks the io_points whose observed *value* transitions join
@@ -299,6 +308,81 @@ typed payload — beside the adapted `point_changed`/`quality_changed`/
 `command_settled`/`step_failed` records. In the served interface the
 `journaled` mark surfaces as the `when_journaled` emission rule on each
 `Bool`/`Int` port's adapted `point_changed:<port>` event entry.
+
+The `EventDecl`'s `retention` names the store the serving layer routes
+the emission to — all three classes are live, and no emission is
+recorded in two stores:
+
+- `journal` — the durable transition journal: `Journal`-retained (and
+  undeclared) emissions land as `event_emitted` entries at the
+  producing tick, replayed by a cold restart like every journaled
+  event. The audit-grade record — the class for run-level boundaries
+  and other low-volume, keep-forever events.
+- `history` — the read model's bounded event-history ring: one
+  `EventRecord` per emission, evicting oldest-first at its bound under
+  the same numbering-gap convention the point-history and journal
+  rings follow. The class for per-cycle operational records a
+  diagnostic reads back — frequent enough that the durable record
+  should not accumulate them.
+- `latest` — the latest-emission view: the newest `EventRecord` per
+  (component, declared event name), superseded by each newer emission.
+  The class for standing publications where only the newest value
+  matters.
+
+`GET /resources`'s per-instance `events` serves all three classes
+beside the attributed journal tail — each entry's `retention` mark
+naming the store the record came from — and a tracking peer's published
+read model carries the same routed events (decision 84's emit-identical
+parity). The `sequencer` kind declares one event per class and sets the
+convention: `step_completed` (`history`) the per-step operational
+record, `sequence_completed` (`journal`) the durable run-level
+boundary, `progress` (`latest`) the superseding standing-position
+publication.
+
+### `record` and the durable process history
+
+`record` declares a point's durable *recording duty* — the
+durable-history decision's one narrowing of the volatile-ring rule
+(decision 102, narrowing decision 36). Every point's samples already
+land in the bounded per-point history ring; that ring is a volatile
+diagnostic window a restart erases. A point declaring
+`{"record": {"every_ticks": N}}` additionally lands its post-scan image
+sample in the monitor's durable history file (`--history-file`) once
+every `N` run ticks — the faithful, quality-stamped, honestly-gapped
+capture a compliance series needs: the per-filter turbidity record, the
+daily disinfection/CT record, interval energy data (`WW-REP-001`'s
+retention clauses).
+
+The declaration is deliberately opt-in and cadenced:
+
+- any point may carry it — a field measurement's stream or an internal
+  computed value alike, either direction, any value kind;
+- `every_ticks` is the recording cadence in run ticks — a sample lands
+  whenever the scan tick has advanced at least that far past the
+  point's last recorded sample; `0` is rejected
+  (`RecordZeroCadence`), since recording every scan would duplicate
+  the full-rate stream the durable record exists to avoid;
+- `retain_days` is the declared retention span the downstream records
+  system must hold — deployment-sizing data the durable file's
+  rotation and archival are engineered against, never a bound the
+  controller enforces: the multi-year regulatory term belongs to the
+  historian/report layer the file feeds.
+
+Recording happens at the recorder's post-scan point — never mid-scan,
+never in the executor — and the file append drains on a bounded queue
+off the monitor lock, so a slow or stalled sink reads as the
+publication's `history_sink` health state (`lagging`, then `failed`)
+and a queue-full or failed append is fatal at the recorded point
+rather than a silent gap or a lengthened scan. The durable stream's
+served window (`GET /history/durable`) is capacity-bounded like every
+retained stream: `seq`s are never reused, eviction reads as a
+numbering gap, and `run_boundary`/`domain` markers are pinned so
+process lifetimes and tick-domain crossings stay attributable under
+retention. A `--state-file` resume keeps appending in the restored
+tick domain and continues the cadence intervals the file already
+paced out; each tick domain's declared civil-time anchor stamps the
+file's boundary markers so exported records self-describe their
+tick-to-civil mapping.
 
 ## `signals`
 
@@ -352,8 +436,9 @@ the instance's whole engineering surface is its declared `kind`,
 `ports`, and `parameters`. Operator submissions arrive at runtime as
 `Command::Invoke` on the receipted path, validated against the
 declaration and dispatched to the component's `invoke_command` at the
-scan boundary; emissions drain after each `step` and journal per their
-declared retention (see `journaled` above). `GET /schema` serves each
+scan boundary; emissions drain after each `step` and route to the
+store their declared `retention` names (see `journaled` above).
+`GET /schema` serves each
 instance's derived `BlockInterface` — ports as measurements/state,
 parameters as configuration, the adapted generic and declared native
 commands, and the adapted and declared events — and `GET /resources`
@@ -1009,6 +1094,16 @@ What each shape means at assembly:
 `crates/dcs-assembly/fixtures/internal_points.json` shows declared
 internal-point wiring.
 
+A channel-bound `out` point named as no connection's `to` end is dead
+engineering: the command path refuses `out` points outright, so
+nothing can ever write the point and the bound channel is never
+written while the model asserts a driven actuator — the
+forgotten-connection case `writable` (`WritableOut`) and
+`unbound_channel` do not cover. Lint flags it
+`undriven_field_output`, advisory only — a deliberately undriven
+output stays valid. Internal `out` points are image-carried values
+and stay silent; the field drives `in` points.
+
 ## Device kinds and their `parameters`
 
 `Device.kind` resolves through the deployment's `DriverRegistry`;
@@ -1251,6 +1346,14 @@ it into the resolved `sim_channel_map`, and test rigs do the same by
 adding `ProcessElement`s to a `ChannelMap` before constructing
 `SimDriver`.
 
+`dcs-plant-server --dynamics-schema` prints the document's draft
+2020-12 JSON Schema — the `ProcessElement::json_schema` emission
+(decision 93) — so non-Rust tooling can check a document against the
+recorded artifact: structure, field types, and the numeric bounds the
+schema language can express. The merge-time rules below stay with
+`ChannelMap::validate`; the schema is a first screen, not the
+validator.
+
 Each list entry is one `dcs_sim::ProcessElement` — an externally tagged
 object whose single key is the snake_case element name:
 
@@ -1278,6 +1381,12 @@ point it drives):
   `bool_flow`'s gate `input`, which must be a `bool` point
   (`ElementGateKind`), and a `threshold`'s contact `output`, which must
   be a `bool` point (`ElementContactKind`);
+- an element's `output` must be an `in` point — the field-side value
+  the controller reads (`ElementOutputDirection`). Elements model
+  physics *answering* commands: a `bool_flow`'s gate or a
+  `scaled_flow`'s demand reads the `out` command point, but driving an
+  `out` point would rewrite the operator's command each step — the
+  merge rejects it;
 - `time_constant`, `damping_ratio`, and `delay` must be finite and
   positive (`InvalidTimeConstant`, `InvalidDamping`, `InvalidDelay`),
   `amplitude` finite and non-negative (`InvalidAmplitude`), `on_rate`,
@@ -1338,7 +1447,7 @@ next sees it; lint never blocks anything.
 | Version | `PlantModel::load` | `LoadError::UnsupportedVersion` — `version` other than `MODEL_VERSION` |
 | Validation | `PlantModel::validate` (inside `load`, or standalone for programmatically built models) | Every `ValidationError`, all reported together: `DuplicateId`, `UnknownDevice`, `UnknownChannel`, `ChannelDirectionMismatch`, `ChannelTypeMismatch`, `FieldInitial`, `MissingInitial`, `InitialKindMismatch`, `WritableOut`, `UnknownSource`, `UnknownPoint`, `UnknownComponent`, `UnknownPort`, `ConnectionDirectionMismatch`, `ConnectionTypeMismatch` |
 | Assembly | `dcs_assembly::resolve_drivers` + `DriverPlan::build` + `assemble` | Every `AssemblyError`: kind resolution — `UnknownDeviceKind`, `UnknownComponentKind`; device `parameters` and backends — `InvalidDeviceParameters`, `DeviceBackend`; the merged local sim map's consistency — `InvalidChannelMap` (`ConfigError`); port wiring — `PortBoundTwice`, `UnboundPort`; requirement verification — `UnmappedPoint`, `DirectionMismatch`, `TypeMismatch`; constructor failures — `Component`; executor wiring — `Wiring`; and `UnroutedPoint`, `InvalidInternalPoint`, `MixedPointLink`, `UnresolvedEndpoint`, the mirrors reachable for a model assembled without validation |
-| Lint | `PlantModel::lint`, `dcs-model lint` | Advisory `LintFinding`s over a validated document, in rule order: `point_without_signal`, `signal_missing_unit`, `signal_missing_description`, `signal_missing_group`, `writable_field_point`, `unbound_channel`. Findings exit zero unless `--strict`; a document failing validation is never linted |
+| Lint | `PlantModel::lint`, `dcs-model lint` | Advisory `LintFinding`s over a validated document, in rule order: `point_without_signal`, `signal_missing_unit`, `signal_missing_description`, `signal_missing_group`, `writable_field_point`, `field_input_without_freshness_budget`, `undriven_field_output`, `unbound_channel`. Findings exit zero unless `--strict`; a document failing validation is never linted |
 | Dynamics merge | `dcs-plant-server --dynamics`, or a rig extending a `ChannelMap` | A malformed document is a startup parse error; each element's merge is `ChannelMap::validate` — `ConfigError` naming the element index and the point it drives |
 
 The deliberate split: the model validates structure — ids, references,
@@ -1348,10 +1457,12 @@ that depends on the registered kinds: which `kind` strings exist, what
 `parameters` each kind accepts, whether every port is bound, and whether
 each constructed component's declared I/O matches the point map. Lint
 checks engineering completeness the contract does not require — signals
-for points, display metadata, the writable field surface, dead channel
-declarations. Runtime failures are a different surface entirely: a
-component `step` error lands in `ComponentDiagnostics`, and driver
-problems surface as `IoError`s — never as document errors.
+for points, display metadata, the writable field surface, undeclared
+input freshness budgets, undriven field outputs, dead channel
+declarations. Runtime failures
+are a different surface entirely: a component `step` error lands in
+`ComponentDiagnostics`, and driver problems surface as `IoError`s —
+never as document errors.
 
 ## Authoring and checking a document
 

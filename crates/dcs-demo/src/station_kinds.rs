@@ -34,9 +34,10 @@
 //! hosting every mapped register with the bus dynamics merged, the same
 //! [`RegisterBank::with_dynamics`] construction
 //! `dcs-sim-bus-device --dynamics` performs, over the union of the three
-//! devices' register maps. All three overlay devices declare the
-//! server's one address; each `sim-bus` attachment probes and serves
-//! only its own device's channels.
+//! devices' register maps — the [`BankDerivation::Declared`] derivation
+//! the run names when it serves the bank. All three overlay devices
+//! declare the server's one address; each `sim-bus` attachment probes
+//! and serves only its own device's channels.
 //!
 //! Because the three attachments share one bank, the run paces the
 //! field from the field side: the driven `after_scan` hook — installed
@@ -55,9 +56,12 @@
 //! # The driven run
 //!
 //! [`run_local`] and [`run_bus`] run the identical scenario through the
-//! externally paced machinery `dcs-controller --driven` uses: an
-//! unpaced [`Monitor`] armed with [`Driven`] wiring, advanced one scan
-//! per `POST /scan` request through [`MonitorClient`]. The scenario —
+//! shared driven-mode orchestration [`equivalence`](crate::equivalence)
+//! carries — the externally paced machinery `dcs-controller --driven`
+//! uses: an unpaced [`Monitor`](dcs_monitor::Monitor) armed with
+//! [`Driven`](dcs_monitor::Driven) wiring, advanced one scan per
+//! `POST /scan` request through
+//! [`MonitorClient`](dcs_monitor::MonitorClient). The scenario —
 //! [`field_ops`]'s boundary-keyed field writes and quality injections
 //! plus [`actions`]'s operator commands — is the `dcs-build` station
 //! scenario kept inside the vocabulary both field sides share: value
@@ -106,27 +110,26 @@
 //! # What equality means here
 //!
 //! The same comparison [`two_kinds`](crate::two_kinds) records:
-//! per-scan [`TelemetrySnapshot`]s — every point's value, quality, and
-//! tick, component diagnostics, descriptors, live parameters, force
-//! set, and the executor's I/O-health counters — and the transition
-//! journal's [`JournalEntry`] sequence, with `io_health.driver`
-//! normalized as the driver's own legitimately kind-specific transport
-//! report.
+//! per-scan [`TelemetrySnapshot`](dcs_core::TelemetrySnapshot)s — every
+//! point's value, quality, and tick, component diagnostics,
+//! descriptors, live parameters, force set, and the executor's
+//! I/O-health counters — and the transition journal's
+//! [`JournalEntry`](dcs_core::JournalEntry) sequence, with
+//! `io_health.driver` normalized as the driver's own legitimately
+//! kind-specific transport report.
 
-use dcs_assembly::{DriverRegistry, FanoutDriver, assemble, resolve_drivers};
+use dcs_assembly::{DriverRegistry, FanoutDriver, resolve_drivers};
 use dcs_core::{IoDriver, PointId, Quality, Value, ValueKind};
-use dcs_model::{Endpoint, PlantModel};
-use dcs_monitor::{Driven, Monitor, MonitorClient};
-use dcs_runtime::Peer;
-use dcs_sim::{Fault, ProcessElement, SimDriver};
-use dcs_sim_bus::{
-    BusDriver, BusServer, DeviceParameters, PointRegister, RegisterBank, RegisterDecl,
-};
+use dcs_model::PlantModel;
+use dcs_sim::{Fault, SimDriver};
+use dcs_sim_bus::{BusDriver, BusServer};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
-use std::thread;
 
-use crate::two_kinds::{OperatorAction, TwoKindsError, VariantRun};
+use crate::equivalence::{
+    self, BankDerivation, EquivalenceError, OperatorAction, VariantRun, driven_run, field_bindings,
+    field_wires, with_served_bank,
+};
 
 /// The checked-in primary station document: the `dcs-build` helper's
 /// emitted `sim-ai`/`sim-di`/`sim-do` local-sim binding.
@@ -162,7 +165,7 @@ pub const SCAN_PERIOD: f64 = 1.0;
 pub const TOTAL_SCANS: u64 = 135;
 
 /// The frozen-field leg's window: `after_scan` boundaries in this range
-/// run the script's field ops but skip the field's own step — the
+/// run the script's ops but skip the field's own step — the
 /// stored samples keep their stamps while the driven scans keep
 /// reading them, the tick-deterministic analogue of the QA lane's
 /// writer-stop induction.
@@ -519,128 +522,6 @@ pub fn actions() -> Vec<OperatorAction> {
     ]
 }
 
-/// The value kind's neutral initial — the `0`/`false`/`0.0` the driver
-/// bindings and an unwritten register seed.
-fn neutral(kind: ValueKind) -> Value {
-    match kind {
-        ValueKind::Bool => Value::Bool(false),
-        ValueKind::Int => Value::Int(0),
-        ValueKind::Float => Value::Float(0.0),
-    }
-}
-
-/// The primary document's dynamics declaration, parsed as
-/// `dcs-plant-server --dynamics` parses it.
-fn local_dynamics() -> Result<Vec<ProcessElement>, TwoKindsError> {
-    serde_json::from_str(LOCAL_DYNAMICS)
-        .map_err(|error| TwoKindsError::Field(format!("invalid dynamics document: {error}")))
-}
-
-/// The overlay's register-addressed dynamics declaration, parsed as
-/// `dcs-sim-bus-device --dynamics` parses it.
-fn bus_dynamics() -> Result<Vec<ProcessElement>, TwoKindsError> {
-    serde_json::from_str(BUS_DYNAMICS)
-        .map_err(|error| TwoKindsError::Field(format!("invalid dynamics document: {error}")))
-}
-
-/// The union register declarations the shared bank serves — every
-/// overlay device's `registers` map, parsed through the same
-/// [`DeviceParameters`] contract the driver-side factory and the
-/// `dcs-sim-bus-device` binary read.
-fn register_decls(model: &PlantModel) -> Result<Vec<RegisterDecl>, TwoKindsError> {
-    let mut decls = Vec::new();
-    for device in &model.devices {
-        let channels: BTreeMap<String, ValueKind> = device
-            .channels
-            .iter()
-            .map(|(name, channel)| (name.clone(), channel.value_type))
-            .collect();
-        let parameters =
-            DeviceParameters::parse(&device.parameters, &channels).map_err(|error| {
-                TwoKindsError::Field(format!(
-                    "device {} parameters rejected: {error}",
-                    device.id.0
-                ))
-            })?;
-        decls.extend(parameters.registers.iter().map(|(name, declaration)| {
-            RegisterDecl {
-                register: declaration.register,
-                initial: declaration
-                    .initial
-                    .unwrap_or_else(|| neutral(channels[name.as_str()])),
-            }
-        }));
-    }
-    Ok(decls)
-}
-
-/// The point → register bindings the field-side [`BusDriver`]
-/// attachment drives through, derived from the overlay's own
-/// channel→register maps so the rig and the controller cannot disagree
-/// about the mapping.
-fn field_bindings(model: &PlantModel) -> Result<Vec<PointRegister>, TwoKindsError> {
-    let mut registers: BTreeMap<(u64, String), u16> = BTreeMap::new();
-    for device in &model.devices {
-        let channels: BTreeMap<String, ValueKind> = device
-            .channels
-            .iter()
-            .map(|(name, channel)| (name.clone(), channel.value_type))
-            .collect();
-        let parameters =
-            DeviceParameters::parse(&device.parameters, &channels).map_err(|error| {
-                TwoKindsError::Field(format!(
-                    "device {} parameters rejected: {error}",
-                    device.id.0
-                ))
-            })?;
-        registers.extend(
-            parameters
-                .registers
-                .iter()
-                .map(|(name, declaration)| ((device.id.0, name.clone()), declaration.register)),
-        );
-    }
-    model
-        .io_points
-        .iter()
-        .filter_map(|point| {
-            let channel = point.channel.as_ref()?;
-            Some(Ok(PointRegister {
-                point: point.id,
-                register: registers[&(channel.device.0, channel.name.clone())],
-                kind: point.value_type,
-            }))
-        })
-        .collect()
-}
-
-/// The model's field wires — `point → point` connections with both
-/// endpoints channel-bound — as `(output, input)` pairs, the direction
-/// [`resolve_drivers`] gives them: the `to` (`Out`) point drives the
-/// `from` (`In`) point. On the primary binding these are loopbacks
-/// inside the shared sim map; on the overlay they are the cross-backend
-/// routes the rig carries field-side.
-fn field_wires(model: &PlantModel) -> Vec<(PointId, PointId)> {
-    let bound: std::collections::BTreeSet<PointId> = model
-        .io_points
-        .iter()
-        .filter(|point| point.channel.is_some())
-        .map(|point| point.id)
-        .collect();
-    model
-        .connections
-        .iter()
-        .filter_map(|connection| match (&connection.from, &connection.to) {
-            (Endpoint::Point(input), Endpoint::Point(output))
-                if bound.contains(input) && bound.contains(output) =>
-            {
-                Some((*output, *input))
-            }
-            _ => None,
-        })
-        .collect()
-}
-
 /// Applies the boundary's field ops against the local sim — the
 /// `sim.write`/`inject_fault`/`clear_fault` vocabulary the `dcs-build`
 /// station scenario uses.
@@ -702,81 +583,12 @@ fn apply_bus(
     Ok(())
 }
 
-/// Runs the documented scenario against an assembled variant through
-/// the driven-mode machinery: an unpaced monitor whose `POST /scan`
-/// requests each run one scan plus the cycle's `after_scan` wiring —
-/// the boundary's field ops, wire copies, and single field step.
-/// `boundary(0)` runs before the first request so scan 1 reads the
-/// seeded field.
-///
-/// Determinism: requests are serialized by the monitor's lock, the
-/// client waits for each response before issuing the next, and both
-/// field sides are tick-domain — identical request sequences produce
-/// identical runs.
-fn driven_run<'d>(
-    model: &PlantModel,
-    driver: &'d FanoutDriver,
-    boundary: impl Fn(u64) -> Result<(), String> + Send + Sync + 'd,
-) -> Result<VariantRun, TwoKindsError> {
-    boundary(0).map_err(TwoKindsError::Field)?;
-    let executor = assemble(model, &dcs_controller::registry(), driver)?;
-    let monitor = Monitor::bind(("127.0.0.1", 0), executor, model.signal_index())
-        .map_err(TwoKindsError::Io)?
-        .driven(Driven {
-            track: None,
-            after_scan: Some(Box::new(move |peer: &Peer<'d>| {
-                // The scan cycle's field boundary — the position the
-                // `--driven` controller's plant step occupies — carrying
-                // the boundary's ops, the field wires, and the one
-                // field step.
-                boundary(peer.tick().0)
-            })),
-        });
-    let addr = monitor.local_addr();
-    thread::scope(|scope| {
-        scope.spawn(|| monitor.serve());
-        let client = MonitorClient::new(addr);
-        let actions = actions();
-        let result = (|| {
-            let mut snapshots = Vec::with_capacity(TOTAL_SCANS as usize);
-            let mut receipts = Vec::with_capacity(actions.len());
-            for tick in 1..=TOTAL_SCANS {
-                // Actions scheduled for this scan are submitted while
-                // the run sits between scans — the executor applies
-                // them at the coming scan's head.
-                for action in actions.iter().filter(|action| action.tick == tick) {
-                    receipts.push(client.command(&action.command)?);
-                }
-                snapshots.push(client.advance(1)?);
-            }
-            let journal = client.journal(0)?;
-            let history = client.history(&[], 0)?;
-            Ok(VariantRun {
-                snapshots,
-                journal,
-                receipts,
-                history,
-            })
-        })();
-        monitor.shutdown();
-        result
-    })
-}
-
 /// Loads the primary document and resolves its driver side through the
 /// standard [`DriverRegistry`], merging the checked-in dynamics into
 /// the shared sim map exactly as `dcs-plant-server --dynamics` does —
 /// each element lands through `with_element` and revalidates the map.
-pub fn local_variant() -> Result<(PlantModel, FanoutDriver), TwoKindsError> {
-    let model = PlantModel::load(LOCAL_DOCUMENT)?;
-    let mut plan = resolve_drivers(&model, &DriverRegistry::standard())?;
-    for element in local_dynamics()? {
-        plan.sim_map = plan.sim_map.with_element(element);
-        plan.sim_map
-            .validate()
-            .map_err(|error| TwoKindsError::Field(format!("dynamics merge rejected: {error}")))?;
-    }
-    Ok((model, plan.build()?))
+pub fn local_variant() -> Result<(PlantModel, FanoutDriver), EquivalenceError> {
+    equivalence::local_variant(LOCAL_DOCUMENT, Some(LOCAL_DYNAMICS))
 }
 
 /// Serves the overlay's shared register bank: the union of the three
@@ -784,11 +596,8 @@ pub fn local_variant() -> Result<(PlantModel, FanoutDriver), TwoKindsError> {
 /// dynamics, merged through [`RegisterBank::with_dynamics`] — the
 /// construction `dcs-sim-bus-device --dynamics` performs — on an
 /// ephemeral port.
-pub fn serve_bus_bank() -> Result<BusServer, TwoKindsError> {
-    let declared = PlantModel::load(BUS_DOCUMENT)?;
-    let bank = RegisterBank::with_dynamics(register_decls(&declared)?, bus_dynamics()?)
-        .map_err(|error| TwoKindsError::Field(format!("register bank rejected: {error}")))?;
-    BusServer::bind(("127.0.0.1", 0), bank).map_err(TwoKindsError::Io)
+pub fn serve_bus_bank() -> Result<BusServer, EquivalenceError> {
+    equivalence::serve_bus_bank(BUS_DOCUMENT, BankDerivation::Declared, Some(BUS_DYNAMICS))
 }
 
 /// Binds a [`BusServer`] serving the overlay's shared register bank and
@@ -797,21 +606,20 @@ pub fn serve_bus_bank() -> Result<BusServer, TwoKindsError> {
 /// server. The caller runs `server.serve()` on its own thread:
 /// resolving the `sim-bus` devices connects and probes every mapped
 /// register, so the server must be serving before assembly runs.
-pub fn bus_variant() -> Result<(PlantModel, BusServer), TwoKindsError> {
-    // The register maps are model data: the bank, the controller's
-    // bindings, and the field feed all derive from the one fixture.
-    let server = serve_bus_bank()?;
-    let addr = server.local_addr().map_err(TwoKindsError::Io)?;
-    let model =
-        PlantModel::load(&BUS_DOCUMENT.replace(BUS_ADDRESS_PLACEHOLDER, &addr.to_string()))?;
-    Ok((model, server))
+pub fn bus_variant() -> Result<(PlantModel, BusServer), EquivalenceError> {
+    equivalence::bus_variant(
+        BUS_DOCUMENT,
+        BUS_ADDRESS_PLACEHOLDER,
+        BankDerivation::Declared,
+        Some(BUS_DYNAMICS),
+    )
 }
 
 /// Runs the scenario on the primary `sim-ai`/`sim-di`/`sim-do` binding:
 /// the dynamics merge into the shared sim map, and each boundary is the
 /// `FanoutDriver::step` the `--driven` wiring installs — the single
 /// local backend's loopbacks and elements.
-pub fn run_local() -> Result<VariantRun, TwoKindsError> {
+pub fn run_local() -> Result<VariantRun, EquivalenceError> {
     run_local_inner(false)
 }
 
@@ -819,11 +627,11 @@ pub fn run_local() -> Result<VariantRun, TwoKindsError> {
 /// script's ops still land but the field never steps — the `net-flow`
 /// report's freshness budget is the only declaration that degrades
 /// while the driven scans outrun the held samples.
-pub fn run_frozen_local() -> Result<VariantRun, TwoKindsError> {
+pub fn run_frozen_local() -> Result<VariantRun, EquivalenceError> {
     run_local_inner(true)
 }
 
-fn run_local_inner(frozen: bool) -> Result<VariantRun, TwoKindsError> {
+fn run_local_inner(frozen: bool) -> Result<VariantRun, EquivalenceError> {
     let (model, driver) = local_variant()?;
     let driver = &driver;
     let sim = driver
@@ -842,7 +650,7 @@ fn run_local_inner(frozen: bool) -> Result<VariantRun, TwoKindsError> {
             .step(SCAN_PERIOD)
             .map_err(|error| format!("plant step failed: {error}"))
     };
-    driven_run(&model, driver, boundary)
+    driven_run(&model, driver, TOTAL_SCANS, &actions(), boundary)
 }
 
 /// Runs the scenario on the `sim-bus` overlay: a [`BusServer`] serves
@@ -853,7 +661,7 @@ fn run_local_inner(frozen: bool) -> Result<VariantRun, TwoKindsError> {
 /// quality injections, and steps the bank once, inside the driven scan
 /// boundary. No writer claim is taken in the run, so the bank stays
 /// open to every attachment.
-pub fn run_bus() -> Result<VariantRun, TwoKindsError> {
+pub fn run_bus() -> Result<VariantRun, EquivalenceError> {
     run_bus_inner(false)
 }
 
@@ -861,19 +669,21 @@ pub fn run_bus() -> Result<VariantRun, TwoKindsError> {
 /// register bank holds its last reports — the wire copies, standing
 /// re-injections, and the bank step the boundary would carry all hold
 /// with it, so the two transports freeze identically.
-pub fn run_frozen_bus() -> Result<VariantRun, TwoKindsError> {
+pub fn run_frozen_bus() -> Result<VariantRun, EquivalenceError> {
     run_bus_inner(true)
 }
 
-fn run_bus_inner(frozen: bool) -> Result<VariantRun, TwoKindsError> {
-    let (model, server) = bus_variant()?;
-    thread::scope(|scope| {
-        scope.spawn(|| server.serve());
-        let result = (|| {
-            let driver = resolve_drivers(&model, &DriverRegistry::standard())?.build()?;
-            let field = BusDriver::connect(server.local_addr()?, &field_bindings(&model)?)?;
+fn run_bus_inner(frozen: bool) -> Result<VariantRun, EquivalenceError> {
+    with_served_bank(
+        BUS_DOCUMENT,
+        BUS_ADDRESS_PLACEHOLDER,
+        BankDerivation::Declared,
+        Some(BUS_DYNAMICS),
+        |model, addr| {
+            let driver = resolve_drivers(model, &DriverRegistry::standard())?.build()?;
+            let field = BusDriver::connect(addr, &field_bindings(model)?)?;
             let ops = field_ops();
-            let wires = field_wires(&model);
+            let wires = field_wires(model);
             let standing: Mutex<BTreeMap<u16, Quality>> = Mutex::new(BTreeMap::new());
             let boundary = move |tick: u64| -> Result<(), String> {
                 apply_bus(&ops, tick, &field, &standing)?;
@@ -911,9 +721,7 @@ fn run_bus_inner(frozen: bool) -> Result<VariantRun, TwoKindsError> {
                     .map_err(|error| format!("bank step failed: {error}"))?;
                 Ok(())
             };
-            driven_run(&model, &driver, boundary)
-        })();
-        server.shutdown();
-        result
-    })
+            driven_run(model, &driver, TOTAL_SCANS, &actions(), boundary)
+        },
+    )
 }

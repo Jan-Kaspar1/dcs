@@ -539,12 +539,19 @@ fn checked_in_document_validates_and_documents_its_lint() {
     let model = fixture_model();
     assert_eq!(model.version, dcs_model::MODEL_VERSION);
     assert!(model.validate().is_empty(), "{:?}", model.validate());
-    // The document's one finding: the protection layer's bypass is a
-    // writable field point — decision 77's declared operator path,
-    // deliberately a finding rather than an internal command point.
+    // The document's one non-freshness finding: the protection layer's
+    // bypass is a writable field point — decision 77's declared
+    // operator path, deliberately a finding rather than an internal
+    // command point. Its remaining advisories are undeclared
+    // `stale_after_ticks` budgets on the field inputs — freshness stays
+    // an opt-in per-point declaration (decision 45).
     let lint = model.lint();
-    assert_eq!(lint.len(), 1, "{lint:?}");
-    let finding = &lint[0];
+    let findings: Vec<_> = lint
+        .iter()
+        .filter(|finding| finding.rule != dcs_model::LintRule::FieldInputWithoutFreshnessBudget)
+        .collect();
+    assert_eq!(findings.len(), 1, "{lint:?}");
+    let finding = findings[0];
     assert_eq!(finding.rule, dcs_model::LintRule::WritableFieldPoint);
     assert!(
         finding

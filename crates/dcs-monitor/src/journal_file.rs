@@ -8,7 +8,14 @@
 //! every entry the [`Recorder`](super::recorder) appends to the
 //! transition journal is also appended here — one line-delimited
 //! [`JournalRecord`] per line — at the same recording point: after the
-//! scan's write phase, under the monitor lock, never mid-scan. On
+//! scan's write phase, never mid-scan. The append itself runs on the
+//! sink's own writer thread, not under the monitor lock: the recording
+//! point hands each record to a bounded [`Drain`](crate::drain::Drain)
+//! queue — the journal-append isolation decision (#942, adopting
+//! unmanaged finding #546) — so a slow or stalled sink can neither
+//! lengthen a scan nor pin the lock, while the queue's declared bound
+//! keeps the failure fatal at the push and the writer's FIFO keeps the
+//! file's `seq` order. On
 //! startup the file replays into the in-memory ring and `seq` numbering
 //! continues where it left off, so `GET /journal` answers continuously
 //! across a restart and a retained eviction still reads as a numbering
@@ -18,12 +25,16 @@
 //!
 //! One [`JournalRecord`] per line:
 //!
-//! - `{"run_boundary":{"run":N,"tick":T}}` — a process-lifetime
-//!   boundary, appended once at startup before the run's first entry.
+//! - `{"run_boundary":{"run":N,"tick":T,"anchor":A}}` — a
+//!   process-lifetime boundary, appended once at startup before the
+//!   run's first entry.
 //!   `run` counts the file's lifetimes from 1; `tick` is the tick the
 //!   run starts at — `0` on a cold start, the restored tick when the
 //!   run resumes through `--state-file`, so the marker records the tick
-//!   domain the following entries belong to. A restart's marker also
+//!   domain the following entries belong to. `anchor` stamps the
+//!   domain's declared civil-time anchor — the durable-history
+//!   decision's self-describing tick-to-civil mapping — absent when
+//!   the domain is unanchored. A restart's marker also
 //!   journals once as a `run_boundary` entry — the marker's served
 //!   form — so a `GET /journal` consumer attributes entries to a
 //!   process lifetime the same way the file's readers do.
@@ -51,6 +62,7 @@
 //! with the holder's file descriptor, so an ordinary restart —
 //! including a killed process's — re-acquires it immediately.
 
+use crate::drain::Drain;
 use dcs_core::{CommandReceipt, JournalEntry, JournalEvent, PointId, Quality, Tick, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -79,8 +91,9 @@ pub struct JournalData {
 }
 
 /// One run-boundary marker's report-relevant data: which lifetime
-/// began, the tick its run started at, and the `seq` the run's first
-/// entry takes — the attribution an entry's run comes from.
+/// began, the tick its run started at, the tick domain's declared
+/// civil-time anchor, and the `seq` the run's first entry takes —
+/// the attribution an entry's run comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunBoundary {
     /// Which lifetime begins — the file counts runs from 1.
@@ -88,6 +101,9 @@ pub struct RunBoundary {
     /// The tick the run started at: `0` on a cold start, the restored
     /// tick under `--state-file`.
     pub start_tick: Tick,
+    /// The run's tick domain's declared civil-time anchor — `None`
+    /// on an unanchored domain or a marker a pre-anchor build wrote.
+    pub anchor: Option<dcs_core::TickAnchor>,
     /// The `seq` the run's first entry takes.
     pub first_seq: u64,
 }
@@ -140,10 +156,11 @@ pub fn read_journal_file(path: &Path) -> io::Result<JournalData> {
                 next_seq = entry.seq + 1;
                 data.entries.push(*entry);
             }
-            JournalRecord::RunBoundary { run, tick } => {
+            JournalRecord::RunBoundary { run, tick, anchor } => {
                 data.boundaries.push(RunBoundary {
                     run,
                     start_tick: tick,
+                    anchor,
                     first_seq: next_seq,
                 });
             }
@@ -168,6 +185,12 @@ pub(super) enum JournalRecord {
         /// The tick the run starts at — `0` cold, the restored tick
         /// under `--state-file`.
         tick: Tick,
+        /// The run's tick domain's declared civil-time anchor — the
+        /// durable-history decision's stamp making the durable files
+        /// self-describing. Absent on an unanchored domain and on
+        /// markers a pre-anchor build wrote.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor: Option<dcs_core::TickAnchor>,
     },
 }
 
@@ -243,8 +266,14 @@ impl JournalFile {
     /// run's boundary marker is appended; a missing file is a cold
     /// start, created holding `run` 1's marker. `tick` is the tick this
     /// run starts at — the restored tick for a `--state-file` resume,
-    /// `0` cold.
-    pub(super) fn open(path: &Path, capacity: usize, tick: Tick) -> io::Result<(Self, Replay)> {
+    /// `0` cold — and `anchor` the run's tick domain's declared
+    /// civil-time anchor, `None` on an unanchored domain.
+    pub(super) fn open(
+        path: &Path,
+        capacity: usize,
+        tick: Tick,
+        anchor: Option<dcs_core::TickAnchor>,
+    ) -> io::Result<(Self, Replay)> {
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -278,14 +307,23 @@ impl JournalFile {
         sink.write(&JournalRecord::RunBoundary {
             run: replay.runs + 1,
             tick,
+            anchor,
         })?;
         Ok((sink, replay))
     }
 
-    /// Appends `entry` as one line — the write every journaled entry
-    /// takes at the recording point.
-    pub(super) fn append(&mut self, entry: &JournalEntry) -> io::Result<()> {
-        self.write(&JournalRecord::Entry(Box::new(entry.clone())))
+    /// Hands this file to a [`Drain`]'s writer thread — the append
+    /// isolation the journal-persistence decision's consequences
+    /// record (#942): the recorder's push queues each entry rather
+    /// than writing it, so the monitor lock never waits on the file,
+    /// and the queue's `capacity` bound — a push finding it full — is
+    /// where a stalled sink turns fatal. The writer appends in push
+    /// order on this descriptor, keeping the advisory lock and the
+    /// file's `seq` continuity with one writer per path.
+    pub(super) fn into_drain(self, capacity: usize) -> Drain<JournalRecord> {
+        let label = format!("journal file {}", self.path.display());
+        let mut file = self;
+        Drain::new(label, capacity, move |record| file.write(record))
     }
 
     /// Serializes `record` as one line and appends it — a direct
@@ -411,6 +449,7 @@ mod tests {
             },
             outcome: CommandOutcome::Applied { tick: Tick(tick) },
             actor: None,
+            reason: None,
         }
     }
 
@@ -429,15 +468,20 @@ mod tests {
 
         // First lifetime: two journaled entries land in the file behind
         // the run-1 boundary marker.
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let mut recorder =
+            crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         recorder.note_settled(None, receipt(10, 1), Tick(1));
         recorder.note_settled(None, receipt(11, 2), Tick(2));
+        // The sink's writer appends off the recording point — wait
+        // the drain out before reading the file.
+        recorder.flush_sink();
         assert_eq!(
             records(&path),
             vec![
                 JournalRecord::RunBoundary {
                     run: 1,
-                    tick: Tick::ZERO
+                    tick: Tick::ZERO,
+                    anchor: None
                 },
                 JournalRecord::Entry(Box::new(JournalEntry {
                     seq: 1,
@@ -461,7 +505,8 @@ mod tests {
         // seqs, the boundary marker separates the runs in the file —
         // and journals once as the restart's served boundary entry —
         // and new entries continue the numbering.
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let mut recorder =
+            crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         assert_eq!(
             recorder
                 .journal(0)
@@ -494,13 +539,15 @@ mod tests {
         let entries = recorder.journal(0);
         assert_eq!(entries.last().unwrap().seq, 4);
 
+        recorder.flush_sink();
         let file = records(&path);
         assert_eq!(file.len(), 6);
         assert_eq!(
             file[3],
             JournalRecord::RunBoundary {
                 run: 2,
-                tick: Tick::ZERO
+                tick: Tick::ZERO,
+                anchor: None
             }
         );
         assert_eq!(
@@ -524,7 +571,8 @@ mod tests {
         // First lifetime: a first-observation transition and a follow-up
         // land in the file as ordinary entries — the variant needs no
         // special file handling.
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let mut recorder =
+            crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         recorder.push(
             Tick(1),
             dcs_core::JournalEvent::PointChanged {
@@ -546,7 +594,8 @@ mod tests {
         // Second lifetime: the `point_changed` entries replay with
         // their seqs behind the restart's served boundary entry, and
         // the next entry continues the numbering.
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let mut recorder =
+            crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         assert_eq!(
             recorder
                 .journal(0)
@@ -567,12 +616,98 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A file written before `role_changed` carried its attribution
+    /// fields — the previous schema's `{"from":…,"to":…}` shape —
+    /// replays under the journal-persistence decision's contract: the
+    /// entries deserialize with both fields absent, and new attributed
+    /// entries append beside them with continuing seqs.
+    #[test]
+    fn role_changed_records_predating_the_attribution_fields_replay() {
+        let dir = scratch("role-changed-pre-attribution");
+        let path = dir.join("journal.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"run_boundary\":{\"run\":1,\"tick\":0}}\n",
+                "{\"entry\":{\"seq\":1,\"tick\":8,\"event\":{\"role_changed\":{\"from\":\"standby\",\"to\":\"promoting\"}}}}\n",
+                "{\"entry\":{\"seq\":2,\"tick\":9,\"event\":{\"role_changed\":{\"from\":\"promoting\",\"to\":\"active\"}}}}\n",
+            ),
+        )
+        .unwrap();
+
+        // The replayed entries carry no attribution — `None`, never a
+        // request origin the record cannot prove — and the open's own
+        // `run_boundary` marker lands after them.
+        let mut recorder =
+            crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
+        let entries = recorder.journal(0);
+        assert_eq!(
+            entries,
+            vec![
+                JournalEntry {
+                    seq: 1,
+                    tick: Tick(8),
+                    event: dcs_core::JournalEvent::RoleChanged {
+                        from: dcs_core::Role::Standby,
+                        to: dcs_core::Role::Promoting,
+                        origin: None,
+                        actor: None,
+                    },
+                },
+                JournalEntry {
+                    seq: 2,
+                    tick: Tick(9),
+                    event: dcs_core::JournalEvent::RoleChanged {
+                        from: dcs_core::Role::Promoting,
+                        to: dcs_core::Role::Active,
+                        origin: None,
+                        actor: None,
+                    },
+                },
+                JournalEntry {
+                    seq: 3,
+                    tick: Tick(0),
+                    event: dcs_core::JournalEvent::RunBoundary { run: 2 },
+                },
+            ]
+        );
+
+        // A new attributed transition appends with continuing seqs and
+        // replays with its fields on the next open.
+        recorder.push(
+            Tick(20),
+            dcs_core::JournalEvent::RoleChanged {
+                from: dcs_core::Role::Active,
+                to: dcs_core::Role::Demoting,
+                origin: Some(dcs_core::SwitchOrigin::Request),
+                actor: Some("operator-7".to_string()),
+            },
+        );
+        drop(recorder);
+        let recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
+        assert!(
+            recorder.journal(0).iter().any(|entry| {
+                entry.event
+                    == dcs_core::JournalEvent::RoleChanged {
+                        from: dcs_core::Role::Active,
+                        to: dcs_core::Role::Demoting,
+                        origin: Some(dcs_core::SwitchOrigin::Request),
+                        actor: Some("operator-7".to_string()),
+                    }
+            }),
+            "the attributed transition must replay with its fields: {:?}",
+            recorder.journal(0)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn replay_keeps_the_retained_tail_and_a_resumed_tick_lands_in_the_marker() {
         let dir = scratch("tail");
         let path = dir.join("journal.jsonl");
 
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 2), Tick::ZERO).unwrap();
+        let mut recorder =
+            crate::recorder::Recorder::new(config(&path, 2), Tick::ZERO, None).unwrap();
         for index in 0..3_u64 {
             recorder.note_settled(None, receipt(10, index + 1), Tick(index + 1));
         }
@@ -583,7 +718,8 @@ mod tests {
         // tick is recorded in the boundary marker — the --state-file
         // resume case. The restart's served boundary entry takes the
         // next `seq` and evicts the oldest retained entry.
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 2), Tick(40)).unwrap();
+        let mut recorder =
+            crate::recorder::Recorder::new(config(&path, 2), Tick(40), None).unwrap();
         assert_eq!(
             recorder
                 .journal(0)
@@ -594,11 +730,13 @@ mod tests {
         );
         recorder.note_settled(None, receipt(10, 41), Tick(41));
         assert_eq!(recorder.journal(3).last().unwrap().seq, 5);
+        recorder.flush_sink();
         assert_eq!(
             records(&path)[4],
             JournalRecord::RunBoundary {
                 run: 2,
-                tick: Tick(40)
+                tick: Tick(40),
+                anchor: None
             }
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -609,7 +747,8 @@ mod tests {
         let dir = scratch("corrupt");
         let path = dir.join("journal.jsonl");
 
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let mut recorder =
+            crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         recorder.note_settled(None, receipt(10, 1), Tick(1));
         drop(recorder);
 
@@ -623,7 +762,7 @@ mod tests {
             body.push_str(bad);
             body.push('\n');
             std::fs::write(&path, body).unwrap();
-            let error = match crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO) {
+            let error = match crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None) {
                 Ok(_) => panic!("a corrupt journal file must fail startup"),
                 Err(error) => error,
             };
@@ -638,7 +777,7 @@ mod tests {
 
         // The repaired file replays fine — the failures named the
         // record, not the file itself.
-        crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -649,14 +788,14 @@ mod tests {
 
         // The first writer binds and journals, holding the file's
         // writer lock for its lifetime.
-        let mut first = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let mut first = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         first.note_settled(None, receipt(10, 1), Tick(1));
 
         // The misconfiguration — a second writer on the same path —
         // fails its bind naming the file and the live-holder conflict
         // rather than interleaving duplicate seqs from its own replay
         // point into the record.
-        let error = match crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO) {
+        let error = match crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None) {
             Ok(_) => panic!("a second live writer on one journal file must fail its bind"),
             Err(error) => error,
         };
@@ -670,9 +809,11 @@ mod tests {
         // across the run boundary.
         first.note_settled(None, receipt(11, 2), Tick(2));
         drop(first);
-        let mut second = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let mut second =
+            crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         second.note_settled(None, receipt(12, 3), Tick(3));
         assert_eq!(second.journal(0).last().unwrap().seq, 4);
+        second.flush_sink();
         let data = read_journal_file(&path).unwrap();
         assert_eq!(
             data.entries
@@ -689,13 +830,14 @@ mod tests {
     fn a_missing_file_is_a_cold_start() {
         let dir = scratch("cold");
         let path = dir.join("journal.jsonl");
-        let recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         assert!(recorder.journal(0).is_empty());
         assert_eq!(
             records(&path),
             vec![JournalRecord::RunBoundary {
                 run: 1,
-                tick: Tick::ZERO
+                tick: Tick::ZERO,
+                anchor: None
             }]
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -706,10 +848,232 @@ mod tests {
         let dir = scratch("unsunk");
         let path = dir.join("journal.jsonl");
         let mut recorder =
-            crate::recorder::Recorder::new(MonitorConfig::default(), Tick::ZERO).unwrap();
+            crate::recorder::Recorder::new(MonitorConfig::default(), Tick::ZERO, None).unwrap();
         recorder.note_settled(None, receipt(10, 1), Tick(1));
         assert_eq!(recorder.journal(0).len(), 1);
         assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The payload a `panic!` carries, as a string — the fatal-report
+    /// message the sink tests assert on.
+    fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+        payload
+            .downcast::<String>()
+            .map(|message| *message)
+            .or_else(|payload| payload.downcast::<&'static str>().map(|s| s.to_string()))
+            .unwrap_or_default()
+    }
+
+    /// #942's stalled sink (adopting unmanaged finding #546): a write
+    /// that parks forever drains nothing — yet the recording point's
+    /// pushes keep returning, because the handoff is a bounded queue's
+    /// non-blocking send, not the file's write. The queue's declared
+    /// capacity is the bound: a push finding it full is the run's
+    /// fatal point — prompt, naming the file — rather than a scan
+    /// lengthened behind the stalled sink or an entry silently
+    /// dropped. Once the sink resumes, the queued records append in
+    /// `seq` order and the file stands gap-free.
+    #[test]
+    fn a_stalled_sink_never_blocks_a_push_and_the_full_queue_is_fatal() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Condvar, Mutex};
+        use std::time::{Duration, Instant};
+
+        let dir = scratch("stalled-sink");
+        let path = dir.join("journal.jsonl");
+        let (mut file, _replay) = JournalFile::open(&path, 8, Tick::ZERO, None).unwrap();
+        // The writer parks inside every append until the gate opens —
+        // a stalled share's stand-in — and `entered` lets the test
+        // wait for the writer to be mid-write before filling the
+        // queue behind it.
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let entered = Arc::new(AtomicBool::new(false));
+        let drain = Drain::new(format!("journal file {}", path.display()), 2, {
+            let gate = Arc::clone(&gate);
+            let entered = Arc::clone(&entered);
+            move |record| {
+                entered.store(true, Ordering::SeqCst);
+                let (lock, cvar) = &*gate;
+                let mut open = lock.lock().unwrap();
+                while !*open {
+                    open = cvar.wait(open).unwrap();
+                }
+                drop(open);
+                file.write(record)
+            }
+        });
+        let mut recorder =
+            crate::recorder::Recorder::new(MonitorConfig::default(), Tick::ZERO, None).unwrap();
+        recorder.with_sink(drain);
+        let event = |n: u64| dcs_core::JournalEvent::PointChanged {
+            point: PointId(10),
+            from: None,
+            to: Value::Int(n as i64),
+        };
+
+        // The first record reaches the writer, which parks inside its
+        // append; the queue then holds two more. Every push still
+        // returns — nothing in the recording path waits on the sink.
+        recorder.push(Tick(1), event(1));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !entered.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < deadline,
+                "the drain writer never took the first record"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let pushed = Instant::now();
+        recorder.push(Tick(2), event(2));
+        recorder.push(Tick(3), event(3));
+        assert_eq!(
+            recorder.sink_health().unwrap().state,
+            crate::drain::DrainState::Lagging,
+            "the sink's lag is the named health state while the queue holds records"
+        );
+
+        // The next journaled entry meets the full queue: the push is
+        // refused and fatal at the recording point — the panic names
+        // the file and the bound, and the served ring never takes the
+        // entry (seq 4 lands nowhere).
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            recorder.push(Tick(4), event(4));
+        }));
+        assert!(
+            pushed.elapsed() < Duration::from_secs(1),
+            "the pushes waited on the sink: the lock's hold would stretch with it"
+        );
+        let message = panic_message(panic.expect_err("a full drain queue must refuse the push"));
+        assert!(message.contains("journal file"), "{message}");
+        assert!(message.contains(path.to_str().unwrap()), "{message}");
+        assert!(message.contains("refused journal seq 4"), "{message}");
+
+        // Releasing the sink drains the standing queue in order: the
+        // file holds the three journaled entries behind the boundary
+        // marker — no torn record, no gap.
+        let (lock, cvar) = &*gate;
+        *lock.lock().unwrap() = true;
+        cvar.notify_all();
+        recorder.flush_sink();
+        let data = read_journal_file(&path).unwrap();
+        assert_eq!(data.boundaries.len(), 1);
+        assert_eq!(
+            data.entries
+                .iter()
+                .map(|entry| entry.seq)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "the durable record stays gap-free through the refused push"
+        );
+        assert_eq!(
+            recorder
+                .journal(0)
+                .iter()
+                .map(|entry| entry.seq)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #942's failing sink: a write error on the writer fails the run
+    /// at the recorded point — the next push is refused naming the
+    /// file — while the records the queue had already taken are
+    /// counted `lost` rather than silently dropped, and the file ends
+    /// at the last durably appended record: no torn line, no gap.
+    #[test]
+    fn a_failing_sink_is_fatal_at_the_recorded_point_without_a_torn_record() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::{Duration, Instant};
+
+        let dir = scratch("failing-sink");
+        let path = dir.join("journal.jsonl");
+        let (mut file, _replay) = JournalFile::open(&path, 8, Tick::ZERO, None).unwrap();
+        // The sink's second write fails — the error before the byte,
+        // so no torn record is possible.
+        let writes = Arc::new(AtomicU64::new(0));
+        let fail_path = path.clone();
+        let drain = Drain::new(
+            format!("journal file {}", path.display()),
+            8,
+            move |record| {
+                if writes.fetch_add(1, Ordering::SeqCst) >= 1 {
+                    return Err(named(
+                        &fail_path,
+                        "cannot append to journal file",
+                        "the simulated sink refuses",
+                    ));
+                }
+                file.write(record)
+            },
+        );
+        let mut recorder =
+            crate::recorder::Recorder::new(MonitorConfig::default(), Tick::ZERO, None).unwrap();
+        recorder.with_sink(drain);
+        let event = |n: u64| dcs_core::JournalEvent::PointChanged {
+            point: PointId(10),
+            from: None,
+            to: Value::Int(n as i64),
+        };
+
+        // The first entry appends; the second's write fails. Which
+        // push first meets the recorded failure races the writer, so
+        // each push may already be the fatal one — the accounting is
+        // what must hold.
+        for n in 1..=3_u64 {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                recorder.push(Tick(n), event(n));
+            }));
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let health = recorder.sink_health().unwrap();
+            if health.state == crate::drain::DrainState::Failed {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the sink's failure never surfaced in the drain's health"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let health = recorder.sink_health().unwrap();
+        assert_eq!(health.drained, 1, "one record reached the file");
+        assert!(
+            health.lost >= 1,
+            "the failed write's record is accounted lost: {health:?}"
+        );
+
+        // Every push after the recorded failure is refused — the run
+        // dies at its next journaled entry naming the file's error.
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            recorder.push(Tick(9), event(9));
+        }));
+        let message = panic_message(panic.expect_err("a failed sink must refuse the push"));
+        assert!(message.contains(path.to_str().unwrap()), "{message}");
+        assert!(message.contains("the simulated sink refuses"), "{message}");
+
+        // The durable record ends cleanly at the appended seq: the
+        // file replays as boundary + one entry — never a torn line —
+        // while the served ring keeps its gap-free seqs (the lost
+        // entries were journaled claims the failure already felled).
+        let data = read_journal_file(&path).unwrap();
+        assert_eq!(data.boundaries.len(), 1);
+        assert_eq!(
+            data.entries
+                .iter()
+                .map(|entry| entry.seq)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        let served: Vec<u64> = recorder.journal(0).iter().map(|entry| entry.seq).collect();
+        assert_eq!(
+            served,
+            (1..=served.len() as u64).collect::<Vec<_>>(),
+            "the served journal stays gap-free"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -717,7 +1081,8 @@ mod tests {
     fn first_observed_quality_entries_roundtrip() {
         let dir = scratch("quality");
         let path = dir.join("journal.jsonl");
-        let mut recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let mut recorder =
+            crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         recorder.push(
             Tick(1),
             dcs_core::JournalEvent::QualityChanged {
@@ -727,7 +1092,7 @@ mod tests {
             },
         );
         drop(recorder);
-        let recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO).unwrap();
+        let recorder = crate::recorder::Recorder::new(config(&path, 8), Tick::ZERO, None).unwrap();
         assert_eq!(
             recorder.journal(0),
             vec![

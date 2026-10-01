@@ -15,7 +15,7 @@
 use crate::carryover::CarryoverReport;
 use crate::command::CommandReceipt;
 use crate::interface::EventRetention;
-use crate::role::{Divergence, Role};
+use crate::role::{Divergence, Role, SwitchError, SwitchOrigin};
 use crate::signal::{PointId, Quality, Tick, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -121,6 +121,45 @@ pub enum JournalEvent {
         from: Role,
         /// The newly reported role.
         to: Role,
+        /// What initiated the switch this transition belongs to —
+        /// [`SwitchOrigin::Request`] for a switch the monitoring surface
+        /// was asked for, the peer's own entries distinguishing
+        /// themselves: [`SwitchOrigin::Failover`] for the automatic
+        /// promotion, [`SwitchOrigin::Fenced`] for the protective
+        /// demotion a preempted claim forces, [`SwitchOrigin::Reclaim`]
+        /// for the granted re-claim that unwedges it. A peer-initiated
+        /// switch's entries therefore never read as an unattributed
+        /// operator request. Serde-optional: entries journaled before
+        /// the field existed deserialize with `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<SwitchOrigin>,
+        /// The declared actor a requested switch carried — the
+        /// command-path audit-identity convention extended to the
+        /// switch endpoints: attestation, not authentication, exactly
+        /// like [`CommandReceipt`]'s `actor`. Absent on an unattributed
+        /// request, always on a peer-initiated transition, and on
+        /// entries journaled before the field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actor: Option<String>,
+    },
+    /// An armed peer's automatic-failover self-promotion at the miss
+    /// boundary was refused — the durable record of an attempt that
+    /// queues no [`RoleChanged`](Self::RoleChanged) of its own: `error`
+    /// carries the named refusal — a live incumbent's still-held field
+    /// claim, a claim the field could not be asked about, or a
+    /// convergence proof the attempt found voided — and `misses` the
+    /// heartbeat-miss count the gate fired at. The refusal does not
+    /// disarm the gate: while the convergence proof stands each later
+    /// due cycle retries, so one entry journals per distinct refusal
+    /// cause a continuous refused streak produces rather than one per
+    /// retried scan. The entry's `tick` is the refused attempt's run
+    /// tick.
+    PromotionRefused {
+        /// The named refusal the self-promotion returned.
+        error: SwitchError,
+        /// The consecutive-miss count the armed gate fired at — at or
+        /// past the armed budget.
+        misses: u32,
     },
     /// A tracking peer's staged field outputs were found to mismatch the
     /// field's actual values at the tick this entry is attributed to —
@@ -211,6 +250,67 @@ pub enum JournalEvent {
     FieldClaimLost {
         /// The point whose write the field fenced.
         point: PointId,
+        /// The owner token the preempting claim was taken under — the
+        /// claimant the field's own arbitration named when it fenced
+        /// this run's mutation, so the audit attributes the takeover
+        /// to whoever holds the field now rather than an anonymous
+        /// "another". `None` where no verdict named one: a driver
+        /// surface whose fencing answer carries no claimant identity,
+        /// or an entry an older build journaled before the record
+        /// carried attribution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        claimant: Option<u64>,
+    },
+    /// A claim probe — the orphan re-arm's conditional grant or the
+    /// bound fencing-loss reclaim — was refused by a standing claim
+    /// naming this owner token: a foreign `claim_writer` episode the
+    /// peer observed through its probes while never owning or fencing
+    /// a write against the field, so no `FieldClaimLost` fired for
+    /// it. The audit record that the episode happened at all — one
+    /// entry per distinct claimant a probe names on this run, not one
+    /// per probe, so a standing foreign claim journals once however
+    /// many scans its refusals span.
+    FieldClaimObserved {
+        /// The point the refused conditional grant was probed against.
+        point: PointId,
+        /// The owner token the standing claim names — the claimant
+        /// the field's arbitration answered the refusal with.
+        claimant: u64,
+    },
+    /// The pending born-active's deferred conditional grant met the
+    /// field's refusal — the verdict the boot-time ask would have
+    /// answered at activation, landing instead at the first answered
+    /// field contact of a run that launched pending on a silent
+    /// field. The born-active contract disposes of it identically
+    /// whichever way it arrived — rejoin the declared pair, exit
+    /// where none was declared — and this entry is the durable record
+    /// that the settle happened at all: the
+    /// [`FieldClaimObserved`](Self::FieldClaimObserved) beside it
+    /// attributes *who* refused, this one records that the launch's
+    /// pending state ended under a refusal verdict rather than
+    /// standing on forever. One entry per refused startup grant — the
+    /// ask never re-issues after a verdict — attributed to the scan
+    /// tick the answer landed on.
+    StartupClaimRefused {
+        /// The named refusal the grant met.
+        error: SwitchError,
+    },
+    /// The orphan cycle's conditional ensure probe landed the field's
+    /// write-ownership claim under this run's recorded token — the
+    /// re-arm a demoted ex-owner whose ownership the field took
+    /// asserts while the tracked line reports no owner, granted only
+    /// where the field stood unclaimed or already named the token.
+    /// The durable record of who re-took the claim: the orphan
+    /// transition journals the detection, this entry attributes the
+    /// re-arm it produced — one entry per landing, not one per probe,
+    /// so a standing re-arm journals once however many orphaned pulls
+    /// confirm it. A peer whose own voluntary demotion released the
+    /// claim never lands this probe — the handed-back field belongs
+    /// to the successor's conditional paths, and the yield is what
+    /// they preempt.
+    FieldClaimRearmed {
+        /// The field point the claim domain arbitrates through.
+        point: PointId,
     },
     /// A tracking peer's applied checkpoint stamped its serving run as
     /// not owning field writes — the checkpoint's `source_owns_field`
@@ -220,11 +320,15 @@ pub enum JournalEvent {
     /// to [`StandbySync::Orphaned`](crate::StandbySync) and a peer that
     /// once owned the field re-arms its claim conditionally — granted
     /// only while the field is unclaimed or already names its own
-    /// token, never preempting a standing owner. One entry journals per
-    /// transition into the orphaned state, attributed to the tick the
-    /// orphaned apply landed at; `aligned` carries the applied
-    /// checkpoint's own tick — where the tracked line stood when the
-    /// observation landed.
+    /// token, never preempting a standing owner — unless its own
+    /// voluntary demotion is what released it: the handed-back claim
+    /// is the successor's to take, and the suppressed probe leaves it
+    /// to them. One entry journals per transition into the orphaned
+    /// state, attributed to the tick the orphaned apply landed at;
+    /// `aligned` carries the applied checkpoint's own tick — where the
+    /// tracked line stood when the observation landed. A re-arm the
+    /// cycle actually lands journals as
+    /// [`FieldClaimRearmed`](Self::FieldClaimRearmed) beside it.
     FieldOrphaned {
         /// The applied checkpoint's tick — the tracked line's position.
         aligned: Tick,
@@ -240,6 +344,21 @@ pub enum JournalEvent {
     TrackingSourceAdopted {
         /// The adopted tracking source's monitor address.
         source: SocketAddr,
+    },
+    /// A tracking-source resolution probed an endpoint and refused the
+    /// document it served — the field-arbitrated claimed monitor, an
+    /// orphan-resolution `line_owner`, or a verified announced hint —
+    /// so the strand a refused source would otherwise leave is durable
+    /// audit rather than silence: the entry names the endpoint and the
+    /// named verification refusal. One entry journals per distinct
+    /// (source, reason) signature per tracking epoch — the dedup set
+    /// clears when a source adoption lands, so a persistent refusal
+    /// neither floods the journal nor vanishes from it.
+    TrackingSourceRefused {
+        /// The endpoint whose served checkpoint was refused.
+        source: SocketAddr,
+        /// The named refusal the served document earned.
+        detail: String,
     },
     /// A new process lifetime began — the served form of the journal
     /// file's run-boundary marker. A monitor bound over a journal file
@@ -270,7 +389,7 @@ pub enum JournalEvent {
 /// ring's bounded eviction is visible to consumers as a numbering
 /// gap — the same honest-gap convention the journal and the
 /// per-point history rings follow. `tick` is the producing scan's
-/// tick; `retention` names the declared class the emission routed
+/// run tick; `retention` names the declared class the emission routed
 /// under; `event` carries the [`EmittedEvent`] itself.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventRecord {
@@ -278,7 +397,7 @@ pub struct EventRecord {
     /// append order starting at 1 and increasing by one per routed
     /// emission, never reused.
     pub seq: u64,
-    /// The producing scan's tick.
+    /// The producing scan's run tick.
     pub tick: Tick,
     /// The declared retention class the emission routed under —
     /// `History` for the bounded ring's records, `Latest` for the
@@ -364,6 +483,7 @@ mod tests {
                         },
                         outcome: CommandOutcome::Applied { tick: Tick(4) },
                         actor: None,
+                        reason: None,
                     },
                 },
             },
@@ -381,6 +501,8 @@ mod tests {
                 event: JournalEvent::RoleChanged {
                     from: Role::Standby,
                     to: Role::Promoting,
+                    origin: Some(SwitchOrigin::Request),
+                    actor: Some("operator-7".to_string()),
                 },
             },
             JournalEntry {
@@ -437,10 +559,21 @@ mod tests {
             JournalEntry {
                 seq: 11,
                 tick: Tick(13),
-                event: JournalEvent::FieldClaimLost { point: PointId(20) },
+                event: JournalEvent::FieldClaimLost {
+                    point: PointId(20),
+                    claimant: Some(424242),
+                },
             },
             JournalEntry {
                 seq: 12,
+                tick: Tick(14),
+                event: JournalEvent::FieldClaimObserved {
+                    point: PointId(20),
+                    claimant: 424243,
+                },
+            },
+            JournalEntry {
+                seq: 13,
                 tick: Tick(14),
                 event: JournalEvent::EventEmitted {
                     event: EmittedEvent {
@@ -456,7 +589,7 @@ mod tests {
                 },
             },
             JournalEntry {
-                seq: 13,
+                seq: 14,
                 tick: Tick(15),
                 event: JournalEvent::SourceRestarted {
                     was_aligned: Some(Tick(14)),
@@ -464,14 +597,14 @@ mod tests {
                 },
             },
             JournalEntry {
-                seq: 14,
+                seq: 15,
                 tick: Tick(20),
                 event: JournalEvent::TrackingSourceAdopted {
                     source: "127.0.0.1:8081".parse().unwrap(),
                 },
             },
             JournalEntry {
-                seq: 15,
+                seq: 16,
                 tick: Tick(20),
                 event: JournalEvent::SourceRestarted {
                     was_aligned: None,
@@ -479,12 +612,20 @@ mod tests {
                 },
             },
             JournalEntry {
-                seq: 16,
+                seq: 17,
+                tick: Tick(20),
+                event: JournalEvent::TrackingSourceRefused {
+                    source: "127.0.0.1:8082".parse().unwrap(),
+                    detail: "the pulled checkpoint's stream position leads the line's".to_string(),
+                },
+            },
+            JournalEntry {
+                seq: 18,
                 tick: Tick(20),
                 event: JournalEvent::RunBoundary { run: 2 },
             },
             JournalEntry {
-                seq: 17,
+                seq: 19,
                 tick: Tick(21),
                 event: JournalEvent::FieldOrphaned { aligned: Tick(20) },
             },
@@ -505,10 +646,29 @@ mod tests {
         assert!(json.contains("\"reinitialized\""), "{json}");
         assert!(json.contains("\"event_emitted\""), "{json}");
         assert!(json.contains("\"field_claim_lost\""), "{json}");
+        assert!(json.contains("\"field_claim_observed\""), "{json}");
         assert!(json.contains("\"field_orphaned\""), "{json}");
         assert!(json.contains("\"source_restarted\""), "{json}");
         assert!(json.contains("\"tracking_source_adopted\""), "{json}");
+        assert!(json.contains("\"tracking_source_refused\""), "{json}");
         assert!(json.contains("\"run_boundary\""), "{json}");
+        // A `field_claim_lost` entry an older build journaled carried
+        // no claimant field; it still decodes, the verdict reading as
+        // unattributed rather than failing the file.
+        assert_eq!(
+            serde_json::from_str::<JournalEntry>(
+                r#"{"seq":3,"tick":9,"event":{"field_claim_lost":{"point":20}}}"#
+            )
+            .unwrap(),
+            JournalEntry {
+                seq: 3,
+                tick: Tick(9),
+                event: JournalEvent::FieldClaimLost {
+                    point: PointId(20),
+                    claimant: None,
+                },
+            }
+        );
     }
 
     #[test]
@@ -526,6 +686,7 @@ mod tests {
             },
             outcome: CommandOutcome::Applied { tick: Tick(14) },
             actor: Some("operator-3".to_string()),
+            reason: None,
         };
         let entry = JournalEntry {
             seq: 10,
@@ -574,6 +735,70 @@ mod tests {
                     error: "computation failed".to_string(),
                 },
             }]
+        );
+    }
+
+    #[test]
+    fn role_changed_attribution_uses_the_documented_wire_shape() {
+        // The attributed switch record: `origin` — `request` for a
+        // switch the monitoring surface was asked for, `failover` for
+        // the peer's own automatic promotion — beside `actor`, the
+        // declared identity a request carried. Both fields are
+        // serde-optional and omitted on the wire when absent.
+        let attributed = JournalEvent::RoleChanged {
+            from: Role::Standby,
+            to: Role::Promoting,
+            origin: Some(SwitchOrigin::Request),
+            actor: Some("operator-7".to_string()),
+        };
+        assert_eq!(
+            serde_json::to_string(&attributed).unwrap(),
+            r#"{"role_changed":{"from":"standby","to":"promoting","origin":"request","actor":"operator-7"}}"#
+        );
+        let failover = JournalEvent::RoleChanged {
+            from: Role::Promoting,
+            to: Role::Active,
+            origin: Some(SwitchOrigin::Failover),
+            actor: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&failover).unwrap(),
+            r#"{"role_changed":{"from":"promoting","to":"active","origin":"failover"}}"#
+        );
+        let bare = JournalEvent::RoleChanged {
+            from: Role::Active,
+            to: Role::Demoting,
+            origin: Some(SwitchOrigin::Request),
+            actor: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&bare).unwrap(),
+            r#"{"role_changed":{"from":"active","to":"demoting","origin":"request"}}"#
+        );
+        for event in [attributed, failover, bare] {
+            let json = serde_json::to_string(&event).unwrap();
+            assert_eq!(serde_json::from_str::<JournalEvent>(&json).unwrap(), event);
+        }
+    }
+
+    #[test]
+    fn role_changed_predating_attribution_deserializes_unattributed() {
+        // A journal file written before the fields existed carries only
+        // `from`/`to`: both attribution fields deserialize absent —
+        // `None`, not a request origin the record cannot prove — under
+        // the replay contract.
+        let entry: JournalEntry = serde_json::from_str(
+            r#"{"seq":7,"tick":8,"event":{"role_changed":{"from":"standby","to":"promoting"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            entry.event,
+            JournalEvent::RoleChanged {
+                from: Role::Standby,
+                to: Role::Promoting,
+                origin: None,
+                actor: None,
+            }
         );
     }
 }

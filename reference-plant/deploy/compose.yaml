@@ -14,16 +14,18 @@
 # as `DCS_MODEL_FINGERPRINT` — the identity the standby's checkpoint
 # pulls verify on the wire.
 #
-# The manifest's per-controller `state_file`/`journal_file` fields
-# name each peer's durability paths (decisions 35 and 36): every
-# declared path lands on a writable named volume — `ctrl-a-data` /
-# `ctrl-b-data` mounted at `/var/tmp`, an existing world-writable
-# directory in the released image, so the non-root controller process
-# can create its files on the volume — and rides the invocation's
-# `--state-file`/`--journal-file` flags, so a container restart
-# resumes in place and the operator-action record outlives the
-# process. The model and dynamics mounts stay read-only: deployment
-# inputs are mounted, never written.
+# The manifest's per-controller `state_file`/`journal_file`/
+# `history_file` fields name each peer's durability paths (decisions
+# 35, 36, and 102): every declared path lands on a writable named
+# volume — `ctrl-a-data` / `ctrl-b-data` mounted at `/var/tmp`, an
+# existing world-writable directory in the released image, so the
+# non-root controller process can create its files on the volume —
+# and rides the invocation's `--state-file`/`--journal-file`/
+# `--history-file` flags, so a container restart resumes in place,
+# the operator-action record outlives the process, and the durable
+# process-history store replays into the served window across runs.
+# The model and dynamics mounts stay read-only: deployment inputs
+# are mounted, never written.
 #
 # The manifest's `failover_budget` on the standby entry instantiates
 # as ctrl-b's `--auto-promote` argument — the missed-pull budget at
@@ -32,12 +34,14 @@
 # `standby` wiring alone never arms it: only the declared budget
 # does.
 #
-# The manifest's `pair_token` instantiates as the `--pair-token`
-# argument on both controllers — the pair's shared tracking secret.
-# Under the keyed contract an announced-source demotion verifies the
-# hinted endpoint's keyed `line_proof` before adopting it, so a
-# forged checkpoint server can never stand down the field owner; an
-# unkeyed pair cannot demote through an announced source at all.
+# Both controllers carry the same `--pair-token` — the pair's shared
+# tracking secret the keyed announced-source contract runs on: a
+# demoted owner's verify pull demands the keyed line proof only a peer
+# holding the token stamps, so an endpoint that merely replays or
+# forges the line's public checkpoints can neither arm a demotion nor
+# feed the demoted peer. The token is a deployment secret — a real
+# plant injects its own, never the checked-in demonstration value —
+# rather than manifest data, so it lands on the invocation alone.
 #
 # `ci/check.sh`'s `deploy` stage asserts this file and the manifest
 # agree on every field — a divergence fails `rig-mismatch` — and that
@@ -50,11 +54,11 @@
 
 name: reference-plant
 
-x-dcs-release: v0.2.0
+x-dcs-release: v0.7.0
 
 services:
   dcs-plant:
-    image: dcs-plant-server:v0.2.0
+    image: dcs-plant-server:v0.7.0
     container_name: dcs-plant
     networks:
       - dcs-rig
@@ -80,7 +84,7 @@ services:
       start_period: 2s
 
   ctrl-a:
-    image: dcs-controller:v0.2.0
+    image: dcs-controller:v0.7.0
     container_name: ctrl-a
     depends_on:
       dcs-plant:
@@ -93,7 +97,7 @@ services:
       - ../model/plant.json:/model/plant.json:ro
       - ctrl-a-data:/var/tmp
     environment:
-      DCS_MODEL_FINGERPRINT: "510136287e2a4b6e"
+      DCS_MODEL_FINGERPRINT: "530e2d4ff6c60a16"
     command:
       - /model/plant.json
       - --remote
@@ -102,15 +106,17 @@ services:
       - "100"
       - --listen
       - 0.0.0.0:8080
-      - --pair-token
-      - dcs-reference-pair
       - --state-file
       - /var/tmp/state.json
       - --journal-file
       - /var/tmp/journal.jsonl
+      - --history-file
+      - /var/tmp/history.jsonl
+      - --pair-token
+      - dcs-reference-pair
 
   ctrl-b:
-    image: dcs-controller:v0.2.0
+    image: dcs-controller:v0.7.0
     container_name: ctrl-b
     depends_on:
       dcs-plant:
@@ -125,7 +131,7 @@ services:
       - ../model/plant.json:/model/plant.json:ro
       - ctrl-b-data:/var/tmp
     environment:
-      DCS_MODEL_FINGERPRINT: "510136287e2a4b6e"
+      DCS_MODEL_FINGERPRINT: "530e2d4ff6c60a16"
     command:
       - /model/plant.json
       - --remote
@@ -138,12 +144,14 @@ services:
       - "100"
       - --listen
       - 0.0.0.0:8081
-      - --pair-token
-      - dcs-reference-pair
       - --state-file
       - /var/tmp/state.json
       - --journal-file
       - /var/tmp/journal.jsonl
+      - --history-file
+      - /var/tmp/history.jsonl
+      - --pair-token
+      - dcs-reference-pair
 
 networks:
   dcs-rig:

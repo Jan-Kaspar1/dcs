@@ -140,6 +140,43 @@ sudo systemctl enable --now dcs-hwtest-netpolicy.service
   mount is preserved untouched — QA containers inherit it like all
   others on this host.
 
+## Keyed posture: deployed pair and the staged probe pair
+
+The keyed announced-source contract (`--pair-token` /
+`line_proof` verification) is exercised per revision by the
+tracking-source legs (2050's keyed halves, 2060's keyed
+precondition). Two config keys record the posture split:
+
+- `pair_token` is the **deployed** pair's posture: the shared
+  tracking secret both deployed controllers and the deployed-pair
+  revised/driven peers sign under. Set to `null` to run the
+  deployed pair unkeyed — its demote/announce path then answers
+  unkeyed, exactly the posture `qax-20260926-002` ran.
+- `probe_pair` is the **lane-staged probe pair**, always keyed: a
+  second `sim-serve` deployment (`dcs-plant-server` on the rig's
+  dedicated bridge — `probe_plant` records placement `bridge`, so
+  nothing host-side dials it) with its own declared dynamics
+  (`dynamics_fixture`) and its own field — field ownership
+  arbitration is per-plant, so the probe pair never shares the
+  deployed pair's field — plus two controllers (`probe_active`,
+  `probe_standby`) launched with the block's `--pair-token`,
+  tracking each other with `line_proof` verification exercised.
+  Their monitors publish on host loopback
+  (`active_port`/`standby_port`, plus `driven_port` for the probe
+  driven peer a keyed island leg may stage); their
+  `--owner-token` pins are the distinct `probe_*` entries in
+  `plant_owner_tokens` — never the deployed pair's tokens. A
+  `probe_pair: null` stages none.
+
+The keyed legs select their subject through the same ctx the
+`@require`-style gating consumes: the deployed pair while the run
+config keys it, else `ctx['probe']` — so an unkeyed-primary run
+still produces real keyed-contract verdicts instead of
+capability-based inconclusive results. Probe objects carry the
+same managed/run labels and are reaped by the same teardown and
+reconciliation as the rest of the rig; a probe launch failure is
+an ordinary rig-start failure and leaves no orphaned objects.
+
 ## Storage bound and retention
 
 The lane's whole footprint — `src/` archives and extractions,

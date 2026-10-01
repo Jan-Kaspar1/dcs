@@ -22,9 +22,9 @@
 //! `release_writer`, and the pure-ops `demote -> promote -> restart the
 //! promoted peer as --standby`.
 
-use dcs_core::{IoDriver, JournalEvent, Role, StandbySync, Value};
+use dcs_core::{FieldClaim, IoDriver, JournalEvent, Role, StandbySync, Value};
 use dcs_monitor::MonitorClient;
-use dcs_sim_net::{RemoteDriver, RemoteError};
+use dcs_sim_net::{ClaimGrant, RemoteDriver, RemoteError};
 use std::path::Path;
 
 mod support;
@@ -50,6 +50,9 @@ const SEED: u64 = 499_900;
 /// The foreign attachment's claim token — any token neither controller
 /// generated stands in for the QA reproduction's rogue claim.
 const FOREIGN: u64 = 999;
+/// The fresh token the restarted-active probe claims under — the QA
+/// reproduction's "new token" the conditional startup grant must accept.
+const RESTART: u64 = 4242;
 const SETPOINT: dcs_core::PointId = dcs_core::PointId(11);
 const VALVE: dcs_core::PointId = dcs_core::PointId(20);
 
@@ -72,15 +75,18 @@ fn reports_orphaned(report: &dcs_core::RoleReport) -> bool {
 /// forever, the field unclaimed, the plant frozen, both peers reporting
 /// healthy `tracking`.
 ///
-/// Now the demoted ex-owner's checkpoint pulls land `orphaned` — the
-/// tracked line's serving run owns nothing — and each orphan cycle
-/// probes the conditional claim re-arm: refused while the foreign token
-/// stands, granted once the release leaves the field unclaimed, so the
-/// claim re-arms for the ex-owner's token rather than staying open to
-/// the next foreign grab. Both peers report the named state throughout,
-/// and the journaled `field_orphaned` carries the outage.
+/// The durable record attributes the takeover: the journaled
+/// `field_claim_lost` names the claimant the field's fencing verdict
+/// reported. And the wedge escapes by itself: while the foreign claim
+/// stands, the demoted ex-owner's *bound* conditional reclaim probe
+/// refuses every scan — never preempting a standing owner — and once
+/// the release leaves the field unclaimed the grant takes the claim
+/// back under the run's own token, the peer's attachments joining its
+/// holders so the re-lifted gate's writes pass. The peer walks
+/// `promoting` → `active` with no operator call and the pair converges
+/// to exactly one active, the plant stepping again.
 #[test]
-fn foreign_claim_release_lets_the_demoted_ex_owner_rearm() {
+fn foreign_claim_release_lets_the_demoted_ex_owner_reclaim() {
     let dir = std::env::temp_dir().join(format!("dcs-mutual-standby-claim-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -166,13 +172,19 @@ fn foreign_claim_release_lets_the_demoted_ex_owner_rearm() {
     assert_eq!(field.read(SETPOINT).unwrap().value, Value::Float(60.0));
 
     // The journaled outage: the demoted run's fencing loss and the
-    // orphan transition are both durable — nothing silent.
+    // orphan transition are both durable — nothing silent. The loss
+    // entry names the claimant: the field's own fencing verdict
+    // reported the preempting claim's owner token.
     let journal = active.journal(0).unwrap();
     assert!(
-        journal
-            .iter()
-            .any(|entry| matches!(entry.event, JournalEvent::FieldClaimLost { .. })),
-        "the fencing loss must journal: {journal:?}"
+        journal.iter().any(|entry| matches!(
+            entry.event,
+            JournalEvent::FieldClaimLost {
+                claimant: Some(FOREIGN),
+                ..
+            }
+        )),
+        "the fencing loss must journal with the preempting claimant: {journal:?}"
     );
     assert!(
         journal
@@ -182,25 +194,36 @@ fn foreign_claim_release_lets_the_demoted_ex_owner_rearm() {
     );
 
     // The reproduction's release: the foreign claim hands the field
-    // back. The ex-owner's next orphan cycle re-arms its released claim
-    // through ensure_writer — conditional, so it lands only because no
-    // owner stands — and the field is closed to foreign grabs again:
-    // a fresh foreign ensure is refused, a foreign write is fenced.
+    // back — and the wedge escapes by itself. The demoted ex-owner's
+    // fencing-loss mark drives the bound conditional reclaim every
+    // standby scan: refused while the foreign token stood, granted the
+    // first scan the field stands unclaimed — the grant binding the
+    // run's attachments to the retaken claim — so the peer re-lifts
+    // its gate and walks `promoting` → `active` with no operator call.
     field.release_writer().unwrap();
     active.advance(1).unwrap();
+    assert_eq!(
+        active.role().unwrap().role,
+        Role::Promoting,
+        "the released field must let the demoted ex-owner reclaim"
+    );
+    // The orphan cycle's unbound ensure landed first in that same
+    // cycle — the released field stood unclaimed when the orphaned
+    // pull applied — and a landed re-arm is durable: the journal
+    // names it once, beside the orphan record the landing answered.
+    let journal = active.journal(0).unwrap();
+    assert_eq!(
+        journal
+            .iter()
+            .filter(|entry| matches!(entry.event, JournalEvent::FieldClaimRearmed { .. }))
+            .count(),
+        1,
+        "a landed orphan-cycle re-arm must journal exactly once: {journal:?}"
+    );
     assert!(
         matches!(field.ensure_writer(FOREIGN), Err(RemoteError::Fenced)),
-        "the ex-owner's re-armed claim must fence the foreign attachment"
+        "the reclaimed claim must fence the foreign attachment"
     );
-    assert!(
-        reports_orphaned(&active.role().unwrap()),
-        "re-arming the claim is not ownership: the peer still surfaces orphaned"
-    );
-
-    // The escape: a promotion takes the field for the re-armed token
-    // and the pair converges to exactly one active — the standby
-    // reconverges on the owner's checkpoints.
-    assert_eq!(active.promote().unwrap().role, Role::Promoting);
     active.advance(1).unwrap();
     standby.advance(1).unwrap();
     assert_eq!(active.role().unwrap().role, Role::Active);
@@ -216,7 +239,162 @@ fn foreign_claim_release_lets_the_demoted_ex_owner_rearm() {
     assert_eq!(
         field.read(VALVE).unwrap().value,
         image_value(&snapshot, VALVE),
-        "the promoted ex-owner's write must reach the field"
+        "the reclaimed owner's write must reach the field"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The QA finding `demoted-ex-owner-orphan-probe-reseizes-field-claim`
+/// (#835) revisited under the fencing-loss reclaim (#935): the same
+/// foreign-claim preemption and release as
+/// `foreign_claim_release_lets_the_demoted_ex_owner_reclaim`, but the
+/// assertion is what the re-armed claim proves on the wire. The
+/// defect's phantom holder — the re-armed claim reading as a live
+/// incumbent while nothing stood behind it — cannot recur: the
+/// reclaim is the *bound* grant, so the claim it retakes has the
+/// ex-owner's live controller attachment in its holder set and the
+/// peer re-owns the field for real. A fresh attachment's conditional
+/// `claim_writer_unless_held` then refuses — correctly, because a
+/// genuine incumbent stands — until the incumbent steps down, when
+/// the restart-as-active grant preempts the yielded claim exactly as
+/// the documented recovery needs.
+#[test]
+fn the_reclaimed_owner_is_a_real_incumbent_the_restart_grant_defers_to() {
+    let dir = std::env::temp_dir().join(format!(
+        "dcs-mutual-standby-rearm-grant-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let plant = spawn_plant(Path::new(PLANT_MODEL), Path::new(PLANT_DYNAMICS));
+    let model = controller_model(
+        &dir,
+        "pair.json",
+        MODEL_SOURCE,
+        plant.addr,
+        SimTcp::PerDevice,
+    )
+    .0;
+
+    let field = RemoteDriver::connect(plant.addr).unwrap();
+    field.ensure_writer(SEED).unwrap();
+    field.write(SETPOINT, Value::Float(50.0)).unwrap();
+    field.release_writer().unwrap();
+
+    let active_process = spawn_controller(&model, &[], DT);
+    let standby_process = spawn_controller(
+        &model,
+        &["--standby".to_string(), active_process.addr.to_string()],
+        DT,
+    );
+    let active = MonitorClient::new(active_process.addr);
+    let standby = MonitorClient::new(standby_process.addr);
+
+    // Let both peers converge: the standby applies the owner's
+    // checkpoint line, the owner stays active.
+    for _ in 0..4 {
+        standby.advance(1).unwrap();
+        active.advance(1).unwrap();
+    }
+    assert!(
+        reports_healthy_tracking(&standby.role().unwrap()),
+        "setup needs a converged standby"
+    );
+
+    // The reproduction's trigger: the foreign attachment claims the
+    // field, holds it across the owner's fenced write — which demotes
+    // the superseded owner in place — then releases, leaving the field
+    // unclaimed.
+    field.claim_writer(FOREIGN).unwrap();
+    active.advance(1).unwrap();
+    active.advance(1).unwrap();
+    assert_eq!(active.role().unwrap().role, Role::Standby);
+    field.release_writer().unwrap();
+    assert_eq!(
+        field.probe_writer().unwrap(),
+        FieldClaim::Unclaimed,
+        "the released foreign claim leaves the field unclaimed"
+    );
+
+    // The wedge escapes by itself: the demoted ex-owner's bound
+    // conditional reclaim takes the unclaimed field under its own
+    // token and the peer re-promotes — the claim now carried by a
+    // live controller holder, not the defect's holderless re-arm.
+    for _ in 0..2 {
+        active.advance(1).unwrap();
+        standby.advance(1).unwrap();
+    }
+    assert_eq!(
+        active.role().unwrap().role,
+        Role::Active,
+        "the released field must let the demoted ex-owner reclaim"
+    );
+    assert_eq!(
+        field.probe_writer().unwrap(),
+        FieldClaim::Held,
+        "the reclaimed claim must stand"
+    );
+    assert_eq!(field.step(0.1), Err(RemoteError::Fenced));
+    assert!(
+        matches!(field.ensure_writer(FOREIGN), Err(RemoteError::Fenced)),
+        "the reclaimed claim still fences the foreign attachment"
+    );
+
+    // The incumbent is real: a restarted controller's conditional
+    // startup grant refuses the live, unyielded controller claim the
+    // reclaim produced — the honest refusal the #835 defect mimicked
+    // with a phantom holder.
+    let restart = RemoteDriver::connect(plant.addr).unwrap().as_controller();
+    assert_eq!(
+        restart.claim_writer_unless_held(RESTART),
+        Err(RemoteError::Fenced),
+        "the restart grant must defer to a genuinely live incumbent"
+    );
+
+    // The recovery the grant exists for still works the moment the
+    // incumbent steps down: the demotion's yielded claim is the
+    // documented hand-off the conditional grant preempts.
+    assert_eq!(active.demote().unwrap().role, Role::Demoting);
+    active.advance(1).unwrap();
+    assert_eq!(active.role().unwrap().role, Role::Standby);
+    assert_eq!(
+        restart.claim_writer_unless_held(RESTART).unwrap(),
+        ClaimGrant::Exclusive,
+        "a yielded claim must not fence the restart-as-active grant"
+    );
+    restart.write(SETPOINT, Value::Float(60.0)).unwrap();
+    restart.step(0.1).unwrap();
+    assert_eq!(field.read(SETPOINT).unwrap().value, Value::Float(60.0));
+
+    // The grant's other half still stands: a granted
+    // `claim_writer_unless_held` is itself a live controller claim, so
+    // the orphaned ex-owner's conditional promote must refuse the live
+    // incumbent rather than roll its applied state back.
+    standby.advance(1).unwrap();
+    active.advance(1).unwrap();
+    let refused = active.promote().unwrap_err();
+    assert!(
+        refused.to_string().contains("live controller"),
+        "the orphan promote must defer to a live incumbent: {refused}"
+    );
+
+    // And the documented recovery still ends the wedge once the field
+    // is handed back: `POST /promote` on the orphaned ex-owner takes
+    // the holderless field and the pair converges on exactly one
+    // active.
+    restart.release_writer().unwrap();
+    active.advance(1).unwrap();
+    assert_eq!(active.promote().unwrap().role, Role::Promoting);
+    active.advance(1).unwrap();
+    standby.advance(1).unwrap();
+    assert_eq!(active.role().unwrap().role, Role::Active);
+    assert!(
+        matches!(
+            standby.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby must reconverge on the restored owner"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

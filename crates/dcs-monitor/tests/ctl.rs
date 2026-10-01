@@ -10,10 +10,10 @@ use dcs_blocks::{Pid, PidConfig, Sequencer, SequencerStep};
 use dcs_core::{
     Command, CommandError, CommandOutcome, CommandReceipt, Direction, ForcedPoint, IoDriver,
     IoError, JournalEvent, PointId, Quality, QualityReason, Role, RoleReport, Sample, SignalId,
-    StandbySync, Tick, Value, ValueKind,
+    StandbySync, SwitchOrigin, Tick, Value, ValueKind,
 };
 use dcs_model::{PointSignal, SignalIndex};
-use dcs_monitor::{Monitor, MonitorClient, PairFaultKind};
+use dcs_monitor::{HealthReport, Monitor, MonitorClient, PairFaultKind};
 use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap, StepError,
 };
@@ -128,6 +128,7 @@ fn entry(point: PointId, direction: Direction, kind: ValueKind, writable: bool) 
         description: None,
         group: None,
         writable,
+        requires_reason: false,
     }
 }
 
@@ -404,8 +405,18 @@ fn read_subcommands_roundtrip_the_served_payloads() {
                 tick: Tick(2),
                 sync: None,
                 field_claim: None,
+                failover: None,
             }
         );
+
+        // `health` prints the bounded liveness answer — the container
+        // health check's probe shape: live, the served role, the run's
+        // tick, and the last completed scan's age.
+        let health: HealthReport = serde_json::from_value(ctl_ok(addr, &["health"])).unwrap();
+        assert_eq!(health.role, Role::Active);
+        assert_eq!(health.tick, Tick(2));
+        assert!(health.live);
+        assert!(health.last_scan_age_ms.is_some());
 
         // `receipts` prints the receipt log — empty so far.
         let receipts: Vec<CommandReceipt> =
@@ -475,7 +486,11 @@ fn schema_prints_the_served_interface_registry() {
         // The sequencer kind's declared vocabulary serves under the
         // instance: `advance`/`reset` sit beside the port- and
         // parameter-adapted generic commands, and the kind-emitted
-        // `step_completed` beside the adapted journal transitions.
+        // events — one declared per retention class — beside the
+        // adapted journal transitions, each spec's `retention` mark
+        // routing the consumer: `step_completed` the bounded
+        // `history` record, `sequence_completed` the durable
+        // `journal`, `progress` the superseding `latest` view.
         let seq = schema
             .interfaces
             .iter()
@@ -502,8 +517,25 @@ fn schema_prints_the_served_interface_registry() {
             .iter()
             .map(|event| event.name.as_str())
             .collect();
-        assert!(events.contains(&"step_completed"), "{events:?}");
         assert!(events.contains(&"command_settled"), "{events:?}");
+        for (name, retention) in [
+            ("step_completed", dcs_core::EventRetention::History),
+            ("sequence_completed", dcs_core::EventRetention::Journal),
+            ("progress", dcs_core::EventRetention::Latest),
+        ] {
+            let spec = seq
+                .interface
+                .events
+                .iter()
+                .find(|event| event.name == name)
+                .unwrap_or_else(|| panic!("{name} missing: {events:?}"));
+            assert_eq!(spec.retention, retention, "{name}");
+            assert_eq!(
+                spec.emission,
+                dcs_core::EventEmission::KindEmitted,
+                "{name}"
+            );
+        }
 
         // And the port/parameter halves: `run` is a measurement, `done`
         // a Status-roled state, `step_count` a tunable configuration.
@@ -538,25 +570,47 @@ fn events_print_each_components_recent_emissions() {
         assert!(events.is_empty());
 
         // Holding `run` through a scan completes the one-tick step: the
-        // kind-emitted `step_completed` journals attributed to `seq` —
-        // the emitted event the run produced reflected in `events`,
-        // marked `journal`-retained: the durable record's mark.
+        // kind-emitted `step_completed` lands in the event-history ring
+        // attributed to `seq` — the emitted event the run produced
+        // reflected in `events`, marked `history`-retained — beside the
+        // standing `progress` record the `latest` mark carries.
         driver.write(SEQ_RUN, Value::Bool(true)).unwrap();
         client.advance(1).unwrap();
         let events: Vec<dcs_core::ResourceEvent> =
             serde_json::from_value(ctl_ok(addr, &["events", "seq"])).unwrap();
-        assert!(events.iter().any(|entry| matches!(
-            &entry.event,
-            JournalEvent::EventEmitted { event }
-                if event.event == "step_completed"
-                    && event.component == "seq"
-                    && event.fields["step"] == dcs_core::EventValue::Value(Value::Int(1))
-        )));
-        assert!(
-            events
-                .iter()
-                .all(|entry| entry.retention == dcs_core::EventRetention::Journal)
-        );
+        let completed = events
+            .iter()
+            .find(|entry| {
+                matches!(
+                    &entry.event,
+                    JournalEvent::EventEmitted { event }
+                        if event.event == "step_completed"
+                            && event.component == "seq"
+                            && event.fields["step"] == dcs_core::EventValue::Value(Value::Int(1))
+                )
+            })
+            .expect("the attributed record carries step_completed");
+        assert_eq!(completed.retention, dcs_core::EventRetention::History);
+        let progress = events
+            .iter()
+            .find(|entry| {
+                matches!(
+                    &entry.event,
+                    JournalEvent::EventEmitted { event } if event.event == "progress"
+                )
+            })
+            .expect("the attributed record carries progress");
+        assert_eq!(progress.retention, dcs_core::EventRetention::Latest);
+        // Neither `history` nor `latest` emission is journaled — the
+        // durable record's mark appears on no routed entry beside the
+        // journal-retained adapted transitions the tail also carries.
+        assert!(events.iter().all(|entry| {
+            !matches!(
+                &entry.event,
+                JournalEvent::EventEmitted { event }
+                    if event.event == "step_completed" || event.event == "progress"
+            ) || entry.retention != dcs_core::EventRetention::Journal
+        }));
 
         // The all-components form keys every served instance's list by
         // name — `seq`'s carries the same tail, and `level-pid`'s the
@@ -721,6 +775,7 @@ fn write_parses_per_the_declared_kind_and_reports_receipts() {
                     apply_tick: Tick(2)
                 },
                 actor: None,
+                reason: None,
             }
         );
         let receipt: CommandReceipt =
@@ -1062,6 +1117,7 @@ fn invoke_submits_declared_commands_and_prints_the_receipt() {
                     apply_tick: Tick(2)
                 },
                 actor: None,
+                reason: None,
             }
         );
 
@@ -1106,8 +1162,9 @@ fn invoke_rejections_print_the_receipt_and_name_the_command_error() {
         // Each named submission rejection prints the server's rejected
         // receipt on stdout and exits nonzero naming the CommandError:
         // unknown component and undeclared command — including a kind
-        // declaring none. An argument whose text is not its declared
-        // request kind's value never reaches the server: the
+        // declaring none — and an argument name the declared `request`
+        // schema does not carry. An argument whose text is not its
+        // declared request kind's value never reaches the server: the
         // schema-driven parse fails it as usage (see
         // `value_parse_errors_print_usage_against_a_live_monitor`).
         for (args, name) in [
@@ -1119,6 +1176,10 @@ fn invoke_rejections_print_the_receipt_and_name_the_command_error() {
             (
                 ["invoke", "plain", "anything"].as_slice(),
                 "unknown_command",
+            ),
+            (
+                ["invoke", "seq", "advance", "stride=2"].as_slice(),
+                "unknown_argument",
             ),
         ] {
             let output = ctl(addr, args);
@@ -1416,6 +1477,115 @@ fn promote_and_demote_print_role_reports_and_named_refusals() {
     standby.stop();
 }
 
+/// The journaled `RoleChanged` events of a peer's served journal: the
+/// transition beside the switch's attribution — `origin` marking a
+/// requested switch, `actor` the declared identity it carried.
+fn role_changes(client: &MonitorClient) -> Vec<(Role, Role, Option<SwitchOrigin>, Option<String>)> {
+    client
+        .journal(0)
+        .unwrap()
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            JournalEvent::RoleChanged {
+                from,
+                to,
+                origin,
+                actor,
+            } => Some((*from, *to, *origin, actor.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Converges `standby` against `active`'s current checkpoint — the
+/// promote contract's prerequisite.
+fn converge(active: &PeerRig, standby: &PeerRig) {
+    active.client.advance(3).unwrap();
+    standby
+        .monitor
+        .apply_checkpoint(&active.client.checkpoint().unwrap())
+        .unwrap();
+}
+
+#[test]
+fn promote_and_demote_carry_the_declared_actor() {
+    let active = PeerRig::start(Role::Active);
+    // The standby names its tracking source — the configured peer its
+    // demotions follow back to the active.
+    let standby = PeerRig::start_tracking(Role::Standby, Some(active.addr));
+    converge(&active, &standby);
+
+    // `promote --actor` declares the identity the switch request
+    // carries: both journaled RoleChanged entries — the request's
+    // transition and the settle's — stamp it beside `origin: request`.
+    let report: RoleReport =
+        serde_json::from_value(ctl_ok(standby.addr, &["promote", "--actor", "console-7"])).unwrap();
+    assert_eq!(report.role, Role::Promoting);
+    ctl_ok(standby.addr, &["scan", "1"]);
+    assert_eq!(
+        role_changes(&standby.client),
+        vec![
+            (
+                Role::Standby,
+                Role::Promoting,
+                Some(SwitchOrigin::Request),
+                Some("console-7".to_string()),
+            ),
+            (
+                Role::Promoting,
+                Role::Active,
+                Some(SwitchOrigin::Request),
+                Some("console-7".to_string()),
+            ),
+        ]
+    );
+
+    // `DCS_ACTOR` is the configured default a flagless `demote`
+    // declares; the flag overrides it — the same convention the
+    // command subcommands honor.
+    let output = ctl_env(standby.addr, &["demote"], &[("DCS_ACTOR", "ops-cli")]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let report: RoleReport = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(report.role, Role::Demoting);
+    ctl_ok(standby.addr, &["scan", "1"]);
+    converge(&active, &standby);
+    let output = ctl_env(
+        standby.addr,
+        &["promote", "--actor", "console-7"],
+        &[("DCS_ACTOR", "ops-cli")],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    ctl_ok(standby.addr, &["scan", "1"]);
+    // An invocation declaring neither — the env removed, no flag —
+    // submits the bare request and journals unattributed.
+    ctl_ok(standby.addr, &["demote"]);
+    ctl_ok(standby.addr, &["scan", "1"]);
+
+    let actors: Vec<Option<String>> = role_changes(&standby.client)
+        .iter()
+        .map(|(_, _, origin, actor)| {
+            assert_eq!(*origin, Some(SwitchOrigin::Request));
+            actor.clone()
+        })
+        .collect();
+    assert_eq!(
+        actors,
+        vec![
+            Some("console-7".to_string()),
+            Some("console-7".to_string()),
+            Some("ops-cli".to_string()),
+            Some("ops-cli".to_string()),
+            Some("console-7".to_string()),
+            Some("console-7".to_string()),
+            None,
+            None,
+        ]
+    );
+
+    active.stop();
+    standby.stop();
+}
+
 #[test]
 fn scan_runs_on_an_unpaced_monitor_and_is_refused_on_a_paced_one() {
     with_monitor(|_driver, addr, _client| {
@@ -1443,22 +1613,36 @@ fn scan_runs_on_an_unpaced_monitor_and_is_refused_on_a_paced_one() {
 #[test]
 fn an_unreachable_monitor_exits_nonzero_naming_the_address() {
     // Bind once to learn a free port, then drop the listener so the
-    // address refuses connections.
-    let addr = TcpListener::bind(("127.0.0.1", 0))
-        .unwrap()
-        .local_addr()
-        .unwrap();
-    for args in [
-        ["snapshot"].as_slice(),
-        ["write", "11", "5"].as_slice(),
-        ["invoke", "seq", "advance"].as_slice(),
-        ["promote"].as_slice(),
-    ] {
-        let output = ctl(addr, args);
-        assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
-        let stderr = stderr(&output);
-        assert!(stderr.contains(&addr.to_string()), "{args:?}: {stderr}");
+    // address refuses connections. A concurrently bound fixture can
+    // legitimately take the freed port — a probe then answers — so
+    // retry until a probed port stays refused.
+    for _ in 0..20 {
+        let addr = TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let mut rebound = false;
+        for args in [
+            ["snapshot"].as_slice(),
+            ["write", "11", "5"].as_slice(),
+            ["invoke", "seq", "advance"].as_slice(),
+            ["promote"].as_slice(),
+        ] {
+            let output = ctl(addr, args);
+            if output.status.success() {
+                rebound = true;
+                break;
+            }
+            let stderr = stderr(&output);
+            assert!(stderr.contains(&addr.to_string()), "{args:?}: {stderr}");
+        }
+        if !rebound {
+            return;
+        }
     }
+    panic!(
+        "twenty dead ports each answered — a concurrent listener keeps taking the freed port or the tool accepts a refused address"
+    );
 }
 
 #[test]
@@ -1524,12 +1708,15 @@ fn malformed_arguments_fail_with_usage_never_a_panic() {
         vec![dead, "invoke", "seq", "advance", "count=1", "count=2"],
         vec![dead, "invoke", "comp", "cmd", "x=1", "--actor"],
         vec![dead, "invoke", "comp", "cmd", "--bogus"],
-        // promote/demote take no actor: the switch-request contract has
-        // no field for one, so the flag is malformed usage there.
+        // promote/demote's malformed shapes: a stray positional, the
+        // actor flag's missing name or a repeat, an unknown flag.
         vec![dead, "promote", "extra"],
-        vec![dead, "promote", "--actor", "op"],
+        vec![dead, "promote", "--actor"],
+        vec![dead, "promote", "--actor", "a", "--actor", "b"],
+        vec![dead, "promote", "--bogus"],
         vec![dead, "demote", "extra"],
-        vec![dead, "demote", "--actor", "op"],
+        vec![dead, "demote", "--actor"],
+        vec![dead, "demote", "--bogus", "x"],
         vec![dead, "snapshot", "--actor", "op"],
         vec![dead, "scan"],
         vec![dead, "scan", "abc"],

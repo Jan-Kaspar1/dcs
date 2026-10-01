@@ -28,7 +28,7 @@ use crate::spec::{ParamDecl, Spec};
 use dcs_core::{Direction, PointId, PointType, SignalId, Value, ValueKind};
 use dcs_model::{
     Channel, ChannelRef, ComponentId, ComponentInstance, Connection, Device, DeviceId, IoPoint,
-    MODEL_VERSION, PlantModel, Port, Signal, ValidationError,
+    MODEL_VERSION, PlantModel, Port, RecordingDuty, Signal, ValidationError,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -258,8 +258,10 @@ impl PlantBuilder {
             channel: Some(channel),
             initial: None,
             writable,
+            requires_reason: false,
             stale_after_ticks: None,
             journaled: false,
+            record: None,
         });
         InPoint::new(id)
     }
@@ -296,8 +298,10 @@ impl PlantBuilder {
             channel: Some(channel),
             initial: None,
             writable: false,
+            requires_reason: false,
             stale_after_ticks: None,
             journaled: false,
+            record: None,
         });
         OutPoint::new(id)
     }
@@ -322,8 +326,10 @@ impl PlantBuilder {
             channel: None,
             initial: Some(initial.into_value()),
             writable,
+            requires_reason: false,
             stale_after_ticks: None,
             journaled: false,
+            record: None,
         });
         InPoint::new(id)
     }
@@ -339,8 +345,10 @@ impl PlantBuilder {
             channel: None,
             initial: Some(initial.into_value()),
             writable: false,
+            requires_reason: false,
             stale_after_ticks: None,
             journaled: false,
+            record: None,
         });
         OutPoint::new(id)
     }
@@ -364,6 +372,86 @@ impl PlantBuilder {
             .find(|declared| declared.id == point)
             .unwrap_or_else(|| panic!("journaled names undeclared io_point {}", point.0));
         declared.journaled = true;
+        self
+    }
+
+    /// Marks a declared point `requires_reason`: commands against it
+    /// must carry a declared `reason` on the attributed envelope —
+    /// refusing `reason_required` at admission without one — the
+    /// per-alarm mandatory-reason declaration the shelving-reason
+    /// decision records for managed request points.
+    ///
+    /// `point` may be a bare [`PointId`] or a handle a point declaration
+    /// returned. Marking an id the builder never declared is a
+    /// programming error and panics naming it; marking anything but a
+    /// writable `In` point surfaces as [`BuildError::Invalid`] at
+    /// [`build`](Self::build), where the same validation a loaded
+    /// document faces rejects the dead declaration.
+    pub fn requires_reason(&mut self, point: impl Into<PointId>) -> &mut Self {
+        let point = point.into();
+        let declared = self
+            .io_points
+            .iter_mut()
+            .find(|declared| declared.id == point)
+            .unwrap_or_else(|| panic!("requires_reason names undeclared io_point {}", point.0));
+        declared.requires_reason = true;
+        self
+    }
+
+    /// Marks a declared point's durable recording duty: the monitor's
+    /// recorder samples its post-scan image into the durable history
+    /// file every `every_ticks` run ticks — the durable-history
+    /// decision's declared-duty narrowing of the volatile-ring rule,
+    /// so a compliance series (the per-filter turbidity record, the
+    /// daily disinfection/CT record, interval energy data) persists
+    /// across restart rather than living only in the diagnostic
+    /// window.
+    ///
+    /// `point` may be a bare [`PointId`] or a handle a point
+    /// declaration returned — either direction, field or internal.
+    /// Marking an id the builder never declared is a programming
+    /// error and panics naming it; a zero `every_ticks` — every scan
+    /// recording, the full-rate stream the durable record exists to
+    /// avoid — surfaces as [`BuildError::Invalid`] at
+    /// [`build`](Self::build), where the same validation a loaded
+    /// document faces rejects the dead declaration.
+    pub fn record(&mut self, point: impl Into<PointId>, every_ticks: u64) -> &mut Self {
+        self.record_duty(point, every_ticks, None)
+    }
+
+    /// Like [`record`](Self::record), plus the declared retention span
+    /// the downstream records system must hold, in days — the
+    /// deployment-sizing half of the duty: the durable file's growth
+    /// is a deployment-managed bound, so `retain_days` is engineering
+    /// data a deployment sizes, rotates, and archives against, never
+    /// a bound the controller enforces.
+    pub fn record_retained(
+        &mut self,
+        point: impl Into<PointId>,
+        every_ticks: u64,
+        retain_days: u64,
+    ) -> &mut Self {
+        self.record_duty(point, every_ticks, Some(retain_days))
+    }
+
+    /// Shared `record`/`record_retained` body: the mark lands on the
+    /// declared point or panics naming the undeclared id.
+    fn record_duty(
+        &mut self,
+        point: impl Into<PointId>,
+        every_ticks: u64,
+        retain_days: Option<u64>,
+    ) -> &mut Self {
+        let point = point.into();
+        let declared = self
+            .io_points
+            .iter_mut()
+            .find(|declared| declared.id == point)
+            .unwrap_or_else(|| panic!("record names undeclared io_point {}", point.0));
+        declared.record = Some(RecordingDuty {
+            every_ticks,
+            retain_days,
+        });
         self
     }
 

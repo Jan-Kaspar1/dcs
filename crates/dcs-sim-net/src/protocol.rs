@@ -17,7 +17,7 @@ use dcs_core::{IoError, PointId, Sample, Tick, Value};
 use dcs_sim::{Fault, PointInfo};
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, BufReader};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 
 /// The maximum size of one protocol message in bytes, delimiter included.
 ///
@@ -50,7 +50,7 @@ pub enum PlantRequest {
         /// declared kind.
         value: Value,
     },
-    /// Advances the shared plant one tick of `dt` time units —
+    /// Advances the shared plant one plant tick of `dt` time units —
     /// `SimDriver::step`. Stepping is an explicit protocol operation so a
     /// controller scan can advance the shared plant deterministically and
     /// a second client observes the same stepped values. `dt` must be
@@ -122,6 +122,19 @@ pub enum PlantRequest {
         /// Whether the claiming attachment belongs to a controller.
         #[serde(default = "default_controller_claim")]
         controller: bool,
+        /// The claimant's monitor endpoint, declared so a peer the
+        /// claim preempts can find the successor's tracking surface:
+        /// the fencing verdicts this claim produces carry it back, and
+        /// the demoted peer's tracking path can then resolve the
+        /// field-arbitrated owner where no announced hint could ever
+        /// prove itself. `None` — the default on requests predating
+        /// the field, and every non-controller claim — leaves the
+        /// verdicts naming no monitor. A wildcard IP declares the
+        /// claimant's bind address, which no peer can dial, so the
+        /// server stores the claiming connection's proven source IP
+        /// with the declared port in its place.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<SocketAddr>,
     },
     /// The launched-controller half of the write-ownership claim: takes
     /// the claim for `owner` only while no *live* attachment holds a
@@ -145,6 +158,13 @@ pub enum PlantRequest {
     ClaimWriterUnlessHeld {
         /// The ownership token the claim asserts.
         owner: u64,
+        /// The claimant's monitor endpoint — the same
+        /// [`ClaimWriter`](Self::ClaimWriter) declaration: a granted
+        /// conditional claim is still the field's owner, so the
+        /// verdicts it later produces name this monitor to the peers
+        /// it supersedes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<SocketAddr>,
     },
     /// The re-attach half of the write-ownership claim: takes the claim
     /// for `owner` only while the field is unclaimed or the standing
@@ -166,8 +186,11 @@ pub enum PlantRequest {
     /// [`ClaimWriterUnlessHeld`](Self::ClaimWriterUnlessHeld) can still
     /// tell the claim is ownerless — without ever becoming a live
     /// holder a different owner's conditional claim would read as a
-    /// live incumbent. Requests from builds predating the flag carry
-    /// none and bind as they always did.
+    /// live incumbent. For the same reason the probe also leaves a
+    /// yielded claim yielded: only a controller's bound re-join —
+    /// `rebind` landing this attachment in the holder set — ends the
+    /// hand-off and clears the mark. Requests from builds predating
+    /// the flag carry none and bind as they always did.
     ///
     /// `controller` carries the same marker [`ClaimWriter`]'s does: a
     /// claim this grant raises for a controller's token is recorded as
@@ -183,6 +206,46 @@ pub enum PlantRequest {
         /// Whether the claiming attachment belongs to a controller.
         #[serde(default = "default_controller_claim")]
         controller: bool,
+        /// The claimant's monitor endpoint — the same
+        /// [`ClaimWriter`](Self::ClaimWriter) declaration: a re-armed
+        /// or probe-raised claim carries its owner's tracking surface
+        /// forward, so a claim rebuilt across a server restart keeps
+        /// naming where the owner serves.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<SocketAddr>,
+    },
+    /// The fencing-loss counterpart of the bound
+    /// [`EnsureWriter`](Self::EnsureWriter) — the conditional re-grant
+    /// a fencing-demoted controller probes while its loss mark stands:
+    /// takes the claim for `owner` while the field is unclaimed, the
+    /// standing claim already names `owner`, or the standing claim's
+    /// holder set is empty — the dead-owner or orphan-placeholder
+    /// shape, whose owner is gone or never bound, so the re-grant
+    /// preempts no live attachment — and is refused
+    /// [`PlantError::Fenced`] while a *different* owner's claim has
+    /// live holders. The refusal ignores the controller marker a
+    /// [`ClaimWriterUnlessHeld`](Self::ClaimWriterUnlessHeld) consults:
+    /// a still-held claim keeps the field until it releases whether a
+    /// controller or a tool holds it — the never-preempts-a-live-holder
+    /// rule the reclaim shares with the bound ensure — while a
+    /// holderless claim protects no one and refusing it wedges the
+    /// redundant pair it was raised to fence: two successive
+    /// ex-owners' unbound probes each leave a holderless claim
+    /// standing, and a reclaim that refused them could never land.
+    /// A granted request binds `owner` to this connection exactly as
+    /// `claim_writer` does — including the
+    /// [`PlantResponse::ClaimedShared`] flag when the token is already
+    /// held by another live attachment — and the claim it lands is
+    /// always recorded as a controller's.
+    ReclaimWriter {
+        /// The ownership token the claim asserts.
+        owner: u64,
+        /// The claimant's monitor endpoint — the same
+        /// [`ClaimWriter`](Self::ClaimWriter) declaration: a granted
+        /// reclaim re-seats the field's owner, so the verdicts it later
+        /// produces name this monitor to the peers it supersedes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<SocketAddr>,
     },
     /// Drop this connection's hold on the write claim. `keep_claim:
     /// false` — the deliberate hand-back a mutation tool performs —
@@ -195,17 +258,40 @@ pub enum PlantRequest {
     /// [`ClaimWriterUnlessHeld`](Self::ClaimWriterUnlessHeld) still
     /// preempts it despite other attachments — a mutation tool's —
     /// holding the yielded token live, while a *live incumbent's*
-    /// unyielded claim keeps refusing it. A release from an attachment
-    /// holding nothing changes nothing either way: an empty holder set
-    /// is the dead-owner state the claim exists to fence, not a
-    /// hand-back. Requests from builds predating the flag carry none
-    /// and release fully, as they always did.
+    /// unyielded claim keeps refusing it. The yield mark ends where the
+    /// hand-off does: the same owner re-granting itself and re-joining
+    /// a live *controller* holder — a bound [`ClaimWriter`](
+    /// Self::ClaimWriter)/[`ClaimWriterUnlessHeld`](
+    /// Self::ClaimWriterUnlessHeld), or a controller's bound
+    /// [`EnsureWriter`](Self::EnsureWriter) — clears it, so a
+    /// re-incumbented owner is never left preemptable by every later
+    /// conditional claim. A release from an attachment holding nothing
+    /// changes nothing either way: an empty holder set is the
+    /// dead-owner state the claim exists to fence, not a hand-back.
+    /// Requests from builds predating the flag carry none and release
+    /// fully, as they always did.
     ReleaseWriter {
         /// Leave the claim standing, marked yielded, instead of
         /// releasing it when the holder set empties.
         #[serde(default)]
         keep_claim: bool,
     },
+    /// The read-only half of the writer claim — the claim-state
+    /// observation a tracking peer reports through its role surface.
+    /// The answer is the verdict a mutation from this connection would
+    /// meet, without any mutation: [`PlantResponse::Done`] while this
+    /// connection holds the claim, [`PlantError::Fenced`] while another
+    /// owner does, [`PlantError::Unclaimed`] while no claim stands.
+    /// The probe asserts, joins, and releases nothing — an observation
+    /// cannot seize the field it reports, so reporting `unclaimed`
+    /// leaves the claim exactly as closed as it found it.
+    ProbeWriter,
+    /// The liveness probe — the container health contract's request
+    /// half: no field access, no claim, no mutation, so every
+    /// attachment's probe answers the same. The server answers
+    /// [`PlantResponse::Alive`] carrying the plant's current tick —
+    /// the freshness a probe watches advance across steps.
+    Ping,
 }
 
 /// The serde default for [`PlantRequest::EnsureWriter`]'s `rebind`:
@@ -237,12 +323,22 @@ pub enum PlantResponse {
     /// Answer to [`PlantRequest::Read`]: the point's latest sample.
     Sample {
         /// The stored sample — value, quality, and the plant tick that
-        /// produced it.
+        /// produced it: the simulated field's own step counter, a
+        /// different tick domain from any reading run's.
         sample: Sample,
     },
     /// Answer to [`PlantRequest::Step`]: the plant's new tick.
     Stepped {
-        /// The tick the step advanced to.
+        /// The plant tick the step advanced to — the simulated field's
+        /// step counter, not a run tick of any client.
+        tick: Tick,
+    },
+    /// Answer to [`PlantRequest::Ping`]: the listener serves, and
+    /// `tick` is the plant's current step tick — the liveness answer's
+    /// freshness half, so a probe sees a stepping plant's tick advance
+    /// between calls.
+    Alive {
+        /// The plant's current tick.
         tick: Tick,
     },
     /// Answer to [`PlantRequest::ListPoints`]: every bound point's
@@ -256,8 +352,10 @@ pub enum PlantResponse {
     /// [`PlantRequest::ClearFault`], [`PlantRequest::ReleaseWriter`],
     /// and the claim requests: the request applied.
     Done,
-    /// Answer to a granted [`PlantRequest::ClaimWriter`] or
-    /// [`PlantRequest::EnsureWriter`] whose `owner` token another live
+    /// Answer to a granted [`PlantRequest::ClaimWriter`],
+    /// [`PlantRequest::ClaimWriterUnlessHeld`],
+    /// [`PlantRequest::EnsureWriter`], or
+    /// [`PlantRequest::ReclaimWriter`] whose `owner` token another live
     /// attachment already holds. The grant stands — one field owner's
     /// several attachments claim the same token by design — but the
     /// sharing is flagged because the token alone cannot distinguish
@@ -288,6 +386,21 @@ pub enum PlantError {
     Io {
         /// The driver's error.
         error: IoError,
+        /// When `error` is the fencing verdict — the write-ownership
+        /// claim refused this attachment's mutation — the standing
+        /// claim's owner token: who the field serves instead. `None`
+        /// on every other point error and absent on the wire from
+        /// servers predating the field, where the fence's claimant is
+        /// recorded only as "another".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<u64>,
+        /// The monitor endpoint the standing claim's owner declared —
+        /// the tracking surface the superseded peer can re-join on:
+        /// the field's arbitration names the successor's address where
+        /// no announced hint could ever prove one. `None` when the
+        /// claim declared none or the server predates the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<SocketAddr>,
     },
     /// The request itself could not be served: a line that does not parse
     /// as a [`PlantRequest`], or a [`PlantRequest::Step`] whose `dt` is
@@ -305,6 +418,22 @@ pub enum PlantError {
     Fenced {
         /// Why the request was refused.
         detail: String,
+        /// The standing claim's owner token — who the field's
+        /// arbitration serves instead of this attachment. Carried so a
+        /// fenced-out field owner's durable audit can name the
+        /// preempting claimant, not just "another". Absent on the wire
+        /// from servers predating the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<u64>,
+        /// The monitor endpoint the standing claim's owner declared —
+        /// the field arbitration's word for where the successor
+        /// serves checkpoints. A demoted peer's tracking path can
+        /// prove this address where no announced `?peer=` hint ever
+        /// proves itself: only actually holding the claim puts a
+        /// monitor under it. `None` when the claim declared none or
+        /// the server predates the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<SocketAddr>,
     },
     /// The request mutates the shared field but no write-ownership
     /// claim stands at all — the server is fresh or restarted, or the
@@ -413,20 +542,35 @@ mod tests {
             PlantRequest::ClaimWriter {
                 owner: 42,
                 controller: false,
+                monitor: Some("127.0.0.1:4190".parse().unwrap()),
             },
-            PlantRequest::ClaimWriterUnlessHeld { owner: 44 },
+            PlantRequest::ClaimWriterUnlessHeld {
+                owner: 44,
+                monitor: None,
+            },
             PlantRequest::EnsureWriter {
                 owner: 43,
                 rebind: true,
                 controller: true,
+                monitor: None,
             },
             PlantRequest::EnsureWriter {
                 owner: 45,
                 rebind: false,
                 controller: true,
+                monitor: None,
+            },
+            PlantRequest::ReclaimWriter {
+                owner: 46,
+                monitor: Some("127.0.0.1:4190".parse().unwrap()),
+            },
+            PlantRequest::ReclaimWriter {
+                owner: 47,
+                monitor: None,
             },
             PlantRequest::ReleaseWriter { keep_claim: false },
             PlantRequest::ReleaseWriter { keep_claim: true },
+            PlantRequest::ProbeWriter,
         ];
         for request in requests {
             let json = serde_json::to_string(&request).unwrap();
@@ -458,23 +602,60 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&PlantRequest::ClaimWriter {
                 owner: 42,
-                controller: false
+                controller: false,
+                monitor: None,
             })
             .unwrap(),
             r#"{"op":"claim_writer","owner":42,"controller":false}"#
         );
+        // A claim declaring its monitor carries it on the wire: the
+        // successors this claim's verdicts name find its tracking
+        // surface there.
         assert_eq!(
-            serde_json::to_string(&PlantRequest::ClaimWriterUnlessHeld { owner: 44 }).unwrap(),
+            serde_json::to_string(&PlantRequest::ClaimWriter {
+                owner: 42,
+                controller: true,
+                monitor: Some("127.0.0.1:4190".parse().unwrap()),
+            })
+            .unwrap(),
+            r#"{"op":"claim_writer","owner":42,"controller":true,"monitor":"127.0.0.1:4190"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PlantRequest::ClaimWriterUnlessHeld {
+                owner: 44,
+                monitor: None
+            })
+            .unwrap(),
             r#"{"op":"claim_writer_unless_held","owner":44}"#
         );
         assert_eq!(
             serde_json::to_string(&PlantRequest::EnsureWriter {
                 owner: 43,
                 rebind: true,
-                controller: true
+                controller: true,
+                monitor: None,
             })
             .unwrap(),
             r#"{"op":"ensure_writer","owner":43,"rebind":true,"controller":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PlantRequest::ReclaimWriter {
+                owner: 46,
+                monitor: None,
+            })
+            .unwrap(),
+            r#"{"op":"reclaim_writer","owner":46}"#
+        );
+        // The re-grant declaring its monitor carries it on the wire:
+        // the peers its claim supersedes find the successor's tracking
+        // surface there.
+        assert_eq!(
+            serde_json::to_string(&PlantRequest::ReclaimWriter {
+                owner: 46,
+                monitor: Some("127.0.0.1:4190".parse().unwrap()),
+            })
+            .unwrap(),
+            r#"{"op":"reclaim_writer","owner":46,"monitor":"127.0.0.1:4190"}"#
         );
         assert_eq!(
             serde_json::to_string(&PlantRequest::ReleaseWriter { keep_claim: false }).unwrap(),
@@ -489,19 +670,34 @@ mod tests {
             PlantRequest::EnsureWriter {
                 owner: 43,
                 rebind: true,
-                controller: true
+                controller: true,
+                monitor: None,
             }
         );
         assert_eq!(
             serde_json::from_str::<PlantRequest>(r#"{"op":"claim_writer","owner":42}"#).unwrap(),
             PlantRequest::ClaimWriter {
                 owner: 42,
-                controller: true
+                controller: true,
+                monitor: None,
             }
         );
         assert_eq!(
             serde_json::from_str::<PlantRequest>(r#"{"op":"release_writer"}"#).unwrap(),
             PlantRequest::ReleaseWriter { keep_claim: false }
+        );
+        assert_eq!(
+            serde_json::to_string(&PlantRequest::ProbeWriter).unwrap(),
+            r#"{"op":"probe_writer"}"#
+        );
+        // The liveness probe is a bare op — no fields, no claim state.
+        assert_eq!(
+            serde_json::to_string(&PlantRequest::Ping).unwrap(),
+            r#"{"op":"ping"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<PlantRequest>(r#"{"op":"ping"}"#).unwrap(),
+            PlantRequest::Ping
         );
     }
 
@@ -516,6 +712,7 @@ mod tests {
                 ),
             },
             PlantResponse::Stepped { tick: Tick(7) },
+            PlantResponse::Alive { tick: Tick(7) },
             PlantResponse::Points {
                 points: vec![PointInfo {
                     point: PointId(10),
@@ -529,6 +726,8 @@ mod tests {
             PlantResponse::Error {
                 error: PlantError::Io {
                     error: IoError::UnknownPoint(PointId(4)),
+                    owner: None,
+                    monitor: None,
                 },
             },
             PlantResponse::Error {
@@ -538,16 +737,22 @@ mod tests {
                         expected: ValueKind::Float,
                         found: Value::Bool(true),
                     },
+                    owner: None,
+                    monitor: None,
                 },
             },
             PlantResponse::Error {
                 error: PlantError::Io {
                     error: IoError::Timeout(PointId(6)),
+                    owner: None,
+                    monitor: None,
                 },
             },
             PlantResponse::Error {
                 error: PlantError::Io {
                     error: IoError::InvalidValue { point: PointId(8) },
+                    owner: None,
+                    monitor: None,
                 },
             },
             PlantResponse::Error {
@@ -558,6 +763,8 @@ mod tests {
             PlantResponse::Error {
                 error: PlantError::Fenced {
                     detail: "another attachment owns field writes".to_string(),
+                    owner: Some(424242),
+                    monitor: None,
                 },
             },
             PlantResponse::Error {
@@ -599,10 +806,18 @@ mod tests {
             serde_json::to_string(&PlantResponse::Stepped { tick: Tick(7) }).unwrap(),
             r#"{"result":"stepped","tick":7}"#
         );
+        // The liveness answer's wire shape the container health check
+        // decodes.
+        assert_eq!(
+            serde_json::to_string(&PlantResponse::Alive { tick: Tick(7) }).unwrap(),
+            r#"{"result":"alive","tick":7}"#
+        );
         assert_eq!(
             serde_json::to_string(&PlantResponse::Error {
                 error: PlantError::Io {
                     error: IoError::UnknownPoint(PointId(4)),
+                    owner: None,
+                    monitor: None,
                 },
             })
             .unwrap(),
@@ -616,6 +831,59 @@ mod tests {
             })
             .unwrap(),
             r#"{"result":"error","error":{"kind":"unclaimed","detail":"no attachment holds field writes"}}"#
+        );
+        // The fencing verdicts name the standing claim's owner — the
+        // claimant the fenced-out owner's audit trail records — while
+        // a `None` keeps the pre-field payload shape byte-identical.
+        assert_eq!(
+            serde_json::to_string(&PlantResponse::Error {
+                error: PlantError::Fenced {
+                    detail: "another attachment owns field writes".to_string(),
+                    owner: Some(424242),
+                    monitor: None,
+                },
+            })
+            .unwrap(),
+            r#"{"result":"error","error":{"kind":"fenced","detail":"another attachment owns field writes","owner":424242}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PlantResponse::Error {
+                error: PlantError::Io {
+                    error: IoError::Fenced(PointId(101)),
+                    owner: Some(424242),
+                    monitor: None,
+                },
+            })
+            .unwrap(),
+            r#"{"result":"error","error":{"kind":"io","error":{"fenced":101},"owner":424242}}"#
+        );
+        // A fenced answer from a build predating the field carries no
+        // owner and decodes to the unattributed verdict.
+        assert_eq!(
+            serde_json::from_str::<PlantResponse>(
+                r#"{"result":"error","error":{"kind":"fenced","detail":"another attachment owns field writes"}}"#
+            )
+            .unwrap(),
+            PlantResponse::Error {
+                error: PlantError::Fenced {
+                    detail: "another attachment owns field writes".to_string(),
+                    owner: None,
+                    monitor: None,
+                },
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<PlantResponse>(
+                r#"{"result":"error","error":{"kind":"io","error":{"fenced":101}}}"#
+            )
+            .unwrap(),
+            PlantResponse::Error {
+                error: PlantError::Io {
+                    error: IoError::Fenced(PointId(101)),
+                    owner: None,
+                    monitor: None,
+                },
+            }
         );
     }
 
@@ -662,6 +930,8 @@ mod tests {
                         expected: ValueKind::Float,
                         found: Value::Bool(true),
                     },
+                    owner: None,
+                    monitor: None,
                 },
             }
         );

@@ -18,12 +18,6 @@ declares:
   negotiation verifies on the wire;
 - `plant.listen` — the plant service's `--listen` address, whose port
   the controllers' `--remote` targets by network name;
-- `pair_token` — the optional pair shared tracking secret: declared,
-  every controller invocation's `--pair-token` carries it verbatim —
-  the keyed announced-source contract only authenticates peers
-  holding the same token. A manifest without the field means the
-  flag is absent everywhere, and a flag the manifest does not
-  declare diverges the same way;
 - `controllers` — one service per named controller, each `--listen`
   matching its declared address and publishing its monitor port, and
   the tracking standby's `--standby` flag plus startup ordering wired
@@ -34,12 +28,29 @@ declares:
   budget the manifest omits means the flag is absent, and the field
   belongs to a tracking standby only — a duty entry declaring it
   diverges the same way;
-- `controllers[].state_file` / `controllers[].journal_file` — the
-  optional durability paths (decisions 35 and 36): each declared
-  container path must be covered by a read-write mount and carried as
-  the `--state-file`/`--journal-file` flag argument; a field the
-  manifest omits means the flag is absent, and a writable mount or
-  flag the manifest does not declare diverges the same way;
+- `controllers[].state_file` / `controllers[].journal_file` /
+  `controllers[].history_file` — the optional durability paths
+  (decisions 35, 36, and 102): each declared container path must be
+  covered by a read-write mount and carried as the
+  `--state-file`/`--journal-file`/`--history-file` flag argument; a
+  field the manifest omits means the flag is absent, and a writable
+  mount or flag the manifest does not declare diverges the same way.
+  One controller's three paths must also be distinct files: the
+  checkpoint lands by write-then-rename outside the append sinks'
+  writer lock, so an aliased `state_file` would orphan the append
+  writer's descriptor — the durable record landing nowhere the path
+  reaches while the visible file reads as checkpoint JSON the next
+  startup's replay refuses (finding
+  state-file-alias-clobbers-append-durable-files);
+- the one-field-per-deployment bound (decision 99): the manifest's
+  single `plant` section is one field whose single-writer claim
+  admits exactly one field-owning run — a duty controller's
+  conditional startup grant refuses a second live claimant
+  (decision 89) — so at most one `controllers` entry may omit
+  `standby`, and a second duty claimant — a second declared pair's
+  duty member included — is a manifest that validates yet describes
+  a rig that cannot run. Tracking entries stay unbounded: a duty
+  may carry several standbys;
 - `topology` — the optional named-pair index (decision 47's deferred
   plant-index artifact, the declaration a `?pair=` overview URL is
   generated from): each declared pair names two distinct member
@@ -218,10 +229,11 @@ def path_within(path, directory):
 
 
 # The manifest's optional per-controller durability fields and the
-# invocation flags that carry them (decisions 35 and 36).
+# invocation flags that carry them (decisions 35, 36, and 102).
 PERSISTENCE = (
     ("state_file", "--state-file"),
     ("journal_file", "--journal-file"),
+    ("history_file", "--history-file"),
 )
 
 
@@ -354,24 +366,6 @@ def main():
                 f"{name} publishes {svc['published']}, expected its monitor port "
                 f"{port} published as {port}",
             )
-        # The pair's shared tracking secret: a declared pair_token
-        # means every controller invocation's --pair-token carries it
-        # verbatim — the keyed announced-source contract authenticates
-        # only peers holding the same token. A flag the manifest does
-        # not declare diverges the same way.
-        pair_flag = flag(svc["argv"], "--pair-token")
-        if manifest.get("pair_token") is None:
-            expect(
-                pair_flag is None,
-                f"{name} passes --pair-token {pair_flag!r} but the "
-                "manifest declares no pair_token",
-            )
-        else:
-            expect(
-                pair_flag == manifest["pair_token"],
-                f"{name} --pair-token is {pair_flag!r}, manifest "
-                f"pair_token is {manifest['pair_token']!r}",
-            )
         if "standby" in controller:
             expect(
                 flag(svc["argv"], "--standby") == controller["standby"],
@@ -434,14 +428,34 @@ def main():
                 f"{name} does not order on the {plant_name} service",
             )
 
-        # Durability: a declared state_file/journal_file must ride a
-        # read-write mount — the innermost mount covering the path is
-        # the one the file lands on — and the invocation flag must
-        # carry it; a field the manifest omits means the flag is
-        # absent, and every writable mount must back a declared path.
+        # Durability: a declared state_file/journal_file/history_file
+        # must ride a read-write mount — the innermost mount covering
+        # the path is the one the file lands on — and the invocation
+        # flag must carry it; a field the manifest omits means the
+        # flag is absent, and every writable mount must back a
+        # declared path. The three paths must also be distinct: an
+        # aliased state_file renames over the append file's path,
+        # orphaning its writer's descriptor — the launch-time refusal
+        # the controller's option parse applies, screened here so a
+        # manifest cannot declare a rig the runtime must refuse
+        # (finding state-file-alias-clobbers-append-durable-files).
         declared_paths = [
             controller[field] for field, _ in PERSISTENCE if field in controller
         ]
+        named_paths = [
+            (field, controller[field])
+            for field, _ in PERSISTENCE
+            if field in controller
+        ]
+        for index, (field, declared_path) in enumerate(named_paths):
+            for other_field, other_path in named_paths[index + 1 :]:
+                expect(
+                    declared_path != other_path,
+                    f"{name} {field} and {other_field} both name "
+                    f"{declared_path!r} — the persistence files must be "
+                    f"distinct paths; the checkpoint's write-then-rename "
+                    f"would orphan the append writer's descriptor",
+                )
         for field, flag_name in PERSISTENCE:
             declared_path = controller.get(field)
             actual = flag(svc["argv"], flag_name)
@@ -472,7 +486,8 @@ def main():
             expect(
                 any(path_within(p, m["target"]) for p in declared_paths),
                 f"{name} carries writable mount {m['source']}:{m['target']} "
-                f"the manifest declares no state_file or journal_file under",
+                f"the manifest declares no state_file, journal_file, or "
+                f"history_file under",
             )
 
     expect(
@@ -495,6 +510,27 @@ def main():
             f"manifest standby {controller['standby']!r} does not name a "
             f"declared controller at its declared listen port",
         )
+
+    # The one-field-per-deployment bound (decision 99): every
+    # declared controller attaches to the manifest's single `plant`,
+    # so each duty entry — a controller without `standby` — is a
+    # claimant on that one field's single-writer claim, whose
+    # conditional startup grant refuses a second live claimant
+    # (decision 89). A second duty — a second declared pair's duty
+    # member or a standalone entry — validates the schema yet
+    # describes a rig that cannot run. Tracking entries stay
+    # unbounded: a duty may carry several standbys.
+    duties = sorted(
+        name
+        for name, controller in declared.items()
+        if "standby" not in controller
+    )
+    expect(
+        len(duties) <= 1,
+        f"manifest declares {len(duties)} duty controllers {duties} "
+        f"over the one plant — the field's single-writer claim "
+        f"admits exactly one field-owning run (decision 99)",
+    )
 
     # The optional topology section: the deployment's declared
     # named-pair index — the artifact a `?pair=` overview URL is

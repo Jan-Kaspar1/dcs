@@ -260,6 +260,7 @@ fn unmarked_points_reject_with_not_writable_naming_the_point() {
                     reason: CommandError::NotWritable { point }
                 },
                 actor: None,
+                reason: None,
             },
             "{point:?}"
         );

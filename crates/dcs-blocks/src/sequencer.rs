@@ -68,11 +68,31 @@ pub struct SequencerStep {
 /// scan boundary through `invoke_command`; `advance` is
 /// `KindDeclared`-available and refuses a completed table, the standing
 /// refusal `command_refusal` publishes on the snapshot's
-/// `command_verdicts` section. The declared
-/// `step_completed` event emits on the scan a step runs its `ticks` out
-/// and journals at the producing tick. None of the commands aliases a
+/// `command_verdicts` section. None of the commands aliases a
 /// writable point: `reset` the command is a one-shot action where the
 /// `reset` input is a held condition.
+///
+/// The kind declares three emitted events, one per retention class —
+/// the serving layer routes each to the store its class names:
+///
+/// - `step_completed` — `History`-retained — emits on the scan a step
+///   runs its `ticks` out, `step` carrying the completed step's 1-based
+///   index. Per-step completions are the bounded operational record: a
+///   diagnostic reads the recent step sequence, and the event-history
+///   ring's oldest-first eviction is the right retention — the durable
+///   journal stays the low-volume audit record instead of accumulating
+///   every step.
+/// - `sequence_completed` — `Journal`-retained — emits once when the
+///   table runs to its end, `steps` carrying the declared table length,
+///   whether `run` paced the final step out or a completing `advance`
+///   landed it there. The run-level boundary is the durable audit
+///   record: one entry per completed run, kept permanently.
+/// - `progress` — `Latest`-retained — emits every scan, `step`,
+///   `elapsed`, and `done` carrying the standing position — the same
+///   fields `capture_state` checkpoints. Progress is a latest-value
+///   publication: only the newest position matters, so each emission
+///   supersedes the last in the latest-emission view rather than
+///   accumulating.
 ///
 /// Declared I/O: `run` (`In`, `Bool`), `reset` (`In`, `Bool`), `out`
 /// (`Out`, `Float`), `step` (`Out`, `Int`), `done` (`Out`, `Bool`).
@@ -265,8 +285,8 @@ impl Component for Sequencer {
                 self.elapsed += 1;
                 if self.elapsed >= self.steps[self.current].ticks.max(1) {
                     // The reported step ran its declared ticks out — the
-                    // declared `step_completed` event, journaled at this
-                    // scan's tick.
+                    // declared `step_completed` event, routed to the
+                    // event-history ring at this scan's tick.
                     self.pending_events.push(EmittedEvent {
                         event: "step_completed".to_string(),
                         component: self.name.clone(),
@@ -280,9 +300,21 @@ impl Component for Sequencer {
                     if self.current == self.steps.len() - 1 {
                         // Hold-at-end: the count clamps at the step's
                         // declared duration, so a captured `done` state
-                        // always reads `elapsed == ticks`.
+                        // always reads `elapsed == ticks`. The run-level
+                        // boundary is the durable audit record —
+                        // `sequence_completed` journals at this tick.
                         self.completed = true;
                         self.elapsed = self.steps[self.current].ticks;
+                        self.pending_events.push(EmittedEvent {
+                            event: "sequence_completed".to_string(),
+                            component: self.name.clone(),
+                            fields: [(
+                                "steps".to_string(),
+                                EventValue::Value(Value::Int(self.steps.len() as i64)),
+                            )]
+                            .into_iter()
+                            .collect(),
+                        });
                     } else {
                         self.current += 1;
                         self.elapsed = 0;
@@ -291,6 +323,30 @@ impl Component for Sequencer {
             }
             reported
         };
+        // The standing position is a latest-value publication — the
+        // `Latest`-retained `progress` event supersedes its previous
+        // record every scan with the post-scan `step`/`elapsed`/`done`
+        // state `capture_state` checkpoints.
+        self.pending_events.push(EmittedEvent {
+            event: "progress".to_string(),
+            component: self.name.clone(),
+            fields: [
+                (
+                    "step".to_string(),
+                    EventValue::Value(Value::Int(self.current as i64 + 1)),
+                ),
+                (
+                    "elapsed".to_string(),
+                    EventValue::Value(Value::Int(self.elapsed as i64)),
+                ),
+                (
+                    "done".to_string(),
+                    EventValue::Value(Value::Bool(self.completed)),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        });
         let driven = self.steps[reported].value;
         io.write_sample(self.out, Sample::new(Value::Float(driven), quality, tick))?;
         io.write_sample(
@@ -360,15 +416,55 @@ impl Component for Sequencer {
                 availability: CommandAvailability::Always,
             },
         ];
-        descriptor.events = vec![EventDecl {
-            name: "step_completed".to_string(),
-            payload: vec![EventField {
-                name: "step".to_string(),
-                kind: EventFieldKind::Value(ValueKind::Int),
-                optional: false,
-            }],
-            retention: EventRetention::Journal,
-        }];
+        // The declared event surface — one event per retention class:
+        // `step_completed` is the bounded operational record a
+        // diagnostic reads (`History` — the event-history ring, evicting
+        // oldest-first at its bound), `sequence_completed` the durable
+        // run-level audit boundary (`Journal` — the one durable record
+        // per completed run), and `progress` the latest-value
+        // publication whose newest emission supersedes (`Latest` — the
+        // standing record per component/event identity).
+        descriptor.events = vec![
+            EventDecl {
+                name: "step_completed".to_string(),
+                payload: vec![EventField {
+                    name: "step".to_string(),
+                    kind: EventFieldKind::Value(ValueKind::Int),
+                    optional: false,
+                }],
+                retention: EventRetention::History,
+            },
+            EventDecl {
+                name: "sequence_completed".to_string(),
+                payload: vec![EventField {
+                    name: "steps".to_string(),
+                    kind: EventFieldKind::Value(ValueKind::Int),
+                    optional: false,
+                }],
+                retention: EventRetention::Journal,
+            },
+            EventDecl {
+                name: "progress".to_string(),
+                payload: vec![
+                    EventField {
+                        name: "step".to_string(),
+                        kind: EventFieldKind::Value(ValueKind::Int),
+                        optional: false,
+                    },
+                    EventField {
+                        name: "elapsed".to_string(),
+                        kind: EventFieldKind::Value(ValueKind::Int),
+                        optional: false,
+                    },
+                    EventField {
+                        name: "done".to_string(),
+                        kind: EventFieldKind::Value(ValueKind::Bool),
+                        optional: false,
+                    },
+                ],
+                retention: EventRetention::Latest,
+            },
+        ];
         descriptor
     }
 
@@ -425,6 +521,19 @@ impl Component for Sequencer {
                     self.current = self.steps.len() - 1;
                     self.elapsed = self.steps[self.current].ticks;
                     self.completed = true;
+                    // The commanded run boundary is the same durable
+                    // audit record the `run`-paced completion journals —
+                    // drained at this apply scan's tick.
+                    self.pending_events.push(EmittedEvent {
+                        event: "sequence_completed".to_string(),
+                        component: self.name.clone(),
+                        fields: [(
+                            "steps".to_string(),
+                            EventValue::Value(Value::Int(self.steps.len() as i64)),
+                        )]
+                        .into_iter()
+                        .collect(),
+                    });
                 } else {
                     self.current += count as usize;
                     self.elapsed = 0;
@@ -441,8 +550,9 @@ impl Component for Sequencer {
         }
     }
 
-    /// Empties the emitted-event queue the `step_completed` emissions
-    /// land in — the executor drains it after every `step`.
+    /// Empties the emitted-event queue the declared events land in —
+    /// the executor drains it after every `step`, so the queue is
+    /// always empty between scans.
     fn drain_events(&mut self) -> Vec<EmittedEvent> {
         std::mem::take(&mut self.pending_events)
     }
@@ -1292,17 +1402,54 @@ mod tests {
                 },
             ]
         );
+        // One declared event per retention class: `step_completed` —
+        // the per-step operational record — `History`; the run-level
+        // `sequence_completed` boundary — the durable audit record —
+        // `Journal`; the standing `progress` publication — superseding
+        // latest value — `Latest`.
         assert_eq!(
             descriptor.events,
-            [EventDecl {
-                name: "step_completed".to_string(),
-                payload: vec![EventField {
-                    name: "step".to_string(),
-                    kind: EventFieldKind::Value(ValueKind::Int),
-                    optional: false,
-                }],
-                retention: EventRetention::Journal,
-            }]
+            [
+                EventDecl {
+                    name: "step_completed".to_string(),
+                    payload: vec![EventField {
+                        name: "step".to_string(),
+                        kind: EventFieldKind::Value(ValueKind::Int),
+                        optional: false,
+                    }],
+                    retention: EventRetention::History,
+                },
+                EventDecl {
+                    name: "sequence_completed".to_string(),
+                    payload: vec![EventField {
+                        name: "steps".to_string(),
+                        kind: EventFieldKind::Value(ValueKind::Int),
+                        optional: false,
+                    }],
+                    retention: EventRetention::Journal,
+                },
+                EventDecl {
+                    name: "progress".to_string(),
+                    payload: vec![
+                        EventField {
+                            name: "step".to_string(),
+                            kind: EventFieldKind::Value(ValueKind::Int),
+                            optional: false,
+                        },
+                        EventField {
+                            name: "elapsed".to_string(),
+                            kind: EventFieldKind::Value(ValueKind::Int),
+                            optional: false,
+                        },
+                        EventField {
+                            name: "done".to_string(),
+                            kind: EventFieldKind::Value(ValueKind::Bool),
+                            optional: false,
+                        },
+                    ],
+                    retention: EventRetention::Latest,
+                },
+            ]
         );
     }
 
@@ -1390,48 +1537,110 @@ mod tests {
         assert_eq!(block.command_refusal("advance"), None);
     }
 
+    /// The `event`/`fields` a drained event carries — the test-side
+    /// view of the emission record.
+    fn emitted(events: &[EmittedEvent]) -> Vec<(&str, &BTreeMap<String, EventValue>)> {
+        events
+            .iter()
+            .map(|event| (event.event.as_str(), &event.fields))
+            .collect()
+    }
+
     #[test]
     fn step_completed_emits_on_the_completing_scan() {
         let mut block = component();
         let io = io();
 
-        // Step 1 banks its first scan: nothing completes, nothing
-        // drains.
+        // Step 1 banks its first scan: nothing completes — the scan's
+        // only emission is the standing `progress` publication.
         step(&mut block, &io, true, false, 1);
-        assert!(block.drain_events().is_empty());
-
-        // Tick 2 runs step 1's declared ticks out — the event names the
-        // completed step's 1-based index.
-        step(&mut block, &io, true, false, 2);
         let events = block.drain_events();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event, "step_completed");
-        assert_eq!(events[0].fields["step"], EventValue::Value(Value::Int(1)));
+        let [(name, fields)] = emitted(&events)[..] else {
+            panic!("one progress emission per scan: {events:?}")
+        };
+        assert_eq!(name, "progress");
+        assert_eq!(fields["step"], EventValue::Value(Value::Int(1)));
+        assert_eq!(fields["elapsed"], EventValue::Value(Value::Int(1)));
+        assert_eq!(fields["done"], EventValue::Value(Value::Bool(false)));
         // The drain emptied the queue.
         assert!(block.drain_events().is_empty());
 
-        // A parked or held scan emits nothing.
+        // Tick 2 runs step 1's declared ticks out — `step_completed`
+        // names the completed step's 1-based index, then `progress`
+        // reports the position the scan leaves: step 2, none banked.
+        step(&mut block, &io, true, false, 2);
+        let events = block.drain_events();
+        let [(completed, fields), (progress, progress_fields)] = emitted(&events)[..] else {
+            panic!("a completing scan emits step_completed then progress: {events:?}")
+        };
+        assert_eq!(completed, "step_completed");
+        assert_eq!(fields["step"], EventValue::Value(Value::Int(1)));
+        assert_eq!(progress, "progress");
+        assert_eq!(progress_fields["step"], EventValue::Value(Value::Int(2)));
+        assert_eq!(progress_fields["elapsed"], EventValue::Value(Value::Int(0)));
+
+        // A parked or held scan emits only its standing `progress`.
         step(&mut block, &io, false, false, 3);
-        assert!(block.drain_events().is_empty());
+        let events = block.drain_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, "progress");
 
         // The run walks to the end: step 2's second running scan
         // completes it on tick 5 and step 3's single scan completes the
-        // table on tick 6 — one event each, in emission order.
+        // table on tick 6 — `sequence_completed` lands beside the final
+        // step's record, `progress` reporting `done`.
         step(&mut block, &io, true, false, 4);
-        assert!(block.drain_events().is_empty());
+        assert_eq!(emitted(&block.drain_events())[0].0, "progress");
         step(&mut block, &io, true, false, 5);
         assert_eq!(
             block.drain_events()[0].fields["step"],
             EventValue::Value(Value::Int(2))
         );
         step(&mut block, &io, true, false, 6);
+        let events = block.drain_events();
+        let names: Vec<&str> = events.iter().map(|event| event.event.as_str()).collect();
+        assert_eq!(names, ["step_completed", "sequence_completed", "progress"]);
+        assert_eq!(events[0].fields["step"], EventValue::Value(Value::Int(3)));
+        assert_eq!(events[1].fields["steps"], EventValue::Value(Value::Int(3)));
         assert_eq!(
-            block.drain_events()[0].fields["step"],
-            EventValue::Value(Value::Int(3))
+            events[2].fields["done"],
+            EventValue::Value(Value::Bool(true))
         );
-        // Held at the end, no further emissions.
+        // Held at the end, only `progress` keeps publishing.
         step(&mut block, &io, true, false, 7);
-        assert!(block.drain_events().is_empty());
+        let events = block.drain_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, "progress");
+        assert_eq!(
+            events[0].fields["done"],
+            EventValue::Value(Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn a_completing_advance_emits_the_run_boundary_once() {
+        let mut block = component();
+        let io = io();
+
+        // `advance` landing past the last step completes the run — the
+        // same `sequence_completed` boundary the `run`-paced completion
+        // emits, queued for the apply scan's drain.
+        invoke(&mut block, "advance", &[("count", Value::Int(9))]).unwrap();
+        let events = block.drain_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, "sequence_completed");
+        assert_eq!(events[0].fields["steps"], EventValue::Value(Value::Int(3)));
+
+        // A non-completing advance emits no boundary — the next scan's
+        // `progress` reports the new position alone.
+        let mut mid = component();
+        invoke(&mut mid, "advance", &[("count", Value::Int(1))]).unwrap();
+        assert!(mid.drain_events().is_empty());
+        step(&mut mid, &io, true, false, 1);
+        let events = mid.drain_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, "progress");
+        assert_eq!(events[0].fields["step"], EventValue::Value(Value::Int(2)));
     }
 
     #[test]

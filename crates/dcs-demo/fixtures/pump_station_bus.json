@@ -118,6 +118,9 @@
       "channel": {
         "device": 1,
         "name": "level-primary"
+      },
+      "record": {
+        "every_ticks": 1
       }
     },
     {
@@ -127,6 +130,9 @@
       "channel": {
         "device": 1,
         "name": "level-backup"
+      },
+      "record": {
+        "every_ticks": 1
       }
     },
     {
@@ -136,6 +142,9 @@
       "channel": {
         "device": 1,
         "name": "inflow"
+      },
+      "record": {
+        "every_ticks": 1
       }
     },
     {
@@ -146,7 +155,10 @@
         "device": 1,
         "name": "net-flow"
       },
-      "stale_after_ticks": 5
+      "stale_after_ticks": 5,
+      "record": {
+        "every_ticks": 1
+      }
     },
     {
       "id": 120,
@@ -3710,7 +3722,7 @@
         }
       },
       "rationalization": {
-        "consequence": "Demand stands with no pump available to meet it",
+        "consequence": "No pump is available; the station cannot pump",
         "required_action": "Restore a pump to service or clear its faults",
         "reference": "none-available-alarm"
       },

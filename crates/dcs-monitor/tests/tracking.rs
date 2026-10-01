@@ -8,19 +8,21 @@
 use dcs_core::{
     Command, CommandAvailability, CommandDecl, CommandOutcome, ComponentDescriptor, Direction,
     Divergence, EmittedEvent, EventDecl, EventField, EventFieldKind, EventRetention, EventValue,
-    IoDriver, IoError, JournalEvent, PointId, Role, Sample, StandbySync, StateMap, SwitchError,
-    Tick, Value, ValueKind,
+    FailoverEvidence, IoDriver, IoError, JournalEvent, PointId, Quality, QualityReason, Role,
+    Sample, StandbySync, StateMap, SwitchError, SwitchOrigin, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
-use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorClient, line_proof};
+use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorClient, TrackTarget};
 use dcs_runtime::{
     Checkpoint, Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap,
-    StepError,
+    PointSpec, StepError, TrackReport, mint_generation,
 };
+use dcs_sim::{ChannelId, ChannelMap, PointBinding, SimDriver};
+use dcs_sim_net::{PlantServer, RemoteDriver, RemoteError};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -58,6 +60,54 @@ impl IoDriver for StubDriver {
         let sample = points.get_mut(&point).ok_or(IoError::UnknownPoint(point))?;
         *sample = Sample::good(value, Tick::ZERO);
         Ok(())
+    }
+}
+
+/// A driver front that fences field writes on demand — the in-process
+/// stand-in for the shared field's arbitration preempting this
+/// attachment's claim: once `preempt` runs, every write returns
+/// `IoError::Fenced`, exactly what a foreign `claim_writer` makes the
+/// superseded owner's next field-owning scan observe.
+struct FencingDriver {
+    inner: StubDriver,
+    preempted: AtomicBool,
+}
+
+impl FencingDriver {
+    fn start() -> &'static Self {
+        Box::leak(Box::new(Self {
+            inner: StubDriver::new(&[
+                (PointId(10), Value::Float(3.0)),
+                (PointId(20), Value::Float(0.0)),
+                (PointId(30), Value::Float(0.0)),
+            ]),
+            preempted: AtomicBool::new(false),
+        }))
+    }
+
+    /// The foreign `claim_writer` preemption: every write fences from
+    /// here on — the claim a dead token keeps standing.
+    fn preempt(&self) {
+        self.preempted.store(true, Ordering::Relaxed);
+    }
+
+    /// The preemption lifting — the foreign claim's release: writes
+    /// under the arbitration's standing owner pass again.
+    fn release(&self) {
+        self.preempted.store(false, Ordering::Relaxed);
+    }
+}
+
+impl IoDriver for FencingDriver {
+    fn read(&self, point: PointId) -> Result<Sample, IoError> {
+        self.inner.read(point)
+    }
+
+    fn write(&self, point: PointId, value: Value) -> Result<(), IoError> {
+        if self.preempted.load(Ordering::Relaxed) {
+            return Err(IoError::Fenced(point));
+        }
+        self.inner.write(point, value)
     }
 }
 
@@ -174,6 +224,45 @@ fn signal_index() -> SignalIndex {
 }
 
 fn executor(driver: &'static StubDriver) -> Executor<'static> {
+    let map = PointMap::new()
+        .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
+        .with_point(PointId(20), Direction::Out, ValueKind::Float)
+        .with_point(PointId(30), Direction::Out, ValueKind::Float);
+    Executor::new(driver, map, vec![Box::new(Scale)]).unwrap()
+}
+
+/// The realign finding's executor: the fixture's surface with a
+/// `stale_after_ticks` budget on the field `In` — the declared
+/// freshness bound the tracker's own scans outrun while the frozen
+/// checkpoint stream holds the field sample unchanged.
+fn stale_executor(driver: &'static StubDriver) -> Executor<'static> {
+    let map = PointMap::new()
+        .with_spec(
+            PointId(10),
+            PointSpec {
+                direction: Direction::In,
+                kind: ValueKind::Float,
+                internal: None,
+                writable: true,
+                requires_reason: false,
+                stale_after_ticks: Some(STALE_BUDGET),
+                journaled: false,
+                record_every_ticks: None,
+            },
+        )
+        .with_point(PointId(20), Direction::Out, ValueKind::Float)
+        .with_point(PointId(30), Direction::Out, ValueKind::Float);
+    Executor::new(driver, map, vec![Box::new(Scale)]).unwrap()
+}
+
+/// Point 10's declared freshness budget on the realign rig — long
+/// enough to span the converging scans, short enough that a handful of
+/// degraded scans crosses it.
+const STALE_BUDGET: u64 = 4;
+
+/// The `executor` fixture over a fencing front — the launched active's
+/// build in the involuntary-demotion reproduction.
+fn fenced_executor(driver: &'static FencingDriver) -> Executor<'static> {
     let map = PointMap::new()
         .with_writable_point(PointId(10), Direction::In, ValueKind::Float)
         .with_point(PointId(20), Direction::Out, ValueKind::Float)
@@ -469,6 +558,29 @@ fn keyed(monitor: Monitor<'static>, key: Option<u64>) -> Monitor<'static> {
     }
 }
 
+/// One sim-net point binding for `point` — the channel-map shape the
+/// shared plant's arbitration test rigs use.
+fn plant_binding(point: u64, direction: Direction, initial: Value) -> PointBinding {
+    PointBinding {
+        point: PointId(point),
+        channel: ChannelId {
+            device: 1,
+            name: format!("ch{point}"),
+        },
+        direction,
+        initial,
+    }
+}
+
+/// The shared-plant channel map the field-arbitration rig serves —
+/// the same three points the executor fixture drives.
+fn plant_map() -> ChannelMap {
+    ChannelMap::new()
+        .with_point(plant_binding(10, Direction::In, Value::Float(3.0)))
+        .with_point(plant_binding(20, Direction::Out, Value::Float(0.0)))
+        .with_point(plant_binding(30, Direction::Out, Value::Float(0.0)))
+}
+
 /// The journaled role transitions, in order.
 fn role_changes(client: &MonitorClient) -> Vec<JournalEvent> {
     client
@@ -523,7 +635,9 @@ fn driven_track_cycle_journals_the_self_promotion_role_changes() {
 
     // The budget-th miss self-promotes at that boundary: the role
     // changes the cycle queued drain into the journal — the request's
-    // promotion, then the scan settling it.
+    // promotion, then the scan settling it — each stamped
+    // `origin: failover` with no actor: the peer's own takeover never
+    // reads as an unattributed operator request.
     standby.standby.client.advance(1).unwrap();
     let report = standby.standby.client.role().unwrap();
     assert_eq!(report.role, Role::Active);
@@ -533,10 +647,14 @@ fn driven_track_cycle_journals_the_self_promotion_role_changes() {
             JournalEvent::RoleChanged {
                 from: Role::Standby,
                 to: Role::Promoting,
+                origin: Some(SwitchOrigin::Failover),
+                actor: None,
             },
             JournalEvent::RoleChanged {
                 from: Role::Promoting,
                 to: Role::Active,
+                origin: Some(SwitchOrigin::Failover),
+                actor: None,
             },
         ]
     );
@@ -570,6 +688,285 @@ fn driven_track_cycle_reports_the_refused_self_promotion() {
     assert!(
         role_changes(&standby.standby.client).is_empty(),
         "a refused promotion journals no role change"
+    );
+}
+
+/// `GET /role`'s served shape on an armed standby: the `failover`
+/// field serializes the gate's evidence — the standing proof, the
+/// consecutive misses, and the armed budget bounding them — and an
+/// unarmed peer omits the key entirely, so reports written before the
+/// field existed re-serve byte-identical.
+#[test]
+fn role_report_serves_the_armed_peers_failover_evidence() {
+    let (standby, active) = DrivenStandby::start(Some(3));
+
+    // Converged and tracking: the armed accounting serves the standing
+    // proof with a clean miss count.
+    active.client.advance(3).unwrap();
+    standby.standby.client.advance(1).unwrap();
+    let (status, body) = standby
+        .standby
+        .client
+        .request("GET", "/role", None)
+        .unwrap();
+    assert_eq!(status, 200);
+    let served: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        served["failover"],
+        serde_json::json!({"converged": true, "misses": 0, "budget": 3}),
+        "the armed peer serves the gate's evidence: {body}"
+    );
+
+    // The same report is the POST /promote answer body — the switch
+    // response carries the armed accounting identically.
+    let promoted = standby.standby.client.promote().unwrap();
+    assert_eq!(promoted.role, Role::Promoting);
+    assert_eq!(
+        promoted.failover,
+        Some(FailoverEvidence {
+            converged: true,
+            misses: 0,
+            budget: 3,
+        })
+    );
+
+    // Mid-window on a second armed rig: the produced-nothing pull
+    // degrades the served verdict while the standing proof holds —
+    // "verdict degraded, proof stands, misses 1 of 3".
+    let (mid, mid_active) = DrivenStandby::start(Some(3));
+    mid_active.client.advance(1).unwrap();
+    mid.standby.client.advance(1).unwrap();
+    mid_active.stop();
+    mid.standby.client.advance(1).unwrap();
+    let (status, body) = mid.standby.client.request("GET", "/role", None).unwrap();
+    assert_eq!(status, 200);
+    let served: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        served["sync"].get("degraded").is_some(),
+        "the missed pull reports degraded: {body}"
+    );
+    assert_eq!(
+        served["failover"],
+        serde_json::json!({"converged": true, "misses": 1, "budget": 3}),
+        "the mid-window report keeps the standing proof's bound: {body}"
+    );
+
+    // An unarmed peer omits the key entirely: the bare proof flag would
+    // survive unbounded misses, so it never reaches the wire.
+    let (unarmed, _unarmed_active) = DrivenStandby::start(None);
+    unarmed.standby.client.advance(1).unwrap();
+    let (status, body) = unarmed
+        .standby
+        .client
+        .request("GET", "/role", None)
+        .unwrap();
+    assert_eq!(status, 200);
+    let served: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        served.get("failover").is_none(),
+        "an unarmed peer's report carries no failover accounting: {body}"
+    );
+}
+
+/// The QA finding `failover-refused-once-window-closed-forever` on the
+/// driven path against the real field arbitration: an armed standby
+/// tracking an ownerless line — the reproduction's `c` on `b`'s
+/// `source_owns_field: false` checkpoints — whose budget-th
+/// self-promotion the live incumbent's claim correctly refuses must
+/// keep the gate armed while fresh orphaned checkpoints keep landing,
+/// each due cycle retrying the conditional claim, so when the
+/// incumbent dies and the claim stands dead-owned a later retry
+/// preempts it and promotes. On the reported build the misses
+/// climbing past the budget voided the gate outright — `c` stranded
+/// `standby` beside the dead-owned field until `POST /promote` — and
+/// the refused attempt left no journal record.
+#[test]
+fn a_refused_armed_self_promotion_retries_once_the_incumbent_dies() {
+    const INCUMBENT: u64 = 0x1165_000a;
+    const TAKEOVER: u64 = 0x1165_000c;
+
+    // The shared field: the incumbent's controller attachment claims
+    // it at launch — the reproduction's live `a` — so a peer's
+    // conditional takeover asks the same arbitration that refused it
+    // there, `RemoteError::Fenced` while the claim stands.
+    let plant = PlantServer::bind("127.0.0.1:0", SimDriver::new(plant_map()).unwrap()).unwrap();
+    let plant_addr = plant.local_addr().unwrap();
+    thread::spawn(move || plant.serve());
+    let incumbent = RemoteDriver::connect(plant_addr).unwrap().as_controller();
+    incumbent.claim_writer(INCUMBENT).unwrap();
+
+    // The ownerless line `b` serves: a standby peer's checkpoints
+    // stamp `source_owns_field: false`, so every landed pull on `c` is
+    // an orphaned apply — the counted miss that is also the fresh
+    // convergence proof the stranded gate must keep reading.
+    let b_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let b = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(b_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    let b_addr = dialable(b.monitor.local_addr());
+
+    // The armed peer `c` — the reproduction's `--standby b
+    // --auto-promote N`: a failover budget of two, a driven pull off
+    // `b`, and the conditional claim the orphaned promotion runs
+    // against the field's own arbitration.
+    let c_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let c_field: &'static RemoteDriver = Box::leak(Box::new(
+        RemoteDriver::connect(plant_addr).unwrap().as_controller(),
+    ));
+    let c = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(c_driver), None)
+                .with_failover(2)
+                .with_field_orphan_claim(|| match c_field.claim_writer_unless_held(TAKEOVER) {
+                    Ok(_) => Ok(true),
+                    Err(RemoteError::Fenced) => Ok(false),
+                    Err(error) => Err(error.to_string()),
+                }),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(b_addr),
+            after_scan: None,
+        }),
+    );
+
+    // One orphaned apply under budget — the counted miss that proves
+    // a peer serves but no field owner does.
+    b.client.advance(1).unwrap();
+    c.client.advance(1).unwrap();
+    let report = c.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert!(
+        matches!(report.sync, Some(StandbySync::Orphaned { .. })),
+        "the ownerless line reports orphaned: {report:?}"
+    );
+    assert_eq!(
+        report.failover,
+        Some(FailoverEvidence {
+            converged: true,
+            misses: 1,
+            budget: 2,
+        })
+    );
+
+    // The budget-th orphaned pull fires the conditional claim — the
+    // live incumbent's refusal is the correct verdict at fire time —
+    // and the attempt journals, the durable record the reported build
+    // left only on stderr.
+    b.client.advance(1).unwrap();
+    c.client.advance(1).unwrap();
+    let report = c.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert_eq!(
+        report.failover,
+        Some(FailoverEvidence {
+            converged: true,
+            misses: 2,
+            budget: 2,
+        })
+    );
+    let journal = c.client.journal(0).unwrap();
+    let refusals: Vec<_> = journal
+        .iter()
+        .filter(|entry| matches!(entry.event, JournalEvent::PromotionRefused { .. }))
+        .collect();
+    assert_eq!(refusals.len(), 1, "the refused attempt must journal");
+    assert!(
+        matches!(
+            refusals[0].event,
+            JournalEvent::PromotionRefused {
+                error: SwitchError::FieldClaimFailed { .. },
+                misses: 2,
+            }
+        ),
+        "the journal names the claim refusal and the misses it fired at: {:?}",
+        refusals[0].event
+    );
+
+    // The stranded window: orphaned applies keep landing, the misses
+    // climb past the budget — but each apply re-proves the run, so
+    // the served proof stays live and the gate armed where the
+    // reported build served `converged: false` forever.
+    for _ in 0..3 {
+        b.client.advance(1).unwrap();
+        c.client.advance(1).unwrap();
+    }
+    let report = c.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert_eq!(
+        report.failover,
+        Some(FailoverEvidence {
+            converged: true,
+            misses: 5,
+            budget: 2,
+        }),
+        "the armed peer keeps serving a live proof past the budget: {report:?}"
+    );
+    assert_eq!(
+        c.client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .filter(|entry| matches!(entry.event, JournalEvent::PromotionRefused { .. }))
+            .count(),
+        1,
+        "a standing refusal cause journals once, not once per retried scan"
+    );
+
+    // The incumbent dies: its connection's end drops its hold, the
+    // claim standing dead-owned — the preemptable state the retry was
+    // kept armed for.
+    drop(incumbent);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let promoted = loop {
+        b.client.advance(1).unwrap();
+        c.client.advance(1).unwrap();
+        let report = c.client.role().unwrap();
+        if report.role == Role::Active {
+            break report;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the armed peer must promote once the claim frees: {report:?}"
+        );
+    };
+    assert_eq!(promoted.role, Role::Active);
+    assert_eq!(promoted.sync, None);
+
+    // The takeover journals the failover origin — the automatic
+    // recovery the stranded pair needed an operator's `POST /promote`
+    // for on the reported build.
+    assert_eq!(
+        role_changes(&c.client),
+        vec![
+            JournalEvent::RoleChanged {
+                from: Role::Standby,
+                to: Role::Promoting,
+                origin: Some(SwitchOrigin::Failover),
+                actor: None,
+            },
+            JournalEvent::RoleChanged {
+                from: Role::Promoting,
+                to: Role::Active,
+                origin: Some(SwitchOrigin::Failover),
+                actor: None,
+            },
+        ]
     );
 }
 
@@ -724,7 +1121,7 @@ fn driven_stale_apply_leaves_the_standby_diverged() {
                 if compared.len() == 1
                     && compared[0].point == PointId(20)
                     && compared[0].staged == compared[0].field
-                    && entry.tick == Tick(5)
+                    && entry.tick == Tick(6)
         )),
         "the clear must journal as divergence_resolved at the compared tick: {journal:?}"
     );
@@ -1044,40 +1441,46 @@ fn closed_port() -> SocketAddr {
 /// whatever document it currently serves, so a test can adopt the
 /// endpoint on one document and then have later pulls answer with
 /// another — the reproduction's flip after the one-shot verify.
-/// Runs on its own thread until dropped.
+/// `serve_signed` gives the endpoint the pair's key: its answers then
+/// carry the `line_proof` a keyed pull's `?prove=` nonce demands —
+/// the strongest interposer shape, where every pulled document is
+/// genuinely signed and only its content can convict it. Runs on its
+/// own thread until dropped.
 struct Hostile {
     addr: SocketAddr,
     body: Arc<Mutex<Checkpoint>>,
+    hits: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Hostile {
     fn serve(forged: &Checkpoint) -> Self {
-        Self::start(forged, None)
+        Self::listen(forged, None)
     }
 
-    /// The same interposer holding the pair's key — the compromised
-    /// key-holder shape: it stamps every answer's `line_proof` for the
-    /// pull's `?prove=` nonce like a real keyed peer, so the document's
-    /// own contents, not a missing signature, are what must convict
-    /// it.
+    /// The key-holding variant: every answer carries the keyed
+    /// `line_proof` binding the pull's `?prove=` nonce to the served
+    /// document — a signed forgery the proof alone cannot refuse.
     fn serve_signed(forged: &Checkpoint, key: u64) -> Self {
-        Self::start(forged, Some(key))
+        Self::listen(forged, Some(key))
     }
 
-    fn start(forged: &Checkpoint, key: Option<u64>) -> Self {
+    fn listen(forged: &Checkpoint, key: Option<u64>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
         let body = Arc::new(Mutex::new(forged.clone()));
         let served = Arc::clone(&body);
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counting = Arc::clone(&hits);
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = Arc::clone(&stop);
         let thread = thread::spawn(move || {
             while !stopping.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        counting.fetch_add(1, Ordering::Relaxed);
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                         let mut seen = Vec::new();
                         let mut buf = [0u8; 4096];
@@ -1096,12 +1499,12 @@ impl Hostile {
                                 Err(_) => break,
                             }
                         }
-                        let mut answer = served.lock().unwrap().clone();
-                        if let Some(key) = key {
-                            answer.line_proof =
-                                prove_nonce(&seen).map(|nonce| line_proof(key, nonce, &answer));
+                        let mut document = served.lock().unwrap().clone();
+                        if let (Some(key), Some(nonce)) = (key, request_prove(&seen)) {
+                            document.line_proof =
+                                Some(dcs_monitor::line_proof(key, nonce, &document));
                         }
-                        let body = serde_json::to_string(&answer).unwrap();
+                        let body = serde_json::to_string(&document).unwrap();
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
                              Content-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1121,9 +1524,17 @@ impl Hostile {
         Self {
             addr,
             body,
+            hits,
             stop,
             thread: Some(thread),
         }
+    }
+
+    /// How many connections the endpoint has served — the count an
+    /// unproven announcer must never see grow past its bounded verify
+    /// probes.
+    fn hits(&self) -> usize {
+        self.hits.load(Ordering::Relaxed)
     }
 
     /// Swaps the document later pulls answer with — the reproduction's
@@ -1134,17 +1545,15 @@ impl Hostile {
     }
 }
 
-/// The `prove=<nonce>` a checkpoint request's query carried, if any —
-/// the nonce a signing hostile stamps its answer for, the same
-/// `?prove=` contract a real keyed monitor answers.
-fn prove_nonce(request: &[u8]) -> Option<u64> {
-    let target = std::str::from_utf8(request)
-        .ok()?
-        .split_whitespace()
-        .nth(1)?;
-    target.split('?').nth(1)?.split('&').find_map(|pair| {
-        pair.strip_prefix("prove=")
-            .and_then(|value| value.parse().ok())
+/// The `prove` nonce a checkpoint request's query carries — the
+/// attestation demand a signing hostile answers under its key.
+fn request_prove(request: &[u8]) -> Option<u64> {
+    let line = std::str::from_utf8(request).ok()?.lines().next()?;
+    let query = line.split_whitespace().nth(1)?.split_once('?')?.1;
+    query.split('&').find_map(|pair| {
+        pair.split_once('=')
+            .filter(|(key, _)| *key == "prove")
+            .and_then(|(_, value)| value.parse().ok())
     })
 }
 
@@ -1166,6 +1575,7 @@ impl Drop for Hostile {
 /// Runs on its own thread until dropped.
 struct Relay {
     addr: SocketAddr,
+    partitioned: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -1175,12 +1585,18 @@ impl Relay {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
+        let partitioned = Arc::new(AtomicBool::new(false));
+        let cutting = Arc::clone(&partitioned);
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = Arc::clone(&stop);
         let thread = thread::spawn(move || {
             while !stopping.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((client, _)) => {
+                        if cutting.load(Ordering::Relaxed) {
+                            drop(client);
+                            continue;
+                        }
                         if let Ok(server) = std::net::TcpStream::connect(upstream) {
                             thread::spawn(move || pump_relay(client, server));
                         }
@@ -1194,9 +1610,18 @@ impl Relay {
         });
         Self {
             addr,
+            partitioned,
             stop,
             thread: Some(thread),
         }
+    }
+
+    /// Cuts or restores the relayed stream — the frozen-source window
+    /// the realign finding pauses: accepted connections close
+    /// unanswered while cut, so the tracker's pulls fail fast like the
+    /// reproduction's paused active.
+    fn partition(&self, cut: bool) {
+        self.partitioned.store(cut, Ordering::Relaxed);
     }
 }
 
@@ -1376,8 +1801,8 @@ fn demote_toward_a_verified_announced_source_journals_the_adopted_source() {
     assert_eq!(active.client.promote().unwrap().role, Role::Promoting);
 }
 
-/// The QA finding `announced-source-adopts-standby-shaped-checkpoint`
-/// at the verify boundary: the reproduction's forge is a same-source
+/// The QA finding `announced-verify-standby-shape-forgery` (#872) at
+/// the verify boundary: the reproduction's forge is a same-source
 /// endpoint serving the victim's own checkpoint with the field claim
 /// stripped — the standby's `source_owns_field: false` shape the
 /// unkeyed document checks used to accept. An unkeyed run can prove
@@ -1394,9 +1819,14 @@ fn an_unkeyed_announced_standby_shaped_document_cannot_arm_the_demotion() {
 
     // The reproduction's forge verbatim: the victim's served document
     // with `source_owns_field` flipped true -> false — the standby
-    // shape the #832 own-document refusal never covered.
+    // shape the own-document refusal never covered — at a tick inside
+    // the honest successor skew, carrying a planted output image.
     let mut forged = lonely.client.checkpoint().unwrap();
     forged.source_owns_field = Some(false);
+    forged.tick = Tick(forged.tick.0 + 1);
+    forged
+        .outputs
+        .insert(PointId(20), Sample::good(Value::Float(1234.0), forged.tick));
     let hostile = Hostile::serve(&forged);
 
     // The same-source announce lands — but on an unkeyed run a bare
@@ -1472,6 +1902,500 @@ fn a_reannounce_cannot_redirect_the_demoted_peers_tracking() {
     assert_eq!(active.client.promote().unwrap().role, Role::Promoting);
 }
 
+/// The QA finding `involuntary-demote-unverified-announced-hint`
+/// (#873): an active launched without `--peer` records every `?peer=`
+/// announce as an unproven hint — the serving side cannot tell the
+/// puller's monitor port from any other same-IP claim. `POST /demote`
+/// proves each hint before following it; the involuntary path — a
+/// foreign `claim_writer` preempting the field, `field_claim_lost`
+/// demoting the owner mid-scan with no demote boundary ever running
+/// the verify — must apply the same scrutiny: the demoted peer's
+/// first sourceless cycle probes the recorded hints under the demote
+/// verify's checks, the dead and foreign endpoints lose to the
+/// legitimate successor's own proof inside one bounded pass, and the
+/// run adopts, journals, and pulls that one — never the unproven
+/// announcer the defect stranded it on.
+#[test]
+fn an_involuntary_demote_verifies_the_announced_hints_before_tracking() {
+    // The announced contract is keyed-only — the reproduction's pair
+    // carries the deployment's `--pair-token`; the foreign probe does
+    // not hold it, so its answers can never attest.
+    const KEY: u64 = 0x243f_6a88_85a3_08d3;
+    let fencing = FencingDriver::start();
+    let active = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(fenced_executor(fencing), None),
+            signal_index(),
+        )
+        .unwrap()
+        .with_pair_key(KEY),
+    );
+
+    // The legitimate successor: a driven standby tracking the active
+    // and announcing its own address on every pull — the `--standby`
+    // half of the reproduction's pair.
+    let standby_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let standby = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(standby_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .with_pair_key(KEY)
+        .driven(Driven {
+            track: Some(dialable(active.monitor.local_addr())),
+            after_scan: None,
+        }),
+    );
+    let successor = standby.monitor.local_addr();
+
+    active.client.advance(3).unwrap();
+    standby.client.advance(1).unwrap();
+    assert!(
+        matches!(
+            standby.client.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby converged and announced itself to the active"
+    );
+    assert_eq!(active.monitor.tracking_source(), Some(successor));
+
+    // The reproduction's interloper: a foreign monitor announcing
+    // itself through a routine `?peer=` pull — served here by a
+    // hostile endpoint answering a foreign-generation document, the
+    // probe the QA run watched the demoted peer strand on — and a
+    // dead address recorded the same way. Both land as recorded
+    // hints, dead last so it heads the set, and both are unproven.
+    let mut foreign = active.client.checkpoint().unwrap();
+    foreign.generation = Some(mint_generation());
+    let probe = Hostile::serve(&foreign);
+    let dead = closed_port();
+    active.client.checkpoint_announcing(probe.addr).unwrap();
+    active.client.checkpoint_announcing(dead).unwrap();
+    assert_eq!(active.monitor.tracking_source(), Some(dead));
+
+    // Preempt the field claim: the superseded owner's next field
+    // write fences and the documented `field_claim_lost` path demotes
+    // it in place — no `POST /demote` ever runs.
+    fencing.preempt();
+    active.client.advance(1).unwrap();
+    assert_eq!(active.client.role().unwrap().role, Role::Demoting);
+    assert!(
+        active
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .any(|entry| matches!(entry.event, JournalEvent::FieldClaimLost { .. })),
+        "the fencing loss must journal on the superseded owner"
+    );
+
+    // The demoted peer's first tracking cycle runs the demote verify
+    // lazily over the recorded set: the dead hint's pull fails inside
+    // its bound and falls back, the foreign stream refuses the
+    // continuation checks, and the standby's own document proves the
+    // line — so the run adopts the legitimate successor, journals it,
+    // and pulls it, reporting the unowned line `orphaned` rather than
+    // stranding on the foreign endpoint.
+    active.client.advance(1).unwrap();
+    let report = active.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert!(
+        matches!(report.sync, Some(StandbySync::Orphaned { .. })),
+        "the demoted peer tracks the announced successor — owning \
+         nothing until promoted — not the foreign probe: {report:?}"
+    );
+    assert_eq!(active.monitor.tracking_source(), Some(successor));
+    assert!(
+        active
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .any(|entry| matches!(
+                entry.event,
+                JournalEvent::TrackingSourceAdopted { source } if source == successor
+            )),
+        "the lazy verification journals the adopted source: {:?}",
+        active.client.journal(0).unwrap()
+    );
+    assert!(
+        probe.hits() <= 2,
+        "the foreign endpoint saw at most the verify probe and the \
+         orphan-resolution probe — never a tracking pull: {}",
+        probe.hits()
+    );
+
+    // And the pair reconverges the way the reproduction needed the
+    // operator to force: the successor promotes, the demoted peer's
+    // next pull converges `tracking` on it, and fail-back works.
+    assert_eq!(standby.client.promote().unwrap().role, Role::Promoting);
+    standby.client.advance(1).unwrap();
+    active.client.advance(1).unwrap();
+    let report = active.client.role().unwrap();
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted peer reconverges on the promoted successor: {report:?}"
+    );
+    assert_eq!(active.client.promote().unwrap().role, Role::Promoting);
+}
+
+/// The refuse leg of the same finding: with only unproven announced
+/// hints — here a foreign endpoint is the lone announcer — the
+/// involuntarily demoted peer pulls nothing, the same answer
+/// `POST /demote` gives an unproven hint. The failed set is
+/// remembered rather than re-probed every cycle, so the unproven
+/// endpoint sees one bounded verification pass — the demote
+/// verify's pull and the owner-resolution probe's — and no
+/// tracking pull ever follows it.
+#[test]
+fn an_involuntary_demote_with_only_unproven_hints_pulls_nothing() {
+    // Keyed, like the verified leg — the announced contract resolves
+    // only under `--pair-token`; the foreign announcer holds no key.
+    const KEY: u64 = 0x6a09_e667_f3bc_c909;
+    let fencing = FencingDriver::start();
+    let active = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(fenced_executor(fencing), None),
+            signal_index(),
+        )
+        .unwrap()
+        .with_pair_key(KEY),
+    );
+    active.client.advance(3).unwrap();
+
+    // The foreign monitor's routine `?peer=` announce — recorded as
+    // the only hint, unproven like every announce.
+    let mut foreign = active.client.checkpoint().unwrap();
+    foreign.generation = Some(mint_generation());
+    let probe = Hostile::serve(&foreign);
+    active.client.checkpoint_announcing(probe.addr).unwrap();
+    assert_eq!(active.monitor.tracking_source(), Some(probe.addr));
+
+    fencing.preempt();
+    active.client.advance(1).unwrap();
+    assert_eq!(active.client.role().unwrap().role, Role::Demoting);
+    assert!(
+        active
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .any(|entry| matches!(entry.event, JournalEvent::FieldClaimLost { .. })),
+        "the fencing loss must journal on the superseded owner"
+    );
+
+    // The demoted peer's cycles refuse the hint the way the demote
+    // path would: one verification pass — the demote verify's pull
+    // and the owner-resolution probe's — proves the stream foreign,
+    // nothing adopts, and no tracking pull ever targets it — the run
+    // reports standby/unsynchronized instead of stranding degraded on
+    // the foreign endpoint.
+    active.client.advance(3).unwrap();
+    let report = active.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert_eq!(report.sync, Some(StandbySync::Unsynchronized));
+    assert!(
+        active
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .all(|entry| !matches!(entry.event, JournalEvent::TrackingSourceAdopted { .. })),
+        "an unproven hint must never journal an adoption"
+    );
+    assert!(
+        probe.hits() <= 2,
+        "the unproven hint earned one bounded verify pass — the \
+         demote-verify pull and the owner-resolution probe — and \
+         nothing else: {}",
+        probe.hits()
+    );
+    // The recorded hint stays the recorded answer, but the proven
+    // resolution stays empty: no pull ever follows it.
+    assert_eq!(active.monitor.tracking_source(), Some(probe.addr));
+    assert_eq!(active.monitor.verified_tracking_source(), None);
+}
+
+/// The QA finding `claim-episode-invisible-in-audit` (#987): a foreign
+/// `claim_writer` episode a peer only ever met through its claim
+/// probes — never through a fenced write of its own — used to journal
+/// nothing: `field_claim_lost` fires only on the fencing demotion, so
+/// a standing foreign claim the reclaim's refused grants observed
+/// recorded no trace the episode ever happened. The peer now queues
+/// one claim observation per distinct claimant a refused conditional
+/// grant names, journaled `field_claim_observed` — the claimant the
+/// fenced write already attributed re-journals nothing — landing in
+/// seq order between the attributed preemption and the role changes
+/// the release's reclaim walks, once however many scans the foreign
+/// claim stands.
+#[test]
+fn a_probe_observed_foreign_claim_journals_once_beside_the_reclaim() {
+    let fencing = FencingDriver::start();
+    // The field's write-ownership arbitration the claim hooks script:
+    // `Some(token)` while an owner stands — the launched peer's own
+    // token until the foreign preempt — `None` while unclaimed.
+    let claim: &'static Mutex<Option<u64>> = Box::leak(Box::new(Mutex::new(Some(7))));
+    const OWNER: u64 = 7;
+    const FIRST: u64 = 999;
+    const SECOND: u64 = 555;
+    let peer = Peer::active(fenced_executor(fencing), None)
+        .with_field_claimant(move |_| *claim.lock().unwrap())
+        .with_field_release(move || {
+            let mut held = claim.lock().unwrap();
+            if *held == Some(OWNER) {
+                *held = None;
+            }
+        })
+        .with_field_reclaim(move || {
+            let mut held = claim.lock().unwrap();
+            Ok(match *held {
+                Some(standing) if standing != OWNER => false,
+                _ => {
+                    *held = Some(OWNER);
+                    true
+                }
+            })
+        })
+        .with_claim_observer(move || (*claim.lock().unwrap()).into_iter().collect());
+    // The sibling standby the demoted peer tracks — the pair topology
+    // every refused-probe contract stages: its checkpoints stamp the
+    // ownerless line `orphaned`, so the demoted ex-owner reconverges
+    // there and its bound reclaim's refused asks keep running — the
+    // convergence evidence the preempting ask needs while a claim
+    // stands.
+    let orphan_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let orphan = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(orphan_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    orphan.client.advance(1).unwrap();
+    let active = Serving::start(
+        Monitor::bind_peer("127.0.0.1:0", peer, signal_index())
+            .unwrap()
+            .driven(Driven {
+                track: Some(dialable(orphan.monitor.local_addr())),
+                after_scan: None,
+            }),
+    );
+
+    active.client.advance(1).unwrap();
+    assert_eq!(active.client.role().unwrap().role, Role::Active);
+
+    // The first preemption: the fenced write demotes the owner and the
+    // journaled `field_claim_lost` attributes the claimant the verdict
+    // named — seeding the observation dedup, so this standing claim's
+    // refused reclaim probes add no second record.
+    *claim.lock().unwrap() = Some(FIRST);
+    fencing.preempt();
+    active.client.advance(1).unwrap();
+    assert_eq!(active.client.role().unwrap().role, Role::Demoting);
+    active.client.advance(2).unwrap();
+    assert_eq!(active.client.role().unwrap().role, Role::Standby);
+    assert_eq!(*claim.lock().unwrap(), Some(FIRST));
+
+    // The preemptor released and a *different* foreign attachment
+    // claimed before the probe ran again: the refused reclaim names a
+    // claimant no record of this run carries — the episode that would
+    // otherwise pass the audit silently.
+    *claim.lock().unwrap() = Some(SECOND);
+    active.client.advance(1).unwrap();
+    assert_eq!(active.client.role().unwrap().role, Role::Standby);
+    active.client.advance(1).unwrap();
+
+    // The second claimant's release: the next reclaim grants and the
+    // peer walks `promoting` → `active` — the journaled record keeps
+    // the episode in seq order between the attributed loss and the
+    // reclaim transitions it preceded.
+    *claim.lock().unwrap() = None;
+    fencing.release();
+    active.client.advance(1).unwrap();
+    assert_eq!(active.client.role().unwrap().role, Role::Promoting);
+    active.client.advance(1).unwrap();
+    assert_eq!(active.client.role().unwrap().role, Role::Active);
+
+    let journal = active.client.journal(0).unwrap();
+    let at = |probe: &dyn Fn(&JournalEvent) -> bool| {
+        journal
+            .iter()
+            .position(|entry| probe(&entry.event))
+            .unwrap_or_else(|| panic!("missing journal entry: {journal:?}"))
+    };
+    let lost = at(&|event| {
+        matches!(
+            event,
+            JournalEvent::FieldClaimLost {
+                claimant: Some(FIRST),
+                ..
+            }
+        )
+    });
+    let observed = at(&|event| {
+        matches!(
+            event,
+            JournalEvent::FieldClaimObserved {
+                claimant: SECOND,
+                ..
+            }
+        )
+    });
+    let promoting = at(&|event| {
+        matches!(
+            event,
+            JournalEvent::RoleChanged {
+                from: Role::Standby,
+                to: Role::Promoting,
+                ..
+            }
+        )
+    });
+    let settled = at(&|event| {
+        matches!(
+            event,
+            JournalEvent::RoleChanged {
+                from: Role::Promoting,
+                to: Role::Active,
+                ..
+            }
+        )
+    });
+    assert!(
+        lost < observed && observed < promoting && promoting < settled,
+        "the observed claim must journal in seq order beside the role changes: {journal:?}"
+    );
+    assert_eq!(
+        journal
+            .iter()
+            .filter(|entry| matches!(entry.event, JournalEvent::FieldClaimObserved { .. }))
+            .count(),
+        1,
+        "a standing foreign claim journals once, not once per refused probe: {journal:?}"
+    );
+}
+
+/// The QA finding `orphan-resolve-pull-target-switch-unjournaled`
+/// (#1137): a standby orphaned on a configured source serving
+/// ownerless checkpoints — a sibling standby propagating the line's
+/// real owner — re-targets its pulls through the orphan-resolution
+/// probe's `resolved` pin, the same pull-target authority the
+/// announced- and claimed-source adoptions carry. The re-target used
+/// to land unjournaled — `field_orphaned` bracketed the switch and
+/// nothing attributed when or where the pulls moved — so the resolved
+/// pin now journals `tracking_source_adopted` naming the verified
+/// owner, exactly like the adopted-path contract.
+#[test]
+fn an_orphaned_peers_resolved_pull_source_journals_the_adoption() {
+    // The third peer: the line's field owner — its served document
+    // stamps its own monitor address as `line_owner`.
+    let owner = lonely_owner(None);
+    owner.client.advance(3).unwrap();
+
+    // The configured source: a sibling standby tracking the owner —
+    // it serves ownerless checkpoints that propagate the owner's
+    // `line_owner` stamp onward.
+    let middle_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let middle = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(middle_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(dialable(owner.monitor.local_addr())),
+            after_scan: None,
+        }),
+    );
+    middle.client.advance(2).unwrap();
+    let served = middle.client.checkpoint().unwrap();
+    assert_eq!(served.source_owns_field, Some(false));
+    assert_eq!(
+        served.line_owner,
+        Some(dialable(owner.monitor.local_addr())),
+        "the sibling's served document propagates the line's owner"
+    );
+
+    // The orphaned standby configured onto the sibling: its pull
+    // applies an ownerless checkpoint — the `orphaned` verdict — and
+    // the orphan-resolution probe follows the propagated owner name,
+    // re-targeting the pulls through the `resolved` slot.
+    let orphan_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let orphan = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(orphan_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(dialable(middle.monitor.local_addr())),
+            after_scan: None,
+        }),
+    );
+    orphan.client.advance(1).unwrap();
+    let report = orphan.client.role().unwrap();
+    assert!(
+        matches!(report.sync, Some(StandbySync::Orphaned { .. })),
+        "the standby orphans on the ownerless configured source: {report:?}"
+    );
+
+    // The probe's re-target journals the adoption naming the verified
+    // owner — the same record the announced- and claimed-source pins
+    // produce for the identical pull-target change.
+    let owner_addr = dialable(owner.monitor.local_addr());
+    assert_eq!(
+        orphan.monitor.tracking_source(),
+        Some(owner_addr),
+        "the resolved pin outranks the configured source"
+    );
+    assert!(
+        orphan
+            .client
+            .journal(0)
+            .unwrap()
+            .iter()
+            .any(|entry| matches!(
+                entry.event,
+                JournalEvent::TrackingSourceAdopted { source } if source == owner_addr
+            )),
+        "the resolved pin must journal the pull-source switch: {:?}",
+        orphan.client.journal(0).unwrap()
+    );
+
+    // And the re-targeted pull lands: the next cycle tracks the real
+    // owner's field-owning document rather than orphaned-tracking the
+    // sibling's island.
+    orphan.client.advance(1).unwrap();
+    let report = orphan.client.role().unwrap();
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the re-targeted pull reaches the field owner: {report:?}"
+    );
+}
+
 /// A lone field owner fixture for the announced-demotion tests —
 /// the reproduction's unconfigured instance: no `--standby`, no
 /// `--peer`, and `key` installing the `--pair-token` secret when set.
@@ -1520,11 +2444,12 @@ fn an_announced_replay_of_the_victims_own_checkpoint_cannot_unblock_no_tracking_
     assert_eq!(lonely.monitor.tracking_source(), Some(hostile.addr));
 
     // But the replayed document cannot arm the demotion: it carries
-    // no keyed `line_proof` for the verify pull's nonce, and its
-    // content is the field-owning shape this run's own `/checkpoint`
-    // answers — either check alone refuses it. The run stays the
-    // field owner at its own tick and nothing journals an adoption or
-    // a role change.
+    // no keyed `line_proof` for the verify pull's nonce — and even
+    // signed it is the shape this run's own `/checkpoint` answers,
+    // which proves nothing about the endpoint serving it — the guard
+    // refuses, the run
+    // stays the field owner at its own tick, and nothing journals an
+    // adoption or a role change.
     let error = lonely.client.demote().unwrap_err();
     assert!(
         error.to_string().contains("no_tracking_source"),
@@ -1553,7 +2478,7 @@ fn an_announced_replay_of_the_victims_own_checkpoint_cannot_unblock_no_tracking_
 /// refused own-document shape.
 #[test]
 fn an_announced_stale_replay_cannot_unblock_no_tracking_source() {
-    const KEY: u64 = 0x9e37_79b9_7f4a_7c15;
+    const KEY: u64 = 0x6a09_e667_f3bc_c909;
     let lonely = lonely_owner(Some(KEY));
 
     // The interposer captures the victim's document, then the run
@@ -1593,13 +2518,15 @@ fn an_announced_stale_replay_cannot_unblock_no_tracking_source() {
 /// the run's tick — so the interposer serving the victim's live
 /// checkpoint with its tick bumped into the honest skew window took
 /// the accepted "successor strictly ahead" shape and armed the
-/// demotion. On an unproven pull no field-owning document can prove
-/// it is not that replay, so every one refuses now: the demotion
+/// demotion. Under the keyed-only announced contract the unsigned
+/// bump fails the verify pull's `line_proof` demand outright, and
+/// even a signed owner document must run strictly ahead of the run
+/// it replaces: the demotion
 /// answers `no_tracking_source`, the run keeps its tick, and nothing
 /// journals an adoption or a role change.
 #[test]
 fn an_announced_tick_bumped_replay_cannot_unblock_no_tracking_source() {
-    const KEY: u64 = 0x6a09_e667_f3bc_c909;
+    const KEY: u64 = 0x85a3_08d3_1319_8a2e;
     let lonely = lonely_owner(Some(KEY));
     lonely.client.advance(3).unwrap();
     let tick = lonely.client.role().unwrap().tick;
@@ -1640,26 +2567,26 @@ fn an_announced_tick_bumped_replay_cannot_unblock_no_tracking_source() {
     );
 }
 
-/// The QA finding `announced-source-verify-adopts-standby-shaped-
-/// checkpoint` (#850) on a keyed run — the shape a compromised
-/// key-holder takes: the interposer signs every answer for the pull's
-/// `?prove=` nonce, so the proof gate passes and only the document
-/// itself can convict it. The owner-document refusals cover the
-/// replayed `source_owns_field: true` shapes, but the standby
-/// document shape — the victim's own checkpoint with the stamp
-/// flipped `false` and the tick bumped inside the announced-ahead
-/// window — is exactly what a real tracking peer serves, so the
-/// verify cannot refuse the shape itself. What it can refuse is the
-/// document's commanded state: a field owner holds the line's audit
-/// itself — its image carries every value its commands produced and
-/// its receipt log is the submission sequence — so a checkpoint
-/// planting an internal `In` value no settled verdict produced is
-/// provably not the tracked line's continuation. Across the whole
-/// `+1..=32` tick window the demotion refuses `no_tracking_source`,
-/// the run stays the field owner, and nothing adopts.
+/// The QA findings `announced-source-verify-adopts-standby-shaped-
+/// checkpoint` (#850) and `announced-verify-standby-shape-forgery`
+/// (#872): the owner-document refusals cover the replayed
+/// `source_owns_field: true` shapes, but the standby document shape —
+/// the victim's own checkpoint with the stamp flipped `false` and the
+/// tick bumped inside the announced-ahead window — is exactly what a
+/// real tracking peer serves, so an unkeyed verify cannot distinguish
+/// the shape itself — nor can it prove the endpoint, since the public
+/// `/checkpoint` hands the forge every shape. The announced-source
+/// contract is therefore keyed-only: on an unkeyed run a bare hint
+/// never becomes a tracking source and the demotion refuses whatever
+/// the document claims — while a keyed demotion's attested pulls
+/// still answer this run's command audit, so a document whose receipt
+/// window forks the settled log or whose internal `In` samples plant
+/// a value no settled verdict produced is forged rather than a
+/// continuation. Across the whole `+1..=32` tick window the unkeyed
+/// demotion refuses `no_tracking_source`, the run stays the field
+/// owner, and nothing adopts.
 #[test]
 fn an_announced_standby_shaped_forgery_cannot_unblock_no_tracking_source() {
-    const KEY: u64 = 0x243f_6a88_85a3_08d3;
     let lonely_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
         (PointId(10), Value::Float(3.0)),
         (PointId(20), Value::Float(0.0)),
@@ -1671,18 +2598,16 @@ fn an_announced_standby_shaped_forgery_cannot_unblock_no_tracking_source() {
             Peer::active(internal_executor(lonely_driver), None),
             signal_index(),
         )
-        .unwrap()
-        .with_pair_key(KEY),
+        .unwrap(),
     );
     lonely.client.advance(3).unwrap();
     let tick = lonely.client.role().unwrap().tick;
 
     // The reproduction's interposer: the victim's own captured
-    // document, re-stamped `source_owns_field: false` — the standby
-    // shape the document checks keep accepting — with a planted
-    // internal value the run never held and no command produced,
-    // signed for the verify pull's nonce at every tick offset the
-    // announced-ahead window covers.
+    // document, re-stamped `source_owns_field: false` — the shape the
+    // unkeyed document checks used to accept — with a planted internal
+    // value the run never held and no command produced, served at
+    // every tick offset the announced-ahead window covers.
     let captured = lonely.client.checkpoint().unwrap();
     assert_eq!(
         captured
@@ -1692,9 +2617,11 @@ fn an_announced_standby_shaped_forgery_cannot_unblock_no_tracking_source() {
         Some(Value::Bool(false)),
         "the rig's operator-held value starts unwritten: {captured:?}"
     );
-    let hostile = Hostile::serve_signed(&captured, KEY);
+    let hostile = Hostile::serve(&captured);
     lonely.client.checkpoint_announcing(hostile.addr).unwrap();
-    assert_eq!(lonely.monitor.tracking_source(), Some(hostile.addr));
+    // The hint records — but unkeyed it can never resolve: nothing
+    // proves the endpoint behind it.
+    assert_eq!(lonely.monitor.tracking_source(), None);
 
     for ahead in 1..=32u64 {
         let mut forged = captured.clone();
@@ -1736,21 +2663,21 @@ fn an_announced_standby_shaped_forgery_cannot_unblock_no_tracking_source() {
     );
 }
 
-/// The finding's post-adoption half on a keyed run — the compromised
-/// key-holder shape again: even where a signed standby-shaped
-/// document is truthful enough to verify, the adoption binds the
-/// endpoint, not its contents. The reproduction's second move: once
-/// adopted, the interposer flips `source_owns_field` back to `true`
-/// to clear the orphan verdict the `false` stamp would raise, and
-/// keeps serving the planted internal value — signed for each pull's
-/// nonce — on the standing pulls nothing re-verifies at the monitor.
-/// The demoted peer's own audit still vets every pulled document: the
-/// forged one refuses like any rejected checkpoint — the peer reports
-/// `degraded` rather than adopting the planted state, and cannot
-/// promote onto it.
+/// The finding's post-adoption half, in its strongest shape under the
+/// keyed contract: a key-holding endpoint — every answer genuinely
+/// signed, so the `line_proof` convicts nothing — adopts on a
+/// standby-shaped document and then flips. The reproduction's second
+/// move: once adopted, the interposer flips `source_owns_field` back
+/// to `true` to clear the orphan verdict the `false` stamp would
+/// raise, and keeps serving the planted internal value on the
+/// standing pulls. The adoption binds the endpoint, not its contents:
+/// the demoted peer's own audit still vets every pulled document, so
+/// the signed forgery refuses like any rejected checkpoint — the peer
+/// reports `degraded` rather than adopting the planted state, and
+/// cannot promote onto it.
 #[test]
 fn an_adopted_announced_source_cannot_land_forged_commanded_state() {
-    const KEY: u64 = 0x517c_c1b7_2722_0a95;
+    const KEY: u64 = 0x9e37_79b9_7f4a_7c15;
     let lonely_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
         (PointId(10), Value::Float(3.0)),
         (PointId(20), Value::Float(0.0)),
@@ -1768,9 +2695,9 @@ fn an_adopted_announced_source_cannot_land_forged_commanded_state() {
     lonely.client.advance(3).unwrap();
 
     // The verification document: standby-shaped and otherwise the
-    // run's own line — signed for the verify pull's nonce — the
-    // endpoint adopts on it, the journaled adoption the
-    // announced-source contract requires.
+    // run's own line, signed under the pair's key — the endpoint
+    // adopts on it, the journaled adoption the announced-source
+    // contract requires.
     let mut clean = lonely.client.checkpoint().unwrap();
     clean.source_owns_field = Some(false);
     clean.tick = Tick(clean.tick.0 + 1);
@@ -2571,7 +3498,10 @@ fn a_tracking_peer_journals_one_settle_per_admission() {
 #[test]
 fn a_demoted_peer_journals_one_settle_per_carried_admission() {
     use dcs_core::Command;
-    const KEY: u64 = 0x85eb_ca6b_c2b2_ae35;
+    const KEY: u64 = 0x85a3_08d3_1319_8a2e;
+    // The announced-source contract is keyed-only — the demotion below
+    // follows the standby's `?peer=` hint, so the pair carries the
+    // `--pair-token` secret.
     let (standby, active) =
         DrivenStandby::start_binding(None, held_executor, "127.0.0.1:0", "127.0.0.1:0", Some(KEY));
 
@@ -2635,5 +3565,948 @@ fn a_demoted_peer_journals_one_settle_per_carried_admission() {
     assert!(
         ticks.windows(2).all(|pair| pair[0] <= pair[1]),
         "the journal's ticks must be non-decreasing: {ticks:?}"
+    );
+}
+
+/// QA finding `tracker-realign-regresses-journal-tick-axis` (#830): the
+/// reported run paused the active for seconds while the standby kept
+/// scanning; the tracker ran its own tick past the point's
+/// `stale_after_ticks` budget and journaled the `good → stale` mark at
+/// that run tick — then the realigning apply rewound the executor's
+/// clock to the stream's tick, so the recovery's `stale → good`
+/// transition journaled below the assertion's tick and tick-order
+/// consumers read the clearance first.
+///
+/// Replayed on the driven pair with a partitionable relay freezing the
+/// checkpoint stream the way `docker pause` froze the source: the
+/// tracker's degraded scans cross the freshness budget and journal the
+/// stale mark at the run's held clock; the restored pull's apply lands
+/// at the run's own tick — `landed`, never the stream's — so the
+/// recovery and the adopted settlement the covering checkpoint carries
+/// attribute at or after the mark they follow. The receipt's own
+/// `Applied{tick}` still names the line's apply tick — the one audit
+/// the pair shares — but the journal's seq axis never rewinds.
+#[test]
+fn a_realign_after_a_degraded_window_never_rewinds_the_journal_axis() {
+    let active_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let active = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(stale_executor(active_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    // The standby tracks the active through the relay, so the frozen
+    // window is a cut stream — unanswered pulls — not a stopped client.
+    let relay = Relay::serve(dialable(active.monitor.local_addr()));
+    let standby_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let standby = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(stale_executor(standby_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(relay.addr),
+            after_scan: None,
+        }),
+    );
+
+    // Converge the standby on the line, then land the command on the
+    // field owner between scans — the pending receipt the covering
+    // checkpoint later adopts.
+    active.client.advance(3).unwrap();
+    standby.client.advance(1).unwrap();
+    assert_eq!(
+        standby.client.role().unwrap().sync,
+        Some(StandbySync::Tracking { aligned: Tick(3) })
+    );
+    let command = Command::WriteValue {
+        point: PointId(10),
+        kind: ValueKind::Float,
+        value: Value::Float(9.0),
+    };
+    let receipt = active.client.command(&command).unwrap();
+    assert_eq!(
+        receipt.outcome,
+        CommandOutcome::Accepted {
+            apply_tick: Tick(4)
+        }
+    );
+
+    // The frozen window: the stream cuts while the standby keeps
+    // scanning — each cycle's pull misses and the run's own tick
+    // outruns the stale budget the field sample can no longer refresh
+    // inside.
+    relay.partition(true);
+    standby.client.advance(4).unwrap();
+    assert!(
+        matches!(
+            standby.client.role().unwrap().sync,
+            Some(StandbySync::Degraded { .. })
+        ),
+        "the cut stream degrades the tracker: {:?}",
+        standby.client.role().unwrap()
+    );
+    let stale = standby
+        .client
+        .journal(0)
+        .unwrap()
+        .into_iter()
+        .find(|entry| {
+            matches!(
+                &entry.event,
+                JournalEvent::QualityChanged { point: PointId(10), to, .. }
+                    if *to == Quality::Uncertain(QualityReason::Stale)
+            )
+        })
+        .expect("the degraded window journals the stale mark");
+    assert!(
+        stale.tick.0 > 4,
+        "the mark stamps the run's held clock, ahead of the stream: {stale:?}"
+    );
+
+    // The stream restores: the line's covering checkpoint carries the
+    // settled receipt and lands at the run's tick — the held clock
+    // never rewinds to the stream's — and the journaled axis holds.
+    relay.partition(false);
+    active.client.advance(1).unwrap();
+    standby.client.advance(1).unwrap();
+    assert!(
+        matches!(
+            standby.client.role().unwrap().sync,
+            Some(StandbySync::Tracking { aligned: Tick(4) })
+        ),
+        "the restored pull realigns the tracker: {:?}",
+        standby.client.role().unwrap()
+    );
+
+    // The recovery: the standby's own driver finally reports a changed
+    // field sample — the freshness evidence the frozen window held —
+    // and the stale mark clears at the scanning run's tick.
+    standby_driver
+        .write(PointId(10), Value::Float(9.0))
+        .unwrap();
+    standby.client.advance(1).unwrap();
+
+    let journal = standby.client.journal(0).unwrap();
+    let ticks: Vec<u64> = journal.iter().map(|entry| entry.tick.0).collect();
+    assert!(
+        ticks.windows(2).all(|pair| pair[0] <= pair[1]),
+        "the journal's ticks must be non-decreasing across the realign: \
+         {ticks:?} — {journal:?}"
+    );
+
+    // The adopted settle journals once, the receipt still naming the
+    // line's apply tick — the pair's one command audit — while its
+    // entry attribution rides the run's non-rewinding axis.
+    let outcomes = |client: &MonitorClient| {
+        settles(client, &command)
+            .into_iter()
+            .map(|(_, outcome)| outcome)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        outcomes(&standby.client),
+        outcomes(&active.client),
+        "the adopted settle's outcome matches the line's"
+    );
+    let settle = settles(&standby.client, &command);
+    assert_eq!(settle.len(), 1, "{settle:?}");
+    assert_eq!(
+        settle[0].1,
+        CommandOutcome::Applied { tick: Tick(4) },
+        "the receipt carries the line's apply tick: {settle:?}"
+    );
+    assert!(
+        settle[0].0 >= stale.tick.0,
+        "the adopted settle attributes at the standing axis, not the \
+         lagging stream tick: {settle:?} vs stale mark {stale:?}"
+    );
+
+    // The recovery clears the mark in order — the clearance's tick
+    // never reads before the assertion's.
+    let cleared = journal
+        .iter()
+        .find(|entry| {
+            matches!(
+                &entry.event,
+                JournalEvent::QualityChanged { point: PointId(10), from, to }
+                    if *from == Some(Quality::Uncertain(QualityReason::Stale))
+                        && *to == Quality::Good
+            )
+        })
+        .expect("the recovery journals the stale mark's clearance");
+    assert!(
+        cleared.tick.0 >= stale.tick.0 && cleared.seq > stale.seq,
+        "the clearance follows the assertion in seq and tick order: \
+         {stale:?} then {cleared:?}"
+    );
+}
+
+/// QA finding `held-internal-point-tick-zero-misdates-adopted-values`
+/// (#852), driven end to end: a checkpoint adoption overlaid internal
+/// `In` samples verbatim, so an adopted held value served stamped
+/// `Tick::ZERO` — the seed stamp claiming the new value dated from run
+/// start — while a `WriteValue` at the same boundary stamps the
+/// applying scan (the finding's point-300 contrast). The reproduction's
+/// shape, replayed through the pull path: the interposer serves the
+/// standby's own model's document with a planted held value stamped
+/// `Tick::ZERO`, and the driven cycle's adopt-then-scan must serve the
+/// change stamped at the apply's landing tick. A held value the
+/// document leaves untouched keeps the seed stamp — the documented
+/// zero-stamp contract.
+#[test]
+fn a_driven_standby_stamps_an_adopted_held_value_at_the_apply_tick() {
+    let driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[])));
+    // The document the finding describes: the standby's own model's
+    // checkpoint, its held point carrying a planted value still stamped
+    // `Tick::ZERO` — the mis-date the verbatim overlay served.
+    let mut forged = held_executor(driver).checkpoint();
+    forged.tick = Tick(7);
+    forged
+        .internal
+        .insert(PointId(40), Sample::good(Value::Bool(true), Tick::ZERO));
+    let hostile = Hostile::serve(&forged);
+
+    let standby_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[])));
+    let standby = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(held_executor(standby_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(hostile.addr),
+            after_scan: None,
+        }),
+    );
+
+    // Before the adoption the zero stamp is honest: the held value has
+    // stood since before the run's first scan.
+    let seed = standby.client.snapshot().unwrap();
+    assert_eq!(
+        seed.points
+            .iter()
+            .find(|point| point.point == PointId(40))
+            .and_then(|point| point.sample),
+        Some(Sample::good(Value::Bool(false), Tick::ZERO)),
+        "the never-written held value serves the zero stamp: {seed:?}"
+    );
+
+    // One driven cycle: the pull adopts the document at its tick and
+    // the quiesced scan serves the adopted image.
+    standby.client.advance(1).unwrap();
+    let adopted = standby.client.snapshot().unwrap();
+    assert_eq!(
+        adopted
+            .points
+            .iter()
+            .find(|point| point.point == PointId(40))
+            .and_then(|point| point.sample),
+        Some(Sample::good(Value::Bool(true), Tick(7))),
+        "the adoption-changed held value stamps the apply's landing \
+         tick, not the document's `Tick::ZERO`: {adopted:?}"
+    );
+
+    // A later document carrying the same value adopts its own stamp —
+    // the line's claim of when the value last changed, which the
+    // standby's image now agrees with.
+    let mut unchanged = forged.clone();
+    unchanged.tick = Tick(9);
+    unchanged
+        .internal
+        .insert(PointId(40), Sample::good(Value::Bool(true), Tick(4)));
+    hostile.set_body(&unchanged);
+    standby.client.advance(1).unwrap();
+    let converged = standby.client.snapshot().unwrap();
+    assert_eq!(
+        converged
+            .points
+            .iter()
+            .find(|point| point.point == PointId(40))
+            .and_then(|point| point.sample),
+        Some(Sample::good(Value::Bool(true), Tick(4))),
+        "an unchanged held value adopts the captured stamp verbatim: \
+         {converged:?}"
+    );
+}
+
+/// The QA finding `pinned-tracking-source-no-liveness-fallback`: the
+/// wedge-escape pins — `resolved` here — outrank the configured source
+/// by design, but on the reported build they outranked it forever:
+/// once the proven successor died, the pin could only be re-derived
+/// inside `resolve_tracking_source`, which ran only on successful
+/// orphaned applies — a dead source made every pull fail, so no orphan
+/// verdict ever arrived and the standby stranded on the corpse while
+/// its configured source served the line again. The learned pins now
+/// carry a liveness bound: consecutive produced-nothing pulls release
+/// the pin and re-run the owner probe inside the same cycle, so a live
+/// successor — the configured source healthy again included — re-earns
+/// the pulls on the probe's own verification instead of the peer
+/// stranding on a dead endpoint.
+#[test]
+fn a_dead_resolved_pin_releases_and_re_resolves_onto_the_live_line() {
+    // The configured source: the reproduction's ctrl-a, serving owner
+    // checkpoints for the whole test.
+    let a_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let a = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(executor(a_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    let a_addr = dialable(a.monitor.local_addr());
+
+    // The successor the reproduction's failover promoted: a sibling
+    // standby of a's that tracks it, then takes the field — its
+    // checkpoints claim ownership on this line's generation.
+    let c_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let c = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(c_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(a_addr),
+            after_scan: None,
+        }),
+    );
+    let c_addr = dialable(c.monitor.local_addr());
+
+    // The reproduction's ctrl-b: configured to track a, with the
+    // field's claim verdicts naming the successor's monitor — the
+    // declaration the resolution probe reads first.
+    let b_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let b = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(b_driver), None).with_claimed_monitor(move || Some(c_addr)),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(a_addr),
+            after_scan: None,
+        }),
+    );
+
+    a.client.advance(3).unwrap();
+    c.client.advance(1).unwrap();
+    b.client.advance(1).unwrap();
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "b converged on its configured source before the failover"
+    );
+
+    // The successor takes the field: its documents now claim
+    // ownership on this line's generation — the shape the
+    // orphan-resolution probe verifies.
+    assert_eq!(c.client.promote().unwrap().role, Role::Promoting);
+    c.client.advance(1).unwrap();
+
+    // Pin `resolved` the way the reproduction's failover did: the
+    // probe's claimed-declared candidate verifies as this line's
+    // owner, and the learned pin outranks the configured source from
+    // here on.
+    assert_eq!(b.monitor.resolve_tracking_source(), Some(c_addr));
+    assert_eq!(
+        b.monitor.verified_tracking_source(),
+        Some(TrackTarget::Addr(c_addr)),
+        "the resolved pin outranks the configured source"
+    );
+
+    // `docker stop c`: the resolved owner dies while the configured
+    // source stays healthy and active.
+    c.stop();
+
+    // Inside the miss bound the pin still stands — the bound absorbs
+    // a transient miss run — and the degraded detail names it,
+    // exactly the reproduction's `degraded: fetch from <dead>`.
+    b.client.advance(2).unwrap();
+    let report = b.client.role().unwrap();
+    match &report.sync {
+        Some(StandbySync::Degraded { detail }) => assert!(
+            detail.contains(&c_addr.to_string()),
+            "the miss window still names the dead pin: {detail}"
+        ),
+        _ => panic!("the dead pin still misses inside its bound: {report:?}"),
+    }
+    assert_eq!(
+        b.monitor.verified_tracking_source(),
+        Some(TrackTarget::Addr(c_addr)),
+        "a bounded miss run keeps the pin — only an unbounded one \
+         would have released it"
+    );
+
+    // Past the bound the pin releases and the same pass re-resolves:
+    // the configured source is live and owning — the reproduction's
+    // `docker restart a` shape — so the probe pins it, and the next
+    // pulls reconverge `tracking` instead of stranding `degraded` on
+    // the dead successor until the process restarts.
+    b.client.advance(6).unwrap();
+    assert_eq!(
+        b.monitor.verified_tracking_source(),
+        Some(TrackTarget::Addr(a_addr)),
+        "the released pin re-resolves onto the live configured source"
+    );
+    let report = b.client.role().unwrap();
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the standby tracks a live line again: {report:?}"
+    );
+}
+
+/// The adopted half of `pinned-tracking-source-no-liveness-fallback`:
+/// the field-arbitrated adoption — the monitor the standing claim
+/// declares, verified as this line's owner — stranded the same way the
+/// resolved pin did. The released slot falls back through the lazy
+/// verification paths: the same dead claimant stays unprobed inside
+/// its retry window while a changed declaration re-earns the pin on
+/// its own proof.
+#[test]
+fn a_dead_adopted_pin_releases_and_the_claimed_path_re_resolves() {
+    // The configured source: owner of the line for the whole test.
+    let a_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let a = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(executor(a_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    let a_addr = dialable(a.monitor.local_addr());
+
+    // The field-declared successor: a sibling standby of a's that
+    // tracks it, then takes the field — owner documents on this
+    // line's generation.
+    let c_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let c = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(c_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(a_addr),
+            after_scan: None,
+        }),
+    );
+    let c_addr = dialable(c.monitor.local_addr());
+
+    a.client.advance(3).unwrap();
+    c.client.advance(1).unwrap();
+    assert_eq!(c.client.promote().unwrap().role, Role::Promoting);
+    c.client.advance(1).unwrap();
+
+    // The reproduction's ctrl-a shape: a sourceless peer the field's
+    // claim verdicts alone can re-join — no configured slot, only the
+    // declared monitor endpoint.
+    let claimed: &'static Mutex<SocketAddr> = Box::leak(Box::new(Mutex::new(c_addr)));
+    let b_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let b = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(b_driver), None)
+                .with_claimed_monitor(move || Some(*claimed.lock().unwrap())),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: None,
+            after_scan: None,
+        }),
+    );
+    // The peer already rides this line's generation — the demoted
+    // run's carried state — so the declaration's owner document can
+    // verify.
+    b.monitor
+        .apply_checkpoint(&a.client.checkpoint().unwrap())
+        .unwrap();
+
+    // The field's verdict names c: the lazy adoption proves it as this
+    // line's owner and pins `adopted`, journaling the move.
+    assert_eq!(
+        b.monitor.verified_tracking_source(),
+        Some(TrackTarget::Addr(c_addr)),
+        "the claimed monitor adopts into the tracking pin"
+    );
+    b.client.advance(1).unwrap();
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "b tracks the adopted successor"
+    );
+
+    // `docker stop c`: the adopted owner dies; the stranded shape the
+    // finding reported identical to the resolved pin's.
+    c.stop();
+    b.client.advance(2).unwrap();
+    assert_eq!(
+        b.monitor.verified_tracking_source(),
+        Some(TrackTarget::Addr(c_addr)),
+        "a bounded miss run keeps the adopted pin"
+    );
+
+    // Past the bound the pin releases: no configured slot stands, so
+    // the pulls stop targeting the dead endpoint at all rather than
+    // fetching it forever.
+    b.client.advance(4).unwrap();
+    assert_eq!(
+        b.monitor.verified_tracking_source(),
+        None,
+        "the dead adopted pin released — no slot left to pull"
+    );
+
+    // The field's verdict later names a live owner — the
+    // reproduction's `a` reclaimed — and the lazy pass adopts it on
+    // its own proof: the pair reconverges without a restart.
+    *claimed.lock().unwrap() = a_addr;
+    b.client.advance(1).unwrap();
+    assert_eq!(
+        b.monitor.verified_tracking_source(),
+        Some(TrackTarget::Addr(a_addr)),
+        "the changed declaration re-earns the pin"
+    );
+    b.client.advance(1).unwrap();
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "b reconverges on the reclaimed owner: {:?}",
+        b.client.role().unwrap()
+    );
+}
+
+/// The `claimed-monitor-wildcard-undialable` consumer half: a fencing
+/// verdict still naming the wildcard — the verbatim declaration a
+/// pre-#1135 plant server stored — is a bind address, not an
+/// endpoint. On this in-process rig dialing `0.0.0.0:<port>` reaches
+/// the owner through the *demoted peer's own loopback*, exactly the
+/// netns trap the finding measured: the pull would verify and pin an
+/// undialable wildcard into `adopted`. The verdict must earn no pull
+/// — `adopt_claimed_source` and `resolve_tracking_source` both refuse
+/// it — and it must spend no retry window, so the corrected routable
+/// verdict verifies on the very next pass.
+#[test]
+fn a_wildcard_claimed_monitor_earns_no_pull() {
+    // The field owner — its owner document is what the verbatim
+    // wildcard dial reaches through loopback on the same port.
+    let a_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let a = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(executor(a_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    let a_addr = dialable(a.monitor.local_addr());
+
+    // The defect's verdict: the claimant's `0.0.0.0` bind declaration
+    // at the owner's port — on this rig a verbatim dial connects to a
+    // through loopback and would adopt the undialable address.
+    let claimed: &'static Mutex<SocketAddr> = Box::leak(Box::new(Mutex::new(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        a_addr.port(),
+    ))));
+    let b_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let b = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(b_driver), None)
+                .with_claimed_monitor(move || Some(*claimed.lock().unwrap())),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: None,
+            after_scan: None,
+        }),
+    );
+    // The peer already rides this line's generation — the demoted
+    // run's carried state — so a served owner document would verify.
+    b.monitor
+        .apply_checkpoint(&a.client.checkpoint().unwrap())
+        .unwrap();
+
+    // The wildcard declaration earns no pull anywhere: no adoption
+    // pin and no orphan-probe candidate — under the defect both
+    // dialed it and pinned `0.0.0.0:<port>` itself.
+    assert_eq!(
+        b.monitor.verified_tracking_source(),
+        None,
+        "the undialable wildcard declaration must never adopt"
+    );
+    assert_eq!(
+        b.monitor.resolve_tracking_source(),
+        None,
+        "the undialable wildcard declaration must never resolve"
+    );
+
+    // The routable correction verifies on the very next pass — a
+    // wildcard verdict spends none of the claim's retry window.
+    *claimed.lock().unwrap() = a_addr;
+    assert_eq!(
+        b.monitor.verified_tracking_source(),
+        Some(TrackTarget::Addr(a_addr)),
+        "the routable declaration adopts immediately after the wildcard"
+    );
+}
+
+/// The QA finding
+/// `tracking-verify-own-tick-ahead-bound-permanent-strand` (#1269): a
+/// tracking standby's paced run clock keeps counting through a source
+/// outage while the pulled stream stands still, so it accrues a
+/// permanent lead over the line's stream position — and the promotion
+/// carries the lead: the run that takes the field still numbers the
+/// ticks it minted waiting. On the defective build the demoted
+/// ex-owner's claimed-source verification compared the successor's
+/// *run* tick against the probing run's own — own ticks are not
+/// synchronized to the line — and refused every pull `Ahead`,
+/// stranding the ex-owner `standby`/`unsynchronized` forever with a
+/// silent journal. The bound now compares each document's declared
+/// stream position — `Checkpoint::stream_tick` — so the
+/// field-arbitrated rejoin verifies inside one pass and journals the
+/// adoption.
+#[test]
+fn a_demoted_ex_owner_rejoins_a_successor_carrying_the_outage_lead() {
+    // The reproduction's ctrl-a: the launched field owner with no
+    // configured tracking source, driven over a fencing front so the
+    // successor's claim preempts its writes mid-run — no `POST
+    // /demote` boundary ever runs — and carrying the field's claim
+    // verdicts the claimed-monitor adoption reads. The verdict names
+    // a's own monitor while its claim stands.
+    let fencing = FencingDriver::start();
+    let claimed: &'static Mutex<SocketAddr> = Box::leak(Box::new(Mutex::new(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        0,
+    ))));
+    let a = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(
+                fenced_executor(fencing).with_generation(mint_generation()),
+                None,
+            )
+            .with_claimed_monitor(move || Some(*claimed.lock().unwrap())),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: None,
+            after_scan: None,
+        }),
+    );
+    let a_addr = dialable(a.monitor.local_addr());
+    *claimed.lock().unwrap() = a_addr;
+
+    // The reproduction's ctrl-b: a standby tracking a through the
+    // relay, so the outage is a cut stream — unanswered pulls — while
+    // the standby keeps pacing.
+    let relay = Relay::serve(a_addr);
+    let b_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let b = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(b_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(relay.addr),
+            after_scan: None,
+        }),
+    );
+    let b_addr = dialable(b.monitor.local_addr());
+
+    a.client.advance(3).unwrap();
+    b.client.advance(1).unwrap();
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby converged on the line before the outage"
+    );
+
+    // The bounded source outage: the stream cuts while a's served
+    // document freezes — the reproduction's stopped active — and b
+    // keeps pacing past MAX_ANNOUNCED_AHEAD ticks of missed pulls.
+    relay.partition(true);
+    b.client.advance(40).unwrap();
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Degraded { .. })
+        ),
+        "the cut stream degrades the tracker: {:?}",
+        b.client.role().unwrap()
+    );
+
+    // The source returns — the reproduction's restarted active — and
+    // b reconverges on its frozen document, minting the outage as a
+    // permanent lead of its run tick over the line's stream position.
+    relay.partition(false);
+    b.client.advance(1).unwrap();
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby reconverges on the resumed source: {:?}",
+        b.client.role().unwrap()
+    );
+    let led = b.client.checkpoint().unwrap();
+    assert!(
+        led.stream_tick
+            .is_some_and(|stream| led.tick.0 > stream.0 + 32),
+        "the survivor's run tick leads the line's stream position past \
+         the old bound: {led:?}"
+    );
+
+    // The routine promote: b claims the field — the arbitration's
+    // fencing verdict preempts a's writes and names b's monitor — and
+    // settles the field owner.
+    assert_eq!(b.client.promote().unwrap().role, Role::Promoting);
+    fencing.preempt();
+    *claimed.lock().unwrap() = b_addr;
+    b.client.advance(1).unwrap();
+    assert_eq!(b.client.role().unwrap().role, Role::Active);
+
+    // The trigger the defect wedged on verbatim: the promoted
+    // successor's served run tick sits more than MAX_ANNOUNCED_AHEAD
+    // past the ex-owner's own — while its declared stream position
+    // honestly locates the line.
+    let own = a.client.checkpoint().unwrap();
+    let successor = b.client.checkpoint().unwrap();
+    assert!(
+        successor.tick.0 > own.tick.0 + 32,
+        "the successor's run tick carries the outage lead past the old \
+         bound — the refusal the defect made permanent: \
+         {successor:?} vs {own:?}"
+    );
+    assert!(
+        successor
+            .stream_tick
+            .is_some_and(|stream| stream.0 <= own.tick.0 + 32),
+        "the declared stream position still proves the line: {successor:?}"
+    );
+
+    // a's next field-owning scan fences: `field_claim_lost` demotes it
+    // in place, and the first sourceless scan resolves the field's
+    // declared monitor — proving the successor's document on its
+    // stream position, where the defective build refused it `Ahead`
+    // forever — then pins, journals, and pulls it.
+    a.client.advance(2).unwrap();
+    let report = a.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted ex-owner reconverges on the promoted successor \
+         instead of stranding unsynchronized: {report:?}"
+    );
+    assert_eq!(a.monitor.tracking_source(), Some(b_addr));
+    assert!(
+        a.client.journal(0).unwrap().iter().any(|entry| matches!(
+            entry.event,
+            JournalEvent::TrackingSourceAdopted { source } if source == b_addr
+        )),
+        "the field-arbitrated adoption journals on the demoted peer: {:?}",
+        a.client.journal(0).unwrap()
+    );
+}
+
+/// The QA finding `orphan-resolution-dead-claimed-monitor-stalls-scan`:
+/// on the reported build every orphaned `track_cycle` ran
+/// `resolve_tracking_source` synchronously on the scan thread, and its
+/// first candidate — the standing claim's declared monitor — cost the
+/// full checkpoint-pull bound on every cycle while the foreign claim
+/// stood, collapsing the paced cadence (~2 ticks/s at `--scan-ms 100`)
+/// and stretching the failover miss budget's wall time with it. The
+/// probe now remembers a refused candidate set the way
+/// `adopt_claimed_source` remembers a dead declared monitor: the same
+/// set earns no fresh pass until it changes or the retry window
+/// elapses, so the dead endpoint costs one bounded pull burst per
+/// window rather than one per scan.
+#[test]
+fn orphaned_cycles_cache_the_failed_resolution_probe() {
+    // The reproduction's ownerless line: a standby serving
+    // `source_owns_field: false` checkpoints — every landed apply
+    // reports orphaned, firing the resolution probe each cycle.
+    let a_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let a = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(a_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    let a_addr = dialable(a.monitor.local_addr());
+    a.client.advance(2).unwrap();
+
+    // The foreign claim's declared monitor: accepts the connect and
+    // never answers — the reproduction's silent sink — so each probe
+    // pass against it costs the full pull bound.
+    let silent = TcpListener::bind("127.0.0.1:0").unwrap();
+    let dead = silent.local_addr().unwrap();
+
+    // The reproduction's orphaned peer: tracking the ownerless sibling
+    // while the standing claim's verdicts declare the dead monitor.
+    let claimed: &'static Mutex<Option<SocketAddr>> = Box::leak(Box::new(Mutex::new(Some(dead))));
+    let b_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let b = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(b_driver), None)
+                .with_claimed_monitor(move || *claimed.lock().unwrap()),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(a_addr),
+            after_scan: None,
+        }),
+    );
+
+    // One scan cycle's tracking half, shaped like the paced loop's:
+    // a pull from the configured source applied in place, ending in
+    // the orphan probe while the verdict is `Orphaned`.
+    let orphaned_cycle = |monitor: &Monitor<'static>| -> Duration {
+        let started = Instant::now();
+        let report = monitor.track_cycle(|| {
+            MonitorClient::new(a_addr)
+                .checkpoint()
+                .map_err(|error| error.to_string())
+        });
+        assert!(
+            matches!(report, TrackReport::Applied(_)),
+            "the ownerless line's checkpoint must apply: {report:?}"
+        );
+        started.elapsed()
+    };
+
+    // The first orphaned cycle pays the probe — the dead declared
+    // monitor's bounded pull plus the live tracked source's owner
+    // refusal — and reports the verdict that fires it.
+    let first = orphaned_cycle(&b.monitor);
+    assert!(
+        first >= Duration::from_millis(500),
+        "the uncached probe must reach the dead endpoint's bound: {first:?}"
+    );
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Orphaned { .. })
+        ),
+        "the ownerless apply reports orphaned: {:?}",
+        b.client.role().unwrap()
+    );
+
+    // The defect: every repeated orphaned cycle re-dialed the dead
+    // endpoint, one pull bound per scan. The refused candidate set is
+    // remembered now, so the window's later cycles keep the scan's own
+    // cost instead of stalling on it.
+    for cycle in 0..3 {
+        let elapsed = orphaned_cycle(&b.monitor);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "orphaned cycle {cycle} re-probed the dead declared monitor \
+             inside its retry window: {elapsed:?}"
+        );
+    }
+
+    // Aged past the retry window the unchanged set earns one fresh
+    // probe — bounded by the pull timeout — and the pass after it is
+    // cached again.
+    thread::sleep(Duration::from_millis(4200));
+    let reprobe = orphaned_cycle(&b.monitor);
+    assert!(
+        reprobe >= Duration::from_millis(500),
+        "the aged-out candidate set re-probes the dead endpoint: {reprobe:?}"
+    );
+    let elapsed = orphaned_cycle(&b.monitor);
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "the re-probe's failure is cached for its own window: {elapsed:?}"
+    );
+
+    // The claim's release changes the candidate set — the next cycle
+    // probes immediately rather than riding out the window — and stays
+    // cheap: the only candidate left is the live ownerless source.
+    *claimed.lock().unwrap() = None;
+    let elapsed = orphaned_cycle(&b.monitor);
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "a changed candidate set re-probes without waiting out the \
+         window: {elapsed:?}"
     );
 }

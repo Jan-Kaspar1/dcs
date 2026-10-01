@@ -92,6 +92,10 @@
       "channel": {
         "device": 1,
         "name": "level-primary"
+      },
+      "record": {
+        "every_ticks": 5,
+        "retain_days": 1095
       }
     },
     {
@@ -101,6 +105,10 @@
       "channel": {
         "device": 1,
         "name": "level-backup"
+      },
+      "record": {
+        "every_ticks": 5,
+        "retain_days": 1095
       }
     },
     {
@@ -110,6 +118,10 @@
       "channel": {
         "device": 1,
         "name": "inflow"
+      },
+      "record": {
+        "every_ticks": 5,
+        "retain_days": 1095
       }
     },
     {
@@ -119,6 +131,10 @@
       "channel": {
         "device": 1,
         "name": "net-flow"
+      },
+      "record": {
+        "every_ticks": 5,
+        "retain_days": 1095
       }
     },
     {
@@ -507,6 +523,17 @@
       "writable": true
     },
     {
+      "id": 1021,
+      "direction": "in",
+      "value_type": "bool",
+      "initial": {
+        "bool": false
+      },
+      "writable": true,
+      "requires_reason": true,
+      "journaled": true
+    },
+    {
       "id": 1023,
       "direction": "out",
       "value_type": "bool",
@@ -720,6 +747,10 @@
       "channel": {
         "device": 1,
         "name": "p101-draw"
+      },
+      "record": {
+        "every_ticks": 5,
+        "retain_days": 1095
       }
     },
     {
@@ -730,7 +761,11 @@
         "device": 2,
         "name": "p101-run"
       },
-      "journaled": true
+      "journaled": true,
+      "record": {
+        "every_ticks": 5,
+        "retain_days": 1095
+      }
     },
     {
       "id": 60,
@@ -1187,6 +1222,10 @@
       "channel": {
         "device": 1,
         "name": "p102-draw"
+      },
+      "record": {
+        "every_ticks": 5,
+        "retain_days": 1095
       }
     },
     {
@@ -1197,7 +1236,11 @@
         "device": 2,
         "name": "p102-run"
       },
-      "journaled": true
+      "journaled": true,
+      "record": {
+        "every_ticks": 5,
+        "retain_days": 1095
+      }
     },
     {
       "id": 61,
@@ -2081,6 +2124,14 @@
       "source": 1020,
       "unit": "",
       "description": "Operator acknowledgment for the alarm",
+      "group": "alarms"
+    },
+    {
+      "id": 11021,
+      "name": "backup-active-shelve",
+      "source": 1021,
+      "unit": "",
+      "description": "Operator shelving request for the alarm",
       "group": "alarms"
     },
     {
@@ -3527,7 +3578,7 @@
           "int": 2
         },
         "max_shelve_ticks": {
-          "int": 0
+          "int": 6
         },
         "priority": {
           "int": 2
@@ -3556,6 +3607,10 @@
         },
         "out_of_service": {
           "direction": "out",
+          "value_type": "bool"
+        },
+        "shelve": {
+          "direction": "in",
           "value_type": "bool"
         },
         "shelved": {
@@ -3590,7 +3645,7 @@
         }
       },
       "rationalization": {
-        "consequence": "Demand stands with no pump available to meet it",
+        "consequence": "No pump is available; the station cannot pump",
         "required_action": "Restore a pump to service or clear its faults",
         "reference": "none-available-alarm"
       },
@@ -5412,6 +5467,17 @@
         "port": {
           "component": 9,
           "name": "ack"
+        }
+      }
+    },
+    {
+      "from": {
+        "point": 1021
+      },
+      "to": {
+        "port": {
+          "component": 9,
+          "name": "shelve"
         }
       }
     },

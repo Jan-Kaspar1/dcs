@@ -167,20 +167,17 @@ fn outcome_key(receipt: &CommandReceipt) -> String {
     }
 }
 
-/// The QA flood channel: `count` copies of `body` POSTed to `/command`
+/// The QA flood channel: every body in `bodies` POSTed to `/command`
 /// on one keep-alive connection, all sent back-to-back before the
 /// first answer is read — the whole wave lands inside the server's
 /// read buffer faster than a scan boundary can drain the pending
 /// queue. Returns `(status, receipt)` per submission in submission
 /// order; a missing or unparseable answer reads `(0, None)` — the
 /// no-receipt case the admission contract forbids.
-fn pipelined_commands(
-    addr: SocketAddr,
-    body: &[u8],
-    count: usize,
-) -> Vec<(u16, Option<CommandReceipt>)> {
+fn pipelined_commands(addr: SocketAddr, bodies: &[Vec<u8>]) -> Vec<(u16, Option<CommandReceipt>)> {
+    let count = bodies.len();
     let mut request = Vec::new();
-    for index in 0..count {
+    for (index, body) in bodies.iter().enumerate() {
         request.extend_from_slice(
             b"POST /command HTTP/1.1\r\nHost: qa\r\nContent-Type: application/json\r\n\
               Content-Length: ",
@@ -259,7 +256,7 @@ fn a_command_flood_past_the_admission_bound_is_receipted() {
         "actor": "qa-lane",
     }))
     .unwrap();
-    let replies = pipelined_commands(rig.addr, &body, 2 * CAPACITY);
+    let replies = pipelined_commands(rig.addr, &vec![body; 2 * CAPACITY]);
 
     // Every submission answered 200 with a parseable receipt — the
     // reproduction's 503s and no-receipt entries are the defect.
@@ -350,4 +347,139 @@ fn a_command_flood_past_the_admission_bound_is_receipted() {
         })
         .unwrap();
     assert!(matches!(receipt.outcome, CommandOutcome::Accepted { .. }));
+}
+
+/// The `command-lane-overflow-receipt-order-inversion` reproduction:
+/// a flood landing while the lane's queue is full used to split the
+/// receipted work across two workers — the overflowed submission ran
+/// the real admission handler on the refuse worker, which raced the
+/// command worker's drain on the shared lock and minted its receipt
+/// ahead of earlier submissions still queued in the lane. Deferred
+/// submissions now re-enter through the lane's own tail in dispatch
+/// order, so the log never inverts, flooded lane or not.
+///
+/// The lane's queue is filled deterministically: the first submission
+/// arrives with its body only partly sent, so the single command
+/// worker blocks inside the body read while the rest of the wave —
+/// more than the lane's `LANE_QUEUE_DEPTH + 2*capacity` bound — piles
+/// into the lane and its overflow deck behind it. Completing the body
+/// then unblocks the drain; every minted receipt must carry its own
+/// submission's index.
+#[test]
+fn a_flood_past_the_lane_bound_keeps_receipts_in_submission_order() {
+    const CAPACITY: usize = 64;
+    // The reproduction's wave: `LANE_QUEUE_DEPTH` (64) plus twice the
+    // served capacity (128) bounds the lane's queue at 192 — the
+    // stalled submission plus these 240 land 49 deep in the overflow
+    // the dual-consumer admission broke.
+    const FLOOD: usize = 240;
+    let rig = Rig::start(CAPACITY);
+
+    let body_for = |index: usize| {
+        serde_json::to_vec(&serde_json::json!({
+            "command": {"write_value": {"point": 10, "kind": "float",
+                "value": {"float": 1.0}}},
+            "actor": format!("qa-lane-{index}"),
+        }))
+        .unwrap()
+    };
+    // Submission 0 rides its own connection and arrives with only the
+    // first half of its body sent: the command worker pops it and
+    // waits inside the body read, pinning the lane while the flood
+    // piles in behind it. The padded reason pushes the declared
+    // `Content-Length` past tiny_http's small eager buffer, so the
+    // half-sent body stays on the socket — a body at or under that
+    // buffer would be drained by the connection's reader before the
+    // request ever reached a worker, pinning nothing.
+    let stalled = serde_json::to_vec(&serde_json::json!({
+        "command": {"write_value": {"point": 10, "kind": "float",
+            "value": {"float": 1.0}}},
+        "actor": "qa-lane-0",
+        "reason": "x".repeat(2048),
+    }))
+    .unwrap();
+    let split = stalled.len() / 2;
+    let mut stalled_stream = TcpStream::connect(rig.addr).unwrap();
+    stalled_stream
+        .write_all(
+            format!(
+                "POST /command HTTP/1.1\r\nHost: qa\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                stalled.len()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    stalled_stream.write_all(&stalled[..split]).unwrap();
+    // Let the dispatcher route the stalled head before the flood
+    // arrives, so submission 0 is the drain's front.
+    thread::sleep(Duration::from_millis(100));
+
+    let bodies: Vec<Vec<u8>> = (1..=FLOOD).map(body_for).collect();
+    let flood_thread = thread::spawn(move || pipelined_commands(rig.addr, &bodies));
+    // Let the wave pile into the lane and overflow deck before the
+    // stalled body completes and the drain begins.
+    thread::sleep(Duration::from_millis(300));
+    stalled_stream.write_all(&stalled[split..]).unwrap();
+    stalled_stream
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    let mut answer = Vec::new();
+    let mut buf = [0u8; 8192];
+    while !answer.windows(4).any(|window| window == b"\r\n\r\n") {
+        let n = stalled_stream.read(&mut buf).unwrap();
+        if n == 0 {
+            break;
+        }
+        answer.extend_from_slice(&buf[..n]);
+    }
+    assert!(
+        String::from_utf8_lossy(&answer)
+            .lines()
+            .next()
+            .is_some_and(|line| line.contains(" 200")),
+        "the stalled submission answered: {}",
+        String::from_utf8_lossy(&answer)
+    );
+    let replies = flood_thread.join().unwrap();
+
+    // Every submission answered 200 with its own parseable receipt —
+    // a bare fault, a missing answer, or another submission's receipt
+    // is the defect.
+    for (offset, (status, receipt)) in replies.iter().enumerate() {
+        let index = offset + 1;
+        assert_eq!(
+            *status, 200,
+            "submission {index} met an HTTP-layer error, not a receipt"
+        );
+        let receipt = receipt
+            .as_ref()
+            .unwrap_or_else(|| panic!("submission {index} answered without a receipt"));
+        assert_eq!(
+            receipt.actor.as_deref(),
+            Some(format!("qa-lane-{index}").as_str()),
+            "submission {index} answered with another submission's receipt"
+        );
+    }
+
+    // The executor's log carries one receipt per submission in
+    // submission order — the first `capacity` admit, the rest take
+    // the named `queue_full` rejection, and no overflowed submission
+    // mints ahead of an earlier one still queued in the lane.
+    let receipts = rig.client.receipts().unwrap();
+    assert_eq!(receipts.len(), FLOOD + 1);
+    for (index, receipt) in receipts.iter().enumerate() {
+        assert_eq!(
+            receipt.actor.as_deref(),
+            Some(format!("qa-lane-{index}").as_str()),
+            "receipt {index} is not the submission's own — the log fell \
+             out of submission order"
+        );
+        let expected = if index < CAPACITY {
+            "accepted"
+        } else {
+            "rejected:queue_full"
+        };
+        assert_eq!(outcome_key(receipt), expected, "receipt {index}");
+    }
 }

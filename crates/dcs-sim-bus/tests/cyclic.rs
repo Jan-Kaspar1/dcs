@@ -16,7 +16,7 @@ use dcs_runtime::{
     Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, PointMap, StepError, WriteGate,
 };
 use dcs_sim_bus::{
-    BusDriver, BusServer, CyclicBusDriver, CyclicPoint, ExchangeOutcome, PointRegister,
+    BusDriver, BusServer, CyclicBusDriver, CyclicPoint, ExchangeOutcome, LinkError, PointRegister,
     RegisterBank, RegisterDecl,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -475,6 +475,45 @@ fn a_fenced_exchange_completes_nothing_but_the_census_stays_open() {
 }
 
 #[test]
+fn the_conditional_claim_refuses_a_live_different_owner() {
+    with_server(|server, addr| {
+        let holder = driver(addr);
+        let starter = driver(addr);
+        // Another attachment owns the field's write claim — a live
+        // incumbent.
+        let owner = observer(
+            addr,
+            &[PointRegister {
+                point: PointId(10),
+                register: 4,
+                kind: ValueKind::Float,
+            }],
+        );
+        owner.claim_writer(7).unwrap();
+
+        // The born-active ask under a different token refuses — the
+        // incumbent's claim untouched: the refusing attachment's
+        // staged outputs still fence at the exchange, the owner still
+        // mutates.
+        assert_eq!(starter.claim_writer_unless_held(8), Err(LinkError::Fenced));
+        starter.write(PointId(20), Value::Float(5.0)).unwrap();
+        assert_eq!(
+            cyclic(&starter).exchange(Tick(1)),
+            Err(IoError::Fenced(PointId(10)))
+        );
+        assert_eq!(server.bank().read(9).unwrap().value, Value::Float(0.0));
+        owner.write(PointId(10), Value::Float(1.0)).unwrap();
+
+        // The same owner's own conditional ask joins the holders —
+        // its staged outputs now publish.
+        holder.claim_writer_unless_held(7).unwrap();
+        holder.write(PointId(20), Value::Float(5.0)).unwrap();
+        cyclic(&holder).exchange(Tick(2)).unwrap();
+        assert_eq!(server.bank().read(9).unwrap().value, Value::Float(5.0));
+    });
+}
+
+#[test]
 fn a_closed_gate_exchanges_but_never_stages() {
     with_server(|server, addr| {
         let driver = driver(addr);
@@ -651,8 +690,10 @@ fn point_map() -> PointMap {
                 kind: ValueKind::Float,
                 internal: None,
                 writable: false,
+                requires_reason: false,
                 stale_after_ticks: Some(1),
                 journaled: false,
+                record_every_ticks: None,
             },
         )
         .with_writable_point(PointId(11), Direction::In, ValueKind::Float)

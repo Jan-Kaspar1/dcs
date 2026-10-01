@@ -92,8 +92,9 @@ pub enum StandbySync {
     /// The last checkpoint applied cleanly: the run is aligned with the
     /// active's at the checkpointed tick and tracking.
     Tracking {
-        /// The last applied checkpoint's tick — how far the run is known
-        /// to be aligned.
+        /// The last applied checkpoint's source tick — the tracked
+        /// stream's own counter, not the reporting run's run tick: how
+        /// far the run is known to be aligned.
         aligned: Tick,
     },
     /// The last transfer failed — an unreachable active or a rejected
@@ -112,8 +113,8 @@ pub enum StandbySync {
     /// with, so the run is promotable on the same evidence `tracking`
     /// stands on: the run it would resume is the proven-converged one.
     Orphaned {
-        /// The last applied checkpoint's tick — how far the run is known
-        /// to be aligned.
+        /// The last applied checkpoint's source tick — the tracked
+        /// stream's own counter: how far the run is known to be aligned.
         aligned: Tick,
     },
     /// Checkpoints apply cleanly but the outputs the standby's own scan
@@ -217,6 +218,50 @@ impl fmt::Display for FieldClaim {
     }
 }
 
+/// The failover gate's evidence as an armed peer reports it — the
+/// standing convergence proof [`SwitchOrigin::Failover`] promotions
+/// read plus the heartbeat miss accounting the proof is bounded by,
+/// per the two-promotion-gates decision.
+///
+/// The served bundle answers why a `degraded` verdict inside a miss
+/// window still lets `self_promote` fire: `converged` is the standing
+/// proof — the last *applied* checkpoint verdict was promotable and the
+/// run of evidence-free misses has not exceeded `budget` — and
+/// `misses`/`budget` are the accounting bounding how stale that proof
+/// may be when the gate fires. `converged` past `budget` is therefore a
+/// live reading, not a contradiction: every landed apply re-proves the
+/// run — an ownerless line's `orphaned` applies included — so an armed
+/// peer whose earlier attempt was refused keeps serving
+/// `converged: true` and `misses` climbing past `budget`, the gate
+/// staying armed for the retry the refusal's cause clearing needs.
+/// The three travel together by contract: a bare `converged` flag on an
+/// unarmed peer survives misses without limit, so the proof is served
+/// only with the armed budget it is read against — an absent `failover`
+/// field means no failover is armed, never a stood proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailoverEvidence {
+    /// The standing proof the self-promotion gate reads: the last
+    /// applied checkpoint verdict was promotable — `tracking`,
+    /// `reinitialized`, or `orphaned` — and the run of evidence-free
+    /// misses since has not exceeded `budget`. `false` before any clean
+    /// apply, after a rejected or diverged apply, on demotion, and while
+    /// an evidence-free miss run has passed the armed budget — the
+    /// staleness bound — but a landed apply re-proves it: `true` beside
+    /// `misses > budget` is the armed gate still live after a refused
+    /// attempt, not the window having closed.
+    pub converged: bool,
+    /// Consecutive checkpoint pulls that produced no applied checkpoint
+    /// — the heartbeat miss count `budget` compares against. A pull
+    /// whose produced checkpoint reports its serving run owns no field
+    /// writes counts the cycle's miss without lifting the count the way
+    /// an owner-serving apply does.
+    pub misses: u32,
+    /// The armed consecutive-miss budget — the miss count at which a
+    /// still-proven peer self-promotes at its scan boundary, and the
+    /// staleness bound `converged` is read against.
+    pub budget: u32,
+}
+
 /// The instance's reported role: the `GET /role` payload and the answer
 /// body of `POST /promote` and `POST /demote`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -243,6 +288,57 @@ pub struct RoleReport {
     /// before the field existed load and re-serve unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field_claim: Option<FieldClaim>,
+    /// The failover gate's evidence — `Some` only on a peer carrying an
+    /// armed failover budget, serving the standing convergence proof
+    /// the self-promotion gate reads together with the consecutive-miss
+    /// count and the armed budget bounding it, so a `degraded` report
+    /// inside a miss window reads "verdict degraded, proof stands,
+    /// misses *k* of *N*" rather than silently diverging from the
+    /// failover path. `None` on an unarmed peer — there the proof flag
+    /// would survive unbounded misses and bound nothing. Absent on the
+    /// wire under the served contract's optional-field convention, so
+    /// payloads written before the field existed load and re-serve
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failover: Option<FailoverEvidence>,
+}
+
+/// What initiated a role switch — the journaled distinction between a
+/// switch the monitoring surface was asked for and the peer's own
+/// automatic transitions.
+///
+/// The paths queue the same role transitions (`standby` → `promoting`
+/// → `active`, `active` → `demoting` → `standby`); without an origin a
+/// failover's or a fenced demotion's journaled entries would read
+/// identically to an unattributed operator request. The marker travels
+/// beside `actor`, not inside it: `origin` says what initiated the
+/// switch — a fact the peer assigns and a requester cannot declare —
+/// while `actor` says *who* asked, on a request that chose to declare
+/// one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchOrigin {
+    /// A switch requested through the monitoring surface —
+    /// `POST /promote` or `POST /demote` — whether or not the request
+    /// declared an actor.
+    Request,
+    /// The peer's own automatic failover promotion — the heartbeat-miss
+    /// budget met while the convergence proof stood — never an
+    /// operator request, and never carrying an actor.
+    Failover,
+    /// The peer's own protective demotion — the field fenced this run's
+    /// write, meaning the claim it held was preempted — never an
+    /// operator request, and never carrying an actor. A launched
+    /// active's stand-down journals the same origin: the field's
+    /// arbitration — a refused startup claim, or a claim that produced
+    /// no answer — is what the run stands down on.
+    Fenced,
+    /// The peer's own reclaim promotion — the conditional re-claim
+    /// probe granted a previously preempted claim back — never an
+    /// operator request, and never carrying an actor. The deferred
+    /// startup grant's landing takes the same shape: the field's
+    /// conditional ask finally answered `granted`.
+    Reclaim,
 }
 
 /// Why a switchover request was refused — the named errors of the
@@ -322,24 +418,28 @@ mod tests {
                 tick: Tick(12),
                 sync: None,
                 field_claim: None,
+                failover: None,
             },
             RoleReport {
                 role: Role::Active,
                 tick: Tick(14),
                 sync: None,
                 field_claim: Some(FieldClaim::Held),
+                failover: None,
             },
             RoleReport {
                 role: Role::Standby,
                 tick: Tick(9),
                 sync: Some(StandbySync::Unsynchronized),
                 field_claim: None,
+                failover: None,
             },
             RoleReport {
                 role: Role::Promoting,
                 tick: Tick(30),
                 sync: Some(StandbySync::Tracking { aligned: Tick(25) }),
                 field_claim: None,
+                failover: None,
             },
             RoleReport {
                 role: Role::Demoting,
@@ -348,18 +448,29 @@ mod tests {
                     detail: "fetch failed".to_string(),
                 }),
                 field_claim: None,
+                failover: Some(FailoverEvidence {
+                    converged: true,
+                    misses: 1,
+                    budget: 3,
+                }),
             },
             RoleReport {
                 role: Role::Standby,
                 tick: Tick(38),
                 sync: Some(StandbySync::Orphaned { aligned: Tick(35) }),
                 field_claim: Some(FieldClaim::Held),
+                failover: None,
             },
             RoleReport {
                 role: Role::Standby,
                 tick: Tick(39),
                 sync: Some(StandbySync::Tracking { aligned: Tick(36) }),
                 field_claim: Some(FieldClaim::Unclaimed),
+                failover: Some(FailoverEvidence {
+                    converged: false,
+                    misses: 4,
+                    budget: 3,
+                }),
             },
             RoleReport {
                 role: Role::Standby,
@@ -379,6 +490,7 @@ mod tests {
                     ],
                 }),
                 field_claim: None,
+                failover: None,
             },
             RoleReport {
                 role: Role::Standby,
@@ -398,6 +510,7 @@ mod tests {
                     }),
                 }),
                 field_claim: None,
+                failover: None,
             },
         ];
         for report in reports {
@@ -418,6 +531,7 @@ mod tests {
                 tick: Tick(30),
                 sync: Some(StandbySync::Tracking { aligned: Tick(25) }),
                 field_claim: None,
+                failover: None,
             })
             .unwrap(),
             r#"{"role":"standby","tick":30,"sync":{"tracking":{"aligned":25}}}"#
@@ -452,6 +566,31 @@ mod tests {
         let grown = r#"{"role":"standby","tick":30,"sync":{"orphaned":{"aligned":25}},"field_claim":"unclaimed"}"#;
         let report = serde_json::from_str::<RoleReport>(grown).unwrap();
         assert_eq!(report.field_claim, Some(FieldClaim::Unclaimed));
+        assert_eq!(serde_json::to_string(&report).unwrap(), grown);
+    }
+
+    /// The optional-field convention on `failover`: a payload written
+    /// before the field existed loads unchanged and re-serves without
+    /// the key, and the grown wire type carries the standing proof
+    /// bundled with the armed budget's accounting — never a bare flag.
+    #[test]
+    fn role_report_failover_is_additive() {
+        let legacy =
+            r#"{"role":"standby","tick":30,"sync":{"degraded":{"detail":"fetch failed"}}}"#;
+        let report = serde_json::from_str::<RoleReport>(legacy).unwrap();
+        assert_eq!(report.failover, None);
+        assert_eq!(serde_json::to_string(&report).unwrap(), legacy);
+
+        let grown = r#"{"role":"standby","tick":30,"sync":{"degraded":{"detail":"fetch failed"}},"failover":{"converged":true,"misses":1,"budget":3}}"#;
+        let report = serde_json::from_str::<RoleReport>(grown).unwrap();
+        assert_eq!(
+            report.failover,
+            Some(FailoverEvidence {
+                converged: true,
+                misses: 1,
+                budget: 3,
+            })
+        );
         assert_eq!(serde_json::to_string(&report).unwrap(), grown);
     }
 

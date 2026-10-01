@@ -284,14 +284,16 @@ fn attributed_events(
 /// follows: point transitions on the instance's bound points, command
 /// receipts its commands settle (addressed by name or by bound point),
 /// its own step failures, and its kind-emitted events. Run-level
-/// entries — role changes, divergence detections and resolutions,
-/// reinitializations, tracking-source adoptions, run boundaries —
-/// belong to no instance.
+/// entries — role changes, refused self-promotions, divergence
+/// detections and resolutions, reinitializations, tracking-source
+/// adoptions, run boundaries — belong to no instance.
 fn attributed(entry: &JournalEntry, name: &str, points: &BTreeSet<PointId>) -> bool {
     match &entry.event {
         JournalEvent::QualityChanged { point, .. }
         | JournalEvent::PointChanged { point, .. }
-        | JournalEvent::FieldClaimLost { point } => points.contains(point),
+        | JournalEvent::FieldClaimLost { point, .. }
+        | JournalEvent::FieldClaimObserved { point, .. }
+        | JournalEvent::FieldClaimRearmed { point, .. } => points.contains(point),
         JournalEvent::CommandSettled { receipt } => {
             receipt.command.component() == Some(name)
                 || receipt
@@ -302,12 +304,15 @@ fn attributed(entry: &JournalEntry, name: &str, points: &BTreeSet<PointId>) -> b
         JournalEvent::StepFailed { component, .. } => component == name,
         JournalEvent::EventEmitted { event } => event.component == name,
         JournalEvent::RoleChanged { .. }
+        | JournalEvent::PromotionRefused { .. }
+        | JournalEvent::StartupClaimRefused { .. }
         | JournalEvent::DivergenceDetected { .. }
         | JournalEvent::DivergenceResolved { .. }
         | JournalEvent::Reinitialized { .. }
         | JournalEvent::FieldOrphaned { .. }
         | JournalEvent::SourceRestarted { .. }
         | JournalEvent::TrackingSourceAdopted { .. }
+        | JournalEvent::TrackingSourceRefused { .. }
         | JournalEvent::RunBoundary { .. } => false,
     }
 }

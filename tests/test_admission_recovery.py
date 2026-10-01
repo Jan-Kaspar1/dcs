@@ -5,6 +5,7 @@ cool down only its own quota group, requeue once per failed invocation, wait
 when every group is saturated, and recover through a single probe — never a
 global pause, never a retry wave, and never past an admission lease.
 """
+import json
 import tempfile
 import time
 import unittest
@@ -61,8 +62,10 @@ class ScopedRecoveryTests(unittest.TestCase):
                       repository=str(self.src), timeout_seconds=60, required_checks=['t'],
                       poll_seconds=60, models=['swe-2-high', 'opencode/union-alpha'],
                       model_caps={'swe-2-high': 2},
-                      scheduler={'cooldown_seconds': 30, 'quiet_seconds': 60})
+                      scheduler={'cooldown_seconds': 30, 'quiet_seconds': 60,
+                                 'quota_requeue_delay_seconds': 10})
         self.sup = Supervisor(config)
+        self.sup.clock = lambda: self.now[0]
         self.sup.admission.clock = lambda: self.now[0]
         self.sup.admission.jitter = lambda: 0
         self.sup.github = FakeGitHub([issue(1), issue(2)])
@@ -87,13 +90,15 @@ class ScopedRecoveryTests(unittest.TestCase):
         # probes, the union job is untouched, and the pool does not pause.
         sup.reconcile_workers(sup.github.items)
         self.assertEqual(sup.state.job(2)['status'], 'blocked')
-        self.assertTrue(sup.state.get('retry:2'))
+        self.assertEqual(sup.state.get('retry:2'), 'quota-requeue')
         self.assertFalse(sup.state.paused())
         self.assertEqual(sup.state.job(1)['status'], 'working')
         self.assertEqual(sup.admission.summary()['groups']['swe-2-high']['mode'], 'probing')
 
-        # During swe's cooldown the retry migrates to a healthy group's worker
-        # instead of dying on the throttled model again; work is preserved.
+        # During swe's cooldown — once the armed quota delay has elapsed —
+        # the retry migrates to a healthy group's worker instead of dying on
+        # the throttled model again; work is preserved.
+        self.now[0] += 11
         sup.retries(sup.github.items)
         job2 = sup.state.job(2)
         self.assertEqual(job2['status'], 'working')
@@ -101,6 +106,9 @@ class ScopedRecoveryTests(unittest.TestCase):
         self.assertEqual(len(sup.runtime.spawned), 3)
         self.assertEqual(sup.runtime.spawned[-1]['model'], 'opencode/union-alpha')
         self.assertEqual(sup.admission.summary()['groups']['swe-2-high']['mode'], 'probing')
+        attributed = [(e['kind'], json.loads(e['payload']).get('cause'))
+                      for e in sup.state.events(2)]
+        self.assertIn(('redispatch', 'quota-requeue'), attributed)
 
         # The migrated job dies to a rate limit too: union goes into its own
         # probing cooldown and the requeue budget decrements once more.
@@ -128,6 +136,51 @@ class ScopedRecoveryTests(unittest.TestCase):
         self.assertEqual(len(sup.runtime.spawned), 4)
         self.assertEqual(sup.runtime.spawned[-1]['model'], 'swe-2-high')
         self.assertEqual(sup.admission.summary()['groups']['swe-2-high']['mode'], 'probing')
+
+    def test_quota_episode_rearms_after_group_quiet_window(self):
+        """A spent episode budget re-arms once its covering group is quiet."""
+        sup = self.sup
+        sup.admission.max_quota_requeues = 1
+        sup.dispatch(sup.github.items)
+        # job2 on swe dies to a rate limit and spends the 1-deep budget's
+        # only requeue; it re-dispatches onto the union group.
+        sup.reconcile_workers(sup.github.items)
+        self.assertEqual(sup.state.get('retry:2'), 'quota-requeue')
+        self.now[0] += 11
+        sup.retries(sup.github.items)
+        self.assertEqual(sup.state.job(2)['status'], 'working')
+        self.assertEqual(sup.runtime.spawned[-1]['model'], 'opencode/union-alpha')
+        # The migrated invocation dies to a rate limit too: the episode
+        # budget is spent while union's congestion episode is still live, so
+        # the park only holds — no flag armed, but a recorded quiet hold.
+        sup.reconcile_workers(sup.github.items)
+        self.assertEqual(sup.state.job(2)['status'], 'blocked')
+        self.assertFalse(sup.state.get('retry:2'))
+        rec = sup.state.get('recovery:2')
+        self.assertEqual(rec['quota_episode']['groups'], ['opencode/union-alpha'])
+        self.assertEqual(rec['quota_requeues'], 1)
+        # Neither elapsed time nor further passes re-arm while the group
+        # still reports its congestion lifecycle.
+        self.now[0] += 120
+        sup.retries(sup.github.items)
+        self.assertEqual(sup.state.job(2)['status'], 'blocked')
+        self.assertEqual(len(sup.runtime.spawned), 3)
+        # Once the group is back to normal and its window has stayed quiet
+        # for quiet_seconds, the hold re-arms with a fresh episode budget.
+        sup.admission.reset('opencode/union-alpha')
+        self.now[0] += 61
+        sup.retries(sup.github.items)
+        self.assertEqual(sup.state.job(2)['status'], 'working')
+        self.assertEqual(len(sup.runtime.spawned), 4)
+        rec = sup.state.get('recovery:2')
+        self.assertEqual(rec['quota_requeues'], 0)
+        self.assertEqual(rec['quota_requeue_resets'], 1)
+        self.assertFalse(rec.get('quota_episode'))
+        redispatches = [json.loads(e['payload']) for e in sup.state.events(2)
+                        if e['kind'] == 'redispatch']
+        self.assertEqual(redispatches[0]['cause'], 'quota-requeue')
+        self.assertEqual(redispatches[0]['delay'],
+                         {'source': 'quiet-window', 'seconds': 60})
 
     def test_auth_failure_blocks_group_until_operator_reset(self):
         sup = self.sup

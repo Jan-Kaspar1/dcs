@@ -601,7 +601,7 @@ fn run_scenario() -> Outcome {
                 .unwrap()
                 .iter()
                 .filter_map(|entry| match entry.event {
-                    JournalEvent::RoleChanged { from, to } => Some((from, to)),
+                    JournalEvent::RoleChanged { from, to, .. } => Some((from, to)),
                     _ => None,
                 })
                 .collect()

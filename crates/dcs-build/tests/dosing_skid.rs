@@ -519,7 +519,16 @@ fn checked_in_document_validates_and_lints_clean() {
     let model = fixture_model();
     assert_eq!(model.version, dcs_model::MODEL_VERSION);
     assert!(model.validate().is_empty(), "{:?}", model.validate());
-    assert!(model.lint().is_empty(), "{:?}", model.lint());
+    // The skid's only advisories are undeclared `stale_after_ticks`
+    // budgets — freshness stays an opt-in per-point declaration
+    // (decision 45); every other lint class stays empty.
+    let findings = model.lint();
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding.rule == dcs_model::LintRule::FieldInputWithoutFreshnessBudget),
+        "{findings:?}"
+    );
 }
 
 #[test]

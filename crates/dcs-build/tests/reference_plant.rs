@@ -3,14 +3,19 @@
 //! consumer repository. This test materializes it into a scratch
 //! directory *outside* the workspace, rewrites only the dependency
 //! remote to a `file://` stand-in for the published origin — the
-//! recorded `rev` pin untouched, with the stand-in seeded to serve
-//! exactly that commit — and runs the tree's own `ci/check.sh`
+//! recorded release pin untouched, with the stand-in seeded to serve
+//! it — and runs the tree's own `ci/check.sh`
 //! end to end: resolve, build, git-only lockfile sources,
 //! byte-identical emit against the checked-in artifacts,
 //! released-tooling acceptance — plus the contract's remaining
-//! `dcs-model` surfaces: `schema` and `interface-schema` emissions
-//! byte-pinned to the release record's artifacts fetched through the
-//! stand-in remote at the pinned rev, `diff` legs over a doctored
+//! `dcs-model` surfaces: `schema`, `interface-schema`, and
+//! `deploy-schema` emissions — and the released `dcs-plant-server`'s
+//! `--dynamics-schema` emission — byte-pinned to the release record's
+//! artifacts fetched through the stand-in remote at the pinned rev,
+//! the checked-in deployment manifest and dynamics document screened
+//! against their declared schema artifacts — a schema-violating
+//! doctored copy of each reporting `schema-mismatch` —
+//! `diff` legs over a doctored
 //! compatible revision and the identical document, and
 //! `summary`/`signal-index` recorded as run evidence — the
 //! alarm-validation leg proving the released `dcs-controller --check`
@@ -175,9 +180,11 @@
 //! checkpoint fingerprint and durable files (the documentation
 //! turnover) — the completeness audit naming any missing artifact,
 //! two passes producing identical digests — and the `upgrade` stage,
-//! which repins the materialized tree to the checkout's `HEAD`
-//! (seeded into the stand-in beside the recorded rev) and re-runs the
-//! full pipeline under the repin.
+//! which materializes the tree at the previous release's recorded rev
+//! (seeded into the stand-in beside the tag) and repins it to the
+//! recorded release — the stand-in's tag naming the checkout's `HEAD`,
+//! the commit the release tag will be cut on — re-running the full
+//! pipeline under the repin.
 //!
 //! Run alone from a clean checkout:
 //!
@@ -190,7 +197,8 @@
 //! and the negative cases prove the new stage names the template
 //! introduces: `stale-artifact`, `manifest-fingerprint-mismatch`,
 //! `scenario-failed`, `rig-mismatch`, `schema-drift`,
-//! `schema-mismatch`, `diff-mismatch`, `pair-failed`,
+//! `schema-mismatch`, `schema-mismatch-nondeterministic`,
+//! `diff-mismatch`, `pair-failed`,
 //! `negotiation-failed`, `refusal-failed`, `handover-failed`,
 //! `takeover-failed`,
 //! `peer-announce-failed`,
@@ -207,7 +215,6 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::Mutex;
 
 use common::{CARGO, PIN_UNRESOLVABLE, head_rev, root};
 
@@ -260,19 +267,38 @@ fn build_tools() -> PathBuf {
     target_dir().join("debug")
 }
 
-/// The `rev = "…"` pin the template's manifest records for the release
-/// crates — the object the stand-in remote must serve.
-fn pinned_rev(dir: &Path) -> String {
+/// The release pin the template's manifest records for the release
+/// crates — `tag = "<name>"` or `rev = "<sha>"` — the object the
+/// stand-in remote must serve.
+fn pinned_release(dir: &Path) -> String {
     let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap();
     for line in manifest.lines() {
-        if let Some(start) = line.find("rev = \"") {
-            let rest = &line[start + "rev = \"".len()..];
-            if let Some(end) = rest.find('"') {
+        for key in ["tag = \"", "rev = \""] {
+            if let Some(start) = line.find(key) {
+                let rest = &line[start + key.len()..];
+                if let Some(end) = rest.find('"') {
+                    return rest[..end].to_owned();
+                }
+            }
+        }
+    }
+    panic!("the template's Cargo.toml records no release pin");
+}
+
+/// The `DCS_UPGRADE_REV` default the tree's own `ci/check.sh` records —
+/// the previous release's recorded rev the `upgrade` stage materializes
+/// its baseline at.
+fn recorded_upgrade_from(dir: &Path) -> String {
+    let check = std::fs::read_to_string(dir.join("ci/check.sh")).unwrap();
+    for line in check.lines() {
+        if let Some(start) = line.find("DCS_UPGRADE_REV:-") {
+            let rest = &line[start + "DCS_UPGRADE_REV:-".len()..];
+            if let Some(end) = rest.find('}') {
                 return rest[..end].to_owned();
             }
         }
     }
-    panic!("the template's Cargo.toml records no rev pin");
+    panic!("the template's ci/check.sh records no DCS_UPGRADE_REV default");
 }
 
 /// Runs `git args` in `dir`, asserting success.
@@ -290,70 +316,161 @@ fn git(dir: &Path, args: &[&str]) {
     );
 }
 
-/// Ensures the checkout's object store contains `rev`. CI checkouts
-/// are shallow (`actions/checkout` fetches at depth 1), so the
-/// recorded release commit may be absent; fetch it from `origin` — the
-/// published origin itself — when the store lacks it.
-fn ensure_commit(rev: &str) {
-    static FETCH_LOCK: Mutex<()> = Mutex::new(());
-    let _guard = FETCH_LOCK.lock().unwrap();
-    let present = Command::new("git")
-        .args(["cat-file", "-e", &format!("{rev}^{{commit}}")])
-        .current_dir(root())
-        .output()
-        .expect("git cat-file runs");
-    if present.status.success() {
-        return;
-    }
-    for remote in ["origin", PUBLISHED_REMOTE] {
-        let fetch = Command::new("git")
-            .args(["fetch", "--depth", "1", remote, rev])
+/// The checkout worktree's delta against `HEAD` — content-changed and
+/// deleted tracked paths plus untracked files, each list NUL-split.
+/// The stand-in's tag commit overlays it so the tag names the release
+/// candidate the checkout will become, not just committed `HEAD`.
+fn worktree_delta() -> (Vec<String>, Vec<String>) {
+    let delta = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
             .current_dir(root())
             .output()
-            .expect("git fetch runs");
-        if fetch.status.success() {
-            return;
-        }
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let mut changed = delta(&["diff", "--name-only", "-z", "--diff-filter=d", "HEAD"]);
+    changed.extend(delta(&["ls-files", "-z", "--others", "--exclude-standard"]));
+    let deleted = delta(&["diff", "--name-only", "-z", "--diff-filter=D", "HEAD"]);
+    (changed, deleted)
+}
+
+/// Builds the release-candidate commit inside the bare remote: `head`'s
+/// tree overlaid with the checkout's uncommitted delta, so a `tag` pin
+/// serves a commit carrying this change's own release record — the
+/// tree `git show FETCH_HEAD:docs/releases/<tag>/…` reads the record
+/// artifacts out of. Objects are hashed straight into the stand-in's
+/// store; the shared checkout's store and index are never written.
+fn seed_release_commit(remote: &Path, head: &str) -> String {
+    let index = remote.join("seed-index");
+    let plumbing = |args: &[&str]| -> String {
+        // The stand-in is bare, but update-index's file forms —
+        // --force-remove for the delta's deleted paths — insist on a
+        // work tree; the checkout's tree is the one the delta was
+        // measured against, so the plumbing names it.
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(remote)
+            .env("GIT_INDEX_FILE", &index)
+            .env("GIT_WORK_TREE", root())
+            .env("GIT_AUTHOR_NAME", "reference-plant-proof")
+            .env("GIT_AUTHOR_EMAIL", "proof@example.invalid")
+            .env("GIT_AUTHOR_DATE", "@0 +0000")
+            .env("GIT_COMMITTER_NAME", "reference-plant-proof")
+            .env("GIT_COMMITTER_EMAIL", "proof@example.invalid")
+            .env("GIT_COMMITTER_DATE", "@0 +0000")
+            .output()
+            .expect("git plumbing runs");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    plumbing(&["read-tree", head]);
+    let (changed, deleted) = worktree_delta();
+    for path in changed {
+        let abs = root().join(&path);
+        let blob = plumbing(&["hash-object", "-w", &abs.display().to_string()]);
+        let executable = std::fs::metadata(&abs)
+            .map(|meta| {
+                use std::os::unix::fs::PermissionsExt;
+                meta.permissions().mode() & 0o111 != 0
+            })
+            .unwrap_or(false);
+        let mode = if executable { "100755" } else { "100644" };
+        plumbing(&[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("{mode},{blob},{path}"),
+        ]);
     }
-    panic!("{PIN_UNRESOLVABLE}: no remote could serve the pinned rev {rev}");
+    for path in deleted {
+        plumbing(&["update-index", "--force-remove", &path]);
+    }
+    let tree = plumbing(&["write-tree"]);
+    plumbing(&["commit-tree", &tree, "-p", head, "-m", "release candidate"])
 }
 
 /// A `file://` stand-in for the published origin: a bare repository in
-/// the materialized scratch that serves exactly the recorded rev. The
+/// the materialized scratch that serves exactly the recorded pin. The
 /// workspace checkout alone cannot play the remote in CI — its shallow
 /// object store lacks the pinned commit and serves no way to name it —
-/// so the stand-in is seeded with that commit, the same object the
-/// published origin serves for the recorded rev. The `upgrade` stage's
-/// repin target — the checkout's `HEAD`, a later commit in the same
-/// minor series — is seeded beside it so the repin resolves.
+/// so the stand-in is seeded with the objects the pin names. The seed
+/// lands in the per-test bare repository, never the shared checkout's
+/// store: the CI shards run these proofs as concurrent processes, and
+/// two fetches into one repository collide on its lock files.
+///
+/// A `rev` pin names an existing commit and is fetched verbatim; a
+/// `tag` pin names the release tag — which the published remote does
+/// not serve until the supervisor cuts it — so the stand-in's tag names
+/// a commit synthesized from `HEAD` plus the checkout's uncommitted
+/// delta: the release-candidate commit the tag will be cut on. The
+/// `upgrade` stage's baseline — the previous release's recorded rev the
+/// check's own `DCS_UPGRADE_REV` default names — is seeded beside it so
+/// the crossing resolves.
 fn serve_pinned_rev(scratch: &Path) -> String {
-    let rev = pinned_rev(scratch);
-    ensure_commit(&rev);
+    let pin = pinned_release(scratch);
     let remote = scratch.join("dcs-remote.git");
     git(scratch, &["init", "--bare", "dcs-remote.git"]);
-    // The local transport serves the object directly; the published
-    // origin is the fallback when the checkout cannot.
-    let fetch = Command::new("git")
-        .args(["fetch", "--depth", "1", &root().display().to_string(), &rev])
-        .current_dir(&remote)
-        .output()
-        .expect("git fetch runs");
-    if !fetch.status.success() {
-        git(&remote, &["fetch", "--depth", "1", PUBLISHED_REMOTE, &rev]);
+    // The local transport serves the object directly when the
+    // checkout's store holds it; the published origin is the fallback
+    // when the shallow store cannot.
+    let seed = |object: &str| {
+        [root().display().to_string(), PUBLISHED_REMOTE.to_string()]
+            .iter()
+            .any(|source| {
+                Command::new("git")
+                    .args(["fetch", "--depth", "1", source, object])
+                    .current_dir(&remote)
+                    .output()
+                    .expect("git fetch runs")
+                    .status
+                    .success()
+            })
+    };
+    if pin.len() == 40 && pin.chars().all(|c| c.is_ascii_hexdigit()) {
+        assert!(
+            seed(&pin),
+            "{PIN_UNRESOLVABLE}: no remote could serve the pinned rev {pin}"
+        );
+        git(&remote, &["update-ref", "refs/heads/main", &pin]);
+    } else {
+        let head = head_rev();
+        assert!(
+            seed(&head),
+            "{PIN_UNRESOLVABLE}: no remote could serve HEAD {head}"
+        );
+        let candidate = seed_release_commit(&remote, &head);
+        git(&remote, &["update-ref", "refs/heads/main", &candidate]);
+        git(
+            &remote,
+            &["update-ref", &format!("refs/tags/{pin}"), &candidate],
+        );
     }
-    git(&remote, &["update-ref", "refs/heads/main", &rev]);
-    let head = head_rev();
+    let upgrade_from = recorded_upgrade_from(scratch);
+    assert!(
+        seed(&upgrade_from),
+        "{PIN_UNRESOLVABLE}: no remote could serve the upgrade-from rev {upgrade_from}"
+    );
     git(
         &remote,
-        &[
-            "fetch",
-            "--depth",
-            "1",
-            &root().display().to_string(),
-            &head,
-        ],
+        &["update-ref", "refs/heads/upgrade", &upgrade_from],
     );
-    git(&remote, &["update-ref", "refs/heads/upgrade", &head]);
     format!("file://{}", remote.display())
 }
 
@@ -380,7 +497,7 @@ struct Materialized {
 
 impl Materialized {
     /// Copies the tree and rewrites only the dependency remote to the
-    /// `file://` stand-in — the `rev` pin stays exactly as recorded.
+    /// `file://` stand-in — the release pin stays exactly as recorded.
     fn new() -> Self {
         let dir = std::env::temp_dir().join(format!(
             "dcs-reference-plant-{}-{:?}",
@@ -404,16 +521,17 @@ impl Materialized {
 
     /// Runs the template's own clean-CI path against the `file://`
     /// stand-in remote and the locally built tooling — the same
-    /// substitutions `consumer_release.rs` makes, plus the upgrade
-    /// stage's repin target: the checkout's `HEAD`, a later commit in
-    /// the same minor series the stand-in remote also serves.
+    /// substitutions `consumer_release.rs` makes. `DCS_UPGRADE_REV`
+    /// keeps the check's own recorded default — the previous release's
+    /// rev — so the stage proves the real named crossing onto the pin's
+    /// release; the stand-in serves both ends of it.
     fn check(&self, tools: &Path) -> Output {
         Command::new("bash")
             .arg("ci/check.sh")
             .current_dir(&self.dir)
             .env("DCS_REMOTE", &self.remote)
             .env("DCS_TOOLS", tools)
-            .env("DCS_UPGRADE_REV", head_rev())
+            .env("DCS_RECORD_DIR", root().join("docs/releases"))
             .env("CARGO_TARGET_DIR", self.dir.join("target"))
             .output()
             .expect("ci/check.sh runs")
@@ -473,8 +591,20 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
     // declared structure, and each leg's own doctored case reported its
     // named diagnostic.
     for line in [
-        "emit the v0.2.0 record's artifacts byte-identically",
+        "record's artifacts byte-identically",
         "a drifted record artifact refused: schema-drift",
+        // The consumer-document screening legs ran and held: the
+        // checked-in manifest and dynamics documents conformed to
+        // their declared record artifacts, and each doctored
+        // schema-violating copy reported schema-mismatch.
+        "the deployment manifest conforms to the recorded schema artifact",
+        "the dynamics document conforms to the recorded schema artifact",
+        "manifest missing-required refused: schema-mismatch",
+        "manifest mistyped-field refused: schema-mismatch",
+        "manifest undeclared-field refused: schema-mismatch",
+        "dynamics missing-required refused: schema-mismatch",
+        "dynamics mistyped-field refused: schema-mismatch",
+        "dynamics undeclared-element refused: schema-mismatch",
         "diff over the doctored compatible revision",
         "changed signal 10010",
         "diff over the identical document",
@@ -684,16 +814,26 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
             "the deploy stage's doctored pairs lack '{line}':\n{stdout}"
         );
     }
-    // The optional topology section's deploy-stage cases each held:
-    // the declared pairs validate — over the single pair and over a
-    // beyond-one-pair rig — while a member the rig does not declare,
-    // a member two pairs share, or a declared pair whose standby
-    // wiring does not close inside it each report the named mismatch.
+    // The checked-in manifest declares the deployed pair under
+    // `topology.pairs`, and the deploy-stage cases each held: the
+    // declaration validates under another pair name, while a member
+    // the rig does not declare, a member two pairs share, a member
+    // whose standby edge leaves the pair, a pair carrying two
+    // standby declarations, or a declared pair whose standby wiring
+    // does not close inside it each report the named
+    // mismatch — and decision 99's one-field-per-deployment bound
+    // refuses the planted undeployable shapes: a second declared pair
+    // over the manifest's one plant and a second duty controller the
+    // section never names, each a second claimant on the field's
+    // single-writer claim.
     for line in [
         "topology-declared: optional declaration — the manifest and the rig agree",
-        "topology-multi-pair: optional declaration — the manifest and the rig agree",
+        "topology-multi-pair refused: rig-mismatch",
+        "undeployable-second-duty refused: rig-mismatch",
         "topology-undeclared-member refused: rig-mismatch",
         "topology-shared-member refused: rig-mismatch",
+        "topology-external-standby refused: rig-mismatch",
+        "topology-two-standbys refused: rig-mismatch",
         "topology-unwired-pair refused: rig-mismatch",
     ] {
         assert!(
@@ -892,6 +1032,34 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
             "the commissioning leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
+    // The pair contract's rolling controller-upgrade leg ran and
+    // held: the pair launched on the upgrade-from revision's
+    // tooling (under the file:// stand-in the same substituted
+    // binaries), each peer rolled onto the pinned binary one
+    // process at a time resuming at its persisted tick, the
+    // promoted peer's receipted command settled exactly once, and
+    // the plant's step record named no unowned window — its digest
+    // line reports the evidence, and the doctored expectation
+    // reported its named diagnostic.
+    let rolling_line = stdout
+        .lines()
+        .find(|line| line.contains("rolling-upgrade-digest"))
+        .unwrap_or_else(|| panic!("the rolling-upgrade leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "rolled and resumed at tick",
+        "promoted at tick",
+        "launch roles restored at tick",
+        "owner scans",
+    ] {
+        assert!(
+            rolling_line.contains(phrase),
+            "the rolling-upgrade digest names no '{phrase}' evidence: {rolling_line}"
+        );
+    }
+    assert!(
+        stdout.contains("expect-degraded: reported, rolling-upgrade-failed"),
+        "the rolling-upgrade leg's expect-degraded case did not report its named diagnostic:\n{stdout}"
+    );
     assert!(
         stdout.contains("== consumers =="),
         "the consumers stage did not run:\n{stdout}"
@@ -923,13 +1091,15 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
 
 /// The `upgrade` stage is the executable assertion of the documented
 /// repin upgrade (README §7): under the same `file://`-remote and
-/// binary substitutions as the other stages, the stage repins the
-/// unchanged tree to the checkout's `HEAD`, proves the emitted
-/// `model/plant.json` is byte-identical across the repin
-/// (`emit-divergent` stands guard), re-runs the full pipeline under the
-/// repin, and refuses the named incompatible crossings — the
-/// nonexistent tag (`pin-unresolvable`) and the pin outside the
-/// supported `MODEL_VERSION`/`version` window (`crossing-unrefused`).
+/// binary substitutions as the other stages, the stage materializes
+/// the unchanged tree at the previous release's recorded rev, repins
+/// it to the recorded release — the stand-in's tag resolving to the
+/// checkout's `HEAD` — proves the emitted `model/plant.json` is
+/// byte-identical across the repin (`emit-divergent` stands guard),
+/// re-runs the full pipeline under the repin, and refuses the named
+/// incompatible crossings — the nonexistent tag (`pin-unresolvable`)
+/// and the pin outside the supported `MODEL_VERSION`/`version` window
+/// (`crossing-unrefused`).
 #[test]
 fn the_upgrade_stage_proves_the_repin_and_the_named_crossings() {
     let tools = build_tools();
@@ -1065,7 +1235,7 @@ fn a_broken_peer_flag_reports_pair_failed() {
     ));
     copy_tree(&root().join("reference-plant"), &dir);
     let output = Command::new("python3")
-        .arg("ci/pair.py")
+        .arg("ci/legs/pair.py")
         .arg("--plant-server")
         .arg(tools.join("dcs-plant-server"))
         .arg("--controller")
@@ -1118,7 +1288,7 @@ fn a_wrong_negotiation_expectation_reports_the_degraded_state() {
     ));
     copy_tree(&root().join("reference-plant"), &dir);
     let output = Command::new("python3")
-        .arg("ci/negotiation.py")
+        .arg("ci/legs/negotiation.py")
         .arg("--plant-server")
         .arg(tools.join("dcs-plant-server"))
         .arg("--controller")
@@ -1170,7 +1340,7 @@ fn a_doctored_write_expectation_reports_refusal_failed() {
     ));
     copy_tree(&root().join("reference-plant"), &dir);
     let output = Command::new("python3")
-        .arg("ci/refusal.py")
+        .arg("ci/legs/refusal.py")
         .arg("--plant-server")
         .arg(tools.join("dcs-plant-server"))
         .arg("--controller")
@@ -1227,7 +1397,7 @@ fn a_doctored_handover_expectation_reports_handover_failed() {
         ("none-available-silent", "never to report"),
     ] {
         let output = Command::new("python3")
-            .arg("ci/handover.py")
+            .arg("ci/legs/handover.py")
             .arg("--plant-server")
             .arg(tools.join("dcs-plant-server"))
             .arg("--controller")
@@ -1282,7 +1452,7 @@ fn a_doctored_follows_group_expectation_reports_takeover_failed() {
     ));
     copy_tree(&root().join("reference-plant"), &dir);
     let output = Command::new("python3")
-        .arg("ci/takeover.py")
+        .arg("ci/legs/takeover.py")
         .arg("--plant-server")
         .arg(tools.join("dcs-plant-server"))
         .arg("--controller")
@@ -1336,7 +1506,7 @@ fn a_skipped_field_write_reports_divergence_missed() {
     ));
     copy_tree(&root().join("reference-plant"), &dir);
     let output = Command::new("python3")
-        .arg("ci/divergence.py")
+        .arg("ci/legs/divergence.py")
         .arg("--plant-server")
         .arg(tools.join("dcs-plant-server"))
         .arg("--controller")
@@ -1386,7 +1556,7 @@ fn a_structurally_divergent_served_document_reports_schema_mismatch() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    let schema = root().join("docs/releases/v0.2.0/block-interfaces.schema.json");
+    let schema = root().join("docs/releases/v0.3.0/block-interfaces.schema.json");
     let script = root().join("reference-plant/ci/schema_conformance.py");
     let conforming = serde_json::json!({
         "publication": 0,
@@ -1734,19 +1904,49 @@ assert any("command_refused" in f for f in failures), failures
 failures = simulate.settlement_misses([("sequencer:39", "advance")], [])
 assert any("no settled receipt" in f for f in failures), failures
 
-# A kind-emitted event absent from the journal is named.
+# A journal-retained kind-emitted event absent from the journal is
+# named.
 event = {
-    "name": "step_completed",
-    "payload": [{"name": "step", "kind": "int"}],
+    "name": "sequence_completed",
+    "payload": [{"name": "steps", "kind": "int"}],
+    "retention": "journal",
     "adapted": "declared",
 }
 failures = simulate.emitted_event_misses([("sequencer:39", event)], [])
+assert any("sequence_completed" in f for f in failures), failures
+
+# A history/latest-retained event landing in the journal is named —
+# the durable record carries no routed emission.
+routed = {
+    "name": "step_completed",
+    "payload": [{"name": "step", "kind": "int"}],
+    "retention": "history",
+    "adapted": "declared",
+}
+failures = simulate.emitted_event_misses(
+    [("sequencer:39", routed)],
+    [
+        {
+            "seq": 1,
+            "tick": 1,
+            "event": {
+                "event_emitted": {
+                    "event": {
+                        "event": "step_completed",
+                        "component": "sequencer:39",
+                        "fields": {"step": {"value": {"int": 1}}},
+                    }
+                }
+            },
+        }
+    ],
+)
 assert any("step_completed" in f for f in failures), failures
 
 # A kind-emitted event missing from the instance's resource view is
 # named.
 failures = simulate.resource_event_misses(
-    [("sequencer:39", event)],
+    [("sequencer:39", routed)],
     {"components": [{"name": "sequencer:39", "events": []}]},
 )
 assert any(
@@ -1812,14 +2012,18 @@ print("registry, receipt, and event tamper cases report named mismatches")
 }
 
 /// The release contract's named-diagnostic vocabulary must resolve
-/// every `<leg>-unchecked` self-check diagnostic `ci/check.sh` emits —
-/// an operator or tool reading a self-check failure resolves the name
-/// against the declared contract, so an emitted name the vocabulary
-/// does not declare is an unnamed diagnostic by another name. An
-/// emitted `<stem>-unchecked` is covered when the contract declares
-/// the name itself, or when the declared `<leg>-unchecked` convention
-/// covers it — the convention entry present and the leg's own
-/// `<stem>` or `<stem>-failed` diagnostic declared.
+/// every `<leg>-unchecked` self-check diagnostic the check emits —
+/// `ci/check.sh`'s inline `fail` names and the pair stage's legs,
+/// whose driver emits `<stem>-unchecked` for each `ci/legs/*.py`
+/// file's declared doctored cases, the stem the file's name with its
+/// underscores turned to dashes. An operator or tool reading a
+/// self-check failure resolves the name against the declared
+/// contract, so an emitted name the vocabulary does not declare is an
+/// unnamed diagnostic by another name. An emitted `<stem>-unchecked`
+/// is covered when the contract declares the name itself, or when the
+/// declared `<leg>-unchecked` convention covers it — the convention
+/// entry present and the leg's own `<stem>` or `<stem>-failed`
+/// diagnostic declared.
 #[test]
 fn the_contract_declares_every_emitted_unchecked_diagnostic() {
     let check = std::fs::read_to_string(root().join("reference-plant/ci/check.sh")).unwrap();
@@ -1839,6 +2043,21 @@ fn the_contract_declares_every_emitted_unchecked_diagnostic() {
             if name.ends_with("-unchecked") && !emitted.contains(&name) {
                 emitted.push(name);
             }
+        }
+    }
+    // The pair stage's legs emit `<stem>-unchecked` through
+    // `ci/legs.py`'s driver rather than the script's `fail` lines —
+    // every leg file's stem is an emitted name.
+    for entry in std::fs::read_dir(root().join("reference-plant/ci/legs")).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().into_string().unwrap();
+        if !name.ends_with(".py") {
+            continue;
+        }
+        let stem = name[..name.len() - 3].replace('_', "-");
+        let emitted_name = format!("{stem}-unchecked");
+        if !emitted.contains(&emitted_name) {
+            emitted.push(emitted_name);
         }
     }
     assert!(

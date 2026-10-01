@@ -313,7 +313,7 @@ fn promotion_is_bumpless_and_exactly_one_peer_writes_the_field() {
                 .unwrap()
                 .iter()
                 .filter_map(|entry| match entry.event {
-                    JournalEvent::RoleChanged { from, to } => Some((from, to)),
+                    JournalEvent::RoleChanged { from, to, .. } => Some((from, to)),
                     _ => None,
                 })
                 .collect()

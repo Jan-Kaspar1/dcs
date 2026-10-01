@@ -663,6 +663,31 @@
         {
           "if": {
             "properties": {
+              "requires_reason": {
+                "const": true
+              }
+            },
+            "required": [
+              "requires_reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "direction": {
+                "const": "in"
+              },
+              "writable": {
+                "const": true
+              }
+            },
+            "required": [
+              "writable"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
               "stale_after_ticks": {
                 "type": "integer"
               }
@@ -809,6 +834,19 @@
         "journaled": {
           "type": "boolean"
         },
+        "record": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/recording-duty"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requires_reason": {
+          "type": "boolean"
+        },
         "stale_after_ticks": {
           "anyOf": [
             {
@@ -885,6 +923,29 @@
         "consequence",
         "required_action",
         "reference"
+      ],
+      "type": "object"
+    },
+    "recording-duty": {
+      "additionalProperties": false,
+      "properties": {
+        "every_ticks": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "retain_days": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/nonneg-int"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "every_ticks"
       ],
       "type": "object"
     },

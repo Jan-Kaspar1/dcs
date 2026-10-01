@@ -34,6 +34,7 @@ const OP_INJECT_QUALITY: u8 = 0x07;
 const OP_CLEAR_QUALITY: u8 = 0x08;
 const OP_EXCHANGE: u8 = 0x09;
 const OP_SCRIPT_EXCHANGE: u8 = 0x0a;
+const OP_CLAIM_WRITER_UNLESS_HELD: u8 = 0x0b;
 
 // Response variant tags.
 const RESP_SAMPLE: u8 = 0x01;
@@ -136,6 +137,27 @@ pub enum BusRequest {
     /// attachment.
     ClaimWriter {
         /// The ownership token the claim asserts.
+        owner: u64,
+    },
+    /// Takes the device's write-ownership claim for `owner` — the
+    /// conditional counterpart of [`BusRequest::ClaimWriter`] a
+    /// launched controller's startup claim asks: granted while the
+    /// field stands unclaimed or the standing claim already names
+    /// `owner` — the requesting attachment then joining the claim's
+    /// holders exactly as `ClaimWriter` joins them — and refused
+    /// [`BusError::Fenced`] while a *different* owner's claim stands,
+    /// the claim it met left untouched: no preemption, no join.
+    ///
+    /// A standing claim on this protocol always has live holders —
+    /// the claim is bound to its attachments, the last drop freeing
+    /// the device — so the refused ask is exactly the live-incumbent
+    /// verdict the born-active startup contract refuses on: a
+    /// restarted controller cannot prove its resumed state is current
+    /// with the incumbent's and must not preempt it. The deliberate
+    /// takeover — a promotion's claim — stays unconditional and uses
+    /// `ClaimWriter`.
+    ClaimWriterUnlessHeld {
+        /// The ownership token the conditional claim asserts.
         owner: u64,
     },
     /// Releases this attachment's hold on the write-ownership claim —
@@ -269,13 +291,15 @@ pub enum BusResponse {
     /// [`BusRequest::InjectQuality`] stamped it), and the device tick
     /// that stamped it.
     Sample {
-        /// The stored sample.
+        /// The stored sample — its tick is a plant tick, the simulated
+        /// device's own step counter.
         sample: Sample,
     },
     /// Answer to [`BusRequest::WriteRegister`]: the write applied,
     /// reporting the tick the stored sample was stamped with.
     Written {
-        /// The device tick at the moment of the write.
+        /// The device tick at the moment of the write — a plant tick,
+        /// not a run tick of any client.
         tick: Tick,
     },
     /// Answer to [`BusRequest::ListRegisters`]: every register's
@@ -286,7 +310,8 @@ pub enum BusResponse {
     },
     /// Answer to [`BusRequest::Step`]: the bank's new tick.
     Stepped {
-        /// The tick the step advanced to.
+        /// The plant tick the step advanced to — the simulated device's
+        /// own step counter, not a run tick of any client.
         tick: Tick,
     },
     /// Answer to [`BusRequest::Exchange`]: the input image the
@@ -301,6 +326,7 @@ pub enum BusResponse {
         late: bool,
     },
     /// Answer to [`BusRequest::ClaimWriter`],
+    /// [`BusRequest::ClaimWriterUnlessHeld`],
     /// [`BusRequest::ReleaseWriter`], [`BusRequest::InjectQuality`],
     /// and [`BusRequest::ClearQuality`]: the request applied.
     Done,
@@ -614,6 +640,10 @@ pub(crate) fn encode_request(request: &BusRequest) -> Vec<u8> {
             body.push(OP_CLAIM_WRITER);
             body.extend_from_slice(&owner.to_be_bytes());
         }
+        BusRequest::ClaimWriterUnlessHeld { owner } => {
+            body.push(OP_CLAIM_WRITER_UNLESS_HELD);
+            body.extend_from_slice(&owner.to_be_bytes());
+        }
         BusRequest::ReleaseWriter => body.push(OP_RELEASE_WRITER),
         BusRequest::InjectQuality { register, quality } => {
             body.push(OP_INJECT_QUALITY);
@@ -756,6 +786,9 @@ pub(crate) fn decode_request(body: &[u8]) -> Result<BusRequest, String> {
             dt: f64::from_be_bytes(reader.take(8).ok_or_else(short)?.try_into().unwrap()),
         },
         OP_CLAIM_WRITER => BusRequest::ClaimWriter {
+            owner: reader.u64().ok_or_else(short)?,
+        },
+        OP_CLAIM_WRITER_UNLESS_HELD => BusRequest::ClaimWriterUnlessHeld {
             owner: reader.u64().ok_or_else(short)?,
         },
         OP_RELEASE_WRITER => BusRequest::ReleaseWriter,
@@ -905,6 +938,7 @@ mod tests {
             BusRequest::ListRegisters,
             BusRequest::Step { dt: 0.1 },
             BusRequest::ClaimWriter { owner: 42 },
+            BusRequest::ClaimWriterUnlessHeld { owner: 43 },
             BusRequest::ReleaseWriter,
             BusRequest::InjectQuality {
                 register: 4,
@@ -981,10 +1015,20 @@ mod tests {
             serde_json::to_string(&BusRequest::Step { dt: 0.5 }).unwrap(),
             r#"{"op":"step","dt":0.5}"#
         );
-        // A claim is tag plus the eight-byte owner token.
+        // A claim is tag plus the eight-byte owner token — and its
+        // conditional counterpart encodes the same way under its own
+        // tag.
         assert_eq!(
             encode_request(&BusRequest::ClaimWriter { owner: 0x0102 }),
             vec![0, 9, 0x05, 0, 0, 0, 0, 0, 0, 1, 2]
+        );
+        assert_eq!(
+            encode_request(&BusRequest::ClaimWriterUnlessHeld { owner: 0x0102 }),
+            vec![0, 9, 0x0b, 0, 0, 0, 0, 0, 0, 1, 2]
+        );
+        assert_eq!(
+            serde_json::to_string(&BusRequest::ClaimWriterUnlessHeld { owner: 42 }).unwrap(),
+            r#"{"op":"claim_writer_unless_held","owner":42}"#
         );
         assert_eq!(
             serde_json::to_string(&BusRequest::InjectQuality {

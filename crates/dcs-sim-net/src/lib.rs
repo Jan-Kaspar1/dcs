@@ -70,10 +70,23 @@
 //!   while one stands — a dead, yielded, or tool-held claim still
 //!   preempts, so a crashed owner's recovery and a rogue claim's
 //!   cleanup keep working where a live incumbent is protected.
+//! - `{"op":"reclaim_writer","owner":7}` — the fencing-loss re-grant a
+//!   fencing-demoted controller probes while its loss mark stands;
+//!   answers `done` while the field is unclaimed, the standing claim
+//!   names `owner`, or a different owner's claim stands holderless —
+//!   the dead-owner and orphan-placeholder shapes, which protect no
+//!   live attachment — and `fenced` while a different owner's claim
+//!   has live holders, controller or tool alike. The grant binds this
+//!   connection to the claim's holders exactly as `claim_writer` does.
 //! - `{"op":"release_writer","keep_claim":false}` — drops this
 //!   connection's hold on the write claim, releasing the claim itself
 //!   when the last holder leaves; answers `done`. `keep_claim:true` —
 //!   the demotion shape — keeps the claim standing, marked yielded.
+//! - `{"op":"ping"}` — the container health contract's liveness probe;
+//!   answers `{"result":"alive","tick":7}` with the plant's current
+//!   tick. No field access, no claim, no mutation — every attachment's
+//!   probe answers the same, and a stepping plant's tick advances
+//!   between calls.
 //!
 //! ## Field write-ownership fencing
 //!
