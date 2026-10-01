@@ -386,6 +386,17 @@ fn the_served_page_renders_each_durable_sinks_drain_health() {
     serving(&monitor, || {
         let page = client.page().unwrap();
         assert_eq!(page, dcs_monitor::PAGE);
+        // The pane renders beside the page's existing health reading,
+        // fed from the snapshot's publication section on every poll.
+        for needle in [
+            "id=\"sink-health\"",
+            "id=\"sink-health-summary\"",
+            "id=\"sink-health-rows\"",
+            "function renderSinkHealth(",
+            "renderSinkHealth(snapshot.publication)",
+        ] {
+            assert!(page.contains(needle), "page lacks {needle}");
+        }
         for needle in [
             // Each publication sink section is consumed…
             "publication.journal_sink",
@@ -405,6 +416,16 @@ fn the_served_page_renders_each_durable_sinks_drain_health() {
             // …and both degraded branches carrying the
             // fail-at-next-push rule.
             "fails the run fatally",
+            // The queue accounting the named state rides.
+            "accepted ",
+            "sink.accepted",
+            ", drained ",
+            "sink.lost",
+            "sink.high_water",
+            // The failed sink takes the page's degraded mark rather
+            // than reading like the alarm and fault rows' plain state.
+            "#sink-health-summary.bad",
+            "#sink-health td.warn",
         ] {
             assert!(page.contains(needle), "page lacks {needle}");
         }

@@ -36,7 +36,7 @@
   #pair-summary.good, #io-health-summary.good, #alarm-summary.good,
   #protection-summary.good, #sink-health-summary.good { color: #060; }
   #pair-summary.bad, #io-health-summary.bad, #alarm-summary.bad,
-  #protection-summary.bad, #sink-health-summary.bad, #sink-health td.bad { color: #b00; font-weight: bold; }
+  #protection-summary.bad, #sink-health-summary.bad { color: #b00; font-weight: bold; }
   #sink-health-summary.warn, #sink-health td.warn { color: #a60; font-weight: 600; }
   tr.alarm td.value { font-weight: 600; }
   tr.alarm.bad td, tr.alarm.substituted td, tr.alarm.uncertain td {
@@ -1719,7 +1719,7 @@ function renderIoHealth(health, commandQueue) {
 function renderSinkHealth(publication) {
   const pane = document.getElementById("sink-health");
   const rows = [];
-  const lagging = [];
+  const degraded = [];
   const failed = [];
   for (const [name, sink] of [
     ["journal sink", publication && publication.journal_sink],
@@ -1742,9 +1742,15 @@ function renderSinkHealth(publication) {
       mark = "warn";
       text = "lagging — depth " + sink.depth + "/" + sink.capacity +
         " queued; a full queue fails the run fatally at the next push";
-      lagging.push(name);
+      degraded.push(name);
     } else if (sink.state === "healthy") {
       text = "healthy";
+    } else {
+      // A state this page does not name is not a clean reading: it
+      // renders the wire name under the degraded mark rather than
+      // letting a peer ahead of this page read as healthy.
+      mark = "warn";
+      degraded.push(name);
     }
     rows.push("<tr><th>" + esc(name) + "</th><td class=\"" + mark +
       "\">" + esc(text) + "</td><td>" + esc(counters) + "</td></tr>");
@@ -1755,8 +1761,8 @@ function renderSinkHealth(publication) {
   if (failed.length > 0) {
     summary.textContent = "durable sink failed: " + failed.join(", ");
     summary.className = "bad";
-  } else if (lagging.length > 0) {
-    summary.textContent = "durable sink lagging: " + lagging.join(", ");
+  } else if (degraded.length > 0) {
+    summary.textContent = "durable sink degraded: " + degraded.join(", ");
     summary.className = "warn";
   } else {
     summary.textContent = "durable sinks healthy";
