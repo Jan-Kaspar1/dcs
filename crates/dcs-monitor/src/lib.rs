@@ -565,8 +565,8 @@ use dcs_core::{
 };
 use dcs_model::SignalIndex;
 use dcs_runtime::{
-    ApplyError, Checkpoint, Executor, Peer, SUPPORTED_FORMAT_VERSIONS, TrackReport, Transfer,
-    mint_generation,
+    ApplyError, Checkpoint, Executor, Peer, PeerEvent, SUPPORTED_FORMAT_VERSIONS, TrackReport,
+    Transfer, mint_generation,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -1844,7 +1844,7 @@ impl<'d> Monitor<'d> {
     }
 
     /// The deferred startup grant's latched refusal verdict, drained —
-    /// [`Peer::take_startup_refusal`](dcs_runtime::Peer::take_startup_refusal)
+    /// [`Peer::drain_startup_refusal`](dcs_runtime::Peer::drain_startup_refusal)
     /// under the shared lock. `Some` once per run: a scan settled the
     /// pending born-active's conditional ask into the deferred half of
     /// the [`Activation::Refused`](dcs_runtime::Activation::Refused)
@@ -1854,8 +1854,15 @@ impl<'d> Monitor<'d> {
     /// exit where none was declared. A driven run's serve loop stands
     /// down when that verdict lands pairless so the shell settles it;
     /// a paced loop drains it inside its own scan cycle.
-    pub fn take_startup_refusal(&self) -> Option<SwitchError> {
-        self.shared.lock().unwrap().peer.take_startup_refusal()
+    ///
+    /// The one accessor outside [`Peer::drain_pending`](dcs_runtime::Peer::drain_pending),
+    /// and deliberately so: the latch answers how this run *ends*, which
+    /// the run's shell decides at the boundary the verdict answers, while
+    /// the drained events answer what the run *observed* — the journal's
+    /// account. The verdict's journal entry is queued and does drain with
+    /// the rest.
+    pub fn drain_startup_refusal(&self) -> Option<SwitchError> {
+        self.shared.lock().unwrap().peer.drain_startup_refusal()
     }
 
     /// Runs one executor scan through the shared lock, records it, and
@@ -2100,14 +2107,31 @@ impl<'d> Monitor<'d> {
         let mut shared = self.shared.lock().unwrap();
         let Shared { peer, recorder, .. } = &mut *shared;
         let activation = peer.activate()?;
-        for observation in peer.take_claim_observations() {
-            recorder.note_claim_observed(observation);
-        }
-        for refusal in peer.take_startup_refusals() {
-            recorder.note_startup_claim_refused(refusal);
-        }
-        for change in peer.take_role_changes() {
-            recorder.note_role_change(&change);
+        // One drain, one match: the activation's whole account. The
+        // kinds this path does not expect are named and dropped rather
+        // than left queued for a later site — an activation queues
+        // nothing else, and a kind that did arrive has its own producer
+        // and its own journal site.
+        for event in peer.drain_pending() {
+            match event {
+                PeerEvent::ClaimObservation(observation) => {
+                    recorder.note_claim_observed(observation);
+                }
+                PeerEvent::StartupRefusal(refusal) => {
+                    recorder.note_startup_claim_refused(refusal);
+                }
+                PeerEvent::RoleChange(change) => recorder.note_role_change(&change),
+                PeerEvent::Divergence(_)
+                | PeerEvent::Resolution(_)
+                | PeerEvent::Reinitialization(_)
+                | PeerEvent::Orphan(_)
+                | PeerEvent::FencingLoss(_)
+                | PeerEvent::ClaimRearm(_)
+                | PeerEvent::SourceRestart(_)
+                | PeerEvent::PromotionRefusal(_)
+                | PeerEvent::SupersededCommand { .. }
+                | PeerEvent::AdoptionReceipt(_) => {}
+            }
         }
         self.store.sync_liveness(peer.report());
         Ok(activation)
@@ -2127,23 +2151,32 @@ impl<'d> Monitor<'d> {
         let mut shared = self.shared.lock().unwrap();
         let Shared { peer, recorder, .. } = &mut *shared;
         let result = peer.apply(checkpoint);
-        for report in peer.take_divergences() {
-            recorder.note_divergence(report.tick, report.mismatches);
-        }
-        for resolution in peer.take_resolutions() {
-            recorder.note_resolution(resolution);
-        }
-        for orphan in peer.take_orphans() {
-            recorder.note_field_orphaned(orphan);
-        }
-        for restart in peer.take_source_restarts() {
-            recorder.note_source_restart(restart);
-        }
-        for (index, receipt) in peer.take_superseded_commands() {
-            recorder.note_settled(Some(index), receipt, peer.tick());
-        }
-        for receipt in peer.take_adoption_receipts() {
-            recorder.note_settled(None, receipt, peer.tick());
+        let tick = peer.tick();
+        // One drain, one match — the applied checkpoint's whole
+        // account, in the producer's category order, which is the
+        // order this path journaled them in by hand.
+        for event in peer.drain_pending() {
+            match event {
+                PeerEvent::Divergence(report) => {
+                    recorder.note_divergence(report.tick, report.mismatches);
+                }
+                PeerEvent::Resolution(resolution) => recorder.note_resolution(resolution),
+                PeerEvent::Orphan(orphan) => recorder.note_field_orphaned(orphan),
+                PeerEvent::SourceRestart(restart) => recorder.note_source_restart(restart),
+                PeerEvent::SupersededCommand { index, receipt } => {
+                    recorder.note_settled(Some(index), receipt, tick);
+                }
+                PeerEvent::AdoptionReceipt(receipt) => {
+                    recorder.note_settled(None, receipt, tick);
+                }
+                PeerEvent::Reinitialization(_)
+                | PeerEvent::FencingLoss(_)
+                | PeerEvent::ClaimRearm(_)
+                | PeerEvent::ClaimObservation(_)
+                | PeerEvent::StartupRefusal(_)
+                | PeerEvent::PromotionRefusal(_)
+                | PeerEvent::RoleChange(_) => {}
+            }
         }
         // An adopted checkpoint carries the active's receipt log —
         // refresh the store's mirror so `GET /receipts` stays current
@@ -2168,26 +2201,33 @@ impl<'d> Monitor<'d> {
         let mut shared = self.shared.lock().unwrap();
         let Shared { peer, recorder, .. } = &mut *shared;
         let result = peer.transfer(checkpoint);
-        for report in peer.take_divergences() {
-            recorder.note_divergence(report.tick, report.mismatches);
-        }
-        for resolution in peer.take_resolutions() {
-            recorder.note_resolution(resolution);
-        }
-        for report in peer.take_reinitializations() {
-            recorder.note_reinitialized(report);
-        }
-        for orphan in peer.take_orphans() {
-            recorder.note_field_orphaned(orphan);
-        }
-        for restart in peer.take_source_restarts() {
-            recorder.note_source_restart(restart);
-        }
-        for (index, receipt) in peer.take_superseded_commands() {
-            recorder.note_settled(Some(index), receipt, peer.tick());
-        }
-        for receipt in peer.take_adoption_receipts() {
-            recorder.note_settled(None, receipt, peer.tick());
+        let tick = peer.tick();
+        // The transfer's own drain, one match: the same applied-checkpoint
+        // account the plain apply journals, plus the model-boundary
+        // crossing a rolling revision adds, in the producer's category
+        // order.
+        for event in peer.drain_pending() {
+            match event {
+                PeerEvent::Divergence(report) => {
+                    recorder.note_divergence(report.tick, report.mismatches);
+                }
+                PeerEvent::Resolution(resolution) => recorder.note_resolution(resolution),
+                PeerEvent::Reinitialization(report) => recorder.note_reinitialized(report),
+                PeerEvent::Orphan(orphan) => recorder.note_field_orphaned(orphan),
+                PeerEvent::SourceRestart(restart) => recorder.note_source_restart(restart),
+                PeerEvent::SupersededCommand { index, receipt } => {
+                    recorder.note_settled(Some(index), receipt, tick);
+                }
+                PeerEvent::AdoptionReceipt(receipt) => {
+                    recorder.note_settled(None, receipt, tick);
+                }
+                PeerEvent::FencingLoss(_)
+                | PeerEvent::ClaimRearm(_)
+                | PeerEvent::ClaimObservation(_)
+                | PeerEvent::StartupRefusal(_)
+                | PeerEvent::PromotionRefusal(_)
+                | PeerEvent::RoleChange(_) => {}
+            }
         }
         self.store.sync_receipts(peer.receipts());
         self.store.sync_liveness(peer.report());
@@ -2399,8 +2439,24 @@ impl<'d> Monitor<'d> {
         let mut shared = self.shared.lock().unwrap();
         let Shared { peer, recorder, .. } = &mut *shared;
         peer.self_promote()?;
-        for change in peer.take_role_changes() {
-            recorder.note_role_change(&change);
+        // One drain, one match: the failover walk's reported transition,
+        // with the refusal a refused streak queues beside it.
+        for event in peer.drain_pending() {
+            match event {
+                PeerEvent::RoleChange(change) => recorder.note_role_change(&change),
+                PeerEvent::PromotionRefusal(refusal) => recorder.note_promotion_refused(refusal),
+                PeerEvent::Divergence(_)
+                | PeerEvent::Resolution(_)
+                | PeerEvent::Reinitialization(_)
+                | PeerEvent::Orphan(_)
+                | PeerEvent::FencingLoss(_)
+                | PeerEvent::ClaimRearm(_)
+                | PeerEvent::ClaimObservation(_)
+                | PeerEvent::StartupRefusal(_)
+                | PeerEvent::SourceRestart(_)
+                | PeerEvent::SupersededCommand { .. }
+                | PeerEvent::AdoptionReceipt(_) => {}
+            }
         }
         let report = peer.report();
         self.store.sync_liveness(report.clone());
@@ -2739,7 +2795,7 @@ impl<'d> Monitor<'d> {
                         // down for the run's exit.
                         if shared.peer.startup_refusal().is_some() {
                             if self.configured_source().is_some() {
-                                shared.peer.take_startup_refusal();
+                                shared.peer.drain_startup_refusal();
                             } else {
                                 failure =
                                     shared.peer.startup_refusal().map(|error| error.to_string());
@@ -2891,26 +2947,33 @@ impl<'d> Monitor<'d> {
         let result = if promote {
             if let Some(pulled) = pulled {
                 peer.final_sync(|| pulled);
-                for divergence in peer.take_divergences() {
-                    recorder.note_divergence(divergence.tick, divergence.mismatches);
-                }
-                for resolution in peer.take_resolutions() {
-                    recorder.note_resolution(resolution);
-                }
-                for report in peer.take_reinitializations() {
-                    recorder.note_reinitialized(report);
-                }
-                for orphan in peer.take_orphans() {
-                    recorder.note_field_orphaned(orphan);
-                }
-                for restart in peer.take_source_restarts() {
-                    recorder.note_source_restart(restart);
-                }
-                for (index, receipt) in peer.take_superseded_commands() {
-                    recorder.note_settled(Some(index), receipt, peer.tick());
-                }
-                for receipt in peer.take_adoption_receipts() {
-                    recorder.note_settled(None, receipt, peer.tick());
+                let tick = peer.tick();
+                // The final sync's applied-checkpoint drain, one match:
+                // the transfer's account in the producer's category
+                // order, ahead of the role change the promotion below
+                // walks.
+                for event in peer.drain_pending() {
+                    match event {
+                        PeerEvent::Divergence(report) => {
+                            recorder.note_divergence(report.tick, report.mismatches);
+                        }
+                        PeerEvent::Resolution(resolution) => recorder.note_resolution(resolution),
+                        PeerEvent::Reinitialization(report) => recorder.note_reinitialized(report),
+                        PeerEvent::Orphan(orphan) => recorder.note_field_orphaned(orphan),
+                        PeerEvent::SourceRestart(restart) => recorder.note_source_restart(restart),
+                        PeerEvent::SupersededCommand { index, receipt } => {
+                            recorder.note_settled(Some(index), receipt, tick);
+                        }
+                        PeerEvent::AdoptionReceipt(receipt) => {
+                            recorder.note_settled(None, receipt, tick);
+                        }
+                        PeerEvent::FencingLoss(_)
+                        | PeerEvent::ClaimRearm(_)
+                        | PeerEvent::ClaimObservation(_)
+                        | PeerEvent::StartupRefusal(_)
+                        | PeerEvent::PromotionRefusal(_)
+                        | PeerEvent::RoleChange(_) => {}
+                    }
                 }
                 self.store.sync_receipts(peer.receipts());
                 self.store.sync_liveness(peer.report());
@@ -2952,8 +3015,24 @@ impl<'d> Monitor<'d> {
         };
         match result {
             Ok(()) => {
-                for change in peer.take_role_changes() {
-                    recorder.note_role_change(&change);
+                // The switch's own drain, one match: the role walk the
+                // promotion or demotion just reported.
+                for event in peer.drain_pending() {
+                    match event {
+                        PeerEvent::RoleChange(change) => recorder.note_role_change(&change),
+                        PeerEvent::Divergence(_)
+                        | PeerEvent::Resolution(_)
+                        | PeerEvent::Reinitialization(_)
+                        | PeerEvent::Orphan(_)
+                        | PeerEvent::FencingLoss(_)
+                        | PeerEvent::ClaimRearm(_)
+                        | PeerEvent::ClaimObservation(_)
+                        | PeerEvent::StartupRefusal(_)
+                        | PeerEvent::SourceRestart(_)
+                        | PeerEvent::PromotionRefusal(_)
+                        | PeerEvent::SupersededCommand { .. }
+                        | PeerEvent::AdoptionReceipt(_) => {}
+                    }
                 }
                 self.store.sync_liveness(peer.report());
                 json(200, &peer.report())
@@ -3968,55 +4047,55 @@ fn track_and_record(
 ) -> TrackReport {
     let Shared { peer, recorder, .. } = shared;
     let report = peer.track_once(pull);
-    for divergence in peer.take_divergences() {
-        recorder.note_divergence(divergence.tick, divergence.mismatches);
-    }
-    for resolution in peer.take_resolutions() {
-        recorder.note_resolution(resolution);
-    }
-    for report in peer.take_reinitializations() {
-        recorder.note_reinitialized(report);
-    }
-    for orphan in peer.take_orphans() {
-        recorder.note_field_orphaned(orphan);
-    }
-    // An orphan-cycle re-arm that actually landed the claim — the
-    // record naming who re-took the field the orphan detection alone
-    // cannot attribute — journals beside the orphan record too.
-    for rearm in peer.take_claim_rearms() {
-        recorder.note_claim_rearmed(rearm);
-    }
-    // A foreign owner the orphan cycle's re-arm probe just met —
-    // the claimant token the refusal named — journals beside the
-    // orphan record it answered, once per distinct claimant.
-    for observation in peer.take_claim_observations() {
-        recorder.note_claim_observed(observation);
-    }
-    for restart in peer.take_source_restarts() {
-        recorder.note_source_restart(restart);
-    }
-    // A self-promotion the boundary refused — a live incumbent's
-    // standing claim, a transient claim ask, a voided proof — leaves
-    // no role change of its own, so the journal takes it here, one
-    // entry per distinct refusal cause the streak produced.
-    for refusal in peer.take_promotion_refusals() {
-        recorder.note_promotion_refused(refusal);
-    }
-    for change in peer.take_role_changes() {
-        recorder.note_role_change(&change);
-    }
-    // Pending commands an adopted checkpoint abandoned — the demoted
-    // run's suspended queue the tracked line never carried — settle
-    // `superseded` here rather than vanishing from the audit.
-    for (index, receipt) in peer.take_superseded_commands() {
-        recorder.note_settled(Some(index), receipt, peer.tick());
-    }
-    // Force-set and held-value changes the adoption authored beyond
-    // the receipted log — a re-stood or dropped force, or a reverted
-    // receipted write, no settled verdict backs — journal here, each
-    // receipt's actor naming the adopting checkpoint.
-    for receipt in peer.take_adoption_receipts() {
-        recorder.note_settled(None, receipt, peer.tick());
+    let tick = peer.tick();
+    // The tracking cycle's drain, one match: the whole account of the
+    // pull, the orphan cycle's claim evidence, the refused
+    // self-promotion, the role walk, and the settlements the adoption
+    // carried — in the producer's category order, which is the order
+    // this path journaled them in by hand.
+    for event in peer.drain_pending() {
+        match event {
+            PeerEvent::Divergence(report) => {
+                recorder.note_divergence(report.tick, report.mismatches);
+            }
+            PeerEvent::Resolution(resolution) => recorder.note_resolution(resolution),
+            PeerEvent::Reinitialization(report) => recorder.note_reinitialized(report),
+            PeerEvent::Orphan(orphan) => recorder.note_field_orphaned(orphan),
+            // An orphan-cycle re-arm that actually landed the claim —
+            // the record naming who re-took the field the orphan
+            // detection alone cannot attribute — journals beside the
+            // orphan record too.
+            PeerEvent::ClaimRearm(rearm) => recorder.note_claim_rearmed(rearm),
+            // A foreign owner the orphan cycle's re-arm probe just met
+            // — the claimant token the refusal named — journals beside
+            // the orphan record it answered, once per distinct claimant.
+            PeerEvent::ClaimObservation(observation) => {
+                recorder.note_claim_observed(observation);
+            }
+            PeerEvent::SourceRestart(restart) => recorder.note_source_restart(restart),
+            // A self-promotion the boundary refused — a live incumbent's
+            // standing claim, a transient claim ask, a voided proof —
+            // leaves no role change of its own, so the journal takes it
+            // here, one entry per distinct refusal cause the streak
+            // produced.
+            PeerEvent::PromotionRefusal(refusal) => recorder.note_promotion_refused(refusal),
+            PeerEvent::RoleChange(change) => recorder.note_role_change(&change),
+            // Pending commands an adopted checkpoint abandoned — the
+            // demoted run's suspended queue the tracked line never
+            // carried — settle `superseded` here rather than vanishing
+            // from the audit. Force-set and held-value changes the
+            // adoption authored beyond the receipted log — a re-stood
+            // or dropped force, or a reverted receipted write, no
+            // settled verdict backs — journal here too, each receipt's
+            // actor naming the adopting checkpoint.
+            PeerEvent::SupersededCommand { index, receipt } => {
+                recorder.note_settled(Some(index), receipt, tick);
+            }
+            PeerEvent::AdoptionReceipt(receipt) => {
+                recorder.note_settled(None, receipt, tick);
+            }
+            PeerEvent::FencingLoss(_) | PeerEvent::StartupRefusal(_) => {}
+        }
     }
     store.sync_receipts(peer.receipts());
     // The cycle's apply, miss accounting, or a self-promotion moved
@@ -4037,31 +4116,40 @@ fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Tick {
     let Shared { peer, recorder, .. } = shared;
     let tick = peer.scan();
     let snapshot = recorder.record_scan(peer.executor(), tick);
-    // A field write the plant fenced — the claim this owner held was
-    // preempted — completed the scan degraded and demoted the peer
-    // inside it rather than failing it: the claim loss and the role
-    // transition it drove journal beside the scan's own events, cause
-    // before effect, beside the `io_health` fault the boundary
-    // already counted.
-    for loss in peer.take_fencing_losses() {
-        recorder.note_field_claim_lost(loss.tick, loss.point, loss.claimant);
-    }
-    // A foreign owner the fencing-loss reclaim probe just met —
-    // the claimant token the refusal named — journals beside the
-    // scan's own events, once per distinct claimant.
-    for observation in peer.take_claim_observations() {
-        recorder.note_claim_observed(observation);
-    }
-    // A deferred startup grant's refusal — the pending born-active's
-    // re-issued ask answered mid-scan — journals the settled verdict
-    // once, beside the observed-claimant record attributing it: the
-    // entry that makes the pending state's terminal settle durable on
-    // run shapes whose shell never regains control.
-    for refusal in peer.take_startup_refusals() {
-        recorder.note_startup_claim_refused(refusal);
-    }
-    for change in peer.take_role_changes() {
-        recorder.note_role_change(&change);
+    // The scan's drain, one match, beside the scan's own events: a field
+    // write the plant fenced — the claim this owner held was preempted
+    // — completed the scan degraded and demoted the peer inside it
+    // rather than failing it, so the claim loss and the role transition
+    // it drove journal here, cause before effect, beside the
+    // `io_health` fault the boundary already counted; the foreign owner
+    // the reclaim probe met journals beside them, once per distinct
+    // claimant; and a deferred startup grant's refusal — the pending
+    // born-active's re-issued ask answered mid-scan — records the
+    // settled verdict once, the entry that makes the pending state's
+    // terminal settle durable on run shapes whose shell never regains
+    // control.
+    for event in peer.drain_pending() {
+        match event {
+            PeerEvent::FencingLoss(loss) => {
+                recorder.note_field_claim_lost(loss.tick, loss.point, loss.claimant);
+            }
+            PeerEvent::ClaimObservation(observation) => {
+                recorder.note_claim_observed(observation);
+            }
+            PeerEvent::StartupRefusal(refusal) => {
+                recorder.note_startup_claim_refused(refusal);
+            }
+            PeerEvent::RoleChange(change) => recorder.note_role_change(&change),
+            PeerEvent::Divergence(_)
+            | PeerEvent::Resolution(_)
+            | PeerEvent::Reinitialization(_)
+            | PeerEvent::Orphan(_)
+            | PeerEvent::ClaimRearm(_)
+            | PeerEvent::SourceRestart(_)
+            | PeerEvent::PromotionRefusal(_)
+            | PeerEvent::SupersededCommand { .. }
+            | PeerEvent::AdoptionReceipt(_) => {}
+        }
     }
     store.publish(tick, snapshot, peer.receipts());
     // The scan's wall-clock completion stamp — `GET /health`'s
