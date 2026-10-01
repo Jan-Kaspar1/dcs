@@ -181,6 +181,22 @@ DEFAULT_CONFIG = {
         'model_fixture': 'crates/dcs-demo/fixtures/pump_station.json',
         'dynamics_fixture': 'qa_lane/fixtures/probe_dynamics.json',
     },
+    # The lane's sim-bus device server (#1368): the register-protocol
+    # endpoint the sim-bus rig legs stage on the rig bridge. The lane's
+    # bounded build compiles the shipped `dcs-sim-bus-device` binary and
+    # the controller image carries it beside its entrypoint, so a leg
+    # launches the real protocol server out of the revision under test
+    # — the shipping precedent #654 recorded for the plant image's
+    # dcs-plant-ctl — instead of a second implementation of the wire
+    # protocol. The block names the device the server serves out of the
+    # bus model, the bridge port it binds, and the model fixture
+    # declaring it; 'sim_bus_device': null stages no device server and
+    # the sim-bus legs report the absent capability.
+    'sim_bus_device': {
+        'device': 1,
+        'port': 9005,
+        'model_fixture': 'crates/dcs-demo/fixtures/two_kinds_bus.json',
+    },
     # The rig bridge-to-host reachability rule the qax-20260922-001,
     # qax-20260922-005, and qax-20260923-001 exploration runs
     # demonstrated, recorded as the lane's endpoint-placement contract:
@@ -205,7 +221,11 @@ DEFAULT_CONFIG = {
         # loopback like the deployed pair's; its plant is rig-dialed
         # only (bridge) — no host-side attachment exists.
         'probe_active': 'loopback', 'probe_standby': 'loopback',
-        'probe_driven': 'loopback', 'probe_plant': 'bridge'},
+        'probe_driven': 'loopback', 'probe_plant': 'bridge',
+        # The sim-bus device server is rig-dialed like the probe plant:
+        # the pair's sim-bus attachments reach it by container name, and
+        # nothing host-side dials the register protocol.
+        'sim_bus_device': 'bridge'},
     # The sink-isolation leg's declared impede lever (#999): the
     # controller endpoints whose --state-file mount the runner may
     # stall, each naming the staged-target kind. 'fifo' parks a
@@ -886,11 +906,13 @@ def _build_images(src, cfg, run_dir, timeline, run_id):
            '-e', 'CARGO_HOME=/cargo',
            '-e', 'CARGO_TARGET_DIR=/work/target',
            cfg['builder_image'], 'bash', '-c',
-           'cd /src && cargo build --release --locked '
-           '-p dcs-controller -p dcs-plant -p dcs-sim-net '
-           '&& cargo build --release --locked '
-           '-p dcs-monitor --bin dcs-ctl --bin dcs-forge',
-           timeout=cfg['builder_timeout'])
+            'cd /src && cargo build --release --locked '
+            '-p dcs-controller -p dcs-plant -p dcs-sim-net '
+            '&& cargo build --release --locked '
+            '-p dcs-monitor --bin dcs-ctl --bin dcs-forge '
+            '&& cargo build --release --locked '
+            '-p dcs-sim-bus --bin dcs-sim-bus-device',
+            timeout=cfg['builder_timeout'])
     # Extra binaries each image ships beside its entrypoint: the plant
     # image carries dcs-plant-ctl — the plant-side tool the lane execs
     # inside the container against the server's loopback listener, so
@@ -898,8 +920,16 @@ def _build_images(src, cfg, run_dir, timeline, run_id):
     # a second Python implementation of the wire protocol; the
     # controller image carries dcs-forge — the announced-source legs'
     # bridge-placed checkpoint endpoint the runner launches with
-    # --entrypoint dcs-forge.
-    ship = {'plant': ['dcs-plant-ctl'], 'controller': ['dcs-forge']}
+    # --entrypoint dcs-forge — and dcs-sim-bus-device, the
+    # register-protocol server the sim-bus legs launch the same way:
+    # the real device server out of the revision under test, serving the
+    # mounted bus model on the rig bridge, so the register-protocol
+    # evidence runs against the released binary and not against the
+    # lane's own protocol double. Both rides the existing image rather
+    # than a third one: the entrypoints, the two reported digests, and
+    # the host-side dcs-ctl seam are unchanged.
+    ship = {'plant': ['dcs-plant-ctl'],
+            'controller': ['dcs-forge', 'dcs-sim-bus-device']}
     digests = {}
     for crate, binary, tag in (
             ('controller', 'dcs-controller', 'dcs-hwtest/controller'),
@@ -1091,13 +1121,14 @@ def _plant_owner_tokens(cfg):
 # The endpoint keys the run config records a placement for: the
 # monitor/plant services every scenario ctx carries plus the named
 # attachment endpoints the takeover-integrity legs (#573 and
-# successors) and the tracking-source/auth evidence place — and the
+# successors) and the tracking-source/auth evidence place — the
 # probe pair's four endpoints: its monitors host-published
-# ('loopback'), its sim-serve plant rig-dialed only ('bridge').
+# ('loopback'), its sim-serve plant rig-dialed only ('bridge') — and
+# the sim-bus device server, rig-dialed like the probe plant.
 PLACEMENT_ENDPOINTS = ('active', 'standby', 'revised', 'foreign',
                        'driven', 'plant', 'interposer', 'forge',
                        'probe_active', 'probe_standby', 'probe_driven',
-                       'probe_plant')
+                       'probe_plant', 'sim_bus_device')
 PLACEMENTS = ('loopback', 'bridge')
 
 
@@ -1128,7 +1159,23 @@ PROBE_PAIR_KEYS = ('pair_token', 'active_port', 'standby_port',
                    'driven_port', 'plant_port', 'model_fixture',
                    'dynamics_fixture')
 PROBE_PAIR_PORTS = ('active_port', 'standby_port', 'driven_port',
-                    'plant_port')
+                     'plant_port')
+
+# The sim-bus device block's required keys: the device id the server
+# serves out of the bus model, the bridge port its register protocol
+# binds, and the model fixture declaring that device.
+SIM_BUS_DEVICE_KEYS = ('device', 'port', 'model_fixture')
+# The fixture placeholder the sim-bus model documents carry for the
+# device server's address — the same convention dcs-demo's bus
+# fixtures record, so one checked-in document serves every rig that
+# binds it to an address of its own.
+BUS_ADDR_PLACEHOLDER = '__BUS_ADDR__'
+# How long the device server's launch waits for the register protocol
+# to bind: the binary reports the address it serves on stderr once the
+# model, the device selection, and the bind all succeed, and exits
+# nonzero naming whichever failed, so a live container without that
+# line is a launch that never served.
+SIM_BUS_BIND_GRACE = 60
 
 
 def _probe_pair(cfg):
@@ -1168,6 +1215,44 @@ def _probe_pair(cfg):
         if not isinstance(spec[key], str) or not spec[key]:
             raise RuntimeError('probe_pair ' + key
                                + ' must name a fixture path')
+    return dict(spec)
+
+
+def _sim_bus_device(cfg):
+    """The run's sim-bus device-server spec, or None when the run
+    config stages none ('sim_bus_device' absent or null).
+
+    The block names the device the server serves out of the bus model,
+    the bridge port its register protocol binds, and the model fixture
+    declaring that device. The device id and the port must both be
+    1..65535 ints and the model must name a path, same fail-before-
+    launch discipline _probe_pair applies — a device id no fixture
+    declares or a port the bridge already serves must fail before a
+    container is launched, not at the server's own load.
+    """
+    spec = cfg.get('sim_bus_device')
+    if spec is None:
+        return None
+    if not isinstance(spec, dict):
+        raise RuntimeError('sim_bus_device must map the device '
+                           "server's staging keys, or be null to "
+                           'stage none')
+    missing = [key for key in SIM_BUS_DEVICE_KEYS if key not in spec]
+    if missing:
+        raise RuntimeError('sim_bus_device stages no '
+                           + ', '.join(missing))
+    bad = {key: spec[key] for key in ('device', 'port')
+           if not isinstance(spec[key], int)
+           or isinstance(spec[key], bool)
+           or not 0 < spec[key] <= 65535}
+    if bad:
+        raise RuntimeError('sim_bus_device device/port must be int '
+                           '1..65535: '
+                           + json.dumps(bad, sort_keys=True))
+    if not isinstance(spec['model_fixture'], str) \
+            or not spec['model_fixture']:
+        raise RuntimeError('sim_bus_device model_fixture must name a '
+                           'fixture path')
     return dict(spec)
 
 
@@ -2520,6 +2605,171 @@ def stop_forge_endpoint(run_id, timeline, pair='deployed'):
     timeline('forge-stopped', container + ' removed')
 
 
+def _stage_bus_model(model, out_path, device, address):
+    """The bus model the device server and every attachment read: the
+    lane's fixture with the named device's declared `address` bound to
+    the rig bridge endpoint the server serves on.
+
+    The sim-bus model documents carry the `__BUS_ADDR__` placeholder for
+    exactly this — the same convention dcs-demo's bus fixtures record,
+    so one checked-in document serves every rig that binds it to an
+    address of its own. Writing the staged document inside the bounded
+    run directory gives the leg one path to mount into both the device
+    server and the controller it launches, so the two ends of the
+    register protocol read a single declaration: the server parses the
+    register map it serves and the attachment dials the address the
+    server was told to bind.
+
+    A fixture that declares no such device, or declares it with an
+    address that is not the placeholder, fails loudly here — before a
+    container exists — rather than silently serving a document the
+    attachments would never dial.
+    """
+    try:
+        document = json.loads(Path(model).read_text())
+    except (OSError, ValueError) as exc:
+        raise RuntimeError('cannot read the sim-bus model fixture '
+                           + str(model) + ': ' + str(exc))
+    if not isinstance(document, dict):
+        raise RuntimeError('sim-bus model fixture ' + str(model)
+                           + ' is not a plant model document')
+    for declared in document.get('devices') or []:
+        if declared.get('id') != device:
+            continue
+        if declared.get('kind') not in ('sim-bus', 'sim-cyclic'):
+            raise RuntimeError('sim-bus device ' + str(device)
+                               + ' declares kind '
+                               + repr(declared.get('kind'))
+                               + ', which the device server does not '
+                               'serve')
+        parameters = dict(declared.get('parameters') or {})
+        if parameters.get('address') != BUS_ADDR_PLACEHOLDER:
+            raise RuntimeError('sim-bus device ' + str(device)
+                               + ' declares address '
+                               + repr(parameters.get('address'))
+                               + ', not the ' + BUS_ADDR_PLACEHOLDER
+                               + ' placeholder the lane binds')
+        parameters['address'] = address
+        declared['parameters'] = parameters
+        staged = Path(out_path)
+        staged.write_text(
+            json.dumps(document, indent=1, sort_keys=True) + '\n')
+        # Both ends read the file as the image's uid-10001 process, so
+        # the staged document is world-readable whatever umask the lane
+        # user runs under.
+        staged.chmod(0o644)
+        return str(staged)
+    raise RuntimeError('the sim-bus model fixture ' + str(model)
+                       + ' declares no device ' + str(device))
+
+
+def start_sim_bus_device(cfg, record, run_dir, timeline):
+    """The scenario-callable sim-bus device server: the run's labeled
+    rig-bridge container running the shipped `dcs-sim-bus-device`
+    binary out of the controller image under `--entrypoint`, serving the
+    register bank the lane's bus model declares over the rig bridge.
+
+    This is the enabler the sim-bus legs stage against the real
+    protocol server of the revision under test — the shipping precedent
+    #654 recorded for the plant image's dcs-plant-ctl — instead of a
+    second implementation of the wire protocol. The bus model is staged
+    inside the bounded run directory with the named device's declared
+    address bound to this container's bridge name, and the leg mounts
+    that same staged document into the controller it launches, so both
+    ends read one declaration.
+
+    The launch refuses unless the run config records the endpoint
+    'bridge' — the host egress policy makes a host socket unreachable
+    from the rig — and waits for the server's own stderr line
+    announcing the address it serves: the binary loads and validates the
+    model, selects the device, and binds before it serves, so a live
+    container without that line is a launch that never served and its
+    logs name the failure. The container carries the run's managed and
+    run labels so teardown reconciles it with the rig, and binds no
+    host port — only the rig's own attachments dial it.
+
+    Recorded on the run's action timeline; a docker failure raises so
+    the calling scenario reports the action never completed. Returns
+    {'container', 'address', 'port', 'device', 'model'} — the bridge
+    address the attachments dial and the staged document path a leg
+    mounts into the controller that attaches to the device.
+    """
+    run_id, sha = record['run_id'], record['attempted_sha']
+    spec = _sim_bus_device(cfg)
+    if spec is None:
+        raise RuntimeError('the run config stages no sim-bus device '
+                           "server — set sim_bus_device to the device, "
+                           'port, and model fixture the legs stage')
+    placements = _endpoint_placement(cfg)
+    if placements['sim_bus_device'] != 'bridge':
+        raise RuntimeError('endpoint_placement records sim_bus_device '
+                           'as ' + repr(placements['sim_bus_device'])
+                           + ' but the register protocol is rig-dialed '
+                           '— a host socket is unreachable from the '
+                           'rig')
+    # The fixture comes from the revision under test's own extracted
+    # tree — src/<attempted sha>/ — beside every other lane fixture,
+    # so the served model is the revision's, not the lane's.
+    model = Path(cfg['src_dir']) / sha / spec['model_fixture']
+    if not model.is_file():
+        raise RuntimeError('sim-bus model fixture missing: ' + str(model))
+    container = 'dcs-hw-' + run_id + '-bus'
+    port = spec['port']
+    address = container + ':' + str(port)
+    directory = Path(run_dir) / 'sim-bus'
+    directory.mkdir(parents=True, exist_ok=True)
+    staged = _stage_bus_model(model, directory / 'model.json',
+                              spec['device'], address)
+    # A leftover device server from an aborted pass leaves the same
+    # name; the staged document above is rewritten regardless.
+    docker('rm', '-f', container, check=False, timeout=60)
+    timeline('sim-bus-start', 'launch ' + container
+             + ' serving device ' + str(spec['device']) + ' on '
+             + address + ' from ' + staged)
+    docker(*_docker_run_args(cfg, run_id, container),
+           '--network', 'dcs-hwtest-' + run_id,
+           '-v', staged + ':/model/plant.json:ro',
+           '--entrypoint', 'dcs-sim-bus-device',
+           IMAGE_PREFIX + 'controller:' + sha,
+           '/model/plant.json',
+           '--device', str(spec['device']),
+           '--listen', '0.0.0.0:' + str(port))
+    # Readiness rides the server's own report of the bound address: the
+    # binary announces it on stderr once the model, the device, and the
+    # bind all succeed and exits nonzero naming whichever failed.
+    serving = 'serving device ' + str(spec['device']) + ' on'
+    deadline = time.monotonic() + SIM_BUS_BIND_GRACE
+    while True:
+        logs = docker('logs', container, check=False)
+        report = (logs.stdout or '') + (logs.stderr or '')
+        if serving in report:
+            break
+        running = docker('inspect', '-f', '{{.State.Running}}',
+                         container, check=False).stdout.strip() == 'true'
+        if not running or time.monotonic() >= deadline:
+            raise RuntimeError('the sim-bus device server never served '
+                               'device ' + str(spec['device'])
+                               + ': ' + (report.strip()[:300]
+                                         or 'no log output'))
+        time.sleep(1)
+    timeline('sim-bus-up', container + ' serving the register protocol '
+             'on ' + address)
+    return {'container': container, 'address': address, 'port': port,
+            'device': spec['device'], 'model': staged}
+
+
+def stop_sim_bus_device(run_id, timeline):
+    """The sim-bus device server's teardown: `docker rm -f` on the
+    device container — removed outright, so a leg's restart sees a dead
+    register protocol again. Recorded on the run's action timeline like
+    the other lifecycle actions; a docker failure raises so the calling
+    scenario reports the teardown never completed."""
+    container = 'dcs-hw-' + run_id + '-bus'
+    timeline('sim-bus-stop', 'docker rm -f ' + container)
+    docker('rm', '-f', container, timeout=90)
+    timeline('sim-bus-stopped', container + ' removed')
+
+
 # The born-active startup-failure leg's staging surface (decision 103 —
 # #985's record, #1017's implementation, #1033's consuming leg): a
 # scratch sim-serve field the leg silences, serves, and freezes — never
@@ -2845,7 +3095,8 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
     tool's docker-exec invocation, the run config's recorded endpoint
     placements and the
     run's rig bridge name — the placement rule a scenario attachment
-    follows when it needs an endpoint a rig peer must dial — the
+    follows when it needs an endpoint a rig peer must dial — the lane's
+    sim-bus device server's launch/teardown (#1368) — the
     drain-stall tracer lever the durable-history leg's parked-writer
     induction drives (None where the runner admits no tracer) — and the
     host-side
@@ -3010,6 +3261,18 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
             start_forge_endpoint(cfg, record, run_dir, document,
                                  owner, timeline, keyed),
         'stop_forge': lambda: stop_forge_endpoint(run_id, timeline),
+        # The lane's sim-bus device server (#1368) — the shipped
+        # dcs-sim-bus-device binary out of the controller image,
+        # serving the run config's bus model on the rig bridge. The
+        # launch returns the bridge address the rig's sim-bus
+        # attachments dial and the staged document a leg mounts into
+        # the controller it points at the field; stop_sim_bus_device
+        # kills the register protocol outright for a leg's
+        # device-outage induction.
+        'start_sim_bus_device': lambda: start_sim_bus_device(
+            cfg, record, run_dir, timeline),
+        'stop_sim_bus_device': lambda: stop_sim_bus_device(
+            run_id, timeline),
         'state_files': {key: str(_controller_dir(run_dir, peer)
                                  / 'state.json')
                         for key, peer in names.items()},

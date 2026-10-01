@@ -674,7 +674,11 @@ A factory returns one of two `DeviceDriver` contributions:
   write-ownership as `RoleReport::field_claim`: `held` while an owner
   stands, `unclaimed` while none does. The probe asserts, joins, and
   releases nothing, so the observation cannot seize the field it
-  reports. `sim-tcp` installs the plant server's `probe_writer`; a kind
+  reports. `sim-tcp` installs the plant server's `probe_writer`, and
+  `sim-bus`/`sim-cyclic` install the register protocol's — whose
+  `claim_status` answer names the standing claim's owner token and
+  declared monitor, and whose unclaimed verdict is the device's open
+  pre-claim state rather than a closed field; a kind
   whose arbitration cannot be observed without taking it leaves it
   `None` and the served report carries `None` — no claim question was
   answered — rather than a guessed `held`.
@@ -711,7 +715,11 @@ A factory returns one of two `DeviceDriver` contributions:
   standing foreign owner a preempt-and-release episode would otherwise
   hide — one journaled record per distinct claimant, not one per
   refused probe. `sim-tcp` installs
-  `RemoteDriver::fenced_by`; a kind whose fencing verdicts carry no
+  `RemoteDriver::fenced_by`, and `sim-bus`/`sim-cyclic` install the
+  register drivers' — every `fenced` verdict on that wire names the
+  standing claim's owner token and declared monitor, and on the cyclic
+  surface the verdict arrives at the image exchange rather than at a
+  point write; a kind whose fencing verdicts carry no
   owner identity leaves it `None` and the entry records `claimant:
   null`.
   `declare_monitor` is an optional `DeclareMonitorHook`
@@ -727,7 +735,12 @@ A factory returns one of two `DeviceDriver` contributions:
   successor — the field's own arbitration is the only rendezvous an
   unkeyed pair can prove (announced `?peer=` hints are unverifiable
   without a pair key). `sim-tcp` installs both on the `RemoteDriver`'s
-  claim state; a kind whose claims carry no declared monitor leaves
+  claim state, and `sim-bus`/`sim-cyclic` on the register drivers' — every
+  claim on that wire may declare the endpoint, the device server records
+  it on the claim (a wildcard declaration resolving to the claiming
+  connection's proven source, so a stored rendezvous is always dialable),
+  and an undeclared join keeps the declaration its owner already made; a
+  kind whose claims carry no declared monitor leaves
   them `None` and a demoted peer reports no claim-arbitrated source.
   `inspect` is an optional
   `Option<Arc<dyn Any + Send + Sync>>` typed handle the factory installs when

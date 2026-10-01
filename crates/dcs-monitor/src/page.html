@@ -34,9 +34,10 @@
   .forced { background: #a60; color: #fff; font-size: 0.75rem;
           padding: 0 0.35rem; border-radius: 0.25rem; margin-left: 0.35rem; }
   #pair-summary.good, #io-health-summary.good, #alarm-summary.good,
-  #protection-summary.good { color: #060; }
+  #protection-summary.good, #sink-health-summary.good { color: #060; }
   #pair-summary.bad, #io-health-summary.bad, #alarm-summary.bad,
-  #protection-summary.bad { color: #b00; font-weight: bold; }
+  #protection-summary.bad, #sink-health-summary.bad { color: #b00; font-weight: bold; }
+  #sink-health-summary.warn, #sink-health td.warn { color: #a60; font-weight: 600; }
   tr.alarm td.value { font-weight: 600; }
   tr.alarm.bad td, tr.alarm.substituted td, tr.alarm.uncertain td {
     background: #f4f0fa; font-style: italic; }
@@ -148,6 +149,14 @@
 <p id="io-health-summary"></p>
 <table>
   <tbody id="io-health-rows"></tbody>
+</table>
+</section>
+
+<section id="sink-health" hidden>
+<h2>Durable sinks</h2>
+<p id="sink-health-summary"></p>
+<table>
+  <tbody id="sink-health-rows"></tbody>
 </table>
 </section>
 </div>
@@ -1460,6 +1469,7 @@ async function refresh() {
       "tick " + snapshot.tick + peerNote + " — polled " +
       new Date().toLocaleTimeString();
     renderIoHealth(snapshot.io_health, snapshot.command_queue);
+    renderSinkHealth(snapshot.publication);
     const telemetry = new Map(snapshot.points.map(p => [p.point, p]));
     // The second half of an ack pulse: the `ack` input is consumed on
     // its rising edge, so once a scan has observed the level the point
@@ -1690,6 +1700,74 @@ function renderIoHealth(health, commandQueue) {
   const summary = document.getElementById("io-health-summary");
   summary.textContent = troubled ? "I/O degraded" : "I/O healthy";
   summary.className = troubled ? "bad" : "good";
+  pane.hidden = false;
+}
+
+// Renders the durable-sink drain health the snapshot's publication
+// section stamps: the journal sink (#942), the --state-file checkpoint
+// sink (#982), and the durable history sink — each naming healthy,
+// lagging, or failed beside its queue's accepted/drained/lost/depth/
+// high_water/capacity accounting. A publication carrying no section
+// for a sink — the run configured no file, or a peer predating the
+// section — renders nothing for it, and one carrying none at all
+// hides the pane. A healthy sink reads plainly so it never competes
+// with the alarm and fault marks; a lagging one names its queued depth
+// against the capacity bound a continued lag fills — the queue finding
+// capacity full fails the run fatally at the next push; a failed one
+// takes the page's bad mark and names the records the file lost, the
+// run already dying at its next push.
+function renderSinkHealth(publication) {
+  const pane = document.getElementById("sink-health");
+  const rows = [];
+  const degraded = [];
+  const failed = [];
+  for (const [name, sink] of [
+    ["journal sink", publication && publication.journal_sink],
+    ["state sink", publication && publication.state_sink],
+    ["history sink", publication && publication.history_sink],
+  ]) {
+    if (!sink) continue;
+    const counters = "accepted " + sink.accepted +
+      ", drained " + sink.drained +
+      ", lost " + sink.lost +
+      ", depth " + sink.depth + "/" + sink.capacity +
+      ", high-water " + sink.high_water;
+    let text = sink.state, mark = "";
+    if (sink.state === "failed") {
+      mark = "bad";
+      text = "failed — " + sink.lost +
+        " record(s) lost; the next push fails the run fatally";
+      failed.push(name);
+    } else if (sink.state === "lagging") {
+      mark = "warn";
+      text = "lagging — depth " + sink.depth + "/" + sink.capacity +
+        " queued; a full queue fails the run fatally at the next push";
+      degraded.push(name);
+    } else if (sink.state === "healthy") {
+      text = "healthy";
+    } else {
+      // A state this page does not name is not a clean reading: it
+      // renders the wire name under the degraded mark rather than
+      // letting a peer ahead of this page read as healthy.
+      mark = "warn";
+      degraded.push(name);
+    }
+    rows.push("<tr><th>" + esc(name) + "</th><td class=\"" + mark +
+      "\">" + esc(text) + "</td><td>" + esc(counters) + "</td></tr>");
+  }
+  if (rows.length === 0) { pane.hidden = true; return; }
+  document.getElementById("sink-health-rows").innerHTML = rows.join("");
+  const summary = document.getElementById("sink-health-summary");
+  if (failed.length > 0) {
+    summary.textContent = "durable sink failed: " + failed.join(", ");
+    summary.className = "bad";
+  } else if (degraded.length > 0) {
+    summary.textContent = "durable sink degraded: " + degraded.join(", ");
+    summary.className = "warn";
+  } else {
+    summary.textContent = "durable sinks healthy";
+    summary.className = "good";
+  }
   pane.hidden = false;
 }
 
