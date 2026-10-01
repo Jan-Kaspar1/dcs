@@ -7,6 +7,25 @@ from pathlib import Path
 from .merge_flow import flow_report, repair_attribution, window_bounds
 
 
+def _probe_ordering(db):
+    """Migration 6: record when a group was last congested and when a lease took its slot.
+
+    admission_groups.congested_at is when the group's latest congestion or
+    block event was recorded; admission_leases.granted is when the lease took
+    its slot, so a recovery probe can only close the episode it was granted
+    for. Re-appliable by construction — an upgrade interrupted between the two
+    ALTERs, or a rewound database, finds the column already present.
+    """
+    for table, column, decl in (('admission_groups', 'congested_at', 'REAL'),
+                                ('admission_leases', 'granted', 'REAL NOT NULL DEFAULT 0')):
+        present = {row[1] for row in db.execute('PRAGMA table_info(' + table + ')')}
+        if column not in present:
+            db.execute('ALTER TABLE ' + table + ' ADD COLUMN ' + column + ' ' + decl)
+
+
+# Ordered schema steps; each entry is SQL to run or a callable taking the
+# connection, and each must be re-appliable — a start rewound to an earlier
+# version runs the remainder again.
 MIGRATIONS = [
     # 1: daily architecture review lane
     """
@@ -64,6 +83,11 @@ MIGRATIONS = [
       payload TEXT NOT NULL DEFAULT '{}');
     CREATE INDEX IF NOT EXISTS work_events_issue ON work_events(issue,id);
     """,
+    # 6: order a recovery probe's unblock against later provider feedback.
+    # Carried as a step rather than a script because SQLite has no
+    # `ADD COLUMN IF NOT EXISTS`, and a start that dies between the two
+    # ALTERs must not wedge on the next one.
+    _probe_ordering,
 ]
 
 # Bounded cause classes persisted on 'repair'/'redispatch' work_events rows so
@@ -74,7 +98,8 @@ REDISPATCH_CAUSES = frozenset(('worker-failure', 'quota-requeue'))
 
 
 class State:
-    def __init__(self, path):
+    def __init__(self, path, capacity=None):
+        self.workspace_capacity = capacity
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(path), timeout=30)
         self.db.row_factory = sqlite3.Row
@@ -92,6 +117,10 @@ class State:
         """)
         version = self.db.execute('PRAGMA user_version').fetchone()[0]
         for index, script in enumerate(MIGRATIONS[version:], start=version + 1):
+            if callable(script):
+                script(self.db)
+                self.db.executescript(f'PRAGMA user_version={index};')
+                continue
             self.db.executescript(script + f'PRAGMA user_version={index};')
 
     def close(self):
@@ -195,6 +224,8 @@ class State:
         self.pause(reason)
 
     def capacity(self):
+        if self.workspace_capacity is not None:
+            return self.workspace_capacity
         merges = self.get('merges', 0)
         return 20 if merges >= 15 else 10 if merges >= 5 else 5
 

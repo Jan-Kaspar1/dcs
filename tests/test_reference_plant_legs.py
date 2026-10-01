@@ -6,7 +6,9 @@ inside the leg files themselves and adding a leg is one new file.
 These tests pin today's legs to their recorded order (a new leg
 joining the directory must not disturb it), refuse a .py file
 carrying no LEG literal or a malformed one, refuse two legs sharing
-an order, and ignore entries outside the convention by name."""
+an order, and ignore entries outside the convention by name. A leg
+registering no doctored case is refused the same way — every leg's
+own audit must be proven to fire, never silently absent."""
 import importlib.util
 import tempfile
 import unittest
@@ -151,6 +153,60 @@ class DiscoveryOrder(unittest.TestCase):
     def test_the_stem_is_the_file_name_with_dashes(self):
         self.assertEqual(legs.leg_stem("demote_pending.py"), "demote-pending")
         self.assertEqual(legs.leg_stem("pair.py"), "pair")
+
+
+class DoctoredCases(unittest.TestCase):
+    """Every leg plants a doctored negative — the <stem>-unchecked
+    self-check proving the leg's own audit fires. A LEG record with a
+    missing or empty `tampers` list is refused by name rather than
+    silently weakening the stage's evidence."""
+
+    def test_a_record_without_tampers_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            write_leg(directory, "real_leg.py", 10)
+            (Path(directory) / "honest_only.py").write_text(
+                'LEG = {"order": 20, "title": "x", "passes": "x"}\n'
+            )
+            with self.assertRaises(legs.Invalid) as raised:
+                legs.discover(directory)
+            self.assertIn("honest_only.py", str(raised.exception))
+
+    def test_a_record_with_empty_tampers_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            write_leg(directory, "real_leg.py", 10)
+            (Path(directory) / "honest_only.py").write_text(
+                'LEG = {"order": 20, "title": "x", "passes": "x", '
+                '"tampers": []}\n'
+            )
+            with self.assertRaises(legs.Invalid) as raised:
+                legs.discover(directory)
+            self.assertIn("honest_only.py", str(raised.exception))
+
+    def test_a_tamper_missing_a_required_field_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            write_leg(directory, "real_leg.py", 10)
+            (Path(directory) / "partial_tamper.py").write_text(
+                'LEG = {"order": 20, "title": "x", "passes": "x", '
+                '"tampers": [{"name": "doctored", "passed": "p", '
+                '"missed": "m"}]}\n'
+            )
+            with self.assertRaises(legs.Invalid) as raised:
+                legs.discover(directory)
+            self.assertIn("partial_tamper.py", str(raised.exception))
+
+    def test_a_leg_with_one_wellformed_tamper_validates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            write_leg(directory, "real_leg.py", 10)
+            path = str(Path(directory) / "real_leg.py")
+            record = legs.validate_leg(path, legs.read_leg(path))
+            self.assertEqual(record["stem"], "real-leg")
+            self.assertEqual(len(record["tampers"]), 1)
+
+    def test_the_real_legs_directory_discovers(self):
+        discovered = legs.discover(str(_CI_DIR / "legs"))
+        self.assertTrue(discovered)
+        for leg in discovered:
+            self.assertTrue(leg["tampers"], leg["file"])
 
 
 if __name__ == "__main__":

@@ -19,13 +19,22 @@ shape: the routine UI-driven `POST /promote` on a tracking standby
 whose paced run clock accrues a permanent lead over the line's
 stream position through every source freeze it survives — a lead
 the promotion carries — so the promoted successor's served run
-tick leads the ex-owner's own past MAX_ANNOUNCED_AHEAD while its
-declared stream position honestly locates the line. On the
-defective build the demoted peer's verify compared the successor's
-run tick against the prober's own — own ticks are not synchronized
-to the line — and refused the field's own answer `Ahead` forever,
-stranding the ex-owner `standby`/`unsynchronized` with a silent
-journal. The run:
+tick leads the ex-owner's own past the retired `MAX_ANNOUNCED_AHEAD`
+window while its declared stream position honestly locates the line.
+On the first defective build the demoted peer's verify compared the
+successor's run tick against the prober's own — own ticks are not
+synchronized to the line — and refused the field's own answer
+`Ahead` forever, stranding the ex-owner `standby`/`unsynchronized`
+with a silent journal; on the second
+(`skew-bound-strands-slower-cadence-ex-owner`, #1336) the comparison
+survived as declared stream positions, where a slow-scanning demoted
+peer refused a *faster* successor forever — both sides' positions
+advancing at their own `--scan-ms`, the gap diverging
+monotonically. Neither bound survives: a detached prober's own
+position is no line-membership reference, so the verify keeps only
+the pulled document's own consistency — a declared `stream_tick`
+ahead of the `tick` it rides is nonsense no honest run produces. The
+run:
 
 - launches the pair unkeyed on its declared wildcard binds — the
   rig's `pair.launch_pair` keys the pair for the announced-source
@@ -40,8 +49,9 @@ journal. The run:
   driven-scan lever: the tracking peer's `POST /scan` ticks its
   paced clock while the field owner is left un-scanned — its served
   stream standing still — until the tracker's own run tick leads
-  the line past MAX_ANNOUNCED_AHEAD, its checkpoint declaring the
-  `stream_tick` the contract's skew bound is written in;
+  the line past the retired window, its checkpoint declaring an
+  `stream_tick` the verification locates inside the line's frozen
+  tick;
 - runs the routine promote — `POST /promote` on the lead-carrying
   standby with no `POST /demote` on the owner first — so the
   successor's standing claim fences and demotes the field owner in
@@ -52,8 +62,8 @@ journal. The run:
   one `tracking_source_adopted` naming the successor's declared
   endpoint beside the attributed `field_claim_lost` and the fenced
   demote walk — converging `tracking` rather than stranding
-  `unsynchronized` past the bound, no skew-bound source refusal
-  journaled;
+  `unsynchronized` past the bound, no source refusal naming the
+  successor journaled;
 - proves a later promote answers the converged path: the
   documented switch re-seats the launch owner — the reconverged
   ex-owner's promote answering `promoting` — restoring the pair's
@@ -146,15 +156,17 @@ class Inconclusive(Exception):
     and minted tokens belong."""
 
 
-# The contract's skew bound and the driven-scan windows each phase
-# runs: the staged lead — the tracking peer's paced scans while the
-# owner's served stream stands still — must clear MAX_ANNOUNCED_AHEAD
-# the way the rig's forty-tick outage does; the fenced demote-in-place
-# settles inside a couple of scans; the claimed-monitor rejoin is the
-# bounded window the contract names — the finding's indefinite
-# `unsynchronized` wedge is the failure the bound catches; and the
-# restored pair's pull train proves the reconvergence holds.
-MAX_ANNOUNCED_AHEAD = 32
+# The staging window and the driven-scan windows each phase runs: the
+# staged lead — the tracking peer's paced scans while the owner's
+# served stream stands still — must clear the retired bound's
+# thirty-two-tick window the way the rig's forty-tick outage does, so
+# the run exercises a successor genuinely ahead of the ex-owner's own
+# position; the fenced demote-in-place settles inside a couple of
+# scans; the claimed-monitor rejoin is the bounded window the contract
+# names — the finding's indefinite `unsynchronized` wedge is the
+# failure the retired bound caught; and the restored pair's pull train
+# proves the reconvergence holds.
+STAGED_AHEAD = 32
 LEAD_SCANS = 40
 WATCH_SCANS = 6
 REJOIN_SCANS = 12
@@ -190,7 +202,8 @@ def own_tick_ahead_rejoin_pass(args, tamper):
     pair, converge, gate the contract surface, stage the
     successor's ahead-bound lead through driven scans, run the
     routine promote, and assert the fenced ex-owner's
-    claimed-monitor re-join inside the bound — journaled,
+    claimed-monitor re-join inside the watch window —
+    journaled,
     converged, promotable, launch roles restored. Returns
     `(digest_entries, evidence, failures)`; raises `Inconclusive`
     where the pinned release predates the contract."""
@@ -356,8 +369,7 @@ def own_tick_ahead_rejoin_pass(args, tamper):
         # reproduction's frozen source. Each pull applies the same
         # frozen document onto a later run tick, so the tracker
         # accrues the permanent lead the promotion carries and its
-        # checkpoint declares the stream position the contract's
-        # skew bound is written in.
+        # checkpoint declares the line position that lead rides.
         frozen = converged["ticks"][-1]
         for _ in range(LEAD_SCANS):
             pair.scan(standby_url, failures)
@@ -399,7 +411,7 @@ def own_tick_ahead_rejoin_pass(args, tamper):
                 f"successor {successor} vs ex-owner {own_doc}",
             )
         lead = succ_tick - own_tick
-        if lead <= MAX_ANNOUNCED_AHEAD:
+        if lead <= STAGED_AHEAD:
             raise Inconclusive(
                 "the driven-scan staging accrued no ahead-bound "
                 "lead — the pinned release predates the "
@@ -417,17 +429,14 @@ def own_tick_ahead_rejoin_pass(args, tamper):
                 f"the checkpoint serves {sorted(successor)}",
             )
         stream = successor.get("stream_tick")
-        if (
-            not isinstance(stream, int)
-            or stream > own_tick + MAX_ANNOUNCED_AHEAD
-        ):
+        if not isinstance(stream, int) or stream > succ_tick:
             failures.append(
                 f"the staged successor declares stream position "
-                f"{stream} past the bound on the line's frozen "
-                f"tick {own_tick} — a declared position leading "
-                "the line past MAX_ANNOUNCED_AHEAD is the "
-                "forgery shape the bound honestly refuses, not "
-                "the accrued lead the contract carries"
+                f"{stream} against its own run tick {succ_tick} — "
+                "a declared position ahead of the tick it rides is "
+                "the nonsense shape the document's own consistency "
+                "check refuses, not the accrued lead the contract "
+                "carries"
             )
             raise Abort
         digest_entries.append(
@@ -648,8 +657,8 @@ def own_tick_ahead_rejoin_pass(args, tamper):
         # and no proven hint the unkeyed run could verify, so the
         # standing claim's declared monitor is the only candidate
         # its re-join resolves — the verify reading the successor's
-        # declared stream position, never the prober's own tick.
-        # The finding's indefinite wedge is the failure this bound
+        # own line membership, never the prober's own paced position.
+        # The findings' indefinite wedges are the failures this
         # catches.
         rejoin = [stranded_rejoin.sync_kind(settled)]
         tracked = settled if claim_reclaim.tracking(settled) else None
@@ -692,9 +701,9 @@ def own_tick_ahead_rejoin_pass(args, tamper):
 
         # The recorded claimed-monitor adoption: one
         # tracking_source_adopted naming the successor's declared
-        # endpoint above the episode floor — and no skew-bound
-        # source refusal, the defective build's durable signature,
-        # beside it.
+        # endpoint above the episode floor — and no source refusal
+        # naming that same successor, the defective build's durable
+        # signature, beside it.
         journal = pair.get(
             f"{duty_url}/journal", "GET /journal", failures
         )
@@ -718,17 +727,17 @@ def own_tick_ahead_rejoin_pass(args, tamper):
             )
         refusals = refused_entries(journal[floor:])
         evidence["refusals"] = refusals
-        skew = [
+        stranded = [
             record
             for _seq, record in refusals
-            if "skew bound" in str(record.get("detail"))
+            if str(record.get("source", "")).endswith(":" + standby_port)
         ]
-        if skew:
+        if stranded:
             failures.append(
-                "the demoted peer journaled a skew-bound source "
-                f"refusal — the defective build's own-tick "
-                f"comparison, durable evidence of the strand: "
-                f"{skew}"
+                "the demoted peer journaled a source refusal "
+                "naming the successor it owed an adoption — the "
+                "defective build's positional comparison, durable "
+                f"evidence of the strand: {stranded}"
             )
         journal_file = rig.duty_files.get("journal_file")
         kinds = stranded_rejoin.durable_kinds(journal_file)
@@ -951,9 +960,9 @@ def main():
     print(
         f"ahead-bound-rejoin-digest {digest} — tracking by tick "
         f"{evidence['converged']}, the staged lead carried the "
-        "successor's promote past the ahead bound and the demoted "
-        "ex-owner re-joined through the claimed monitor inside "
-        "the bound, launch roles restored at tick "
+        "successor's promote from ahead of the ex-owner's own "
+        "position and the demoted ex-owner re-joined through the "
+        "claimed monitor, launch roles restored at tick "
         f"{evidence['restored_at']}"
     )
     return 0

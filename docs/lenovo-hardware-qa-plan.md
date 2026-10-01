@@ -495,6 +495,111 @@ Implementation order: second, after [daily architecture review](daily-architectu
   a pull inside the pending window reports inconclusive; the pair
   leaves on its launch roles.
 
+### Landed 2026-09-30 (persistence-path alias-refusal leg, #1295)
+
+- The persistence-path distinctness startup contract — #1292's fix
+  serving WW-LCM-001's continuity clause — is exercised on the
+  deployed rig by scenario leg
+  `3695_persistence_path_alias_refusal`. `--state-file`,
+  `--journal-file`, and `--history-file` are distinct-file
+  declarations with distinct formats — a write-then-rename
+  checkpoint beside two append-only record streams — and an
+  aliased pair must fail startup by name rather than divert the
+  append stream onto the orphaned inode the observed run produced
+  (a healthy /history/durable writing nowhere reachable, then a
+  crash-loop on restart reading the checkpoint document as a
+  history record). The leg stages each recorded pair through the
+  run context's `admit_persistence` lever — the harness's
+  per-run variant seam for a doctored launch: the run's own
+  controller image in a labeled `--rm` networkless scratch
+  container mounting a per-probe run-dir directory, launched on
+  the rig's pacing shape bounded by `--ticks`. The
+  `--state-file`/`--history-file` and `--state-file`/`--journal-file`
+  aliases must each exit nonzero naming both conflicting flags
+  and the shared path; the `--journal-file`/`--history-file`
+  append-append alias is the standing contrast the finding
+  recorded — every build fails it closed, the named parse refusal
+  replacing the second sink's writer-lock conflict once the
+  contract lands; and the correctly-distinct launch of the same
+  shape must scan its ticks and write each sink's own file. The
+  deployed pair never moves — the scratch containers share no
+  file, port, or field claim with the running members — and no
+  member launch is rebuilt, so the launch configuration stands
+  untouched throughout.
+- Named diagnostics are `persistence-alias-accepted` and
+  `persistence-alias-nondeterministic`, with the self-check's
+  `persistence-alias-unchecked` covering the planted accepted
+  aliases, unnamed refusals, refused control, and disturbed pair;
+  two consecutive passes produce identical digests; a run whose
+  ctx carries no `admit_persistence` lever, whose pair is
+  unreachable or never settles tracking, or whose staged revision
+  predates the contract — the append-append alias still failing
+  closed through the writer lock alone — reports inconclusive;
+  the pair leaves on its launch roles.
+
+### Landed 2026-10-01 (sim-bus device server in the lane image set, #1368)
+
+- The sim-bus rig legs stage against the released protocol server: the
+  bounded builder adds `-p dcs-sim-bus --bin dcs-sim-bus-device` to
+  its compile set and the ship map carries that binary into the
+  controller image beside `dcs-controller`, so a leg launches the
+  real register-protocol server out of the revision under test —
+  the `dcs-plant-ctl` precedent #654 recorded for the plant image,
+  and the `dcs-forge --entrypoint` precedent on the same image —
+  instead of a disposable in-session server or a Python
+  reimplementation of the wire protocol. The two reported digests,
+  the controller entrypoint, and the host-side `dcs-ctl` seam are
+  unchanged; a dedicated bus image would have changed the digest set.
+- The `sim_bus_device` config block names the device the server
+  serves, its bridge port, and the bus model declaring it;
+  `endpoint_placement` records it `bridge` like the probe field,
+  since no host socket is reachable from the rig. The launch stages
+  the fixture inside the run directory with that device's
+  `__BUS_ADDR__` placeholder bound to the device container's bridge
+  name, mounts it into a controller-image container run under
+  `--entrypoint dcs-sim-bus-device`, waits for the server's own
+  bound-address report, and returns the bridge address and the staged
+  document a leg mounts into the controller it points at the field.
+  An enabler for the sim-bus rig legs (#1355/#1356/#1357); a leg
+  needing the server itself to misbehave may still stage a double.
+
+### Landed 2026-10-01 (sim-cyclic fencing-loss demotion leg, #1357)
+
+- The sim-cyclic fencing-loss demotion contract — the per-revision
+  lane evidence for the single-writer/one-active invariant
+  WW-FND-002 requires, over the claim protocol #1352's fix
+  establishes — is exercised on the deployed rig by scenario leg
+  `2470_sim_cyclic_fencing_loss_demote`. The leg stages the lane's
+  `dcs-sim-bus-device` server on the run config's
+  `sim_bus_device.cyclic_model` document (the block carries one
+  fixture per register-protocol model the legs serve), launches a
+  controller pair onto the staged `sim-cyclic` device on the
+  driven/foreign born seats — a register-protocol model carries its
+  device address in its parameters, so the pair needs no `--remote`
+  — and severs every attachment's control connection with a device
+  restart, the rig-durable link flap that releases the
+  connection-bound claim to nobody. POST /promote on the tracking
+  member then takes the claim, so the ex-owner's next staged
+  exchange meets the fence: the leg asserts the demotion through
+  the named path — served role walking `demoting` to `standby`, the
+  durable `--journal-file` carrying `role_changed` with origin
+  `fenced` beside exactly one `field_claim_lost` attributed to the
+  promoted peer's owner token — inside the documented bound, with
+  never two peers reporting `role:active` at any poll. The promoted
+  owner's exchanges must keep completing with the claim held, the
+  demoted peer's go census-only once its staged image releases, and
+  the pair reconverges to its launch roles; the deployed pair is
+  framed undisturbed before and after.
+- Named diagnostics are `cyclic-fencing-loss-failed` and
+  `cyclic-fencing-loss-nondeterministic`, with the self-check's
+  `cyclic-fencing-loss-unchecked`; two passes produce identical
+  digests. A run staging no device server, no `cyclic_model`, a
+  staged model whose served device is not `sim-cyclic` or declares
+  no output channel, a pair that never settles — or the recorded
+  defect signature itself, the ex-owner whose io_health never names
+  a fenced exchange and who stays active beside its promoted peer —
+  reports inconclusive; the pair leaves on its launch roles.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,

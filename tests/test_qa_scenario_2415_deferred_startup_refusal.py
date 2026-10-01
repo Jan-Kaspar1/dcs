@@ -1,4 +1,4 @@
-"""The 2420_deferred_startup_refusal leg's scenario unit coverage —
+"""The 2415_deferred_startup_refusal leg's scenario unit coverage —
 the feed fakes and TestCase classes for
 scenario_deferred_startup_refusal, split out per the leg-module
 convention (#940). The shared fakes and helpers live in
