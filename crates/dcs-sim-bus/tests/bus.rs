@@ -528,7 +528,19 @@ fn protocol_contract_types_serde_roundtrip() {
         },
         BusRequest::ListRegisters,
         BusRequest::Step { dt: 0.1 },
-        BusRequest::ClaimWriter { owner: 42 },
+        BusRequest::ClaimWriter {
+            owner: 42,
+            monitor: None,
+        },
+        BusRequest::ClaimWriterUnlessHeld {
+            owner: 43,
+            monitor: None,
+        },
+        BusRequest::EnsureWriter {
+            owner: 44,
+            monitor: Some("127.0.0.1:4190".parse().unwrap()),
+        },
+        BusRequest::ProbeWriter,
         BusRequest::ReleaseWriter,
         BusRequest::InjectQuality {
             register: 4,
@@ -547,6 +559,14 @@ fn protocol_contract_types_serde_roundtrip() {
         BusResponse::Written { tick: Tick(7) },
         BusResponse::Stepped { tick: Tick(8) },
         BusResponse::Done,
+        BusResponse::ClaimStatus {
+            owner: Some(7),
+            monitor: Some("127.0.0.1:4190".parse().unwrap()),
+        },
+        BusResponse::ClaimStatus {
+            owner: None,
+            monitor: None,
+        },
         BusResponse::Error {
             error: BusError::KindMismatch {
                 register: 5,
@@ -557,6 +577,17 @@ fn protocol_contract_types_serde_roundtrip() {
         BusResponse::Error {
             error: BusError::Fenced {
                 detail: "another attachment owns register writes".to_string(),
+                owner: Some(9),
+                monitor: None,
+            },
+        },
+        // The pre-attribution verdict — what a device predating the
+        // attribution block answers, still decodable.
+        BusResponse::Error {
+            error: BusError::Fenced {
+                detail: "another attachment owns register writes".to_string(),
+                owner: None,
+                monitor: None,
             },
         },
     ];
@@ -1323,6 +1354,261 @@ fn the_conditional_claim_grants_once_the_standing_claim_dies() {
         });
         assert!(granted, "the freed field must grant the conditional claim");
         starter.write(PointId(2), Value::Float(2.0)).unwrap();
+    });
+}
+
+#[test]
+fn the_claim_status_probe_names_the_standing_owner_and_its_monitor() {
+    with_server(&fixture_decls(), |_, addr| {
+        let observer = BusDriver::connect(addr, &fixture_points()).unwrap();
+        // The pre-claim device names nobody: on this protocol that is
+        // the open field every attachment may still write through, not
+        // a closed one waiting for an owner.
+        assert_eq!(observer.probe_writer().unwrap().owner, None);
+        assert_eq!(observer.probe_writer().unwrap().monitor, None);
+        assert_eq!(
+            observer.probe_writer().unwrap().claim(),
+            dcs_core::FieldClaim::Unclaimed
+        );
+        // The probe asserts nothing: the field it reported open is
+        // still open.
+        observer.write(PointId(2), Value::Float(1.0)).unwrap();
+
+        // The owner's claim declares its tracking surface, and the
+        // probe reports both halves of the standing claim's identity.
+        let owner = BusDriver::connect(addr, &fixture_points()).unwrap();
+        owner.set_claim_monitor("127.0.0.1:4190".parse().unwrap());
+        owner.claim_writer(7).unwrap();
+        let held = observer.probe_writer().unwrap();
+        assert_eq!(held.owner, Some(7));
+        assert_eq!(held.monitor, Some("127.0.0.1:4190".parse().unwrap()));
+        assert_eq!(held.claim(), dcs_core::FieldClaim::Held);
+
+        // A second attachment under the same token — the shape one
+        // controller presents — keeps the declaration its owner made.
+        let sibling = BusDriver::connect(addr, &fixture_points()).unwrap();
+        sibling.claim_writer(7).unwrap();
+        assert_eq!(
+            observer.probe_writer().unwrap().monitor,
+            Some("127.0.0.1:4190".parse().unwrap())
+        );
+        // A declared re-claim rebinds the owner's monitor with it.
+        owner.set_claim_monitor("127.0.0.1:4191".parse().unwrap());
+        owner.ensure_writer(7).unwrap();
+        assert_eq!(
+            observer.probe_writer().unwrap().monitor,
+            Some("127.0.0.1:4191".parse().unwrap())
+        );
+        // A claim that declares no monitor leaves the standing
+        // declaration alone — a tool's join cannot erase where the
+        // owner serves.
+        sibling.release_writer().unwrap();
+        sibling.claim_writer(7).unwrap();
+        assert_eq!(
+            observer.probe_writer().unwrap().monitor,
+            Some("127.0.0.1:4191".parse().unwrap())
+        );
+
+        // The last holder's release frees the claim, and the probe
+        // reports the field open again.
+        sibling.release_writer().unwrap();
+        owner.release_writer().unwrap();
+        let released = wait_for_unclaimed(&observer, Duration::from_secs(5));
+        assert_eq!(released, dcs_core::FieldClaim::Unclaimed);
+    });
+}
+
+/// Polls the probe until the device reports no claim standing or
+/// `deadline` expires — the claim-release half of the re-attach
+/// family, where the server observes a holder's close asynchronously.
+fn wait_for_unclaimed(bus: &BusDriver, deadline: Duration) -> dcs_core::FieldClaim {
+    let start = Instant::now();
+    loop {
+        let claim = bus.probe_writer().unwrap().claim();
+        if claim == dcs_core::FieldClaim::Unclaimed || start.elapsed() >= deadline {
+            return claim;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_refused_claim_and_a_fenced_mutation_name_the_incumbent() {
+    with_server(&fixture_decls(), |_, addr| {
+        let incumbent = BusDriver::connect(addr, &fixture_points()).unwrap();
+        let challenger = BusDriver::connect(addr, &fixture_points()).unwrap();
+
+        // A claim that declared no monitor names no monitor: the
+        // verdict carries the claimant alone.
+        incumbent.claim_writer(424242).unwrap();
+        assert_eq!(
+            challenger.claim_writer_unless_held(7),
+            Err(LinkError::Fenced)
+        );
+        assert_eq!(challenger.fenced_by(), Some(424242));
+        assert_eq!(challenger.claimed_monitor(), None);
+
+        // The declared monitor rides every verdict the claim produces:
+        // the fenced write, the fenced step, and the refused
+        // re-arm/claim asks alike.
+        incumbent.set_claim_monitor("10.0.0.5:4190".parse().unwrap());
+        incumbent.ensure_writer(424242).unwrap();
+        assert_eq!(
+            challenger.write(PointId(2), Value::Float(1.0)),
+            Err(IoError::Fenced(PointId(2)))
+        );
+        assert_eq!(challenger.fenced_by(), Some(424242));
+        assert_eq!(
+            challenger.claimed_monitor(),
+            Some("10.0.0.5:4190".parse().unwrap())
+        );
+        assert_eq!(challenger.step(0.1), Err(LinkError::Fenced));
+        assert_eq!(
+            challenger.claimed_monitor(),
+            Some("10.0.0.5:4190".parse().unwrap())
+        );
+        assert_eq!(challenger.ensure_writer(7), Err(LinkError::Fenced));
+        assert_eq!(challenger.fenced_by(), Some(424242));
+        assert_eq!(challenger.claim_writer_unless_held(7), Err(LinkError::Fenced));
+        assert_eq!(
+            challenger.claimed_monitor(),
+            Some("10.0.0.5:4190".parse().unwrap())
+        );
+
+        // Reads, the census, and quality injection stay open to the
+        // fenced attachment — the verdict is the claim's, not a
+        // severed link's.
+        assert!(challenger.connected());
+        assert_eq!(challenger.last_failure(), None);
+        assert_eq!(challenger.list_registers().unwrap().len(), 3);
+        challenger
+            .inject_quality(4, Quality::Bad(QualityReason::DeviceFault))
+            .unwrap();
+
+        // The deliberate takeover stays unconditional: the claim path
+        // preempts the incumbent exactly as before, and the recorded
+        // attribution follows the new standing claim.
+        challenger.claim_writer(7).unwrap();
+        assert_eq!(incumbent.fenced_by(), None);
+        assert_eq!(incumbent.write(PointId(2), Value::Float(2.0)), Err(IoError::Fenced(PointId(2))));
+        assert_eq!(incumbent.fenced_by(), Some(7));
+    });
+}
+
+#[test]
+fn a_wildcard_monitor_declaration_stores_the_claimants_proven_source() {
+    with_server(&fixture_decls(), |_, addr| {
+        // A controller bound to the wildcard declares its bind address,
+        // which no peer can dial: the server stores the claiming
+        // connection's proven source with the declared port instead, so
+        // a fenced peer is handed an address it can actually reach.
+        let owner = BusDriver::connect(addr, &fixture_points()).unwrap();
+        owner.set_claim_monitor("0.0.0.0:4190".parse().unwrap());
+        owner.claim_writer(7).unwrap();
+        let observer = BusDriver::connect(addr, &fixture_points()).unwrap();
+        assert_eq!(
+            observer.probe_writer().unwrap().monitor,
+            Some(SocketAddr::from(([127, 0, 0, 1], 4190)))
+        );
+
+        // A routable declaration stands verbatim — only an address that
+        // can never be dialed earns the substitute.
+        owner.set_claim_monitor("10.0.0.5:4191".parse().unwrap());
+        owner.ensure_writer(7).unwrap();
+        assert_eq!(
+            observer.probe_writer().unwrap().monitor,
+            Some("10.0.0.5:4191".parse().unwrap())
+        );
+    });
+}
+
+#[test]
+fn the_recorded_owner_re_arms_through_the_ensure_path() {
+    // A device restart drops the claim server-side; the recorded owner
+    // re-arms it on its re-attach through the conditional ensure —
+    // never preempting a different owner that claimed during the
+    // outage.
+    let server = BusServer::bind(
+        ("127.0.0.1", 0),
+        RegisterBank::new(fixture_decls()).unwrap(),
+    )
+    .unwrap();
+    let addr = server.local_addr().unwrap();
+    let bus = thread::scope(|scope| {
+        scope.spawn(|| server.serve());
+        let _guard = ShutdownOnDrop(&server);
+        let bus = BusDriver::connect(addr, &fixture_points()).unwrap();
+        bus.set_claim_monitor("127.0.0.1:4190".parse().unwrap());
+        bus.claim_writer(7).unwrap();
+        bus.write(PointId(2), Value::Float(1.0)).unwrap();
+        bus
+    });
+    drop(server);
+    let restarted = rebind(addr);
+    thread::scope(|scope| {
+        scope.spawn(|| restarted.serve());
+        let _guard = ShutdownOnDrop(&restarted);
+        let observer = BusDriver::connect(addr, &fixture_points()).unwrap();
+        // The restarted device's arbitration starts empty: the claim
+        // the owner held did not survive it.
+        assert_eq!(observer.probe_writer().unwrap().owner, None);
+
+        wait_for_reattach(&bus, Duration::from_secs(10));
+        // The re-arm re-registered the claim under its recorded token,
+        // declaration included, so the probe names both again.
+        let held = observer.probe_writer().unwrap();
+        assert_eq!(held.owner, Some(7));
+        assert_eq!(held.monitor, Some("127.0.0.1:4190".parse().unwrap()));
+        bus.write(PointId(2), Value::Float(2.0)).unwrap();
+    });
+}
+
+#[test]
+fn the_ensure_path_refuses_a_different_owner_and_grants_its_own() {
+    with_server(&fixture_decls(), |_, addr| {
+        let incumbent = BusDriver::connect(addr, &fixture_points()).unwrap();
+        incumbent.set_claim_monitor("127.0.0.1:4190".parse().unwrap());
+        incumbent.claim_writer(7).unwrap();
+
+        // A re-arming attachment never preempts: the ask is refused
+        // naming the incumbent it met, and the claim it met stands.
+        let rearm = BusDriver::connect(addr, &fixture_points()).unwrap();
+        assert_eq!(rearm.ensure_writer(9), Err(LinkError::Fenced));
+        assert_eq!(rearm.fenced_by(), Some(7));
+        assert_eq!(
+            rearm.claimed_monitor(),
+            Some("127.0.0.1:4190".parse().unwrap())
+        );
+        incumbent.write(PointId(2), Value::Float(1.0)).unwrap();
+
+        // The same owner's second attachment re-arms onto the standing
+        // claim and writes through it — the re-attach shape.
+        let sibling = BusDriver::connect(addr, &fixture_points()).unwrap();
+        sibling.set_claim_monitor("127.0.0.1:4190".parse().unwrap());
+        sibling.ensure_writer(7).unwrap();
+        sibling.write(PointId(2), Value::Float(2.0)).unwrap();
+        assert_eq!(
+            BusDriver::connect(addr, &fixture_points())
+                .unwrap()
+                .probe_writer()
+                .unwrap()
+                .owner,
+            Some(7)
+        );
+
+        // The conditional grant on a free field lands and binds.
+        incumbent.release_writer().unwrap();
+        sibling.release_writer().unwrap();
+        assert_eq!(
+            wait_for_unclaimed(&sibling, Duration::from_secs(5)),
+            dcs_core::FieldClaim::Unclaimed
+        );
+        rearm.ensure_writer(9).unwrap();
+        rearm.write(PointId(2), Value::Float(3.0)).unwrap();
+        assert_eq!(
+            sibling.probe_writer().unwrap().owner,
+            Some(9)
+        );
     });
 }
 

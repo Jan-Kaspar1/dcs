@@ -12,7 +12,10 @@ use dcs_assembly::{
     assemble, resolve_drivers,
 };
 use dcs_blocks::{AnalogInput, Pid};
-use dcs_core::{CyclicIoDriver, Direction, IoDriver, PointId, Sample, Tick, Value, ValueKind};
+use dcs_core::{
+    CyclicIoDriver, Direction, FieldClaim, IoDriver, IoError, PointId, Sample, Tick, Value,
+    ValueKind,
+};
 use dcs_model::{DeviceId, PlantModel};
 use dcs_runtime::Component;
 use dcs_sim_bus::{BusServer, CyclicBusDriver, CyclicPoint, RegisterBank, RegisterDecl};
@@ -263,6 +266,72 @@ fn the_cyclic_backend_arbitrates_the_writer_claim() {
             server.bank().read(VALVE_REGISTER).unwrap().value,
             Value::Float(4.0)
         );
+    });
+}
+
+#[test]
+fn a_fenced_exchange_surfaces_the_claim_loss_to_the_driver() {
+    with_server(|server, addr| {
+        let model = cyclic_model(addr);
+        let driver = build_driver(&model);
+
+        // The claim-status probe reads the standing claim without
+        // touching it: `unclaimed` on the pre-claim device, `held`
+        // while this run's own claim stands.
+        assert_eq!(
+            driver.probe_field_claim().unwrap(),
+            FieldClaim::Unclaimed
+        );
+        driver.declare_field_monitor("127.0.0.1:4190".parse().unwrap());
+        driver.claim_field_writer(7).unwrap();
+        assert_eq!(driver.probe_field_claim().unwrap(), FieldClaim::Held);
+
+        // A successor's unconditional claim preempts: this run's next
+        // output-bearing exchange is refused at the field — the
+        // `Fenced` verdict a demoted ex-owner learns its claim is gone
+        // from, the #1352 contract on this transport.
+        let successor = CyclicBusDriver::connect_with_timeout(
+            addr,
+            Duration::from_millis(500),
+            &[CyclicPoint {
+                point: LEVEL_RAW,
+                register: LEVEL_REGISTER,
+                direction: Direction::In,
+                kind: ValueKind::Float,
+            }],
+            &stations(),
+            3,
+        )
+        .unwrap();
+        successor.set_claim_monitor("10.0.0.5:4191".parse().unwrap());
+        successor.claim_writer(424242).unwrap();
+
+        driver.write(VALVE_CMD, Value::Float(4.0)).unwrap();
+        assert_eq!(
+            cyclic(&driver).exchange(Tick(1)),
+            Err(IoError::Fenced(LEVEL_RAW)),
+            "a fenced exchange must surface the claim-loss verdict, not a transport failure"
+        );
+        // Nothing published: the ex-owner is out before it reaches the
+        // field.
+        assert_eq!(
+            server.bank().read(VALVE_REGISTER).unwrap().value,
+            Value::Float(0.0)
+        );
+        // And the verdict names the incumbent: the claimant a peer's
+        // `field_claim_lost` journal record attributes the preemption
+        // to, and the monitor its tracking path re-joins on.
+        assert_eq!(driver.fencing_claimant(VALVE_CMD), Some(424242));
+        assert_eq!(
+            driver.claimed_monitor(),
+            Some("10.0.0.5:4191".parse().unwrap())
+        );
+
+        // The startup-claim hook is installed on this kind too: a
+        // launched active over the live-held claim is refused rather
+        // than preempting the incumbent.
+        assert!(!driver.claim_field_writer_unless_held(8).unwrap());
+        assert_eq!(driver.fencing_claimant(LEVEL_RAW), Some(424242));
     });
 }
 
