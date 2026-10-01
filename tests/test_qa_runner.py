@@ -3244,6 +3244,7 @@ class SimBusDeviceImageTests(unittest.TestCase):
         finally:
             process.terminate()
             process.wait(timeout=30)
+            process.stderr.close()
 
     def _announced_address(self, process):
         """The address the shipped server reports it serves on: its own
