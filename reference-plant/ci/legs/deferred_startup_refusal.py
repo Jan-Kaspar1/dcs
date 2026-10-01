@@ -48,12 +48,12 @@ The run:
   gone, the pair resting on its launch roles for the legs behind this
   one.
 
-The contract postdates the pinned v0.6.0 release: a pairless run whose
-deferred refusal landed — the incumbent's observed claimant journaled,
-the claim probed `held` — while the process kept serving past the
-bound is the pre-contract strand this leg exists to catch, and reports
-`deferred-startup-refusal-digest inconclusive` rather than asserting
-until the manifest repins a release carrying the contract.
+A pinned release predating the contract reports
+`deferred-startup-refusal-digest inconclusive` rather than asserting: a
+pairless run whose deferred refusal landed — the incumbent's observed
+claimant journaled, the claim probed `held` — while the process kept
+serving past the bound is the pre-contract strand this leg exists to
+catch, and the v0.6.0 artifact set is that predating pin.
 
 Usage:
 
@@ -102,7 +102,11 @@ import pair
 # closed — must surface the named diagnostic on the honest run rather
 # than passing an unexercised contract.
 LEG = {
-    "order": 690,
+    # The next free slot after the pair legs origin/main added
+    # (persistence-alias-refusal 690, remote-foreign-model 700,
+    # ownerless-backoff 710) — the stage runs the legs in this order and
+    # no two may share one.
+    "order": 720,
     "title": "the deferred-startup-refusal leg",
     "passes": "deferred-startup-refusal-leg",
     "failed": "deferred-refusal-strand-failed",

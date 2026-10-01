@@ -13,7 +13,7 @@ use dcs_assembly::{
 };
 use dcs_blocks::{AnalogInput, Pid};
 use dcs_core::{
-    DriverDiagnostics, IoDriver, IoError, LinkState, PointId, Quality, QualityReason,
+    DriverDiagnostics, FieldClaim, IoDriver, IoError, LinkState, PointId, Quality, QualityReason,
     TelemetrySnapshot, Value, ValueKind,
 };
 use dcs_model::{DeviceId, PlantModel};
@@ -229,6 +229,105 @@ fn the_bus_backend_arbitrates_the_single_writer_claim() {
         );
         // Reads stay open to the fenced attachment.
         assert_eq!(fenced.read(PointId(11)).unwrap().value, Value::Float(8.5));
+    });
+}
+
+#[test]
+fn the_bus_backend_carries_the_claim_introspection_hooks() {
+    with_server(device_bank(), |_, addr| {
+        let model = mixed_model(addr);
+        let driver = build_driver(&model);
+
+        // The startup-claim hook is installed: a launched active asserts
+        // the device server's conditional grant, so a claim already
+        // standing under another owner refuses the launch rather than
+        // being preempted.
+        driver.claim_field_writer_unless_held(7).unwrap();
+        // A claim holding device makes the field report `held` — the
+        // observation a peer's role surface reports per scan, and the
+        // unclaimed device reports `unclaimed`.
+        assert_eq!(driver.probe_field_claim().unwrap(), FieldClaim::Held);
+        driver.release_field_claims();
+        assert_eq!(driver.probe_field_claim().unwrap(), FieldClaim::Unclaimed);
+
+        // The incumbent's own attachment takes the claim and declares
+        // its tracking surface, the way a controller's monitor endpoint
+        // rides the claims it asserts.
+        let incumbent = BusDriver::connect(
+            addr,
+            &[PointRegister {
+                point: LEVEL_RAW,
+                register: LEVEL_REGISTER,
+                kind: ValueKind::Float,
+            }],
+        )
+        .unwrap();
+        incumbent.set_claim_monitor("127.0.0.1:4190".parse().unwrap());
+        incumbent.claim_writer(424242).unwrap();
+        assert_eq!(driver.probe_field_claim().unwrap(), FieldClaim::Held);
+
+        // The launched-active contract: the conditional ask over a
+        // live-held bus claim is refused — the #1350 outcome — where the
+        // unconditional promotion claim still preempts.
+        assert!(!driver.claim_field_writer_unless_held(7).unwrap());
+        // The refusal's attribution reaches the driver: the standing
+        // claim's claimant, which the peer's `field_claim_lost` journal
+        // record names, and the claim-declared monitor, which its
+        // tracking path can re-join on.
+        assert_eq!(driver.fencing_claimant(LEVEL_RAW), Some(424242));
+        assert_eq!(
+            driver.claimed_monitor(),
+            Some("127.0.0.1:4190".parse().unwrap())
+        );
+        // A fenced register write over the same claim carries the same
+        // attribution — the write's verdict is what names the claimant.
+        assert_eq!(
+            driver.write(LEVEL_RAW, Value::Float(1.0)),
+            Err(IoError::Fenced(LEVEL_RAW))
+        );
+        assert_eq!(driver.fencing_claimant(LEVEL_RAW), Some(424242));
+        assert_eq!(
+            driver.claimed_monitor(),
+            Some("127.0.0.1:4190".parse().unwrap())
+        );
+        // A refused conditional grant's claimant reaches the peer's
+        // observed-claimant surface, so a `field_claim_lost`
+        // attribution never double-records.
+        driver.ensure_field_writer(7).unwrap();
+        assert_eq!(driver.refused_claimants(), vec![424242]);
+
+        // The deliberate takeover stays unconditional: the promotion
+        // path's claim preempts the incumbent exactly as before.
+        driver.claim_field_writer(7).unwrap();
+        driver.write(LEVEL_RAW, Value::Float(2.0)).unwrap();
+
+        // The declaration hook is installed: a declared monitor rides
+        // the claims this driver asserts, and the field's own verdicts
+        // hand it back.
+        let successor = BusDriver::connect(
+            addr,
+            &[PointRegister {
+                point: LEVEL_RAW,
+                register: LEVEL_REGISTER,
+                kind: ValueKind::Float,
+            }],
+        )
+        .unwrap();
+        driver.declare_field_monitor("127.0.0.1:4191".parse().unwrap());
+        driver.claim_field_writer(8).unwrap();
+        // The successor's own fenced verdict names the new claim — so
+        // its recording surfaces the claimant and the declared monitor
+        // once it has actually met the fence.
+        assert_eq!(successor.fenced_by(), None);
+        assert_eq!(
+            successor.write(LEVEL_RAW, Value::Float(0.0)),
+            Err(IoError::Fenced(LEVEL_RAW))
+        );
+        assert_eq!(successor.fenced_by(), Some(8));
+        assert_eq!(
+            successor.claimed_monitor(),
+            Some("127.0.0.1:4191".parse().unwrap())
+        );
     });
 }
 

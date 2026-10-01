@@ -137,13 +137,23 @@ list in the same change.
   protocol `dcs-sim-bus-device` serves and `BusDriver` speaks
   (decision 32, #113).
 - **Exposed operations:** `read_register`, `write_register`,
-  `list_registers`, the explicit `step`, `claim_writer`/`release_writer`
-  (the single-writer claim #154 extended to this wire), quality
-  injection (`inject_quality`/`clear_quality`), `exchange` — the cyclic
+  `list_registers`, the explicit `step`, the write-ownership claim
+  family — `claim_writer` (the single-writer claim #154 extended to
+  this wire), `claim_writer_unless_held` (the launched-controller
+  conditional grant), `ensure_writer` (the re-attached owner's re-arm),
+  `release_writer`, and `probe_writer` (the read-only claim-status
+  observation) — quality injection
+  (`inject_quality`/`clear_quality`), `exchange` — the cyclic
   whole-image exchange the `sim-cyclic` kind runs under decision 78 —
   and the scripted-outcome `script_exchange`; `dcs-sim-bus-ctl` is the
   field tool. `sim-bus` and `sim-cyclic` devices share this one wire:
-  they are one conduit, not two.
+  they are one conduit, not two. The claim family carries the
+  claim-introspection surface the plant protocol already arbitrates on
+  (#1354): every claim may declare the claimant's monitor endpoint, and
+  each `fenced` verdict names the standing claim's owner token together
+  with that declared monitor, so a superseded owner's audit attributes
+  the preemption and its tracking path can re-join the successor the
+  field's own arbitration vouches for.
 - **Bind posture:** simulated link. The device server binds `--listen`,
   defaulting to the device model's declared `parameters.address` — a
   model-declared `host:port` the deployment stands up; loopback or

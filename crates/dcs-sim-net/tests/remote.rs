@@ -720,6 +720,104 @@ fn an_unresponsive_peer_pays_one_timeout_per_reattach_window() {
 }
 
 #[test]
+fn an_ownerless_attachment_pays_the_owner_attachments_frozen_field_bound() {
+    // QA `ownerless-remote-attachment-no-reattach-backoff`: against a
+    // peer that completes the handshake but never answers — the
+    // `docker pause` socket shape — a claim-recording attachment paid
+    // one `ensure_writer` timeout per re-attach window while the
+    // ownerless one paid the request timeout on every access: its
+    // re-attach skipped the ensure, so nothing armed the backoff, and
+    // a pending born-active's scan serialized ~one stall per point
+    // into a minutes-long cycle. A failed exchange now counts as the
+    // window's contact attempt for every attachment shape — both
+    // seats stall once per window and fail every in-window access
+    // fast.
+    let timeout = Duration::from_millis(200);
+    let server =
+        PlantServer::bind(("127.0.0.1", 0), SimDriver::new(loopback_map()).unwrap()).unwrap();
+    let addr = server.local_addr().unwrap();
+    thread::scope(|scope| {
+        scope.spawn(|| server.serve());
+
+        // The owner shape: the claim recorded on the live plant runs
+        // the re-attach's `ensure_writer` exchange before the pending
+        // request — the only exchange the defect build's backoff came
+        // from.
+        let owner = RemoteDriver::connect_with_timeout(addr, timeout).unwrap();
+        owner.claim_writer(1).unwrap();
+
+        // Freeze the field `docker pause`-style: the server stops
+        // answering and the rebound listener accepts handshakes into
+        // its backlog without ever responding. The shutdown severed
+        // the owner's live link, so its first access fails fast and
+        // arms the window like any dropped link's.
+        server.shutdown();
+        let _frozen = TcpListener::bind(addr).unwrap();
+        assert_eq!(
+            owner.read(PointId(10)),
+            Err(IoError::Disconnected(PointId(10)))
+        );
+
+        // The ownerless shape — the finding's pending born-active —
+        // assembles link-down and attaches through the backlog on its
+        // first request, paying the single timeout on its own
+        // exchange rather than the ensure the owner paid.
+        let ownerless = RemoteDriver::connect_deferred(addr, timeout).unwrap();
+        let stalled = Instant::now();
+        assert_eq!(
+            ownerless.read(PointId(10)),
+            Err(IoError::Timeout(PointId(10)))
+        );
+        assert!(stalled.elapsed() >= timeout && stalled.elapsed() < timeout * 4);
+
+        // The failed exchange armed the window: the ownerless
+        // attachment's next accesses fail fast instead of each paying
+        // the timeout — the per-request bound the defect denied it.
+        let burst = Instant::now();
+        for _ in 0..8 {
+            assert_eq!(
+                ownerless.read(PointId(10)),
+                Err(IoError::Disconnected(PointId(10)))
+            );
+        }
+        assert!(
+            burst.elapsed() < timeout,
+            "in-window accesses must fail fast, not each pay the timeout"
+        );
+
+        // The owner seat pays the same one stall per window: past the
+        // backoff its re-attach connects and times the ensure out
+        // once — the request reports the standing failure's
+        // Disconnected — and its in-window accesses fail fast too.
+        thread::sleep(RemoteDriver::REATTACH_INTERVAL + timeout);
+        let stalled = Instant::now();
+        assert_eq!(
+            owner.read(PointId(10)),
+            Err(IoError::Disconnected(PointId(10)))
+        );
+        assert!(stalled.elapsed() >= timeout && stalled.elapsed() < timeout * 4);
+        let burst = Instant::now();
+        for _ in 0..8 {
+            assert_eq!(
+                owner.read(PointId(10)),
+                Err(IoError::Disconnected(PointId(10)))
+            );
+        }
+        assert!(burst.elapsed() < timeout);
+
+        // And each new window costs the ownerless attachment one more
+        // timeout — never one per access.
+        thread::sleep(RemoteDriver::REATTACH_INTERVAL + timeout);
+        let stalled = Instant::now();
+        assert_eq!(
+            ownerless.read(PointId(10)),
+            Err(IoError::Timeout(PointId(10)))
+        );
+        assert!(stalled.elapsed() >= timeout && stalled.elapsed() < timeout * 4);
+    });
+}
+
+#[test]
 fn connecting_to_a_dead_port_fails_cleanly() {
     // Bind once to learn a free port, then drop the listener so the
     // address refuses connections. A concurrently bound fixture can
@@ -1712,8 +1810,9 @@ fn an_unclaimed_window_does_not_demote_the_standing_owner() {
         // again under the standing token.
         peer.scan();
         assert_eq!(peer.role(), Role::Active);
-        assert!(peer.take_fencing_losses().is_empty());
-        assert!(peer.take_role_changes().is_empty());
+        let drained = peer.drain_pending();
+        assert!(drained.fencing_losses().is_empty());
+        assert!(drained.role_changes().is_empty());
 
         // The write landed on the shared field under the re-armed claim.
         let probe = RemoteDriver::connect(addr).unwrap();
@@ -1833,7 +1932,7 @@ fn an_orphaned_ex_owners_rearm_holds_no_live_holder_and_stays_preemptable() {
         assert_eq!(a_peer.role(), Role::Demoting);
         a_peer.scan();
         assert_eq!(a_peer.role(), Role::Standby);
-        assert_eq!(a_peer.take_fencing_losses().len(), 1);
+        assert_eq!(a_peer.drain_pending().fencing_losses().len(), 1);
         interposer.release_writer().unwrap();
 
         let probe = RemoteDriver::connect(addr).unwrap();
@@ -2110,7 +2209,7 @@ fn an_orphan_failover_regrant_rearms_the_live_incumbent_refusal() {
         c.step(0.1).unwrap();
         c_peer.scan();
         assert_eq!(c_peer.role(), Role::Active);
-        assert_eq!(c_peer.take_fencing_losses().len(), 0);
+        assert_eq!(c_peer.drain_pending().fencing_losses().len(), 0);
         // The refused restartee holds no claim — its own mutations
         // fence against the incumbent's standing claim.
         assert_eq!(a2.step(0.1), Err(RemoteError::Fenced));
@@ -2420,7 +2519,7 @@ fn the_fencing_loss_reclaim_preempts_the_orphan_placeholder() {
         assert_eq!(b_peer.role(), Role::Demoting);
         b_peer.scan();
         assert_eq!(b_peer.role(), Role::Standby);
-        assert_eq!(b_peer.take_fencing_losses().len(), 1);
+        assert_eq!(b_peer.drain_pending().fencing_losses().len(), 1);
 
         // While the tool's claim stands *held*, the reclaim refuses
         // every scan — the never-preempts-a-live-holder half of the
@@ -2465,7 +2564,8 @@ fn the_fencing_loss_reclaim_preempts_the_orphan_placeholder() {
         b_peer.track_once(|| Ok(a_peer.checkpoint()));
         assert_eq!(
             b_peer
-                .take_claim_observations()
+                .drain_pending()
+                .claim_observations()
                 .iter()
                 .map(|observation| observation.claimant)
                 .collect::<Vec<_>>(),

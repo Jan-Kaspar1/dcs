@@ -9,10 +9,10 @@ use dcs_core::{
     Command, CommandAvailability, CommandDecl, CommandOutcome, ComponentDescriptor, Direction,
     Divergence, EmittedEvent, EventDecl, EventField, EventFieldKind, EventRetention, EventValue,
     FailoverEvidence, IoDriver, IoError, JournalEvent, PointId, Quality, QualityReason, Role,
-    Sample, StandbySync, StateMap, SwitchError, SwitchOrigin, Tick, Value, ValueKind,
+    RoleReport, Sample, StandbySync, StateMap, SwitchError, SwitchOrigin, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
-use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorClient, TrackTarget};
+use dcs_monitor::{CheckpointPuller, Driven, Monitor, MonitorClient, PullMiss, TrackTarget};
 use dcs_runtime::{
     Checkpoint, Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap,
     PointSpec, StepError, TrackReport, mint_generation,
@@ -1566,6 +1566,28 @@ impl Drop for Hostile {
     }
 }
 
+/// What a [`Relay`] does with an accepted connection — one address the
+/// tracking standby's puller stays bound to while the staging moves it
+/// between a source's states.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RelayMode {
+    /// Proxy the connection to the upstream monitor: the source
+    /// serving.
+    Proxy,
+    /// Close it unanswered: the source is up but not yet serving — the
+    /// pending window a standby that entered tracking inside it pulls
+    /// against.
+    Refuse,
+    /// Hold it open without answering: the source accepts and goes
+    /// silent, so every fetch sits in flight to the pull bound.
+    Silence,
+    /// Dribble bytes without ever finishing a response: each of the
+    /// fetch's reads lands inside its own bound, so the fetch stays
+    /// outstanding well past it — the worker-side per-fetch stall the
+    /// pull path's `Stalled` stage names.
+    Trickle,
+}
+
 /// A transparent TCP relay — the reproduction's interposer in its
 /// strongest shape: rather than serving a captured document it proxies
 /// every connection to the victim's real monitor, so a keyed verify
@@ -1575,7 +1597,7 @@ impl Drop for Hostile {
 /// Runs on its own thread until dropped.
 struct Relay {
     addr: SocketAddr,
-    partitioned: Arc<AtomicBool>,
+    mode: Arc<Mutex<RelayMode>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -1585,22 +1607,49 @@ impl Relay {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
-        let partitioned = Arc::new(AtomicBool::new(false));
-        let cutting = Arc::clone(&partitioned);
+        let mode = Arc::new(Mutex::new(RelayMode::Proxy));
+        let staging = Arc::clone(&mode);
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = Arc::clone(&stop);
         let thread = thread::spawn(move || {
             while !stopping.load(Ordering::Relaxed) {
                 match listener.accept() {
-                    Ok((client, _)) => {
-                        if cutting.load(Ordering::Relaxed) {
-                            drop(client);
-                            continue;
+                    Ok((client, _)) => match *staging.lock().unwrap() {
+                        RelayMode::Proxy => {
+                            if let Ok(server) = std::net::TcpStream::connect(upstream) {
+                                thread::spawn(move || pump_relay(client, server));
+                            }
                         }
-                        if let Ok(server) = std::net::TcpStream::connect(upstream) {
-                            thread::spawn(move || pump_relay(client, server));
+                        RelayMode::Refuse => drop(client),
+                        RelayMode::Silence => {
+                            // Held open and unanswered: nothing reads
+                            // the request and nothing answers it, so
+                            // the fetch's write completes and its read
+                            // then runs out of the pull bound — the
+                            // pending source's own verdict.
+                            thread::spawn(move || {
+                                let _held = client;
+                                thread::sleep(Duration::from_secs(3));
+                            });
                         }
-                    }
+                        RelayMode::Trickle => {
+                            thread::spawn(move || {
+                                // A response that never ends: each byte
+                                // lands inside the fetch's own read
+                                // bound, so the fetch never fails and
+                                // never completes — for long enough
+                                // that the puller gives up on the worker
+                                // holding it, and no longer.
+                                let mut client = client;
+                                for _ in 0..30 {
+                                    thread::sleep(Duration::from_millis(300));
+                                    if client.write_all(b" ").is_err() {
+                                        return;
+                                    }
+                                }
+                            });
+                        }
+                    },
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(5));
                     }
@@ -1610,10 +1659,17 @@ impl Relay {
         });
         Self {
             addr,
-            partitioned,
+            mode,
             stop,
             thread: Some(thread),
         }
+    }
+
+    /// Stops proxying and answers every later connection `mode` — the
+    /// staging a source's pending window and its loss are reached
+    /// through, on the one address the puller holds.
+    fn stage(&self, mode: RelayMode) {
+        *self.mode.lock().unwrap() = mode;
     }
 
     /// Cuts or restores the relayed stream — the frozen-source window
@@ -1621,7 +1677,11 @@ impl Relay {
     /// unanswered while cut, so the tracker's pulls fail fast like the
     /// reproduction's paused active.
     fn partition(&self, cut: bool) {
-        self.partitioned.store(cut, Ordering::Relaxed);
+        self.stage(if cut {
+            RelayMode::Refuse
+        } else {
+            RelayMode::Proxy
+        });
     }
 }
 
@@ -4291,7 +4351,8 @@ fn a_demoted_ex_owner_rejoins_a_successor_carrying_the_outage_lead() {
 
     // The bounded source outage: the stream cuts while a's served
     // document freezes — the reproduction's stopped active — and b
-    // keeps pacing past MAX_ANNOUNCED_AHEAD ticks of missed pulls.
+    // keeps pacing well past the old bound's thirty-two ticks of
+    // missed pulls.
     relay.partition(true);
     b.client.advance(40).unwrap();
     assert!(
@@ -4334,9 +4395,9 @@ fn a_demoted_ex_owner_rejoins_a_successor_carrying_the_outage_lead() {
     assert_eq!(b.client.role().unwrap().role, Role::Active);
 
     // The trigger the defect wedged on verbatim: the promoted
-    // successor's served run tick sits more than MAX_ANNOUNCED_AHEAD
-    // past the ex-owner's own — while its declared stream position
-    // honestly locates the line.
+    // successor's served run tick sits more than the old bound's
+    // thirty-two ticks past the ex-owner's own — while its declared
+    // stream position honestly locates the line.
     let own = a.client.checkpoint().unwrap();
     let successor = b.client.checkpoint().unwrap();
     assert!(
@@ -4373,6 +4434,156 @@ fn a_demoted_ex_owner_rejoins_a_successor_carrying_the_outage_lead() {
         )),
         "the field-arbitrated adoption journals on the demoted peer: {:?}",
         a.client.journal(0).unwrap()
+    );
+}
+
+/// The QA finding `skew-bound-strands-slower-cadence-ex-owner`: the
+/// announced/owner skew bound compared the pulled checkpoint's
+/// declared stream position against the *probing* run's own — but a
+/// detached prober's stream position advances at its own scan cadence
+/// while the pulled one advances at the successor's, so any sustained
+/// pace asymmetry diverges the gap monotonically and the verify can
+/// never pass. On the defective build a slow-scanning demoted ex-owner
+/// refused a faster promoted successor `Ahead` at every re-probe —
+/// `standby`/`unsynchronized` forever, `not_converged` on promote,
+/// journal repeating the skew-bound refusal as N-M grew. The
+/// prober's own paced position is no line-membership reference: a
+/// same-generation successor honestly declaring its stream position
+/// is the line's continuation however fast it advances, so no
+/// ahead-of-own bound stands and the demoted peer's claimed-monitor
+/// adoption converges `tracking`.
+#[test]
+fn a_demoted_ex_owner_rejoins_a_faster_paced_successor() {
+    // The retired `MAX_ANNOUNCED_AHEAD` window the staging must
+    // overshoot: the defect's refusal fired on divergence past this
+    // many ticks between the prober's own declared position and the
+    // pulled one, and nothing may refuse at it any more.
+    const RETIRED_AHEAD: u64 = 32;
+
+    // The reproduction's ctrl-a: the launched field owner with no
+    // configured tracking source, driven over a fencing front so the
+    // successor's claim preempts its writes mid-run — no `POST
+    // /demote` boundary ever runs — and carrying the field's claim
+    // verdicts the claimed-monitor adoption reads. The verdict names
+    // a's own monitor while its claim stands.
+    let fencing = FencingDriver::start();
+    let claimed: &'static Mutex<SocketAddr> = Box::leak(Box::new(Mutex::new(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        0,
+    ))));
+    let a = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(
+                fenced_executor(fencing).with_generation(mint_generation()),
+                None,
+            )
+            .with_claimed_monitor(move || Some(*claimed.lock().unwrap())),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: None,
+            after_scan: None,
+        }),
+    );
+    let a_addr = dialable(a.monitor.local_addr());
+    *claimed.lock().unwrap() = a_addr;
+
+    // The reproduction's ctrl-b: a standby tracking a — no outage
+    // anywhere in this staging; the divergence is pace alone.
+    let b_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let b = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(b_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .driven(Driven {
+            track: Some(a_addr),
+            after_scan: None,
+        }),
+    );
+    let b_addr = dialable(b.monitor.local_addr());
+
+    a.client.advance(3).unwrap();
+    b.client.advance(1).unwrap();
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Tracking { .. })
+        ),
+        "the standby converged on the line before the promotion"
+    );
+
+    // The routine promote: b claims the field — the arbitration's
+    // fencing verdict preempts a's writes and names b's monitor — and
+    // settles the field owner.
+    assert_eq!(b.client.promote().unwrap().role, Role::Promoting);
+    fencing.preempt();
+    *claimed.lock().unwrap() = b_addr;
+    b.client.advance(1).unwrap();
+    assert_eq!(b.client.role().unwrap().role, Role::Active);
+
+    // The reproduction's cadence asymmetry, staged without a wall
+    // clock: the faster successor keeps scanning — each driven scan
+    // advancing its declared stream position — while the demoted
+    // ex-owner has not yet observed the fencing, so the pulled
+    // position leads the prober's own past the defective build's
+    // bound and keeps diverging.
+    b.client.advance(40).unwrap();
+    let own = a.client.checkpoint().unwrap();
+    let successor = b.client.checkpoint().unwrap();
+    let own_position = own.stream_tick.unwrap_or(own.tick).min(own.tick);
+    let pulled_position = successor
+        .stream_tick
+        .unwrap_or(successor.tick)
+        .min(successor.tick);
+    assert!(
+        pulled_position.0 > own_position.0 + RETIRED_AHEAD,
+        "the successor's declared stream position leads the detached \
+         prober's own past the old skew bound — the refusal the defect \
+         made permanent: {successor:?} vs {own:?}"
+    );
+    assert_eq!(
+        successor.generation, own.generation,
+        "same generation — the line's own continuation, honestly \
+         declared: {successor:?} vs {own:?}"
+    );
+
+    // a's next field-owning scan fences: `field_claim_lost` demotes it
+    // in place, and the first sourceless scan resolves the field's
+    // declared monitor — proving the successor's document on its line
+    // membership, where the defective build refused it `Ahead` on
+    // every re-probe — then pins, journals, and pulls it.
+    a.client.advance(2).unwrap();
+    let report = a.client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert!(
+        matches!(report.sync, Some(StandbySync::Tracking { .. })),
+        "the demoted ex-owner reconverges on the faster successor \
+         instead of stranding unsynchronized: {report:?}"
+    );
+    assert_eq!(a.monitor.tracking_source(), Some(b_addr));
+    let journal = a.client.journal(0).unwrap();
+    assert!(
+        journal.iter().any(|entry| matches!(
+            entry.event,
+            JournalEvent::TrackingSourceAdopted { source } if source == b_addr
+        )),
+        "the field-arbitrated adoption journals on the demoted peer: {journal:?}"
+    );
+    assert!(
+        journal.iter().all(|entry| !matches!(
+            entry.event,
+            JournalEvent::TrackingSourceRefused { source, .. } if source == b_addr
+        )),
+        "no verify refusal strands the honest successor: {journal:?}"
     );
 }
 
@@ -4509,4 +4720,510 @@ fn orphaned_cycles_cache_the_failed_resolution_probe() {
         "a changed candidate set re-probes without waiting out the \
          window: {elapsed:?}"
     );
+}
+
+/// The QA finding `pending-source-pull-latches-egain` (#1315): a standby
+/// that entered tracking inside its source's pending window can never
+/// converge for the life of the process, while every manual pull against
+/// the same source answers — the operator sees a permanently degraded
+/// sync beside a healthy-looking peer, and only a restart clears it.
+///
+/// The rig is the reproduction's shape: a field-owning source behind a
+/// staging relay (the relay is the source's pending window, moved from
+/// "not answering yet" to "serving" while the standby is already
+/// tracking), and a paced standby whose tracking cycles consume a
+/// [`CheckpointPuller`] exactly as `dcs-controller`'s loop does. The
+/// latch trigger is isolated in the period: the pull's own bound is one
+/// second, and a scan period past it — a legal `--scan-ms`, and what a
+/// contended cycle stretches into on its own — used to make *every*
+/// completed document too old to apply, so the puller discarded each
+/// one and reported the pending window's refusal instead, forever.
+///
+/// Post-fix the document's wait is measured against the puller's own
+/// cadence, so the same staging converges within one cycle of the source
+/// beginning to serve — and the refusal that described the pending
+/// window never comes back.
+#[test]
+fn a_pending_source_does_not_latch_the_standbys_tracking() {
+    // The pending window's verdict, verbatim: a source that accepts the
+    // pull and never answers makes the fetch's read run out of its
+    // bound, which is the `Resource temporarily unavailable (os error
+    // 11)` the reported runs degraded on every poll.
+    const PENDING_REFUSAL: &str = "Resource temporarily unavailable";
+
+    let active = source(SourceKind::Owner);
+    let relay = Relay::serve(dialable(active.monitor.local_addr()));
+    relay.stage(RelayMode::Silence);
+    let tracker = PacedTracker::start(relay.addr, Duration::from_millis(1200));
+
+    // The pending window: the standby tracks into it and reports the
+    // fetch failure the pending source answers with.
+    let pending = tracker.await_detail(6, |detail| detail.contains(PENDING_REFUSAL));
+    assert!(
+        pending.contains(PENDING_REFUSAL),
+        "the pending window's pull must fail the way the reported runs \
+         did: {pending:?}"
+    );
+
+    // The source begins serving.
+    relay.stage(RelayMode::Proxy);
+
+    // The standby converges `Tracking`: the document the source serves
+    // lands.
+    assert!(
+        tracker.await_verdict_of(SourceKind::Owner, 8),
+        "a standby tracking a source that began serving must converge \
+         within a bounded window: {:?} — misses {:?}",
+        tracker.role().sync,
+        tracker.misses()
+    );
+
+    // And the pending window's verdict stays gone. The pulls armed
+    // inside it resolve on their own terms — a fetch that started while
+    // the source was not yet serving may still answer afterwards — but
+    // every cycle past the convergence describes the source that has
+    // been answering ever since.
+    let settled = tracker.misses().len();
+    thread::sleep(Duration::from_millis(2600));
+    assert!(
+        tracker.converged_as(SourceKind::Owner),
+        "the converged standby keeps tracking the serving source: {:?}",
+        tracker.role().sync
+    );
+    let later = tracker.misses()[settled..].to_vec();
+    assert!(
+        later.iter().all(|detail| !detail.contains(PENDING_REFUSAL)),
+        "the pending window's verdict stood again after the source \
+         began serving: {later:?}"
+    );
+}
+
+/// The same pending window staged every way a source's come-up can be
+/// reached, at both periods and against both source shapes: the
+/// pulled-back outcome is the contract, the reported run's latch is not.
+/// Each leg asserts that the standby converges inside a bounded window
+/// after the source begins serving.
+#[test]
+fn a_pending_window_reconverges_whatever_shape_it_takes() {
+    // The rig's own period against a silent window: the source's
+    // come-up costs a fetch's full bound, and the standby tracks
+    // through it without ever being stuck.
+    assert_pending_window_reconverges(
+        SourceKind::Owner,
+        RelayMode::Silence,
+        Duration::from_millis(60),
+        "silent",
+    );
+    // The window closing connections instead of holding them open: the
+    // refusal arrives at once, and the pulled-back document still lands
+    // past the pull bound.
+    assert_pending_window_reconverges(
+        SourceKind::Owner,
+        RelayMode::Refuse,
+        Duration::from_millis(1200),
+        "refused",
+    );
+    // The reported reproduction's own source: a run standing pending —
+    // `source_owns_field: false`, so every landed apply converges
+    // orphaned and pays the orphan probe — behind the same silent
+    // window, at the period the latch trigger needs.
+    assert_pending_window_reconverges(
+        SourceKind::Ownerless,
+        RelayMode::Silence,
+        Duration::from_millis(1200),
+        "pending-source",
+    );
+}
+
+/// One leg of the staged orderings: a standby tracking a source of
+/// `kind` behind `mode`'s pending window at `period` must converge
+/// within a bounded window once the source begins serving, whatever the
+/// window's shape and whichever line the source serves.
+fn assert_pending_window_reconverges(
+    kind: SourceKind,
+    mode: RelayMode,
+    period: Duration,
+    label: &str,
+) {
+    let active = source(kind);
+    let relay = Relay::serve(dialable(active.monitor.local_addr()));
+    relay.stage(mode);
+    let tracker = PacedTracker::start(relay.addr, period);
+
+    // The standby tracks into the pending window and misses at least
+    // once there — the state the reported runs never left.
+    tracker.await_detail(6, |_| true);
+    relay.stage(RelayMode::Proxy);
+    assert!(
+        tracker.await_verdict_of(kind, 8),
+        "a {label} pending window must not outlive the source's serving: \
+         {:?} — misses {:?}",
+        tracker.role().sync,
+        tracker.misses()
+    );
+}
+
+/// The control half: a source that was never pending converges on its
+/// first pull, and a source that goes pending *after* the standby
+/// reconverges when it comes back — the shape the rig's frozen-source
+/// windows take. Neither ever passed through a pending window, so
+/// neither is the reported defect; both guard the fix against breaking
+/// the ordinary cadence.
+#[test]
+fn a_standby_tracks_a_source_that_was_never_pending() {
+    let active = source(SourceKind::Owner);
+    let tracker = PacedTracker::start(
+        dialable(active.monitor.local_addr()),
+        Duration::from_millis(60),
+    );
+    assert!(
+        tracker.await_verdict_of(SourceKind::Owner, 6),
+        "a live source converges on its first pull: {:?} — misses {:?}",
+        tracker.role().sync,
+        tracker.misses()
+    );
+
+    // The source's window: it stops answering and comes back. The
+    // standby reports the misses and reconverges.
+    let relay = Relay::serve(dialable(active.monitor.local_addr()));
+    let recovering = PacedTracker::start(relay.addr, Duration::from_millis(60));
+    relay.stage(RelayMode::Silence);
+    recovering.await_detail(6, |_| true);
+    relay.stage(RelayMode::Proxy);
+    assert!(
+        recovering.await_convergence(8),
+        "a restored source reconverges the standby: {:?} — misses {:?}",
+        recovering.role().sync,
+        recovering.misses()
+    );
+}
+
+/// The pull path's own account of itself, one stage at a time: what the
+/// QA finding could not isolate on the rig becomes a stage this test
+/// pins. A fetch inside its bound reports [`PullMiss::InFlight`]; one
+/// that has outrun it reports [`PullMiss::Stalled`] — the worker-side
+/// per-fetch stall, which the reported build could only show as
+/// whatever the endpoint last said; the endpoint's own refusal arrives
+/// as [`PullMiss::Refused`], carrying the read that ran out of its
+/// bound; a name that does not resolve reports [`PullMiss::Unresolved`]
+/// rather than an endpoint refusal; and once the endpoint serves, the
+/// document lands — after which no cycle reports the earlier refusal
+/// again.
+#[test]
+fn a_pull_reports_the_stage_its_fetch_reached() {
+    const PENDING_REFUSAL: &str = "Resource temporarily unavailable";
+
+    let active = source(SourceKind::Owner);
+    let relay = Relay::serve(dialable(active.monitor.local_addr()));
+    // A source that dribbles bytes without ever finishing a response:
+    // each read lands inside the fetch's own bound, so the fetch stays
+    // outstanding well past it — the stall this stage exists to name.
+    relay.stage(RelayMode::Trickle);
+    let mut stalled = CheckpointPuller::new(relay.addr, None);
+
+    let inside = stalled.poll_staged();
+    assert!(
+        matches!(inside, Err(PullMiss::InFlight)),
+        "a fetch still inside its bound is in flight: {inside:?}"
+    );
+    thread::sleep(Duration::from_millis(400));
+    let inside = stalled.poll_staged();
+    assert!(
+        matches!(inside, Err(PullMiss::InFlight)),
+        "the outstanding fetch is still inside its bound: {inside:?}"
+    );
+    thread::sleep(Duration::from_millis(900));
+    let over = stalled.poll_staged();
+    assert!(
+        matches!(over, Err(PullMiss::Stalled)),
+        "a fetch that has outrun the puller's bound is a stall, not the \
+         in-flight state and not an earlier failure: {over:?}"
+    );
+
+    // The endpoint's own answer, on a puller of its own: a source that
+    // accepts the pull and never answers makes the fetch's read run out
+    // of its bound — the `Resource temporarily unavailable (os error
+    // 11)` the reported runs degraded on.
+    relay.stage(RelayMode::Silence);
+    let mut refused = CheckpointPuller::new(relay.addr, None);
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        if let Err(PullMiss::Refused(detail)) = refused.poll_staged()
+            && detail.contains(PENDING_REFUSAL)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the silent source's own refusal never landed"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    // The source serves: that puller's next fetch lands the document.
+    relay.stage(RelayMode::Proxy);
+    assert!(
+        wait_until(4, || refused.poll_staged().is_ok()),
+        "a serving source's document must land"
+    );
+
+    // And nothing of the pending window survives it: the cycle right
+    // after the document landed waits on its own fresh fetch and says
+    // so, rather than reporting the refusal that described the source
+    // while it was not yet serving.
+    let fresh = refused.poll_staged();
+    assert!(
+        matches!(fresh, Err(PullMiss::InFlight)),
+        "the cycle after a landed document reports its own fresh fetch: \
+         {fresh:?}"
+    );
+
+    // A configured name that does not resolve is its own stage, never
+    // an endpoint refusal: no request ran, so nothing the endpoint did
+    // can describe it.
+    let mut unnamed = CheckpointPuller::for_target(
+        TrackTarget::Name("127.0.0.1:not-a-service".to_string()),
+        None,
+        None,
+    );
+    assert!(
+        wait_until(4, || {
+            matches!(unnamed.poll_staged(), Err(PullMiss::Unresolved(_)))
+        }),
+        "a name that cannot resolve reports the unresolved stage"
+    );
+}
+
+/// The QA finding `pending-source-pull-latches-egain`'s second,
+/// unisolated candidate — a worker-side per-fetch stall — closed at the
+/// same place as the first: a fetch the worker cannot finish must not
+/// decide what every later cycle reports.
+///
+/// The rig holds the source's response open with bytes that never
+/// complete it, so the first fetch runs far past any bound a socket
+/// read carries, then serves normally. The puller reports the stall it
+/// is in, and a fresh worker takes the next request: the document lands
+/// on a source that has been healthy the whole time. On the reported
+/// build the stall decided the run's fate for good, and the standby's
+/// sync never left the state the pending window put it in.
+#[test]
+fn a_stalled_fetch_does_not_strand_the_pull_path() {
+    let active = source(SourceKind::Owner);
+    let relay = Relay::serve(dialable(active.monitor.local_addr()));
+    relay.stage(RelayMode::Trickle);
+    let mut puller = CheckpointPuller::new(relay.addr, None);
+
+    // The stalled fetch reports itself as the stall it is, not as the
+    // endpoint's refusal and not as a fetch still inside its bound.
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if matches!(puller.poll_staged(), Err(PullMiss::Stalled)) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the stalling fetch never reported the stall: {:?}",
+            puller.poll_staged()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    // The source is serving all along.
+    relay.stage(RelayMode::Proxy);
+
+    // The pull path takes the document: a fresh worker carries the next
+    // request, and the standby's tracking converges on it.
+    assert!(
+        wait_until(8, || puller.poll_staged().is_ok()),
+        "a source that serves must land its document even after a fetch \
+         wedged: {:?}",
+        puller.poll_staged()
+    );
+}
+
+/// Polls `condition` on a short interval until `seconds` have passed.
+fn wait_until(seconds: u64, mut condition: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    while Instant::now() < deadline {
+        if condition() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    condition()
+}
+
+/// The line the relay's upstream serves — which of the two source
+/// shapes a tracking peer converges on.
+#[derive(Clone, Copy)]
+enum SourceKind {
+    /// A field owner: its checkpoints stamp `source_owns_field`, so a
+    /// standby that lands one converges `Tracking`.
+    Owner,
+    /// An ownerless run — the reported reproduction's pending source —
+    /// whose checkpoints carry `source_owns_field: false`, so a standby
+    /// that lands one converges `Orphaned` and pays the orphan probe
+    /// on every cycle that does.
+    Ownerless,
+}
+
+/// One serving source of `kind` — the upstream every pull-path rig here
+/// relays, scanned a few cycles ahead so its checkpoints are documents a
+/// tracking peer can actually adopt.
+fn source(kind: SourceKind) -> Serving {
+    let driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let peer = match kind {
+        SourceKind::Owner => Peer::active(executor(driver), None),
+        SourceKind::Ownerless => Peer::standby(executor(driver), None),
+    };
+    let serving = Serving::start(Monitor::bind_peer("127.0.0.1:0", peer, signal_index()).unwrap());
+    serving.client.advance(2).unwrap();
+    serving
+}
+
+/// A paced tracking standby: the controller's loop shape — one tracking
+/// cycle consuming the fetch worker's latest pull, then one paced scan —
+/// paced at `period` rather than at the deployment's `--scan-ms`. Every
+/// produced-nothing cycle's detail is recorded in order, so a test can
+/// assert both that the standby converged and what it reported on the
+/// way there.
+struct PacedTracker {
+    standby: Serving,
+    misses: Arc<Mutex<Vec<String>>>,
+    stop: Arc<AtomicBool>,
+    pacer: Option<JoinHandle<()>>,
+}
+
+impl PacedTracker {
+    /// Starts a standby tracking the source at `source` through the
+    /// pull worker, one tracking cycle every `period`.
+    fn start(source: SocketAddr, period: Duration) -> Self {
+        let driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+            (PointId(10), Value::Float(3.0)),
+            (PointId(20), Value::Float(0.0)),
+            (PointId(30), Value::Float(0.0)),
+        ])));
+        let standby = Serving::start(
+            Monitor::bind_paced_peer(
+                "127.0.0.1:0",
+                Peer::standby(executor(driver), None),
+                signal_index(),
+            )
+            .unwrap()
+            .with_standby_source(source),
+        );
+        let misses = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let pacing = Arc::clone(&standby.monitor);
+        let reported = Arc::clone(&misses);
+        let stopping = Arc::clone(&stop);
+        let pacer = thread::spawn(move || {
+            let mut puller = CheckpointPuller::new(source, None);
+            while !stopping.load(Ordering::Relaxed) {
+                let report = pacing.track_cycle(|| puller.poll());
+                let detail = match &report {
+                    TrackReport::Missed { detail }
+                    | TrackReport::Promoted { detail, .. }
+                    | TrackReport::PromotionRefused { detail, .. } => Some(detail.clone()),
+                    TrackReport::OwnsField | TrackReport::Applied(_) => None,
+                    TrackReport::Refused(error) => Some(error.to_string()),
+                };
+                if let Some(detail) = detail {
+                    reported.lock().unwrap().push(detail);
+                }
+                pacing.paced_scan();
+                thread::sleep(period);
+            }
+        });
+        Self {
+            standby,
+            misses,
+            stop,
+            pacer: Some(pacer),
+        }
+    }
+
+    /// The `degraded` details every produced-nothing cycle reported, in
+    /// order.
+    fn misses(&self) -> Vec<String> {
+        self.misses.lock().unwrap().clone()
+    }
+
+    /// The standby's served role report.
+    fn role(&self) -> RoleReport {
+        self.standby.client.role().unwrap()
+    }
+
+    /// Waits for a reported detail `matches` — the pending window's own
+    /// verdict — within `seconds`, answering the detail that matched.
+    fn await_detail(&self, seconds: u64, matches: impl Fn(&str) -> bool) -> String {
+        let deadline = Instant::now() + Duration::from_secs(seconds);
+        loop {
+            let misses = self.misses();
+            if let Some(detail) = misses.iter().find(|detail| matches(detail)) {
+                return detail.clone();
+            }
+            if Instant::now() >= deadline {
+                panic!("the standby never reported the awaited tracking miss: {misses:?}");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Whether the standby's served sync state is a converged one —
+    /// `Tracking` on a field owner's line, `Orphaned` on an ownerless
+    /// one. Either is a landed document; `Degraded` never is.
+    fn converged(&self) -> bool {
+        self.converged_as(SourceKind::Owner) || self.converged_as(SourceKind::Ownerless)
+    }
+
+    /// Whether the standby reached the verdict a source of `kind`'s
+    /// documents land as — the exact shape, so a leg cannot pass by
+    /// converging onto the wrong line.
+    fn converged_as(&self, kind: SourceKind) -> bool {
+        matches!(
+            (self.role().sync, kind),
+            (Some(StandbySync::Tracking { .. }), SourceKind::Owner)
+                | (Some(StandbySync::Orphaned { .. }), SourceKind::Ownerless)
+        )
+    }
+
+    /// Waits up to `seconds` for the standby to converge, answering
+    /// whether it did.
+    fn await_convergence(&self, seconds: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(seconds);
+        while Instant::now() < deadline {
+            if self.converged() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    /// Waits up to `seconds` for the standby to reach the verdict a
+    /// source of `kind`'s documents land as.
+    fn await_verdict_of(&self, kind: SourceKind, seconds: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(seconds);
+        while Instant::now() < deadline {
+            if self.converged_as(kind) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+}
+
+impl Drop for PacedTracker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(pacer) = self.pacer.take() {
+            let _ = pacer.join();
+        }
+    }
 }
