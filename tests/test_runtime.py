@@ -142,6 +142,29 @@ class RuntimeTests(unittest.TestCase):
         while self.runtime.poll(metadata) is None and time.monotonic() < deadline:
             time.sleep(.05)
 
+    @posix_only
+    def test_opencode_session_uses_checkout_even_with_inherited_pwd(self):
+        clone = self.runtime.prepare_clone('worker-01')
+        # OpenCode 1.18.31 honors inherited PWD unless run --dir is explicit.
+        # This executable fixture implements that external CLI directory contract.
+        client = self.root / 'opencode-fixture'
+        client.write_text('#!/usr/bin/env python3\n'
+                          'import os, sys\nfrom pathlib import Path\n'
+                          'args = sys.argv\n'
+                          'directory = args[args.index("--dir")+1] if "--dir" in args else os.environ["PWD"]\n'
+                          'Path(directory, "session-directory.txt").write_text(directory)\n')
+        client.chmod(0o755)
+        self.runtime.opencode = str(client)
+        with patch.dict(os.environ, {'PWD': str(self.source)}):
+            meta = self.runtime.spawn('directory-contract', clone, 'test',
+                                      model='opencode/space-bunny-free')
+            deadline = time.monotonic() + 5
+            while self.runtime.poll(meta) is None and time.monotonic() < deadline:
+                time.sleep(.01)
+        self.assertTrue((clone / 'session-directory.txt').exists())
+        self.assertEqual((clone / 'session-directory.txt').read_text(), str(clone))
+        self.assertFalse((self.source / 'session-directory.txt').exists())
+
     def test_spawn_resumes_opencode_session(self):
         clone = self.runtime.prepare_clone('worker-01')
         self.runtime.opencode = '/bin/true'
