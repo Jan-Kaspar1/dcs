@@ -35,12 +35,19 @@ from .common import *
 # a second attachment's `claim_writer`/`release_writer` frees the
 # field while both unbound probes race, and a staged unbound
 # `ensure_writer` raises the cleared ex-owner's holderless claim —
-# the wedge shape. The contract: the marked peer's bound reclaim —
-# or the orphan probe's recorded holderless preemption — takes the
-# field inside the orphan failover's miss budget, with no operator
-# promote and no restart, joining the run's attachments so the
-# recovered owner's writes land and the pair reconverges to exactly
-# one active plus one tracking standby.
+# the wedge shape. The contract: the bound reclaim takes that
+# holderless claim — the designated path, whichever ex-owner's
+# arm reaches it — with no operator promote and no restart, joining
+# the run's attachments so the recovered owner's writes land and the
+# pair reconverges to exactly one active plus one tracking standby.
+# The orphan budget's own recorded preemption
+# (`claim_writer_unless_held` at the miss budget) is the broken
+# reclaim's symptom, never an alternative success: a fixed pair
+# re-seats the field on its next scan, so the resolution window's
+# bound sits under the lane's failover miss budget and that rescue
+# can never be what unwedges the placeholder — which is what keeps
+# the leg per-revision evidence for the contract rather than for the
+# clock.
 #
 # Every stage audits through both peers' serving monitors and the
 # bind-mounted --journal-file mirrors: the attributed
@@ -69,15 +76,21 @@ from .common import *
 # holderless-reclaim-unchecked. The leg is inconclusive when the
 # staged run predates the contract: no probe_writer claim surface,
 # no owner/monitor attribution on the fencing verdicts, no pinned
-# owner tokens, no plant_ctl seam, or no durable journal mounts.
+# owner tokens, no plant_ctl seam, no durable journal mounts, or an
+# --auto-promote budget whose own rescue would fire inside the
+# resolution watch and stand in for the reclaim it judges.
 
 HOLDERLESS_SETTLE = 30    # bound on each settle watch
 HOLDERLESS_POLL = 0.4     # cadence polling the peers mid-episode
 HOLDERLESS_DEADLINE = 15  # bound on the demotion/island waits
 HOLDERLESS_ROUNDS = 5     # polls the held foreign-claim window spans
-HOLDERLESS_RESOLVE = 8    # bound on the unattended reclaim — inside
-                          # the orphan failover's miss budget, so a
-                          # rescue by it lands as its own origin
+HOLDERLESS_RESOLVE = 8    # bound on the unattended reclaim — kept
+                          # under the lane's orphan failover miss
+                          # budget, so that budget's own
+                          # claim_writer_unless_held rescue can never
+                          # be what unwedges the placeholder the watch
+                          # exists to catch (a rig configured so it
+                          # would is reported inconclusive)
 HOLDERLESS_RESTORE = 20   # bound on the launch-layout restore
 DIAG_FAILED = 'holderless-reclaim-failed'
 DIAG_NONDET = 'holderless-reclaim-nondeterministic'
@@ -1255,10 +1268,9 @@ def scenario_holderless_claim_recovery(ctx):
         'staged unbound ensure_writer raises the cleared ex-owner\'s '
         'holderless claim — the wedge shape; both peers\u2019 '
         'serving monitors, the probe_writer claim surface, and the '
-        'durable --journal-file mirrors prove the loss-marked '
-        'bound reclaim — or the recorded holderless preemption — '
-        're-seats the field unattended (origin=reclaim, no operator '
-        'promote, no restart), the recovered owner\u2019s writes '
+        'durable --journal-file mirrors prove the designated bound '
+        'reclaim re-seats the field unattended (origin=reclaim, no '
+        'operator promote, no restart), the recovered owner\u2019s writes '
         'land, the loser reconverges to tracking, and the launch '
         'roles restore; two consecutive passes produce identical '
         'digests; failures report holderless-reclaim-failed / '
@@ -1302,11 +1314,26 @@ def scenario_holderless_claim_recovery(ctx):
                 'inconclusive', 'the run config records no pinned '
                 '--owner-token for the pair — the standing claim\'s '
                 'owner is not attributable')
-        if not ctx.get('failover_misses'):
+        budget = ctx.get('failover_misses')
+        if not budget:
             return case.finish(
                 'inconclusive', 'the run config records no '
                 '--auto-promote miss budget — the reclaim\'s '
                 'recovery bound is unanchored')
+        # The designated reclaim grants on the ex-owner's next scan,
+        # so the resolution watch's bound must stay under the orphan
+        # budget's own rescue window — the lane's 100 ms scan cadence
+        # over the armed misses. A rig whose budget fires inside the
+        # watch would let the budget's recorded holderless preemption
+        # unwedge the placeholder in place of the reclaim the leg
+        # exists to evidence, and the leg cannot tell the two apart.
+        if HOLDERLESS_RESOLVE >= budget * 0.1:
+            return case.finish(
+                'inconclusive', 'the armed --auto-promote budget '
+                'fires inside the ' + str(HOLDERLESS_RESOLVE) + 's '
+                'resolution watch (' + str(budget) + ' misses) — the '
+                'orphan budget\'s own rescue would mask the bound '
+                'reclaim this leg judges')
         case.observe('subject pair — active ' + active
                      + ', standby ' + standby)
 

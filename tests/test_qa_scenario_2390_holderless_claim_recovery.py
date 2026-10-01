@@ -20,6 +20,8 @@ EXPECTED_CASES = frozenset({
     'HolderlessClaimRecoveryTests.test_clean_pair_passes_and_'
     'validates',
     'HolderlessClaimRecoveryTests.test_wedged_reclaim_reports_failed',
+    'HolderlessClaimRecoveryTests.test_asserted_recovered_reports_'
+    'failed',
     'HolderlessClaimRecoveryTests.test_never_reclaims_reports_failed',
     'HolderlessClaimRecoveryTests.test_unbound_reseat_reports_failed',
     'HolderlessClaimRecoveryTests.test_premature_grant_reports_'
@@ -78,6 +80,8 @@ EXPECTED_CASES = frozenset({
     'inconclusive',
     'HolderlessClaimRecoveryTests.test_missing_failover_budget_reports_'
     'inconclusive',
+    'HolderlessClaimRecoveryTests.test_rescue_inside_the_watch_'
+    'reports_inconclusive',
     'HolderlessClaimRecoveryTests.test_missing_journal_files_reports_'
     'inconclusive',
     'HolderlessClaimRecoveryTests.test_bridge_placement_reports_'
@@ -261,7 +265,23 @@ class HolderlessPairFeed:
                                        # its orphan island forms
         self.b_never_retracks = False  # ctrl-b never reconverges —
                                        # the restore never lands
+        self.asserted_recovered = False  # the fenced peer's monitor
+                                          # asserts the recovery its
+                                          # own bound reclaim never
+                                          # made: role=active while
+                                          # the field still names the
+                                          # cleared ex-owner's
+                                          # holderless claim and both
+                                          # peers stay orphaned
         self._island_seen = False
+
+    def _holderless_standing(self):
+        """Whether the field's claim names one of the pair's own
+        tokens with no live holder — the dead-owner or orphan
+        placeholder shape the resolution watch exists to observe."""
+        claim = self.plant.claim or {}
+        return claim.get('owner') in (self.a.token, self.b.token) \
+            and not claim.get('holders')
 
     def _granted(self, member):
         """The gate lift every granted claim ends in: a fresh
@@ -475,6 +495,12 @@ class HolderlessPairFeed:
                 and (member.fencing_lost or member.sync == 'orphaned')
         if not armed or self.never_reclaims:
             return
+        if self.asserted_recovered and self._holderless_standing():
+            # The doctored negative: while the holderless placeholder
+            # stands no bound reclaim takes it, so the reported
+            # recovery the fenced peer's monitor serves is a lie the
+            # leg must not read as the field re-seat.
+            return
         if claim is not None and claim['owner'] != member.token:
             if self.preempts_live:
                 pass
@@ -535,6 +561,15 @@ class HolderlessPairFeed:
             if self.dual_active and member is self.a \
                     and member.role == 'standby' \
                     and member.sync == 'tracking':
+                role = 'active'
+            if self.asserted_recovered and member is self.b \
+                    and member.role == 'standby' \
+                    and member.sync == 'orphaned' \
+                    and self._holderless_standing():
+                # The asserted recovery: the monitor reports a
+                # field-owning role the field's own claim never
+                # granted, while probe_writer still names the
+                # cleared ex-owner's holderless claim.
                 role = 'active'
             if self.no_active and member is self.a:
                 role = 'standby'
@@ -728,6 +763,30 @@ class HolderlessClaimRecoveryTests(unittest.TestCase):
         self.assertIn('holderless-reclaim-failed',
                       record.get('detail', ''))
         self.assertIn('wedge', record.get('detail', ''))
+
+    def test_asserted_recovered_reports_failed(self):
+        # The doctored negative the issue names: the pair asserted as
+        # recovered — the fenced peer's monitor answers role=active —
+        # while probe_writer still reports the cleared ex-owner's
+        # holderless claim standing and both peers stay orphaned,
+        # because no bound reclaim ever re-seated the field. The leg
+        # must refuse to read the report as a recovery.
+        self.feed.asserted_recovered = True
+        record = self.run_scenario()
+        report.validate_scenario(record)
+        self.assertEqual('failed', record['outcome'], record)
+        self.assertIn('holderless-reclaim-failed',
+                      record.get('detail', ''))
+        # The reported recovery left no walk behind it: not one
+        # reclaim-origin promotion was ever journaled, so the
+        # active role came from the monitor alone.
+        self.assertFalse(
+            [change
+             for member in (self.feed.a, self.feed.b)
+             for entry in member.journal
+             for change in [entry['event'].get('role_changed') or {}]
+             if change.get('to') == 'promoting'
+             and change.get('origin') == 'reclaim'])
 
     def test_never_reclaims_reports_failed(self):
         self.feed.never_reclaims = True
@@ -988,6 +1047,19 @@ class HolderlessClaimRecoveryTests(unittest.TestCase):
         record = self.run_scenario(ctx=ctx)
         report.validate_scenario(record)
         self.assertEqual('inconclusive', record['outcome'], record)
+
+    def test_rescue_inside_the_watch_reports_inconclusive(self):
+        # An --auto-promote budget whose own orphan rescue fires
+        # inside the resolution watch (the watch is narrowed to 2s
+        # above, so 20 misses is 2s of controller time) would stand
+        # in for the bound reclaim — the leg cannot tell the two
+        # apart, so the rig's shape is inconclusive rather than a
+        # contract verdict.
+        record = self.run_scenario(ctx=self._ctx(failover_misses=20))
+        report.validate_scenario(record)
+        self.assertEqual('inconclusive', record['outcome'], record)
+        self.assertIn('mask the bound reclaim',
+                      record.get('detail', ''))
 
     def test_missing_journal_files_reports_inconclusive(self):
         ctx = self._ctx()
