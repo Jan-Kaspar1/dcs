@@ -563,6 +563,47 @@ Implementation order: second, after [daily architecture review](daily-architectu
   An enabler for the sim-bus rig legs (#1355/#1356/#1357); a leg
   needing the server itself to misbehave may still stage a double.
 
+### Landed 2026-10-01 (sim-bus born-active claim refusal leg, #1356)
+
+- The born-active startup-claim refusal now has per-revision lane
+  evidence over a sim-bus field, not only over the sim-tcp plant: leg
+  `2470` stages the lane's shipped `dcs-sim-bus-device`, launches a
+  first controller onto it and asserts it takes the field's
+  write-ownership claim, then stages a second born-active declaring
+  the same model with no `--peer` and asserts it exits nonzero inside
+  the documented bound carrying the live-holder verdict — the sim-tcp
+  refusal reproduced on the register protocol, which the conditional
+  `claim_writer_unless_held` grant makes possible there, since a bus
+  claim dies with its last holder's link and a standing claim is
+  therefore always a live incumbent to name. A `--standby` launch in
+  the same shape is the positive control: it must converge `tracking`
+  behind the incumbent with its command gate closed and no
+  tracking-source refusal journaled — the arm the defect orphaned.
+  The incumbent's claim and role must be undisturbed throughout: no
+  claim-owner flip, no fenced demotion journaled on it, its scan
+  still moving. Named diagnostics `sim-bus-claim-refusal-failed` and
+  `sim-bus-claim-refusal-nondeterministic`, with
+  `sim-bus-claim-refusal-unchecked` covering the planted negatives;
+  two consecutive passes produce identical digests; a rig with no
+  staged device server, an unsettled deployed pair, or a staged
+  revision predating the contract — the second born-active claiming
+  the field and going active — reports inconclusive. Each pass ends
+  with the three born seats and the device server removed, so the
+  rig's claim state and launch roles are restored for the legs behind
+  it.
+- The leg needed one lane-contract extension: the born-seat launcher
+  takes a model-addressed launch, `start_born_controller(seat,
+  remote=None, model=<document>)`, which runs with no `--remote` and
+  mounts the caller's document in place of the run's sim-tcp fixture.
+  That is what points a seat at the device server — the attachment
+  dials the device's declared `address` out of the same staged file
+  the server serves its register map from, so both ends of the
+  register protocol read one declaration. Every other part of the
+  launch — the seat's pinned `--owner-token`, the published monitor,
+  the cold state/journal/history reset, the `--peer`/`--standby`
+  wiring, the refuse-to-replace guard — is the rig's born-seat shape
+  unchanged, so the sim-tcp legs are untouched by the extension.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,

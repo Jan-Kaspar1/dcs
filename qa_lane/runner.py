@@ -2935,7 +2935,18 @@ def start_born_controller(cfg, record, run_dir, model, seat, remote,
     startup-failure leg's per-class launcher: runs a controller on one
     of the labeled scenario seats (`revised`/`foreign`/`driven` — the
     run's third-controller containers 'c'/'foreign'/'d') bound to
-    `remote`, the scratch field's sim-serve address.
+    `remote`, the scratch field's sim-serve address, or — with
+    `remote` None — to whatever field the mounted `model` declares.
+
+    `remote` is the field the launch attaches to — the scratch field's
+    sim-serve address, mounted through `--remote`. `None` instead
+    launches the mounted `model` with no `--remote` at all: a field
+    whose own declaration addresses it, which is what a sim-bus device
+    kind's `parameters.address` is. That is the shape the sim-bus rig
+    legs stage: the leg mounts the staged bus document
+    `start_sim_bus_device` returned and the controller dials the
+    device server's bridge address straight out of the model, so both
+    ends of the register protocol read one declaration.
 
     `peer` and `standby` name the tracking wiring the launch carries:
     `peer` launches a born-active declaring its pair member — the
@@ -2951,14 +2962,16 @@ def start_born_controller(cfg, record, run_dir, model, seat, remote,
     path — a different class entirely.
 
     The container carries the run's managed and run labels, mounts the
-    run's model read-only, publishes its monitor on the seat's recorded
-    port, and carries the seat's pinned --owner-token plus the run's
-    --pair-token. The launch is recorded on the run's action timeline;
-    a docker failure raises so the calling scenario reports the launch
-    never completed. Returns {'container', 'seat', 'address', 'remote',
-    'peer', 'standby', 'monitor'} — `address` is the rig-bridge
-    monitor endpoint a peer's tracking declaration dials, `monitor`
-    the published host-loopback URL the scenario reads.
+    given `model` read-only, publishes its monitor on the seat's
+    recorded port, and carries the seat's pinned --owner-token plus the
+    run's --pair-token. The launch is recorded on the run's action
+    timeline; a docker failure raises so the calling scenario reports
+    the launch never completed. Returns {'container', 'seat',
+    'address', 'remote', 'peer', 'standby', 'model', 'monitor'} —
+    `address` is the rig-bridge monitor endpoint a peer's tracking
+    declaration dials, `monitor` the published host-loopback URL the
+    scenario reads, `model` the document mounted into the container,
+    `remote` None on the model-addressed launch.
     """
     run_id, sha = record['run_id'], record['attempted_sha']
     if peer is not None and standby is not None:
@@ -2993,7 +3006,8 @@ def start_born_controller(cfg, record, run_dir, model, seat, remote,
     standby_flag = (_born_target(run_id, standby)
                     if standby is not None else None)
     timeline('born-start',
-             'launch ' + container + ' --remote ' + remote
+             'launch ' + container
+             + (' --remote ' + remote if remote else ' (model-addressed)')
              + (' --peer ' + peer_flag if peer_flag else '')
              + (' --standby ' + standby_flag if standby_flag else '')
              + ' --owner-token ' + str(owner_token))
@@ -3005,7 +3019,7 @@ def start_born_controller(cfg, record, run_dir, model, seat, remote,
            '-v', str(directory) + ':' + CONTAINER_RUN_DIR,
            IMAGE_PREFIX + 'controller:' + sha,
            '/model/plant.json',
-           '--remote', remote,
+           *(['--remote', remote] if remote else []),
            '--owner-token', str(owner_token),
            *(['--peer', peer_flag] if peer_flag else []),
            *(['--standby', standby_flag] if standby_flag else []),
@@ -3020,7 +3034,7 @@ def start_born_controller(cfg, record, run_dir, model, seat, remote,
     return {'container': container, 'seat': seat,
             'address': container + ':' + str(BORN_MONITOR_PORT),
             'remote': remote, 'peer': peer_flag,
-            'standby': standby_flag,
+            'standby': standby_flag, 'model': str(model),
             'monitor': 'http://127.0.0.1:' + str(cfg[seat + '_port'])}
 
 
@@ -3240,9 +3254,18 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         'unpause_born_field': lambda: unpause_born_field(
             run_id, timeline),
         'stop_born_field': lambda: stop_born_field(run_id, timeline),
-        'start_born_controller': lambda seat, remote, peer=None,
-                standby=None: start_born_controller(
-                    cfg, record, run_dir, src / cfg['model_fixture'],
+        # The born-active staging launcher. `remote` is the scratch
+        # field's sim-serve address the seat attaches to, or None for a
+        # model-addressed launch — a sim-bus rig leg mounts the staged
+        # bus document `start_sim_bus_device` returned and lets the
+        # model's own device `address` point the attachment at the
+        # register protocol, which `model` then names in place of the
+        # run's sim-tcp fixture.
+        'start_born_controller': lambda seat, remote=None, peer=None,
+                standby=None, model=None: start_born_controller(
+                    cfg, record, run_dir,
+                    model if model is not None
+                    else src / cfg['model_fixture'],
                     seat, remote, timeline, peer=peer, standby=standby),
         'stop_born_controller': lambda seat: stop_born_controller(
             run_id, seat, timeline),
