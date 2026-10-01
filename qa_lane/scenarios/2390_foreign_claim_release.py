@@ -155,16 +155,33 @@ def _journaled_walk(ctx, name, floor):
 
 
 def _learned_pin(ctx, name):
-    """Whether the peer's whole served journal records a
-    tracking_source_adopted — the process-lifetime verified source
-    the run still pulls. Its presence is what makes `orphaned` an
-    honest un-converged reading beside `unsynchronized` while a
-    monitor-less claim stands; None when the read dropped."""
+    """Whether the peer's current process lifetime records a
+    tracking_source_adopted — the verified source the run still
+    pulls. Its presence is what makes `orphaned` an honest
+    un-converged reading beside `unsynchronized` while a monitor-less
+    claim stands; None when both reads dropped. The durable file
+    answers first: a verified source is a process-lifetime pin and
+    the served ring's bound would evict an earlier leg's adoption
+    record while the pin keeps serving, so a peer carrying a pin
+    whose record fell off the ring would read as carrying none. The
+    fallback covers a peer whose file cannot be read."""
+    try:
+        records = _journal_entries(ctx['journal_files'][name])
+    except Exception:
+        records = None
+    if records is not None:
+        return any('tracking_source_adopted'
+                   in ((record.get('entry') or {}).get('event') or {})
+                   for record in _last_lifetime(records))
     entries = _served_journal(ctx, name, 0)
     if entries is None:
         return None
+    boundary = max(
+        ((entry.get('seq') or 0) for entry in entries
+         if 'run_boundary' in (entry.get('event') or {})), default=0)
     return any('tracking_source_adopted' in (entry.get('event') or {})
-               for entry in entries)
+               for entry in entries
+               if (entry.get('seq') or 0) > boundary)
 
 
 def _durable_records(ctx, name, floor):
@@ -182,6 +199,17 @@ def _durable_kinds(records):
     for record in records or []:
         kinds.update((record.get('entry') or {}).get('event') or {})
     return sorted(kinds)
+
+
+def _last_lifetime(records):
+    """The journal records of the last process lifetime in a stream —
+    everything after its final `run_boundary` marker. A pin adopted
+    before a restart is not one the resumed run pulls."""
+    start = 0
+    for index, record in enumerate(records):
+        if 'run_boundary' in record:
+            start = index + 1
+    return records[start:]
 
 
 def _run_boundaries(ctx, name):

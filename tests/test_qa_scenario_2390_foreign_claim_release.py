@@ -30,6 +30,11 @@ EXPECTED_CASES = frozenset({
     'test_monitorless_declared_reports_failed',
     'ForeignClaimReleaseTests.'
     'test_orphaned_unpinned_reports_failed',
+    'ForeignClaimReleaseTests.test_pinned_peer_passes',
+    'ForeignClaimReleaseTests.'
+    'test_pin_evicted_from_the_served_ring_passes',
+    'ForeignClaimReleaseTests.'
+    'test_retired_pin_reports_failed',
     'ForeignClaimReleaseTests.'
     'test_clean_window_reports_failed',
     'ForeignClaimReleaseTests.'
@@ -131,7 +136,9 @@ class ReleasePairFeed(StrandedPairFeed):
     sibling promoting out from under the leg, the second pass's
     clean window, the orphan-tracked reading with no pin behind
     it, and the successor-declared adoption resolving instead of
-    the reclaim."""
+    the reclaim. `seed_pin` stages the verified pin an earlier
+    leg's adoption leaves behind, in the three lifetimes the leg's
+    pin audit distinguishes."""
 
     def __init__(self, plant, journal_files=None):
         super().__init__(plant, keyed=False,
@@ -166,6 +173,35 @@ class ReleasePairFeed(StrandedPairFeed):
             member.seq += 1   # the seq burns; the record never lands
             return
         super()._journal(member, event)
+
+    def seed_pin(self, lifetime='current'):
+        """Give ctrl-a the verified pin an earlier leg's adoption left
+        behind — the process-lifetime source the run still pulls, so
+        the held window's orphan-tracked reading is honest. The
+        lifetime shapes the leg's pin audit runs against: 'current'
+        leaves the peer carrying the pin and journals the adoption in
+        the served ring and the durable mirror alike,
+        'durable-only' stages the served ring's bound evicting the
+        record — which the lane's journal ring eventually does to an
+        earlier leg's adoption while the pin keeps serving — and
+        'retired' stages the adoption above a fresh `run_boundary`,
+        the stale record a resumed run pulls from nowhere."""
+        entry = {'seq': self.a.seq + 1, 'tick': self.a.tick,
+                 'event': {'tracking_source_adopted':
+                           {'source': self.b.bridge}}}
+        self.a.seq += 1
+        if lifetime != 'retired':
+            self.a.adopted = self.b.bridge
+        if lifetime == 'current':
+            self.a.journal.append(entry)
+        path = self.journal_paths.get(self.a)
+        if path is None:
+            return
+        with path.open('a') as stream:
+            stream.write(json.dumps({'entry': entry}) + '\n')
+            if lifetime == 'retired':
+                stream.write(json.dumps({'run_boundary': {
+                    'run': 2, 'tick': self.a.tick}}) + '\n')
 
     def _foreign_claims(self):
         return sum(1 for request in self.plant.requests
@@ -354,6 +390,38 @@ class ForeignClaimReleaseTests(unittest.TestCase):
         # shape only under a learned pin — asserted with none
         # journaled, it is a verdict the claim's window never
         # granted.
+        self.feed.orphan_unpinned = True
+        record = self.run_scenario()
+        report.validate_scenario(record)
+        self.assertEqual('failed', record['outcome'], record)
+        self.assertIn('foreign-claim-release-failed',
+                      record.get('detail', ''))
+
+    def test_pinned_peer_passes(self):
+        # The ex-owner carries the verified pin an earlier leg's
+        # adoption left, so the held window's orphan-tracked reading
+        # is honest beside `unsynchronized`.
+        self.feed.seed_pin()
+        record = self.run_scenario()
+        report.validate_scenario(record)
+        self.assertEqual('passed', record['outcome'], record)
+
+    def test_pin_evicted_from_the_served_ring_passes(self):
+        # The pin's adoption record survives in the durable mirror
+        # alone — the shape the lane's journal ring's bound eventually
+        # leaves an earlier leg's adoption in while the pin keeps
+        # serving. Reading the pin off the served ring alone would
+        # convict an honest orphan-tracked reading.
+        self.feed.seed_pin('durable-only')
+        record = self.run_scenario()
+        report.validate_scenario(record)
+        self.assertEqual('passed', record['outcome'], record)
+
+    def test_retired_pin_reports_failed(self):
+        # The adoption record stands above the run's last
+        # run_boundary: a pin the resumed run pulls from nowhere
+        # admits no orphan-tracked reading, however the record reads.
+        self.feed.seed_pin('retired')
         self.feed.orphan_unpinned = True
         record = self.run_scenario()
         report.validate_scenario(record)
