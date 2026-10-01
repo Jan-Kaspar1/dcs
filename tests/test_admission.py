@@ -1,9 +1,10 @@
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
 from agent_pool.admission import Admission, classify
-from agent_pool.state import State
+from agent_pool.state import MIGRATIONS, State
 from agent_pool.config import scheduler
 
 
@@ -223,6 +224,128 @@ class AdmissionTests(unittest.TestCase):
         tail = 'level=ERROR message="stream error" error.error="unexpected server error"'
         self.assertEqual(classify({'status': 'timeout', 'exit_code': -15}, tail)[0], 'endpoint')
         self.assertEqual(classify({'status': 'timeout', 'exit_code': -15}, 'rate limit')[0], 'timeout')
+
+    def _inflight_probe(self, advance=11):
+        """A probe granted under an expired cooldown, one stale lease still running.
+
+        Four leases fill the group; the rate receipt opens the congestion
+        episode and halves the target, the other two drain, and the probe
+        takes the group's single recovery slot after the cooldown elapsed.
+        """
+        self.config['scheduler']['groups']['swe'].update(initial=4, ceiling=8)
+        leases = [self.start('L' + str(i)) for i in range(4)]
+        self.a.finish('L0', leases[0], 'rate')
+        self.assertEqual(self.a.summary()['groups']['swe']['mode'], 'probing')
+        self.a.finish('L2', leases[2], 'success')
+        self.a.finish('L3', leases[3], 'success')
+        self.now += advance
+        probe = self.start('probe')
+        granted = self.state.db.execute('SELECT probe,granted FROM admission_leases WHERE owner=?',
+                                        ('probe',)).fetchone()
+        self.assertEqual(granted['probe'], 1)
+        self.assertEqual(granted['granted'], self.now)
+        return leases[1], probe
+
+    def test_probe_success_keeps_a_block_recorded_after_its_grant(self):
+        stale, probe = self._inflight_probe()
+        self.a.finish('L1', stale, 'auth')
+        self.assertEqual(self.a.summary()['groups']['swe']['mode'], 'blocked')
+        self.a.finish('probe', probe, 'success')
+        groups = self.a.summary()['groups']['swe']
+        self.assertEqual(groups['mode'], 'blocked')
+        self.assertIsNone(groups['cooldown_until'])
+        # Sleeping never fixes credentials, so the probe's success is no
+        # substitute for the operator reset the group is documented to need.
+        self.now += 86400
+        self.assertFalse(self.a.reserve('next', 'swe-2-high', 'next', 5))
+        self.a.reset('swe')
+        self.assertTrue(self.a.reserve('next', 'swe-2-high', 'next', 5))
+
+    def test_probe_success_keeps_a_reset_window_recorded_after_its_grant(self):
+        stale, probe = self._inflight_probe()
+        self.a.finish('L1', stale, 'rate', retry_after=3600)
+        window = self.a.summary()['groups']['swe']['cooldown_until']
+        self.assertEqual(window, self.now + 3600)
+        self.a.finish('probe', probe, 'success')
+        groups = self.a.summary()['groups']['swe']
+        self.assertEqual(groups['mode'], 'probing')
+        self.assertEqual(groups['cooldown_until'], window)
+        # The provider-stated window still gates the whole group, and past it
+        # recovery is a single fresh probe rather than normal dispatch.
+        self.now += 3599
+        self.assertFalse(self.a.reserve('next', 'swe-2-high', 'next', 5))
+        self.now += 1
+        fresh = self.start('fresh-probe')
+        self.assertFalse(self.a.reserve('second', 'swe-2-high', 'second', 5))
+        self.assertEqual(self.a.summary()['groups']['swe']['mode'], 'probing')
+        # Ordering newer feedback above the probe never strands the group: the
+        # newer episode's own probe still reopens it.
+        self.a.finish('fresh-probe', fresh, 'success')
+        self.assertEqual(self.a.summary()['groups']['swe']['mode'], 'normal')
+
+    def test_probe_success_keeps_a_reset_recorded_in_its_grant_tick(self):
+        stale, probe = self._inflight_probe(advance=10)
+        self.a.finish('L1', stale, 'rate', retry_after=3600)
+        window = self.a.summary()['groups']['swe']['cooldown_until']
+        self.a.finish('probe', probe, 'success')
+        groups = self.a.summary()['groups']['swe']
+        self.assertEqual(groups['mode'], 'probing')
+        self.assertEqual(groups['cooldown_until'], window)
+
+    def test_probe_success_clears_the_episode_it_was_granted_for(self):
+        _stale, probe = self._inflight_probe()
+        self.a.finish('probe', probe, 'success')
+        groups = self.a.summary()['groups']['swe']
+        self.assertEqual(groups['mode'], 'normal')
+        self.assertIsNone(groups['cooldown_until'])
+        self.assertTrue(self.a.reserve('next', 'swe-2-high', 'next', 5))
+
+    def test_probe_lease_predating_the_ordering_column_cannot_unblock(self):
+        stale, probe = self._inflight_probe()
+        # A deployment upgraded with a probe in flight keeps that lease at the
+        # migration default; with no grant to order against, its success may not
+        # lift anything the group recorded afterwards.
+        self.state.db.execute('UPDATE admission_leases SET granted=0 WHERE owner=?', ('probe',))
+        self.a.finish('L1', stale, 'auth')
+        self.a.finish('probe', probe, 'success')
+        self.assertEqual(self.a.summary()['groups']['swe']['mode'], 'blocked')
+
+
+class ProbeOrderingMigrationTests(unittest.TestCase):
+    def test_existing_database_gains_the_probe_ordering_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'state.db'
+            legacy = sqlite3.connect(str(path))
+            legacy.executescript(''.join(MIGRATIONS[:5]) + 'PRAGMA user_version=5;')
+            legacy.execute("INSERT INTO admission_groups(grp,target,mode,cooldown_len) "
+                           "VALUES('swe',4,'probing',10)")
+            legacy.execute("INSERT INTO admission_leases(owner,model,grps,probe,updated) "
+                           "VALUES('P','swe-2-high','[\"swe\"]',1,99)")
+            legacy.commit()
+            legacy.close()
+
+            state = State(path)
+            self.assertEqual(state.db.execute('PRAGMA user_version').fetchone()[0], len(MIGRATIONS))
+            state.db.execute('UPDATE admission_groups SET congested_at=120 WHERE grp=?', ('swe',))
+            state.db.commit()
+            a = Admission(state, {'scheduler': {'cooldown_seconds': 10}},
+                          clock=lambda: 130, jitter=lambda: 0)
+            # The lease predates the column, so its grant cannot be ordered and
+            # its success may not lift the block's group back into dispatch.
+            a.finish('P', {'invocation': 'P-run'}, 'success')
+            self.assertEqual(state.db.execute('SELECT mode FROM admission_groups WHERE grp=?',
+                                             ('swe',)).fetchone()['mode'], 'probing')
+            state.db.execute('PRAGMA user_version=5')
+            state.close()
+
+            # The step re-applies to a database that already carries the
+            # columns, as an interrupted upgrade would find it.
+            reopened = State(path)
+            self.assertEqual(reopened.db.execute('PRAGMA user_version').fetchone()[0], len(MIGRATIONS))
+            self.assertEqual(reopened.db.execute(
+                "SELECT COUNT(*) FROM pragma_table_info('admission_leases') "
+                "WHERE name='granted'").fetchone()[0], 1)
+            reopened.close()
 
 
 if __name__ == '__main__':
