@@ -16,10 +16,10 @@ from .common import *
 # intended-unsynchronized bound, WW-LCM-001's continuity clause).
 # On an unkeyed pair, a foreign attachment's claim_writer held with
 # no monitor declared leaves the fenced ex-owner's served sync
-# unsynchronized — the field's arbitration names nothing to track
-# and no announced hint can prove itself unkeyed, so unsynchronized
-# is the only honest report — and unsynchronized is intended ONLY
-# while that monitor-less claim stands. Releasing it must resolve
+# un-converged — the field's arbitration names nothing to track
+# and no announced hint can prove itself unkeyed, so nothing here
+# proves the run converged — and that reading is intended ONLY
+# while the monitor-less claim stands. Releasing it must resolve
 # the field through one of the two recorded paths, never a
 # permanent strand: the ex-owner's loss-marked bound conditional
 # re-grant re-arms its token and walks it back to active
@@ -31,9 +31,9 @@ from .common import *
 # claim-monitor-rendezvous the dialable declared monitor and
 # journaled adoption, 2370's stranded-standby-no-resync the
 # same-claim-monitor succession — none asserts that the served
-# unsynchronized covers exactly the monitor-less claim's window
-# and no more, nor that the foreign claim's own release_writer is
-# what resolves it. The durable test
+# un-converged reading covers exactly the monitor-less claim's
+# window and no more, nor that the foreign claim's own
+# release_writer is what resolves it. The durable test
 # `unkeyed_fenced_demote_reclaims_the_released_field` drives the
 # defect's scripted reproduction; this leg is its per-revision rig
 # evidence.
@@ -44,8 +44,8 @@ from .common import *
 # attachment claims under a foreign token with `controller: false`
 # and no monitor field — the monitor-less tool-claim shape — and
 # holds it through the fenced-write demotion. Through the
-# ex-owner's serving monitor the verdict must be standby+
-# unsynchronized on every poll of the claim's standing window —
+# ex-owner's serving monitor the verdict must be standby and
+# un-converged on every poll of the claim's standing window —
 # never tracking, never a dead monitor, never silence — while the
 # claim surface keeps naming the monitor-less induction token, and
 # the durable journal carries the attributed field_claim_lost.
@@ -54,10 +54,25 @@ from .common import *
 # adoption naming the resolved claim's declared monitor — the
 # resolved claim itself declaring a monitor, the field's writes
 # landing again, and the pair settling back to one active plus one
-# tracking standby. A peer still unsynchronized past the bound is
+# tracking standby. A peer still un-converged past the bound is
 # the finding's permanent strand; a peer reporting clean while the
 # monitor-less claim stands is the same verdict asserted past its
 # window.
+#
+# The un-converged reading the window admits is `unsynchronized`
+# plus, for an ex-owner that already carries a verified tracking
+# pin, the orphan-tracked cousin `orphaned` — a learned source is a
+# process-lifetime pin, and the earlier legs of this very schedule
+# (2380's claim-monitor rendezvous) leave one behind, so the pin's
+# endpoint keeps serving its `source_owns_field: false` document
+# while the foreign claim stands and the peer reports the tracked
+# line owns nothing. Both readings say the same thing the bound
+# names — nothing here proves the run converged with the field's
+# current owner — and neither is the clean `tracking` verdict the
+# window forbids. The leg reads the pin's presence off the
+# ex-owner's own served journal, so a peer carrying no
+# `tracking_source_adopted` record is held to `unsynchronized`
+# strictly and one carrying it to the un-converged pair.
 #
 # Named diagnostics: foreign-claim-release-failed for a contract
 # miss, foreign-claim-release-nondeterministic for the instability
@@ -137,6 +152,19 @@ def _journaled_walk(ctx, name, floor):
             for change in [(entry.get('event') or {})
                            .get('role_changed') or {}]
             if change]
+
+
+def _learned_pin(ctx, name):
+    """Whether the peer's whole served journal records a
+    tracking_source_adopted — the process-lifetime verified source
+    the run still pulls. Its presence is what makes `orphaned` an
+    honest un-converged reading beside `unsynchronized` while a
+    monitor-less claim stands; None when the read dropped."""
+    entries = _served_journal(ctx, name, 0)
+    if entries is None:
+        return None
+    return any('tracking_source_adopted' in (entry.get('event') or {})
+               for entry in entries)
 
 
 def _durable_records(ctx, name, floor):
@@ -251,6 +279,13 @@ def _release_pass(ctx, number, owner, peer, tokens, watch_point):
                 _journal_entries(ctx['journal_files'][name]))
         except Exception:
             durable_floors[name] = None
+    # The owner's process lifetimes before the episode: a run_boundary
+    # landing inside it means the resolution needed a restart, which
+    # the bound says is never required.
+    boundaries0 = _run_boundaries(ctx, owner)
+    # Whether the ex-owner already carries a verified tracking pin:
+    # the reading the held window admits depends on it.
+    record['pinned'] = _learned_pin(ctx, owner)
 
     baseline = _claim_surface(ctx)
     record['baseline'] = baseline
@@ -298,6 +333,7 @@ def _release_pass(ctx, number, owner, peer, tokens, watch_point):
                     walked = report
             if walked is None:
                 time.sleep(RELEASE_POLL)
+        demotion['walked'] = walked is not None
         evidence['demotion'] = demotion['walk'][-8:]
         record['demoted'] = demotion
         if walked is None:
@@ -374,10 +410,23 @@ def _release_pass(ctx, number, owner, peer, tokens, watch_point):
         record['adoptions'] = _journaled(
             ctx, owner, floors[owner], 'tracking_source_adopted') \
             if floors.get(owner) is not None else None
+        # The pin's own adoption record: a verified source is a
+        # process-lifetime pin journaled once, so a later episode
+        # resolves through a record this pass's floor stands above.
+        record['pin_adoptions'] = _journaled(
+            ctx, owner, 0, 'tracking_source_adopted') \
+            if floors.get(owner) is not None else None
         records = _durable_records(ctx, owner, durable_floors[owner]) \
             if isinstance(durable_floors.get(owner), int) else None
         record['durable'] = _durable_kinds(records) \
             if records is not None else None
+        # The whole durable file's kinds: the pin's own adoption
+        # record stands above the pass floor on a later episode, the
+        # same process-lifetime semantics the served journal carries.
+        lifetime = _durable_records(ctx, owner, 0) \
+            if isinstance(durable_floors.get(owner), int) else None
+        record['durable_all'] = _durable_kinds(lifetime) \
+            if lifetime is not None else None
         record['boundaries'] = {'before': boundaries0,
                                 'after': _run_boundaries(ctx, owner)}
 
@@ -529,6 +578,11 @@ def _judge_release(record, note):
                    + ' expected')
 
     hold = record.get('hold') or []
+    pinned = record.get('pinned')
+    if pinned is None:
+        nondet('pin', 'the ex-owner\'s served-journal read dropped — '
+               'the pin its held-window reading depends on cannot be '
+               'audited')
     if not hold:
         nondet('hold', 'the held window recorded no polls — the '
                'verdict bound cannot be audited')
@@ -549,12 +603,21 @@ def _judge_release(record, note):
                        + json.dumps(report, sort_keys=True)[:160])
                 continue
             kind = _sync_kind(report)
-            if kind != 'unsynchronized':
+            if kind not in ('unsynchronized', 'orphaned') or (
+                    kind == 'orphaned' and not pinned):
+                # `orphaned` is the un-converged reading only for an
+                # ex-owner carrying a verified tracking pin: its
+                # source keeps serving a `source_owns_field: false`
+                # document while the foreign claim stands. Without
+                # one, unsynchronized is the only honest verdict the
+                # bound names for the claim's standing window.
                 failed('hold-verdict', 'the fenced ex-owner '
                        'reported ' + kind + ' while the '
-                       'monitor-less claim stood — unsynchronized '
-                       'is the only honest verdict the bound '
-                       'names for the claim\'s standing window')
+                       'monitor-less claim stood — the window admits '
+                       'unsynchronized, and orphaned only under a '
+                       'learned tracking pin the peer\'s journal '
+                       'records none of: '
+                       + json.dumps(report, sort_keys=True)[:160])
             partner = row.get('peer')
             if partner is not None \
                     and partner.get('role') != 'standby':
@@ -623,7 +686,8 @@ def _judge_release(record, note):
                    + json.dumps(walk)[:200])
     else:
         adoptions = record.get('adoptions')
-        if adoptions is None:
+        pin_adoptions = record.get('pin_adoptions')
+        if adoptions is None or pin_adoptions is None:
             nondet('adopted', 'the served-journal read dropped — '
                    'the adoption\'s journaled evidence cannot be '
                    'audited')
@@ -637,7 +701,7 @@ def _judge_release(record, note):
             port = str(declared).rpartition(':')[2] \
                 if declared else None
             sources = [entry.get('source')
-                       for entry in adoptions
+                       for entry in list(adoptions) + list(pin_adoptions)
                        if isinstance(entry, dict)]
             if not any(port is None
                        or str(source).rpartition(':')[2] == port
@@ -683,10 +747,13 @@ def _judge_release(record, note):
                    'no role_changed for the reclaim walk: '
                    + json.dumps(durable)[:200])
         if path == 'adopted' \
-                and 'tracking_source_adopted' not in durable:
+                and 'tracking_source_adopted' not in durable \
+                and 'tracking_source_adopted' not in (
+                    record.get('durable_all') or []):
             failed('durable', 'the durable journal file carries '
                    'no tracking_source_adopted for the '
-                   'resolution: ' + json.dumps(durable)[:200])
+                   'resolution, in the episode or anywhere in the '
+                   'file: ' + json.dumps(durable)[:200])
 
     if 'restored' in record and not record.get('restored'):
         failed('restore', 'the pair never settled back to its '
@@ -698,7 +765,11 @@ def _release_digest(record, violations):
     """The normalized verdict digest the two passes must produce
     identically — the episode's seven clauses reduced to the
     verdict each names. Diagnostics are the complaint's name; the
-    digest is the rig's answer."""
+    digest is the rig's answer. The held window normalizes to the
+    un-converged reading rather than the exact verdict: the second
+    pass can legitimately serve the orphan-tracked cousin where the
+    first served unsynchronized, and the contract's clause is the
+    same one either way."""
     def clean(*keys):
         return not any(key in violations for key in keys)
 
@@ -714,7 +785,7 @@ def _release_digest(record, violations):
                              'owner-silent')
                     else 'held',
         'loss': 'attributed' if clean('loss') else 'unattributed',
-        'hold': 'unsynchronized'
+        'hold': 'unconverged'
                 if clean('hold', 'hold-role', 'hold-verdict',
                          'hold-silent', 'hold-monitor')
                 else 'breached',
@@ -735,217 +806,247 @@ def _release_digest(record, violations):
 
 
 def _self_check():
-    """The unchecked-diagnostic self-check: each planted negative —
-    every clause the leg asserts — must produce a named diagnostic
-    through the same judge path the rig evidence takes. Returns the
-    list of planted keys whose judgment slipped."""
-    clean_record = {
-        'owner': 'active', 'peer': 'standby',
-        'owner_token': 424243, 'peer_token': 424244,
-        'baseline': {'result': 'error', 'error': {
-            'kind': 'fenced',
-            'detail': 'another attachment owns field writes',
-            'owner': 424243, 'monitor': '172.18.0.2:8080'}},
-        'claim': {'result': 'done'},
-        'seized': {'result': 'error', 'error': {
-            'kind': 'fenced',
-            'detail': 'another attachment owns field writes',
-            'owner': RELEASE_FOREIGN}},
-        'demoted': {'polls': 3, 'answered': 3,
-                    'walk': [{'owner': 'active'},
-                             {'owner': 'demoting'},
-                             {'owner': 'standby'}],
-                    'walked': True},
-        'losses': [{'point': 200, 'owner': 424243,
-                    'claimant': RELEASE_FOREIGN}],
-        'hold': [{'owner': {'role': 'standby', 'tick': 12,
-                            'sync': {'unsynchronized': {}}},
-                  'peer': {'role': 'standby', 'tick': 12,
-                           'sync': {'orphaned': {'checkpoint': 4}}},
-                  'verdict': {'result': 'error', 'error': {
-                      'kind': 'fenced',
-                      'owner': RELEASE_FOREIGN}}}
-                 for _ in range(RELEASE_ROUNDS)],
-        'release': {'result': 'done'},
-        'anchor': 12,
-        'resolve': {'path': 'reclaim',
-                    'watch': [{'owner': {'role': 'standby',
-                                         'sync': {'unsynchronized': {}}},
-                               'peer': {'role': 'standby',
-                                        'sync': {'orphaned': {}}}},
-                              {'owner': {'role': 'active',
-                                         'tick': 16},
-                               'peer': {'role': 'standby',
-                                        'sync': {'tracking': {'aligned': 14}}}}]},
-        'resolved_verdict': {'result': 'error', 'error': {
-            'kind': 'fenced', 'owner': 424243,
-            'monitor': '172.18.0.2:8080'}},
-        'walk': [('active', 'demoting'), ('demoting', 'standby'),
-                 ('standby', 'promoting'), ('promoting', 'active')],
-        'adoptions': [],
-        'writes': 'landed',
-        'durable': ['field_claim_lost', 'role_changed'],
-        'boundaries': {'before': 1, 'after': 1},
-        'restored': True}
-
-    def clean_window():
-        record = copy.deepcopy(clean_record)
-        # The planted negative the issue names: unsynchronized is
-        # bound to the claim's standing window — a clean verdict
-        # under the held monitor-less claim is off-contract.
-        record['hold'][2]['owner']['sync'] = {'tracking': {'aligned': 12}}
-        return record
-
-    def stranded_past_release():
-        record = copy.deepcopy(clean_record)
-        # The doctored negative the issue names: the peer asserted
-        # resolved while stranded past the claim's release.
-        record['resolve'] = {'path': None,
-                             'watch': [{'owner': {'role': 'standby',
-                                                  'sync': {'unsynchronized': {}}},
-                                        'peer': {'role': 'standby',
-                                                 'sync': {'orphaned': {}}}}]}
-        record['writes'] = 'stalled'
-        return record
-
-    expect = [
-        ('clean-while-claimed', clean_window(), DIAG_FAILED,
-         'hold-verdict'),
-        ('stranded-past-release', stranded_past_release(),
-         DIAG_FAILED, 'stranded'),
-        ('monitor-declared', {**copy.deepcopy(clean_record),
-                              'seized': {'result': 'error', 'error': {
-                                  'kind': 'fenced',
-                                  'owner': RELEASE_FOREIGN,
-                                  'monitor': '172.18.0.9:8080'}}},
-         DIAG_FAILED, 'seized-monitor'),
-        ('seized-open', {**copy.deepcopy(clean_record),
-                         'seized': {'result': 'error', 'error': {
-                             'kind': 'unclaimed',
-                             'detail': 'no attachment holds field '
-                                      'writes'}}},
-         DIAG_FAILED, 'seized-open'),
-        ('hold-silenced', {**copy.deepcopy(clean_record),
-                           'hold': [dict(row, owner=None) if index == 1
-                                    else row
-                                    for index, row in enumerate(
-                                        copy.deepcopy(
-                                            clean_record)['hold'])]},
-         DIAG_FAILED, 'hold-silent'),
-        ('hold-promoted', {**copy.deepcopy(clean_record),
-                           'hold': [dict(row, owner={
-                               'role': 'active', 'tick': 13})
-                               if index == 3 else row
-                               for index, row in enumerate(
-                                   copy.deepcopy(
-                                       clean_record)['hold'])]},
-         DIAG_FAILED, 'hold-role'),
-        ('never-demoted', {**copy.deepcopy(clean_record),
-                           'demoted': {'polls': 4, 'answered': 4,
-                                       'walk': [{'owner': 'active'}] * 4,
-                                       'walked': False}},
-         DIAG_FAILED, 'demotion'),
-        ('killed-not-demoted', {**copy.deepcopy(clean_record),
-                                'demoted': {'polls': 4, 'answered': 1,
-                                            'walk': [{'owner': 'active'},
-                                                     {'owner': 'demoting'},
-                                                     {'owner': None},
-                                                     {'owner': 'standby'}],
-                                            'walked': True}},
-         DIAG_FAILED, 'owner-silent'),
-        ('silent-loss', {**copy.deepcopy(clean_record), 'losses': []},
-         DIAG_FAILED, 'loss'),
-        ('unattributed-loss',
-         {**copy.deepcopy(clean_record),
-          'losses': [{'point': 200, 'owner': 424243}]},
-         DIAG_FAILED, 'loss'),
-        ('misattributed-loss',
-         {**copy.deepcopy(clean_record),
-          'losses': [{'point': 200, 'owner': 424243,
-                      'claimant': 424244}]},
-         DIAG_FAILED, 'loss'),
-        ('unjournaled-resolution',
-         {**copy.deepcopy(clean_record),
-          'walk': [('active', 'demoting'), ('demoting', 'standby')]},
-         DIAG_FAILED, 'resolution-unrecorded'),
-        ('resolve-monitor-less',
-         {**copy.deepcopy(clean_record),
-          'resolved_verdict': {'result': 'error', 'error': {
-              'kind': 'fenced', 'owner': 424243}}},
-         DIAG_FAILED, 'resolve-monitor'),
-        ('adoption-unnamed',
-         {**copy.deepcopy(clean_record),
-          'resolve': {'path': 'adopted', 'watch': []},
-          'resolved_verdict': {'result': 'error', 'error': {
-              'kind': 'fenced', 'owner': 424244,
-              'monitor': '172.18.0.3:8080'}},
-          'adoptions': []},
-         DIAG_FAILED, 'adopted'),
-        ('restarted', {**copy.deepcopy(clean_record),
-                       'boundaries': {'before': 1, 'after': 2}},
-         DIAG_FAILED, 'restart'),
-        ('writes-stalled', {**copy.deepcopy(clean_record),
-                            'writes': 'stalled'},
-         DIAG_FAILED, 'writes-stalled'),
-        ('undurable', {**copy.deepcopy(clean_record), 'durable': []},
-         DIAG_FAILED, 'durable'),
-        ('unrestored', {**copy.deepcopy(clean_record),
-                        'restored': False},
-         DIAG_FAILED, 'restore'),
-        ('baseline-dropped', {**copy.deepcopy(clean_record),
-                              'baseline': None},
-         DIAG_NONDET, 'baseline'),
-        ('claim-refused',
-         {**copy.deepcopy(clean_record),
-          'claim': {'result': 'error', 'error': {
-              'kind': 'fenced', 'owner': 424243}}},
-         DIAG_NONDET, 'claim'),
-        ('claim-shared',
-         {**copy.deepcopy(clean_record),
-          'claim': {'result': 'claimed_shared',
-                    'owner': RELEASE_FOREIGN}},
-         DIAG_NONDET, 'claim'),
-        ('seized-dropped', {**copy.deepcopy(clean_record),
-                            'seized': None},
-         DIAG_NONDET, 'seized'),
-        ('seized-foreign',
-         {**copy.deepcopy(clean_record),
-          'seized': {'result': 'error', 'error': {
-              'kind': 'fenced', 'owner': 424299}}},
-         DIAG_NONDET, 'seized-foreign'),
-        ('release-refused',
-         {**copy.deepcopy(clean_record),
-          'release': {'result': 'error', 'error': {
-              'kind': 'invalid_request'}}},
-         DIAG_NONDET, 'release'),
-        ('journal-dropped', {**copy.deepcopy(clean_record),
-                             'losses': None},
-         DIAG_NONDET, 'loss'),
-        ('peer-moved',
-         {**copy.deepcopy(clean_record),
-          'hold': [{**row, 'peer': {'role': 'promoting',
-                                    'tick': 12}}
-                   for row in copy.deepcopy(clean_record)['hold']]},
-         DIAG_NONDET, 'hold-peer'),
-        ('durable-dropped', {**copy.deepcopy(clean_record),
-                             'durable': None},
-         DIAG_NONDET, 'durable'),
-    ]
-
+    """The unchecked-diagnostic self-check: replay the release judge
+    over each planted negative — every clause the leg asserts — and
+    require the judge to note each through the same path the rig
+    evidence takes. A silent judge returns the negative names it let
+    through."""
     slipped = []
-    violations = {}
-    _judge_release(copy.deepcopy(clean_record),
-                   lambda key, diag, detail:
-                   violations.setdefault(key, (diag, detail)))
-    if violations:
-        slipped.append(('clean-record', violations))
-    for name, record, diagnostic, key in expect:
-        violations = {}
-        _judge_release(record, lambda key2, diag, detail:
-                       violations.setdefault(key2, (diag, detail)))
-        got = violations.get(key, (None, ''))[0]
+
+    def clean_record():
+        """The record of a clean pass: the monitor-less induction
+        claim granted and seizing the field, the fenced ex-owner
+        answering its demotion walk poll by poll, the held window
+        unsynchronized with the claim naming the induction token and
+        no monitor, and the released field re-seated through the
+        journaled loss-marked reclaim."""
+        return {
+            'owner': 'active', 'peer': 'standby',
+            'owner_token': 424243, 'peer_token': 424244,
+            'baseline': {'result': 'error', 'error': {
+                'kind': 'fenced',
+                'detail': 'another attachment owns field writes',
+                'owner': 424243, 'monitor': '172.18.0.2:8080'}},
+            'claim': {'result': 'done'},
+            'pinned': False,
+            'seized': {'result': 'error', 'error': {
+                'kind': 'fenced',
+                'detail': 'another attachment owns field writes',
+                'owner': RELEASE_FOREIGN}},
+            'demoted': {'polls': 3, 'answered': 3,
+                        'walk': [{'owner': 'active'},
+                                 {'owner': 'demoting'},
+                                 {'owner': 'standby'}],
+                        'walked': True},
+            'losses': [{'point': 200, 'owner': 424243,
+                        'claimant': RELEASE_FOREIGN}],
+            # At least four held rows: the planted mid-window
+            # negatives need a row whatever a shortened round count
+            # leaves the rig.
+            'hold': [_held_row() for _ in
+                     range(max(RELEASE_ROUNDS, 4))],
+            'release': {'result': 'done'},
+            'anchor': 12,
+            'resolve': {'path': 'reclaim',
+                        'watch': [{'owner': {
+                            'role': 'standby',
+                            'sync': {'unsynchronized': {}}},
+                            'peer': {'role': 'standby',
+                                     'sync': {'orphaned': {}}}},
+                            {'owner': {'role': 'active',
+                                       'tick': 16},
+                             'peer': {'role': 'standby',
+                                      'sync': {'tracking': {
+                                          'aligned': 14}}}}]},
+            'resolved_verdict': {'result': 'error', 'error': {
+                'kind': 'fenced', 'owner': 424243,
+                'monitor': '172.18.0.2:8080'}},
+            'walk': [('active', 'demoting'),
+                     ('demoting', 'standby'),
+                     ('standby', 'promoting'),
+                     ('promoting', 'active')],
+            'adoptions': [],
+            'pin_adoptions': [],
+            'writes': 'landed',
+            'durable': ['field_claim_lost', 'role_changed'],
+            'durable_all': ['field_claim_lost', 'role_changed'],
+            'boundaries': {'before': 1, 'after': 1},
+            'restored': True}
+
+    def _held_row():
+        return {'owner': {'role': 'standby', 'tick': 12,
+                          'sync': {'unsynchronized': {}}},
+                'peer': {'role': 'standby', 'tick': 12,
+                         'sync': {'orphaned': {'checkpoint': 4}}},
+                'verdict': {'result': 'error', 'error': {
+                    'kind': 'fenced', 'owner': RELEASE_FOREIGN}}}
+
+    def expect(name, mutate, key, diagnostic=DIAG_FAILED):
+        """Plant one negative and require the judge to note it under
+        `key` with `diagnostic`."""
+        record = clean_record()
+        mutate(record)
+        found = {}
+        _judge_release(
+            record,
+            lambda note_key, diag, detail:
+            found.setdefault(note_key, (diag, detail)))
+        got = found.get(key, (None, ''))[0]
         if got != diagnostic:
             slipped.append((name, diagnostic, got))
+
+    clean = {}
+    _judge_release(clean_record(),
+                   lambda key, diag, detail:
+                   clean.setdefault(key, (diag, detail)))
+    if clean:
+        slipped.append(('clean-record', clean))
+
+    # The doctored negative the issue names second: the peer asserted
+    # resolved while stranded past the claim's release.
+    expect('stranded-past-release', lambda record: record.update(
+        {'resolve': {'path': None,
+                     'watch': [{'owner': {
+                         'role': 'standby',
+                         'sync': {'unsynchronized': {}}},
+                         'peer': {'role': 'standby',
+                                  'sync': {'orphaned': {}}}}]},
+         'writes': 'stalled'}), 'stranded')
+    # ... and the first: unsynchronized asserted as the only-while-
+    # claimed verdict while the served monitor reports clean inside
+    # the claim's standing window.
+    expect('clean-while-claimed', lambda record:
+           record['hold'][2]['owner'].update(
+               {'sync': {'tracking': {'aligned': 12}}}),
+           'hold-verdict')
+    # The orphan-tracked cousin asserted where no learned pin backs
+    # it: the peer reports `orphaned` with no adoption in its
+    # journal.
+    expect('orphaned-unpinned', lambda record:
+           record['hold'][1]['owner'].update(
+               {'sync': {'orphaned': {'aligned': 12}}}),
+           'hold-verdict')
+    # The monitor-less premise itself broken: the verdict names a
+    # monitor the claim never declared.
+    expect('monitor-declared', lambda record:
+           record['seized']['error'].update(
+               {'monitor': '172.18.0.9:8080'}), 'seized-monitor')
+    expect('seized-open', lambda record: record.update(
+        {'seized': {'result': 'error', 'error': {
+            'kind': 'unclaimed',
+            'detail': 'no attachment holds field writes'}}}),
+        'seized-open')
+    # A silent serving monitor is a kill, not the demote-in-place the
+    # contract asserts — mid-hold and mid-demotion.
+    expect('hold-silenced', lambda record:
+           record['hold'][1].update({'owner': None}), 'hold-silent')
+    expect('killed-not-demoted', lambda record: record.update(
+        {'demoted': {'polls': 4, 'answered': 1,
+                     'walk': [{'owner': 'active'},
+                              {'owner': 'demoting'},
+                              {'owner': None},
+                              {'owner': 'standby'}],
+                     'walked': True}}), 'owner-silent')
+    # The ex-owner never demoted at all.
+    expect('never-demoted', lambda record: record.update(
+        {'demoted': {'polls': 4, 'answered': 4,
+                     'walk': [{'owner': 'active'}] * 4,
+                     'walked': False}}), 'demotion')
+    # The ex-owner back on the field while the claim stands.
+    expect('hold-promoted', lambda record: record['hold'][3].update(
+        {'owner': {'role': 'active', 'tick': 13}}), 'hold-role')
+    # The preemption's loss record missing, unattributed, or naming
+    # a claimant that never stood.
+    expect('silent-loss', lambda record: record.update({'losses': []}),
+           'loss')
+    expect('unattributed-loss', lambda record: record.update(
+        {'losses': [{'point': 200, 'owner': 424243}]}), 'loss')
+    expect('misattributed-loss', lambda record: record.update(
+        {'losses': [{'point': 200, 'owner': 424243,
+                     'claimant': 424244}]}), 'loss')
+    # The re-seat landed on an operator or restart path, not on the
+    # loss-marked reclaim the contract names.
+    expect('unjournaled-resolution', lambda record: record.update(
+        {'walk': [('active', 'demoting'),
+                  ('demoting', 'standby')]}),
+        'resolution-unrecorded')
+    # The resolved field names nothing to track.
+    expect('resolve-monitor-less', lambda record:
+           record['resolved_verdict']['error'].pop('monitor'),
+           'resolve-monitor')
+    # The declared-monitor resolution journaling no adoption.
+    expect('adoption-unnamed', lambda record: record.update(
+        {'resolve': {'path': 'adopted', 'watch': []},
+         'resolved_verdict': {'result': 'error', 'error': {
+             'kind': 'fenced', 'owner': 424244,
+             'monitor': '172.18.0.3:8080'}},
+         'adoptions': []}), 'adopted')
+    # ... nor through the process-lifetime pin's own record.
+    expect('pin-adoption-unnamed', lambda record: record.update(
+        {'resolve': {'path': 'adopted', 'watch': []},
+         'resolved_verdict': {'result': 'error', 'error': {
+             'kind': 'fenced', 'owner': 424244,
+             'monitor': '172.18.0.3:8080'}},
+         'adoptions': [],
+         'pin_adoptions': [{'source': '172.18.0.9:9999'}]}),
+        'adopted')
+    # The resolution needing a restart the contract says is never
+    # required.
+    expect('restarted', lambda record: record.update(
+        {'boundaries': {'before': 1, 'after': 2}}), 'restart')
+    expect('writes-stalled', lambda record:
+           record.update({'writes': 'stalled'}), 'writes-stalled')
+    expect('undurable', lambda record: record.update({'durable': []}),
+           'durable')
+    expect('adoption-undurable', lambda record: record.update(
+        {'resolve': {'path': 'adopted', 'watch': []},
+         'resolved_verdict': {'result': 'error', 'error': {
+             'kind': 'fenced', 'owner': 424244,
+             'monitor': '172.18.0.3:8080'}},
+         'adoptions': [{'source': '172.18.0.3:8080'}],
+         'pin_adoptions': [{'source': '172.18.0.3:8080'}],
+         'durable': ['field_claim_lost'],
+         'durable_all': ['field_claim_lost']}), 'durable')
+    expect('unrestored', lambda record:
+           record.update({'restored': False}), 'restore')
+    # The instability the contract does not answer for must report
+    # nondeterministic, not failed: dropped reads, a refused or
+    # shared staging claim, a sibling moving under the leg.
+    expect('baseline-dropped', lambda record:
+           record.update({'baseline': None}), 'baseline', DIAG_NONDET)
+    expect('claim-refused', lambda record: record.update(
+        {'claim': {'result': 'error', 'error': {
+            'kind': 'fenced', 'owner': 424243}}}),
+        'claim', DIAG_NONDET)
+    expect('claim-shared', lambda record: record.update(
+        {'claim': {'result': 'claimed_shared',
+                   'owner': RELEASE_FOREIGN}}),
+        'claim', DIAG_NONDET)
+    expect('seized-dropped', lambda record:
+           record.update({'seized': None}), 'seized', DIAG_NONDET)
+    expect('seized-foreign', lambda record: record['seized'][
+        'error'].update({'owner': 424299}),
+        'seized-foreign', DIAG_NONDET)
+    expect('release-refused', lambda record: record.update(
+        {'release': {'result': 'error',
+                     'error': {'kind': 'invalid_request'}}}),
+        'release', DIAG_NONDET)
+    expect('journal-dropped', lambda record:
+           record.update({'losses': None}), 'loss', DIAG_NONDET)
+    expect('peer-moved', lambda record: [
+        row['peer'].update({'role': 'promoting'})
+        for row in record['hold']], 'hold-peer', DIAG_NONDET)
+    expect('durable-dropped', lambda record:
+           record.update({'durable': None}), 'durable', DIAG_NONDET)
+    expect('pin-dropped', lambda record:
+           record.update({'pinned': None}), 'pin', DIAG_NONDET)
+    expect('pin-journal-dropped', lambda record: record.update(
+        {'resolve': {'path': 'adopted', 'watch': []},
+         'resolved_verdict': {'result': 'error', 'error': {
+             'kind': 'fenced', 'owner': 424244,
+             'monitor': '172.18.0.3:8080'}},
+         'adoptions': [{'source': '172.18.0.3:8080'}],
+         'pin_adoptions': None}), 'adopted', DIAG_NONDET)
     return slipped
 
 
@@ -957,14 +1058,15 @@ def scenario_foreign_claim_release(ctx):
     With the deployed unkeyed pair settled and tracking, the
     dedicated attachment's claim_writer holds the field under a
     foreign token with controller:false and no monitor declared;
-    the fenced ex-owner's serving monitor must report standby+
-    unsynchronized on every poll of the claim's standing window —
-    and only while that claim stands. Releasing it must resolve the
-    field: the ex-owner's loss-marked reclaim re-arms its token and
-    walks it back to active, or a successor's declared monitor is
-    adopted — journaled, reconverged to one active plus one
-    tracking standby, never stranded. Named diagnostics
-    foreign-claim-release-failed and
+    the fenced ex-owner's serving monitor must report standby and
+    un-converged — unsynchronized, or the orphan-tracked cousin
+    under a verified pin its journal records — on every poll of the
+    claim's standing window, and only while that claim stands.
+    Releasing it must resolve the field: the ex-owner's loss-marked
+    reclaim re-arms its token and walks it back to active, or a
+    successor's declared monitor is adopted — journaled,
+    reconverged to one active plus one tracking standby, never
+    stranded. Named diagnostics foreign-claim-release-failed and
     foreign-claim-release-nondeterministic; the unchecked-diagnostic
     self-check reports foreign-claim-release-unchecked; two
     consecutive passes produce identical outcome digests; the leg
@@ -972,15 +1074,14 @@ def scenario_foreign_claim_release(ctx):
     keys the pair."""
     case = Case(
         'foreign-claim-release',
-        'Monitor-less foreign claim unsynchronized window and '
+        'Monitor-less foreign claim un-converged window and '
         'release resolution',
         'A foreign attachment\'s claim_writer held with no monitor '
-        'declared leaves the fenced ex-owner reporting '
-        'unsynchronized only while the claim stands — the field '
-        'names nothing to track — and the released field resolves '
-        'through the recorded loss-marked reclaim or '
-        'declared-monitor adoption, journaled and reconverged, '
-        'never stranded')
+        'declared leaves the fenced ex-owner reporting un-converged '
+        'only while the claim stands — the field names nothing to '
+        'track — and the released field resolves through the '
+        'recorded loss-marked reclaim or declared-monitor adoption, '
+        'journaled and reconverged, never stranded')
     try:
         active, standby = ctx.get('active'), ctx.get('standby')
         if not active or not standby:
@@ -1038,6 +1139,26 @@ def scenario_foreign_claim_release(ctx):
                 'inconclusive',
                 'the deployed pair is unreachable — the leg needs '
                 'the serving monitors to audit the verdict')
+        # The claim surface gates the staging posture before the
+        # pair's roles: an unreadable or open field is the rig never
+        # reached the posture the leg stages on — nothing for the
+        # contract to miss, and an owner-plus-tracker assertion over
+        # an unclaimed field would report a fault the bound does not
+        # name.
+        baseline = _claim_surface(ctx)
+        if baseline is None:
+            return case.finish(
+                'inconclusive',
+                'the plant\'s claim surface answered no probe — '
+                'the staged run predates the claim verdict the '
+                'contract audits')
+        if not _fenced(baseline):
+            return case.finish(
+                'inconclusive',
+                'the claim surface answered no fenced verdict — '
+                'the field is unclaimed or the claim read surface '
+                'is absent: '
+                + json.dumps(baseline, sort_keys=True)[:200])
         owner = _pair_active(ctx)
         if owner is None:
             return case.finish(
@@ -1067,20 +1188,6 @@ def scenario_foreign_claim_release(ctx):
                 'the pair never reported a settled tracking '
                 'standby — the leg stages on a healthy '
                 'owner-plus-tracker pair')
-        baseline = _claim_surface(ctx)
-        if baseline is None:
-            return case.finish(
-                'inconclusive',
-                'the plant\'s claim surface answered no probe — '
-                'the staged run predates the claim verdict the '
-                'contract audits')
-        if not _fenced(baseline):
-            return case.finish(
-                'inconclusive',
-                'the claim surface answered no fenced verdict — '
-                'the field is unclaimed or the claim read surface '
-                'is absent: '
-                + json.dumps(baseline, sort_keys=True)[:200])
         if _verdict_owner(baseline) != tokens[owner]:
             return case.finish(
                 'inconclusive',
@@ -1131,11 +1238,16 @@ def scenario_foreign_claim_release(ctx):
                 key: {'diagnostic': diagnostic, 'detail': detail}
                 for key, (diagnostic, detail) in violations.items()}
             ref = save_evidence(
-                ctx, 'foreign-claim-release-pass-' + str(number),
-                evidence)
+                ctx['evidence_dir'],
+                'foreign-claim-release-pass-' + str(number)
+                + '.json', evidence)
             case.evidence('file', ref,
                           'the leg\'s normalized record of release '
-                          'pass ' + str(number))
+                          'pass ' + str(number) + ' — the claim '
+                          'surface reads, the demotion walk, the '
+                          'held unsynchronized window, the '
+                          'resolution watch, the durable records '
+                          'and the normalized digest')
             digests.append(digest)
             if violations:
                 diagnostic, detail = next(iter(violations.values()))

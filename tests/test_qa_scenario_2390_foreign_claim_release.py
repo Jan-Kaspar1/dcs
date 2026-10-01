@@ -29,6 +29,8 @@ EXPECTED_CASES = frozenset({
     'ForeignClaimReleaseTests.'
     'test_monitorless_declared_reports_failed',
     'ForeignClaimReleaseTests.'
+    'test_orphaned_unpinned_reports_failed',
+    'ForeignClaimReleaseTests.'
     'test_clean_window_reports_failed',
     'ForeignClaimReleaseTests.'
     'test_second_pass_clean_reports_failed',
@@ -127,8 +129,9 @@ class ReleasePairFeed(StrandedPairFeed):
     assertions name: the unjournaled re-seat, the durable mirror
     going silent, the serving monitor dropping mid-hold, the
     sibling promoting out from under the leg, the second pass's
-    clean window, and the successor-declared adoption resolving
-    instead of the reclaim."""
+    clean window, the orphan-tracked reading with no pin behind
+    it, and the successor-declared adoption resolving instead of
+    the reclaim."""
 
     def __init__(self, plant, journal_files=None):
         super().__init__(plant, keyed=False,
@@ -143,6 +146,9 @@ class ReleasePairFeed(StrandedPairFeed):
                                         # tool claim
         self.second_pass_clean = False  # the second pass serves a
                                         # clean held verdict
+        self.orphan_unpinned = False    # ctrl-a reports the orphan-
+                                        # tracked reading with no
+                                        # adoption in its journal
         self.always_adopted = False     # the successor's declared
                                         # claim resolves the
                                         # released field
@@ -166,6 +172,16 @@ class ReleasePairFeed(StrandedPairFeed):
                    if request.get('op') == 'claim_writer'
                    and request.get('controller') is False)
 
+    def _declared_for(self, member):
+        # The staged successor adoption needs a dialable declaration:
+        # the deployed rig binds the wildcard listener and the plant
+        # stores the substituted routable address (#1135's
+        # normalization), or the demoted peer could never resolve the
+        # resolved claim's declared monitor at all.
+        if self.always_adopted:
+            return member.bridge
+        return super()._declared_for(member)
+
     def _track(self, member):
         claim = self.plant.claim
         tool = claim is not None \
@@ -182,10 +198,17 @@ class ReleasePairFeed(StrandedPairFeed):
             return
         if tool and member is self.b and self.peer_moves:
             if member.role != 'active' \
-                    and self._take_claim(member, unconditional=True):
+                    and self._take_claim(member):
                 member.role = 'promoting'
                 self._journal(member, {'role_changed': {
                     'from': 'standby', 'to': 'promoting'}})
+            return
+        if tool and member is self.a and self.orphan_unpinned:
+            # The doctored defect: the orphan-tracked reading
+            # asserted where no learned pin backs it — the peer's
+            # journal records no adoption, so unsynchronized is the
+            # only honest verdict the claim's window names.
+            member.sync = 'orphaned'
             return
         if self.always_adopted:
             if member is self.a:
@@ -320,6 +343,18 @@ class ForeignClaimReleaseTests(unittest.TestCase):
 
     def test_monitorless_declared_reports_failed(self):
         self.plant.monitorless_named = True
+        record = self.run_scenario()
+        report.validate_scenario(record)
+        self.assertEqual('failed', record['outcome'], record)
+        self.assertIn('foreign-claim-release-failed',
+                      record.get('detail', ''))
+
+    def test_orphaned_unpinned_reports_failed(self):
+        # The orphan-tracked reading is the window's second honest
+        # shape only under a learned pin — asserted with none
+        # journaled, it is a verdict the claim's window never
+        # granted.
+        self.feed.orphan_unpinned = True
         record = self.run_scenario()
         report.validate_scenario(record)
         self.assertEqual('failed', record['outcome'], record)
