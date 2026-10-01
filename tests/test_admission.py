@@ -134,6 +134,31 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(classify({'exit_code': 1}, 'Rate limit exceeded. Retry-After: 300'), ('rate', 300))
         self.assertEqual(classify({'exit_code': 0}, 'test verifies rate limit handling')[0], 'success')
 
+    def test_provider_reset_message_gates_until_the_stated_window(self):
+        message = 'Reached free model rate limit. Your limit will reset in 1 hour 34 minutes.'
+        meta = self.start('limited')
+        category, delay = classify({'exit_code': 1}, message)
+        self.a.finish('limited', meta, category, retry_after=delay)
+        self.now += 34 * 60
+        self.assertFalse(self.a.reserve('early', 'swe-2-high', 'early', 5))
+        self.now += 60 * 60
+        self.start('probe')
+
+    def test_provider_reset_duration_formats_and_explicit_header_precedence(self):
+        cases = [('39 minutes', 2340), ('1 hour 34 minutes', 5640),
+                 ('2 hours', 7200), ('17 seconds', 17),
+                 ('1 hour 2 minutes 3 seconds', 3723), ('0 seconds', 1)]
+        for duration, seconds in cases:
+            message = 'Reached free model rate limit. Your limit will reset in ' + duration + '.'
+            with self.subTest(duration=duration):
+                self.assertEqual(classify({'exit_code': 1}, message), ('rate', seconds))
+        message = 'Reached free model rate limit. Your limit will reset in 39 minutes. Retry-After: 60'
+        self.assertEqual(classify({'exit_code': 1}, message), ('rate', 60))
+        self.assertEqual(classify({'exit_code': 0}, message), ('success', None))
+        self.assertEqual(classify({'exit_code': 1}, 'Rate limit. Your limit will reset in tomorrow.'), ('rate', None))
+        stream = 'stream error: Reached free model rate limit. Your limit will reset in 17 seconds.'
+        self.assertEqual(classify({'status': 'timeout'}, stream), ('rate', 17))
+
     def test_timeout_with_provider_stream_error_scopes_cooldown(self):
         tail = 'level=ERROR message="stream error" error.error="AI_APICallError: Rate limit exceeded"'
         self.assertEqual(classify({'status': 'timeout', 'exit_code': -15}, tail)[0], 'rate')
