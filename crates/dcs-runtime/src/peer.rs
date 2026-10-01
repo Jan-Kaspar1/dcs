@@ -1860,11 +1860,11 @@ impl<'d> Peer<'d> {
 
     /// The demotion body every stand-down path shares: the monitoring
     /// surface's requests arrive through [`demote_as`](Self::demote_as)
-    /// with `origin: request`; the fenced-write demotion a preempted
-    /// claim forces runs the same survivable path under
-    /// `origin: fenced`, so the journaled transitions name what
-    /// initiated them rather than reading as an unattributed operator
-    /// request. The origin also marks the release: a requested
+    /// with `origin: request`; the fencing demotion a preempted — or
+    /// connection-dropped, claim-bound — ownership forces runs the
+    /// same survivable path under `origin: fenced`, so the journaled
+    /// transitions name what initiated them rather than reading as an
+    /// unattributed operator request. The origin also marks the release: a requested
     /// demotion's is the deliberate hand-back the orphan cycle's
     /// conditional re-arm must not undo — the claim this run gave up
     /// is the successor's to take, not this standby's to re-arm under
@@ -3375,9 +3375,15 @@ impl<'d> Peer<'d> {
     /// [`apply`](Self::apply) runs; a field-owning peer stages nothing —
     /// its writes are the field's truth.
     ///
-    /// A field-owning scan whose write the shared field fenced —
-    /// [`IoError::Fenced`](dcs_core::IoError::Fenced), meaning the claim
-    /// this peer held was preempted by another attachment — completes
+    /// A field-owning scan whose field-mutating boundary the shared
+    /// field fenced — a `write` answering
+    /// [`IoError::Fenced`](dcs_core::IoError::Fenced), or a cyclic
+    /// `exchange` refused the same way: under the process-image
+    /// contract per-point writes only stage, so the verdict arrives at
+    /// the exchange and the executor marks it identically — meaning
+    /// the claim this peer held was preempted by another attachment,
+    /// or died with the claim-bound connection a link flap dropped —
+    /// completes
     /// degraded like any field fault: the refusal counts in `io_health`
     /// and one [`FencingLoss`] queues for the journal. But the peer is
     /// superseded, and a degraded report alone would leave it still

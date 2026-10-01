@@ -331,9 +331,12 @@ pub type ClaimHook = Arc<dyn Fn(u64) -> Result<(), StepError> + Send + Sync>;
 /// per-backend half of [`FanoutDriver::release_field_claims`], run when
 /// this peer demotes: an attachment that gave the field up must not
 /// re-assert a stale claim when a re-attach finds the field's
-/// arbitration reset. `None` on kinds whose claim bookkeeping needs no
-/// forgetting — e.g. `sim-cyclic`, whose attachments record no claim
-/// to re-assert.
+/// arbitration reset. `None` on kinds that record no ownership to
+/// forget — e.g. `sim-ethercat`, which arbitrates no claim at all.
+/// What the hook forgets is the kind's own: `sim-tcp` and `sim-bus`
+/// drop their recorded claim token, while `sim-cyclic` — whose claim
+/// dies with its connection — drops the staged-but-unpublished output
+/// image a demoted ex-owner must not keep re-presenting.
 pub type ReleaseHook = Arc<dyn Fn() + Send + Sync>;
 
 /// The conditional counterpart of [`ClaimHook`] — the per-backend half
@@ -1172,6 +1175,7 @@ fn sim_cyclic_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError>
     let stepping = Arc::clone(&bus);
     let claiming = Arc::clone(&bus);
     let starting = Arc::clone(&bus);
+    let releasing = Arc::clone(&bus);
     let inspect: Arc<dyn Any + Send + Sync> = bus.clone();
     let device = spec.id.0;
     Ok(DeviceDriver::Backend(DeviceBackend {
@@ -1194,8 +1198,15 @@ fn sim_cyclic_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError>
         })),
         // The claim binds to the attachment that took it and dies with
         // that connection — a re-attach never re-arms it, so there is
-        // no recorded token for a release hook to forget.
-        release: None,
+        // no recorded token for a release hook to forget. What it must
+        // forget instead is the cyclic driver's *pending output
+        // image*: staged outputs are retained across fenced exchanges
+        // by the cyclic contract, so a demoted ex-owner would keep
+        // re-presenting them — fenced forever while a successor's
+        // claim stands, or publishing onto a freed field it no longer
+        // owns. The release drops them; the demoted run's exchanges go
+        // census-only, the tracking standby's shape.
+        release: Some(Arc::new(move || releasing.drop_pending_outputs())),
         // No *unbound* conditional grant (`ensure`) — and none needed:
         // a claim that dies with its connection leaves nothing to
         // re-arm.
