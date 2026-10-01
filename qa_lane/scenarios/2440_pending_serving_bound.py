@@ -75,18 +75,21 @@ RUNS_BEFORE = frozenset({'scenario_incompatible_revision',
 # calls, a starved watch, an endpoint the window never reached, an
 # unread state verdict, a moved or wedged deployed pair, or two passes
 # whose digests diverge. A staged revision predating the contract — the
-# pending launch exiting on the frozen or refused field, the pending
-# surface never serving while the container stands, no /health answer
-# carrying the bounded liveness report at all (a run that has not
-# completed a scan yet serves the stamp null, which is the documented
-# shape before the first completion, not a pre-contract revision) — or
-# showing the recorded defect signature (the tick frozen at 0 while the
-# lock-taking reads starve or the served scan age runs unbounded) reports
-# inconclusive. The unchecked-diagnostic self-check replays the judge
-# over planted negatives — bounded serving asserted while a lock-taking
-# endpoint queues ~N_channels timeouts behind the wedged pending scan
-# among them — and reports pending-serving-bound-unchecked for any that
-# slip through.
+# pending launch exiting (or its container standing absent) on the frozen
+# or refused field, a /health answer set that never carries the bounded
+# liveness report at all (a run that has not completed a scan yet serves
+# the stamp null, which is the documented shape before the first
+# completion, not a pre-contract revision) — or showing the recorded
+# defect signature (the tick frozen at 0 while the lock-taking reads
+# starve or the served scan age runs unbounded) reports inconclusive. A
+# container that stands while its monitor never serves is not a
+# pre-contract signature — the pending state has always published its
+# mirror — so that instability stays nondeterministic, named as the
+# starved watch it is. The unchecked-diagnostic self-check replays the
+# judge over planted negatives — bounded serving asserted while a
+# lock-taking endpoint queues ~N_channels timeouts behind the wedged
+# pending scan among them — and reports pending-serving-bound-unchecked
+# for any that slip through.
 
 SEAT = 'driven'          # the labeled born seat the leg launches on
 FIELD_TIMEOUT = 5.0      # RemoteDriver::DEFAULT_TIMEOUT — one exchange

@@ -60,6 +60,7 @@ EXPECTED_CASES = frozenset({
     'PendingServingBoundTests.test_departed_mid_window_is_inconclusive',
     'PendingServingBoundTests.test_refused_departure_is_inconclusive',
     'PendingServingBoundTests.test_defect_signature_is_inconclusive',
+    'PendingServingBoundTests.test_unserved_standing_seat_is_nondeterministic',
     'PendingServingBoundTests.test_stage_failure_is_nondeterministic',
     'PendingServingBoundTests.test_pause_failure_is_nondeterministic',
     'PendingServingBoundTests.test_launch_failure_is_nondeterministic',
@@ -128,6 +129,10 @@ class ServingFeed:
         self.silent_rig = False         # every endpoint refuses
         self.unsettled_pair = False     # the standby never tracks
         self.watch_starves_seat = False  # the seat monitor never answers
+        self.stand_unserved = False     # the seat stands, its monitor
+                                         # never binds — not the
+                                         # pre-contract shape, which
+                                         # exits instead
         # The pre-contract shapes the leg inconcludes on.
         self.predates_pending = False   # the launch exits on the freeze
         self.departs_mid_window = False  # the pending seat dies mid-watch
@@ -331,7 +336,8 @@ class ServingFeed:
             raise AssertionError('unexpected request %s %s'
                                  % (method, url))
         if self.HOSTS.get(host) != 'driven' or self.seat is None \
-                or self.seat['exited'] or self.watch_starves_seat:
+                or self.seat['exited'] or self.watch_starves_seat \
+                or self.stand_unserved:
             raise urllib.error.URLError('connection refused')
         self._advance()
         seat = self.seat
@@ -754,6 +760,20 @@ class PendingServingBoundTests(unittest.TestCase):
         record = self.run_scenario()
         self.assertEqual(record['outcome'], 'inconclusive', record)
         self.assertIn('predates', record.get('detail', ''))
+        report.validate_scenario(record)
+
+    def test_unserved_standing_seat_is_nondeterministic(self):
+        # A pending seat whose container stands while its monitor never
+        # binds is the starved-watch instability, never a pre-contract
+        # signature: the pending state has always published its
+        # mirror, so a revision predating this contract exits at launch
+        # instead. The leg must not excuse it as inconclusive either —
+        # it fails by its nondeterministic name.
+        self.feed.stand_unserved = True
+        record = self.run_scenario()
+        self.assertEqual(record['outcome'], 'failed', record)
+        self.assertIn('pending-serving-bound-nondeterministic',
+                      record.get('detail', ''))
         report.validate_scenario(record)
 
     # The instability the contract does not answer for must report
