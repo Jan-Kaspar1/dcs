@@ -724,26 +724,6 @@ const JOURNAL_DRAIN_WAIT: Duration = Duration::from_secs(30);
 /// trail silently.
 const STATE_DRAIN_WAIT: Duration = crate::state_file::STATE_DRAIN_WAIT;
 
-/// How far ahead of the line's stream position a checkpoint pulled to
-/// verify an announced demotion hint, a claimed source, or an orphan
-/// resolution may serve: a successor tracking this line applies its
-/// checkpoints and scans alongside it, so its stream position can
-/// honestly sit a few ticks ahead — but a same-generation stream far
-/// ahead of the line's position is not this line's continuation. It
-/// is the signature of a forged or foreign stream served from an
-/// attacker-chosen endpoint, and the verification refuses it rather
-/// than moving the run onto it. The comparison runs on each
-/// document's declared [`stream position`](Checkpoint::stream_tick),
-/// not the probing run's own paced tick: a tracking peer's run clock
-/// accrues a permanent lead over the stream for every source outage
-/// it survives, so run ticks are not synchronized to the line and
-/// only the declared stream position locates the document in the
-/// domain the line's generation began in. Thirty-two ticks is a
-/// short skew window at any deployed scan period — far beyond the
-/// lockstep drift of a real tracking peer, far below any forgery
-/// worth serving.
-const MAX_ANNOUNCED_AHEAD: u64 = 32;
-
 /// How many announced follow-peer hints the tracking-source contract
 /// retains: every standby pulling `GET /checkpoint?peer=` lands its
 /// own monitor address, newest first, so a demotion with several
@@ -4299,21 +4279,6 @@ pub fn line_proof(key: u64, nonce: u64, checkpoint: &Checkpoint) -> u64 {
     u64::from_le_bytes(digest[..8].try_into().unwrap())
 }
 
-/// The position a checkpoint document occupies in the tracked line's
-/// origin tick domain — the currency the announced/owner skew bound is
-/// written in. `stream_tick` is the serving run's declaration of where
-/// its capture lands in the domain the line's generation began in;
-/// absent — a lead-free run or a pre-field capture — the document's
-/// own `tick` is the only position it can claim. A document declaring
-/// a position past its own tick is nonsense and reads as lead-free:
-/// the bound stays written against `tick`, the stricter answer.
-fn stream_position(checkpoint: &Checkpoint) -> Tick {
-    checkpoint
-        .stream_tick
-        .unwrap_or(checkpoint.tick)
-        .min(checkpoint.tick)
-}
-
 /// Why a checkpoint pulled to verify an announced demotion hint is
 /// not this run's continuation — [`verify_announced_checkpoint`]'s
 /// named refusals. Each means the announced endpoint serves a stream
@@ -4337,17 +4302,18 @@ enum AnnouncedCheckpointError {
     /// against this run's unidentified one, is not the tracked
     /// continuation.
     ForeignGeneration,
-    /// The pulled checkpoint's stream position runs more than
-    /// [`MAX_ANNOUNCED_AHEAD`] past this run's own: a successor
-    /// tracking this line sits only a few stream ticks ahead of it,
-    /// so a same-generation stream that far ahead is not this line's
-    /// continuation — it is a forged or foreign tick domain wearing
-    /// this line's identity.
-    Ahead {
-        /// The stream position the pulled checkpoint claims.
-        pulled: Tick,
-        /// This run's stream position when the pull was verified.
-        own: Tick,
+    /// The pulled checkpoint declares a stream position ahead of its
+    /// own run tick: `stream_tick` stamps the captured `tick` minus
+    /// the lead the serving run's paced clock accrued over the line,
+    /// so an honest declaration never exceeds the tick it rides — a
+    /// document claiming one is nonsense the line's stream cannot
+    /// have produced, a forged or corrupt document wearing this
+    /// line's identity.
+    ImpossibleLead {
+        /// The stream position the pulled checkpoint declares.
+        declared: Tick,
+        /// The run tick the pulled checkpoint claims.
+        tick: Tick,
     },
     /// The pulled checkpoint claims its source owns the field — the
     /// stamp every document this run's own `/checkpoint` answer
@@ -4389,11 +4355,12 @@ impl std::fmt::Display for AnnouncedCheckpointError {
                     "the pulled checkpoint names a foreign generation"
                 )
             }
-            Self::Ahead { pulled, own } => write!(
+            Self::ImpossibleLead { declared, tick } => write!(
                 formatter,
-                "the pulled checkpoint's stream position {} leads the line's {} \
-                 past the announced skew bound",
-                pulled.0, own.0
+                "the pulled checkpoint declares stream position {} ahead of its \
+                 own run tick {} — an honest document's declared lead is never \
+                 negative",
+                declared.0, tick.0
             ),
             Self::OwnDocument { pulled, own } => write!(
                 formatter,
@@ -4419,10 +4386,23 @@ impl std::fmt::Display for AnnouncedCheckpointError {
 /// would: a readable format, this run's generation — the line's
 /// tick-domain identity, which a tracking peer adopts verbatim on
 /// every apply and a reinitialized successor keeps across the
-/// fingerprint crossing — and a tick no further ahead of this run's
-/// than [`MAX_ANNOUNCED_AHEAD`], the honest skew of a peer applying
-/// this run's checkpoints and scanning alongside it. The model
-/// fingerprint is deliberately absent here: a revised successor's
+/// fingerprint crossing — and an internally consistent declared
+/// stream position. There is deliberately no skew bound against this
+/// run's own position: a detached prober's `tick` and `stream_tick`
+/// alike advance at its own scan cadence while the pulled stream
+/// advances at its source's, so the gap between them measures pace
+/// asymmetry, never line membership — a same-generation successor
+/// that is simply ahead in stream position is this line's
+/// continuation regardless of how fast it advances relative to this
+/// run's clock (QA finding
+/// `skew-bound-strands-slower-cadence-ex-owner`, where a
+/// slow-scanning demoted peer refused a faster successor forever).
+/// The position check that survives is the document's own
+/// consistency: `stream_tick` stamps `tick` minus the serving run's
+/// accrued lead, so a declaration ahead of the document's own run
+/// tick is nonsense no honest run produces — the forgery shape,
+/// refused. The model fingerprint is deliberately absent here: a
+/// revised successor's
 /// checkpoints legitimately carry the next model's — the demoted
 /// peer's own apply gate refuses a foreign fingerprint at adoption
 /// and reports `degraded`, the revision roll's designed shape, so a
@@ -4450,18 +4430,16 @@ fn verify_announced_checkpoint(
     if pulled.generation != own.generation {
         return Err(AnnouncedCheckpointError::ForeignGeneration);
     }
-    // The skew bound compares stream positions, not run ticks: each
-    // side's declared position in the line's origin domain is the
-    // comparable currency — a successor whose paced clock accrued an
-    // outage lead keeps the honest stream position it serves, while a
-    // foreign document without that declaration keeps the run tick it
-    // claims as its position.
-    let pulled_stream = stream_position(pulled);
-    let own_stream = stream_position(own);
-    if pulled_stream.0 > own_stream.0.saturating_add(MAX_ANNOUNCED_AHEAD) {
-        return Err(AnnouncedCheckpointError::Ahead {
-            pulled: pulled_stream,
-            own: own_stream,
+    // The one positional check the document can honestly carry: its
+    // declared stream position is its own tick minus the accrued
+    // outage lead, so a declaration ahead of the tick itself is
+    // nonsense — a forged or corrupt document, refused.
+    if let Some(declared) = pulled.stream_tick
+        && declared > pulled.tick
+    {
+        return Err(AnnouncedCheckpointError::ImpossibleLead {
+            declared,
+            tick: pulled.tick,
         });
     }
     if pulled.source_owns_field == Some(true) && pulled.tick.0 <= own.tick.0 {
@@ -4477,14 +4455,19 @@ fn verify_announced_checkpoint(
 /// field owner proves its source serves this line *as that owner* —
 /// the orphan-resolution probe's bar. The document checks are the
 /// demote verification's readable-format, same-generation,
-/// bounded-lead ones; on top of them the document must itself claim
+/// internally-consistent ones — no skew bound against this run's own
+/// position stands on a detached prober, whose stream position
+/// advances at its own scan cadence and is no line-membership
+/// reference: an owner ahead of it by any distance is this line's
+/// continuation (QA finding
+/// `skew-bound-strands-slower-cadence-ex-owner`). On top of them the
+/// document must itself claim
 /// the field — `source_owns_field: true` — since a standby-line
 /// endpoint merely tracking this line onward proves nothing about
 /// ownership and would only re-pin the demoted peer onto another
 /// island member. The demote check's own-document rejection does not
 /// apply here: the probing run is already a standby, so an owner a
-/// few ticks behind its local tick is still this line's owner — only
-/// a runaway lead marks a foreign stream.
+/// few ticks behind its local tick is still this line's owner.
 fn verify_owner_checkpoint(
     pulled: &Checkpoint,
     own: &Checkpoint,
@@ -4497,16 +4480,16 @@ fn verify_owner_checkpoint(
     if pulled.generation != own.generation {
         return Err(AnnouncedCheckpointError::ForeignGeneration);
     }
-    // As in `verify_announced_checkpoint`: the skew bound compares
-    // each document's declared stream position — the probing run's own
-    // paced tick carries whatever outage lead it survived and is no
-    // line-membership reference.
-    let pulled_stream = stream_position(pulled);
-    let own_stream = stream_position(own);
-    if pulled_stream.0 > own_stream.0.saturating_add(MAX_ANNOUNCED_AHEAD) {
-        return Err(AnnouncedCheckpointError::Ahead {
-            pulled: pulled_stream,
-            own: own_stream,
+    // As in `verify_announced_checkpoint`: the only positional check
+    // the document honestly carries is internal consistency — a
+    // declared stream position ahead of the document's own run tick
+    // is nonsense no honest run serves.
+    if let Some(declared) = pulled.stream_tick
+        && declared > pulled.tick
+    {
+        return Err(AnnouncedCheckpointError::ImpossibleLead {
+            declared,
+            tick: pulled.tick,
         });
     }
     if pulled.source_owns_field != Some(true) {
@@ -5783,13 +5766,18 @@ mod tests {
     /// The demote-side half of the `?peer=` hardening at the document
     /// level: the checkpoint pulled to prove an announced hint must be
     /// this line's continuation — readable format, this run's model
-    /// fingerprint and generation, and a tick within the honest
-    /// successor skew — or the hint proves nothing and the demotion
+    /// generation, and an internally consistent declared stream
+    /// position — or the hint proves nothing and the demotion
     /// refuses. The check runs only on pulls the caller proved under
     /// the pair's key — the announced-source contract is keyed-only —
     /// so a field-owning document strictly ahead of this run's tick
     /// is a real successor's, while one at or behind it is the
-    /// replayable own-document shape and refuses.
+    /// replayable own-document shape and refuses. No skew bound
+    /// compares the pulled position against this run's own: a
+    /// detached prober's positions advance at its own scan cadence,
+    /// so a same-generation successor that is simply ahead in stream
+    /// position verifies — the `skew-bound-strands-slower-cadence-
+    /// ex-owner` contract.
     #[test]
     fn verify_announced_checkpoint_accepts_only_this_lines_continuation() {
         let checkpoint = || Checkpoint {
@@ -5812,12 +5800,12 @@ mod tests {
         };
         let own = checkpoint();
 
-        // The honest successor shapes: this line at the same tick, a
-        // few ticks ahead inside the skew window, and far behind — a
-        // lagging successor is still this line. None of them stamps
-        // field ownership, which a tracking peer's checkpoint never
-        // claims.
-        for ahead in [0, 1, MAX_ANNOUNCED_AHEAD] {
+        // The honest successor shapes: this line at the same tick,
+        // ahead by any distance — a faster-paced successor is still
+        // this line — and far behind — a lagging successor is too.
+        // None of them stamps field ownership, which a tracking peer's
+        // checkpoint never claims.
+        for ahead in [0, 1, 32, 99999] {
             let mut pulled = checkpoint();
             pulled.tick = Tick(own.tick.0 + ahead);
             assert_eq!(verify_announced_checkpoint(&pulled, &own), Ok(()));
@@ -5833,7 +5821,7 @@ mod tests {
         // `demote-verify-own-document-check-bypassed-by-tick-bump`
         // reproduction — which the demotion refuses; strictly ahead
         // under the caller's key attestation it is a real successor's.
-        for ahead in [1, 10, MAX_ANNOUNCED_AHEAD] {
+        for ahead in [1, 10, 32] {
             let mut owner_ahead = checkpoint();
             owner_ahead.source_owns_field = Some(true);
             owner_ahead.tick = Tick(own.tick.0 + ahead);
@@ -5879,36 +5867,25 @@ mod tests {
         pulled.tick = Tick(101);
         assert_eq!(verify_announced_checkpoint(&pulled, &unminted_own), Ok(()));
 
-        // The reproduction's forgery: this line's identity at a tick
-        // far ahead of the run's — refused.
-        let mut forged = checkpoint();
-        forged.tick = Tick(99999);
-        assert_eq!(
-            verify_announced_checkpoint(&forged, &own),
-            Err(AnnouncedCheckpointError::Ahead {
-                pulled: Tick(99999),
-                own: Tick(100),
-            })
-        );
-        let mut just_past = checkpoint();
-        just_past.tick = Tick(own.tick.0 + MAX_ANNOUNCED_AHEAD + 1);
-        assert!(matches!(
-            verify_announced_checkpoint(&just_past, &own),
-            Err(AnnouncedCheckpointError::Ahead { .. })
-        ));
+        // This line's identity at a position arbitrarily far ahead of
+        // the run's own is still this line's continuation: the prober's
+        // detached positions are no line-membership reference — the QA
+        // finding `skew-bound-strands-slower-cadence-ex-owner`, where a
+        // slow-scanning demoted peer's skew bound refused a faster
+        // successor forever. A forged stream's conviction lives in the
+        // keyed `line_proof` and the command audit at the call sites,
+        // never in a positional bound this run's own clock cannot
+        // supply.
+        let mut far_ahead = checkpoint();
+        far_ahead.tick = Tick(99999);
+        assert_eq!(verify_announced_checkpoint(&far_ahead, &own), Ok(()));
         // The QA finding
-        // `tracking-verify-own-tick-ahead-bound-permanent-strand`: the
-        // bound compares declared stream positions, not run ticks. A
+        // `tracking-verify-own-tick-ahead-bound-permanent-strand`: a
         // successor whose paced clock accrued a source-outage lead
         // serves `tick` arbitrarily far ahead while its `stream_tick`
         // honestly locates the line's position — and verifies; a
         // probed run whose own clock carries a lead declares it the
-        // same way, so neither side's outage history moves the line's
-        // reference. The *declared* stream position is still bounded:
-        // a stream_tick past the window is the same forgery shape,
-        // and a declaration ahead of the document's own tick is
-        // nonsense — the run tick stays the strictest claim it can
-        // make.
+        // same way, so neither side's outage history moves the answer.
         let mut led = checkpoint();
         led.tick = Tick(own.tick.0 + 700);
         led.stream_tick = Some(Tick(own.tick.0 + 4));
@@ -5916,20 +5893,29 @@ mod tests {
         let mut led_own = checkpoint();
         led_own.stream_tick = Some(Tick(own.tick.0 - 10));
         assert_eq!(verify_announced_checkpoint(&led, &led_own), Ok(()));
+        // The new finding's shape verbatim: the faster successor's
+        // declared stream position runs genuinely ahead of the
+        // detached prober's own — same generation, honestly declared,
+        // and one tick past the retired thirty-two-tick window where
+        // the defect's refusal fired — and verifies rather than
+        // refusing `Ahead` forever.
         let mut runaway = checkpoint();
         runaway.tick = Tick(own.tick.0 + 700);
-        runaway.stream_tick = Some(Tick(own.tick.0 + MAX_ANNOUNCED_AHEAD + 1));
-        assert!(matches!(
-            verify_announced_checkpoint(&runaway, &own),
-            Err(AnnouncedCheckpointError::Ahead { .. })
-        ));
+        runaway.stream_tick = Some(Tick(own.tick.0 + 33));
+        assert_eq!(verify_announced_checkpoint(&runaway, &own), Ok(()));
+        // The one positional refusal that survives: a stream position
+        // declared ahead of the document's own run tick is nonsense no
+        // honest run produces — the forgery shape.
         let mut nonsense = checkpoint();
-        nonsense.tick = Tick(own.tick.0 + MAX_ANNOUNCED_AHEAD + 1);
+        nonsense.tick = Tick(own.tick.0 + 33);
         nonsense.stream_tick = Some(Tick(nonsense.tick.0 + 100));
-        assert!(matches!(
+        assert_eq!(
             verify_announced_checkpoint(&nonsense, &own),
-            Err(AnnouncedCheckpointError::Ahead { .. })
-        ));
+            Err(AnnouncedCheckpointError::ImpossibleLead {
+                declared: nonsense.stream_tick.unwrap(),
+                tick: nonsense.tick,
+            })
+        );
         // A foreign generation — a restarted or unrelated stream, and
         // an identified stream against this run's unidentified one —
         // and an unreadable format are refusals too.
@@ -5955,10 +5941,11 @@ mod tests {
     }
 
     /// The orphan-resolution probe's bar: the same readable-format,
-    /// same-generation, bounded-lead document checks, plus the pulled
-    /// checkpoint must itself claim the field — a standby-line source
-    /// merely tracking the line onward is `NotOwner`, so the demoted
-    /// peer can never re-resolve onto another island member.
+    /// same-generation, internally-consistent document checks, plus
+    /// the pulled checkpoint must itself claim the field — a
+    /// standby-line source merely tracking the line onward is
+    /// `NotOwner`, so the demoted peer can never re-resolve onto
+    /// another island member.
     #[test]
     fn verify_owner_checkpoint_rejects_a_standby_line_source() {
         let checkpoint = || Checkpoint {
@@ -5982,7 +5969,7 @@ mod tests {
         let own = checkpoint();
 
         // The owner shapes: this line stamped field-owning — at the
-        // probing standby's tick, ahead inside the skew window, and
+        // probing standby's tick, ahead of it by any distance, and
         // behind it: the probe runs on a stalled demoted peer, so an
         // owner a few ticks back is still this line's owner, where the
         // demote check's own-document rejection does not apply.
@@ -5994,31 +5981,34 @@ mod tests {
         }
         let mut ahead = checkpoint();
         ahead.source_owns_field = Some(true);
-        ahead.tick = Tick(own.tick.0 + MAX_ANNOUNCED_AHEAD);
+        ahead.tick = Tick(own.tick.0 + 32);
         assert_eq!(verify_owner_checkpoint(&ahead, &own), Ok(()));
         // The QA finding
         // `tracking-verify-own-tick-ahead-bound-permanent-strand`'s
         // reproduction shape: the promoted successor's paced clock
         // carries the standby's accrued source-outage lead — `tick`
-        // arbitrarily far past the bound — while its declared
-        // `stream_tick` honestly locates the line's position. The
-        // bound compares stream positions, so the legitimate owner
-        // verifies and the demoted ex-owner rejoins.
+        // arbitrarily far ahead — while its declared `stream_tick`
+        // honestly locates the line's position, so the legitimate
+        // owner verifies and the demoted ex-owner rejoins.
         let mut successor = checkpoint();
         successor.source_owns_field = Some(true);
         successor.tick = Tick(own.tick.0 + 700);
         successor.stream_tick = Some(Tick(own.tick.0 + 5));
         assert_eq!(verify_owner_checkpoint(&successor, &own), Ok(()));
-        // A declared stream position itself past the bound is the
-        // same forgery shape the unmarked runaway is — refused.
-        let mut declared_runaway = checkpoint();
-        declared_runaway.source_owns_field = Some(true);
-        declared_runaway.tick = Tick(own.tick.0 + 700);
-        declared_runaway.stream_tick = Some(Tick(own.tick.0 + MAX_ANNOUNCED_AHEAD + 1));
-        assert!(matches!(
-            verify_owner_checkpoint(&declared_runaway, &own),
-            Err(AnnouncedCheckpointError::Ahead { .. })
-        ));
+        // The QA finding
+        // `skew-bound-strands-slower-cadence-ex-owner`'s reproduction
+        // shape: the promoted successor's declared stream position
+        // runs genuinely ahead of the detached prober's own — same
+        // generation, honestly declared, simply faster-paced, one
+        // tick past the retired thirty-two-tick window — and
+        // verifies: the prober's own stream position is no
+        // line-membership reference, so no skew bound may compare
+        // against it.
+        let mut declared_ahead = checkpoint();
+        declared_ahead.source_owns_field = Some(true);
+        declared_ahead.tick = Tick(own.tick.0 + 700);
+        declared_ahead.stream_tick = Some(Tick(own.tick.0 + 33));
+        assert_eq!(verify_owner_checkpoint(&declared_ahead, &own), Ok(()));
 
         // The reproduction's shape: a sibling standby's checkpoint —
         // this line's continuation stamped `source_owns_field: false`
@@ -6039,8 +6029,10 @@ mod tests {
             Err(AnnouncedCheckpointError::NotOwner)
         );
 
-        // A foreign generation, a runaway lead, and an unreadable
-        // format refuse before the ownership question is ever asked.
+        // A foreign generation, an impossible declared position, and
+        // an unreadable format refuse before the ownership question is
+        // ever asked. A field-owning document at an arbitrary tick —
+        // the faster successor's honest shape — is no refusal.
         let mut restarted = checkpoint();
         restarted.generation = Some(12);
         restarted.source_owns_field = Some(true);
@@ -6048,13 +6040,17 @@ mod tests {
             verify_owner_checkpoint(&restarted, &own),
             Err(AnnouncedCheckpointError::ForeignGeneration)
         );
-        let mut forged = checkpoint();
-        forged.source_owns_field = Some(true);
-        forged.tick = Tick(99999);
-        assert!(matches!(
-            verify_owner_checkpoint(&forged, &own),
-            Err(AnnouncedCheckpointError::Ahead { .. })
-        ));
+        let mut nonsense = checkpoint();
+        nonsense.source_owns_field = Some(true);
+        nonsense.tick = Tick(99999);
+        nonsense.stream_tick = Some(Tick(99999 + 100));
+        assert_eq!(
+            verify_owner_checkpoint(&nonsense, &own),
+            Err(AnnouncedCheckpointError::ImpossibleLead {
+                declared: nonsense.stream_tick.unwrap(),
+                tick: nonsense.tick,
+            })
+        );
         let mut unreadable = checkpoint();
         unreadable.format_version = 999;
         unreadable.source_owns_field = Some(true);

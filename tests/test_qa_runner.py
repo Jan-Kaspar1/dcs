@@ -148,6 +148,32 @@ BUS_MODEL = {
     'connections': [],
 }
 
+# The cyclic counterpart the fencing-loss leg stages through the
+# launch's fixture override: one `sim-cyclic` device declaring its
+# register image as a station map — the `stations` partition the kind
+# requires — on the same placeholder address.
+CYCLIC_BUS_MODEL = {
+    'version': 1,
+    'devices': [{
+        'id': 1,
+        'kind': 'sim-cyclic',
+        'parameters': {'address': '__BUS_ADDR__',
+                       'exchange_miss_threshold': 3,
+                       'stations': {'field': {'di1': 0, 'do1': 1}}},
+        'channels': {'di1': {'direction': 'in', 'value_type': 'bool'},
+                     'do1': {'direction': 'out', 'value_type': 'bool'}},
+    }],
+    'io_points': [
+        {'id': 10, 'direction': 'in', 'value_type': 'bool',
+         'channel': {'device': 1, 'name': 'di1'}},
+        {'id': 20, 'direction': 'out', 'value_type': 'bool',
+         'channel': {'device': 1, 'name': 'do1'}},
+    ],
+    'signals': [],
+    'components': [],
+    'connections': [],
+}
+
 
 class Result:
     def __init__(self, stdout='', returncode=0):
@@ -898,6 +924,10 @@ class PlantActionTests(unittest.TestCase):
             ctx['stop_plant']()
             ctx['start_plant']()
         self.assertEqual(ctx['plant'], '127.0.0.1:19001')
+        # The rig-bridge --remote address for born launches staging
+        # against the deployed pair's own plant.
+        self.assertEqual(ctx['plant_remote'],
+                         'dcs-hw-qa-1-plant:9001')
         self.assertEqual(
             calls, [('stop', '--time', '2', 'dcs-hw-qa-1-plant'),
                     ('start', 'dcs-hw-qa-1-plant')])
@@ -2474,6 +2504,19 @@ class BornActiveActionTests(unittest.TestCase):
                          str(self.cfg['plant_owner_tokens']
                             ['driven']))
 
+    def test_pair_member_keys_resolve_to_their_monitors(self):
+        # The deferred-refusal leg declares the deployed pair's
+        # incumbent the born launch's tracking source: member keys map
+        # to the members' rig-bridge monitor addresses.
+        calls, _, _ = self._launch(seat='foreign', peer='active')
+        launch = self._run(calls)
+        index = launch.index('--peer')
+        self.assertEqual(launch[index + 1], 'dcs-hw-qa-1-a:8080')
+        calls, _, _ = self._launch(seat='driven', standby='standby')
+        launch = self._run(calls)
+        index = launch.index('--standby')
+        self.assertEqual(launch[index + 1], 'dcs-hw-qa-1-b:8081')
+
     def test_peer_and_standby_together_rejected(self):
         with self.assertRaises(RuntimeError):
             self._launch(peer='foreign', standby='revised')
@@ -3136,6 +3179,8 @@ class SimBusDeviceImageTests(unittest.TestCase):
             ({**self.spec, 'device': 0}, 'device/port must be int'),
             ({key: value for key, value in self.spec.items()
               if key != 'model_fixture'}, 'stages no model_fixture'),
+            ({**self.spec, 'cyclic_model': 9},
+             'cyclic_model must name'),
             ('device-1', 'sim_bus_device must map'),
         ]
         for block, message in cases:
@@ -3176,6 +3221,84 @@ class SimBusDeviceImageTests(unittest.TestCase):
                     'qa-1',
                     lambda event, detail=None: events.append(event))
         self.assertEqual(events, ['sim-bus-stop'])
+
+    def test_a_fixture_override_stages_the_selected_model(self):
+        # The fencing-loss leg's seam: the run config's cyclic_model
+        # names the sim-cyclic document, and the launch stages it on
+        # the same device block — the server serves either
+        # register-protocol kind.
+        cyclic = self.src / 'crates/dcs-demo/fixtures/cyclic.json'
+        cyclic.parent.mkdir(parents=True, exist_ok=True)
+        cyclic.write_text(json.dumps(CYCLIC_BUS_MODEL, indent=1) + '\n')
+        with patch.object(runner, 'docker',
+                          self._serving_docker([])):
+            info = runner.start_sim_bus_device(
+                self.cfg, self._record(), self.run_dir,
+                lambda e, d=None: None,
+                fixture='crates/dcs-demo/fixtures/cyclic.json')
+        staged = json.loads(Path(info['model']).read_text())
+        device = next(d for d in staged['devices'] if d['id'] == 1)
+        self.assertEqual(device['kind'], 'sim-cyclic')
+        self.assertEqual(device['parameters']['address'],
+                         info['address'])
+
+    def test_a_missing_override_fixture_fails_before_launch(self):
+        calls = []
+        with patch.object(runner, 'docker',
+                          self._serving_docker(calls)):
+            with self.assertRaises(RuntimeError) as caught:
+                runner.start_sim_bus_device(
+                    self.cfg, self._record(), self.run_dir,
+                    lambda e, d=None: None,
+                    fixture='crates/dcs-demo/fixtures/absent.json')
+        self.assertIn('fixture missing', str(caught.exception))
+        self.assertEqual(calls, [])
+
+    def test_restart_severs_and_waits_on_the_fresh_lifetime(self):
+        # The fencing-loss leg's sever: docker restart drops every
+        # attachment's control connection and the same server comes
+        # back — the readiness read is scoped to the restarted
+        # process's logs, since the old lifetime's announcement stays
+        # on the container log.
+        calls = []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            if args[0] == 'inspect' and 'StartedAt' in str(args):
+                return Result('2026-10-01T12:00:00Z')
+            if args[0] == 'logs' and '--since' in args:
+                return Result(self.serving)
+            if args[0] == 'logs':
+                # The previous lifetime's announcement — present but
+                # scoped out of the readiness read.
+                return Result(self.serving + '\nstale')
+            if args[0] == 'inspect':
+                return Result('true')
+            return Result('')
+
+        events = []
+        with patch.object(runner, 'docker', fake_docker):
+            info = runner.restart_sim_bus_device(
+                self.cfg, 'qa-1', self.run_dir,
+                lambda e, d=None: events.append(e))
+        self.assertIn(('restart', 'dcs-hw-qa-1-bus'), calls)
+        self.assertTrue(any(c[0] == 'logs' and '--since' in c
+                            for c in calls))
+        self.assertEqual(info['address'], 'dcs-hw-qa-1-bus:9005')
+        self.assertEqual(info['model'],
+                         str(self.run_dir / 'sim-bus' / 'model.json'))
+        self.assertEqual(events, ['sim-bus-sever', 'sim-bus-severed'])
+
+    def test_restart_without_a_staged_server_refuses(self):
+        self.cfg['sim_bus_device'] = None
+        calls = []
+        with patch.object(runner, 'docker',
+                          self._serving_docker(calls)):
+            with self.assertRaises(RuntimeError) as caught:
+                runner.restart_sim_bus_device(
+                    self.cfg, 'qa-1', self.run_dir, lambda e, d=None: None)
+        self.assertIn('nothing to sever', str(caught.exception))
+        self.assertEqual(calls, [])
 
     def test_scenario_ctx_carries_the_device_actions(self):
         calls = []
@@ -3493,8 +3616,14 @@ class ProbePairTests(unittest.TestCase):
             self.assertEqual(probe['driven'],
                              'http://127.0.0.1:'
                              + str(self.probe['driven_port']))
-            # Bridge-placed field: no host-side plant attachment.
+            # Bridge-placed field: no host-side plant attachment; the
+            # rig-bridge --remote address is the probe pair's own
+            # plant, never the deployed pair's.
             self.assertIsNone(probe['plant'])
+            self.assertEqual(
+                probe['plant_remote'],
+                'dcs-hw-qa-1-probe-plant:'
+                + str(self.probe['plant_port']))
             self.assertEqual(probe['pair_token'],
                              self.probe['pair_token'])
             tokens = self.cfg['plant_owner_tokens']
