@@ -11,6 +11,7 @@ DEFAULT_CHECKS = ['rust-format', 'rust-clippy', 'rust-tests', 'supervisor-tests'
 # Verified no-cost backends only; anything else is a rejected paid fallback.
 FREE_MODELS = ('swe-2-high', 'swe-2-medium', 'swe-2-max',
                'opencode/union-alpha',
+               'opencode/space-bunny-free',
                'opencode/muse-spark-1.3-contributor-free',
                'opencode/muse-spark-1.2-contributor-free',
                'opencode/ling-3.0-flash-fin-free',
@@ -40,6 +41,10 @@ def scheduler(raw):
                 raise ValueError('scheduler group ' + name + ' needs a positive integer initial')
             if not isinstance(group.get('ceiling'), int) or group['ceiling'] < group['initial']:
                 raise ValueError('scheduler group ' + name + ' needs ceiling >= initial')
+            minimum = group.get('minimum', 1)
+            if (type(minimum) is not int or minimum < 1
+                    or minimum > group['initial']):
+                raise ValueError('scheduler group ' + name + ' needs 1 <= minimum <= initial')
             if not isinstance(group.get('external_slots', 0), int) or group.get('external_slots', 0) < 0:
                 raise ValueError('scheduler group ' + name + ' needs external_slots >= 0')
     for key in ('quiet_seconds', 'cooldown_seconds', 'max_cooldown_seconds',
@@ -70,6 +75,18 @@ def load(path=None):
         raise ValueError('model_caps references unpermitted models: ' + ', '.join(unknown))
     config['model_caps'] = caps
     config['scheduler'] = scheduler(config.get('scheduler'))
+    factory = config.get('factory')
+    if factory is not None:
+        if not isinstance(factory, dict):
+            raise ValueError('factory must be an object')
+        for key in ('worker_slots', 'workspace_slots', 'daily_merge_goal'):
+            if type(factory.get(key)) is not int or factory[key] < 1:
+                raise ValueError('factory.' + key + ' must be a positive integer')
+        spacing = factory.get('launch_spacing_seconds', 5)
+        if type(spacing) not in (int, float) or not 0 <= spacing <= 30:
+            raise ValueError('factory.launch_spacing_seconds must be between 0 and 30')
+        if factory['workspace_slots'] < factory['worker_slots']:
+            raise ValueError('factory.workspace_slots must cover worker_slots')
     config.setdefault('required_checks', DEFAULT_CHECKS)
     if config['required_checks'] != DEFAULT_CHECKS:
         raise ValueError('Required CI checks cannot be weakened in active configuration')
