@@ -4892,6 +4892,13 @@ impl CheckpointPuller {
                 Ok(checkpoint)
             }
             Some(Completed { result: Ok(_), .. }) => {
+                // A document too old to apply is not evidence the
+                // endpoint has gone away — it answered, and this cycle
+                // was merely late. The earlier failure goes with it, so
+                // a stretched cadence cannot stand the pending window's
+                // verdict back up on the cycles the next fetch has not
+                // answered yet.
+                self.last_error = None;
                 self.cadence = CHECKPOINT_PULL_TIMEOUT;
                 Err(PullMiss::Stale)
             }
