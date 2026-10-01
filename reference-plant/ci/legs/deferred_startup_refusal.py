@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """The deferred-startup-refusal leg for the reference plant — the
 consumer-side proof that the #1301 deferred startup-claim refusal
-contract (decision 103's deferred-timing half, mirrored from the qa
-rig's `claim-refused-undeclared` class) holds on the manifest-declared
+contract (decision 103's deferred-timing half, the
+`deferred-startup-claim-refusal-strands-unpaired-standby` finding,
+where the rig's `claim-refused-undeclared` class meets its verdict at
+activation) holds on the manifest-declared
 redundant pair (WW-ENG-003, WW-LCM-001): a born-active launched with
 no `--peer`/`--standby` whose conditional startup grant is refused at
 the first *answered* field contact — not at activation — exits nonzero
@@ -276,8 +278,20 @@ def pending_surface(url, process, preamble, failures):
 def pair_health(rig, failures, when):
     """The deployed pair's launch roles mid-leg — one tracking-first
     pair tick plus the role poll: the field owner `active`, the
-    declared standby `tracking`."""
+    declared standby `tracking`, and the field's write-ownership claim
+    still `held` on the incumbent the deferred grant was refused
+    against — the refusal took nothing."""
     held = driver_recovery.roles_hold(rig, failures, when)
+    claim = pair.get(f"{rig.duty_url}/role", "GET /role", failures).get(
+        "field_claim"
+    )
+    if claim != "held":
+        failures.append(
+            f"the field owner reports claim {claim!r} {when} — the "
+            "refused deferred grant moved the field's write-ownership "
+            "claim off the incumbent"
+        )
+        held = False
     rig.tick(rig.standby_url, rig.duty_url, failures)
     return "active+tracking" if held else "moved"
 
