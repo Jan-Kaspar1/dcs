@@ -5,6 +5,7 @@ use crate::protocol::{
     BusError, BusRequest, BusResponse, MAX_FRAME, RegisterInfo, decode_response, encode_request,
     read_frame,
 };
+use dcs_core::FieldClaim;
 use dcs_core::{
     DriverDiagnostics, IoDriver, IoError, LinkState, PointId, Quality, Sample, Tick, Value,
     ValueKind,
@@ -61,6 +62,13 @@ pub enum LinkError {
     /// of the failover decision. Reads still succeed; writing again
     /// requires taking the claim back with
     /// [`claim_writer`](Self::claim_writer).
+    ///
+    /// The verdict names the standing claim: the attachment records it
+    /// as [`fenced_by`](Self::fenced_by) and
+    /// [`claimed_monitor`](Self::claimed_monitor), so a superseded
+    /// owner's audit attributes the preemption to a named claimant and
+    /// its tracking path can re-join the successor the field itself
+    /// named.
     Fenced,
 }
 
@@ -144,6 +152,25 @@ struct Connection {
     /// at demotion, or watched the field's verdict show a different
     /// owner standing.
     owner: Option<u64>,
+    /// The standing claim the field's last fencing verdict named — the
+    /// owner token it asserted and the monitor endpoint that owner
+    /// declared. Recorded from the verdict that fenced this
+    /// attachment, so [`fenced_by`](BusDriver::fenced_by) and
+    /// [`claimed_monitor`](BusDriver::claimed_monitor) answer with the
+    /// field's own ruling rather than a guess. `None` while no
+    /// attribution has landed: no fenced answer received yet, a verdict
+    /// from a device predating the attribution, or a claim that
+    /// declared no monitor (which clears the pair, the standing claim
+    /// having named no claimant to record).
+    fenced_by: Option<(u64, Option<SocketAddr>)>,
+    /// The monitor endpoint this attachment declares on every claim it
+    /// asserts — where *this* owner serves checkpoints, so the peers
+    /// its claim fences learn the successor's tracking surface from the
+    /// field's own arbitration. Set by
+    /// [`set_claim_monitor`](BusDriver::set_claim_monitor); `None`
+    /// leaves claims undeclared — a tool's shape, and every attachment
+    /// predating the declaration.
+    claim_monitor: Option<SocketAddr>,
     /// The earliest instant the next re-attach may run: a failed attach
     /// — or a failed exchange, which counts as the window's attempt —
     /// backs the next attempt off by
@@ -179,12 +206,20 @@ impl Connection {
             }
         };
         if let Some(owner) = self.owner {
-            match exchange(&mut stream, &BusRequest::EnsureWriter { owner }) {
+            // The re-armed claim carries this attachment's monitor
+            // declaration too, so a claim rebuilt across a device
+            // restart keeps naming where its owner serves.
+            let monitor = self.claim_monitor;
+            match exchange(&mut stream, &BusRequest::EnsureWriter { owner, monitor }) {
                 Ok(BusResponse::Done) => {}
                 Ok(BusResponse::Error {
-                    error: BusError::Fenced { .. },
+                    error:
+                        BusError::Fenced {
+                            owner: by, monitor, ..
+                        },
                 }) => {
                     self.owner = None;
+                    self.fenced_by = by.map(|by| (by, monitor));
                 }
                 Ok(_) => {
                     self.last_failure = Some(LinkError::Disconnected);
@@ -215,13 +250,20 @@ impl Connection {
         };
         match exchange(stream, request) {
             Ok(response) => {
-                if matches!(
-                    response,
-                    BusResponse::Error {
-                        error: BusError::Fenced { .. }
-                    }
-                ) {
+                if let BusResponse::Error {
+                    error:
+                        BusError::Fenced {
+                            owner: by, monitor, ..
+                        },
+                } = &response
+                {
+                    // A fenced answer means the field's standing claim
+                    // names another owner, so this attachment holds
+                    // nothing left to re-assert — and the verdict's own
+                    // attribution is recorded, so the audit can name the
+                    // claimant and re-join the successor's monitor.
                     self.owner = None;
+                    self.fenced_by = by.map(|by| (by, *monitor));
                 }
                 self.last_failure = None;
                 Ok(response)
@@ -296,6 +338,41 @@ pub(crate) fn exchange(
     decode_response(&body).map_err(|_| LinkError::Disconnected)
 }
 
+/// The standing write-ownership claim a [`BusDriver`] — or a
+/// [`CyclicBusDriver`](crate::CyclicBusDriver) — observed through
+/// [`probe_writer`](BusDriver::probe_writer): the owner token the
+/// device's claim asserts and the monitor endpoint that owner declared.
+///
+/// Where the claim names no owner, the device stands unclaimed — and on
+/// this protocol, unlike the plant protocol's fail-closed field, that is
+/// the open pre-claim state every attachment may still write through,
+/// not a closed one waiting for an owner.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClaimStatus {
+    /// The standing claim's owner token, or `None` while no claim
+    /// stands.
+    pub owner: Option<u64>,
+    /// The monitor endpoint the standing claim's owner declared — the
+    /// tracking surface a superseded peer re-joins on. `None` when the
+    /// claim declared none.
+    pub monitor: Option<SocketAddr>,
+}
+
+impl ClaimStatus {
+    /// The claim verdict a mutation from the probing attachment would
+    /// meet — the read-only observation a peer reports through its
+    /// role surface: [`FieldClaim::Held`] while an owner stands (this
+    /// attachment's own hold or a standing owner's, which the report
+    /// need not distinguish) and [`FieldClaim::Unclaimed`] while none
+    /// does.
+    pub fn claim(&self) -> FieldClaim {
+        match self.owner {
+            Some(_) => FieldClaim::Held,
+            None => FieldClaim::Unclaimed,
+        }
+    }
+}
+
 /// An [`IoDriver`] whose logical points are registers in a
 /// [`BusServer`](crate::BusServer) reached over TCP.
 ///
@@ -359,6 +436,16 @@ pub(crate) fn exchange(
 /// request — forgets the recorded token, and
 /// [`release_claim`](Self::release_claim) drops it at demotion, so
 /// only an attachment the field still owes ownership re-arms.
+///
+/// Claim introspection: [`probe_writer`](Self::probe_writer) reports
+/// the standing claim's identity without touching it,
+/// [`fenced_by`](Self::fenced_by) and
+/// [`claimed_monitor`](Self::claimed_monitor) replay what the field's
+/// last fencing verdict named, and
+/// [`set_claim_monitor`](Self::set_claim_monitor) declares this
+/// attachment's own tracking surface on every claim it asserts — the
+/// four seams the field-claim contract reads on this transport exactly
+/// as it reads them on `dcs-sim-net`'s plant protocol.
 ///
 /// Diagnostics: [`IoDriver::diagnostics`] reports the link as
 /// [`LinkState::Disconnected`] while no live connection stands — a
@@ -428,6 +515,8 @@ impl BusDriver {
             connection: Mutex::new(Connection {
                 stream: Some(BufReader::new(stream)),
                 owner: None,
+                fenced_by: None,
+                claim_monitor: None,
                 retry_at: Instant::now(),
                 last_failure: None,
             }),
@@ -453,6 +542,52 @@ impl BusDriver {
         self.connection.lock().unwrap().last_failure.clone()
     }
 
+    /// Declares `monitor` as this attachment's tracking surface: every
+    /// write-ownership claim it asserts or re-arms from here on carries
+    /// the address, so the device's fencing verdicts can hand a peer the
+    /// claim preempted the monitor endpoint it should re-join on — the
+    /// field-arbitrated successor an unkeyed pair cannot otherwise
+    /// name. A controller declares its own monitor's bound address;
+    /// tool attachments leave it unset: a claim that declares no
+    /// monitor simply hands its victims nothing to track, exactly like
+    /// an attachment on a build predating the declaration.
+    pub fn set_claim_monitor(&self, monitor: SocketAddr) {
+        self.connection.lock().unwrap().claim_monitor = Some(monitor);
+    }
+
+    /// The owner token the device's standing claim named the last time
+    /// it fenced one of this attachment's requests — who the field
+    /// serves instead, the claimant a superseded field owner's
+    /// `field_claim_lost` journal record attributes the preemption to.
+    /// `None` while no verdict named one: no fenced answer recorded
+    /// yet, the field's last verdict named no claimant, or a device
+    /// predating the attribution block.
+    pub fn fenced_by(&self) -> Option<u64> {
+        self.connection
+            .lock()
+            .unwrap()
+            .fenced_by
+            .map(|(owner, _)| owner)
+    }
+
+    /// The monitor endpoint the device's standing claim declared the
+    /// last time it fenced one of this attachment's requests — where
+    /// the owner the field now serves publishes the tracking surface a
+    /// superseded peer re-joins on. The value is the verdict's own
+    /// evidence, exactly like [`fenced_by`](Self::fenced_by): the
+    /// field's own arbitration names the successor's address, so a
+    /// demoted peer can prove it where no announced hint ever proves
+    /// itself — only actually holding the claim puts a monitor under
+    /// it. `None` while no verdict has named one, including every
+    /// claim a tool or a pre-field attachment raised undeclared.
+    pub fn claimed_monitor(&self) -> Option<SocketAddr> {
+        self.connection
+            .lock()
+            .unwrap()
+            .fenced_by
+            .and_then(|(_, monitor)| monitor)
+    }
+
     /// Advances the device server's bank one tick of `dt` time units —
     /// the explicit step behind the register protocol, stepping any
     /// declared dynamics by `dt` — and returns the bank's new tick.
@@ -464,7 +599,10 @@ impl BusDriver {
     pub fn step(&self, dt: f64) -> Result<Tick, LinkError> {
         match self.request(&BusRequest::Step { dt })? {
             BusResponse::Stepped { tick } => Ok(tick),
-            BusResponse::Error { error } => Err(refused(error)),
+            BusResponse::Error { error } => {
+                self.note_fence(&error);
+                Err(refused(error))
+            }
             _ => Err(self.protocol_violation()),
         }
     }
@@ -501,12 +639,16 @@ impl BusDriver {
     /// replays once on a fresh link rather than refusing a recovered
     /// field.
     pub fn claim_writer(&self, owner: u64) -> Result<(), LinkError> {
-        match self.claim_request(&BusRequest::ClaimWriter { owner })? {
+        let monitor = self.connection.lock().unwrap().claim_monitor;
+        match self.claim_request(&BusRequest::ClaimWriter { owner, monitor })? {
             BusResponse::Done => {
                 self.connection.lock().unwrap().owner = Some(owner);
                 Ok(())
             }
-            BusResponse::Error { error } => Err(refused(error)),
+            BusResponse::Error { error } => {
+                self.note_fence(&error);
+                Err(refused(error))
+            }
             _ => Err(self.protocol_violation()),
         }
     }
@@ -526,12 +668,16 @@ impl BusDriver {
     /// claim, the ask rides [`claim_request`](Self::claim_request) — a
     /// link that died unexercised replays once on a fresh attachment.
     pub fn ensure_writer(&self, owner: u64) -> Result<(), LinkError> {
-        match self.claim_request(&BusRequest::EnsureWriter { owner })? {
+        let monitor = self.connection.lock().unwrap().claim_monitor;
+        match self.claim_request(&BusRequest::EnsureWriter { owner, monitor })? {
             BusResponse::Done => {
                 self.connection.lock().unwrap().owner = Some(owner);
                 Ok(())
             }
-            BusResponse::Error { error } => Err(refused(error)),
+            BusResponse::Error { error } => {
+                self.note_fence(&error);
+                Err(refused(error))
+            }
             _ => Err(self.protocol_violation()),
         }
     }
@@ -560,13 +706,53 @@ impl BusDriver {
     /// replays once on a fresh link rather than refusing a recovered
     /// field.
     pub fn claim_writer_unless_held(&self, owner: u64) -> Result<(), LinkError> {
-        match self.claim_request(&BusRequest::ClaimWriterUnlessHeld { owner })? {
+        let monitor = self.connection.lock().unwrap().claim_monitor;
+        match self.claim_request(&BusRequest::ClaimWriterUnlessHeld { owner, monitor })? {
             BusResponse::Done => {
                 self.connection.lock().unwrap().owner = Some(owner);
                 Ok(())
             }
-            BusResponse::Error { error } => Err(refused(error)),
+            BusResponse::Error { error } => {
+                self.note_fence(&error);
+                Err(refused(error))
+            }
             _ => Err(self.protocol_violation()),
+        }
+    }
+
+    /// The read-only half of the write-ownership claim — the
+    /// claim-status observation a peer reports through its role surface
+    /// and the startup live-holder probe a launched controller asks
+    /// before it claims: the standing claim's owner token and declared
+    /// monitor, or an unclaimed device naming neither. The probe
+    /// asserts, joins, and releases nothing — an observation cannot
+    /// seize the field it reports — so an unclaimed answer leaves the
+    /// device exactly as open as it found it, and a probe is safe to
+    /// run every scan.
+    ///
+    /// The refusals are answers, not link failures: the link stays live
+    /// and records no failure, while a transport failure is `Err` like
+    /// any request's.
+    pub fn probe_writer(&self) -> Result<ClaimStatus, LinkError> {
+        match self.request(&BusRequest::ProbeWriter)? {
+            BusResponse::ClaimStatus { owner, monitor } => Ok(ClaimStatus { owner, monitor }),
+            BusResponse::Error { error } => {
+                self.note_fence(&error);
+                Err(refused(error))
+            }
+            _ => Err(self.protocol_violation()),
+        }
+    }
+
+    /// Records the standing claim a `fenced` verdict names — the
+    /// claimant the audit attributes the preemption to and the
+    /// successor's monitor the tracking path re-joins on — before the
+    /// caller maps the refusal into its own vocabulary. A verdict that
+    /// names no claimant (a device predating the attribution) clears
+    /// the record rather than leaving a stale attribution standing.
+    fn note_fence(&self, error: &BusError) {
+        if let BusError::Fenced { owner, monitor, .. } = error {
+            self.connection.lock().unwrap().fenced_by = owner.map(|owner| (owner, *monitor));
         }
     }
 
@@ -631,7 +817,10 @@ impl BusDriver {
         self.connection.lock().unwrap().owner = None;
         match self.claim_request(&BusRequest::ReleaseWriter)? {
             BusResponse::Done => Ok(()),
-            BusResponse::Error { error } => Err(refused(error)),
+            BusResponse::Error { error } => {
+                self.note_fence(&error);
+                Err(refused(error))
+            }
             _ => Err(self.protocol_violation()),
         }
     }
@@ -765,7 +954,10 @@ impl IoDriver for BusDriver {
                 }
                 Ok(sample)
             }
-            Ok(BusResponse::Error { error }) => Err(error.at_point(point)),
+            Ok(BusResponse::Error { error }) => {
+                self.note_fence(&error);
+                Err(error.at_point(point))
+            }
             Ok(_) => Err(self.protocol_violation().at_point(point)),
             Err(error) => Err(error.at_point(point)),
         }
@@ -796,7 +988,10 @@ impl IoDriver for BusDriver {
             value,
         }) {
             Ok(BusResponse::Written { .. }) => Ok(()),
-            Ok(BusResponse::Error { error }) => Err(error.at_point(point)),
+            Ok(BusResponse::Error { error }) => {
+                self.note_fence(&error);
+                Err(error.at_point(point))
+            }
             Ok(_) => Err(self.protocol_violation().at_point(point)),
             Err(error) => Err(error.at_point(point)),
         }

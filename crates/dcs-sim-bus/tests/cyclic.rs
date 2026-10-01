@@ -515,6 +515,68 @@ fn the_conditional_claim_refuses_a_live_different_owner() {
 }
 
 #[test]
+fn the_cyclic_claim_probe_and_verdicts_name_the_incumbent() {
+    with_server(|server, addr| {
+        let ex_owner = driver(addr);
+        let observer = driver(addr);
+        // The pre-claim device reports itself unclaimed: on this
+        // protocol that is the open field, not a closed one.
+        assert_eq!(observer.probe_writer().unwrap().owner, None);
+        assert_eq!(
+            observer.probe_writer().unwrap().claim(),
+            dcs_core::FieldClaim::Unclaimed
+        );
+
+        // The standing claim declares its tracking surface; the probe
+        // reports both halves of its identity.
+        ex_owner.set_claim_monitor("127.0.0.1:4190".parse().unwrap());
+        ex_owner.claim_writer(7).unwrap();
+        let held = observer.probe_writer().unwrap();
+        assert_eq!(held.owner, Some(7));
+        assert_eq!(held.monitor, Some("127.0.0.1:4190".parse().unwrap()));
+        assert_eq!(held.claim(), dcs_core::FieldClaim::Held);
+
+        // A fenced image exchange — the cyclic surface's own claim-loss
+        // verdict — names the standing claim's claimant and its
+        // declared monitor, so the ex-owner's journal record can
+        // attribute the preemption and re-join the successor.
+        let fenced = driver(addr);
+        fenced.write(PointId(20), Value::Float(5.0)).unwrap();
+        assert_eq!(
+            cyclic(&fenced).exchange(Tick(1)),
+            Err(IoError::Fenced(PointId(10)))
+        );
+        assert_eq!(fenced.fenced_by(), Some(7));
+        assert_eq!(
+            fenced.claimed_monitor(),
+            Some("127.0.0.1:4190".parse().unwrap())
+        );
+        // Nothing published: the verdict is the field's own ruling,
+        // not a severed link's.
+        assert_eq!(server.bank().read(9).unwrap().value, Value::Float(0.0));
+        assert!(fenced.connected());
+
+        // The re-arm ask under a different token is refused with the
+        // same attribution, and the recorded owner's own re-arm grants
+        // — the same live incumbent, named both times.
+        assert_eq!(fenced.ensure_writer(9), Err(LinkError::Fenced));
+        assert_eq!(fenced.fenced_by(), Some(7));
+        ex_owner.ensure_writer(7).unwrap();
+        assert_eq!(
+            observer.probe_writer().unwrap().owner,
+            Some(7),
+            "the owner's re-arm must not change who the field serves"
+        );
+
+        // The retained staged image publishes once the claim frees —
+        // the deliberate takeover's own claim, exactly as before.
+        fenced.claim_writer(9).unwrap();
+        cyclic(&fenced).exchange(Tick(2)).unwrap();
+        assert_eq!(server.bank().read(9).unwrap().value, Value::Float(5.0));
+    });
+}
+
+#[test]
 fn a_closed_gate_exchanges_but_never_stages() {
     with_server(|server, addr| {
         let driver = driver(addr);
