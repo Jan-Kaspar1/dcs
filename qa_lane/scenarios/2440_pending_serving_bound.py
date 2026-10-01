@@ -587,9 +587,15 @@ def _judge_serving(record, note):
     # seat answers inside the instant bound with the same named
     # verdicts, the signature distinguishing the bounded stall from an
     # unreachable transport.
+    # A refused-field seat that departed is the pre-contract shape the
+    # pass reports inconclusive on before the judge runs; reaching here
+    # with one means the control left the judge nothing to speak for,
+    # which is an instability, never a silent pass.
     refused = record.get('refused') or {}
     if refused.get('departed'):
-        pass  # classified inconclusive by the pass itself
+        nondet('refused-watch', 'the refused-field pending seat '
+               'departed rather than serving the contrast — the '
+               'contrast cannot speak for the instant bound')
     elif refused.get('stage_error') is not None:
         nondet('refused-stage', 'the refused-field staging never '
                'completed: ' + str(refused['stage_error']))
@@ -1065,6 +1071,8 @@ def _serving_self_check():
            DIAG_NONDET)
     expect('refused-watch-starved', lambda r:
            r['refused'].update(served=False), DIAG_NONDET)
+    expect('refused-departed', lambda r:
+           r['refused'].update(served=True, departed=True), DIAG_NONDET)
     expect('pair-owner-moved', lambda r:
            r['roles']['after']['active'].update(role='standby'),
            DIAG_NONDET)
