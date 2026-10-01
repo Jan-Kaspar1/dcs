@@ -659,6 +659,74 @@ Implementation order: second, after [daily architecture review](daily-architectu
   a fenced exchange and who stays active beside its promoted peer —
   reports inconclusive; the pair leaves on its launch roles.
 
+### Landed 2026-10-01 (sim-bus driver lazy-reattach leg, #1355)
+
+- The point-wise `BusDriver`'s lazy-reattach contract — #1351's fix
+  serving WW-LCM-001's continuity clause and the health model's rule
+  that a field communication fault is a transient, retriable event —
+  is exercised per revision by scenario leg
+  `3560_sim_bus_driver_reattach`. `dcs-sim-bus`'s `BusDriver` and
+  `dcs-sim-net`'s `RemoteDriver` implement their recovery
+  independently, so a rig with no register-mapped device says
+  nothing about this one; the leg stages the subject through the
+  lane's `sim_bus_device` seam — `start_sim_bus_device` launches the
+  revision's own shipped `dcs-sim-bus-device` binary on the rig
+  bridge, serving the run config's bus model with a `timeout_ms`
+  stamped under the leg's ~2 s stall so a frozen device times out
+  mid-exchange and the driver has a failed exchange to recover from.
+  A controller pair is born-launched onto the `driven`/`foreign`
+  seats with the staged document mounted and no `--remote` — a
+  register-protocol model carries its device address in its
+  parameters — so each member's serving monitor is the leg's window
+  on its own driver's health. The pre-fix defect dropped the
+  point-wise driver's stream on the first failed exchange and
+  answered `Disconnected` for the life of the process: the active's
+  scanning `communication_fault` values never cleared and the
+  standby stayed unpromotable, because a promotion must claim the
+  device and the claim request rode a dead link. The leg drives
+  both outage classes the finding records — (a) the device server
+  restarted under the pair, returning with its claim table empty so
+  the owner must re-attach *and* re-arm, and (b) the device frozen
+  ~2 s then thawed through the lane's `freeze_sim_bus_device`/
+  `thaw_sim_bus_device` levers, a transient unanswerable window with
+  nothing dying — and through each member's serving monitor asserts
+  the healthy baseline carries a connected link and no standing
+  `last_error`; the outage is counted in the served `io_health` —
+  the boundary counters moved over the baseline with the fault
+  stamped — and the first serve reporting the link `connected`
+  after the outage already carries the cleared standing record, the
+  reset failure streak, and the kept cumulative history and recorded
+  fault, with the served tick and scan cadence resumed without
+  rewinding past the running peak, which would be a controller
+  restart rather than a driver recovery; the pair's launch roles
+  hold throughout; and `POST /promote` on the converged standby must
+  answer inside its own bound once the backend is back — the
+  promotion path's device claim riding the recovered link — after
+  which the launch roles are restored by promoting the original
+  owner back. The re-attach is fast by design, so the window in
+  which the link is observably down is about one re-attach interval
+  wide and no poll can prove it caught it: the stall class, whose
+  freeze the leg owns, therefore *holds* the device down past the
+  documented stall until every member has surfaced the outage as
+  `disconnected` with the severing failure named, and only that
+  class gates on the transient — the restart class lets the device
+  return on its own schedule and witnesses an outage that fell
+  between two polls through the moved counters instead.
+- Named diagnostics are `sim-bus-reattach-failed` and
+  `sim-bus-reattach-nondeterministic`, with the self-check's
+  `sim-bus-reattach-unchecked` covering the planted lingering
+  record, standing streak, reset history, uncounted outage, and held
+  tick; both outage classes run twice with identical digests; a run
+  context carrying no `sim_bus_device` device-server seam or born-
+  controller levers, a rig whose device or pair never answers, a
+  device that never serves again after a restart, a pair that never
+  settles tracking, a staging lever that never completes, a restore
+  the leg cannot classify, and a staged revision whose served
+  `io_health` cannot express the driver's diagnostics and
+  failed-exchange accounting — every build, until #1351's fix lands
+  — report inconclusive; the rig leaves on its launch roles with
+  the staged born seats and device container torn down.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,

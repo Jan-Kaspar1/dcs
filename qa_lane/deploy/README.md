@@ -222,9 +222,21 @@ under `--entrypoint dcs-sim-bus-device`, and waits for the server's
 own report of the address it serves on. The launch returns the bridge
 address the rig's sim-bus attachments dial and the staged document a
 leg mounts into the controller it points at the field, so both ends
-of the register protocol read one declaration.
+of the register protocol read one declaration. `start_sim_bus_device`
+also accepts `timeout_ms`, stamped onto the staged document's device
+parameters — a leg staging a field stall needs the driver's declared
+per-request timeout to sit under the outage, where the fixtures'
+five-second default would not.
 `stop_sim_bus_device` removes the container outright, for a leg's
-device-outage induction. The container carries the run's
+device-outage induction. `restart_sim_bus_device` severs every
+attachment's control connection while the same server comes back —
+the register bank and the connection-bound claim reset with the fresh
+process — and `freeze_sim_bus_device`/`thaw_sim_bus_device` hold the
+attachments' sockets open and unanswered for a bounded stall instead,
+the field's state surviving. `sim_bus_device_serving` reports whether
+the server is answering right now, so a leg separates a field that
+never came back from a driver that never re-attached. The container
+carries the run's
 `dcs-hwtest.managed=1` / `dcs-hwtest.run=<id>` labels, so ordinary
 teardown and reconciliation reap a leg that leaves one running.
 

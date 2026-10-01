@@ -2617,7 +2617,7 @@ def stop_forge_endpoint(run_id, timeline, pair='deployed'):
     timeline('forge-stopped', container + ' removed')
 
 
-def _stage_bus_model(model, out_path, device, address):
+def _stage_bus_model(model, out_path, device, address, timeout_ms=None):
     """The bus model the device server and every attachment read: the
     lane's fixture with the named device's declared `address` bound to
     the rig bridge endpoint the server serves on.
@@ -2631,6 +2631,14 @@ def _stage_bus_model(model, out_path, device, address):
     register protocol read a single declaration: the server parses the
     register map it serves and the attachment dials the address the
     server was told to bind.
+
+    `timeout_ms` stamps the device's declared per-request timeout onto
+    the same declaration when given — a driver's field timeout is what
+    turns a held connection into a failed exchange the reattach leg's
+    ~2 s stall has to produce, and the fixtures' device-agnostic five-
+    second default would sit longer than the outage. None leaves the
+    declared (or default) timeout alone, the posture a leg staging no
+    stall takes.
 
     A fixture that declares no such device, or declares it with an
     address that is not the placeholder, fails loudly here — before a
@@ -2662,6 +2670,8 @@ def _stage_bus_model(model, out_path, device, address):
                                + ', not the ' + BUS_ADDR_PLACEHOLDER
                                + ' placeholder the lane binds')
         parameters['address'] = address
+        if timeout_ms is not None:
+            parameters['timeout_ms'] = timeout_ms
         declared['parameters'] = parameters
         staged = Path(out_path)
         staged.write_text(
@@ -2675,7 +2685,8 @@ def _stage_bus_model(model, out_path, device, address):
                        + ' declares no device ' + str(device))
 
 
-def start_sim_bus_device(cfg, record, run_dir, timeline, fixture=None):
+def start_sim_bus_device(cfg, record, run_dir, timeline, fixture=None,
+                         timeout_ms=None):
     """The scenario-callable sim-bus device server: the run's labeled
     rig-bridge container running the shipped `dcs-sim-bus-device`
     binary out of the controller image under `--entrypoint`, serving the
@@ -2697,6 +2708,12 @@ def start_sim_bus_device(cfg, record, run_dir, timeline, fixture=None):
     register-protocol kind, so one block carries a fixture per model
     the lane's legs need; a path the revision's tree does not carry
     fails before a container exists, naming the missing fixture.
+
+    `timeout_ms` stamps the device's declared per-request timeout onto
+    the staged document — the reattach leg's ~2 s stall has to produce
+    a failed exchange, so the driver's field timeout must sit under
+    the outage rather than at the device-agnostic five-second default.
+    None leaves the declared (or default) timeout alone.
 
     The launch refuses unless the run config records the endpoint
     'bridge' — the host egress policy makes a host socket unreachable
@@ -2735,6 +2752,12 @@ def start_sim_bus_device(cfg, record, run_dir, timeline, fixture=None):
         raise RuntimeError('the sim-bus device server was asked to '
                            'stage a model fixture that names no path: '
                            + repr(fixture))
+    if timeout_ms is not None and (not isinstance(timeout_ms, int)
+                                   or isinstance(timeout_ms, bool)
+                                   or timeout_ms < 0):
+        raise RuntimeError('the sim-bus device server was asked to '
+                           'stage a non-integer timeout_ms: '
+                           + repr(timeout_ms))
     model = Path(cfg['src_dir']) / sha / rel
     if not model.is_file():
         raise RuntimeError('sim-bus model fixture missing: ' + str(model))
@@ -2744,7 +2767,7 @@ def start_sim_bus_device(cfg, record, run_dir, timeline, fixture=None):
     directory = Path(run_dir) / 'sim-bus'
     directory.mkdir(parents=True, exist_ok=True)
     staged = _stage_bus_model(model, directory / 'model.json',
-                              spec['device'], address)
+                              spec['device'], address, timeout_ms)
     # A leftover device server from an aborted pass leaves the same
     # name; the staged document above is rewritten regardless.
     docker('rm', '-f', container, check=False, timeout=60)
@@ -2856,6 +2879,66 @@ def stop_sim_bus_device(run_id, timeline):
     timeline('sim-bus-stop', 'docker rm -f ' + container)
     docker('rm', '-f', container, timeout=90)
     timeline('sim-bus-stopped', container + ' removed')
+
+
+def freeze_sim_bus_device(run_id, timeline):
+    """The reattach leg's stall staging: `docker pause` freezes the
+    register device server in place — the attachments' sockets stay
+    open and unanswered, so a driver's in-flight exchange runs into its
+    declared per-request timeout and the field is transiently
+    unreachable without anything dying: the communication-stall half of
+    the lazy-reattach contract. `thaw_sim_bus_device` resumes it — and
+    unlike `docker restart`, the field's state (and any connection-bound
+    claim) survives the freeze, exactly the transient-stall shape the
+    finding records. Recorded on the run's action timeline; a docker
+    failure raises so the leg reports the freeze never landed."""
+    container = 'dcs-hw-' + run_id + '-bus'
+    timeline('sim-bus-freeze', 'docker pause ' + container)
+    docker('pause', container, timeout=30)
+    timeline('sim-bus-frozen', container + ' frozen')
+
+
+def thaw_sim_bus_device(run_id, timeline):
+    """The recovery half of freeze_sim_bus_device: `docker unpause`
+    resumes the frozen register device, so the driver's next
+    re-attached exchange finds the server answering again — the claim
+    table intact, nothing restarted. Recorded on the run's action
+    timeline; a docker failure raises so the leg reports the thaw never
+    landed."""
+    container = 'dcs-hw-' + run_id + '-bus'
+    timeline('sim-bus-thaw', 'docker unpause ' + container)
+    docker('unpause', container, timeout=30)
+    timeline('sim-bus-thawed', container + ' running')
+
+
+def sim_bus_device_serving(run_id, device):
+    """Whether the register device reports itself serving right now.
+
+    Readiness rides the same self-report `_await_bus_server` polls —
+    the `serving device <id> on` line the binary announces on stderr
+    once the model, the device, and the bind all succeed — scoped to
+    the container's current lifetime's StartedAt, so a restarted
+    process's fresh announcement is what counts, never the previous
+    lifetime's stale one. A leg calls this between outage induction
+    and the driver's own recovery window: the field's reachability is
+    a fact the leg asserts separately from the driver's report, so a
+    device that never came back reads as the staged rig's inconclusive,
+    not the driver's failure to reattach. False on a dead or frozen
+    container, on a docker failure, or before the announcement lands.
+    """
+    container = 'dcs-hw-' + run_id + '-bus'
+    started = docker('inspect', '-f', '{{.State.StartedAt}}', container,
+                     check=False).stdout.strip()
+    if not started:
+        return False
+    paused = docker('inspect', '-f', '{{.State.Paused}}', container,
+                    check=False).stdout.strip()
+    if paused != 'false':
+        return False
+    logs = docker('logs', '--since', started, container,
+                  check=False)
+    report = (logs.stdout or '') + (logs.stderr or '')
+    return 'serving device ' + str(device) + ' on' in report
 
 
 # The born-active startup-failure leg's staging surface (decision 103 —
@@ -3401,21 +3484,37 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         # serving the run config's bus model on the rig bridge. The
         # launch's `fixture` selects which spec-named document the
         # server stages (None → model_fixture; the fencing-loss leg's
-        # cyclic_model names the sim-cyclic one); it returns the
-        # bridge address the rig's attachments dial and the staged
-        # document a leg mounts into the controller it points at the
+        # cyclic_model names the sim-cyclic one) and `timeout_ms`
+        # stamps the device's declared per-request timeout (the
+        # reattach leg's stall has to produce a failed exchange inside
+        # it); the launch returns the bridge address the rig's
+        # attachments dial and the staged document a leg mounts into
+        # the controller it points at the
         # field; stop_sim_bus_device kills the register protocol
         # outright for a leg's
         # device-outage induction; restart_sim_bus_device severs every
         # attachment's control connection while the same server comes
         # back — the fencing-loss legs' link flap, which releases the
-        # connection-bound claim with its dead holders.
-        'start_sim_bus_device': lambda fixture=None: start_sim_bus_device(
-            cfg, record, run_dir, timeline, fixture=fixture),
+        # connection-bound claim with its dead holders;
+        # freeze/thaw_sim_bus_device hold the sockets open and
+        # unanswered — the reattach leg's ~2 s communication stall —
+        # and sim_bus_device_serving reports whether the register
+        # protocol is answering right now, so a leg separates a field
+        # that never came back from a driver that never re-attached.
+        'start_sim_bus_device': lambda fixture=None, timeout_ms=None:
+            start_sim_bus_device(
+                cfg, record, run_dir, timeline, fixture=fixture,
+                timeout_ms=timeout_ms),
         'restart_sim_bus_device': lambda: restart_sim_bus_device(
             cfg, run_id, run_dir, timeline),
         'stop_sim_bus_device': lambda: stop_sim_bus_device(
             run_id, timeline),
+        'freeze_sim_bus_device': lambda: freeze_sim_bus_device(
+            run_id, timeline),
+        'thaw_sim_bus_device': lambda: thaw_sim_bus_device(
+            run_id, timeline),
+        'sim_bus_device_serving': lambda device:
+            sim_bus_device_serving(run_id, device),
         # The run config's staged device-server block, or None where the
         # config stages none: a leg reads the absent capability here
         # instead of staging a launch that raises, and names the device
