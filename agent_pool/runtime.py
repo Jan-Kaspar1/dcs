@@ -105,7 +105,7 @@ class Runtime:
             # argv: large backlog contexts exceed Linux ARG_MAX and the
             # launch fails with E2BIG before opencode starts.
             command = [self.opencode, 'run', '--model', model, '--auto',
-                       '--print-logs', '--title', key]
+                       '--print-logs', '--title', key, '--dir', str(cwd)]
             if resume_session:
                 command.extend(['--session', resume_session])
             stdin_path = str(prompt_path)
