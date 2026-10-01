@@ -222,9 +222,21 @@ under `--entrypoint dcs-sim-bus-device`, and waits for the server's
 own report of the address it serves on. The launch returns the bridge
 address the rig's sim-bus attachments dial and the staged document a
 leg mounts into the controller it points at the field, so both ends
-of the register protocol read one declaration.
+of the register protocol read one declaration. `start_sim_bus_device`
+also accepts `timeout_ms`, stamped onto the staged document's device
+parameters — a leg staging a field stall needs the driver's declared
+per-request timeout to sit under the outage, where the fixtures'
+five-second default would not.
 `stop_sim_bus_device` removes the container outright, for a leg's
-device-outage induction. The container carries the run's
+device-outage induction. `restart_sim_bus_device` severs every
+attachment's control connection while the same server comes back —
+the register bank and the connection-bound claim reset with the fresh
+process — and `freeze_sim_bus_device`/`thaw_sim_bus_device` hold the
+attachments' sockets open and unanswered for a bounded stall instead,
+the field's state surviving. `sim_bus_device_serving` reports whether
+the server is answering right now, so a leg separates a field that
+never came back from a driver that never re-attached. The container
+carries the run's
 `dcs-hwtest.managed=1` / `dcs-hwtest.run=<id>` labels, so ordinary
 teardown and reconciliation reap a leg that leaves one running.
 
@@ -240,6 +252,43 @@ Normal-path staging runs the released device server; a fault-injection
 leg that needs the server itself to misbehave can still stage a
 protocol double of its own — but the register-protocol evidence runs
 against the shipped binary.
+
+### Attaching a controller to the bus field
+
+The born-seat launcher takes a document-addressed launch alongside its
+`sim-tcp` shape: `start_born_controller(seat, remote, peer=,
+standby=, document=)` mounts the caller's `document` in place of the
+run's own model, and a `remote` of None runs with no `--remote` flag
+at all. That is how a leg points a seat at the device server: mount
+the staged document `start_sim_bus_device` returned and the
+attachment dials the device's declared `address` straight out of the
+model, so the server's register map and the attachment's dialed
+endpoint come out of one file. A launch carrying neither a `remote`
+nor a `document` is refused, as is one whose document is not a file.
+Everything else about the launch is the rig's born-seat shape
+unchanged — the seat's pinned `--owner-token`, the published monitor,
+the cold state/journal/history reset, the `--peer`/`--standby`
+wiring, the refuse-to-replace guard — and the return value's `model`
+names the document actually mounted beside `remote: None`, so a leg
+can evidence that both ends read the one declaration it staged.
+
+Two sim-bus legs stage through it. The sim-cyclic fencing-loss leg
+(`2470`) launches a pair on the staged `sim-cyclic` document and
+asserts the fenced-exchange demotion; the sim-bus startup-claim-
+refusal leg (`2480`) is the other: a first controller takes the
+device's write-ownership claim, a second born-active declaring no
+`--peer` must exit nonzero naming the live-holder refusal rather than
+preempting the incumbent, and a `--standby` launch in the same shape
+converges behind it. A rig whose `sim_bus_device` is null, whose
+monitor ports carry no born seats, or whose `plant_owner_tokens` pin
+nothing for that leg's incumbent seat, reports it inconclusive rather
+than staging against an endpoint it was never granted or auditing a
+claimant it cannot attribute. The leg sweeps its three seats and the
+device server at the end of every pass and reads the rig back
+afterwards — a seat's presence through `born_controller_state`, the
+device server's own removal error, the deployed pair framed once more
+— so a leftover claim surfaces as a failed leg instead of an inherited
+one.
 
 ## Storage bound and retention
 
