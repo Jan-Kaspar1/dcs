@@ -924,6 +924,10 @@ class PlantActionTests(unittest.TestCase):
             ctx['stop_plant']()
             ctx['start_plant']()
         self.assertEqual(ctx['plant'], '127.0.0.1:19001')
+        # The rig-bridge --remote address for born launches staging
+        # against the deployed pair's own plant.
+        self.assertEqual(ctx['plant_remote'],
+                         'dcs-hw-qa-1-plant:9001')
         self.assertEqual(
             calls, [('stop', '--time', '2', 'dcs-hw-qa-1-plant'),
                     ('start', 'dcs-hw-qa-1-plant')])
@@ -2500,6 +2504,19 @@ class BornActiveActionTests(unittest.TestCase):
                          str(self.cfg['plant_owner_tokens']
                             ['driven']))
 
+    def test_pair_member_keys_resolve_to_their_monitors(self):
+        # The deferred-refusal leg declares the deployed pair's
+        # incumbent the born launch's tracking source: member keys map
+        # to the members' rig-bridge monitor addresses.
+        calls, _, _ = self._launch(seat='foreign', peer='active')
+        launch = self._run(calls)
+        index = launch.index('--peer')
+        self.assertEqual(launch[index + 1], 'dcs-hw-qa-1-a:8080')
+        calls, _, _ = self._launch(seat='driven', standby='standby')
+        launch = self._run(calls)
+        index = launch.index('--standby')
+        self.assertEqual(launch[index + 1], 'dcs-hw-qa-1-b:8081')
+
     def test_peer_and_standby_together_rejected(self):
         with self.assertRaises(RuntimeError):
             self._launch(peer='foreign', standby='revised')
@@ -3669,8 +3686,14 @@ class ProbePairTests(unittest.TestCase):
             self.assertEqual(probe['driven'],
                              'http://127.0.0.1:'
                              + str(self.probe['driven_port']))
-            # Bridge-placed field: no host-side plant attachment.
+            # Bridge-placed field: no host-side plant attachment; the
+            # rig-bridge --remote address is the probe pair's own
+            # plant, never the deployed pair's.
             self.assertIsNone(probe['plant'])
+            self.assertEqual(
+                probe['plant_remote'],
+                'dcs-hw-qa-1-probe-plant:'
+                + str(self.probe['plant_port']))
             self.assertEqual(probe['pair_token'],
                              self.probe['pair_token'])
             tokens = self.cfg['plant_owner_tokens']
