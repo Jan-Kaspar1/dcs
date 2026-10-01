@@ -163,3 +163,19 @@ Before calling rollout complete, record a real issue-to-PR-to-CI-to-merge-to-clo
 # Git ownership and permissions
 
 Workers edit and test files; the supervisor stages and commits completed edits before publishing. This ownership remains explicit even with full Devin tool access. Permission rejections, including those accompanied by a zero exit status, block the issue and preserve its workspace. Initial smart-mode restrictions were replaced with user-authorized full tool access after live validation.
+
+### Space Bunny free worker lane (verified 2026-10-01)
+
+`opencode/space-bunny-free` is an explicitly permitted no-cost backend. Verified
+zero input/output/cache prices in the installed OpenCode model catalog and the
+[OpenCode Zen pricing page](https://opencode.ai/docs/zen/). OpenRouter also lists
+[Space Bunny Alpha](https://openrouter.ai/stealth/space-bunny-alpha) as free;
+these routes are separate providers, not evidence of unlimited concurrency.
+
+A direct read/write probe and eight staggered sessions passed on the Zen route.
+OpenCode 1.18.31 can resolve a new session from inherited PWD rather than the
+process checkout. The runner therefore passes `run --dir <checkout>` explicitly
+for every new or resumed OpenCode session. The actual client failed the input
+probe without this argument and passed with it; a process-boundary regression
+protects the external CLI directory contract. Retain five-second launch spacing
+and bounded admission; keep heavy Rust verification behind its four build slots.

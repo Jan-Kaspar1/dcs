@@ -11,6 +11,7 @@ DEFAULT_CHECKS = ['rust-format', 'rust-clippy', 'rust-tests', 'supervisor-tests'
 # Verified no-cost backends only; anything else is a rejected paid fallback.
 FREE_MODELS = ('swe-2-high', 'swe-2-medium', 'swe-2-max',
                'opencode/union-alpha',
+               'opencode/space-bunny-free',
                'opencode/muse-spark-1.3-contributor-free',
                'opencode/muse-spark-1.2-contributor-free',
                'opencode/ling-3.0-flash-fin-free',
