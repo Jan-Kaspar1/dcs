@@ -1,8 +1,8 @@
 //! The born-active startup-failure contract — architecture decision 103
 //! (#985, implemented by #1017): every startup-failure class a launched
 //! active's deferred startup claim can meet settles to the recorded
-//! disposition rather than wedging unreported or dying silently. The two
-//! QA findings the contract answers replay here:
+//! disposition rather than wedging unreported or dying silently. The QA
+//! findings the contract answers replay here:
 //!
 //! - `launched-active-boot-requires-reachable-plant`: an unreachable
 //!   field at boot is no longer a process exit inside driver assembly —
