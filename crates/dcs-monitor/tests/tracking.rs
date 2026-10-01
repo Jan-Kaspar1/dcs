@@ -1566,6 +1566,23 @@ impl Drop for Hostile {
     }
 }
 
+/// What a [`Relay`] does with an accepted connection — one address the
+/// tracking standby's puller stays bound to while the staging moves it
+/// between a source's states.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RelayMode {
+    /// Proxy the connection to the upstream monitor: the source
+    /// serving.
+    Proxy,
+    /// Close it unanswered: the source is up but not yet serving — the
+    /// pending window a standby that entered tracking inside it pulls
+    /// against.
+    Refuse,
+    /// Hold it open without answering: the source accepts and goes
+    /// silent, so every fetch sits in flight to the pull bound.
+    Silence,
+}
+
 /// A transparent TCP relay — the reproduction's interposer in its
 /// strongest shape: rather than serving a captured document it proxies
 /// every connection to the victim's real monitor, so a keyed verify
@@ -1575,7 +1592,7 @@ impl Drop for Hostile {
 /// Runs on its own thread until dropped.
 struct Relay {
     addr: SocketAddr,
-    partitioned: Arc<AtomicBool>,
+    mode: Arc<Mutex<RelayMode>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -1585,22 +1602,30 @@ impl Relay {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
-        let partitioned = Arc::new(AtomicBool::new(false));
-        let cutting = Arc::clone(&partitioned);
+        let mode = Arc::new(Mutex::new(RelayMode::Proxy));
+        let staging = Arc::clone(&mode);
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = Arc::clone(&stop);
         let thread = thread::spawn(move || {
             while !stopping.load(Ordering::Relaxed) {
                 match listener.accept() {
-                    Ok((client, _)) => {
-                        if cutting.load(Ordering::Relaxed) {
-                            drop(client);
-                            continue;
+                    Ok((client, _)) => match *staging.lock().unwrap() {
+                        RelayMode::Proxy => {
+                            if let Ok(server) = std::net::TcpStream::connect(upstream) {
+                                thread::spawn(move || pump_relay(client, server));
+                            }
                         }
-                        if let Ok(server) = std::net::TcpStream::connect(upstream) {
-                            thread::spawn(move || pump_relay(client, server));
+                        RelayMode::Refuse => drop(client),
+                        RelayMode::Silence => {
+                            // Held open and unanswered: the connection
+                            // establishes and the fetch then waits out
+                            // the pull bound.
+                            thread::spawn(move || {
+                                let mut client = client;
+                                let _ = client.read(&mut [0u8; 1]);
+                            });
                         }
-                    }
+                    },
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(5));
                     }
@@ -1610,10 +1635,17 @@ impl Relay {
         });
         Self {
             addr,
-            partitioned,
+            mode,
             stop,
             thread: Some(thread),
         }
+    }
+
+    /// Stops proxying and answers every later connection `mode` — the
+    /// staging a source's pending window and its loss are reached
+    /// through, on the one address the puller holds.
+    fn stage(&self, mode: RelayMode) {
+        *self.mode.lock().unwrap() = mode;
     }
 
     /// Cuts or restores the relayed stream — the frozen-source window
@@ -1621,7 +1653,11 @@ impl Relay {
     /// unanswered while cut, so the tracker's pulls fail fast like the
     /// reproduction's paused active.
     fn partition(&self, cut: bool) {
-        self.partitioned.store(cut, Ordering::Relaxed);
+        self.stage(if cut {
+            RelayMode::Refuse
+        } else {
+            RelayMode::Proxy
+        });
     }
 }
 
