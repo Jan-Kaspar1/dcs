@@ -124,7 +124,12 @@ fn release_claim(writer: &Mutex<Option<WriterClaim>>, connection: u64) {
 /// One client connection's request loop: read a frame, dispatch it,
 /// write the response. Ends when the peer goes away, the link fails,
 /// the peer violates the frame bound, or the server stops.
-fn serve_connection(shared: &Shared, stream: TcpStream, remote: Option<SocketAddr>, connection: u64) {
+fn serve_connection(
+    shared: &Shared,
+    stream: TcpStream,
+    remote: Option<SocketAddr>,
+    connection: u64,
+) {
     let _ = stream.set_nodelay(true);
     let mut reader = BufReader::new(stream);
     loop {

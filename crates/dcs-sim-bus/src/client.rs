@@ -5,11 +5,11 @@ use crate::protocol::{
     BusError, BusRequest, BusResponse, MAX_FRAME, RegisterInfo, decode_response, encode_request,
     read_frame,
 };
+use dcs_core::FieldClaim;
 use dcs_core::{
     DriverDiagnostics, IoDriver, IoError, LinkState, PointId, Quality, Sample, Tick, Value,
     ValueKind,
 };
-use dcs_core::FieldClaim;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{BufReader, Write};
@@ -213,11 +213,10 @@ impl Connection {
             match exchange(&mut stream, &BusRequest::EnsureWriter { owner, monitor }) {
                 Ok(BusResponse::Done) => {}
                 Ok(BusResponse::Error {
-                    error: BusError::Fenced {
-                        owner: by,
-                        monitor,
-                        ..
-                    },
+                    error:
+                        BusError::Fenced {
+                            owner: by, monitor, ..
+                        },
                 }) => {
                     self.owner = None;
                     self.fenced_by = by.map(|by| (by, monitor));
@@ -252,11 +251,10 @@ impl Connection {
         match exchange(stream, request) {
             Ok(response) => {
                 if let BusResponse::Error {
-                    error: BusError::Fenced {
-                        owner: by,
-                        monitor,
-                        ..
-                    },
+                    error:
+                        BusError::Fenced {
+                            owner: by, monitor, ..
+                        },
                 } = &response
                 {
                     // A fenced answer means the field's standing claim
@@ -753,12 +751,8 @@ impl BusDriver {
     /// names no claimant (a device predating the attribution) clears
     /// the record rather than leaving a stale attribution standing.
     fn note_fence(&self, error: &BusError) {
-        if let BusError::Fenced {
-            owner, monitor, ..
-        } = error
-        {
-            self.connection.lock().unwrap().fenced_by =
-                owner.map(|owner| (owner, *monitor));
+        if let BusError::Fenced { owner, monitor, .. } = error {
+            self.connection.lock().unwrap().fenced_by = owner.map(|owner| (owner, *monitor));
         }
     }
 

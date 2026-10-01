@@ -278,10 +278,7 @@ fn a_fenced_exchange_surfaces_the_claim_loss_to_the_driver() {
         // The claim-status probe reads the standing claim without
         // touching it: `unclaimed` on the pre-claim device, `held`
         // while this run's own claim stands.
-        assert_eq!(
-            driver.probe_field_claim().unwrap(),
-            FieldClaim::Unclaimed
-        );
+        assert_eq!(driver.probe_field_claim().unwrap(), FieldClaim::Unclaimed);
         driver.declare_field_monitor("127.0.0.1:4190".parse().unwrap());
         driver.claim_field_writer(7).unwrap();
         assert_eq!(driver.probe_field_claim().unwrap(), FieldClaim::Held);

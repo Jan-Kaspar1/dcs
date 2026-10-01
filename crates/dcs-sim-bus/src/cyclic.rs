@@ -599,11 +599,7 @@ impl CyclicBusDriver {
     /// controller reads the attribution a fenced image exchange
     /// carries. `None` while no verdict named one.
     pub fn fenced_by(&self) -> Option<u64> {
-        self.claim
-            .lock()
-            .unwrap()
-            .fenced_by
-            .map(|(owner, _)| owner)
+        self.claim.lock().unwrap().fenced_by.map(|(owner, _)| owner)
     }
 
     /// The monitor endpoint the device's standing claim declared the

@@ -248,10 +248,7 @@ fn the_bus_backend_carries_the_claim_introspection_hooks() {
         // unclaimed device reports `unclaimed`.
         assert_eq!(driver.probe_field_claim().unwrap(), FieldClaim::Held);
         driver.release_field_claims();
-        assert_eq!(
-            driver.probe_field_claim().unwrap(),
-            FieldClaim::Unclaimed
-        );
+        assert_eq!(driver.probe_field_claim().unwrap(), FieldClaim::Unclaimed);
 
         // The incumbent's own attachment takes the claim and declares
         // its tracking surface, the way a controller's monitor endpoint

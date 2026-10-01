@@ -1469,7 +1469,10 @@ fn a_refused_claim_and_a_fenced_mutation_name_the_incumbent() {
         );
         assert_eq!(challenger.ensure_writer(7), Err(LinkError::Fenced));
         assert_eq!(challenger.fenced_by(), Some(424242));
-        assert_eq!(challenger.claim_writer_unless_held(7), Err(LinkError::Fenced));
+        assert_eq!(
+            challenger.claim_writer_unless_held(7),
+            Err(LinkError::Fenced)
+        );
         assert_eq!(
             challenger.claimed_monitor(),
             Some("10.0.0.5:4190".parse().unwrap())
@@ -1490,7 +1493,10 @@ fn a_refused_claim_and_a_fenced_mutation_name_the_incumbent() {
         // attribution follows the new standing claim.
         challenger.claim_writer(7).unwrap();
         assert_eq!(incumbent.fenced_by(), None);
-        assert_eq!(incumbent.write(PointId(2), Value::Float(2.0)), Err(IoError::Fenced(PointId(2))));
+        assert_eq!(
+            incumbent.write(PointId(2), Value::Float(2.0)),
+            Err(IoError::Fenced(PointId(2)))
+        );
         assert_eq!(incumbent.fenced_by(), Some(7));
     });
 }
@@ -1605,10 +1611,7 @@ fn the_ensure_path_refuses_a_different_owner_and_grants_its_own() {
         );
         rearm.ensure_writer(9).unwrap();
         rearm.write(PointId(2), Value::Float(3.0)).unwrap();
-        assert_eq!(
-            sibling.probe_writer().unwrap().owner,
-            Some(9)
-        );
+        assert_eq!(sibling.probe_writer().unwrap().owner, Some(9));
     });
 }
 

@@ -827,11 +827,7 @@ fn push_monitor(out: &mut Vec<u8>, monitor: Option<SocketAddr>) {
 /// token, the monitor endpoint it declared, or both. Like the monitor
 /// declaration, a verdict naming neither appends nothing — the
 /// pre-attribution shape every earlier build's fenced answers carried.
-fn push_attribution(
-    out: &mut Vec<u8>,
-    owner: Option<u64>,
-    monitor: Option<SocketAddr>,
-) {
+fn push_attribution(out: &mut Vec<u8>, owner: Option<u64>, monitor: Option<SocketAddr>) {
     if owner.is_none() && monitor.is_none() {
         return;
     }
@@ -1223,13 +1219,19 @@ mod tests {
                 owner: 42,
                 monitor: Some("127.0.0.1:4190".parse().unwrap()),
             },
-            BusRequest::ClaimWriterUnlessHeld { owner: 43, monitor: None },
+            BusRequest::ClaimWriterUnlessHeld {
+                owner: 43,
+                monitor: None,
+            },
             BusRequest::ClaimWriterUnlessHeld {
                 owner: 43,
                 monitor: Some("[::1]:4191".parse().unwrap()),
             },
             BusRequest::ReleaseWriter,
-            BusRequest::EnsureWriter { owner: 7, monitor: None },
+            BusRequest::EnsureWriter {
+                owner: 7,
+                monitor: None,
+            },
             BusRequest::EnsureWriter {
                 owner: 7,
                 monitor: Some("127.0.0.1:4190".parse().unwrap()),
@@ -1417,10 +1419,7 @@ mod tests {
             .concat()
         );
         // The claim-status probe is a bare tag.
-        assert_eq!(
-            encode_request(&BusRequest::ProbeWriter),
-            vec![0, 1, 0x0d]
-        );
+        assert_eq!(encode_request(&BusRequest::ProbeWriter), vec![0, 1, 0x0d]);
         assert_eq!(
             serde_json::to_string(&BusRequest::InjectQuality {
                 register: 4,
@@ -1854,10 +1853,10 @@ mod tests {
             &[0x05, 0x04, 0, 1, b'x', 0x04][..],
             &[0x08, 0x01][..], // claim status, truncated owner token
             &[0x08, 0x03, 0, 0, 0, 0, 0, 0, 0, 1][..], // claim status, truncated monitor
-            &[0x06, 0][..],       // trailing byte after done
-            &[0x07][..],          // exchanged, missing flags
-            &[0x07, 0x09][..],    // exchanged, unknown flag bits
-            &[0x07, 0][..],       // exchanged, missing count
+            &[0x06, 0][..],    // trailing byte after done
+            &[0x07][..],       // exchanged, missing flags
+            &[0x07, 0x09][..], // exchanged, unknown flag bits
+            &[0x07, 0][..],    // exchanged, missing count
             &[0x07, 0, 0, 1][..], // exchanged, missing register entry
             // Sample carrying value and tick but no quality.
             &[0x01, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0][..],
