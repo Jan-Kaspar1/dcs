@@ -2737,7 +2737,25 @@ def start_sim_bus_device(cfg, record, run_dir, timeline):
     # Readiness rides the server's own report of the bound address: the
     # binary announces it on stderr once the model, the device, and the
     # bind all succeed and exits nonzero naming whichever failed.
-    serving = 'serving device ' + str(spec['device']) + ' on'
+    _await_bus_server(container, spec['device'], timeline, 'sim-bus-up')
+    return {'container': container, 'address': address, 'port': port,
+            'device': spec['device'], 'model': staged}
+
+
+def _await_bus_server(container, device, timeline, label):
+    """Block until the device server reports the address it serves, or
+    raise naming whatever its logs say.
+
+    Readiness rides the server's own report: the binary announces the
+    bound address on stderr once the model, the device, and the bind all
+    succeed, and exits nonzero naming whichever failed — so a live
+    container without that line is a launch that never served and its
+    logs are the evidence. The same wait serves a leg's sever-then-
+    resume: after a `docker restart` the process re-announces on a fresh
+    log, which is exactly the report that says the register protocol is
+    answering again.
+    """
+    serving = 'serving device ' + str(device) + ' on'
     deadline = time.monotonic() + SIM_BUS_BIND_GRACE
     while True:
         logs = docker('logs', container, check=False)
@@ -2748,14 +2766,51 @@ def start_sim_bus_device(cfg, record, run_dir, timeline):
                          container, check=False).stdout.strip() == 'true'
         if not running or time.monotonic() >= deadline:
             raise RuntimeError('the sim-bus device server never served '
-                               'device ' + str(spec['device'])
+                               'device ' + str(device)
                                + ': ' + (report.strip()[:300]
                                          or 'no log output'))
         time.sleep(1)
-    timeline('sim-bus-up', container + ' serving the register protocol '
-             'on ' + address)
-    return {'container': container, 'address': address, 'port': port,
-            'device': spec['device'], 'model': staged}
+    timeline(label, container + ' serving the register protocol')
+
+
+def restart_sim_bus_device(cfg, run_id, run_dir, timeline):
+    """The scenario-callable control-connection sever for the lane's
+    device server: `docker restart` on the device container, the
+    rig-durable form of the link flap the fencing-loss legs reproduce.
+
+    A restart drops every attachment's control connection at once and
+    brings the same server back on the same bridge address, so the
+    device's write-ownership claim — bound to the attachments that took
+    it on this protocol, released with its last holder — dies with the
+    dead connections and the field reopens claimed by nobody, exactly
+    the state a network flap leaves behind. The register bank is reset
+    by the fresh process, so a leg reads the field's post-flap state
+    from the attachments' own exchanges rather than from carried
+    register values. Readiness rides the same self-report the launch
+    waits on, so a container that never comes back raises here instead
+    of leaving the leg to read a dead field. Recorded on the run's
+    action timeline; a docker failure raises so the calling scenario
+    reports the sever never completed.
+
+    Returns the same shape start_sim_bus_device does: the bridge
+    address the rig's attachments dial and the staged document a leg
+    mounts into the controllers it points at the field.
+    """
+    spec = _sim_bus_device(cfg)
+    if spec is None:
+        raise RuntimeError('the run config stages no sim-bus device '
+                           'server — nothing to sever')
+    container = 'dcs-hw-' + run_id + '-bus'
+    address = container + ':' + str(spec['port'])
+    timeline('sim-bus-sever', 'docker restart ' + container
+             + ' — every attachment\'s control connection drops and the '
+               'connection-bound claim releases with them')
+    docker('restart', container, timeout=120)
+    _await_bus_server(container, spec['device'], timeline,
+                      'sim-bus-severed')
+    return {'container': container, 'address': address,
+            'port': spec['port'], 'device': spec['device'],
+            'model': str(Path(run_dir) / 'sim-bus' / 'model.json')}
 
 
 def stop_sim_bus_device(run_id, timeline):
@@ -2930,7 +2985,8 @@ def stop_born_field(run_id, timeline):
 
 
 def start_born_controller(cfg, record, run_dir, model, seat, remote,
-                          timeline, peer=None, standby=None):
+                          timeline, peer=None, standby=None,
+                          document=None):
     """The scenario-callable born-active launch — the born-active
     startup-failure leg's per-class launcher: runs a controller on one
     of the labeled scenario seats (`revised`/`foreign`/`driven` — the
@@ -2950,21 +3006,41 @@ def start_born_controller(cfg, record, run_dir, model, seat, remote,
     is cold by contract, and a stale --state-file would run the resume
     path — a different class entirely.
 
+    `remote` and `document` are the field seam a leg staging its own
+    field replaces: `document` mounts that plant model in place of the
+    run's own — the register-protocol device server's staged document,
+    whose device's `address` a leg's pair attaches to — and a
+    `remote` of None launches with no `--remote` attachment at all, the
+    shape a `sim-bus`/`sim-cyclic` model needs (its devices carry their
+    own address in their parameters, and the controller assembles them
+    through the local driver registry). A launched pair on such a
+    document claims and steps the register protocol on the same
+    single-writer terms the sim-net plant arbitrates, so a leg staging
+    a pair there exercises the real server of the revision under test.
+
     The container carries the run's managed and run labels, mounts the
-    run's model read-only, publishes its monitor on the seat's recorded
-    port, and carries the seat's pinned --owner-token plus the run's
-    --pair-token. The launch is recorded on the run's action timeline;
-    a docker failure raises so the calling scenario reports the launch
-    never completed. Returns {'container', 'seat', 'address', 'remote',
-    'peer', 'standby', 'monitor'} — `address` is the rig-bridge
-    monitor endpoint a peer's tracking declaration dials, `monitor`
-    the published host-loopback URL the scenario reads.
+    mounted model read-only, publishes its monitor on the seat's
+    recorded port, and carries the seat's pinned --owner-token plus the
+    run's --pair-token. The launch is recorded on the run's action
+    timeline; a docker failure raises so the calling scenario reports
+    the launch never completed. Returns {'container', 'seat', 'address',
+    'remote', 'peer', 'standby', 'monitor'} — `address` is the
+    rig-bridge monitor endpoint a peer's tracking declaration dials,
+    `monitor` the published host-loopback URL the scenario reads.
     """
     run_id, sha = record['run_id'], record['attempted_sha']
     if peer is not None and standby is not None:
         raise RuntimeError('a born launch is either the pair\'s '
                            'born-active (--peer) or its tracking '
                            'standby (--standby), never both')
+    if document is None and remote is None:
+        raise RuntimeError('a born launch carries either the run\'s own '
+                           'model with its --remote attachment or a '
+                           'staged document of its own; got neither')
+    mounted = Path(document) if document is not None else model
+    if not mounted.is_file():
+        raise RuntimeError('born launch model document missing: '
+                           + str(mounted))
     container = _born_seat_container(run_id, seat)
     listed = docker('ps', '-a', '--filter',
                     'name=^/' + container + '$', '--format', '{{.ID}}',
@@ -2993,7 +3069,9 @@ def start_born_controller(cfg, record, run_dir, model, seat, remote,
     standby_flag = (_born_target(run_id, standby)
                     if standby is not None else None)
     timeline('born-start',
-             'launch ' + container + ' --remote ' + remote
+             'launch ' + container
+             + (' --remote ' + str(remote) if remote else '')
+             + ' on ' + str(mounted)
              + (' --peer ' + peer_flag if peer_flag else '')
              + (' --standby ' + standby_flag if standby_flag else '')
              + ' --owner-token ' + str(owner_token))
@@ -3001,11 +3079,11 @@ def start_born_controller(cfg, record, run_dir, model, seat, remote,
            '--network', 'dcs-hwtest-' + run_id,
            '-p', '127.0.0.1:' + str(cfg[seat + '_port']) + ':'
            + str(BORN_MONITOR_PORT),
-           '-v', str(model) + ':/model/plant.json:ro',
+           '-v', str(mounted) + ':/model/plant.json:ro',
            '-v', str(directory) + ':' + CONTAINER_RUN_DIR,
            IMAGE_PREFIX + 'controller:' + sha,
            '/model/plant.json',
-           '--remote', remote,
+           *(['--remote', str(remote)] if remote else []),
            '--owner-token', str(owner_token),
            *(['--peer', peer_flag] if peer_flag else []),
            *(['--standby', standby_flag] if standby_flag else []),
@@ -3096,10 +3174,13 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
     placements and the
     run's rig bridge name — the placement rule a scenario attachment
     follows when it needs an endpoint a rig peer must dial — the lane's
-    sim-bus device server's launch/teardown (#1368) — the
-    drain-stall tracer lever the durable-history leg's parked-writer
-    induction drives (None where the runner admits no tracer) — and the
-    host-side
+    sim-bus device server's launch/teardown (#1368), its
+    control-connection sever (a restart, which drops every
+    attachment's connection and releases the connection-bound claim
+    with them), and the run config's staged block describing the device
+    it serves — the drain-stall tracer lever the durable-history leg's
+    parked-writer induction drives (None where the runner admits no
+    tracer) — and the host-side
     per-controller state/journal/history files the restart and
     model-revision
     scenarios read — and, under 'probe', the same ctx shape
@@ -3240,10 +3321,16 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         'unpause_born_field': lambda: unpause_born_field(
             run_id, timeline),
         'stop_born_field': lambda: stop_born_field(run_id, timeline),
+        # The born launch's own field seam: `document` mounts a staged
+        # model of the leg's choosing in place of the run's own — the
+        # device server's staged document — and a `remote` of None
+        # launches with no --remote attachment, the shape a
+        # register-protocol model carries its own device address in.
         'start_born_controller': lambda seat, remote, peer=None,
-                standby=None: start_born_controller(
+                standby=None, document=None: start_born_controller(
                     cfg, record, run_dir, src / cfg['model_fixture'],
-                    seat, remote, timeline, peer=peer, standby=standby),
+                    seat, remote, timeline, peer=peer, standby=standby,
+                    document=document),
         'stop_born_controller': lambda seat: stop_born_controller(
             run_id, seat, timeline),
         'born_controller_state': lambda seat: born_controller_state(
@@ -3268,11 +3355,21 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         # attachments dial and the staged document a leg mounts into
         # the controller it points at the field; stop_sim_bus_device
         # kills the register protocol outright for a leg's
-        # device-outage induction.
+        # device-outage induction; restart_sim_bus_device severs every
+        # attachment's control connection while the same server comes
+        # back — the fencing-loss legs' link flap, which releases the
+        # connection-bound claim with its dead holders.
         'start_sim_bus_device': lambda: start_sim_bus_device(
             cfg, record, run_dir, timeline),
+        'restart_sim_bus_device': lambda: restart_sim_bus_device(
+            cfg, run_id, run_dir, timeline),
         'stop_sim_bus_device': lambda: stop_sim_bus_device(
             run_id, timeline),
+        # The run config's staged device-server block, or None where the
+        # config stages none: a leg reads the absent capability here
+        # instead of staging a launch that raises, and names the device
+        # id and fixture its own contract needs.
+        'sim_bus_device': _sim_bus_device(cfg),
         'state_files': {key: str(_controller_dir(run_dir, peer)
                                  / 'state.json')
                         for key, peer in names.items()},
