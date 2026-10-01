@@ -81,6 +81,9 @@ def load(path=None):
         for key in ('worker_slots', 'workspace_slots', 'daily_merge_goal'):
             if type(factory.get(key)) is not int or factory[key] < 1:
                 raise ValueError('factory.' + key + ' must be a positive integer')
+        spacing = factory.get('launch_spacing_seconds', 5)
+        if type(spacing) not in (int, float) or not 0 <= spacing <= 30:
+            raise ValueError('factory.launch_spacing_seconds must be between 0 and 30')
         if factory['workspace_slots'] < factory['worker_slots']:
             raise ValueError('factory.workspace_slots must cover worker_slots')
     config.setdefault('required_checks', DEFAULT_CHECKS)

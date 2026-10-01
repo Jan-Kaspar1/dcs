@@ -107,6 +107,24 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn('dangerous', spec['command'])
         self.assertNotIn('smart', spec['command'])
 
+    @posix_only
+    def test_session_starts_are_spaced_across_runtime_restart(self):
+        # Actual child starts, including a recreated runtime, must avoid bursts.
+        starts = []
+        for n in range(4):
+            if n == 2:
+                self.runtime = Runtime(self.runtime.pool_root, self.runtime.state_root,
+                                       str(self.source))
+            self.runtime.devin = '/bin/true'
+            self.runtime.launch_spacing_seconds = .2
+            clone = self.runtime.prepare_clone('worker-' + str(n))
+            meta = self.runtime.spawn('paced-' + str(n), clone, 'test')
+            starts.append(meta['started_at'])
+            deadline = time.monotonic() + 5
+            while self.runtime.poll(meta) is None and time.monotonic() < deadline:
+                time.sleep(.01)
+        self.assertTrue(all(b - a >= .19 for a, b in zip(starts, starts[1:])), starts)
+
     def test_spawn_selects_opencode_backend(self):
         clone = self.runtime.prepare_clone('worker-01')
         self.runtime.opencode = '/bin/true'

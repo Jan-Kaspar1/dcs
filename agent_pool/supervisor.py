@@ -49,7 +49,9 @@ class Supervisor:
         self.root.mkdir(parents=True, exist_ok=True)
         self.state = State(self.root / 'state.sqlite3', capacity=(config.get('factory') or {}).get('workspace_slots'))
         self.github = GitHub(config['repository'])
-        self.runtime = Runtime(Path(config['pool_root']), self.root, config['repository'], timeout_seconds=config['timeout_seconds'])
+        self.runtime = Runtime(Path(config['pool_root']), self.root, config['repository'], timeout_seconds=config['timeout_seconds'],
+                               launch_spacing_seconds=(config['factory'].get('launch_spacing_seconds', 5)
+                                                       if config.get('factory') else 0))
         self.models = config.get('models') or ['swe-2-high']
         self.model_caps = config.get('model_caps') or {}
         self.admission = Admission(self.state, config)
