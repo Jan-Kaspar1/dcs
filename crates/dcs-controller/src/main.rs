@@ -838,7 +838,8 @@ fn settle_activation(
             Ok(())
         }
         Ok(Activation::Refused { error }) => Err(format!(
-            "{error} — no --peer was declared, so there is no pair to rejoin"
+            "{error} — no --peer was declared, so there is no pair to rejoin: \
+             relaunch with --standby ADDRESS to track the field's live owner"
         )),
         Err(error) => Err(format!("{error}")),
     }

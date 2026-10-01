@@ -1,8 +1,8 @@
 //! The born-active startup-failure contract — architecture decision 103
 //! (#985, implemented by #1017): every startup-failure class a launched
 //! active's deferred startup claim can meet settles to the recorded
-//! disposition rather than wedging unreported or dying silently. The two
-//! QA findings the contract answers replay here:
+//! disposition rather than wedging unreported or dying silently. The QA
+//! findings the contract answers replay here:
 //!
 //! - `launched-active-boot-requires-reachable-plant`: an unreachable
 //!   field at boot is no longer a process exit inside driver assembly —
@@ -25,6 +25,13 @@
 //!   unanswered rather than severing it — the pending run's deferred
 //!   ask must still reach the refused verdict's named disposition
 //!   instead of standing as an invisible dead seat.
+//! - `deferred-claim-refusal-strands-undeclared-standby`: the same
+//!   disposition on the reproduction's dead-IP arm — the run launched
+//!   against nothing listening stands pending, and the field then binds
+//!   on that address *already claimed*, so the first answered retry
+//!   meets a standing claim. Nothing else races the born-active's grant
+//!   here: the refusal must end the launch rather than leave a
+//!   sourceless standby indistinguishable from a correctly idling one.
 //!
 //! The rig is the failover harness's shape: a `dcs-plant-server`
 //! process owns the shared `tank_loop` plant and the controllers load
@@ -1035,6 +1042,172 @@ fn a_pending_born_active_on_a_frozen_field_keeps_serving_bounded_scans() {
             < (RemoteDriver::DEFAULT_TIMEOUT + Duration::from_secs(3)).as_millis() as u64,
         "last_scan_age_ms must stay near one field timeout: {health:?}"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// QA finding `deferred-claim-refusal-strands-undeclared-standby` — the
+/// finding's own staging, the one shape the earlier deferred legs do
+/// not run. There, the incumbent was itself a born-active racing the
+/// same deferred grant over a thawed field. Here the incumbent is a
+/// *controller* that already held the field before the launch, and the
+/// undeclared born-active never shares its retry with anyone: it is
+/// launched against a **dead endpoint** — nothing listening at the
+/// declared address, the "point the born at a dead IP" arm of the
+/// reproduction — so its boot ask produces no verdict and it stands
+/// pending. The field is then bound on that exact address *already
+/// claimed by the incumbent*, so the born-active's first answered
+/// contact meets a standing claim rather than an open field.
+///
+/// That is the defect's shape, and the finding's evidence is what the
+/// defect produced there: the deferred retry observed the refusal —
+/// `role_changed{from: active, to: standby, origin: fenced}` and
+/// `field_claim_observed{claimant: 7202}` — and then the run kept
+/// serving as an honest-looking `standby`/`unsynchronized` indefinitely
+/// (observed >20 min, tick 21744+), never converging because it has no
+/// tracking source, never holding the claim, and not promoting, so
+/// `POST /promote` refused `not_converged` on a seat nothing would
+/// ever heal. The recorded disposition (decision 103 class (b), which
+/// `settle_activation` already implements for the boot-time verdict) is
+/// the same at both timings: exit nonzero, naming the refusal and the
+/// `--standby` remedy, so the supervisor relaunches with the flag that
+/// turns the refusal into a rejoin.
+///
+/// The run here is `--driven`, so its answer is countable: the refused
+/// scan request itself carries the verdict, and the process exits
+/// immediately behind it. The bound is the contract's own — the grant
+/// is never re-asked after a verdict (the field answered), so the
+/// refusal settles on the *first* answered contact, never a second.
+#[test]
+fn a_deferred_startup_claim_refusal_over_a_dead_endpoint_exits_the_pairless_run() {
+    let dir = scratch("deferred-dead-endpoint-claimed");
+    // Nothing listens here yet: the launch's attach cannot complete,
+    // so the startup ask yields no verdict at all — class (c)'s
+    // inconclusive leg, the finding's dead-IP arm.
+    let plant_addr = unclaimed_addr();
+    let model = controller_model(&dir, "pair.json", MODEL_SOURCE, plant_addr, SimTcp::Merged).0;
+    let journal_path = dir.join("deferred.jsonl");
+
+    let (mut launched, preamble) = spawn_controller_logged(
+        &model,
+        &[
+            "--owner-token".to_string(),
+            LAUNCHED.to_string(),
+            "--journal-file".to_string(),
+            journal_path.to_str().unwrap().to_string(),
+        ],
+        DT,
+    );
+    assert!(
+        preamble.iter().any(|line| line.contains("stands pending")),
+        "the pending launch must report itself: {preamble:?}"
+    );
+
+    // The pending surface the finding watched strand: served, honest,
+    // and inert — standby, unsynchronized, no claim verdict observed,
+    // commands refused, nothing promotable. Field safety intact, which
+    // is exactly why the defect was indistinguishable from a correctly
+    // idling standby.
+    let client = MonitorClient::new(launched.addr);
+    let report = client.role().unwrap();
+    assert_eq!(report.role, Role::Standby);
+    assert_eq!(report.sync, Some(StandbySync::Unsynchronized));
+    assert_eq!(report.field_claim, None);
+    assert_command_refused(&client);
+    let error = client
+        .promote()
+        .expect_err("a pending run has nothing to promote from")
+        .to_string();
+    assert!(
+        error.contains("not_converged"),
+        "the pending promote must answer the named refusal: {error}"
+    );
+
+    // Answering nothing still asks nothing: the deferred grant re-issues
+    // only on a contact the field answered, so scans against the dead
+    // endpoint leave the run pending rather than guessing a verdict.
+    client.advance(2).unwrap();
+    assert_eq!(client.role().unwrap().field_claim, None);
+
+    // The field arrives on the *same* address already claimed — the
+    // incumbent holds the claim the born-active's first answered retry
+    // will meet. It claims through a controller attachment the test
+    // owns, so the hold is a live unyielded controller claim: exactly
+    // the shape decision 91 makes the conditional grant refuse.
+    let _port = PLANT_PORT.lock().unwrap();
+    let _plant = spawn_plant_at(
+        Path::new(PLANT_MODEL),
+        Path::new(PLANT_DYNAMICS),
+        plant_addr,
+    );
+    let incumbent = RemoteDriver::connect(plant_addr).unwrap().as_controller();
+    assert_eq!(
+        incumbent.ensure_writer(INCUMBENT).unwrap(),
+        ClaimGrant::Exclusive
+    );
+    drop(_port);
+    // The remote kind's re-attach cadence paces the first contact: one
+    // bounded attempt per recorded interval, not a grace period.
+    std::thread::sleep(
+        dcs_sim_net::RemoteDriver::REATTACH_INTERVAL + std::time::Duration::from_millis(200),
+    );
+
+    // The first answered contact settles the refusal, and the scan
+    // request carries it — the request the refused verdict ended the
+    // launch with. A bounded number of answered contacts, not an open
+    // wait: the grant is never re-asked once the field has answered.
+    let error = client.advance(1).unwrap_err().to_string();
+    assert!(
+        error.contains("a live peer holds the field's write-ownership claim"),
+        "the deferred refusal must answer the first answered scan: {error}"
+    );
+    let status = launched
+        .wait_exit(Duration::from_secs(10))
+        .expect("the deferred-refused pairless run must exit, not strand a standby");
+    assert!(!status.success(), "the refused run must exit nonzero");
+    assert!(
+        launched.child.try_wait().unwrap().is_some(),
+        "the exit must not take a second request: the verdict already landed"
+    );
+
+    // The exit names the refusal and the remedy an operator can act on
+    // — the `--standby` relaunch, by its flag. A stranded run's last
+    // words are the only place the remedy can be read, so the text
+    // must carry it.
+    let stderr = launched.stderr_tail();
+    assert!(
+        stderr.contains("a live peer holds the field's write-ownership claim"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("no --peer was declared, so there is no pair to rejoin"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("--standby ADDRESS"),
+        "the refusal must name the --standby remedy: {stderr}"
+    );
+
+    // The refusal's own trace is durable: the verdict journals beside
+    // the incumbent-attributing observation, flushed before the refused
+    // scan answered. Without the journal the exit message would be the
+    // only record, and a monitorless relaunch reads no stderr.
+    let journal = std::fs::read_to_string(&journal_path).unwrap();
+    assert!(
+        journal.contains("startup_claim_refused"),
+        "the deferred refusal must journal its own verdict: {journal}"
+    );
+    assert!(
+        journal.contains(&INCUMBENT.to_string()),
+        "the incumbent's claim must be attributed in the record: {journal}"
+    );
+
+    // Field safety held throughout: the refusal never preempted the
+    // live incumbent, whose claim is still this probe's shared hold
+    // after the refused run is gone.
+    let probe = RemoteDriver::connect(plant_addr).unwrap();
+    assert_eq!(probe.ensure_writer(INCUMBENT).unwrap(), ClaimGrant::Shared);
+    probe.release_writer().unwrap();
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1396,13 +1396,18 @@ pub enum Activation {
 /// produces — one verdict shared by [`Peer::activate`]'s
 /// activation-time ask and the pending run's deferred retry, so both
 /// timings of the same answer settle under the identical
-/// [`SwitchError::FieldClaimFailed`].
+/// [`SwitchError::FieldClaimFailed`]. The remedy is named by its flag:
+/// `--standby` is the relaunch an operator actually types, and the
+/// message is what a stranded run's only last words would have been —
+/// so it names the remedy the launch must carry, not merely the
+/// standby role it would land in.
 fn startup_claim_refused() -> SwitchError {
     SwitchError::FieldClaimFailed {
         detail: "a live peer holds the field's write-ownership claim — a \
                  controller restarting into a pair cannot prove its resumed \
                  state is current with the incumbent's and must not preempt \
-                 it; rejoin as a standby instead"
+                 it; relaunch with --standby ADDRESS to rejoin as the \
+                 incumbent's tracking standby instead"
             .to_string(),
     }
 }
