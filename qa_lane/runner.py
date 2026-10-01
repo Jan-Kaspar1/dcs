@@ -2972,12 +2972,18 @@ def _born_seat_container(run_id, seat):
 
 def _born_target(run_id, value):
     """The --peer/--standby argument a born launch carries: a seat key
-    resolves to that seat's rig-bridge monitor address; anything else —
-    the leg's deliberately unresolvable peer name — passes through
-    verbatim."""
+    resolves to that seat's rig-bridge monitor address, a deployed
+    pair's member key ('active'/'standby') to that member's — the
+    deferred-refusal leg's born seats declare the pair's incumbent
+    their tracking source — and anything else, the leg's deliberately
+    unresolvable peer name, passes through verbatim."""
     if value in BORN_SEATS:
         return 'dcs-hw-' + run_id + '-' + BORN_SEATS[value] \
             + ':' + str(BORN_MONITOR_PORT)
+    member = PAIRS['deployed']['peers'].get(value)
+    if member is not None:
+        return 'dcs-hw-' + run_id + '-' + member \
+            + ':' + str(PAIR_MONITOR_PORTS[value])
     return value
 
 
@@ -3276,7 +3282,10 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
     answers on 'revised' once launched, the checkpoint-negotiation
     case's foreign peer on 'foreign', the dead-peer-latency case's
     driven standby on 'driven'), the published plant-protocol
-    endpoint, the run config's pinned plant-writer owner token per
+    endpoint, the pair's own plant as a rig-bridge `--remote` address
+    a born launch dials when a leg stages against the pair's field
+    rather than a scratch one, the run config's pinned plant-writer
+    owner token per
     endpoint key — the pair's and every third peer's — the run's
     evidence dir and deadline, the runner-owned
     controller restart/cold-restart/relaunch, plant stop/start,
@@ -3315,6 +3324,12 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         'foreign': 'http://127.0.0.1:' + str(cfg['foreign_port']),
         'driven': 'http://127.0.0.1:' + str(cfg['driven_port']),
         'plant': '127.0.0.1:' + str(cfg['plant_host_port']),
+        # The pair's plant on the rig bridge — the --remote a born
+        # launch dials when a leg stages it against the pair's own
+        # field rather than the leg's scratch one (the
+        # deferred-refusal leg's incumbent race).
+        'plant_remote': _pair_plant_remote(cfg, 'deployed',
+                                           'dcs-hw-' + run_id),
         # The run config's pinned --owner-token per endpoint key: a
         # scenario attachment ensures the writer claim under the
         # active's token to drive plant stimuli on the designed
@@ -3565,6 +3580,8 @@ def _probe_ctx(ctx, cfg, record, src, run_dir, probe, mounts,
         'foreign': None,
         'driven': 'http://127.0.0.1:' + str(probe['driven_port']),
         'plant': None,
+        'plant_remote': _pair_plant_remote(cfg, 'probe',
+                                           'dcs-hw-' + run_id),
         # The probe pair's own pinned claim tokens — never the
         # deployed pair's.
         'plant_owner': {'active': tokens['probe_active'],
