@@ -982,7 +982,7 @@ def _holderless_digest(record, violations):
         'placeholder': 'standing' if clean('placeholder')
                        else 'dropped',
         'recovery': 'reclaim' if clean('resolution', 'walk',
-                                       'loser-quiet', 'monitor')
+                                       'loser-quiet', 'monitor', 'dual')
                     else 'other',
         'pair': 'reconverged' if clean('reconverge') else 'split',
         'writes': 'landed' if clean('writes', 'reseat',
