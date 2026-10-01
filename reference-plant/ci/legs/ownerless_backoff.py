@@ -481,10 +481,15 @@ def ownerless_backoff_pass(args, tamper):
                     daemon=True,
                 )
                 thread.start()
-                while thread.is_alive():
+                started = time.monotonic()
+                while thread.is_alive() and (
+                    time.monotonic() - started < SCAN_BOUND_S
+                ):
                     pending_probe(seat_url, failures)
                     time.sleep(PROBE_SPACING_S)
-                thread.join(SCAN_BOUND_S)
+                thread.join(
+                    max(0.0, SCAN_BOUND_S - (time.monotonic() - started))
+                )
                 if thread.is_alive():
                     raise Inconclusive(
                         "the pinned release predates the ownerless "
