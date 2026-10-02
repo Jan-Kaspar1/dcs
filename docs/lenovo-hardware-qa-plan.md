@@ -834,6 +834,80 @@ Implementation order: second, after [daily architecture review](daily-architectu
   — report inconclusive; the rig leaves on its launch roles with
   the staged born seats and device container torn down.
 
+### Landed 2026-10-02 (reclaim convergence-gate leg, #1321)
+
+- The convergence-gated fencing-loss reclaim contract — the
+  per-revision lane evidence for the contract #1317's fix establishes
+  (WW-LCM-001 continuity and the ownership-epoch integrity the
+  failover-miss budget's staleness bound rests on) — is exercised per
+  revision by scenario leg `2485_reclaim_convergence_gate`. The
+  fencing-loss reclaim exists so a fenced ex-owner can re-take its own
+  released claim and escape the released-preemption wedge; the
+  conditional-claim paths that break that deadlock may only run where
+  the asker can prove convergence with the field's line, so a run
+  with zero convergence evidence — never tracked, unsynchronized, no
+  adoptable tracking source — must never preempt a different owner's
+  claim on stale state. The defect the contract answers let the
+  least-converged participant win the post-outage race purely on
+  transport ordering: the stale ex-owner's armed reclaim landed
+  before the incumbent's re-attach, re-activating it on a stale image
+  while the incumbent was fenced and demoted on its own re-attach.
+- The leg stages the finding's deterministic sequence on the lane's
+  scratch sim-serve field, so the deployed pair is never moved:
+  `start_born_field('serving')` serves the plant and a born-active on
+  the `driven` seat claims it to `active`; `start_born_field('serving')`
+  again re-serves the field under the same container name — a fresh
+  server with an empty claim table and the ex-owner's control
+  connection severed — so a born-active on the `foreign` seat launches
+  pending and claims first while the ex-owner reattaches, meets the
+  fence, and settles `standby`/`unsynchronized` with the loss mark
+  armed and no adoptable tracking source; `pause_born_field` freezes
+  the plant and the leg holds it there until both seats' served
+  `io_health` reports their control connection down, and
+  `unpause_born_field` thaws. A `dcs-sim-net` claim outlives its
+  holders, so the thaw leaves the incumbent's claim standing
+  holderless — the shape the field's arbitration cannot tell from a
+  dead owner's, and the shape the defect's reclaim exploited.
+- On the thaw, through both seats' serving monitors and their durable
+  `--journal-file`s, the leg asserts that the ex-owner's reclaim
+  cannot preempt the live claim: the incumbent's re-attach keeps or
+  retakes ownership on its live line (it settles `active` with the
+  claim `held` and its served tick advancing across the window), the
+  unsynchronized ex-owner stays `standby` without the field across
+  every poll, and no ownership epoch rolls back to the staler image —
+  the ex-owner's journal carries no `reclaim`-origin promotion, no
+  re-armed claim, and no `field_claim_observed` naming the incumbent,
+  and the incumbent's journal carries no walk away from `active`. The
+  positive control then proves the probe still does its designed work:
+  on a freshly re-served field a born-active on the `revised` seat
+  claims it declaring the incumbent seat its tracking source, the
+  re-serve and the incumbent's claim fence it in place, it converges
+  `tracking` on the live line, and once the incumbent is removed and
+  the claim stands holderless its bound reclaim of its own released
+  claim preempts by design — walking `standby → promoting → active`
+  under the `reclaim` origin with the claim `held`. The deployed pair
+  is framed before and after, every staged seat and the scratch field
+  are torn down, and the launch configuration and roles are restored.
+- Named diagnostics are `reclaim-convergence-failed` and
+  `reclaim-convergence-nondeterministic`, with the self-check's
+  `reclaim-convergence-unchecked` covering the planted asserted-gating
+  record, the ownership-epoch rollback, the refused ask, the displaced
+  and fenced incumbent, the silent positive control, the unrestored
+  pair, and the instability shapes; two passes produce identical
+  digests. A run context carrying no born-field staging levers or
+  per-seat journal files, a deployed pair off its settled launch shape,
+  and a read that dropped report inconclusive. #1317's fix is a
+  behavioural guard with no new served field and no new durable
+  record, so the leg's pre-contract signature is behavioural too: the
+  ex-owner's reclaim *issued* — its journal carries the granted
+  `reclaim`-origin promotion or a refused `field_claim_observed` — and
+  its own serving monitor showed it taking the field is a revision
+  predating the contract, and reports inconclusive. A record whose
+  served surfaces report the gating holding while its durable journal
+  proves the reclaim took the field is not that signature: the served
+  monitors never saw the take, so the leg names the contradiction as
+  the contract failure it is.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,
