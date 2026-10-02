@@ -1397,6 +1397,66 @@ Implementation order: second, after [daily architecture review](daily-architectu
   never-settling rig, and a staging that never landed report
   inconclusive.
 
+### Landed 2026-10-02 (recorded shipped-binary contract, #1419)
+
+- The three exploration runs at cabe3b3 — a revision carrying both
+  c8b0cde's sim-bus ship list (#1368) and the earlier `dcs-plant-ctl`
+  shipping precedent (#654) — each measured the bounded image set
+  carrying only the two images' entrypoints, so the keyed-interposer,
+  sim-bus, and claim-probing legs fell back to bind-mounting recovered
+  binaries out of the host build cache or probing the claim protocol
+  raw. The ship list was not the gap; its *reach* was. The lane code is
+  pinned on the host at `/srv/homelab/dcs-hwtest/qa_lane/` separately
+  from the revision under test (the deploy README's own rule: upgrading
+  it is a deliberate deployment step, not a side effect of a merge), and
+  the deployed copy that built those three runs' images predated both
+  ship lists, so its image build staged entrypoints alone while the
+  tested revision's tree compiled every shipped binary — into
+  `build-cache/target/release/`, which is exactly where the exploring
+  sessions found the binaries to bind-mount instead. Nothing in a run
+  said so: the report recorded the two image digests and nothing about
+  the payload inside them, so a stale lane pin, an image-cache reuse
+  path, and a ship-map gap all looked identical from the evidence.
+- `qa_lane/ship.json` is now the lane's recorded shipped-binary
+  contract: the compile groups the bounded builder runs in `/src` with
+  the binaries each produces, the two report-fixed images with their
+  entrypoints and the extra binaries beside them, and the host-side
+  tools that stay out of both images. `qa_lane/ship.py` reads and
+  shape-checks it, and `_build_images` derives its cargo chain, each
+  image's payload, and the presence assertions from it instead of
+  keeping its own lists — so a shipped binary cannot be added without a
+  compile target (`no recorded compile target produces …`), a compile
+  that produces no one of an image's binaries fails the run by name
+  (`build produced no …`, unchanged), and a staging that leaves one out
+  of the generated context fails the run by name too
+  (`<image> image stages no …`) because the assertion reads the staged
+  directory and its Dockerfile back against the contract rather than
+  trusting the copy loop that wrote them. The staged payload rides the
+  run's timeline as `image-staged`, so the evidence of what each image
+  carried sits beside the digests the report persists. The cargo chain
+  is byte-identical to the literal it replaces, so the two digests, the
+  entrypoints, and the host-side `dcs-ctl` seam are unchanged.
+- The contract is data rather than code because it ships inside the
+  revision's own `git archive` at `src/qa_lane/ship.json`. Every build —
+  assessment, exploration, and fix-verification alike, since all three
+  reach `_build_images` — now compares the payload its deployed copy
+  stages against the one the tested revision records and refuses the run
+  before compiling anything when the pinned copy is behind
+  (`the deployed qa_lane copy predates the shipped-binary contract the
+  revision under test records: controller ships no dcs-sim-bus-device`),
+  which is the stale-pin case the three runs hit and the check could
+  not be written for inside the copy that is behind. A revision
+  predating the document records none and is left alone.
+- `python3 -m qa_lane ship [<extracted-src-dir>]` is the deployment
+  step's own check: it prints the deployed copy's contract and runs the
+  same comparison against an extracted revision, so upgrading the
+  pinned copy under `/srv/homelab/dcs-hwtest/` is verified before a run
+  spends an attempt on entrypoint-only images. Lane verification is the
+  next rig run's sim-bus and interposer legs staging the revision's own
+  binaries with no bind-mount recovery, which this change makes the
+  recorded contract's precondition rather than a hope about the pinned
+  copy.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,

@@ -1,9 +1,13 @@
+import copy
+import io
 import json
 import os
 import select
+import shutil
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -11,7 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from qa_lane import revision, runner, scenarios, state as qa_state
+from qa_lane import __main__ as qa_main
+from qa_lane import revision, runner, scenarios, ship, state as qa_state
 
 
 SHA_A = 'a' * 40
@@ -3659,6 +3664,274 @@ class SimBusDeviceImageTests(unittest.TestCase):
                 return (host, int(port))
         self.fail('the shipped device server never reported a served '
                   'address: ' + (report.strip() or 'no output'))
+
+
+class ShippedBinaryContractTests(unittest.TestCase):
+    """The lane's recorded shipped-binary contract (#1419), the gap its
+    introduction closes.
+
+    Three exploration runs at cabe3b3 — a revision carrying both
+    c8b0cde's sim-bus ship list (#1368) and the earlier dcs-plant-ctl
+    precedent (#654) — each found the images the lane built carrying
+    their entrypoints alone, so the keyed-interposer, sim-bus, and
+    claim-probing legs fell back to bind-mounting the host build
+    cache's binaries or probing the claim protocol raw. The cause was
+    not the ship list but its reach: the lane code is pinned on the
+    host separately from the revision under test, so the deployed copy
+    that built those images predated the ship list, and nothing in a
+    run said so — the report recorded digests only.
+
+    The contract is `qa_lane/ship.json`, data that ships inside the
+    tested revision's own archive: the build derives its cargo chain
+    and each image's payload from it, asserts every named binary was
+    built and staged, and refuses a run whose deployed copy ships less
+    than the tested revision records — each by name.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        self.run_dir.mkdir(parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+        self.release = Path(self.cfg['state_dir']) / 'build-cache' \
+            / 'target' / 'release'
+        self.every_binary = ('dcs-controller', 'dcs-plant-server',
+                             'dcs-plant-ctl', 'dcs-ctl', 'dcs-forge',
+                             'dcs-sim-bus-device')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _fake_docker(self, calls, binaries=None):
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            if args[0] == 'run' and 'cargo' in str(args):
+                self.release.mkdir(parents=True, exist_ok=True)
+                for binary in (self.every_binary if binaries is None
+                               else binaries):
+                    (self.release / binary).write_text('bin')
+            if args[:2] == ('image', 'inspect'):
+                return Result('sha256:' + 'a' * 64)
+            return Result('')
+        return fake_docker
+
+    def _build(self, calls, events=None):
+        recorded = [] if events is None else events
+        return runner._build_images(
+            self.src, self.cfg, self.run_dir,
+            lambda event, detail=None: recorded.append((event, detail)),
+            'qa-1')
+
+    def _reset_build(self):
+        """A fresh run directory and build cache per build attempt — the
+        lane's own target/ cache is what persists across a run's retries,
+        so a test that omits a binary has to start from nothing."""
+        shutil.rmtree(self.run_dir, ignore_errors=True)
+        shutil.rmtree(self.release, ignore_errors=True)
+        self.run_dir.mkdir(parents=True)
+
+    def _record_revision_contract(self, contract):
+        """Write a contract at the revision-under-test path inside the
+        run's extracted source tree — the record a `git archive` of the
+        tested revision carries."""
+        path = self.src.joinpath(*ship.REVISION_PATH)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(contract, indent=1) + '\n')
+
+    def _pinned_copy(self):
+        """The deployed lane copy as it stood before either ship list
+        landed (#654 and #1368): the forge on the controller image and
+        both images carrying their entrypoint alone."""
+        stale = copy.deepcopy(ship.load())
+        stale['images'][0]['ships'] = ['dcs-forge']
+        stale['images'][1]['ships'] = []
+        return stale
+
+    def _staged(self, image):
+        return {path.name for path
+                in (self.run_dir / ('image-' + image)).iterdir()
+                if path.is_file()}
+
+    def test_the_contract_records_the_whole_shipped_binary_set(self):
+        contract = ship.load()
+        # The full set the runs evidenced diverging from: the plant
+        # tool (#654) and the sim-bus server plus the forge endpoint
+        # (#1368) beside their image entrypoints, the operator CLI
+        # host-side only.
+        self.assertEqual(ship.payload(contract), {
+            'controller': ['dcs-controller', 'dcs-forge',
+                           'dcs-sim-bus-device'],
+            'plant': ['dcs-plant-server', 'dcs-plant-ctl']})
+        self.assertEqual(contract['host_tools'], ['dcs-ctl'])
+        # Every shipped binary and host tool has the compile target that
+        # builds it, so no image can name a binary the builder never
+        # produces.
+        ship.assert_complete(contract)
+        for binaries in ship.payload(contract).values():
+            for binary in binaries:
+                self.assertIn(binary, ship.compiled(contract))
+        for tool in contract['host_tools']:
+            self.assertIn(tool, ship.compiled(contract))
+
+    def test_the_ship_maps_full_binary_set_lands_in_each_image_context(self):
+        calls, events = [], []
+        with patch.object(runner, 'docker', self._fake_docker(calls)):
+            digests = self._build(calls, events)
+        contract = ship.load()
+        builds = [args for args in calls if args[0] == 'build']
+        self.assertEqual(len(builds), 2)
+        for image in contract['images']:
+            binaries = ship.payload(contract)[image['name']]
+            context = self.run_dir / ('image-' + image['name'])
+            dockerfile = (context / 'Dockerfile').read_text()
+            self.assertEqual(self._staged(image['name']),
+                             set(binaries) | {'Dockerfile'})
+            for binary in binaries:
+                self.assertTrue((context / binary).is_file())
+                self.assertIn('COPY ' + binary + ' /usr/local/bin/'
+                              + binary, dockerfile)
+            self.assertIn('ENTRYPOINT ["' + image['entrypoint'] + '"]',
+                          dockerfile)
+            self.assertTrue(
+                any(args[2] == image['tag'] + ':' + SHA_A
+                    for args in builds))
+        # The two reported digests and the host-side dcs-ctl seam are
+        # unchanged, and the staged payload is the run's evidence of
+        # what rode the images.
+        self.assertEqual(set(digests), {'controller', 'plant'})
+        staged = [detail for event, detail in events
+                  if event == 'image-staged']
+        self.assertEqual(len(staged), 2)
+        self.assertIn('dcs-controller dcs-forge dcs-sim-bus-device',
+                      staged[0])
+        self.assertIn('dcs-plant-server dcs-plant-ctl', staged[1])
+
+    def test_a_build_output_missing_a_shipped_binary_fails_by_name(self):
+        for missing in ('dcs-forge', 'dcs-sim-bus-device', 'dcs-plant-ctl'):
+            with self.subTest(missing=missing):
+                self._reset_build()
+                binaries = tuple(b for b in self.every_binary
+                                 if b != missing)
+                with patch.object(runner, 'docker',
+                                  self._fake_docker([], binaries)):
+                    with self.assertRaises(RuntimeError) as caught:
+                        self._build([])
+                self.assertEqual(str(caught.exception),
+                                 'build produced no ' + missing)
+
+    def test_a_context_that_drops_a_shipped_binary_fails_by_name(self):
+        # A staging change that stops copying one shipped binary must
+        # fail the run by name: the assertion reads the staged context
+        # back against the contract rather than trusting the copy loop.
+        copied = []
+        real_copy = shutil.copy2
+
+        def dropping_copy(source, target):
+            if 'dcs-forge' in str(target):
+                copied.append('dcs-forge')
+                return
+            return real_copy(source, target)
+
+        with patch.object(runner, 'docker', self._fake_docker([])):
+            with patch.object(runner.shutil, 'copy2', dropping_copy):
+                with self.assertRaises(ship.ShipError) as caught:
+                    self._build([])
+        self.assertEqual(copied, ['dcs-forge'])
+        self.assertIn('dcs-forge', str(caught.exception))
+        self.assertIn('controller', str(caught.exception))
+
+    def test_a_ship_map_gap_fails_by_name(self):
+        # The recorded contract naming a binary no compile group builds
+        # is the ship-map gap: an image carrying a tool the bounded
+        # builder never produces. It fails before the compile, by name.
+        contract = ship.load()
+        gapped = copy.deepcopy(contract)
+        gapped['images'][0]['ships'].append('dcs-sim-bus-ctl')
+        with self.assertRaises(ship.ShipError) as caught:
+            ship.assert_complete(gapped)
+        self.assertIn('dcs-sim-bus-ctl', str(caught.exception))
+        self.assertIn('no recorded compile target produces',
+                      str(caught.exception))
+
+    def test_a_lane_copy_behind_the_revision_fails_the_run_by_name(self):
+        # The divergence the runs evidenced: the deployed lane copy
+        # predating the tested revision's ship list. The build refuses
+        # it before compiling anything, naming each binary the
+        # revision's legs would have exec'd and found absent.
+        self._record_revision_contract(ship.load())
+        with patch.object(runner, 'docker', self._fake_docker([])), \
+                patch.object(ship, 'load', return_value=self._pinned_copy()):
+            with self.assertRaises(ship.ShipError) as caught:
+                self._build([])
+        detail = str(caught.exception)
+        self.assertIn('predates the shipped-binary contract', detail)
+        self.assertIn('controller ships no dcs-sim-bus-device', detail)
+        self.assertIn('plant ships no dcs-plant-ctl', detail)
+
+    def test_a_current_lane_copy_builds_the_revision_payload(self):
+        self._record_revision_contract(ship.load())
+        calls, events = [], []
+        with patch.object(runner, 'docker', self._fake_docker(calls)):
+            digests = self._build(calls, events)
+        self.assertEqual(set(digests), {'controller', 'plant'})
+        # Nothing on the compiler's critical path ran before the refusal
+        # in the case above; here the whole recorded payload is staged.
+        self.assertIn('dcs-forge', self._staged('controller'))
+        self.assertIn('dcs-plant-ctl', self._staged('plant'))
+
+    def test_a_revision_predating_the_contract_is_left_alone(self):
+        # A revision whose archive carries no lane tree (or predates
+        # the document) records nothing to be behind: the deployed
+        # copy's own contract is then the only record there is.
+        self.assertIsNone(ship.revision_contract(self.src))
+        with patch.object(runner, 'docker', self._fake_docker([])), \
+                patch.object(ship, 'load', return_value=self._pinned_copy()):
+            digests = self._build([])
+        self.assertEqual(set(digests), {'controller', 'plant'})
+
+    def test_a_malformed_contract_fails_by_name(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'ship.json'
+            contract = copy.deepcopy(ship.load())
+            contract['images'][1]['ships'] = ['dcs-plant-server']
+            path.write_text(json.dumps(contract))
+            with self.assertRaises(ship.ShipError) as caught:
+                ship.load(path)
+            self.assertIn('ships a binary twice or its own entrypoint',
+                          str(caught.exception))
+            path.write_text('{ not json')
+            with self.assertRaises(ship.ShipError) as caught:
+                ship.load(path)
+            self.assertIn('cannot read shipped-binary contract',
+                          str(caught.exception))
+            with self.assertRaises(ship.ShipError) as caught:
+                ship.load(Path(root) / 'absent.json')
+            self.assertIn('cannot read shipped-binary contract',
+                          str(caught.exception))
+
+    def test_the_deploy_check_prints_the_pinned_copy_contract(self):
+        out = io.StringIO()
+        self._record_revision_contract(ship.load())
+        with patch.object(sys, 'argv',
+                          ['qa_lane', 'ship', str(self.src)]), \
+                patch('sys.stdout', out):
+            self.assertEqual(qa_main.main(), 0)
+        printed = json.loads(out.getvalue())
+        self.assertEqual(printed['payload']['plant'],
+                         ['dcs-plant-server', 'dcs-plant-ctl'])
+        self.assertEqual(printed['host_tools'], ['dcs-ctl'])
+        self.assertTrue(printed['revision_contract'])
+        # The deployment step's own check: a pinned copy predating the
+        # revision the dispatcher will push from fails by name here,
+        # before any run spends an attempt on entrypoint-only images.
+        with patch.object(sys, 'argv', ['qa_lane', 'ship', str(self.src)]), \
+                patch.object(ship, 'load', return_value=self._pinned_copy()), \
+                patch('sys.stdout', io.StringIO()):
+            with self.assertRaises(ship.ShipError) as caught:
+                qa_main.main()
+        self.assertIn('controller ships no dcs-sim-bus-device',
+                      str(caught.exception))
 
 
 class ProbePairTests(unittest.TestCase):
