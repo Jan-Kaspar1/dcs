@@ -255,6 +255,136 @@ fn the_paced_persist_queues_and_the_health_reports_by_name() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Finding `state-file-shared-between-processes-not-detected`: the
+/// checkpoint is one run's state, so a second monitor on the same
+/// `state_file` must fail its bind naming the live holder's writer-lock
+/// conflict instead of both runs persisting into one file — last writer
+/// wins on the tick domain, the receipt log, and the component state,
+/// and the next restart adopts whichever run renamed last.
+#[test]
+fn a_second_monitor_on_the_same_state_file_fails_its_bind_naming_the_conflict() {
+    let dir = scratch("shared-writer");
+    let path = dir.join("state.json");
+    let driver = StubDriver {
+        points: Mutex::new(
+            [(PointId(10), Sample::good(Value::Float(0.0), Tick::ZERO))]
+                .into_iter()
+                .collect(),
+        ),
+    };
+    let bind = || {
+        let map = PointMap::new().with_writable_point(PointId(10), Direction::In, ValueKind::Float);
+        let executor = Executor::new(&driver, map, Vec::new()).unwrap();
+        Monitor::bind_with(
+            "127.0.0.1:0",
+            executor,
+            signal_index(),
+            MonitorConfig {
+                state_file: Some(path.clone()),
+                ..MonitorConfig::default()
+            },
+        )
+    };
+
+    // The first writer binds and scans, holding the checkpoint's
+    // writer lock for the monitor's lifetime.
+    let first = bind().unwrap();
+    first.paced_scan();
+    first.persist_state().unwrap();
+    first.flush_state_sink(Duration::from_secs(10));
+
+    let error = match bind() {
+        Ok(_) => panic!("two monitors on one state file must not both bind"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(message.contains(path.to_str().unwrap()), "{message}");
+    assert!(message.contains("writer lock"), "{message}");
+    // The sidecar the claim actually holds — the path an operator's
+    // `fuser`/`lsof` names to find the live holder.
+    assert!(
+        message.contains(
+            dcs_monitor::StateWriterLock::lock_path(&path)
+                .to_str()
+                .unwrap()
+        ),
+        "{message}"
+    );
+
+    // The holder keeps saving undisturbed, and once it drops — its
+    // descriptor releasing the lock — the next writer resumes the
+    // single-writer file, which is the restart the checkpoint exists
+    // for.
+    first.paced_scan();
+    first.persist_state().unwrap();
+    first.flush_state_sink(Duration::from_secs(10));
+    let held = persisted(&path).tick;
+    assert_eq!(held, Tick(2));
+    drop(first);
+    let second = bind().unwrap();
+    second.paced_scan();
+    second.persist_state().unwrap();
+    second.flush_state_sink(Duration::from_secs(10));
+    assert_eq!(
+        persisted(&path).tick,
+        Tick(1),
+        "the released claim lets the next writer take the file — its own \
+         scan's checkpoint, over a freshly assembled executor"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same claim handed in rather than taken twice: a controller takes
+/// the checkpoint's writer lock before it reads the file to resume, so
+/// the sink it builds for the saves must join that one claim instead of
+/// colliding with its own process.
+#[test]
+fn a_sink_joins_the_callers_writer_lock_instead_of_colliding_with_it() {
+    let dir = scratch("caller-lock");
+    let path = dir.join("state.json");
+    let claim = dcs_monitor::StateWriterLock::acquire(&path).unwrap();
+    let driver = StubDriver {
+        points: Mutex::new(
+            [(PointId(10), Sample::good(Value::Float(0.0), Tick::ZERO))]
+                .into_iter()
+                .collect(),
+        ),
+    };
+    let map = PointMap::new().with_writable_point(PointId(10), Direction::In, ValueKind::Float);
+    let executor = Executor::new(&driver, map, Vec::new()).unwrap();
+    let monitor = Monitor::bind_with(
+        "127.0.0.1:0",
+        executor,
+        signal_index(),
+        MonitorConfig {
+            state_file: Some(path.clone()),
+            state_writer: Some(claim.clone()),
+            ..MonitorConfig::default()
+        },
+    )
+    .unwrap();
+
+    monitor.paced_scan();
+    monitor.persist_state().unwrap();
+    monitor.flush_state_sink(Duration::from_secs(10));
+    assert_eq!(persisted(&path).tick, Tick(1));
+
+    // The claim outlives the monitor it served, and only its release
+    // frees the file: a second descriptor on a held claim is still a
+    // second writer, refused exactly as a live foreign process's hold
+    // is.
+    drop(monitor);
+    let error = match dcs_monitor::StateWriterLock::acquire(&path) {
+        Ok(_) => panic!("a held claim refuses a second writer's own acquisition"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("writer lock"), "{error}");
+    assert_eq!(claim.state_path(), path);
+    drop(claim);
+    dcs_monitor::StateWriterLock::acquire(&path).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Finding `state-file-alias-clobbers-append-durable-files`: a
 /// `MonitorConfig` naming one path for two persistence sinks must
 /// fail the bind naming the conflict — the append sinks' writer lock
@@ -311,6 +441,55 @@ fn aliased_persistence_paths_fail_the_bind_naming_the_conflict() {
         assert!(
             !shared.exists(),
             "the refused bind left the aliased path touched"
+        );
+    }
+
+    // The checkpoint's writer lock is a path of its own — the `.lock`
+    // sidecar the rename never replaces. An append sink pointed at it
+    // would hold the lock every state-file run needs, and no file lock
+    // can catch it (the append sink takes the sidecar first), so the
+    // pair is refused at the bind by name.
+    let state = dir.join("state.json");
+    let sidecar = dcs_monitor::StateWriterLock::lock_path(&state);
+    let sidecar_cases: [(MonitorConfig, [&str; 2]); 2] = [
+        (
+            MonitorConfig {
+                state_file: Some(state.clone()),
+                journal_file: Some(sidecar.clone()),
+                ..MonitorConfig::default()
+            },
+            ["journal_file", "state_file"],
+        ),
+        (
+            MonitorConfig {
+                state_file: Some(state.clone()),
+                history_file: Some(sidecar.clone()),
+                ..MonitorConfig::default()
+            },
+            ["history_file", "state_file"],
+        ),
+    ];
+    for (config, [first, second]) in sidecar_cases {
+        let driver = StubDriver {
+            points: Mutex::new(HashMap::new()),
+        };
+        let map = PointMap::new().with_writable_point(PointId(10), Direction::In, ValueKind::Float);
+        let executor = Executor::new(&driver, map, Vec::new()).unwrap();
+        let error = match Monitor::bind_with("127.0.0.1:0", executor, signal_index(), config) {
+            Ok(_) => panic!("{first} on {second}'s writer lock must fail the bind"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("distinct")
+                && message.contains(first)
+                && message.contains(second)
+                && message.contains("writer lock"),
+            "{first} on {second}'s writer lock: {message}"
+        );
+        assert!(
+            !state.exists(),
+            "the refused bind created the checkpoint or its sidecar"
         );
     }
     let _ = std::fs::remove_dir_all(&dir);
