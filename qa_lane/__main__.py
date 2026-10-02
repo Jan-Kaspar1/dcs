@@ -12,6 +12,13 @@ anywhere a config or report file is reachable).
                                          no spec lists current pins
   python3 -m qa_lane ledger              print the exploration ledger
                                          (charters from qax-* runs)
+  python3 -m qa_lane ship [<src-dir>]    print the deployed lane copy's
+                                         shipped-binary contract and
+                                         check it against the contract
+                                         an extracted revision records
+                                         (the deploy-time check: the
+                                         pinned copy is separate from
+                                         the revision under test)
   python3 -m qa_lane netpolicy <apply|verify>
                                          host egress firewall policy
                                          (needs root; the dedicated
@@ -24,9 +31,33 @@ import time
 from pathlib import Path
 
 from . import netpolicy, report as qa_report
-from . import runner, state as qa_state
+from . import runner, ship, state as qa_state
 
 GIT_SHA_LEN = 40
+
+
+def _ship(rest):
+    """Print the deployed lane copy's shipped-binary contract and check
+    it against the contract an extracted revision records under it.
+
+    The lane code is pinned on the host separately from the revision
+    under test, so this is the check the deployment step owes: run it
+    after copying `qa_lane/` from the commit the dispatcher will push
+    revisions from, and a pinned copy predating a revision's ship list
+    fails here by name instead of leaving that revision's runs to build
+    images missing the binaries its legs exec.
+    """
+    contract = ship.load()
+    ship.assert_complete(contract)
+    source = Path(rest[0]) if rest else None
+    ship.check_lane_copy(source, contract)
+    print(json.dumps({'compile_command': ship.compile_command(contract),
+                      'payload': ship.payload(contract),
+                      'host_tools': contract['host_tools'],
+                      'source': str(source) if source else None,
+                      'revision_contract': ship.revision_contract(
+                          source) is not None},
+                     indent=1))
 
 
 def _preserve(st, rest):
@@ -104,6 +135,8 @@ def main(argv=None):
             print(json.dumps(explorer.ledger(st), indent=1))
         finally:
             st.close()
+    elif command == 'ship':
+        _ship(rest)
     elif command == 'netpolicy':
         if len(rest) != 1 or rest[0] not in ('apply', 'verify'):
             raise SystemExit('netpolicy expects apply or verify')
