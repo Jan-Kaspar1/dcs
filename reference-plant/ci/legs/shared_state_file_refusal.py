@@ -123,10 +123,12 @@ import simulate
 # disposition — must surface the named diagnostic rather than passing
 # an unexercised contract.
 LEG = {
-    # The next free slot after the mirror legs origin/main added past
-    # the convergence-gated reclaim one (770) — the stage runs the
-    # legs in this order and no two may share one.
-    "order": 780,
+    # The next free slot after the legs origin/main added past the
+    # convergence-gated reclaim one (770) — the pending-serving bound
+    # took the 780 this leg first claimed, so the shared-state-file
+    # refusal follows it — the stage runs the legs in this order and
+    # no two may share one.
+    "order": 790,
     "title": "the shared-state-file refusal leg",
     "passes": "shared-state-file-refusal",
     "tampers": [
