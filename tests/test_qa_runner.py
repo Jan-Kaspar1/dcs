@@ -2733,7 +2733,10 @@ class BornActiveActionTests(unittest.TestCase):
         self.assertEqual(events, ['born-stop', 'born-stopped'])
 
     def test_born_controller_state_reports_the_process_verdict(self):
+        calls = []
+
         def docker(*args, timeout=120, check=True):
+            calls.append(args)
             if args[0] == 'inspect':
                 return Result('false 1\n')
             if args[0] == 'logs':
@@ -2748,6 +2751,14 @@ class BornActiveActionTests(unittest.TestCase):
         self.assertEqual(state['exit'], 1)
         self.assertFalse(state['absent'])
         self.assertIn('no --peer was declared', state['logs'])
+        # The tail must hold a boot usage error whole — the shell
+        # answers an argument-parse refusal with the refusal line
+        # followed by the controller's USAGE block, so a tail shorter
+        # than that block would drop the named verdict the
+        # self-standby refusal leg reads.
+        self.assertGreaterEqual(runner.BORN_LOG_TAIL, 200)
+        self.assertIn(('logs', '--tail', str(runner.BORN_LOG_TAIL),
+                       'dcs-hw-qa-1-d'), calls)
 
     def test_born_controller_state_reports_absence(self):
         def docker(*args, timeout=120, check=True):
