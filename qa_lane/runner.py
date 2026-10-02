@@ -2958,6 +2958,14 @@ BORN_FIELD_PORT = 9003
 # The --listen port every born seat's monitor binds in-container —
 # identical across seats since each container owns its netns.
 BORN_MONITOR_PORT = 8082
+# The --scan-ms pacing a born launch carries when the caller names no
+# cadence of its own — the rig's documented third-controller pace. One
+# seat can be launched off it through `start_born_controller`'s
+# `scan_ms`: a seat's run tick accrues one per scan, so a faster-paced
+# seat's basis separates from a slower peer at exactly the cadence
+# difference, which is how the lane stages a clock skew it cannot
+# otherwise inject (the claim-skew leg's lever).
+BORN_SCAN_MS = 100
 
 
 def _born_seat_container(run_id, seat):
@@ -3108,7 +3116,7 @@ def stop_born_field(run_id, timeline):
 
 def start_born_controller(cfg, record, run_dir, model, seat, remote,
                           timeline, peer=None, standby=None,
-                          document=None):
+                          document=None, scan_ms=None):
     """The scenario-callable born-active launch — the born-active
     startup-failure leg's per-class launcher: runs a controller on one
     of the labeled scenario seats (`revised`/`foreign`/`driven` — the
@@ -3148,15 +3156,37 @@ def start_born_controller(cfg, record, run_dir, model, seat, remote,
     recorded on the run's action timeline; a docker failure raises so
     the calling scenario reports the launch never completed. Returns
     {'container', 'seat', 'address', 'remote', 'peer', 'standby',
-    'model', 'monitor'} — `address` is the rig-bridge monitor
-    endpoint a peer's tracking declaration dials, `monitor` the
-    published host-loopback URL the scenario reads, `model` the
+    'model', 'monitor', 'scan_ms'} — `address` is the rig-bridge
+    monitor endpoint a peer's tracking declaration dials, `monitor`
+    the published host-loopback URL the scenario reads, `model` the
     document actually mounted, which a leg stages against a
     register-protocol server needs as its own evidence that both ends
-    read one declaration, and `remote` None on the document-addressed
-    launch.
+    read one declaration, `remote` None on the document-addressed
+    launch, and `scan_ms` the cadence the container actually paces
+    at.
+
+    `scan_ms` is the per-container skew lever: the launch's own
+    `--scan-ms` pacing, so one seat's run clock can be driven faster
+    than another's and the skew a leg stages is a property of the rig
+    rather than of the clock the leg cannot reach. A seat's run tick
+    accrues one per scan, so a seat paced at 25 ms accrues four ticks
+    per 100 ms-paced peer's one — the basis separation the
+    claim-skew leg measures before it lets a claimant compute its
+    claim, and the same lever the announced-source skew findings
+    staged. None keeps the born launch's documented 100 ms pacing; a
+    non-integer or non-positive cadence is refused by name, since a
+    launch that silently paced at something else would stage a skew
+    the leg never asked for.
     """
     run_id, sha = record['run_id'], record['attempted_sha']
+    if scan_ms is None:
+        pace = BORN_SCAN_MS
+    elif (isinstance(scan_ms, bool) or not isinstance(scan_ms, int)
+            or scan_ms <= 0):
+        raise RuntimeError('a born launch scan_ms is a positive '
+                           'millisecond integer, got ' + repr(scan_ms))
+    else:
+        pace = scan_ms
     if peer is not None and standby is not None:
         raise RuntimeError('a born launch is either the pair\'s '
                            'born-active (--peer) or its tracking '
@@ -3202,6 +3232,7 @@ def start_born_controller(cfg, record, run_dir, model, seat, remote,
              + ' on ' + str(mounted)
              + (' --peer ' + peer_flag if peer_flag else '')
              + (' --standby ' + standby_flag if standby_flag else '')
+             + ' --scan-ms ' + str(pace)
              + ' --owner-token ' + str(owner_token))
     docker(*_docker_run_args(cfg, run_id, container),
            '--network', 'dcs-hwtest-' + run_id,
@@ -3215,7 +3246,7 @@ def start_born_controller(cfg, record, run_dir, model, seat, remote,
            '--owner-token', str(owner_token),
            *(['--peer', peer_flag] if peer_flag else []),
            *(['--standby', standby_flag] if standby_flag else []),
-           '--scan-ms', '100', '--listen', '0.0.0.0:'
+           '--scan-ms', str(pace), '--listen', '0.0.0.0:'
            + str(BORN_MONITOR_PORT),
            '--state-file', CONTAINER_STATE_FILE,
            '--journal-file', CONTAINER_JOURNAL_FILE,
@@ -3227,6 +3258,7 @@ def start_born_controller(cfg, record, run_dir, model, seat, remote,
             'address': container + ':' + str(BORN_MONITOR_PORT),
             'remote': remote, 'peer': peer_flag,
             'standby': standby_flag, 'model': str(mounted),
+            'scan_ms': pace,
             'monitor': 'http://127.0.0.1:' + str(cfg[seat + '_port'])}
 
 
@@ -3240,13 +3272,24 @@ def stop_born_controller(run_id, seat, timeline):
     timeline('born-stopped', container + ' removed')
 
 
+# The `docker logs --tail` bound a born seat's process-verdict read
+# uses. It must hold a boot usage error whole: the shell answers an
+# argument-parse refusal with the refusal line followed by the
+# controller's ~150-line USAGE block (the self-addressed
+# `--standby`/`--peer` verdict #1340's fix adds is one), so a shorter
+# tail drops the very line the refusal contract names and reports the
+# seat's verdict as an unnameable exit.
+BORN_LOG_TAIL = 256
+
+
 def born_controller_state(run_id, seat):
     """The born seat container's process verdict — the
     undeclared-refusal class's evidence: `{'container', 'running',
     'exit', 'logs', 'absent'}` — Running=false with a nonzero exit and
-    the named refusal on the log tail is the recorded disposition; an
+    the     named refusal on the log tail is the recorded disposition; an
     absent container reports `absent` rather than raising, since the
-    read itself is the leg's evidence collection."""
+    read itself is the leg's evidence collection. The tail is
+    `BORN_LOG_TAIL` so a boot usage error's whole output is read."""
     container = _born_seat_container(run_id, seat)
     probe = docker('inspect', '-f', '{{.State.Running}} {{.State.ExitCode}}',
                    container, check=False)
@@ -3259,7 +3302,8 @@ def born_controller_state(run_id, seat):
         exit_code = int(parts[1])
     except (IndexError, ValueError):
         exit_code = None
-    logs = docker('logs', '--tail', '60', container, check=False)
+    logs = docker('logs', '--tail', str(BORN_LOG_TAIL), container,
+                  check=False)
     return {'container': container, 'running': running,
             'exit': exit_code, 'absent': False,
             'logs': (logs.stdout or '') + (logs.stderr or '')}
@@ -3296,7 +3340,9 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
     evidence dir and deadline, the runner-owned
     controller restart/cold-restart/relaunch, plant stop/start,
     model-revision, foreign-peer launch/teardown, driven-peer
-    launch/teardown, born-active launch/teardown/state reads, and
+    launch/teardown, born-active launch/teardown/state reads (the
+    launch naming its own --scan-ms cadence, the per-container skew
+    lever), and
     born-field serve/silence/freeze actions, and
     forged-checkpoint-endpoint
     launch/teardown actions, the run's shared --pair-token the
@@ -3463,11 +3509,17 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         # device server's staged document — and a `remote` of None
         # launches with no --remote attachment, the shape a
         # register-protocol model carries its own device address in.
+        # `scan_ms` is the per-container skew lever: the launch's own
+        # --scan-ms pacing, so a leg can drive one seat's run clock
+        # faster than the holder's and stage the basis separation a
+        # claim is computed against (the claim-skew leg's staging; None
+        # keeps the documented BORN_SCAN_MS pace).
         'start_born_controller': lambda seat, remote, peer=None,
-                standby=None, document=None: start_born_controller(
+                standby=None, document=None,
+                scan_ms=None: start_born_controller(
                     cfg, record, run_dir, src / cfg['model_fixture'],
                     seat, remote, timeline, peer=peer, standby=standby,
-                    document=document),
+                    document=document, scan_ms=scan_ms),
         'stop_born_controller': lambda seat: stop_born_controller(
             run_id, seat, timeline),
         'born_controller_state': lambda seat: born_controller_state(

@@ -2525,6 +2525,50 @@ class BornActiveActionTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self._launch(peer='foreign', standby='revised')
 
+    def test_a_launch_paces_at_the_documented_default(self):
+        calls, events, info = self._launch(seat='revised')
+        launch = self._run(calls)
+        index = launch.index('--scan-ms')
+        self.assertEqual(launch[index + 1],
+                         str(runner.BORN_SCAN_MS))
+        self.assertEqual(info['scan_ms'], runner.BORN_SCAN_MS)
+        self.assertIn(' --scan-ms ' + str(runner.BORN_SCAN_MS),
+                      events[0][1])
+
+    def test_a_named_cadence_drives_that_container_only(self):
+        # The claim-skew leg's per-container skew lever: one seat's run
+        # clock paced faster than its holder's, so the basis separation
+        # a claim is computed against is a property of the rig. The
+        # pacing rides that launch's own --scan-ms and nothing else —
+        # the seat's model mount, token pin, and listen address are the
+        # same launch shape.
+        calls, events, info = self._launch(seat='foreign', scan_ms=25)
+        launch = self._run(calls)
+        index = launch.index('--scan-ms')
+        self.assertEqual(launch[index + 1], '25')
+        self.assertEqual(info['scan_ms'], 25)
+        self.assertIn(' --scan-ms 25', events[0][1])
+        index = launch.index('--owner-token')
+        self.assertEqual(launch[index + 1],
+                         str(self.cfg['plant_owner_tokens']
+                            ['foreign']))
+        self.assertIn('0.0.0.0:' + str(runner.BORN_MONITOR_PORT),
+                      launch)
+        # A second launch at the default pace leaves its own container
+        # untouched — the skew is staged per container.
+        other, _, other_info = self._launch(seat='driven')
+        other_launch = self._run(other)
+        self.assertEqual(other_launch[other_launch.index('--scan-ms')
+                                      + 1], str(runner.BORN_SCAN_MS))
+        self.assertEqual(other_info['scan_ms'], runner.BORN_SCAN_MS)
+
+    def test_an_unusable_cadence_is_refused_by_name(self):
+        for cadence in (0, -25, '25', 25.0, True):
+            with self.assertRaises(RuntimeError) as caught:
+                self._launch(seat='driven', scan_ms=cadence)
+            self.assertIn('positive millisecond integer',
+                          str(caught.exception))
+
     def test_a_document_addressed_launch_carries_no_remote(self):
         # The sim-bus rig legs point a seat at a field the staged
         # document declares: no --remote at all, and that document
@@ -2570,6 +2614,7 @@ class BornActiveActionTests(unittest.TestCase):
             events[0][1],
             'launch dcs-hw-qa-1-d on ' + str(bus_model)
             + ' --standby dcs-hw-qa-1-c:' + str(runner.BORN_MONITOR_PORT)
+            + ' --scan-ms ' + str(runner.BORN_SCAN_MS)
             + ' --owner-token '
             + str(self.cfg['plant_owner_tokens']['driven']))
 
@@ -2688,7 +2733,10 @@ class BornActiveActionTests(unittest.TestCase):
         self.assertEqual(events, ['born-stop', 'born-stopped'])
 
     def test_born_controller_state_reports_the_process_verdict(self):
+        calls = []
+
         def docker(*args, timeout=120, check=True):
+            calls.append(args)
             if args[0] == 'inspect':
                 return Result('false 1\n')
             if args[0] == 'logs':
@@ -2703,6 +2751,14 @@ class BornActiveActionTests(unittest.TestCase):
         self.assertEqual(state['exit'], 1)
         self.assertFalse(state['absent'])
         self.assertIn('no --peer was declared', state['logs'])
+        # The tail must hold a boot usage error whole — the shell
+        # answers an argument-parse refusal with the refusal line
+        # followed by the controller's USAGE block, so a tail shorter
+        # than that block would drop the named verdict the
+        # self-standby refusal leg reads.
+        self.assertGreaterEqual(runner.BORN_LOG_TAIL, 200)
+        self.assertIn(('logs', '--tail', str(runner.BORN_LOG_TAIL),
+                       'dcs-hw-qa-1-d'), calls)
 
     def test_born_controller_state_reports_absence(self):
         def docker(*args, timeout=120, check=True):
@@ -2750,6 +2806,12 @@ class BornActiveActionTests(unittest.TestCase):
             # caller names the document to mount and omits the remote.
             bus = ctx['start_born_controller'](
                 'revised', None, document=bus_model)
+            # ... and a named cadence: the per-container skew lever a
+            # claim-skew leg drives one seat's run clock off the
+            # documented pace with.
+            skewed = ctx['start_born_controller'](
+                'foreign', info['remote'], standby='revised',
+                scan_ms=25)
         self.assertEqual(launched['container'], 'dcs-hw-qa-1-d')
         launch = next(c for c in calls
                       if c[0] == 'run' and 'dcs-hw-qa-1-d' in c)
@@ -2764,6 +2826,12 @@ class BornActiveActionTests(unittest.TestCase):
         self.assertNotIn('--remote', bus_launch)
         self.assertIn(str(bus_model) + ':/model/plant.json:ro',
                       bus_launch)
+        self.assertEqual(skewed['scan_ms'], 25)
+        skew_launch = next(c for c in calls
+                           if c[0] == 'run' and 'dcs-hw-qa-1-foreign'
+                           in c)
+        self.assertEqual(skew_launch[skew_launch.index('--scan-ms')
+                                     + 1], '25')
         self.assertFalse(state['running'])
 
 
