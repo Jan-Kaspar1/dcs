@@ -2245,6 +2245,10 @@ fn main() -> ExitCode {
                                     "standby: armed self-promotion refused at tick {} (misses {}) — {}; the gate stays armed while convergence stands",
                                     refusal.tick.0, refusal.misses, refusal.error
                                 ),
+                                PeerEvent::ForeignClaimPreempt(preempt) => eprintln!(
+                                    "standby: took the field's write-ownership claim from the standing writer {} at tick {} — it could not prove this line's pair key",
+                                    preempt.writer, preempt.tick.0
+                                ),
                                 PeerEvent::RoleChange(change) => eprintln!(
                                     "standby: role {} -> {} at tick {}",
                                     change.from, change.to, change.tick.0
@@ -2293,6 +2297,7 @@ fn main() -> ExitCode {
                                 | PeerEvent::StartupRefusal(_)
                                 | PeerEvent::SourceRestart(_)
                                 | PeerEvent::PromotionRefusal(_)
+                                | PeerEvent::ForeignClaimPreempt(_)
                                 | PeerEvent::SupersededCommand { .. }
                                 | PeerEvent::AdoptionReceipt(_) => {}
                             }
@@ -2448,6 +2453,7 @@ fn main() -> ExitCode {
                                 | PeerEvent::StartupRefusal(_)
                                 | PeerEvent::SourceRestart(_)
                                 | PeerEvent::PromotionRefusal(_)
+                                | PeerEvent::ForeignClaimPreempt(_)
                                 | PeerEvent::SupersededCommand { .. }
                                 | PeerEvent::AdoptionReceipt(_) => {}
                             }
