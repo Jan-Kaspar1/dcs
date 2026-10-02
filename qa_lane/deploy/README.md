@@ -183,7 +183,8 @@ The bounded builder compiles the lane's runtime binaries out of the
 revision under test — the controller and plant servers, the
 sim-net/sim-bus libraries, the monitor's operator CLI, the plant-side
 `dcs-plant-ctl`, the `dcs-forge` checkpoint endpoint, and the
-sim-bus `dcs-sim-bus-device` register-protocol server — then
+sim-bus register-protocol pair — the `dcs-sim-bus-device` server and
+the `dcs-sim-bus-ctl` control tool — then
 packages two minimal images, `dcs-hwtest/controller:<sha>` and
 `dcs-hwtest/plant:<sha>`. Both report the same two digests as
 before; only the binaries riding inside them changed:
@@ -194,12 +195,15 @@ before; only the binaries riding inside them changed:
   so covered operations run through the released binary rather than a
   second implementation of the plant wire protocol (#654).
 - `dcs-hwtest/controller` ships `dcs-controller` as its entrypoint
-  plus `dcs-forge` and `dcs-sim-bus-device` beside it. Both are
-  launched through `--entrypoint` on that one image: the forge is the
-  bridge-placed checkpoint endpoint the tracking-source/auth legs
-  announce, and the device server is the bridge-placed sim-bus field
-  the sim-bus rig legs stage (#1368). A separate bus image would
-  change the reported digest set, so the existing image carries it.
+  plus `dcs-forge`, `dcs-sim-bus-device`, and `dcs-sim-bus-ctl`
+  beside it. The first two are launched through `--entrypoint` on that
+  one image: the forge is the bridge-placed checkpoint endpoint the
+  tracking-source/auth legs announce, and the device server is the
+  bridge-placed sim-bus field the sim-bus rig legs stage (#1368). The
+  third is exec'd inside that same device container, the register
+  protocol's counterpart to the plant image's `dcs-plant-ctl`. A
+  separate bus image would change the reported digest set, so the
+  existing image carries all three.
 - `dcs-ctl` is not in either image: it stays a host-side binary in
   `build-cache/target/release/`, exec'd against the pair's published
   monitor ports.
@@ -253,6 +257,27 @@ leg that needs the server itself to misbehave can still stage a
 protocol double of its own — but the register-protocol evidence runs
 against the shipped binary.
 
+### Driving the register protocol through its own tool
+
+`sim_bus_ctl(*args)` is the register protocol's control seam: it
+`docker exec`s the shipped `dcs-sim-bus-ctl` inside the device
+server's own container against its loopback listener — the same shape
+`plant_ctl` gives the sim-net protocol, and the same reason: nothing
+host-side reaches the rig bridge, so the exchange never leaves the
+network the netpolicy closes, and the ops run through the revision's
+own binary rather than a second Python implementation of the wire
+protocol. The tool's subcommands are its contract: `list` and
+`read <register>` report the register bank the server serves,
+`write`, `step`, and `inject-quality`/`clear-quality` perturb it, and
+`script-exchange <outcome>...` appends to the device's exchange
+queue — `complete`, `miss`, `late`, `short-station:<name>`, or
+`short-registers:<r>[,<r>…]`, one consumed by each following
+`exchange`. The seam returns the tool's own CompletedProcess on a
+refusal as well (`check=False`), so a nonzero exit with its stderr is
+the answer the calling leg classifies, not a docker failure. The seam
+is `None` on a run config that stages no `sim_bus_device`, the absent
+capability a leg declines on rather than staging against it.
+
 ### Attaching a controller to the bus field
 
 The born-seat launcher takes a document-addressed launch alongside its
@@ -284,10 +309,10 @@ keeps the documented `BORN_SCAN_MS` (100) pace, and a non-positive or
 non-integer cadence is refused by name rather than silently paced at
 something else.
 
-Two sim-bus legs stage through it. The sim-cyclic fencing-loss leg
+Three sim-bus legs stage through it. The sim-cyclic fencing-loss leg
 (`2470`) launches a pair on the staged `sim-cyclic` document and
 asserts the fenced-exchange demotion; the sim-bus startup-claim-
-refusal leg (`2480`) is the other: a first controller takes the
+refusal leg (`2480`) is the second: a first controller takes the
 device's write-ownership claim, a second born-active declaring no
 `--peer` must exit nonzero naming the live-holder refusal rather than
 preempting the incumbent, and a `--standby` launch in the same shape
@@ -295,12 +320,22 @@ converges behind it. A rig whose `sim_bus_device` is null, whose
 monitor ports carry no born seats, or whose `plant_owner_tokens` pin
 nothing for that leg's incumbent seat, reports it inconclusive rather
 than staging against an endpoint it was never granted or auditing a
-claimant it cannot attribute. The leg sweeps its three seats and the
+claimant it cannot attribute. That leg sweeps its three seats and the
 device server at the end of every pass and reads the rig back
 afterwards — a seat's presence through `born_controller_state`, the
 device server's own removal error, the deployed pair framed once more
 — so a leftover claim surfaces as a failed leg instead of an inherited
 one.
+
+The scripted-miss claim-hold leg (`2482`) is the third: one
+born-active takes the staged `sim-cyclic` device's write-ownership
+claim, and a `miss` queued through `sim_bus_ctl` must answer in band
+on that live connection — the failed cycle recorded, the claim still
+held, no journaled claim loss or fenced walk — with the `complete`
+queued after it completing on the same link while the device keeps
+serving. It keeps the field single-attached on purpose: the scripted
+queue is device-global, so a second exchanging attachment could
+consume the queued outcome and make the attribution nondeterministic.
 
 ## Storage bound and retention
 

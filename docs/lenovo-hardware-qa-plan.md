@@ -834,6 +834,76 @@ Implementation order: second, after [daily architecture review](daily-architectu
   — report inconclusive; the rig leaves on its launch roles with
   the staged born seats and device container torn down.
 
+### Landed 2026-10-02 (scripted-miss claim-hold leg, #1418)
+
+- The scripted-miss claim-hold contract — the per-revision lane
+  evidence for the contract #1413's fix establishes on the register
+  protocol, the exchange semantics WW-FND-002's claim lifecycle rides
+  — is exercised on the deployed rig by scenario leg
+  `2482_sim_bus_scripted_miss_claim_hold`. A queued `miss` is
+  development tooling deciding what the next exchange observes, so it
+  may cost the consuming attachment its cycle; it must never cost that
+  attachment its connection, and through it the write-ownership claim
+  only a disconnect or `release_writer` may release. The defect the
+  contract answers: the scripted `miss` dropped the consuming
+  connection unanswered, teardown released the claim hold bound to it,
+  and since a bus claim stands only while an attachment holds it, any
+  unfenced attachment could free another's field ownership by queuing
+  one outcome onto the shared device. The outcome now answers `missed`
+  in band, keeping the script queue outside the arbitration
+  vocabulary.
+- The staging is the rig's own register-protocol field: the lane's
+  shipped `dcs-sim-bus-device` server on the run config's
+  `sim_bus_device.cyclic_model` document, and one born-active
+  controller launched onto that staged document on the `driven` born
+  seat with no `--remote` and no pair, so it takes the device's
+  write-ownership claim and serves `field_claim: held`. The `sim-cyclic`
+  document is the one whose per-scan process-image `exchange` is the
+  only traffic the scripted queue feeds, so a queued outcome lands on
+  the claim holder's own scan and nowhere else; the field is kept
+  single-attached on purpose, since the queue is device-global and a
+  second exchanging attachment could consume the queued miss and make
+  the attribution nondeterministic. The device's continued service is
+  witnessed through the holder's own following exchanges and through
+  the shipped `dcs-sim-bus-ctl` the leg scripts and reads it with.
+- That tool is a new lane seam: `sim_bus_ctl(*args)` `docker exec`s it
+  inside the device server's own container against its loopback
+  listener, the register protocol's counterpart to the plant image's
+  `dcs-plant-ctl` — nothing host-side reaches the rig bridge, and the
+  ops ride the revision's own binary rather than a second Python
+  implementation of the wire protocol. `dcs-sim-bus-ctl` now rides the
+  controller image beside `dcs-sim-bus-device`; the entrypoints, the
+  two reported digests, and the host-side `dcs-ctl` seam are
+  unchanged.
+- The pass queues `miss` through that tool and reads the failed cycle
+  the scan recorded: the cumulative `failed_exchanges` moved past the
+  settled baseline, and the driver's own standing description of the
+  failed exchange names the *in-band* scripted miss — the line a
+  severed link cannot produce, since it reads as the dropped
+  connection instead. Across the window the claim the connection
+  carries must survive: the run still reports the device claim held,
+  still `active`, its run tick still moving, and its durable
+  `--journal-file` carrying no `field_claim_lost`, no fenced
+  `active → demoting` walk, no observed foreign claimant, and no
+  second run boundary. The `complete` queued afterwards must answer on
+  the same link — the exchange successes moving past the missed cycle,
+  the link verdict back to connected, the boundary's failure streak
+  back to zero — with the device answering the tool's own served read.
+- A staged revision predating the contract is inconclusive, and the
+  signature is read off the rig rather than assumed: the queued miss
+  answered as a sever and the claim bound to that connection went with
+  it. Named diagnostics are `sim-bus-scripted-miss-failed` and
+  `sim-bus-scripted-miss-nondeterministic`, with the self-check's
+  `sim-bus-scripted-miss-unchecked` covering the planted negatives —
+  the issue's doctored case, a record asserting the claim survived
+  while the device severed the link, plus the claim freed anyway, the
+  fenced and operator demotions, the restarted process, the miss no
+  exchange consumed, a recovery that never completed, and a frozen run
+  clock; two consecutive passes produce identical digests; every pass
+  ends with the seat and the device server swept and the sweep audited
+  back over the rig, the deployed pair framed before, after, and once
+  the leg's own claim is gone.
+
 ### Landed 2026-10-02 (skewed-claim preemption bound leg, #1345)
 
 - The claim-skew preemption bound is exercised per revision by

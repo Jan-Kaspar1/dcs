@@ -1410,7 +1410,8 @@ class DcsCtlBuildTests(unittest.TestCase):
                                             'dcs-plant-ctl',
                                             'dcs-ctl',
                                             'dcs-forge',
-                                            'dcs-sim-bus-device')):
+                                            'dcs-sim-bus-device',
+                                            'dcs-sim-bus-ctl')):
         def fake_docker(*args, timeout=120, check=True):
             calls.append(args)
             if args[0] == 'run' and 'cargo' in str(args):
@@ -1482,7 +1483,8 @@ class PlantCtlShipTests(unittest.TestCase):
                                             'dcs-plant-ctl',
                                             'dcs-ctl',
                                             'dcs-forge',
-                                            'dcs-sim-bus-device')):
+                                            'dcs-sim-bus-device',
+                                            'dcs-sim-bus-ctl')):
         def fake_docker(*args, timeout=120, check=True):
             calls.append((args, check))
             if args[0] == 'run' and 'cargo' in str(args):
@@ -3032,7 +3034,8 @@ class ForgeEndpointTests(unittest.TestCase):
                 target.mkdir(parents=True, exist_ok=True)
                 for binary in ('dcs-controller', 'dcs-plant-server',
                                'dcs-plant-ctl', 'dcs-ctl', 'dcs-forge',
-                               'dcs-sim-bus-device'):
+                               'dcs-sim-bus-device',
+                               'dcs-sim-bus-ctl'):
                     (target / binary).write_text('bin')
             if args[:2] == ('image', 'inspect'):
                 return Result('sha256:' + 'a' * 64)
@@ -3122,7 +3125,8 @@ class SimBusDeviceImageTests(unittest.TestCase):
                                             'dcs-plant-ctl',
                                             'dcs-ctl',
                                             'dcs-forge',
-                                            'dcs-sim-bus-device')):
+                                            'dcs-sim-bus-device',
+                                            'dcs-sim-bus-ctl')):
         target = Path(self.cfg['state_dir']) / 'build-cache' \
             / 'target' / 'release'
 
@@ -3467,6 +3471,48 @@ class SimBusDeviceImageTests(unittest.TestCase):
         self.assertIn('--entrypoint', launch)
         self.assertIn('dcs-sim-bus-device', launch)
         self.assertEqual(calls[-1], ('rm', '-f', 'dcs-hw-qa-1-bus'))
+
+    def test_scenario_ctx_execs_the_control_tool_in_the_device(self):
+        # The scripted-outcome seam: the shipped dcs-sim-bus-ctl runs
+        # inside the device server's own container against its loopback
+        # listener, the register protocol's counterpart to the plant
+        # image's dcs-plant-ctl — a host-side attachment could not
+        # reach the bridge at all, and a second Python implementation
+        # of the wire protocol would not be the revision's own tool.
+        calls = []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append((args, check))
+            return Result('{\n  "result": "done"\n}\n')
+
+        with patch.object(runner, 'docker', fake_docker):
+            ctx = runner._scenario_ctx(
+                self.cfg, self._record(), self.src, self.run_dir,
+                self.run_dir / 'evidence', 0,
+                lambda e, d=None: None)
+            answer = ctx['sim_bus_ctl']('script-exchange', 'miss')
+            listed = ctx['sim_bus_ctl']('list')
+        self.assertEqual(calls[0], (
+            ('exec', 'dcs-hw-qa-1-bus', 'dcs-sim-bus-ctl',
+             '127.0.0.1:9005', 'script-exchange', 'miss'), False))
+        self.assertEqual(calls[1][0][-1], 'list')
+        # The tool's own exit is the answer a leg classifies, so a
+        # refused request never raises through the seam.
+        self.assertEqual(answer.returncode, 0)
+        self.assertIn('done', answer.stdout)
+        self.assertEqual(listed.returncode, 0)
+
+    def test_the_control_tool_seam_is_absent_without_a_staged_device(self):
+        self.cfg['sim_bus_device'] = None
+        calls = []
+        with patch.object(runner, 'docker',
+                          self._serving_docker(calls)):
+            ctx = runner._scenario_ctx(
+                self.cfg, self._record(), self.src, self.run_dir,
+                self.run_dir / 'evidence', 0,
+                lambda e, d=None: None)
+        self.assertIsNone(ctx['sim_bus_ctl'])
+        self.assertEqual(calls, [])
 
     def test_timeout_ms_stamps_the_staged_document(self):
         # The reattach leg's stall has to produce a failed exchange:

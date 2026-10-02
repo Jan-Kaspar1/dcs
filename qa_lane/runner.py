@@ -184,8 +184,11 @@ DEFAULT_CONFIG = {
     # The lane's sim-bus device server (#1368): the register-protocol
     # endpoint the sim-bus rig legs stage on the rig bridge. The lane's
     # bounded build compiles the shipped `dcs-sim-bus-device` binary and
-    # the controller image carries it beside its entrypoint, so a leg
-    # launches the real protocol server out of the revision under test
+    # `dcs-sim-bus-ctl` beside it — the protocol's client-side tool a leg
+    # execs inside the server's own container to script the exchanges it
+    # is about to observe — and the controller image carries both beside
+    # its entrypoint, so a leg launches the real protocol server and
+    # drives the real control surface out of the revision under test
     # — the shipping precedent #654 recorded for the plant image's
     # dcs-plant-ctl — instead of a second implementation of the wire
     # protocol. The block names the device the server serves out of the
@@ -917,9 +920,10 @@ def _build_images(src, cfg, run_dir, timeline, run_id):
             '-p dcs-controller -p dcs-plant -p dcs-sim-net '
             '&& cargo build --release --locked '
             '-p dcs-monitor --bin dcs-ctl --bin dcs-forge '
-            '&& cargo build --release --locked '
-            '-p dcs-sim-bus --bin dcs-sim-bus-device',
-            timeout=cfg['builder_timeout'])
+             '&& cargo build --release --locked '
+             '-p dcs-sim-bus --bin dcs-sim-bus-device '
+             '--bin dcs-sim-bus-ctl',
+             timeout=cfg['builder_timeout'])
     # Extra binaries each image ships beside its entrypoint: the plant
     # image carries dcs-plant-ctl — the plant-side tool the lane execs
     # inside the container against the server's loopback listener, so
@@ -927,16 +931,24 @@ def _build_images(src, cfg, run_dir, timeline, run_id):
     # a second Python implementation of the wire protocol; the
     # controller image carries dcs-forge — the announced-source legs'
     # bridge-placed checkpoint endpoint the runner launches with
-    # --entrypoint dcs-forge — and dcs-sim-bus-device, the
-    # register-protocol server the sim-bus legs launch the same way:
-    # the real device server out of the revision under test, serving the
-    # mounted bus model on the rig bridge, so the register-protocol
-    # evidence runs against the released binary and not against the
-    # lane's own protocol double. Both rides the existing image rather
-    # than a third one: the entrypoints, the two reported digests, and
-    # the host-side dcs-ctl seam are unchanged.
+    # --entrypoint dcs-forge — and the register protocol's pair of
+    # shipped binaries: dcs-sim-bus-device, the device server the
+    # sim-bus legs launch the same way — the real device server out of
+    # the revision under test, serving the mounted bus model on the rig
+    # bridge, so the register-protocol evidence runs against the
+    # released binary and not against the lane's own protocol double —
+    # and dcs-sim-bus-ctl, the register protocol's client-side
+    # development tool, which the lane execs inside that server's own
+    # container against its loopback listener the same seam the plant
+    # image's dcs-plant-ctl gives the sim-net protocol: the scripted
+    # exchange outcomes a leg queues on a staged device must ride the
+    # shipped binary rather than a second Python implementation of the
+    # wire protocol. All three ride the existing images rather than
+    # another one: the entrypoints, the two reported digests, and the
+    # host-side dcs-ctl seam are unchanged.
     ship = {'plant': ['dcs-plant-ctl'],
-            'controller': ['dcs-forge', 'dcs-sim-bus-device']}
+            'controller': ['dcs-forge', 'dcs-sim-bus-device',
+                           'dcs-sim-bus-ctl']}
     digests = {}
     for crate, binary, tag in (
             ('controller', 'dcs-controller', 'dcs-hwtest/controller'),
@@ -3034,6 +3046,33 @@ def sim_bus_device_serving(run_id, device):
     return 'serving device ' + str(device) + ' on' in report
 
 
+def sim_bus_ctl(run_id, port, *args):
+    """The scenario-callable register-protocol control invocation:
+    `docker exec` runs the shipped `dcs-sim-bus-ctl` inside the lane's
+    sim-bus device container against the server's own loopback listener
+    — the register protocol's counterpart to `plant_ctl`, and the same
+    honest seam: the scripted outcomes, served reads, quality injections
+    and steps a leg drives ride the released binary of the revision
+    under test rather than a second Python implementation of the wire
+    protocol.
+
+    The device server binds `0.0.0.0` inside its own netns, so the
+    tool's loopback address reaches it without the exchange ever
+    leaving the rig bridge the netpolicy closes — a host-side
+    attachment could not, which is why the tool runs in the container
+    the protocol already lives in. The tool's own subcommands carry the
+    ops: `script-exchange <outcome>...` appends to the device's
+    exchange queue, `list`/`read` report the register bank the server
+    serves, and a nonzero exit with its stderr is the tool's answer to
+    classify. `check=False` returns the CompletedProcess on a refused
+    request too — the tool's nonzero exit and stderr are the answer the
+    caller classifies, not a docker failure."""
+    container = 'dcs-hw-' + run_id + '-bus'
+    return docker('exec', container, 'dcs-sim-bus-ctl',
+                  '127.0.0.1:' + str(port), *args,
+                  check=False, timeout=60)
+
+
 # The born-active startup-failure leg's staging surface (decision 103 —
 # #985's record, #1017's implementation, #1033's consuming leg): a
 # scratch sim-serve field the leg silences, serves, and freezes — never
@@ -3450,10 +3489,12 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
     sim-bus device server's launch/teardown (#1368), its
     control-connection sever (a restart, which drops every
     attachment's connection and releases the connection-bound claim
-    with them), and the run config's staged block describing the device
-    it serves — the drain-stall tracer lever the durable-history leg's
-    parked-writer induction drives (None where the runner admits no
-    tracer) — and the host-side
+    with them), the shipped `dcs-sim-bus-ctl` invocation that scripts
+    the staged device's exchange outcomes through the revision's own
+    control tool, and the run config's staged block describing the
+    device it serves — the drain-stall tracer lever the durable-history
+    leg's parked-writer induction drives (None where the runner admits
+    no tracer) — and the host-side
     per-controller state/journal/history files the restart and
     model-revision
     scenarios read — and, under 'probe', the same ctx shape
@@ -3465,6 +3506,7 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
              'foreign': 'foreign', 'driven': 'd'}
     mounts = _state_file_mounts(cfg)
     lever = _drain_stall_lever()
+    bus = _sim_bus_device(cfg)
     ctx = {
         'active': 'http://127.0.0.1:' + str(cfg['active_port']),
         'standby': 'http://127.0.0.1:' + str(cfg['standby_port']),
@@ -3663,6 +3705,13 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         # and sim_bus_device_serving reports whether the register
         # protocol is answering right now, so a leg separates a field
         # that never came back from a driver that never re-attached.
+        # sim_bus_ctl runs the shipped dcs-sim-bus-ctl inside the
+        # device container against its loopback listener — the seam a
+        # leg scripts the device's exchange outcomes (and reads its
+        # register bank) through, so the scripted-miss contract is
+        # driven by the revision's own control tool. None where the run
+        # config stages no device server, the absent capability a leg
+        # declines on.
         'start_sim_bus_device': lambda fixture=None, timeout_ms=None:
             start_sim_bus_device(
                 cfg, record, run_dir, timeline, fixture=fixture,
@@ -3677,6 +3726,8 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
             run_id, timeline),
         'sim_bus_device_serving': lambda device:
             sim_bus_device_serving(run_id, device),
+        'sim_bus_ctl': (lambda *args: sim_bus_ctl(
+            run_id, bus['port'], *args)) if bus else None,
         # The run config's staged device-server block, or None where the
         # config stages none: a leg reads the absent capability here
         # instead of staging a launch that raises, and names the device
