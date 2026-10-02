@@ -10,8 +10,11 @@ its clone lease in `jobs` while releasing its inference lease here.
 Quota feedback is scoped to the affected group: a rate-limit receipt
 cools down only the models sharing that provider budget, other groups
 keep dispatching, and recovery reopens with a single probe session
-instead of a retry wave. Authentication and credit failures block the
-group until an explicit operator reset — sleeping cannot fix them.
+instead of a retry wave. A probe that ends in a generic failure re-arms
+the cooldown, so a crashing spawn paces the next probe at the cooldown
+interval instead of respinning at the dispatch rate. Authentication and
+credit failures block the group until an explicit operator reset —
+sleeping cannot fix them.
 
 Provider delay hints are read in the provider's own units and bounded by
 the cooldown ceiling, and a hint never classifies a receipt: only a quota
@@ -352,6 +355,12 @@ class Admission:
                         self.db.execute("UPDATE admission_groups SET mode='normal',cooldown_until=NULL,"
                                         'cooldown_len=?,congested_at=NULL WHERE grp=?',
                                         (self.cooldown, name))
+                elif (category == 'failure' and lease and lease['probe']
+                        and group['mode'] == 'probing'):
+                    length = group['cooldown_len'] or self.cooldown
+                    cooldown_until = max(group['cooldown_until'] or 0, now + length + self.jitter())
+                    self.db.execute('UPDATE admission_groups SET cooldown_until=? WHERE grp=?',
+                                    (cooldown_until, name))
             self.db.commit()
         except Exception:
             self.db.rollback()
