@@ -120,10 +120,11 @@ import stranded_rejoin
 # timeouts — must surface the named diagnostic on the honest bounded
 # run rather than passing an unexercised contract.
 LEG = {
-    # The next free slot after the release-class legs origin/main
-    # added (demote-release-stays-released 750) — the stage runs the
-    # legs in this order and no two may share one.
-    "order": 760,
+    # The next free slot after the legs origin/main added past the
+    # release-class order (self-standby-refusal 760, the
+    # convergence-gated reclaim 770) — the stage runs the legs in this
+    # order and no two may share one.
+    "order": 780,
     "title": "the pending-serving-bound leg",
     "passes": "pending-serving-bound-leg",
     "tampers": [
