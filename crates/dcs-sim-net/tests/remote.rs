@@ -1061,6 +1061,73 @@ fn a_run_resumed_behind_the_plant_domain_still_marks_stale() {
 }
 
 #[test]
+fn a_reader_outpacing_the_field_owners_step_cadence_never_flaps_stale() {
+    // The freshness finding's reproduction over the real remote driver:
+    // one peer scanning ten times faster than the field owner steps the
+    // shared plant. Every plant step re-stamps the bare channel's held
+    // sample, so nine of every ten reads serve the byte-identical
+    // plant-stamped report — and the declared budget, five reader
+    // ticks, must not read that pace asymmetry as staleness.
+    with_server(bare_map(), |addr| {
+        let remote = RemoteDriver::connect(addr).unwrap();
+        remote.claim_writer(1).unwrap();
+        let mut executor = Executor::new(
+            &remote,
+            budgeted_map(10, 5),
+            vec![Box::new(Accumulator {
+                input: PointId(10),
+                output: PointId(20),
+                total: 0.0,
+            })],
+        )
+        .unwrap();
+
+        // Sixty scans, the owner stepping every tenth of them.
+        for scan in 1..=60 {
+            if scan % 10 == 1 {
+                remote.step(0.1).unwrap();
+            }
+            executor.scan();
+            // The cold start is judged on the declared budget alone —
+            // the run had not yet watched the owner publish. From the
+            // arrival period the first publication demonstrated on, the
+            // held reports between two steps are the field keeping its
+            // own pace, and no scan may present the stale verdict.
+            if scan > 10 {
+                assert_eq!(
+                    executor.sample(PointId(10)).unwrap().quality,
+                    Quality::Good,
+                    "scan {scan} read a report the owner was about to \
+                     refresh as stale — the reader's pace, not the \
+                     field's freshness"
+                );
+            }
+        }
+
+        // The owner stops stepping: the report freezes at the last
+        // plant step and the run's own clock is the only evidence left.
+        // The held report reads fresh while its lag sits inside the
+        // demonstrated arrival period — the owner's own ten-scan step
+        // cadence — and presents stale one tick past it: the
+        // frozen-field verdict, reached on the source's pace rather than
+        // on the reader's.
+        executor.scan();
+        assert_eq!(executor.sample(PointId(10)).unwrap().quality, Quality::Good);
+        executor.scan();
+        assert_eq!(
+            executor.sample(PointId(10)).unwrap().quality,
+            Quality::Uncertain(QualityReason::Stale)
+        );
+
+        // The owner resumes stepping: the re-stamped report is a
+        // changed report, and the driver's own quality lands with it.
+        remote.step(0.1).unwrap();
+        executor.scan();
+        assert_eq!(executor.sample(PointId(10)).unwrap().quality, Quality::Good);
+    });
+}
+
+#[test]
 fn the_writer_claim_fences_every_attachment_not_holding_it() {
     with_server(loopback_map(), |addr| {
         // Two attachments per side — the multi-connection shape one

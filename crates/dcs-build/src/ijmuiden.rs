@@ -199,9 +199,30 @@ pub mod schedule {
     /// The field mode reports automatic again.
     pub const MODE_TO_AUTO: u64 = 45;
     /// The remote repeater's last update before the comms freeze —
-    /// `level-remote` presents `Uncertain(Stale)` once
-    /// `stale_after_ticks` elapses past this tick.
+    /// `level-remote` presents `Uncertain(Stale)` once its freshness
+    /// patience elapses past this tick (see [`REMOTE_FIRST_STALE`]).
     pub const REMOTE_LAST_UPDATE: u64 = 10;
+    /// The remote repeater's declared freshness budget, in scan ticks
+    /// — the floor the `stale_after_ticks` declaration carries on
+    /// `level-remote`.
+    pub const REMOTE_STALE_AFTER: u64 = 3;
+    /// The remote repeater's scripted playback publishes every four
+    /// driver ticks before the freeze — the arrival period a run
+    /// demonstrates on that point, and the patience its declared
+    /// budget is widened to while the field keeps publishing.
+    pub const REMOTE_PERIOD: u64 = 4;
+    /// The scan at which the frozen repeater's held report first
+    /// presents `Uncertain(Stale)`: the lag past
+    /// [`REMOTE_LAST_UPDATE`] crossing the greater of the declared
+    /// [`REMOTE_STALE_AFTER`] budget and the [`REMOTE_PERIOD`]
+    /// arrival period the playback demonstrated (decision 45).
+    pub const REMOTE_FIRST_STALE: u64 = REMOTE_LAST_UPDATE
+        + if REMOTE_STALE_AFTER > REMOTE_PERIOD {
+            REMOTE_STALE_AFTER
+        } else {
+            REMOTE_PERIOD
+        }
+        + 1;
     /// The remote repeater's comms recover.
     pub const REMOTE_RECOVERY: u64 = 30;
     /// The independent high-high layer trips — the scripted inflow
@@ -233,10 +254,6 @@ const SIGNAL_BASE: u64 = 10_000;
 
 /// The bound a single-sided level alarm parks its unused limit at.
 const PARKED_LIMIT: f64 = 1.0e9;
-
-/// The remote repeater's declared freshness budget — three scans past
-/// the last scripted update the image sample lands `Uncertain(Stale)`.
-const REMOTE_STALE_AFTER: u64 = 3;
 
 /// The independent high-high layer's declared trip bound, in metres —
 /// the `threshold` element's `on`: the canal `level` reaching it
@@ -576,7 +593,7 @@ pub fn ijmuiden(config: &IjmuidenConfig) -> Result<Ijmuiden, BuildError> {
         points::LEVEL_REMOTE,
         level_remote_ch,
         false,
-        REMOTE_STALE_AFTER,
+        schedule::REMOTE_STALE_AFTER,
     );
     let gate_mode = plant.field_input::<bool>(points::GATE_MODE, gate_mode_ch, false);
     let sis_available = plant.field_input::<bool>(points::SIS_AVAILABLE, sis_available_ch, false);

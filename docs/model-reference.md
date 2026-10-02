@@ -212,22 +212,23 @@ availability: every bound `In` port's adapted `write_value:<port>`,
 
 ### `stale_after_ticks` and input freshness
 
-`stale_after_ticks` declares how fresh a field `in` point's samples must
-stay: the number of executor scan ticks the point's driver-returned
-report may go unchanged before the point's data is stale (decision 45).
-The budget lives in the point map assembly produces, and the *executor's
-input phase* applies the rule in the run's own tick domain — each scan,
-for a budgeted field `in` point, it compares the sample the driver
-returned against the report last observed on that point:
+`stale_after_ticks` declares how patient a run may be with a field `in`
+point's data: the number of executor scan ticks the point's
+driver-returned report may go unchanged before the point's data is stale
+(decision 45). The budget lives in the point map assembly produces, and
+the *executor's input phase* applies the rule in the run's own tick
+domain — each scan, for a budgeted field `in` point, it compares the
+sample the driver returned against the report last observed on that
+point:
 
 - a changed report — value, quality, or stamp — is fresh evidence: the
   observation age restarts at the current scan tick and the
   driver-returned quality lands untouched;
-- a report unchanged for more scan ticks than the budget merges
-  `Uncertain(Stale)` by the worst-of rule, so a driver-reported `Bad`
-  or worse-named `Uncertain` is never improved, while a held `Good`
-  value degrades to `Uncertain(Stale)` until the next changed report
-  returns it to `Good`;
+- a report unchanged for more scan ticks than the point's *patience*
+  merges `Uncertain(Stale)` by the worst-of rule, so a driver-reported
+  `Bad` or worse-named `Uncertain` is never improved, while a held
+  `Good` value degrades to `Uncertain(Stale)` until the next changed
+  report returns it to `Good`;
 - the landed image sample always carries the scan tick — the executor
   is the only timestamp authority; the driver-returned sample is
   freshness evidence, never an image timestamp;
@@ -245,6 +246,32 @@ forever, and a run resumed behind the driver's domain as fresh forever;
 change-tracking marks both correctly — stale while the report holds,
 the driver's own quality the scan it moves again.
 
+The patience a report is held to is the **greater of the declared
+budget and the arrival period the run has demonstrated on that point**:
+the reader-tick gaps between the report changes the run has watched. The
+budget is a floor, because a run tick measures the *reader's* patience
+and a reader cannot see a publication it has not been sent yet — a peer
+scanning faster than the field owner steps its inputs reads the same
+report on every scan in between, and a budget below the owner's step
+period would present a healthy field as stale on every step. What the
+declaration buys is therefore a bound on how long the reader tolerates
+silence, not a bound on how old the data may be in wall time; a field
+that stops publishing ages to stale one demonstrated period past its
+last report, and a point whose report has never moved answers to the
+declared budget alone.
+
+Two gaps decide that period, not one, so a source's own jitter cannot
+make the verdict flap under a report that keeps arriving. Two rather than
+every gap, so one unusually long silence does not relax the verdict for
+good, and a gap spanning the run's own failed exchange or failed read
+demonstrates nothing at all — a report held across the run'7s own
+transport trouble is not evidence about how fast the field publishes, and
+a forced point'7s window ends the arrival evidence outright because it
+answers to no driver report. Before the run has watched a point publish,
+nothing is demonstrated and the declared budget judges the report alone:
+a peer that starts observing a slower field may see one stale interval
+there, and none after its first two publications.
+
 A budget of `0` requires a changed report every scan — the strictest
 declaration, for sources expected to refresh every scan. The sim bank,
 the remote plant, and the sim-bus register bank all stamp their writes
@@ -254,7 +281,10 @@ changes. A driver whose samples carry no usable freshness signal — one
 that returns a changed report every read, or one whose report never
 varies — simply makes the declaration inert or always-stale; declare
 the field only where the source distinguishes fresh samples from held
-ones.
+ones, and size the budget to the reader's scan period rather than to
+the field's own step period — the arrival period covers the difference
+on a reader that paces itself, but a budget far below the demonstrated
+period is a declaration the runtime cannot honour.
 
 A channel-bound `in` point that declares no budget is lint
 `field_input_without_freshness_budget`: the stale-data honesty rule
