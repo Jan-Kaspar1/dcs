@@ -87,7 +87,9 @@ A pinned release predating the contract reports
 same-shape control's paced pulls cannot carry the deployed active's
 served document across a cycle slower than the fixed one-second bound
 the contract replaced — which is how every released artifact set reads
-until a release carries it — a born-active launch exiting at startup
+until the fix's release is cut, `docs/releases/v0.8.0`'s record
+carrying it while its tag stands pending — a born-active launch
+exiting at startup
 naming a field-side refusal, a pending run serving no honest pending
 surface, the labeled seats' served reports stalling inside the liveness
 bound, the field owner's startup log carrying no owner-token claim
@@ -141,7 +143,7 @@ import simulate
 # surface the named diagnostic on the honest converging run, never let a
 # defect pass silently.
 LEG = {
-    "order": 720,
+    "order": 730,
     "title": "the pending-source-pull latch leg",
     "passes": "pending-source-pull",
     "tampers": [
