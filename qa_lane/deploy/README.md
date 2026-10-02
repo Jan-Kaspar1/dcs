@@ -272,6 +272,18 @@ wiring, the refuse-to-replace guard — and the return value's `model`
 names the document actually mounted beside `remote: None`, so a leg
 can evidence that both ends read the one declaration it staged.
 
+The launcher also takes a per-container cadence: `start_born_controller
+(seat, remote, peer=, standby=, document=, scan_ms=)` sets that
+container's own `--scan-ms`, and the return value's `scan_ms` names the
+pace it actually runs at. A run's tick accrues one per scan, so a seat
+launched at 25 ms accrues four ticks for every one a 100 ms-paced peer
+does — the rig's own clock skew, staged on the rig instead of injected,
+which the claim-skew leg (`2490`) reads back off both seats' served
+`/role` ticks before a claimant computes its claim. Omitting `scan_ms`
+keeps the documented `BORN_SCAN_MS` (100) pace, and a non-positive or
+non-integer cadence is refused by name rather than silently paced at
+something else.
+
 Two sim-bus legs stage through it. The sim-cyclic fencing-loss leg
 (`2470`) launches a pair on the staged `sim-cyclic` document and
 asserts the fenced-exchange demotion; the sim-bus startup-claim-
