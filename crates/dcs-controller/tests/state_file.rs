@@ -335,6 +335,116 @@ fn a_driven_run_resumes_from_its_state_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The QA finding `state-file-shared-between-processes-not-detected`:
+/// the checkpoint carries one run's state — its tick domain, its
+/// receipt log, its component state — so `--state-file` is
+/// single-writer, the contract the append sinks already declare. Two
+/// live controllers pointed at one path used to both run and exit `0`,
+/// each save overwriting the other's state until a restart adopted
+/// whichever wrote last as its own. The second live writer now exits
+/// nonzero naming the writer-lock conflict, and the run holding the
+/// file is undisturbed by the refusal.
+#[test]
+fn a_second_live_controller_on_one_state_file_exits_naming_the_writer_lock() {
+    let dir = scratch("shared-writer");
+    let state = dir.join("state.json");
+    let state_arg = state.to_str().unwrap().to_string();
+    let args = || {
+        vec![
+            TANK_LOOP.to_string(),
+            "--listen".to_string(),
+            "127.0.0.1:0".to_string(),
+            "--driven".to_string(),
+            "--state-file".to_string(),
+            state_arg.clone(),
+        ]
+    };
+
+    // The incumbent: a live run persisting each requested scan into
+    // the shared path, holding the writer lock from before its own
+    // resume through its last save.
+    let mut first = spawn_driven(&args());
+    let client = MonitorClient::new(first.addr);
+    client.advance(HALF).unwrap();
+
+    // The misconfiguration — a second live controller on the same
+    // `--state-file` — refuses at its startup claim on the checkpoint:
+    // the file, the sidecar the lock lives on, and the live holder.
+    let second = run(&[TANK_LOOP, "--ticks", "10", "--state-file", &state_arg]);
+    assert!(!second.status.success());
+    let stderr = String::from_utf8(second.stderr).unwrap();
+    assert!(stderr.contains("writer lock"), "{stderr}");
+    assert!(stderr.contains(state.to_str().unwrap()), "{stderr}");
+    assert!(
+        stderr.contains(
+            dcs_monitor::StateWriterLock::lock_path(&state)
+                .to_str()
+                .unwrap()
+        ),
+        "{stderr}"
+    );
+    assert!(second.stdout.is_empty(), "no partial run's output");
+
+    // The holder is undisturbed: it keeps scanning, and the file still
+    // holds its own run's state.
+    let snapshot = client.advance(2).unwrap();
+    assert_eq!(snapshot.tick, Tick(HALF + 2));
+    assert_eq!(persisted(&state).tick, Tick(HALF + 2));
+
+    // And once the holder dies — its descriptor releasing the lock —
+    // the restart resumes that file rather than starting cold: the
+    // recovery the checkpoint exists for, unchanged by the guard.
+    kill(&mut first);
+    let resumed = run(&[TANK_LOOP, "--ticks", "10", "--state-file", &state_arg]);
+    assert!(resumed.status.success());
+    let stderr = String::from_utf8(resumed.stderr).unwrap();
+    assert!(stderr.contains("resumed from state file"), "{stderr}");
+    assert_eq!(persisted(&state).tick, Tick(HALF + 2 + 10));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same refusal on the paced shape a deployment launches: a
+/// `--standby` peer sharing one `--state-file` with its active — the
+/// shared-volume misconfiguration the finding's vector names — must not
+/// boot into tracking pulls and saves beside it.
+#[test]
+fn a_shared_state_file_refuses_a_paced_standby_beside_its_active() {
+    let dir = scratch("shared-paced");
+    let state = dir.join("state.json");
+    let state_arg = state.to_str().unwrap().to_string();
+
+    // The active: a paced run owning the file.
+    let active_args = vec![
+        TANK_LOOP.to_string(),
+        "--listen".to_string(),
+        "127.0.0.1:0".to_string(),
+        "--scan-ms".to_string(),
+        "25".to_string(),
+        "--state-file".to_string(),
+        state_arg.clone(),
+    ];
+    let (active, _) = spawn_logged(Path::new(BINARY), &active_args, listening_on);
+    let peer = format!("http://{}", active.addr);
+    let standby = run(&[
+        TANK_LOOP,
+        "--listen",
+        "127.0.0.1:0",
+        "--scan-ms",
+        "25",
+        "--standby",
+        &peer,
+        "--state-file",
+        &state_arg,
+    ]);
+    assert!(!standby.status.success());
+    let stderr = String::from_utf8(standby.stderr).unwrap();
+    assert!(stderr.contains("writer lock"), "{stderr}");
+    assert!(stderr.contains(state.to_str().unwrap()), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The QA finding `standby-source-unresolvable-fatal-on-owner-resume`:
 /// a controller restarted mid-failover — its state file resuming, the
 /// `--standby` peer's name gone from DNS with the stopped peer — used
