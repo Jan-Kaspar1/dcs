@@ -1497,7 +1497,7 @@ def relaunch_controller(cfg, record, run_dir, model, name, timeline,
     container = prefix + '-' + peer
     monitor_port = PAIR_MONITOR_PORTS[name]
     command = _controller_argv(cfg, pair, name, prefix, track=track)
-    flag = '' if track is None else (
+    track_flag = '' if track is None else (
         ('--peer ' if name == 'active' else '--standby ') + track)
     # The shared-state alias: the member's declared CONTAINER_RUN_DIR
     # mounts the named peer's directory instead of its own, so the
@@ -1515,17 +1515,17 @@ def relaunch_controller(cfg, record, run_dir, model, name, timeline,
             + ':' + CONTAINER_RUN_DIR,
             '-v', str(_controller_dir(run_dir, peer))
             + ':' + CONTAINER_OWN_RUN_DIR]
-        for flag, target in (
+        for append_flag, target in (
                 ('--journal-file',
                  CONTAINER_OWN_RUN_DIR + '/journal.jsonl'),
                 ('--history-file',
                  CONTAINER_OWN_RUN_DIR + '/history.jsonl')):
-            command[command.index(flag) + 1] = target
+            command[command.index(append_flag) + 1] = target
         alias = ('; --state-file aliases ' + prefix + '-'
                  + peers[share_state_with] + '\'s '
                  + CONTAINER_STATE_FILE)
     timeline('controller-relaunch', 'docker rm -f ' + container
-             + ('; launch ' + flag if flag
+             + ('; launch ' + track_flag if track_flag
                 else '; launch flags restored') + alias)
     removed = docker('rm', '-f', container, check=False, timeout=90)
     docker(*_docker_run_args(cfg, run_id, container),
@@ -1537,7 +1537,8 @@ def relaunch_controller(cfg, record, run_dir, model, name, timeline,
            IMAGE_PREFIX + 'controller:' + sha,
            *command)
     timeline('controller-relaunched', container + ' running'
-             + (' with ' + flag if flag else ' with its launch flags')
+             + (' with ' + track_flag if track_flag
+                else ' with its launch flags') + alias
              + ('' if removed.returncode == 0
                 else ' (previous container already absent)'))
 

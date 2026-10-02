@@ -1139,6 +1139,64 @@ Implementation order: second, after [daily architecture review](daily-architectu
   durable record is present, and the leg names it as the contract
   failure it is.
 
+### Landed 2026-10-02 (cross-peer shared-state-file refusal leg, #1347)
+
+- The cross-peer persistence-path distinctness refusal — the per-revision
+  lane evidence for the contract #1341's fix establishes, the family
+  the 3695 leg pins within one launch — is exercised on the deployed rig
+  by scenario leg `3697_shared_state_file_refusal`. The `--state-file`
+  checkpoint carries one run's tick domain, receipt log, and component
+  state, so it is single-writer: the guard rides a `.lock` sidecar the
+  write-then-rename never replaces, which is what keeps the claim
+  attached to the path across every save. The guard compares the
+  declared paths inside one launch, so the deployed pair had never been
+  read against it: two peers configured with the same `--state-file` —
+  a shared volume, a copied bind-mount stanza, one member's directory
+  mounted over the other's — each replace the other's checkpoint on
+  every capture, and nothing reports the second writer. A restart
+  resuming that file adopts whichever run renamed last as its own
+  state, under the model fingerprint any same-model writer matches.
+  #1341's fix refuses the configuration at startup: the launch whose
+  `--state-file` a live peer already claimed exits nonzero naming the
+  file, its sidecar, and the conflict it found held.
+- The leg stages that misconfiguration on the deployed pair through the
+  run context's new `share_state_with` deployment doctoring: the
+  runner's relaunch lever rebuilds the non-owner's launch with its
+  declared persistence directory bind-mounted onto the live owner's,
+  the member's own directory still mounted at a second path serving
+  only its `--journal-file`/`--history-file` append sinks. The pair's
+  identical declarations then resolve to one backing checkpoint, the
+  owner's live writer lock included, and the only refusal available is
+  the cross-peer single-writer claim — never an append sink's own lock,
+  never a same-launch path comparison. The member relaunched is the
+  pair's non-owner, so the staged refusal costs the field nothing.
+- The claims: the correctly-pathed pair settles and tracks with each
+  member's own checkpoint carrying its own run `generation`; the
+  aliased member's container reads down with a nonzero exit (or no live
+  process) and its captured output naming the shared checkpoint, its
+  `.lock` sidecar, and the writer-lock conflict, its monitor falling
+  silent; the shared checkpoint sampled across the staged window keeps
+  the owner's generation while the owner's tick keeps advancing and the
+  aliased member's own file stands untouched, the field owner still
+  `role=active` and answering every poll; and the correctly-pathed
+  relaunch restores the member so the pair reconverges to one active
+  plus a tracking standby. The leg runs after the same-peer
+  alias-refusal leg and before the unclaimed-rearm leg, so the 3695
+  verdict is read on its own scratch probes and the leg leaves the
+  launch roles the cases behind it need.
+- Named diagnostics are `shared-state-file-accepted` (a contract miss:
+  an aliased launch that served, exited 0, refused unnamed, kept its
+  monitor up, or left the shared checkpoint carrying both runs' writes)
+  and `shared-state-file-nondeterministic` (unread verdicts, an
+  unsettled, moved, frozen, or silent owner, a stalled shared
+  checkpoint, an unrestored pair, two passes disagreeing), with the
+  self-check's `shared-state-file-unchecked` covering every planted
+  negative. Two consecutive passes produce identical digests; a run
+  context carrying no relaunch lever, no container-state probe, or no
+  per-member `--state-file` path, a single-endpoint, unreachable, or
+  never-settling rig, and a staging that never landed report
+  inconclusive.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,
