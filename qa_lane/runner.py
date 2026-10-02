@@ -1079,6 +1079,12 @@ CONTAINER_JOURNAL_FILE = CONTAINER_RUN_DIR + '/journal.jsonl'
 # — the declared-duty sample record a restart replays, inspectable
 # host-side for the durable-history leg's file audit.
 CONTAINER_HISTORY_FILE = CONTAINER_RUN_DIR + '/history.jsonl'
+# The shared-state-file leg's second mount point (#1347): a member
+# relaunched with its persistence dir aliased onto its peer's keeps
+# its own directory mounted here so only --state-file aliases — the
+# member's append sinks keep serving their own files and the refusal
+# can only come from the cross-peer single-writer claim.
+CONTAINER_OWN_RUN_DIR = '/var/lib/dcs-own'
 
 # The endpoint keys whose controllers the runner launches — the pair
 # `_start_rig` brings up, the three scenario-action peers, and the
@@ -1424,7 +1430,8 @@ def cold_restart_controller(run_id, run_dir, name, timeline,
 
 
 def relaunch_controller(cfg, record, run_dir, model, name, timeline,
-                        track=None, pair='deployed'):
+                        track=None, pair='deployed',
+                        share_state_with=None):
     """The scenario-callable flag-doctoring relaunch: `docker rm -f`
     on the pair member's container, then a fresh `docker run`
     rebuilding the member's launch through the same _controller_argv
@@ -1456,6 +1463,20 @@ def relaunch_controller(cfg, record, run_dir, model, name, timeline,
     the run half still raises on a docker failure so the calling
     scenario reports the relaunch never completed. Both halves are
     recorded on the run's action timeline.
+
+    `share_state_with` is the shared-state-file leg's deployment
+    doctoring (#1347): a peer endpoint key whose runner-owned
+    persistence directory is bind-mounted at CONTAINER_RUN_DIR in
+    place of the member's own, so both peers' identical --state-file
+    declaration resolves to one backing checkpoint — the
+    shared-volume misconfiguration the checkpoint's single-writer
+    lock exists to refuse. The member's own directory still mounts
+    at CONTAINER_OWN_RUN_DIR and its --journal-file/--history-file
+    flags point there, so the alias is exactly the checkpoint: a
+    refusal can only come from the cross-peer single-writer claim,
+    never from an append sink's lock. The member's own files are
+    untouched, so a track=None relaunch afterward restores the
+    correctly-pathed member exactly.
     """
     run_id, sha = record['run_id'], record['attempted_sha']
     prefix = 'dcs-hw-' + run_id
@@ -1463,23 +1484,56 @@ def relaunch_controller(cfg, record, run_dir, model, name, timeline,
     if name not in peers:
         raise RuntimeError('relaunch_controller expects an endpoint '
                            'key, got ' + repr(name))
+    if share_state_with is not None \
+            and share_state_with not in peers:
+        raise RuntimeError('share_state_with expects a peer endpoint '
+                           'key of pair ' + repr(pair) + ', got '
+                           + repr(share_state_with))
+    if share_state_with == name:
+        raise RuntimeError('share_state_with cannot name the '
+                           'relaunched member itself — the alias '
+                           'needs a live peer\'s directory')
     peer = peers[name]
     container = prefix + '-' + peer
     monitor_port = PAIR_MONITOR_PORTS[name]
     command = _controller_argv(cfg, pair, name, prefix, track=track)
     flag = '' if track is None else (
         ('--peer ' if name == 'active' else '--standby ') + track)
+    # The shared-state alias: the member's declared CONTAINER_RUN_DIR
+    # mounts the named peer's directory instead of its own, so the
+    # pair's identical --state-file declarations resolve to one
+    # backing checkpoint — the peer's live writer lock included —
+    # while the member's own directory keeps serving its append sinks
+    # from a second mount.
+    if share_state_with is None:
+        volumes = ['-v', str(_controller_dir(run_dir, peer))
+                   + ':' + CONTAINER_RUN_DIR]
+        alias = ''
+    else:
+        volumes = [
+            '-v', str(_controller_dir(run_dir, peers[share_state_with]))
+            + ':' + CONTAINER_RUN_DIR,
+            '-v', str(_controller_dir(run_dir, peer))
+            + ':' + CONTAINER_OWN_RUN_DIR]
+        for flag, target in (
+                ('--journal-file',
+                 CONTAINER_OWN_RUN_DIR + '/journal.jsonl'),
+                ('--history-file',
+                 CONTAINER_OWN_RUN_DIR + '/history.jsonl')):
+            command[command.index(flag) + 1] = target
+        alias = ('; --state-file aliases ' + prefix + '-'
+                 + peers[share_state_with] + '\'s '
+                 + CONTAINER_STATE_FILE)
     timeline('controller-relaunch', 'docker rm -f ' + container
              + ('; launch ' + flag if flag
-                else '; launch flags restored'))
+                else '; launch flags restored') + alias)
     removed = docker('rm', '-f', container, check=False, timeout=90)
     docker(*_docker_run_args(cfg, run_id, container),
            '--network', 'dcs-hwtest-' + run_id,
            '-p', '127.0.0.1:' + str(_pair_host_port(cfg, pair, name))
            + ':' + str(monitor_port),
            '-v', str(model) + ':/model/plant.json:ro',
-           '-v', str(_controller_dir(run_dir, peer))
-           + ':' + CONTAINER_RUN_DIR,
+           *volumes,
            IMAGE_PREFIX + 'controller:' + sha,
            *command)
     timeline('controller-relaunched', container + ' running'
@@ -1908,6 +1962,33 @@ def start_controller(run_id, name, timeline, pair='deployed'):
     timeline('controller-start', 'docker start ' + container)
     docker('start', container, timeout=60)
     timeline('controller-started', container + ' running')
+
+
+def controller_state(run_id, name, pair='deployed'):
+    """The pair member container's process verdict — the
+    shared-state-file leg's exit evidence: `{'container', 'running',
+    'exit', 'logs', 'absent'}`. A refused member — the launch whose
+    doctored --state-file found a live peer's writer lock — reads as
+    Running=false with a nonzero exit and the named refusal on the
+    log tail; an absent container reports `absent` rather than
+    raising, since the read itself is the leg's evidence collection.
+    """
+    container = _controller_container(run_id, name, pair)
+    probe = docker('inspect', '-f', '{{.State.Running}} {{.State.ExitCode}}',
+                   container, check=False)
+    if probe.returncode != 0:
+        return {'container': container, 'running': False, 'exit': None,
+                'logs': '', 'absent': True}
+    parts = probe.stdout.split()
+    running = parts[:1] == ['true']
+    try:
+        exit_code = int(parts[1])
+    except (IndexError, ValueError):
+        exit_code = None
+    logs = docker('logs', '--tail', '60', container, check=False)
+    return {'container': container, 'running': running,
+            'exit': exit_code, 'absent': False,
+            'logs': (logs.stdout or '') + (logs.stderr or '')}
 
 
 def stop_plant(run_id, timeline, pair='deployed'):
@@ -3326,7 +3407,10 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
     owner token per
     endpoint key — the pair's and every third peer's — the run's
     evidence dir and deadline, the runner-owned
-    controller restart/cold-restart/relaunch, plant stop/start,
+    controller restart/cold-restart/relaunch (the relaunch's
+    `share_state_with` mount doctoring included), member
+    stop/start/pause and the read-only container-state probe, plant
+    stop/start,
     model-revision, foreign-peer launch/teardown, driven-peer
     launch/teardown, born-active launch/teardown/state reads (the
     launch naming its own --scan-ms cadence, the per-container skew
@@ -3395,11 +3479,14 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         # (--peer on the launched active, --standby on the launched
         # standby); track=None restores the launch command. The
         # standby-dns-resume leg's seam: a plain docker start could
-        # never stage the doctored name.
-        'relaunch_controller': lambda name, track=None:
-            relaunch_controller(
+        # never stage the doctored name. `share_state_with` mounts the
+        # named peer's persistence directory in place of the member's
+        # own — the shared-state-file leg's deployment alias, both
+        # peers' identical --state-file resolving to one file.
+        'relaunch_controller': lambda name, track=None,
+                share_state_with=None: relaunch_controller(
                 cfg, record, run_dir, src / cfg['model_fixture'], name,
-                timeline, track),
+                timeline, track, share_state_with=share_state_with),
         # The tracking-source address-move staging — the
         # rediscovery leg's reproduction of the stale-IP-pin
         # finding: the runner removes the named member's container,
@@ -3427,6 +3514,11 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
             run_id, name, timeline),
         'start_controller': lambda name: start_controller(
             run_id, name, timeline),
+        # The member's process verdict — running/exit/log tail — the
+        # read-only half the shared-state-file leg's refused launch
+        # reports through once its container is down.
+        'controller_state': lambda name: controller_state(
+            run_id, name),
         # The frozen-source induction — docker pause/unpause on a
         # controller container, the orphan-episode leg's lever for
         # produced-nothing checkpoint-pull misses.
@@ -3638,10 +3730,11 @@ def _probe_ctx(ctx, cfg, record, src, run_dir, probe, mounts,
         'cold_restart_controller': lambda name:
             cold_restart_controller(run_id, run_dir, name, timeline,
                                     pair='probe'),
-        'relaunch_controller': lambda name, track=None:
-            relaunch_controller(
+        'relaunch_controller': lambda name, track=None,
+                share_state_with=None: relaunch_controller(
                 cfg, record, run_dir, src / probe['model_fixture'],
-                name, timeline, track, pair='probe'),
+                name, timeline, track, pair='probe',
+                share_state_with=share_state_with),
         'move_controller_address': lambda name: move_controller_address(
             cfg, record, run_dir, src / probe['model_fixture'], name,
             timeline, pair='probe'),
@@ -3658,6 +3751,8 @@ def _probe_ctx(ctx, cfg, record, src, run_dir, probe, mounts,
             run_id, name, timeline, pair='probe'),
         'start_controller': lambda name: start_controller(
             run_id, name, timeline, pair='probe'),
+        'controller_state': lambda name: controller_state(
+            run_id, name, pair='probe'),
         'pause_controller': lambda name: pause_controller(
             run_id, name, timeline, pair='probe'),
         'unpause_controller': lambda name: unpause_controller(
