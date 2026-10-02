@@ -126,6 +126,38 @@
 //!    writable resets — the accumulated flow drops to zero and the
 //!    counter's count and `done` clear, rearmed.
 //!
+//! # Declared units
+//!
+//! The sheet adopts architecture decision 106's declared-unit metadata:
+//! every quantity-bearing point carries its engineering unit on the
+//! `io_points` entry — the transmitter and valve field channels and
+//! commands in `mA`, the level setpoint, the level loop, the valve
+//! station's demand path, the batch program's values, and the flow
+//! signal in `%` — beside the `unit` its signal already rendered, so
+//! the two are checked against each other rather than trusted
+//! separately. Each unit-transparent kind carries its dimension on its
+//! own instance: the `analog-input`s' `raw` ports and `raw_min`/
+//! `raw_max` bounds in `mA` against `out`/`eng_min`/`eng_max` in `%`,
+//! the `analog-output` the other way round, the level, valve, and batch
+//! `pid`/`rate-limiter`/`override-select`/`manual-station`/`valve`/
+//! `alarm-monitor`/`latching-alarm` paths and their bounds in `%`, the
+//! `median-voter` and `signal-filter` level path in `%`, the
+//! `totalizer`'s `rate` in the flow's `%`, and every scan interval —
+//! each `*_ticks` parameter plus the `motor`'s and the
+//! `latching-alarm`'s response budgets — in `ticks`. A connection
+//! whose two ends disagree now fails the document by the named
+//! `ConnectionUnitMismatch` rather than passing every check.
+//!
+//! Three families stay deliberately undeclared. The `pid`'s gains and
+//! `dt` and the `signal-filter`'s `alpha` are tuning coefficients, not
+//! plant quantities; the `counter`'s `preset` and `count` and the
+//! `sequencer`'s `step_count` and `step` index are program positions
+//! rather than measured quantities; and the `totalizer`'s `total` and
+//! its `rate_unit` scale factor depend on an engineering flow unit this
+//! line does not declare — its `FT-101` is read in `%` — so the
+//! accumulated total stays uncheckable rather than dimensioned by
+//! assumption.
+//!
 //! Everything is tick-domain — the executor's virtual ticks, the
 //! driver's logical tick per [`FanoutDriver::step`], and the pid's `dt`
 //! tuned to [`SCAN_PERIOD`] — so identical runs produce identical
