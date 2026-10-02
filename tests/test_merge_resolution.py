@@ -5,11 +5,13 @@ on a lockfile-shaped path completes the merge in-process — Cargo.lock is
 regenerated from the merged manifests, the merge commit lands, and the
 branch pushes — without repair() being invoked. The same holds for a
 docs/release-contract.md conflict where both sides only append keyed
-diagnostic rows to the tail table — the union lands deduplicated in
-deterministic key order. A conflict including a non-registered path, a
-lockfile that can no longer be regenerated, a same-key row with divergent
-text, or a hunk outside a table region falls through to the bounded
-merge-conflict repair unchanged.
+diagnostic rows to the tail table, and for a
+docs/lenovo-hardware-qa-plan.md conflict where both sides only append
+whole `### Landed` ledger blocks at the ledger's tail anchor — each union
+lands deduplicated in deterministic key order. A conflict including a
+non-registered path, a lockfile that can no longer be regenerated, a
+same-key entry with divergent text, or a hunk outside a table/ledger
+region falls through to the bounded merge-conflict repair unchanged.
 """
 import json
 import tempfile
@@ -18,7 +20,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_pool import planning
+from agent_pool import merge_resolution, planning
 from agent_pool.runtime import Runtime
 from agent_pool.supervisor import Supervisor
 
@@ -76,6 +78,30 @@ Trailer paragraph.
 def contract_rows(*names):
     return ''.join(f'| `{name}` | {name} diagnostic text. |\n'
                    for name in names)
+
+
+# A miniature of docs/lenovo-hardware-qa-plan.md's implementation ledger:
+# `### Landed <date> (<title>, #NNNN)` blocks appended at the tail of the
+# Landed region, each a multi-line body, ahead of the closing sections.
+PLAN_PROSE = 'Implementation order: second.'
+QA_PLAN = '''# Implementation plan: Lenovo hardware QA
+
+{prose}
+
+## Landed 2026-09-15 (base slice)
+
+{base}
+
+{blocks}## Outcome
+
+Outcome paragraph.
+'''
+
+
+def qa_plan_blocks(*titles):
+    return ''.join('### Landed 2026-10-02 ({0})\n\n- {0} landed its leg.\n'
+                   '  The body wraps across lines.\n\n'.format(title)
+                   for title in titles)
 
 
 class FakeGitHub:
@@ -143,6 +169,7 @@ class MechanicalResolutionTests(unittest.TestCase):
         self.write_package(self.source, version='0.1.0', license='MIT')
         (self.source / 'notes.txt').write_text('base\n')
         self.write_contract(self.source)
+        self.write_plan(self.source)
         self.git(self.source, 'add', '-A')
         self.git(self.source, 'commit', '-m', 'initial')
         self.config = dict(state_root=str(self.root / 'state'),
@@ -177,6 +204,14 @@ class MechanicalResolutionTests(unittest.TestCase):
         (directory / 'docs').mkdir(exist_ok=True)
         (directory / 'docs' / 'release-contract.md').write_text(
             CONTRACT.format(prose=prose, base=base, rows=rows))
+
+    def write_plan(self, directory, blocks='', prose=PLAN_PROSE,
+                   base='- The base ledger entry did its recorded work.\n'
+                        '  Its body wraps across lines.'):
+        directory = Path(directory)
+        (directory / 'docs').mkdir(exist_ok=True)
+        (directory / 'docs' / 'lenovo-hardware-qa-plan.md').write_text(
+            QA_PLAN.format(prose=prose, base=base, blocks=blocks))
 
     def repair_events(self, kind=None):
         rows = [e for e in self.sup.state.events(1)
@@ -242,7 +277,33 @@ class MechanicalResolutionTests(unittest.TestCase):
         self.git(self.source, 'add', '-A')
         self.git(self.source, 'commit', '-m', 'main advance')
 
-    def assert_repair_fallback(self, clone, paths):
+    def stage_plan_clone(self, notes=None, **plan):
+        """Dispatch, commit branch-side QA-plan ledger appends, publish."""
+        self.sup.dispatch(self.gh.items)
+        job = self.sup.state.job(1)
+        self.assertEqual(job['status'], 'working')
+        clone = Path(job['clone'])
+        self.git(clone, 'config', 'user.email', 'test@example.com')
+        self.git(clone, 'config', 'user.name', 'Test')
+        self.write_plan(clone, **plan)
+        if notes is not None:
+            (clone / 'notes.txt').write_text(notes)
+        self.git(clone, 'add', '-A')
+        self.git(clone, 'commit', '-m', 'branch work')
+        self.sup.publish(self.sup.state.job(1), self.gh.items[0])
+        self.assertEqual(self.sup.state.job(1)['status'], 'pr-open')
+        return clone
+
+    def advance_main_plan(self, notes=None, **plan):
+        """Main's own QA-plan ledger append, conflicting on the same anchor."""
+        self.write_plan(self.source, **plan)
+        if notes is not None:
+            (self.source / 'notes.txt').write_text(notes)
+        self.git(self.source, 'add', '-A')
+        self.git(self.source, 'commit', '-m', 'main advance')
+
+    def assert_repair_fallback(self, clone, paths,
+                              conflicted='docs/release-contract.md'):
         """The merge stays in progress and the bounded repair is dispatched."""
         job = self.sup.state.job(1)
         self.assertEqual(job['repairs'], 1)
@@ -256,8 +317,7 @@ class MechanicalResolutionTests(unittest.TestCase):
         self.assertIn('Resolve the existing merge conflict',
                       self.runtime.spawned[-1]['prompt'])
         self.assertTrue((clone / '.git' / 'MERGE_HEAD').exists())
-        self.assertIn('<<<<<<<',
-                      (clone / 'docs' / 'release-contract.md').read_text())
+        self.assertIn('<<<<<<<', (clone / conflicted).read_text())
 
     def test_lockfile_only_conflict_merges_without_repair(self):
         clone = self.stage_clone()
@@ -400,6 +460,138 @@ class MechanicalResolutionTests(unittest.TestCase):
         self.sup.integrate(self.gh.items)
         self.assert_repair_fallback(
             clone, ['docs/release-contract.md', 'notes.txt'])
+
+    def test_qa_plan_block_append_merges_without_repair(self):
+        shared = qa_plan_blocks('shared leg')
+        clone = self.stage_plan_clone(
+            blocks=qa_plan_blocks('branch leg') + shared)
+        self.advance_main_plan(
+            blocks=qa_plan_blocks('alpha leg') + shared)
+        with patch.object(self.sup, 'repair') as repair:
+            self.sup.integrate(self.gh.items)
+        repair.assert_not_called()
+        job = self.sup.state.job(1)
+        self.assertEqual(job['repairs'], 0)
+        self.assertEqual(job['status'], 'pr-open')
+        self.assertEqual(len(self.runtime.spawned), 1)
+        parents = self.git(clone, 'rev-list', '--parents', '-n', '1', 'HEAD')
+        self.assertEqual(len(parents.split()), 3)
+        self.assertEqual(self.git(self.source, 'rev-parse', 'codex/issue-1-1'),
+                         self.git(clone, 'rev-parse', 'HEAD'))
+        resolved = (clone / 'docs' / 'lenovo-hardware-qa-plan.md').read_text()
+        self.assertNotIn('<<<<<<<', resolved)
+        # The ledger's existing entries and closing sections survive verbatim.
+        self.assertIn('## Landed 2026-09-15 (base slice)', resolved)
+        self.assertIn('- The base ledger entry did its recorded work.\n'
+                      '  Its body wraps across lines.', resolved)
+        self.assertIn('## Outcome\n\nOutcome paragraph.\n', resolved)
+        # Union in deterministic heading order, whole blocks intact, and the
+        # identically appended block lands exactly once.
+        expected = ['alpha leg', 'branch leg', 'shared leg']
+        positions = [resolved.index('### Landed 2026-10-02 (%s)' % title)
+                     for title in expected]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(resolved.count('(shared leg)'), 1)
+        for title in expected:
+            self.assertIn('- %s landed its leg.\n'
+                          '  The body wraps across lines.' % title, resolved)
+        self.assertEqual(self.git(clone, 'status', '--porcelain'), '')
+        self.assertEqual(self.repair_events('repair'), [])
+        rows = self.repair_events('mechanical-resolution')
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['payload']['resolvers'],
+                         {'docs/lenovo-hardware-qa-plan.md':
+                          'qa-plan-landed-union'})
+        self.assertEqual(rows[0]['payload']['paths'],
+                         ['docs/lenovo-hardware-qa-plan.md'])
+
+    def test_qa_plan_resolution_is_deterministic_across_merge_roles(self):
+        """The union depends on the entries, never on which side is HEAD."""
+        first = self.stage_plan_clone(blocks=qa_plan_blocks('branch leg'))
+        self.advance_main_plan(blocks=qa_plan_blocks('alpha leg'))
+        self.sup.integrate(self.gh.items)
+        ours = (first / 'docs' / 'lenovo-hardware-qa-plan.md').read_text()
+        # Re-run the same conflict with the sides swapped: the branch is the
+        # incoming side this time, so HEAD labels the blocks the other way.
+        self.setUp()
+        second = self.stage_plan_clone(blocks=qa_plan_blocks('alpha leg'))
+        self.advance_main_plan(blocks=qa_plan_blocks('branch leg'))
+        self.sup.integrate(self.gh.items)
+        self.assertEqual(
+            (second / 'docs' / 'lenovo-hardware-qa-plan.md').read_text(), ours)
+
+    def test_qa_plan_existing_entry_edit_falls_through(self):
+        clone = self.stage_plan_clone(
+            base='- The base entry was corrected on the branch.\n'
+                 '  Its body wraps across lines.')
+        self.advance_main_plan(
+            base='- The base entry was corrected on main.\n'
+                 '  Its body wraps across lines.')
+        self.sup.integrate(self.gh.items)
+        self.assert_repair_fallback(clone, ['docs/lenovo-hardware-qa-plan.md'],
+                                    'docs/lenovo-hardware-qa-plan.md')
+
+    def test_qa_plan_append_plus_existing_entry_edit_falls_through(self):
+        """A side that also edits a landed entry is not a pure append."""
+        clone = self.stage_plan_clone(blocks=qa_plan_blocks('branch leg'))
+        self.advance_main_plan(
+            blocks=qa_plan_blocks('alpha leg'),
+            base='- The base entry was corrected on main.\n'
+                 '  Its body wraps across lines.')
+        self.sup.integrate(self.gh.items)
+        self.assert_repair_fallback(clone, ['docs/lenovo-hardware-qa-plan.md'],
+                                    'docs/lenovo-hardware-qa-plan.md')
+
+    def test_qa_plan_prose_conflict_falls_through(self):
+        clone = self.stage_plan_clone(prose='Branch implementation order.')
+        self.advance_main_plan(prose='Main implementation order.')
+        self.sup.integrate(self.gh.items)
+        self.assert_repair_fallback(clone, ['docs/lenovo-hardware-qa-plan.md'],
+                                    'docs/lenovo-hardware-qa-plan.md')
+
+    def test_qa_plan_plus_unregistered_path_falls_through(self):
+        clone = self.stage_plan_clone(blocks=qa_plan_blocks('branch leg'),
+                                      notes='branch\n')
+        self.advance_main_plan(blocks=qa_plan_blocks('alpha leg'),
+                               notes='main\n')
+        self.sup.integrate(self.gh.items)
+        self.assert_repair_fallback(
+            clone, ['docs/lenovo-hardware-qa-plan.md', 'notes.txt'],
+            'docs/lenovo-hardware-qa-plan.md')
+
+
+class QaPlanSectionRuleTests(unittest.TestCase):
+    """The QA plan's keyed-append unit rule, on doctored hunk sides."""
+
+    def test_blocks_split_on_landed_headings(self):
+        self.assertEqual(
+            merge_resolution.QA_PLAN_REGION.entries([
+                '### Landed 2026-10-02 (alpha leg)', '',
+                '- alpha landed its leg.', '  Body wraps.',
+                '### Landed 2026-10-02 (beta leg)', '- beta landed.']),
+            [('### Landed 2026-10-02 (alpha leg)',
+              ['### Landed 2026-10-02 (alpha leg)', '',
+               '- alpha landed its leg.', '  Body wraps.']),
+             ('### Landed 2026-10-02 (beta leg)',
+              ['### Landed 2026-10-02 (beta leg)', '- beta landed.'])])
+
+    def test_side_opening_with_body_text_raises(self):
+        with self.assertRaises(RuntimeError):
+            merge_resolution.QA_PLAN_REGION.entries(
+                ['- a block body with no heading', ''])
+
+    def test_non_landed_heading_raises(self):
+        with self.assertRaises(RuntimeError):
+            merge_resolution.QA_PLAN_REGION.entries(
+                ['## Follow-up', 'Not a ledger entry.'])
+
+    def test_keys_tolerate_surrounding_document_text(self):
+        self.assertEqual(
+            merge_resolution.QA_PLAN_REGION.keys([
+                '# Implementation plan: Lenovo hardware QA', '',
+                '## Landed 2026-09-15 (base slice)', '- base entry.',
+                '## Outcome', 'Outcome paragraph.']),
+            {'## Landed 2026-09-15 (base slice)'})
 
 
 if __name__ == '__main__':

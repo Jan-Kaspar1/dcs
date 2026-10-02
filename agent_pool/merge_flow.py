@@ -36,6 +36,31 @@ CHECK_RECORD_MARK = "as read-only diagnostics. "
 # the attribution separate mechanical resolutions from agent repairs.
 MECHANICAL_RESOLUTION_KIND = "mechanical-resolution"
 
+# Resolution classes a conflicted path is attributed to. ``resolved`` counts
+# the paths a mechanical-resolution row resolved in the window;
+# ``registered_unresolved`` counts merge-conflict-repair occurrences of paths
+# the resolver table covers that resolved nothing then — the resolver refused
+# the conflict's shape, or an unregistered path in the same all-or-nothing set
+# kept it from running; ``unregistered`` counts occurrences on paths no
+# resolver covers, the class that names where the next coverage decision
+# belongs. A path may hold occurrences in two classes (the contract's keyed
+# rows resolve on a pure append and are refused on the ``<leg>-unchecked``
+# edit), which is the reading the coverage decision needs.
+PATH_RESOLUTION_CLASSES = ("resolved", "registered_unresolved", "unregistered")
+
+
+def registered_resolution_paths():
+    """The conflicted paths carrying a registered mechanical resolver.
+
+    Imported lazily because ``agent_pool.merge_resolution`` imports this
+    module for the ledger kind; a module-level import back would be
+    circular. The resolver table is the only registration record, so the
+    report's classes and the supervisor's admission cannot drift.
+    """
+    from . import merge_resolution
+
+    return frozenset(merge_resolution.MECHANICAL_RESOLVERS)
+
 
 def window_bounds(now, window_seconds):
     """Named adjacent windows: previous=[now-2w, now-w), current=[now-w, now)."""
@@ -133,6 +158,34 @@ def _conflict_load(repairs, paths):
     return "concentrated" if covering <= 2 else "spread"
 
 
+def _resolved_paths(event):
+    """The paths one mechanical-resolution row resolved, from its resolver map."""
+    resolvers = event_payload(event).get("resolvers")
+    if not isinstance(resolvers, dict):
+        return []
+    return [path for path in resolvers if isinstance(path, str) and path]
+
+
+def _path_resolution_classes(conflict_paths, resolved, registered):
+    """Conflicted and resolved paths attributed per PATH_RESOLUTION_CLASSES.
+
+    Every recorded occurrence lands in exactly one class: a
+    mechanical-resolution row's paths as ``resolved``, and each
+    merge-conflict repair's paths by whether the resolver table covers
+    them — ``registered_unresolved`` when it does (that repair spent a
+    bounded repair session on a path the resolver was admitted for and
+    resolved nothing on), ``unregistered`` when it does not, which is
+    the class that names the dominant path a coverage decision would
+    have to earn.
+    """
+    classes = {name: Counter() for name in PATH_RESOLUTION_CLASSES}
+    for path, count in conflict_paths.items():
+        name = "registered_unresolved" if path in registered else "unregistered"
+        classes[name][path] += count
+    classes["resolved"].update(resolved)
+    return {name: _ranked(counter) for name, counter in classes.items()}
+
+
 def repair_attribution(events, lo, hi, issues_by_number, jobs_by_issue):
     """Repair/redispatch attribution for ledger rows in [lo, hi).
 
@@ -145,13 +198,23 @@ def repair_attribution(events, lo, hi, issues_by_number, jobs_by_issue):
     the job's terminal check record. ``mechanical-resolution`` rows —
     publish merges completed in-process without a repair dispatch — are
     counted separately so a falling merge-conflict repair count can be
-    read against them.
+    read against them, and their resolved paths join the conflicted ones
+    under ``conflict_paths_by_resolution`` (resolved /
+    registered_unresolved / unregistered), so a path the resolver table
+    covers but never resolved reads apart from one it does not cover.
+    ``repairs_on_registered_paths`` counts the merge-conflict repairs whose
+    whole recorded path set is registered: the ceiling on the repairs a
+    mechanical resolution could have displaced in the window, read against
+    ``mechanical_resolutions``.
     """
     repairs_by_cause = Counter()
     redispatches_by_cause = Counter()
     repairs_by_area = {}
     conflict_paths = Counter()
     conflict_repairs = conflict_pathless = conflict_unclassified = 0
+    registered_only_repairs = 0
+    resolved_paths = Counter()
+    registered = registered_resolution_paths()
     mechanical_resolutions = 0
     failing_checks = Counter()
     checks_unattributed = 0
@@ -165,6 +228,7 @@ def repair_attribution(events, lo, hi, issues_by_number, jobs_by_issue):
             continue
         if kind == MECHANICAL_RESOLUTION_KIND:
             mechanical_resolutions += 1
+            resolved_paths.update(_resolved_paths(event))
             continue
         if kind != "repair":
             continue
@@ -178,6 +242,8 @@ def repair_attribution(events, lo, hi, issues_by_number, jobs_by_issue):
             paths = _payload_names(event, "paths")
             if paths:
                 conflict_paths.update(paths)
+                if all(path in registered for path in set(paths)):
+                    registered_only_repairs += 1
             elif event_payload(event).get("pathless"):
                 conflict_pathless += 1
             else:
@@ -200,6 +266,9 @@ def repair_attribution(events, lo, hi, issues_by_number, jobs_by_issue):
         "conflict_paths": _ranked(conflict_paths, pathless=conflict_pathless,
                                 unclassified=conflict_unclassified),
         "conflict_load": _conflict_load(conflict_repairs, conflict_paths),
+        "conflict_paths_by_resolution": _path_resolution_classes(
+            conflict_paths, resolved_paths, registered),
+        "repairs_on_registered_paths": registered_only_repairs,
         "failing_checks": _ranked(failing_checks, unclassified=checks_unattributed),
     }
 

@@ -26,10 +26,16 @@ matching the supervisor's rolling merge comparison in ``State.merge_flow``):
   failed-merge output or captured from the worktree's unmerged paths when
   the output named none — ranked by incidence, a ``pathless`` bucket
   counting rows that recorded unrecoverable paths and an ``unclassified``
-  bucket for rows predating recorded detail; a verdict names whether the
-  window's conflict load concentrates on few paths or spreads, plus the
-  failing check names ``ci-failure`` repairs expose through their ledger
-  row or the job's terminal check record;
+  bucket for rows predating recorded detail; the same paths attributed by
+  resolution class (``resolved`` for the ones a mechanical resolution
+  landed, ``registered_unresolved`` for the ones a registered resolver
+  was admitted for and refused, ``unregistered`` for the ones no resolver
+  covers — the class that names where the next coverage decision belongs),
+  with the count of repairs confined to registered paths read against the
+  mechanical resolutions; a verdict names whether the window's conflict
+  load concentrates on few paths or spreads, plus the failing check names
+  ``ci-failure`` repairs expose through their ledger row or the job's
+  terminal check record;
 - per-window flow attribution so a merge decline can be read as starvation,
   failure load, or exhausted supply: reserved dispatches (``reserved`` and
   ``retry-reserved`` rows), park-to-blocked transitions (``status:blocked``
@@ -63,7 +69,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # The bounded ledger classifiers live in agent_pool.merge_flow so the planner
 # input (State.merge_flow) shares this report's vocabulary verbatim.
 from agent_pool.merge_flow import (  # noqa: E402
-    CHECK_RECORD_MARK, DISPATCH_KINDS, PARK_CAUSES, QUOTA_INVOCATIONS,
+    CHECK_RECORD_MARK, DISPATCH_KINDS, PARK_CAUSES,
+    PATH_RESOLUTION_CLASSES, QUOTA_INVOCATIONS,
     _WORKER_FAILURE_MARKERS, _block_cause, _conflict_load, _payload_names,
     _ranked, _resumes, _status_at, event_cause, event_payload, flow_report,
     issue_area, job_check_names, repair_attribution, window_bounds)
@@ -92,6 +99,11 @@ LIMITATIONS = (
     "unrecoverable paths count in the pathless bucket, rows predating "
     "recorded detail in unclassified, and a concentrated/spread verdict "
     "reads only the attributed share",
+    "resolution classes read the resolver table as it stands in this "
+    "checkout: a path registered after a window's conflicts cannot show "
+    "as resolved there, and repairs_on_registered_paths is the ceiling on "
+    "displaced repairs, since a registered path's conflict shape can still "
+    "be one the resolver refuses",
     "failing-check attribution covers ci-failure repairs whose ledger row "
     "or terminal jobs.error check record names the failed checks; other "
     "ci-failure repairs count in the unclassified bucket",
@@ -343,6 +355,13 @@ def render_text(report):
         lines.append("  areas: " + (", ".join(f"{k}={v}" for k, v in w["areas"].items()) or "none"))
         lines.append("  conflict_paths: " + _causes_text(repair["conflict_paths"])
                      + " load=" + repair["conflict_load"])
+        classes = repair["conflict_paths_by_resolution"]
+        lines.append("  conflict_resolution: %s mechanical=%d against "
+                     "repairs_on_registered_paths=%d"
+                     % (" ".join("%s{%s}" % (name, _causes_text(classes[name]))
+                                 for name in PATH_RESOLUTION_CLASSES),
+                        repair["mechanical_resolutions"],
+                        repair["repairs_on_registered_paths"]))
         lines.append("  failing_checks: " + _causes_text(repair["failing_checks"]))
         lines.append("  repairs_by_area: " + (
             "; ".join("%s[%s]" % (area, _causes_text(causes))

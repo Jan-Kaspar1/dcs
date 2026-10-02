@@ -355,6 +355,118 @@ def blocked_job(number, updated, error):
                 error=error)
 
 
+def resolution_event(at, issue_number, resolvers):
+    return event("mechanical-resolution", at, issue_number,
+                 payload=json.dumps({"resolvers": resolvers,
+                                     "paths": sorted(resolvers)}))
+
+
+class ConflictResolutionClassTests(unittest.TestCase):
+    """Conflicted paths attributed by the resolver table's coverage classes."""
+
+    def test_paths_split_into_resolved_registered_and_unregistered(self):
+        events = [
+            # One merge resolved in-process on the QA plan's ledger.
+            resolution_event(NOW - 10, 1,
+                             {"docs/lenovo-hardware-qa-plan.md":
+                              "qa-plan-landed-union"}),
+            # A registered path the resolver refused: the contract's
+            # `<leg>-unchecked` row is edited in place, so the hunk is not
+            # a pure append and the repair session was spent.
+            repair_event(NOW - 20, 2, "merge-conflict",
+                         paths=["docs/release-contract.md"]),
+            repair_event(NOW - 30, 3, "merge-conflict",
+                         paths=["docs/release-contract.md"]),
+            # The dominant unregistered path is named, not folded away.
+            repair_event(NOW - 40, 4, "merge-conflict",
+                         paths=["docs/architecture.md"] * 2),
+            repair_event(NOW - 50, 5, "merge-conflict",
+                         paths=["docs/architecture.md", "qa_lane/runner.py"]),
+        ]
+        report = merge_flow.window_report([], NOW - WEEK, NOW, {}, {},
+                                          events)
+        repair = report["repair_incidence"]
+        self.assertEqual(repair["conflict_paths_by_resolution"], {
+            "resolved": {"docs/lenovo-hardware-qa-plan.md": 1},
+            "registered_unresolved": {"docs/release-contract.md": 2},
+            "unregistered": {"docs/architecture.md": 3,
+                             "qa_lane/runner.py": 1}})
+        self.assertEqual(repair["mechanical_resolutions"], 1)
+        # Two repairs were confined to registered paths; the three naming an
+        # unregistered path could not have been resolved in-process at all,
+        # since one unregistered path refuses the whole conflict set.
+        self.assertEqual(repair["repairs_on_registered_paths"], 2)
+
+    def test_resolved_and_refused_occurrences_of_one_path_read_apart(self):
+        """One path resolving on some merges and refused on others."""
+        events = [
+            resolution_event(NOW - 10, 1,
+                             {"docs/release-contract.md":
+                              "release-contract-union"}),
+            repair_event(NOW - 20, 2, "merge-conflict",
+                         paths=["docs/release-contract.md"]),
+        ]
+        report = merge_flow.window_report([], NOW - WEEK, NOW, {}, {},
+                                          events)
+        classes = report["repair_incidence"]["conflict_paths_by_resolution"]
+        self.assertEqual(classes["resolved"],
+                         {"docs/release-contract.md": 1})
+        self.assertEqual(classes["registered_unresolved"],
+                         {"docs/release-contract.md": 1})
+        self.assertEqual(classes["unregistered"], {})
+
+    def test_detail_less_rows_contribute_no_resolved_paths(self):
+        events = [
+            repair_event(NOW - 10, 1, "merge-conflict"),
+            repair_event(NOW - 20, 2, "merge-conflict", paths=[], pathless=True),
+            resolution_event(NOW - 30, 3, {}),
+        ]
+        report = merge_flow.window_report([], NOW - WEEK, NOW, {}, {},
+                                          events)
+        repair = report["repair_incidence"]
+        self.assertEqual(repair["conflict_paths_by_resolution"],
+                         {"resolved": {}, "registered_unresolved": {},
+                          "unregistered": {}})
+        self.assertEqual(repair["repairs_on_registered_paths"], 0)
+        # The row still counts as a resolution and the repairs still carry
+        # their coverage buckets.
+        self.assertEqual(repair["mechanical_resolutions"], 1)
+        self.assertEqual(repair["conflict_paths"],
+                         {"pathless": 1, "unclassified": 1})
+
+    def test_classes_rank_by_incidence_within_each_class(self):
+        events = [repair_event(NOW - 10 - i, i + 1, "merge-conflict",
+                               paths=[path])
+                  for i, path in enumerate(
+                      ["docs/b.md", "docs/a.md", "docs/c.md", "docs/a.md"])]
+        report = merge_flow.window_report([], NOW - WEEK, NOW, {}, {},
+                                          events)
+        classes = report["repair_incidence"]["conflict_paths_by_resolution"]
+        self.assertEqual(list(classes["unregistered"]),
+                         ["docs/a.md", "docs/b.md", "docs/c.md"])
+
+    def test_text_report_names_the_class_line_and_the_displacement_reading(self):
+        events = [
+            resolution_event(NOW - 10, 1,
+                             {"docs/lenovo-hardware-qa-plan.md":
+                              "qa-plan-landed-union"}),
+            repair_event(NOW - 20, 2, "merge-conflict",
+                         paths=["docs/lenovo-hardware-qa-plan.md"]),
+            repair_event(NOW - 30, 3, "merge-conflict",
+                         paths=["docs/architecture.md"]),
+        ]
+        report = merge_flow.build_report([], None, None, NOW, 7.0, events)
+        line = next(row for row in merge_flow.render_text(report).splitlines()
+                    if row.strip().startswith("conflict_resolution:")
+                    and "docs/architecture.md" in row)
+        self.assertEqual(
+            line.strip(),
+            "conflict_resolution: resolved{docs/lenovo-hardware-qa-plan.md=1}"
+            " registered_unresolved{docs/lenovo-hardware-qa-plan.md=1}"
+            " unregistered{docs/architecture.md=1} mechanical=1 against"
+            " repairs_on_registered_paths=1")
+
+
 class FlowAttributionTests(unittest.TestCase):
     """Per-window dispatch/park/merge attribution from the work ledger."""
 
