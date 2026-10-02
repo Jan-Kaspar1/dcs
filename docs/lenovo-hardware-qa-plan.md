@@ -1060,6 +1060,85 @@ Implementation order: second, after [daily architecture review](daily-architectu
   present on that very monitor — and the leg names it as the contract
   failure it is.
 
+### Landed 2026-10-02 (voluntary-demote released-claim leg, #1273)
+
+- The voluntary-demote released-claim contract — the per-revision lane
+  evidence for the contract #1270's fix establishes (WW-LCM-001
+  continuity) — is exercised per revision by scenario leg
+  `2495_demote_release_stays_released`. A voluntary `POST /demote` is a
+  deliberate hand-back of the field's write claim, and the
+  just-demoted member's orphan-cycle ensure must not re-arm that claim
+  under its own token: the released field then stands — no owner
+  serving it — until a documented conditional path takes it where it
+  stands, the fencing-loss-armed ex-owner's bound reclaim, a
+  conditional promote, or a startup grant. The finding the contract
+  answers left a claim standing under a member reporting `standby`,
+  a run whose gate is closed so it serves no owner checkpoints, while
+  the field's own arbitration answered every conditional,
+  non-preemptive path `fenced` — and the re-arm journaled nothing at
+  all, so the durable trail could not even show who re-took the claim.
+- The leg stages the finding's own sequence on the deployed pair, over
+  the pair's own control plane and the pair's own field. With the pair
+  settled on its launch layout — the launch owner holding the field
+  with its sibling converged `tracking` behind it, and the
+  claim-aware attachment reading the claim under the launch owner's
+  pinned `--owner-token` — `POST /promote` on the tracking peer
+  preempts the live owner's claim, the former owner's next field write
+  meets the fence and demotes it in place, and the fenced ex-owner
+  converges `tracking` on the successor the standing claim declares
+  (its journal's `field_claim_lost` names the promoting token, the
+  loss mark that arms the reclaim). `POST /demote` on the new owner is
+  then the deliberate hand-back: the claim it leaves is `yielded` and
+  holderless where the demotion keeps it standing for the successors'
+  conditional paths, and the field reads `unclaimed` where the release
+  frees it outright — the leg accepts either and records which it saw
+  in the digest's `release` word.
+- The hand-off window is polled on both peers' serving monitors, on a
+  dedicated attachment's read-only `probe_writer` verdicts (the
+  claim-aware seam the shipped `dcs-plant-ctl` cannot serve — it wraps
+  its own mutations in its own conditional claim — so the probe stays
+  on the raw plant-protocol client, as the field-claim and
+  claim-reclaim legs' claim probes do), and on both durable
+  `--journal-file`s above cursors taken where the demotion settled.
+  The clauses: the demoted member journals no `field_claim_rearmed` of
+  the claim it handed back; any re-arm that does land names its field
+  point; the released claim never stands under the demoted member's
+  token at the end of the window while that member serves no field
+  writes; whichever member took the field took it through a walk the
+  durable record names — the `reclaim`-origin promotion the
+  fencing-loss arm drives or the re-arm record the grant journals —
+  and never through a `request`-origin promotion the leg never issued;
+  the pair reconverges to one active plus one tracking standby; the
+  watched field output's tick advances through the shipped tool, so the
+  reconverged owner really writes again; and the launch claim state
+  and roles are restored afterwards.
+- Named diagnostics are `demote-release-rearm-failed` and
+  `demote-release-rearm-nondeterministic`, with the self-check's
+  `demote-release-rearm-unchecked` covering the planted doctored
+  record the issue calls out (the release asserted as staying released
+  while the demoted peer's token still holds the claim), the re-arm
+  that lands with no point named, the resolution no durable record
+  names, the operator re-promote, the pair that never reconverged, the
+  frozen field, a third party's claim, the unrestored launch layout,
+  and the instability shapes. Two consecutive passes produce identical
+  digests. A run context carrying no plant endpoint, no shipped plant
+  tool, no pinned owner tokens, or no per-peer journal files, a
+  third-party mutation answering unfenced, a fencing verdict naming no
+  owner, a field answering no claim observation, and a read that
+  dropped report inconclusive. #1270's fix adds a durable record
+  (`field_claim_rearmed`) and a behavioural suppression, so the
+  leg's pre-contract signature is both: the demoted member's own orphan
+  probe re-armed the released claim under its own token, the claim
+  never left that token across the whole window, no peer journaled a
+  re-arm naming it, and the only member that ever stood on the field
+  was the demoted one re-taking the claim it had handed back — the
+  shape a build without the `yielded` suppression presents, and what
+  every released and staged build predates until the fix lands. A
+  re-arm journaled *by name* under that token is not that signature:
+  the `yielded` suppression is then demonstrably absent while the
+  durable record is present, and the leg names it as the contract
+  failure it is.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,
