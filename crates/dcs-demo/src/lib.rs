@@ -7,7 +7,15 @@
 //!   [`PlantModel`](dcs_model::PlantModel) document — the single contract.
 //!   It declares the simulated field devices and their channels, the
 //!   logical I/O points bound to them, the component instances, and the
-//!   connections wiring points to ports.
+//!   connections wiring points to ports. Architecture decision 106's
+//!   declared-unit metadata rides on it: the level transmitter's raw
+//!   reading and the valve command are `mA`, the operator setpoint is
+//!   `%`, the `analog-input`'s `raw`/`out` ports and its
+//!   `raw_min`/`raw_max`/`eng_min`/`eng_max` bounds follow the same
+//!   split, and the `pid`'s `sp`/`pv` are the level's `%` while its
+//!   manipulated variable — written straight to the command channel,
+//!   this M1 sheet has no `analog-output` scaling stage — is the
+//!   channel's `mA`, its `out_min`/`out_max` bounds beside it.
 //! - [`assemble`] resolves the model's devices through
 //!   [`DriverRegistry::standard`](dcs_assembly::DriverRegistry::standard),
 //!   merges the tank's [`FirstOrderLag`] — the simulated physics the
