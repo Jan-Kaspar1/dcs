@@ -834,6 +834,80 @@ Implementation order: second, after [daily architecture review](daily-architectu
   — report inconclusive; the rig leaves on its launch roles with
   the staged born seats and device container torn down.
 
+### Landed 2026-10-02 (skewed-claim preemption bound leg, #1345)
+
+- The claim-skew preemption bound is exercised per revision by
+  scenario leg `2490_claim_skew_bound` — the lane evidence for the
+  single-field-writer contract over the tick-domain comparability
+  rule `CONTEXT.md` records (WW-FND-002's failover continuity). The
+  rule bounds the tracking path today: #1336 retired the window
+  that stood between a pulled document's declared stream position
+  and a detached prober's own paced position, since the gap between
+  them measures pace asymmetry and never line membership. Claim
+  arbitration has no equivalent bound — a standby computing its
+  claim against a live incumbent reads the claimant's basis and the
+  incumbent's stamps directly and takes the field whenever the
+  comparison lands past the promotion bound, so the incumbent's next
+  staged exchange meets the fence, it demotes itself in place under
+  the field-arbitration origin, and the claimant writes the field
+  from a position the comparability rule forbids resolving on. The
+  contract the leg asserts: a claim whose basis exceeds the recorded
+  skew bound is refused or bounded **by name**, so a live incumbent
+  keeps write-ownership, while a claim whose basis sits inside the
+  bound is unaffected, so the documented switchover still lands.
+- The rig stages the skew rather than injecting it, through the born
+  launcher's new per-container `scan_ms` seam: a run's tick accrues
+  one per scan, so a seat launched at 25 ms accrues four ticks for
+  every one the holder's 100 ms pace does. One pass stages one field
+  and one proven holder per arm, so the skew is the only variable
+  either arm turns. The holder (`revised`) is a born-active
+  declaring no pair over the born legs' scratch field — its
+  conditional startup grant lands and `probe_writer` serves the
+  claim posture through `/role`'s `field_claim: held`. The in-bound
+  arm (`driven`) declares `--standby <holder>` at the documented
+  cadence, converges `tracking`, reads its basis against the
+  holder's immediately before claiming — a freshly launched
+  tracker's own tick trails the holder's by the holder's accrued
+  scans, well inside the leg's recorded 64-tick staging bound — and
+  its `POST /promote` must land the documented switchover: the seat
+  settles `active` with the claim held and the holder demotes in
+  place through the fenced-origin `active → demoting → standby`
+  walk beside exactly one `field_claim_lost` naming the promoted
+  peer's owner token. The skewed arm (`foreign`) declares `--standby
+  <the promoted peer>` at 25 ms, and the leg waits for the *measured*
+  separation between the two seats' served `/role` ticks to pass the
+  bound before the claim goes out: an attempt computed inside the
+  bound proves nothing, so a staging that never separated reports
+  nondeterministic rather than a verdict.
+- The attempt's answer is the subject. `POST /promote` carries the
+  documented unconditional claim — the winner-take-all grant a
+  switchover relies on — and must not take the field from the live
+  incumbent; either outcome the contract allows counts (refused, or
+  granted and then bounded), but it must be named, so the refusal is
+  auditable rather than an unexplained gate that stays shut. A
+  refusal carrying one of the promote gate's own names
+  (`not_converged`, `already_active`, `no_tracking_source`) is not
+  that audit trail — the claim was never computed — and is reported
+  as the staging race it is. Across the attempt the promoted holder
+  must be untouched: still the field's writer, still `active`, its
+  scan advancing, its journal carrying no `field_claim_lost` and no
+  fenced-origin demotion. The deployed pair never enters the staging
+  and is framed before, after, and once the leg's own seats are gone.
+- No staged revision predates this contract in a shape the leg
+  declines on: a skewed claim that resolves the field is the defect
+  the leg names, not an unread surface, so every inconclusive verdict
+  is rig-side — an unstaged lever, an unreachable endpoint, an
+  unsettled pair, or a staging that never produced the basis it
+  declared. Named diagnostics are `claim-skew-bound-failed` and
+  `claim-skew-bound-nondeterministic`, with the self-check's
+  `claim-skew-unchecked` covering the planted negatives — the issue's
+  doctored case, the attempt read as refused and bounded while the
+  skewed claim preempts the field; two consecutive passes produce
+  identical digests; every pass ends with the three born seats and the
+  scratch field swept, the sweep audited back over the rig (each
+  seat's presence through the read-only state lever, the field's own
+  shipped tool refusing), and the pair left on its launch roles.
+
 ### Landed 2026-10-02 (reclaim convergence-gate leg, #1321)
 
 - The convergence-gated fencing-loss reclaim contract — the
@@ -907,6 +981,84 @@ Implementation order: second, after [daily architecture review](daily-architectu
   proves the reclaim took the field is not that signature: the served
   monitors never saw the take, so the leg names the contradiction as
   the contract failure it is.
+
+### Landed 2026-10-02 (attributed-switch control-lane isolation leg, #1265)
+
+- The attributed-switch control-lane isolation contract — the
+  per-revision lane evidence for the contract #1264's fix establishes
+  (WW-FND-004's disposable-consumer quarantine extended to the
+  actuation half; decision 83's schedule) — is exercised per revision
+  by scenario leg `1020_attributed_switch_isolation`. The monitor's
+  `role_change` routing documents `POST /promote` and `POST /demote`
+  as control-plane actuation on a dedicated control lane, so an
+  operator's switch — issued during an incident, exactly when
+  consoles wedge — never queues behind serving workers pinned by
+  undrained responses. The attributed `{"actor": …}` form carries a
+  body, and before the fix every request with `body_length > 0` was
+  quarantined on the submission lane beside `POST /scan`: an
+  operator's declared-identity switch queued behind severed scan
+  batches (~40 s behind two `scans: 40` batches on a driven peer
+  whose source had gone silent) and stalled outright behind
+  raw-socket clients that declare a `Content-Length` and never
+  deliver it, both submit workers pinned with no read timeout to
+  bound them. The attributed body is tens of bytes — always inside
+  tiny_http's eager-read bound — so it arrives already buffered and
+  rides the control lane beside the bare request.
+- The leg stages both congestion shapes on the lane's own driven
+  standby, never on the deployed pair's monitors: `start_driven`
+  launches the run's third monitor `--standby <field owner> --driven`,
+  so every checkpoint pull it performs happens inside a `POST /scan`
+  request, and `pause_controller` on the owner freezes that source in
+  place — the listener completes the handshake and nothing answers, so
+  each scan of a batch waits the documented `CHECKPOINT_PULL_TIMEOUT`
+  out and the batch holds its submission worker for its whole span.
+  The first shape is the holding set: two raw sockets send a head
+  declaring a body past the eager-read bound plus a partial body and
+  then hold, pinning both submit workers for as long as the leg keeps
+  them. The second is the reproduction's own: two severed `POST
+  /scan` batches sized to occupy both submit workers, sent whole and
+  never read.
+- Under each shape the leg proves the pin is real — a one-scan
+  submission that must not answer inside the declared probe bound —
+  and then asserts the contract through the congested peer: an
+  attributed `POST /demote` and an attributed `POST /promote` each
+  answer inside the declared bound with the verdict the peer's own
+  reported posture earns (`not_active` from the non-owner,
+  `not_converged` from the standby whose final-sync pull just failed
+  against the silent source), never a lane-timeout silence, while
+  `GET /health`, `GET /role`, and the bodiless `POST /demote` stay at
+  baseline. The congestion is then released — the lane must serve a
+  scan again, the source thawed, the pair reconverging with its
+  launch roles restored — and the run's driven standby is torn down
+  before the legs behind it see the rig as they launched it.
+- Named diagnostics are
+  `attributed-switch-isolation-failed` and
+  `attributed-switch-isolation-nondeterministic`, with the
+  self-check's `attributed-switch-isolation-unchecked` covering the
+  planted negatives: isolation asserted held while an attributed
+  switch sits queued behind the staged batches or never answers behind
+  them, the same shared-lane wait under the holding set, an attributed
+  answer carrying a verdict the peer's posture does not earn, a
+  baseline lane starved or late, an unreleased lane, an unrestored
+  pair, and the instability shapes. Two consecutive passes produce
+  identical digests. A run context carrying no driven-launch or
+  frozen-source seam, a pair off its converged launch shape, a
+  congestion shape that never stood, and a read that dropped report
+  inconclusive.
+- #1264's fix is a behavioural routing guard with no new served field
+  and no new durable record, so the leg's pre-contract signature is
+  behavioural too — and positive rather than a mere lateness: an
+  attributed switch that *shared* the submission lane's wait under the
+  holding set, its answer landing only once the staged congestion
+  drained or never while it stood, with the bare control lanes beside
+  it answering at baseline, is a monitored revision that routes bodied
+  switches onto the submission lane and reports inconclusive. Every
+  released and staged build predates the contract until the fix lands,
+  so that is the honest verdict for them. A revision whose holding
+  shape answered in isolation and whose batch shape then queued or
+  timed out is not that signature — the contract was demonstrated
+  present on that very monitor — and the leg names it as the contract
+  failure it is.
 
 ## Outcome
 
