@@ -433,6 +433,7 @@ mod tests {
             parameters,
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let mut block =
             Counter::from_parameters("ctr", IN, RESET, COUNT, DONE, &instance.parameters).unwrap();

@@ -493,6 +493,7 @@ mod tests {
             parameters: Parameters::new(),
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         FailoverSelect::from_parameters(
             "fsel",

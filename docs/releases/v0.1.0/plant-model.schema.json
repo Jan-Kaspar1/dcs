@@ -84,6 +84,12 @@
         "kind": {
           "type": "string"
         },
+        "parameter_units": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
         "parameters": {
           "additionalProperties": {
             "$ref": "#/$defs/value"
@@ -92,7 +98,7 @@
         },
         "ports": {
           "additionalProperties": {
-            "$ref": "#/$defs/endpoint-shape"
+            "$ref": "#/$defs/port"
           },
           "type": "object"
         },
@@ -857,6 +863,12 @@
             }
           ]
         },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "value_type": {
           "$ref": "#/$defs/value-kind"
         },
@@ -884,6 +896,28 @@
       },
       "required": [
         "int"
+      ],
+      "type": "object"
+    },
+    "port": {
+      "additionalProperties": false,
+      "properties": {
+        "direction": {
+          "$ref": "#/$defs/direction"
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value_type": {
+          "$ref": "#/$defs/value-kind"
+        }
+      },
+      "required": [
+        "direction",
+        "value_type"
       ],
       "type": "object"
     },

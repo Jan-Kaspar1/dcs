@@ -84,6 +84,23 @@
 //! plant.connect(counter.count, timer.input);
 //! ```
 //!
+//! ## Declared units
+//!
+//! `ValueKind` is a representation — an `f64` — not a dimension: a flow
+//! in `"m3/h"` and a dose bound in `"mg/L"` are both `Float`. The
+//! dimensional half of the composition contract is declared data: a
+//! point through [`PlantBuilder::unit`], a unit-transparent port or
+//! parameter through [`PlantBuilder::port_unit`] /
+//! [`PlantBuilder::param_unit`], a kind's inherent unit through
+//! [`PortDecl::with_unit`]/[`ParamDecl::with_unit`] in the spec table —
+//! the [`unit`] module holds the canonical spellings. Two wired ends
+//! declaring disagreeing units fail `connect` where both declarations
+//! are known and [`build`](PlantBuilder::build) where they are not —
+//! the same [`ConnectionUnitMismatch`](dcs_model::ValidationError::ConnectionUnitMismatch)
+//! a hand-written document faces at [`load`](dcs_model::PlantModel::load).
+//! An end declaring no unit stays uncheckable, so a unit-transparent
+//! port and an undimensioned document remain admissible.
+//!
 //! ## Kinds without a spec
 //!
 //! [`DynamicSpec`] registers a component kind whose interface is known
@@ -134,6 +151,7 @@ pub mod ijmuiden;
 mod spec;
 pub mod specs;
 pub mod station;
+pub mod unit;
 pub mod wago;
 
 pub use builder::{BuildError, PlantBuilder, SignalBuilder};

@@ -20,6 +20,7 @@ use crate::spec::{
     BINARY_CODE_RANGE, CODE_RANGE, FINITE_F64, FRACTION_F64, NONNEGATIVE_F64, NONNEGATIVE_INT,
     POSITIVE_F64, POSITIVE_INT, ParamDecl, Parameters, PortDecl, Spec, optional, port, required,
 };
+use crate::unit;
 use dcs_core::{
     CommandArgument, CommandAvailability, CommandDecl, Direction, EventDecl, EventField,
     EventFieldKind, EventRetention, PointType, ValueKind,
@@ -304,7 +305,7 @@ impl DigitalInputSpec {
     /// The declared parameter set.
     pub const PARAMETERS: &'static [ParamDecl] = &[
         optional("invert", ValueKind::Bool, None),
-        optional("debounce_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        optional("debounce_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
     ];
 
     /// A spec carrying `parameters` as the instance's parameter map.
@@ -677,7 +678,7 @@ impl ValveSpec {
     /// The declared parameter set.
     pub const PARAMETERS: &'static [ParamDecl] = &[
         required("tolerance", ValueKind::Float, Some(NONNEGATIVE_F64)),
-        optional("discrepancy_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        optional("discrepancy_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
     ];
 
     /// A spec carrying `parameters` as the instance's parameter map.
@@ -751,11 +752,8 @@ impl MotorSpec {
     pub const KIND: &'static str = "motor";
 
     /// The declared parameter set.
-    pub const PARAMETERS: &'static [ParamDecl] = &[optional(
-        "fault_ticks",
-        ValueKind::Int,
-        Some(NONNEGATIVE_INT),
-    )];
+    pub const PARAMETERS: &'static [ParamDecl] =
+        &[optional("fault_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS)];
 
     /// A spec carrying `parameters` as the instance's parameter map.
     pub fn new(parameters: Parameters) -> Self {
@@ -825,7 +823,7 @@ impl TimerSpec {
 
     /// The declared parameter set.
     pub const PARAMETERS: &'static [ParamDecl] = &[
-        required("delay_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("delay_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
         optional("off_delay", ValueKind::Bool, None),
     ];
 
@@ -1049,7 +1047,7 @@ impl LatchingAlarmSpec {
         optional("hysteresis", ValueKind::Float, Some(NONNEGATIVE_F64)),
         required("priority", ValueKind::Int, Some(NONNEGATIVE_INT)),
         required("class", ValueKind::Int, Some(NONNEGATIVE_INT)),
-        required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
     ];
 
     /// A spec carrying `parameters` as the instance's parameter map and
@@ -1146,7 +1144,7 @@ impl BoolLatchingAlarmSpec {
     pub const PARAMETERS: &'static [ParamDecl] = &[
         required("priority", ValueKind::Int, Some(NONNEGATIVE_INT)),
         required("class", ValueKind::Int, Some(NONNEGATIVE_INT)),
-        required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
     ];
 
     /// A spec carrying `parameters` as the instance's parameter map and
@@ -1253,10 +1251,10 @@ fn managed_output_ports() -> Vec<PortDecl> {
 /// `response_ticks` rationalization fields; all required non-negative
 /// `Int`s.
 const MANAGED_ALARM_PARAMETERS: &[ParamDecl] = &[
-    required("max_shelve_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+    required("max_shelve_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
     required("priority", ValueKind::Int, Some(NONNEGATIVE_INT)),
     required("class", ValueKind::Int, Some(NONNEGATIVE_INT)),
-    required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+    required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
 ];
 
 /// Typed handles for the managed-alarm ports both managed latching
@@ -1352,10 +1350,10 @@ impl ManagedLatchingAlarmSpec {
         required("low_limit", ValueKind::Float, Some(FINITE_F64)),
         required("high_limit", ValueKind::Float, Some(FINITE_F64)),
         optional("hysteresis", ValueKind::Float, Some(NONNEGATIVE_F64)),
-        required("max_shelve_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("max_shelve_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
         required("priority", ValueKind::Int, Some(NONNEGATIVE_INT)),
         required("class", ValueKind::Int, Some(NONNEGATIVE_INT)),
-        required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        required("response_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
     ];
 
     /// A spec carrying `parameters` as the instance's parameter map;
@@ -2180,10 +2178,11 @@ impl PumpGroupSpec {
     /// The declared parameter set.
     pub const PARAMETERS: &'static [ParamDecl] = &[
         required("rotation", ValueKind::Int, Some(CODE_RANGE)),
-        optional("rotation_ticks", ValueKind::Int, Some(POSITIVE_INT)),
-        optional("start_delay_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
-        optional("restage_delay_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
-        optional("min_off_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)),
+        optional("rotation_ticks", ValueKind::Int, Some(POSITIVE_INT)).with_unit(unit::TICKS),
+        optional("start_delay_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
+        optional("restage_delay_ticks", ValueKind::Int, Some(NONNEGATIVE_INT))
+            .with_unit(unit::TICKS),
+        optional("min_off_ticks", ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS),
     ];
 
     /// A spec for an instance managing `pumps` pumps and carrying
@@ -2966,7 +2965,7 @@ impl DeviationMonitorSpec {
     /// The declared parameter set.
     pub const PARAMETERS: &'static [ParamDecl] = &[
         required("deviation_limit", ValueKind::Float, Some(NONNEGATIVE_F64)),
-        required("window_ticks", ValueKind::Int, Some(POSITIVE_INT)),
+        required("window_ticks", ValueKind::Int, Some(POSITIVE_INT)).with_unit(unit::TICKS),
     ];
 
     /// A spec carrying `parameters` as the instance's parameter map.
@@ -3506,7 +3505,7 @@ impl HeaderCoordinatorSpec {
         required("pressure_max", ValueKind::Float, Some(FINITE_F64)),
         required("mov_band_lo", ValueKind::Float, Some(FINITE_F64)),
         required("mov_band_hi", ValueKind::Float, Some(FINITE_F64)),
-        required("adjust_ticks", ValueKind::Int, Some(POSITIVE_INT)),
+        required("adjust_ticks", ValueKind::Int, Some(POSITIVE_INT)).with_unit(unit::TICKS),
         required("min_total_airflow", ValueKind::Float, Some(NONNEGATIVE_F64)),
         required("max_pulsing", ValueKind::Int, Some(NONNEGATIVE_INT)),
     ];
@@ -3632,7 +3631,7 @@ impl PhaseMonitorSpec {
     /// The declared parameter set.
     pub const PARAMETERS: &'static [ParamDecl] = &[
         required("bound", ValueKind::Float, Some(NONNEGATIVE_F64)),
-        required("limit_ticks", ValueKind::Int, Some(POSITIVE_INT)),
+        required("limit_ticks", ValueKind::Int, Some(POSITIVE_INT)).with_unit(unit::TICKS),
         required("mode", ValueKind::Int, Some(BINARY_CODE_RANGE)),
     ];
 

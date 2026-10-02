@@ -497,6 +497,7 @@ mod tests {
             parameters,
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let mut valve =
             Valve::from_parameters("vlv", CMD, OUT, FB, DISCREPANCY, &instance.parameters).unwrap();

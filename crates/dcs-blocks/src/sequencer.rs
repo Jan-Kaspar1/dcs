@@ -1124,6 +1124,7 @@ mod tests {
             parameters,
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let block =
             Sequencer::from_parameters("seq", RUN, RESET, OUT, STEP, DONE, &instance.parameters)

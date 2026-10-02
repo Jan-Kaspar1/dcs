@@ -694,6 +694,7 @@ mod tests {
             .collect(),
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let block =
             Totalizer::from_parameters("tot", RATE, RESET, TOTAL, &instance.parameters).unwrap();

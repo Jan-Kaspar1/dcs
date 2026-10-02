@@ -192,6 +192,18 @@ pub struct RecordingDuty {
 /// to the volatile ring. Validation bounds the declaration's shape: a
 /// zero `every_ticks` is a dead declaration — every scan would record,
 /// reproducing the full-rate stream the decision keeps volatile.
+///
+/// `unit` declares the engineering unit the point's value is expressed
+/// in — `"m3/h"`, `"L"`, `"g/h"`. Where a `value_type` answers "what
+/// representation does the value carry", `unit` answers "what is it a
+/// measure of". The declaration joins the dimensional-discipline
+/// checks: a connection whose other end declares a different unit is
+/// rejected, and a `Signal` declaring a `unit` that disagrees with its
+/// source point's is rejected — see
+/// [`PlantModel::validate`](crate::PlantModel::validate). An end
+/// declaring no unit stays uncheckable, so unit-transparent points and
+/// values the document never dimensioned remain admissible; the
+/// declared form is what the checks guard.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IoPoint {
     /// Unique point identifier.
@@ -264,6 +276,13 @@ pub struct IoPoint {
     /// documents predating the field load with `record` unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record: Option<RecordingDuty>,
+    /// The declared engineering unit of the carried value — see the
+    /// type docs. `None` declares no unit: the point stays uncheckable
+    /// on connections, the gradual-adoption half of the discipline.
+    ///
+    /// Optional like [`Signal::unit`]; see its note on schema versioning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
 }
 
 impl IoPoint {
@@ -284,7 +303,11 @@ pub struct Signal {
     pub name: String,
     /// The I/O point carrying this signal's value.
     pub source: PointId,
-    /// Engineering unit of the carried value, e.g. `"degC"`.
+    /// Engineering unit of the carried value, e.g. `"degC"` — the
+    /// display-side declaration of the unit the source [`IoPoint`]
+    /// declares. Validation rejects a signal whose `unit` disagrees
+    /// with its point's declared `unit`: the name consumers render
+    /// cannot drift from the unit the value is wired in.
     ///
     /// `unit`, `description`, and `group` extend the version-1 schema as
     /// optional fields: documents written before they existed deserialize
@@ -353,6 +376,18 @@ pub struct ComponentInstance {
     /// the model wires; the runtime checks it against the component kind's
     /// definition.
     pub ports: BTreeMap<String, Port>,
+    /// The declared engineering units of `parameters` entries, keyed by
+    /// parameter name — `"ticks"` for a declared scan-interval parameter,
+    /// `"mg/L"` for a dose bound. Parameter values stay bare [`Value`]s;
+    /// this map carries the dimension beside them so the document
+    /// records what a number is a measure of. Every key must name a key
+    /// present in `parameters` — a unit for an absent value is a dead
+    /// declaration validation rejects.
+    ///
+    /// Optional like [`Signal::unit`]; see its note on schema versioning:
+    /// documents predating the field load with the map empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameter_units: BTreeMap<String, String>,
 }
 
 impl ComponentInstance {
@@ -367,12 +402,23 @@ impl ComponentInstance {
 }
 
 /// A named component port with a fixed direction and value type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Port {
     /// `In` ports consume a connection's value; `Out` ports produce one.
     pub direction: Direction,
     /// The port's value type.
     pub value_type: ValueKind,
+    /// The declared engineering unit the port's value is expressed in
+    /// — the instance-level declaration the composition made on the
+    /// spec's port declaration. A connection joining this port to
+    /// an end declaring a different unit is rejected — see
+    /// [`PlantModel::validate`](crate::PlantModel::validate); an
+    /// undeclared unit stays uncheckable, matching
+    /// [`IoPoint::unit`]'s convention.
+    ///
+    /// Optional like [`Signal::unit`]; see its note on schema versioning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
 }
 
 /// A reference to one named port on one component instance.
