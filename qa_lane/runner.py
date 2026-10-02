@@ -39,7 +39,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import netpolicy, report as qa_report, revision
+from . import netpolicy, report as qa_report, revision, ship
 from . import scenarios, state as qa_state
 
 MANAGED_LABEL = 'dcs-hwtest.managed'
@@ -882,7 +882,23 @@ def _build_images(src, cfg, run_dir, timeline, run_id):
     The build shares a target/ cache across runs so a re-tested revision
     does not recompile the world; the cache is lane-owned state, not
     evidence.
+
+    What the builder compiles and what each image carries comes from
+    the recorded shipped-binary contract (`qa_lane/ship.json`, read
+    through `qa_lane.ship`) rather than from this function's own lists:
+    the contract derives the cargo chain, each image's payload, and the
+    assertions that every binary named is built and staged, so a
+    shipped binary cannot be added without a compile target or lost
+    from an image without the run failing by name. It also carries the
+    lane-copy check the runs' divergence needed — the lane code is
+    pinned on the host separately from the revision under test, so this
+    compares the payload this copy builds against the one the tested
+    revision's own archive records and refuses the run before compiling
+    anything when the pinned copy is behind (#1419).
     """
+    contract = ship.load()
+    ship.assert_complete(contract)
+    ship.check_lane_copy(src, contract)
     work = Path(cfg['state_dir']) / 'build-cache'
     work.mkdir(parents=True, exist_ok=True)
     cargo = Path(cfg['state_dir']) / 'cargo-cache'
@@ -913,13 +929,8 @@ def _build_images(src, cfg, run_dir, timeline, run_id):
            '-e', 'CARGO_HOME=/cargo',
            '-e', 'CARGO_TARGET_DIR=/work/target',
            cfg['builder_image'], 'bash', '-c',
-            'cd /src && cargo build --release --locked '
-            '-p dcs-controller -p dcs-plant -p dcs-sim-net '
-            '&& cargo build --release --locked '
-            '-p dcs-monitor --bin dcs-ctl --bin dcs-forge '
-            '&& cargo build --release --locked '
-            '-p dcs-sim-bus --bin dcs-sim-bus-device',
-            timeout=cfg['builder_timeout'])
+           'cd /src && ' + ship.compile_command(contract),
+           timeout=cfg['builder_timeout'])
     # Extra binaries each image ships beside its entrypoint: the plant
     # image carries dcs-plant-ctl — the plant-side tool the lane execs
     # inside the container against the server's loopback listener, so
@@ -934,47 +945,57 @@ def _build_images(src, cfg, run_dir, timeline, run_id):
     # evidence runs against the released binary and not against the
     # lane's own protocol double. Both rides the existing image rather
     # than a third one: the entrypoints, the two reported digests, and
-    # the host-side dcs-ctl seam are unchanged.
-    ship = {'plant': ['dcs-plant-ctl'],
-            'controller': ['dcs-forge', 'dcs-sim-bus-device']}
-    digests = {}
-    for crate, binary, tag in (
-            ('controller', 'dcs-controller', 'dcs-hwtest/controller'),
-            ('plant', 'dcs-plant-server', 'dcs-hwtest/plant')):
-        binaries = [binary] + ship.get(crate, [])
+    # the host-side dcs-ctl seam are unchanged. Which binaries ride
+    # where is the recorded contract's, not this comment's — see
+    # qa_lane/ship.json.
+    release = work / 'target' / 'release'
+    digests, staged = {}, ship.payload(contract)
+    for image in contract['images']:
+        binaries = staged[image['name']]
         for name in binaries:
-            binary_path = work / 'target' / 'release' / name
-            if not binary_path.is_file():
+            if not (release / name).is_file():
                 raise RuntimeError('build produced no ' + name)
-        context = run_dir / ('image-' + crate)
+        context = run_dir / ('image-' + image['name'])
         context.mkdir(exist_ok=True)
         copies = ''
         for name in binaries:
-            shutil.copy2(work / 'target' / 'release' / name,
-                         context / name)
-            copies += 'COPY ' + name + ' /usr/local/bin/' + name + '\n'
+            shutil.copy2(release / name, context / name)
+            copies += 'COPY ' + name + ' ' + ship.INSTALL_PREFIX + name \
+                + '\n'
         (context / 'Dockerfile').write_text(
             'FROM debian:bookworm-slim\n'
             'RUN useradd --no-create-home --shell /usr/sbin/nologin '
             '--uid 10001 dcs\n'
             + copies +
             'USER dcs\n'
-            'ENTRYPOINT ["' + binary + '"]\n'
+            'ENTRYPOINT ["' + image['entrypoint'] + '"]\n'
             'CMD ["--help"]\n')
-        docker('build', '-t', tag + ':' + sha,
+        # The payload assertion the runs' divergence needed: read the
+        # staged context back against the contract, so an image that
+        # would be built without one of the binaries its legs exec is
+        # refused by name here rather than discovered mid-run as an
+        # absent tool. The staged payload is also the run's evidence of
+        # what rode the images, recorded beside the digests the report
+        # carries.
+        ship.assert_staged(context, image)
+        timeline('image-staged', image['name'] + ' '
+                 + ' '.join(binaries) + ' -> ' + str(context))
+        docker('build', '-t', image['tag'] + ':' + sha,
                '--label', MANAGED_LABEL + '=1',
                '--label', RUN_LABEL + '=' + run_id,
                str(context), timeout=600)
-        image_id = docker('image', 'inspect', tag + ':' + sha,
+        image_id = docker('image', 'inspect', image['tag'] + ':' + sha,
                           '--format', '{{.Id}}').stdout.strip()
-        digests[crate] = image_id
-        timeline('image-built', crate + ' ' + image_id[:19])
+        digests[image['name']] = image_id
+        timeline('image-built', image['name'] + ' ' + image_id[:19])
     # The operator CLI ships as a host-side binary, not an image: the
     # same bounded builder compile produces it, and the dcs-ctl
     # scenario execs it against the pair's published monitor ports.
-    if not _dcs_ctl_path(cfg).is_file():
-        raise RuntimeError('build produced no dcs-ctl')
-    timeline('tool-built', 'dcs-ctl ' + str(_dcs_ctl_path(cfg)))
+    for tool in contract['host_tools']:
+        if not (release / tool).is_file():
+            raise RuntimeError('build produced no ' + tool)
+    timeline('tool-built', ' '.join(
+        tool + ' ' + str(release / tool) for tool in contract['host_tools']))
     return digests
 
 

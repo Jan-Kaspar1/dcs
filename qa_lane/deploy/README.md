@@ -30,6 +30,10 @@ sudo chown jan-kaspar:jan-kaspar /srv/homelab/dcs-hwtest /srv/dcs-hwtest
 # copy qa_lane/ from a chosen commit of the dcs repo
 cp -r qa_lane /srv/homelab/dcs-hwtest/
 cp config.example.json /srv/homelab/dcs-hwtest/config.json
+# verify the pinned copy's shipped-binary contract against the revision
+# the dispatcher will push from (see "Keeping the pinned lane copy at
+# the contract"); this fails by name when the copy is behind it
+python3 -m qa_lane ship /srv/dcs-hwtest/src/<sha>
 sudo cp dcs-hwtest.service dcs-hwtest.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now dcs-hwtest.timer
@@ -92,6 +96,10 @@ sudo systemctl enable --now dcs-hwtest-netpolicy.service
   unpins evidence the retention reconciler must keep — the
   findings/verification lane uses this so runs tied to unresolved
   findings or queued fix verifications are never reaped.
+- `python3 -m qa_lane ship [<extracted-src-dir>]` prints the pinned
+  copy's recorded shipped-binary contract and checks it against the
+  contract the given revision records — the deploy step's own check
+  that the copy is not behind the revisions it will be asked to test.
 
 ## Isolation and limits
 
@@ -204,9 +212,58 @@ before; only the binaries riding inside them changed:
   `build-cache/target/release/`, exec'd against the pair's published
   monitor ports.
 
-A build that produces no one of an image's shipped binaries fails
-the run loudly rather than leaving a leg to run against a phantom
-tool.
+`qa_lane/ship.json` is where that payload is *recorded*: the compile
+groups the bounded builder runs in `/src` with the binaries each one
+produces, the two images with their entrypoints and the binaries beside
+them, and the host-side tools. `_build_images` derives its cargo chain,
+each image's payload, and its assertions from that document, so the two
+lists cannot drift apart — and because the document is data it also
+ships inside the revision's own `git archive`, which is what makes the
+pinned-copy check below possible.
+
+Three things fail the run by name instead of leaving a leg to discover a
+phantom tool:
+
+- A contract naming a binary no compile group produces — the ship-map
+  gap — fails before the compile: `no recorded compile target produces …`.
+- A compile that produces no one of an image's binaries fails the run:
+  `build produced no dcs-sim-bus-device`.
+- A staged context that does not carry every binary its image's record
+  names — read back from the generated context directory and Dockerfile,
+  not from the copy loop that wrote them — fails the run:
+  `controller image stages no dcs-forge`. The staged payload is
+  recorded on the run's timeline as `image-staged`, beside the digests
+  the report persists.
+
+### Keeping the pinned lane copy at the contract
+
+The pinned `qa_lane/` copy and the revision under test advance
+separately, which is how the recorded ship list failed to reach the
+runs' images at cabe3b3: three exploration runs tested a revision
+carrying both #1368's sim-bus ship list and #654's `dcs-plant-ctl`
+precedent, but the deployed copy that built their images predated
+both, so the images carried their entrypoints alone and the sim-bus,
+keyed-interposer, and claim-probing legs fell back to bind-mounting
+`build-cache/target/release/` binaries. Nothing in the report said so —
+only the two digests were recorded.
+
+Two checks now carry that knowledge, both naming the binary:
+
+- **At deploy time:** `python3 -m qa_lane ship [<extracted-src-dir>]`
+  prints the deployed copy's recorded payload and compares it against
+  the contract an extracted revision records at `qa_lane/ship.json`.
+  Run it after copying `qa_lane/` from the commit the dispatcher pushes
+  revisions from; a copy predating that revision's ship list exits with
+  `the deployed qa_lane copy predates the shipped-binary contract the
+  revision under test records: …`.
+- **In every run:** the image build makes the same comparison against
+  the run's own extracted source tree, so an assessment,
+  exploration, or fix-verification run refuses before it compiles
+  anything rather than staging entrypoint-only images.
+
+A revision predating `ship.json` records none and is left alone. Upgrade
+the pinned copy whenever a merge changes the recorded payload; a run
+whose revision carries no contract cannot catch a pin that is behind.
 
 ## The lane's sim-bus device server
 
