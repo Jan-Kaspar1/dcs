@@ -4863,6 +4863,35 @@ fn a_standing_writer_that_cannot_prove_the_key_narrows_the_verdict() {
          fall back to the ownerless one, got {:?}",
         b.client.role().unwrap()
     );
+
+    // A writer that is not there any more: the foreign claim releases,
+    // so the field's own arbitration names no endpoint at all. There is
+    // no writer left to be outside the line, and the narrower verdict
+    // must not outlive its evidence — an `usurped` beside an
+    // `unclaimed` field would tell an operator and the pair view that a
+    // live foreign writer is standing on a field the arbitration says
+    // nobody holds.
+    *claimed.lock().unwrap() = Some(usurper_addr);
+    assert!(matches!(cycle(&b.monitor), TrackReport::Applied(_)));
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Usurped { .. })
+        ),
+        "the foreign writer is back on the field, so the narrower verdict \
+         returns"
+    );
+    *claimed.lock().unwrap() = None;
+    assert!(matches!(cycle(&b.monitor), TrackReport::Applied(_)));
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Orphaned { .. })
+        ),
+        "a claim declaring no monitor is no writer to be outside the \
+         line, so the verdict must fall back to the ownerless one, got {:?}",
+        b.client.role().unwrap()
+    );
 }
 
 /// The QA finding `pending-source-pull-latches-egain` (#1315): a standby

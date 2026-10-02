@@ -1277,19 +1277,17 @@ struct ClaimedVerify {
 }
 
 /// What one diagnosis pass answered for the field's standing writer —
-/// the three readings [`Monitor::diagnose_foreign_writer`] can return.
-/// The distinction is between *no answer earned* and *an answer*, not
-/// between verdicts: a suppressed pass is not a cleared diagnosis, so
-/// the caller keeps whatever the last pass concluded.
+/// the two readings [`Monitor::diagnose_foreign_writer`] can return.
+/// There is no third: every case where no fresh answer was earned is
+/// `Absent`, so the narrower verdict can never outlive the writer it
+/// was earned against.
 enum WriterDiagnosis {
-    /// No pass ran — an unkeyed run, a field owner, a claim declaring
-    /// no monitor, or the same declaration inside its retry window.
-    /// Whatever diagnosis stands keeps standing.
-    Unchanged,
-    /// A pass ran and answered: the named writer proved the line's
-    /// key, or could not be reached. Neither is evidence that it is
-    /// outside the line, so the run falls back to the orphan verdict's
-    /// conditional claim.
+    /// No writer is outside the line: a pass ran and answered — the
+    /// named writer proved the line's key, or could not be reached — or
+    /// no writer could be asked at all (an unkeyed run, a field owner, a
+    /// claim declaring no monitor, an own-monitor or undialable
+    /// declaration). Either way the run falls back to the orphan
+    /// verdict's conditional claim.
     Absent,
     /// A pass ran and diagnosed the named writer: it answered and its
     /// document could not prove this line's pair key.
@@ -2432,16 +2430,19 @@ impl<'d> Monitor<'d> {
         // orphan verdict it reframes — outside `shared`, so its bounded
         // pull stalls this request and not the paced scan — and its
         // answer lands on the peer, where both promotion gates read it.
-        // A run no longer reporting an ownerless verdict is not
-        // tracking a non-owner, so it keeps no diagnosis.
-        let diagnosis = if orphaned {
-            self.diagnose_foreign_writer()
+        if orphaned {
+            match self.diagnose_foreign_writer() {
+                WriterDiagnosis::Foreign(writer) => self.note_foreign_writer(Some(writer)),
+                WriterDiagnosis::Absent => self.note_foreign_writer(None),
+            }
         } else {
-            WriterDiagnosis::Unchanged
-        };
-        if let WriterDiagnosis::Foreign(writer) = diagnosis {
-            self.note_foreign_writer(Some(writer));
-        } else if matches!(diagnosis, WriterDiagnosis::Absent) {
+            // A run no longer reporting an ownerless verdict is not
+            // tracking a non-owner, so it keeps no diagnosis. The
+            // reading is dropped outright rather than left standing for
+            // the next orphaned apply to pick up unverified: the writer
+            // may have changed hands many times over since the pass
+            // that earned it, and the promotion gate the next apply
+            // routes would be reading that old verdict.
             self.note_foreign_writer(None);
         }
         report
@@ -3538,10 +3539,15 @@ impl<'d> Monitor<'d> {
     ///
     /// Keyed-only, and only while this run owns no field: an unkeyed
     /// run holds no key to ask under, and a field owner has no writer
-    /// outside its line. [`WriterDiagnosis::Unchanged`] covers every
-    /// case where no fresh answer was earned — the caller keeps
-    /// whatever the last pass concluded rather than reading a
-    /// suppressed pass as a cleared verdict.
+    /// outside its line. Every case where *no writer can be asked* is
+    /// [`WriterDiagnosis::Absent`] rather than a shrug — an unkeyed run,
+    /// a field owner, a claim declaring no monitor (the field
+    /// arbitrating no writer at all, which a released foreign claim
+    /// leaves standing), a declaration naming this run's own monitor or
+    /// an undialable wildcard bind. All of those are the plain
+    /// [`StandbySync::Orphaned`] verdict with its conditional claim, and
+    /// saying so is what keeps the narrower verdict honest about a
+    /// writer that is no longer there.
     ///
     /// A diagnosed writer journals its own refusal like every other
     /// probe here ([`TrackingSourceRefused`](dcs_core::JournalEvent::TrackingSourceRefused)),
@@ -3553,26 +3559,29 @@ impl<'d> Monitor<'d> {
         // an unkeyed run, and an unkeyed run's peers never claimed a
         // line in the first place.
         if self.pair_key.is_none() {
-            return WriterDiagnosis::Unchanged;
+            return WriterDiagnosis::Absent;
         }
         let claimed = {
             let shared = self.shared.lock().unwrap();
             if shared.peer.owns_field() {
-                return WriterDiagnosis::Unchanged;
+                return WriterDiagnosis::Absent;
             }
-            // The field named no endpoint for its claim — a tool's
-            // claim, or a build predating the declaration. That is no
-            // writer to diagnose, never a verdict that one is foreign.
+            // The field named no endpoint for its claim — an unclaimed
+            // field, a tool's claim, or a build predating the
+            // declaration. There is no writer to be outside the line,
+            // so the verdict is the ownerless one: the narrower reading
+            // is not a shrug that survives the writer's departure.
             match shared.peer.claimed_monitor() {
                 Some(claimed) => claimed,
-                None => return WriterDiagnosis::Unchanged,
+                None => return WriterDiagnosis::Absent,
             }
         };
         // A verdict naming this run's own monitor names no other
         // writer, and an undialable bind address is no endpoint at
-        // all — the same two refusals the adoption paths apply.
+        // all — the same two refusals the adoption paths apply, and the
+        // same plain ownerless verdict they leave behind.
         if claimed == self.local_addr() || claimed.ip().is_unspecified() {
-            return WriterDiagnosis::Unchanged;
+            return WriterDiagnosis::Absent;
         }
         {
             // A pass inside its window stands as the verdict: the
