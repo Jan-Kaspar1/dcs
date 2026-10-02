@@ -164,6 +164,16 @@ pub struct MonitorConfig {
     /// own command-queue capacity, a `POST /scan` batch's one push
     /// per scan — so it sits at the command queue's own default.
     pub state_drain_capacity: usize,
+    /// The checkpoint's single-writer lock when the caller already holds
+    /// it for this process — QA finding
+    /// `state-file-shared-between-processes-not-detected` (#1341). The
+    /// controller's `--state-file` run takes the claim before it reads
+    /// the checkpoint to resume, so the resume and every later save are
+    /// one guard; handing it here joins the sink to that claim instead
+    /// of colliding with the caller's own process. `None` — the default
+    /// — leaves the sink to take the claim itself, refusing a second
+    /// live writer on the same path exactly as a bind without one does.
+    pub state_writer: Option<crate::state_file::StateWriterLock>,
 }
 
 impl Default for MonitorConfig {
@@ -182,6 +192,7 @@ impl Default for MonitorConfig {
             history_drain_capacity: 1024,
             state_file: None,
             state_drain_capacity: crate::state_file::DEFAULT_STATE_DRAIN_CAPACITY,
+            state_writer: None,
         }
     }
 }
@@ -201,6 +212,16 @@ impl MonitorConfig {
     /// journal/history alias already fails closed at the file lock
     /// when the second sink opens; naming every pair here fails the
     /// bind before any sink opens.
+    ///
+    /// The checkpoint's writer lock is a fourth path — the `.lock`
+    /// sidecar its single-writer claim takes (finding
+    /// `state-file-shared-between-processes-not-detected`), which the
+    /// checkpoint's rename can never replace. An append sink pointed at
+    /// that sidecar would hold the lock every state-file run needs, so
+    /// its pair is named here too: the misconfiguration then fails at
+    /// the bind instead of surfacing later as a state-file run that
+    /// refuses to start for a reason its own configuration does not
+    /// explain.
     pub(crate) fn check_persistence_paths(&self) -> io::Result<()> {
         let configured = [
             ("state_file", self.state_file.as_deref()),
@@ -228,8 +249,41 @@ impl MonitorConfig {
                 }
             }
         }
+        // Every append sink's own file against the checkpoint's
+        // writer-lock sidecar — the one alias the file locks cannot
+        // catch, because the append sink takes the sidecar first and
+        // the checkpoint then finds it held. Only the checkpoint sink
+        // has a sidecar: the two append sinks lock the file they
+        // append to.
+        if let Some(lock_path) = state_writer_lock(self.state_file.as_deref()) {
+            for (field, path) in [
+                ("journal_file", self.journal_file.as_deref()),
+                ("history_file", self.history_file.as_deref()),
+            ] {
+                let Some(path) = path else { continue };
+                if same_persistence_file(path, &lock_path) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "monitor persistence paths must be distinct files: {field} and \
+                             state_file's writer lock both name {} — the append sink would \
+                             hold the checkpoint's single-writer lock and refuse every run \
+                             that persists there",
+                            lock_path.display()
+                        ),
+                    ));
+                }
+            }
+        }
         Ok(())
     }
+}
+
+/// The writer-lock sidecar a configured checkpoint path claims — the
+/// path the single-writer guard actually locks, so the configuration
+/// checks compare configured paths against the one the runtime holds.
+fn state_writer_lock(path: Option<&Path>) -> Option<PathBuf> {
+    path.map(crate::state_file::StateWriterLock::lock_path)
 }
 
 /// Whether two configured persistence paths name the same file —

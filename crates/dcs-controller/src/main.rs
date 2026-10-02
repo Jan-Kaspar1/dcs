@@ -98,6 +98,23 @@
 //! checkpoint stream converging a standby continuously rather than at
 //! the last persisted cycle.
 //!
+//! The checkpoint is one run's state — its tick domain, its receipt
+//! log, its component state — so `PATH` is single-writer, the same
+//! contract the append sinks below declare: an exclusive advisory
+//! lock on the `PATH.lock` sidecar is taken before the file is read and
+//! held for this process's lifetime, so a second live writer on one
+//! `--state-file` — a pair member and a stale probe container sharing
+//! one mounted directory, the shared-volume misconfiguration — exits
+//! nonzero naming the file, the sidecar, and the live-holder conflict
+//! instead of both runs overwriting each other's state until a restart
+//! adopted whichever wrote last as its own. The lock rides the sidecar
+//! rather than `PATH` because the save's write-then-rename replaces the
+//! checkpoint's inode on every cycle: a lock on the file itself would
+//! detach from the path at the first save and the next process would
+//! lock the fresh inode happily. A dead holder's lock releases with its
+//! descriptor, so the restart that resumes the dead run's checkpoint
+//! re-acquires it — the recovery this flag exists for, unchanged.
+//!
 //! `--journal-file PATH` persists the transition journal the monitor
 //! records — the journal-persistence decision's durable audit trail:
 //! every journaled entry is appended to `PATH` as one line-delimited
@@ -336,7 +353,7 @@ use dcs_core::{
 use dcs_model::PlantModel;
 use dcs_monitor::{
     CheckpointPuller, DEFAULT_STATE_DRAIN_CAPACITY, Driven, Monitor, MonitorConfig, StateSink,
-    TrackTarget,
+    StateWriterLock, TrackTarget,
 };
 use dcs_runtime::{
     Activation, Checkpoint, Executor, Peer, PeerEvent, TrackReport, WriteGate, mint_generation,
@@ -1057,7 +1074,15 @@ controller scan.
                   the reason; a missing file is a cold start. With
                   --revised, a foreign-fingerprint file instead crosses
                   the model boundary under the carryover rule — the lone
-                  controller's scheduled-outage roll. PATH must be
+                  controller's scheduled-outage roll. The file is
+                  single-writer: an exclusive advisory lock on the PATH
+                  .lock sidecar — a sibling the rename never replaces —
+                  is held from before the resume to this process's exit,
+                  so a second live process on the same PATH exits
+                  nonzero naming the writer-lock conflict rather than
+                  both runs overwriting each other's state until a
+                  restart adopts whichever wrote last. Never point two
+                  controllers at one state file. PATH must be
                   distinct from --journal-file and --history-file: the
                   rename would orphan an append writer sharing it
   --journal-file PATH
@@ -1073,8 +1098,8 @@ controller scan.
                   second live process on the same PATH exits nonzero
                   naming the writer-lock conflict — never point two
                   controllers at one journal file. Requires --listen.
-                  PATH must be distinct from --state-file and
-                  --history-file
+                  PATH must be distinct from --state-file, its .lock
+                  writer-lock sidecar, and --history-file
   --history-file PATH
                   persist the durable process history to PATH — the
                   declared-record points' samples, run-boundary
@@ -1083,7 +1108,8 @@ controller scan.
                   scheme the journal file takes — and replay it at
                   startup into the served window GET /history/durable
                   answers from. Requires --listen. PATH must be
-                  distinct from --state-file and --journal-file
+                  distinct from --state-file, its .lock writer-lock
+                  sidecar, and --journal-file
   -h, --help      show this text
 
 With neither --ticks nor --scan-ms, a paced run at 100 ms is assumed.
@@ -1317,6 +1343,32 @@ impl Options {
                         path.display()
                     ));
                 }
+            }
+        }
+        // The checkpoint's single-writer lock lives on a `.lock`
+        // sidecar the rename never replaces (QA finding
+        // state-file-shared-between-processes-not-detected, #1341). An
+        // append sink pointed at that sidecar would hold the lock
+        // every state-file run needs — the one alias the file locks
+        // cannot catch, because the append sink takes the sidecar
+        // first and the checkpoint then finds it held — so its pair
+        // is refused here, where the misconfiguration can still be
+        // explained by the flags that made it.
+        let state_lock = state_file.as_deref().map(StateWriterLock::lock_path);
+        for (flag, path) in [
+            ("--journal-file", journal_file.as_deref()),
+            ("--history-file", history_file.as_deref()),
+        ] {
+            let (Some(path), Some(lock)) = (path, state_lock.as_deref()) else {
+                continue;
+            };
+            if same_persistence_path(path, lock) {
+                return Err(format!(
+                    "{flag} and --state-file's writer lock both name {}: the persistence \
+                     paths must be distinct — the append sink would hold the checkpoint's \
+                     single-writer lock and refuse every run that persists there",
+                    lock.display()
+                ));
             }
         }
         // A tracking source must name a different instance. Pointed at
@@ -1648,11 +1700,20 @@ fn resume_state_file(
 /// rides the scan loop's own serialization (single-threaded), the
 /// write drains off it. The sink's drop drains and joins the writer,
 /// so a graceful exit leaves the file complete through the last push.
-fn open_state_sink(options: &Options) -> Option<StateSink> {
-    options
-        .state_file
-        .as_ref()
-        .map(|path| StateSink::new(path, DEFAULT_STATE_DRAIN_CAPACITY))
+/// `writer` is the run's single-writer claim on the checkpoint, taken
+/// before the resume above: the sink joins that one claim instead of
+/// taking a second, and a refusal to have taken it already failed the
+/// launch.
+fn open_state_sink(
+    options: &Options,
+    writer: Option<&StateWriterLock>,
+) -> Result<Option<StateSink>, String> {
+    let (Some(path), Some(writer)) = (&options.state_file, writer) else {
+        return Ok(None);
+    };
+    StateSink::with_writer(path, DEFAULT_STATE_DRAIN_CAPACITY, writer.clone())
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 /// The monitorless scan loop's cycle-end `--state-file` persist:
@@ -1809,6 +1870,24 @@ fn main() -> ExitCode {
         }
     }
 
+    // The checkpoint file is this run's single-run identity — its tick
+    // domain, its receipt log, its component state — so it is
+    // single-writer like the two append sinks (QA finding
+    // `state-file-shared-between-processes-not-detected`, #1341). The
+    // claim is taken here, before the file is read: a second live
+    // writer pointed at one `--state-file` is refused by name at this
+    // line rather than both runs overwriting each other's state until
+    // a restart adopted whichever wrote last. A restart after the
+    // holder died re-acquires the lock with its descriptor released —
+    // the resume below is the recovery the file exists for.
+    let state_writer = match &options.state_file {
+        Some(path) => match StateWriterLock::acquire(path) {
+            Ok(lock) => Some(lock),
+            Err(error) => return fail(error.to_string()),
+        },
+        None => None,
+    };
+
     // The --state-file resume half: an existing file holds the run's
     // last persisted checkpoint, applied to the fresh executor before
     // the first scan — the restarted process then continues the
@@ -1928,6 +2007,10 @@ fn main() -> ExitCode {
         journal_file: options.journal_file.clone(),
         history_file: options.history_file.clone(),
         state_file: options.state_file.clone(),
+        // The run already holds the checkpoint's single-writer claim
+        // from before its resume, so the sink joins that one claim
+        // rather than taking a second against its own process.
+        state_writer: state_writer.clone(),
         ..MonitorConfig::default()
     };
 
@@ -2095,7 +2178,10 @@ fn main() -> ExitCode {
                 // fresh one.
                 let mut puller: Option<CheckpointPuller> = None;
                 let peer = std::cell::RefCell::new(peer);
-                let state_sink = open_state_sink(&options);
+                let state_sink = match open_state_sink(&options, state_writer.as_ref()) {
+                    Ok(sink) => sink,
+                    Err(error) => return fail(error),
+                };
                 let step = || driver.step(dt, peer.borrow().owns_field());
                 scan_loop(
                     || {
@@ -2321,7 +2407,10 @@ fn main() -> ExitCode {
                 // the role each cycle so a demoted peer stops stepping
                 // a shared plant it no longer owns.
                 let peer = std::cell::RefCell::new(peer);
-                let state_sink = open_state_sink(&options);
+                let state_sink = match open_state_sink(&options, state_writer.as_ref()) {
+                    Ok(sink) => sink,
+                    Err(error) => return fail(error),
+                };
                 scan_loop(
                     || {
                         let mut peer = peer.borrow_mut();
