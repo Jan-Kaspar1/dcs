@@ -982,6 +982,84 @@ Implementation order: second, after [daily architecture review](daily-architectu
   monitors never saw the take, so the leg names the contradiction as
   the contract failure it is.
 
+### Landed 2026-10-02 (attributed-switch control-lane isolation leg, #1265)
+
+- The attributed-switch control-lane isolation contract — the
+  per-revision lane evidence for the contract #1264's fix establishes
+  (WW-FND-004's disposable-consumer quarantine extended to the
+  actuation half; decision 83's schedule) — is exercised per revision
+  by scenario leg `1020_attributed_switch_isolation`. The monitor's
+  `role_change` routing documents `POST /promote` and `POST /demote`
+  as control-plane actuation on a dedicated control lane, so an
+  operator's switch — issued during an incident, exactly when
+  consoles wedge — never queues behind serving workers pinned by
+  undrained responses. The attributed `{"actor": …}` form carries a
+  body, and before the fix every request with `body_length > 0` was
+  quarantined on the submission lane beside `POST /scan`: an
+  operator's declared-identity switch queued behind severed scan
+  batches (~40 s behind two `scans: 40` batches on a driven peer
+  whose source had gone silent) and stalled outright behind
+  raw-socket clients that declare a `Content-Length` and never
+  deliver it, both submit workers pinned with no read timeout to
+  bound them. The attributed body is tens of bytes — always inside
+  tiny_http's eager-read bound — so it arrives already buffered and
+  rides the control lane beside the bare request.
+- The leg stages both congestion shapes on the lane's own driven
+  standby, never on the deployed pair's monitors: `start_driven`
+  launches the run's third monitor `--standby <field owner> --driven`,
+  so every checkpoint pull it performs happens inside a `POST /scan`
+  request, and `pause_controller` on the owner freezes that source in
+  place — the listener completes the handshake and nothing answers, so
+  each scan of a batch waits the documented `CHECKPOINT_PULL_TIMEOUT`
+  out and the batch holds its submission worker for its whole span.
+  The first shape is the holding set: two raw sockets send a head
+  declaring a body past the eager-read bound plus a partial body and
+  then hold, pinning both submit workers for as long as the leg keeps
+  them. The second is the reproduction's own: two severed `POST
+  /scan` batches sized to occupy both submit workers, sent whole and
+  never read.
+- Under each shape the leg proves the pin is real — a one-scan
+  submission that must not answer inside the declared probe bound —
+  and then asserts the contract through the congested peer: an
+  attributed `POST /demote` and an attributed `POST /promote` each
+  answer inside the declared bound with the verdict the peer's own
+  reported posture earns (`not_active` from the non-owner,
+  `not_converged` from the standby whose final-sync pull just failed
+  against the silent source), never a lane-timeout silence, while
+  `GET /health`, `GET /role`, and the bodiless `POST /demote` stay at
+  baseline. The congestion is then released — the lane must serve a
+  scan again, the source thawed, the pair reconverging with its
+  launch roles restored — and the run's driven standby is torn down
+  before the legs behind it see the rig as they launched it.
+- Named diagnostics are
+  `attributed-switch-isolation-failed` and
+  `attributed-switch-isolation-nondeterministic`, with the
+  self-check's `attributed-switch-isolation-unchecked` covering the
+  planted negatives: isolation asserted held while an attributed
+  switch sits queued behind the staged batches or never answers behind
+  them, the same shared-lane wait under the holding set, an attributed
+  answer carrying a verdict the peer's posture does not earn, a
+  baseline lane starved or late, an unreleased lane, an unrestored
+  pair, and the instability shapes. Two consecutive passes produce
+  identical digests. A run context carrying no driven-launch or
+  frozen-source seam, a pair off its converged launch shape, a
+  congestion shape that never stood, and a read that dropped report
+  inconclusive.
+- #1264's fix is a behavioural routing guard with no new served field
+  and no new durable record, so the leg's pre-contract signature is
+  behavioural too — and positive rather than a mere lateness: an
+  attributed switch that *shared* the submission lane's wait under the
+  holding set, its answer landing only once the staged congestion
+  drained or never while it stood, with the bare control lanes beside
+  it answering at baseline, is a monitored revision that routes bodied
+  switches onto the submission lane and reports inconclusive. Every
+  released and staged build predates the contract until the fix lands,
+  so that is the honest verdict for them. A revision whose holding
+  shape answered in isolation and whose batch shape then queued or
+  timed out is not that signature — the contract was demonstrated
+  present on that very monitor — and the leg names it as the contract
+  failure it is.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,

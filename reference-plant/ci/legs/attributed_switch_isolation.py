@@ -136,9 +136,15 @@ import pair
 # unexercised bound.
 LEG = {
     # The next free slot after the pair legs origin/main added
-    # (deferred-startup-refusal 720, claim-skew-bound 730) — the stage
-    # runs the legs in this order and no two may share one.
-    "order": 740,
+    # (deferred-startup-refusal 720, claim-skew-bound 730,
+    # pending-source-pull 740) — the stage runs the legs in this order
+    # and no two may share one. Slots are allocated in landing order, so
+    # a leg concurrent with main's takes the next slot after the one
+    # main's own leg already holds rather than the slot both picked off
+    # the same pre-merge tree: this leg and `pending_source_pull.py`
+    # each read 730 as the highest and both claimed 740, which
+    # `ci/legs.py`'s discovery refuses by name — `pair-legs-invalid`.
+    "order": 750,
     "title": "the attributed-switch-isolation leg",
     "passes": "attributed-switch-isolation-leg",
     "tampers": [
