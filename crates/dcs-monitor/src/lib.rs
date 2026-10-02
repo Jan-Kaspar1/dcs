@@ -327,6 +327,22 @@
 //! the lock's; every other path — the paced loop's cycle-end persist
 //! included — only queues, never waits.
 //!
+//! The checkpoint is one run's state, so its file is single-writer
+//! like the two append sinks: a [`StateWriterLock`] holds an exclusive
+//! advisory lock on a `.lock` sidecar beside the path — a sibling the
+//! write-then-rename never replaces, which is why a lock taken on the
+//! checkpoint itself would detach from the path at the first save.
+//! A second live writer on one state file is refused where the sink
+//! opens, naming the checkpoint, the sidecar, and the live-holder
+//! conflict, instead of leaving last-writer-wins for a restart to
+//! discover as a foreign run's tick domain, receipts, and component
+//! state adopted under a matching model fingerprint. A caller that
+//! holds the claim itself — the controller takes it before it reads
+//! the checkpoint to resume — hands it in through `state_writer` so
+//! the resume and every later save are one guard. A dead holder's lock
+//! releases with its descriptor, so the restart that resumes the dead
+//! run's checkpoint re-acquires it.
+//!
 //! The alarm flood and performance report (`dcs-alarm-report`, backed by
 //! [`alarm_report`]) is tooling-side aggregation over that record — the
 //! flood-and-performance decision's computing surface: it consumes
@@ -554,7 +570,7 @@ pub use pair::{
     PeerStatus, PeerView,
 };
 pub use recorder::MonitorConfig;
-pub use state_file::{DEFAULT_STATE_DRAIN_CAPACITY, StateSink};
+pub use state_file::{DEFAULT_STATE_DRAIN_CAPACITY, StateSink, StateWriterLock};
 pub use store::{Publication, PublicationGap, PublicationPage};
 
 use dcs_core::{
@@ -1367,11 +1383,22 @@ impl<'d> Monitor<'d> {
         // The state-file sink's writer spawns at bind beside the
         // recorder's journal drain — its shared counters stamp every
         // publication's `state_sink` section from the bind-time read
-        // model on.
-        let state_sink = config
-            .state_file
-            .as_ref()
-            .map(|path| StateSink::new(path, config.state_drain_capacity));
+        // model on. The sink takes the checkpoint's single-writer lock
+        // unless the caller already holds it for this process
+        // (`state_writer`): a second live writer on the same path is
+        // refused here naming the conflict (finding
+        // state-file-shared-between-processes-not-detected), which is
+        // the checkpoint sink's half of the append sinks' single-writer
+        // rule.
+        let state_sink = match (config.state_file.as_deref(), config.state_writer.clone()) {
+            (None, _) => None,
+            (Some(path), Some(writer)) => Some(StateSink::with_writer(
+                path,
+                config.state_drain_capacity,
+                writer,
+            )?),
+            (Some(path), None) => Some(StateSink::new(path, config.state_drain_capacity)?),
+        };
         let mut recorder = recorder::Recorder::new(config, peer.tick(), peer.executor().anchor())?;
         // A `--state-file`-restored executor already carries the run's
         // state — the receipt log and the restored image are this run's

@@ -207,7 +207,15 @@ that survives the process lifetime, and `history_file` is decision
 append-only file, replayed at bind into the bounded served window
 behind its run-boundary marks. `history_file` is additive-optional:
 a manifest written before it exists declares no durable-history mount
-and validates unchanged. Each
+and validates unchanged. Each declared path is that controller's own:
+every one of the three sinks is single-writer, and the checkpoint's
+writer lock is held on the `state_file` path's `.lock` sidecar from
+before the resume read through the process's exit, so two controllers
+sharing one mounted state file — the reference rig keeps a separate
+volume per controller for exactly this reason — leaves the second
+refusing at startup naming the live holder's writer-lock conflict
+instead of both runs overwriting each other's tick domain, receipts,
+and component state until a restart adopted whichever wrote last. A
 declared path must live on writable deployment storage — a named
 volume in the checked-in rig definition — while the model and
 dynamics mounts stay read-only; a consumer without durable storage
