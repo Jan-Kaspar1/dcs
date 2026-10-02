@@ -47,7 +47,11 @@ pub fn parameters<const N: usize>(pairs: [(&str, Value); N]) -> Parameters {
 ///
 /// Mirrors the kind's [`PortDescriptor`](dcs_core::PortDescriptor) minus
 /// the monitoring-only role hint — name, direction, and value kind are
-/// the composition contract.
+/// the composition contract, and `unit` the dimensional half of it: a
+/// kind whose port is inherently dimensioned declares the unit here
+/// ([`PortDecl::with_unit`]), a unit-transparent kind leaves it unset
+/// and the composition declares the instance's unit through
+/// [`PlantBuilder::port_unit`](crate::PlantBuilder::port_unit).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortDecl {
     /// The port's name within the component.
@@ -56,6 +60,27 @@ pub struct PortDecl {
     pub direction: Direction,
     /// The port's declared value kind.
     pub kind: ValueKind,
+    /// The engineering unit the port's value is inherently expressed
+    /// in, when the kind fixes one. `connect` checks it against the
+    /// connection's other end and `port_unit` must agree with it; the
+    /// emitted [`Port`](dcs_model::Port)'s `unit` records composition
+    /// declarations only, so the document's bytes are the
+    /// composition's own.
+    pub unit: Option<String>,
+}
+
+impl PortDecl {
+    /// Declares the port's inherent engineering unit — `"ticks"` on a
+    /// scan-period output, `"m3/h"` on a kind that is itself a flow
+    /// interface. Leave unset when the port is unit-transparent — an
+    /// `interlock`'s `input` carries whatever the composition wires —
+    /// and the instance declares its unit through
+    /// [`PlantBuilder::port_unit`](crate::PlantBuilder::port_unit)
+    /// instead.
+    pub fn with_unit(mut self, unit: &str) -> Self {
+        self.unit = Some(unit.to_string());
+        self
+    }
 }
 
 /// One declared parameter of a component kind.
@@ -65,6 +90,17 @@ pub struct PortDecl {
 /// [`PlantBuilder::build`](crate::PlantBuilder::build) reports a
 /// [`MissingParameter`](crate::BuildError::MissingParameter) for a
 /// required parameter the instance's map does not supply.
+///
+/// `unit` declares the engineering unit the parameter's value is
+/// inherently expressed in — `response_ticks` and the other
+/// `*_ticks` intervals declare `"ticks"`, while a unit-transparent
+/// bound such as `low_limit` (whose unit is whatever the wired `input`
+/// carries) leaves it unset for the composition to declare through
+/// [`PlantBuilder::param_unit`](crate::PlantBuilder::param_unit).
+/// The declaration is agreement-checked against `param_unit`; the
+/// emitted `parameter_units` records composition declarations only,
+/// so an unchanged composition emits identical bytes across a
+/// compatible crossing.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ParamDecl {
     /// The parameter's name in the model's parameter map.
@@ -76,6 +112,20 @@ pub struct ParamDecl {
     pub range: Option<ParameterRange>,
     /// Whether the instance's parameter map must carry this key.
     pub required: bool,
+    /// The engineering unit the parameter is inherently expressed in —
+    /// [`crate::unit::TICKS`] for a scan-counted interval. `None` marks
+    /// a unit-transparent parameter the composition dimensions.
+    pub unit: Option<&'static str>,
+}
+
+impl ParamDecl {
+    /// Declares the parameter's inherent engineering unit — the const
+    /// builder for spec tables: `required("response_ticks",
+    /// ValueKind::Int, Some(NONNEGATIVE_INT)).with_unit(unit::TICKS)`.
+    pub const fn with_unit(mut self, unit: &'static str) -> Self {
+        self.unit = Some(unit);
+        self
+    }
 }
 
 /// A [`PortDecl`]: `port("pv", Direction::In, ValueKind::Float)`.
@@ -84,6 +134,7 @@ pub fn port(name: &str, direction: Direction, kind: ValueKind) -> PortDecl {
         name: name.to_string(),
         direction,
         kind,
+        unit: None,
     }
 }
 
@@ -99,6 +150,7 @@ pub const fn required(
         kind,
         range,
         required: true,
+        unit: None,
     }
 }
 
@@ -113,6 +165,7 @@ pub const fn optional(
         kind,
         range,
         required: false,
+        unit: None,
     }
 }
 

@@ -456,6 +456,7 @@ mod tests {
             parameters,
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let mut block = EdgeTrigger::from_parameters("etr", IN, OUT, &instance.parameters).unwrap();
         assert_eq!(block.edge, Edge::Both);

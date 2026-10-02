@@ -1481,6 +1481,7 @@ mod tests {
             parameters,
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let block =
             ManagedLatchingAlarm::from_parameters("mlal", io_all(), &instance.parameters).unwrap();

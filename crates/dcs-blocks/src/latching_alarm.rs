@@ -686,6 +686,7 @@ mod tests {
             parameters,
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let mut block =
             LatchingAlarm::from_parameters("lal", IN, ACK, ALARM, UNACK, &instance.parameters)
