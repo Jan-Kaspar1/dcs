@@ -207,11 +207,14 @@
 #   DCS_UPGRADE_REV
 #                the earlier compatible revision the upgrade stage
 #                materializes the tree at before repinning to $DCS_REV
-#                (default: the previous release's recorded rev — the
-#                v0.7.0 publish commit — so the stage proves the
-#                recorded rev → tag half of the v0.7.0 → v0.8.0
-#                crossing the manifest names; the workspace-side proof
-#                seeds its stand-in remote to serve it).
+#                (default: the earliest release-line rev whose builder
+#                API carries the composition's declared dimensional
+#                metadata — `PlantBuilder::unit`/`port_unit`/
+#                `param_unit` — so the stage proves the recorded
+#                rev → tag crossing the manifest names from a
+#                baseline this tree's own source still compiles
+#                against; the workspace-side proof seeds its stand-in
+#                remote to serve it).
 #   DCS_UPGRADE  set to 0 to skip the upgrade stage — the stage's own
 #                repinned re-run uses this internally.
 #   DCS_TOOLS    a directory holding prebuilt `dcs-model`,
@@ -241,7 +244,7 @@ cd "$(dirname "$0")/.."
 
 DCS_REMOTE="${DCS_REMOTE:-https://github.com/Jan-Kaspar1/dcs.git}"
 DCS_REV="${DCS_REV:-v0.8.0}"
-DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-850edf6b9da8bfe13863fe863578b5b5531ad730}"
+DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-07ec24f94dfaf5ff42d56a614718190da3403fd5}"
 DCS_TOOLS="${DCS_TOOLS:-}"
 DCS_RECORD_DIR="${DCS_RECORD_DIR:-}"
 TOOLS=""
