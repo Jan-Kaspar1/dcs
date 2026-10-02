@@ -4,8 +4,8 @@
 # dependencies are the pinned release crates. The pin is the release
 # contract's recorded mechanism: `git = "<published origin>"` at an
 # immutable revision on the release line — the tag recorded below is
-# the `v0.7.0` release
-# (docs/releases/v0.7.0/record.md — the recorded commit, filled at the
+# the `v0.8.0` release
+# (docs/releases/v0.8.0/record.md — the recorded commit, filled at the
 # cut, is the same pin as a `rev`), whose tooling serves the
 # block-interface registry, declared commands, routed emitted events,
 # the redundant-pair claim and suspended-receipt contracts the legs
@@ -18,9 +18,16 @@
 # released-claim hand-back, the persistence paths' startup
 # distinctness refusal, the deferred startup-claim refusal's named
 # dispositions, and the remote born-active's deferred correspondence
-# gate the mirror legs gate on — and the shipped
-# `dcs-ctl`/`dcs-alarm-report` tooling the clean check proves;
-# `docs/release-contract.md` records the mechanism.
+# gate — and the remote attachment's bounded contact backoff, the
+# convergence-gated fencing-loss reclaim, the self-address
+# tracking-source refusal, the sim-bus claim family's conditional
+# grant and claim-introspection surface with the point-wise driver's
+# re-attach and the cyclic exchange's claim-loss demotion, the
+# deferred refusal's `--standby` remedy, the announced-source
+# checkpoint verification, the announced/owner skew bound, and the
+# checkpoint puller's transient-miss recovery the mirror legs gate
+# on — and the shipped `dcs-ctl`/`dcs-alarm-report` tooling the clean
+# check proves; `docs/release-contract.md` records the mechanism.
 [package]
 name = "pump-station"
 version = "0.1.0"
@@ -32,6 +39,6 @@ description = "Reference duty/standby lift station — a DCS consumer plant"
 [workspace]
 
 [dependencies]
-dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.7.0" }
-dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.7.0" }
+dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.8.0" }
+dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.8.0" }
 serde_json = "1"
