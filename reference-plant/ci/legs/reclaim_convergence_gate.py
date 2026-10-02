@@ -123,7 +123,7 @@ import stranded_rejoin
 # incumbent's claim stood must surface the named diagnostic rather
 # than passing an unexercised contract.
 LEG = {
-    "order": 760,
+    "order": 770,
     "title": "the reclaim-convergence-gate leg",
     "passes": "reclaim-convergence",
     "failed": "reclaim-convergence-failed",
