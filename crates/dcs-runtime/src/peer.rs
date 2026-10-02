@@ -116,6 +116,30 @@
 //! role changes — the survivable quiesced state the demote path
 //! defines, not a dead process.
 //!
+//! The claim a promotion asserts is unconditional, so the field's
+//! arbitration resolves it on no basis at all — a rogue tool's hold and
+//! a promoted peer are indistinguishable to it, and the preemption is
+//! by design. What the claim path *does* bound is the claimant: a
+//! promotion refuses with [`SwitchError::FieldClaimFailed`] — the same
+//! named verdict the field's own refusal carries, so the disposition is
+//! legible either way — when the basis it would assert on, the
+//! [`ClaimBasis`] this run declares from its own run tick and the
+//! tracked line's last served stamp, has outgrown
+//! [`MAX_CLAIM_LEAD`] ticks since the current alignment was
+//! established. That is the one quantity pace asymmetry cannot hide: a
+//! run that survives a source outage accrues a large lead while no
+//! transfer lands, and that lead stops growing once the line serves
+//! again, while a claimant whose clock runs ahead of a *live* line keeps
+//! outpacing it transfer after transfer. The bound rides the claim,
+//! not the field: two runs' stamps are not one domain, so the field
+//! cannot translate them and the run that holds both must be the one to
+//! refuse. The refusals are scoped so no documented recovery wedges:
+//! an `Unclaimed` probe and a line that stopped serving this run both
+//! mean nothing stands to preempt, and the conditional claims — the
+//! startup grant, the orphaned promotion, the re-arm, the reclaim —
+//! are untouched, the field arbitrating those on liveness the runtime
+//! cannot see.
+//!
 //! The startup half is narrower than the promotion half: where
 //! [`with_field_startup_claim`](Peer::with_field_startup_claim)
 //! installed the conditional grant, `activate` takes the field only
@@ -582,6 +606,91 @@ pub struct Peer<'d> {
     /// [`FieldClaim::Held`] — an uninstrumented driver surface must
     /// never read as "an owner stands".
     field_claim: Option<FieldClaim>,
+    /// The declared lead the current alignment was established at — this
+    /// run's own run tick measured from the source tick of the
+    /// checkpoint that first landed under it, in the same signed form
+    /// [`claim_basis`](Self::claim_basis) reports. The baseline the
+    /// claim-bound's growth reads against, cleared wherever the
+    /// alignment itself is (`applied_offset`), so a demotion or a
+    /// tracking reset re-bases it on the next transfer.
+    claim_lead_base: Option<i64>,
+    /// Whether the most recent scan's own claim probe answered
+    /// `unclaimed` and no grant that scan landed changed the posture
+    /// since — the fresh "nothing stands to preempt" observation the
+    /// claim-bound's escape reads. An absent probe hook, an unanswered
+    /// probe, a posture a grant flipped, and a scan that never ran all
+    /// read `false`, fail-closed like the served report's
+    /// absent-vs-unclaimed distinction.
+    unclaimed_observed: bool,
+}
+
+/// The bound over the claim basis a promotion declares: the number of
+/// run ticks this run's own clock may outpace the tracked line whose
+/// field its claim would take, measured from the lead the current
+/// alignment was established at, before the claim is refused by name.
+///
+/// Sized at 64 ticks — the window the QA lane's
+/// `2490_claim_skew_bound` stages a four-times-paced claimant against.
+/// A pair at one cadence outpaces nothing (its outpace is the
+/// pull-period jitter of a scan or two), while a claimant whose clock
+/// runs a measurable fraction ahead of the line crosses the window in
+/// seconds and is refused: the field's arbitration cannot translate
+/// one run's stamp into another's, so a claim resolved on such a basis
+/// is resolved on a pair `CONTEXT.md`'s same-domain comparability rule
+/// forbids ordering.
+pub const MAX_CLAIM_LEAD: i64 = 64;
+
+/// The basis a peer declares alongside the write-ownership claim a
+/// promotion asserts: what the claimant's own run tick says about its
+/// standing with the tracked line whose field the claim would take.
+///
+/// The stamps are *measured*, never resolved: `run` is this run's own
+/// attribution domain and `source` is the tracked stream's counter,
+/// and no site in the platform subtracts one from the other to decide
+/// anything except the bound below. `growth` is the difference the
+/// bound reads, and it is the one quantity pace asymmetry cannot hide:
+/// a run that survives a source outage accrues a large `lead` while no
+/// transfer lands — an honest accrued lead the claim path honors — but
+/// that lead stops growing the moment the line serves again, whereas a
+/// claimant whose clock runs ahead of a *live* line keeps outpacing it
+/// transfer after transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimBasis {
+    /// This run's own run tick — the claimant's attribution domain.
+    pub run: Tick,
+    /// The tracked line's last served stamp, in the source-tick domain:
+    /// the source tick of the checkpoint this run last applied.
+    pub source: Tick,
+    /// The declared lead — this run's own tick measured from that
+    /// stamp. Negative while the run trails the line it tracks.
+    pub lead: i64,
+    /// The lead the current alignment was established at, in the same
+    /// signed form as [`lead`](Self::lead).
+    pub baseline: i64,
+    /// How far the lead has outgrown its baseline since the alignment
+    /// was established — the quantity [`MAX_CLAIM_LEAD`] bounds.
+    pub growth: i64,
+}
+
+impl ClaimBasis {
+    /// Whether the declared basis sits inside [`MAX_CLAIM_LEAD`] — the
+    /// condition a claim against a standing field claim may be
+    /// asserted on.
+    pub fn within_bound(&self) -> bool {
+        self.growth <= MAX_CLAIM_LEAD
+    }
+}
+
+impl fmt::Display for ClaimBasis {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "run tick {} against the tracked line's stamp {} — a lead of {} \
+             ticks, {} of them outgrown since the alignment was established \
+             at {} (bound {MAX_CLAIM_LEAD})",
+            self.run.0, self.source.0, self.lead, self.growth, self.baseline
+        )
+    }
 }
 
 /// The field-side write-ownership claim a promotion runs before the
@@ -1555,6 +1664,8 @@ impl<'d> Peer<'d> {
             pending_observations: Vec::new(),
             reclaim: None,
             field_claim: None,
+            claim_lead_base: None,
+            unclaimed_observed: false,
         }
     }
 
@@ -1930,6 +2041,8 @@ impl<'d> Peer<'d> {
             pending_observations: Vec::new(),
             reclaim: None,
             field_claim: None,
+            claim_lead_base: None,
+            unclaimed_observed: false,
         }
     }
 
@@ -2098,8 +2211,18 @@ impl<'d> Peer<'d> {
     /// [`StandbySync::Diverged`] — is refused with
     /// [`SwitchError::NotConverged`] carrying the reported state; a
     /// field-owning instance — including a still-settling promotion —
-    /// with [`SwitchError::AlreadyActive`]. A refused promotion touches
-    /// nothing: the gate stays as it was.
+    /// with [`SwitchError::AlreadyActive`].
+    ///
+    /// The unconditional claim the other two verdicts assert is itself
+    /// bounded on the basis it resolves on: a [`ClaimBasis`] past
+    /// [`MAX_CLAIM_LEAD`] refuses the promotion with
+    /// [`SwitchError::FieldClaimFailed`] naming the bound and the
+    /// stamps, so a claimant whose clock has run away from the tracked
+    /// line cannot take write-ownership from that line's live
+    /// incumbent — see [`claim_basis`](Self::claim_basis) and the module
+    /// docs for the scope that keeps every documented recovery
+    /// reachable. A refused promotion touches nothing: the gate stays as
+    /// it was, and the claim hook never ran.
     ///
     /// The unattributed request — [`promote_as`](Self::promote_as) with
     /// no declared actor.
@@ -2170,7 +2293,10 @@ impl<'d> Peer<'d> {
     /// — a live incumbent still holding the field's claim — therefore
     /// retries on the next due cycle instead of disarming armed
     /// failover for the rest of the episode, and promotes the cycle the
-    /// refusal cause clears.
+    /// refusal cause clears. The claim-basis bound never applies here: a
+    /// self-promotion fires on a miss run, which is exactly the
+    /// "nothing stands to preempt" escape the promotion claim reads, so
+    /// the armed recovery a skewed run depends on is untouched.
     ///
     /// A self-promotion's queued [`RoleChange`]s carry
     /// `origin: failover` and no actor — the journaled distinction from
@@ -2317,6 +2443,7 @@ impl<'d> Peer<'d> {
         self.sync = StandbySync::Unsynchronized;
         self.aligned = None;
         self.applied_offset = None;
+        self.claim_lead_base = None;
         self.staged = None;
         self.misses = 0;
         self.converged = false;
@@ -2346,6 +2473,7 @@ impl<'d> Peer<'d> {
         self.sync = StandbySync::Unsynchronized;
         self.aligned = None;
         self.applied_offset = None;
+        self.claim_lead_base = None;
         self.staged = None;
         self.misses = 0;
         self.converged = false;
@@ -2557,6 +2685,12 @@ impl<'d> Peer<'d> {
         // peer lives but no field owner does — precisely the dead-owner
         // condition the heartbeat counts — so the cycle counts as the
         // miss it is rather than resetting.
+        //
+        // Whether this transfer ends a miss run is read before the
+        // count moves: the claim bound re-bases the declared lead on a
+        // resume, because a lead that accrued while the line could not
+        // be reached is not the pace asymmetry the bound refuses.
+        let line_resumed = self.misses != 0;
         if checkpoint.source_owns_field == Some(false) {
             self.misses += 1;
         } else {
@@ -2645,6 +2779,7 @@ impl<'d> Peer<'d> {
                 }
                 self.aligned = Some(checkpoint.tick);
                 self.applied_offset = Some(offset);
+                self.note_alignment_lead(line_resumed);
                 let was_diverged = matches!(self.sync, StandbySync::Diverged { .. });
                 // The checkpoint's `source_owns_field` stamp is the
                 // tracked line's verdict on field ownership:
@@ -2961,6 +3096,54 @@ impl<'d> Peer<'d> {
         (run.0.saturating_sub(checkpoint.tick.0), regressed)
     }
 
+    /// Records the declared lead the bound's growth reads against: the
+    /// first transfer that lands under an alignment fixes the baseline,
+    /// and so does the first transfer after a miss run. The bound then
+    /// measures how far this run's clock has outpaced the line *while
+    /// the line has been serving it* — never how far the two clocks sit
+    /// apart in absolute terms, and never across a window where the
+    /// line could not be reached. Both are the honest shape: a bound on
+    /// the absolute gap would refuse every young tracker against a
+    /// long-running incumbent, pace aside, and a lead that grew while
+    /// no transfer landed grew for reasons the claim cannot attribute
+    /// to cadence, so the first transfer out of that window re-bases it
+    /// rather than counting it against the claimant.
+    fn note_alignment_lead(&mut self, line_resumed: bool) {
+        if line_resumed || self.claim_lead_base.is_none() {
+            self.claim_lead_base = self.declared_lead();
+        }
+    }
+
+    /// This run's own tick measured from the tracked line's last served
+    /// stamp — the declared lead, signed: negative while the run trails
+    /// the line it tracks, which is the resting shape of a young
+    /// tracker. `None` before any transfer aligned this run, where there
+    /// is no line to measure against.
+    fn declared_lead(&self) -> Option<i64> {
+        let aligned = self.aligned?;
+        Some(
+            i64::try_from(self.executor.tick().0).unwrap_or(i64::MAX)
+                - i64::try_from(aligned.0).unwrap_or(i64::MAX),
+        )
+    }
+
+    /// The claim basis a promotion of this run declares: this run's own
+    /// run tick, the tracked line's last served stamp, and the lead
+    /// between them beside the growth the recorded bound reads.
+    /// `None` while no transfer has aligned this run — nothing to
+    /// declare, and a promotion is refused `not_converged` anyway.
+    pub fn claim_basis(&self) -> Option<ClaimBasis> {
+        let lead = self.declared_lead()?;
+        let baseline = self.claim_lead_base.unwrap_or(lead);
+        Some(ClaimBasis {
+            run: self.executor.tick(),
+            source: self.aligned?,
+            lead,
+            baseline,
+            growth: lead - baseline,
+        })
+    }
+
     /// Whether a regressed checkpoint stream crossed a source
     /// generation boundary — the condition [`apply`](Self::apply) and
     /// [`reinitialize`](Self::reinitialize) journal a
@@ -3258,6 +3441,8 @@ impl<'d> Peer<'d> {
         // miss count resets as in `apply`, whether the crossing lands —
         // and a checkpoint whose serving run owns no field writes counts
         // the same miss `apply` counts: the tracked owner did not serve.
+        // The claim bound's re-base reads the same resume `apply` reads.
+        let line_resumed = self.misses != 0;
         if checkpoint.source_owns_field == Some(false) {
             self.misses += 1;
         } else {
@@ -3330,6 +3515,7 @@ impl<'d> Peer<'d> {
                 };
                 self.aligned = Some(checkpoint.tick);
                 self.applied_offset = Some(offset);
+                self.note_alignment_lead(line_resumed);
                 // Staged evidence belongs to the old alignment — the
                 // divergence check does not pair against a crossing.
                 self.staged = None;
@@ -3956,6 +4142,14 @@ impl<'d> Peer<'d> {
         }
         self.reclaim_field_claim(tick, field_answered);
         self.retry_startup_claim(tick, field_answered);
+        // The claim-bound's escape, read the same way the reclaim's
+        // gate reads it: this scan's own probe answered, and no grant
+        // the scan landed flipped the posture it observed. An absent
+        // hook, an unanswered probe, or a posture a grant changed all
+        // read "a claim may stand" — fail-closed, so a promotion
+        // arriving between scans never rides an observation older than
+        // the scan it was taken in.
+        self.unclaimed_observed = field_answered && self.field_claim == Some(FieldClaim::Unclaimed);
         if self.owns_field() {
             self.staged = None;
         } else {
@@ -4202,6 +4396,15 @@ impl<'d> Peer<'d> {
         let usurped = self
             .foreign_writer
             .filter(|_| matches!(self.sync, StandbySync::Usurped { .. }));
+        // The skew bound runs ahead of the lift, so a claim whose basis
+        // has outgrown the recorded window is refused with the gate
+        // still closed, the claim hook never run, and the diagnosis
+        // left standing for a later attempt. A `Usurped` run reaches
+        // here with a non-zero miss run — the ownerless line it tracks
+        // is exactly the case `check_claim_basis` declines to bound,
+        // the field arbitrating on liveness this run cannot see — so
+        // the pair's reclaim path is untouched by it.
+        self.check_claim_basis()?;
         self.lift_gate()?;
         if let Some(writer) = usurped
             && self.claim.is_some()
@@ -4212,6 +4415,65 @@ impl<'d> Peer<'d> {
             });
         }
         Ok(())
+    }
+
+    /// The bound over the *basis* the unconditional claim is asserted
+    /// on: a claim whose declared basis has outgrown the recorded
+    /// [`MAX_CLAIM_LEAD`] window since the current alignment was
+    /// established is refused as [`SwitchError::FieldClaimFailed`], so
+    /// the live incumbent keeps write-ownership instead of being fenced
+    /// by a run whose clock has run away from the line whose field it
+    /// would take. The field's own arbitration cannot translate one
+    /// run's stamp into another's — it sees an owner token and a
+    /// monitor — so the bound has to be read here, where the run's own
+    /// accounting against the tracked line exists, in the same
+    /// peer-side-gate shape the fencing-loss reclaim's convergence gate
+    /// takes: the ask is what is gated, not the field's grant.
+    ///
+    /// Two escapes keep every documented recovery reachable, and both
+    /// are "nothing stands to preempt" readings rather than exemptions:
+    ///
+    /// - this scan's own probe answered `unclaimed` — the field is free,
+    ///   so the claim takes it from nobody and the documented
+    ///   unclaimed-field remedy is untouched;
+    /// - the tracked line is not serving this run — the heartbeat's
+    ///   miss run stands, so this run cannot reach the line whose field
+    ///   its claim would take, and a bound that refused there would
+    ///   strand the documented failover recovery on exactly the peers
+    ///   whose lead is largest. (The bound therefore rides the
+    ///   `Tracking`/`Reinitialized` line the arm above already
+    ///   distinguishes: an `Orphaned` run takes the conditional
+    ///   grant, which the field arbitrates on liveness the run cannot
+    ///   see, and the narrower `Usurped` sibling rides the same
+    ///   miss-run escape — a line reporting no owner of its own has
+    ///   missed every pull it did not serve.)
+    ///
+    /// A refused attempt touches nothing: the gate stays as it was, the
+    /// claim hook never runs, and every later attempt is re-judged on
+    /// the basis standing then.
+    fn check_claim_basis(&self) -> Result<(), SwitchError> {
+        if self.unclaimed_observed || self.misses != 0 {
+            return Ok(());
+        }
+        let Some(basis) = self.claim_basis() else {
+            return Ok(());
+        };
+        if basis.within_bound() {
+            return Ok(());
+        }
+        Err(SwitchError::FieldClaimFailed {
+            detail: format!(
+                "the claim's basis is past the recorded skew bound ({basis}) — this run's \
+                 clock has outpaced the tracked line it tracks, and the field's \
+                 arbitration cannot translate one run's stamp into another's, so the \
+                 claim would resolve on a pair the same-domain comparability rule \
+                 forbids ordering: a live incumbent keeps write-ownership. A redundant \
+                 pair runs one cadence: bring the claimant to the field owner's --scan-ms \
+                 and its claim lands as it always did, or release the standing claim \
+                 (the field's own `release_writer` hand-back) and promote onto the free \
+                 field."
+            ),
+        })
     }
 
     /// Takes the field's write-ownership claim when one is installed —
@@ -5829,6 +6091,231 @@ mod tests {
             Value::Float(1.0),
             "the converged reclaimant's writes must pass the claim it re-took"
         );
+    }
+
+    /// The claim-basis bound's own subject: a claimant whose clock runs
+    /// ahead of the tracked line it tracks — the QA lane's
+    /// `2490_claim_skew_bound` arm, where the source's stamp stands
+    /// while the claimant's run keeps counting at several times the
+    /// source's cadence — is refused the field by name, the claim hook
+    /// never runs, and the live incumbent keeps write-ownership.
+    #[test]
+    fn a_promotion_past_the_claim_lead_bound_refuses_the_live_incumbent() {
+        const INCUMBENT: u64 = 1001;
+        const CLAIMANT: u64 = 2002;
+        let field = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let gate = WriteGate::closed(&field);
+        let claim = ScriptedClaim::unclaimed();
+        let asks = std::sync::atomic::AtomicUsize::new(0);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_field_claim(|| {
+                asks.fetch_add(1, Ordering::Relaxed);
+                claim.claim(CLAIMANT);
+                Ok(())
+            })
+            .with_field_probe(|| Ok(claim.probe()));
+        // The live incumbent the claim would preempt: a different
+        // owner's standing claim, which the probe reads as `held`.
+        claim.claim(INCUMBENT);
+
+        // A source whose stamp stands still while this run keeps
+        // scanning — the four-times-paced claimant's own tick outrunning
+        // the line it tracks, transfer after transfer.
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(4);
+        let checkpoint = source.checkpoint();
+        peer.apply(&checkpoint).unwrap();
+        assert_eq!(
+            peer.claim_basis().map(|basis| basis.growth),
+            Some(0),
+            "the alignment's first transfer establishes the baseline"
+        );
+        for _ in 0..=MAX_CLAIM_LEAD {
+            peer.scan();
+            peer.apply(&checkpoint).unwrap();
+        }
+        let basis = peer.claim_basis().unwrap();
+        assert_eq!(basis.source, Tick(4));
+        assert!(
+            basis.growth > MAX_CLAIM_LEAD,
+            "the staged skew must sit past the bound, got {basis}"
+        );
+
+        let error = peer.promote().unwrap_err();
+        assert!(
+            matches!(&error, SwitchError::FieldClaimFailed { detail }
+                if detail.contains("recorded skew bound")
+                    && detail.contains("--scan-ms")),
+            "{error:?}"
+        );
+        assert!(
+            !gate.is_open(),
+            "a refused claim lifts nothing: the gate stays closed"
+        );
+        assert_eq!(
+            asks.load(Ordering::Relaxed),
+            0,
+            "a refused basis must never reach the field's arbitration"
+        );
+        assert_eq!(claim.holder(), Some(INCUMBENT));
+        assert_eq!(peer.role(), Role::Standby);
+        assert!(
+            peer.drain_pending().role_changes().is_empty(),
+            "a refused promotion transitions nothing"
+        );
+
+        // The same claim once the field stands unclaimed: nothing is
+        // left to preempt, so the documented unclaimed-field remedy
+        // lands regardless of the basis.
+        claim.release();
+        assert_eq!(peer.scan().0, basis.run.0 + 1);
+        peer.promote().unwrap();
+        assert_eq!(peer.role(), Role::Promoting);
+        assert!(gate.is_open());
+        assert_eq!(claim.holder(), Some(CLAIMANT));
+    }
+
+    /// The bound's other half: a claimant at the line's own cadence
+    /// declares a basis inside the window however long the alignment
+    /// runs, so the documented switchover is untouched.
+    #[test]
+    fn an_inside_bound_promotion_still_takes_the_field() {
+        let field = StubDriver::field(&[(INPUT, Value::Float(1.0)), (OUTPUT, Value::Float(0.0))]);
+        let gate = WriteGate::closed(&field);
+        let claim = ScriptedClaim::unclaimed();
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_field_claim(|| {
+                claim.claim(2);
+                Ok(())
+            })
+            .with_field_probe(|| Ok(claim.probe()));
+        claim.claim(1);
+
+        // One aligned transfer per scan: the source keeps pace with
+        // this run, so the lead neither grows nor shrinks for many more
+        // scans than the bound's window.
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        for _ in 0..4 * MAX_CLAIM_LEAD {
+            source.scan();
+            peer.scan();
+            peer.apply(&source.checkpoint()).unwrap();
+        }
+        let basis = peer.claim_basis().unwrap();
+        assert!(basis.within_bound(), "{basis}");
+        peer.promote().unwrap();
+        assert_eq!(peer.role(), Role::Promoting);
+        assert!(gate.is_open());
+        assert_eq!(claim.holder(), Some(2));
+    }
+
+    /// The scope that keeps the bound from stranding a recovery, in both
+    /// of its halves: a lead that accrued while the line could not be
+    /// reached re-bases when the line serves again — the accrued lead
+    /// #1269's strand is about is not the bound's subject — and a claim
+    /// over a line this run cannot reach is granted whatever its basis,
+    /// because nothing demonstrably stands to preempt.
+    #[test]
+    fn the_claim_bound_leaves_the_outage_lead_and_the_failover_recovery_free() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let claim = ScriptedClaim::unclaimed();
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_field_claim(|| {
+                claim.claim(2);
+                Ok(())
+            })
+            .with_field_probe(|| Ok(claim.probe()));
+        claim.claim(1);
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(4);
+        let checkpoint = source.checkpoint();
+        assert_eq!(
+            peer.track_once(|| Ok(checkpoint)),
+            TrackReport::Applied(Transfer::Applied)
+        );
+        // The source outage this run survives: no transfer lands, so
+        // its own clock accrues the honest accrued lead while the
+        // line's stamps stand still.
+        for _ in 0..4 * MAX_CLAIM_LEAD {
+            peer.scan();
+            assert!(matches!(
+                peer.track_once(|| Err("the source is gone".to_string())),
+                TrackReport::Missed { .. }
+            ));
+        }
+        assert!(
+            peer.claim_basis()
+                .is_some_and(|basis| !basis.within_bound()),
+            "the outage alone leaves this run's clock far ahead of the \
+             line's stamps — the declared lead, not the growth"
+        );
+
+        // The line serves again: the first transfer out of the window
+        // re-bases the declared lead, so the switchover the operator
+        // asks for lands exactly as it does on a pair that never
+        // lost its source.
+        source.scan();
+        let served = source.checkpoint();
+        assert_eq!(
+            peer.track_once(|| Ok(served)),
+            TrackReport::Applied(Transfer::Applied)
+        );
+        let rebased = peer.claim_basis().unwrap();
+        assert!(rebased.within_bound(), "{rebased}");
+        peer.promote().unwrap();
+        assert_eq!(peer.role(), Role::Promoting);
+        assert!(gate.is_open());
+        assert_eq!(claim.holder(), Some(2));
+
+        // The armed-failover half: a skew past the bound never strands
+        // the documented takeover over a line this run cannot reach —
+        // the budget-th miss fires on the miss run, which is exactly
+        // the escape the requested promotion's claim-bound reads.
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let claim = ScriptedClaim::unclaimed();
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_failover(2)
+            .with_field_claim(|| {
+                claim.claim(3);
+                Ok(())
+            })
+            .with_field_probe(|| Ok(claim.probe()));
+        claim.claim(1);
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(4);
+        let standing = source.checkpoint();
+        assert_eq!(
+            peer.track_once(|| Ok(standing.clone())),
+            TrackReport::Applied(Transfer::Applied)
+        );
+        for _ in 0..=MAX_CLAIM_LEAD {
+            peer.scan();
+            peer.apply(&standing).unwrap();
+        }
+        assert!(
+            !peer
+                .claim_basis()
+                .expect("an aligned run declares a basis")
+                .within_bound(),
+            "the staged skew must sit past the bound"
+        );
+        assert!(matches!(
+            peer.track_once(|| Err("the line went away".to_string())),
+            TrackReport::Missed { .. }
+        ));
+        assert!(matches!(
+            peer.track_once(|| Err("and stayed away".to_string())),
+            TrackReport::Promoted { .. }
+        ));
+        assert_eq!(peer.role(), Role::Promoting);
+        assert!(gate.is_open());
+        assert_eq!(claim.holder(), Some(3));
     }
 
     /// The pre-hook behavior a driver surface without the reclaim

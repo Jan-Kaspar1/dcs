@@ -93,8 +93,8 @@ pub use executor::{
 };
 pub use gate::WriteGate;
 pub use peer::{
-    Activation, ApplyError, ClaimObservation, ClaimRearm, ForeignClaimPreempt, OrphanReport, Peer,
-    PeerEvent, PeerEvents, PromotionRefusal, RoleChange, SourceRestart, StartupRefusal,
-    TrackReport, Transfer,
+    Activation, ApplyError, ClaimBasis, ClaimObservation, ClaimRearm, ForeignClaimPreempt,
+    MAX_CLAIM_LEAD, OrphanReport, Peer, PeerEvent, PeerEvents, PromotionRefusal, RoleChange,
+    SourceRestart, StartupRefusal, TrackReport, Transfer,
 };
 pub use revision::CarryoverError;

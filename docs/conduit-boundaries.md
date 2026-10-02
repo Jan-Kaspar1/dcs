@@ -108,7 +108,7 @@ list in the same change.
   and a keyed pair reads the key once more, on the monitoring surface,
   to ask the standing writer's declared endpoint whether it can prove
   the line — the narrower `usurped` verdict and the unconditional claim
-  it arms (decision 107). The secret never crosses to the controller
+  it arms (decision 108). The secret never crosses to the controller
   process or to the field.
 
 ### 3. Remote-driver plant protocol — the `dcs-sim-net` TCP link

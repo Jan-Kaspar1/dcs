@@ -36,4 +36,9 @@ _Avoid_: "the tick" unqualified, "checkpoint tick"
 Two ticks order and subtract meaningfully only when minted in the same
 domain; a cross-domain comparison is meaningful only after explicit
 translation — the apply offset for source ticks, the freshness record for
-plant ticks — never by subtracting stamps directly.
+plant ticks — never by subtracting stamps directly. A decision may never
+be *resolved* on an untranslated pair; where the platform still measures
+one — a promotion's declared **claim basis**, this run's tick against the
+tracked line's last stamp — the measurement bounds what the decision may
+do and is refused by name once it leaves the recorded window, rather than
+deciding anything on its own.
