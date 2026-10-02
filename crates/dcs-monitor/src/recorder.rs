@@ -45,8 +45,8 @@ use dcs_core::{
     TickAnchor, Value,
 };
 use dcs_runtime::{
-    ClaimObservation, ClaimRearm, Executor, OrphanReport, PromotionRefusal, ResolutionReport,
-    RoleChange, SourceRestart, StartupRefusal,
+    ClaimObservation, ClaimRearm, Executor, ForeignClaimPreempt, OrphanReport, PromotionRefusal,
+    ResolutionReport, RoleChange, SourceRestart, StartupRefusal,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
@@ -852,12 +852,33 @@ impl Recorder {
     /// checkpoint stamped its serving run as owning no field writes,
     /// the mutual-standby wedge — attributed to the tick the orphaned
     /// apply landed at, `aligned` carrying the applied checkpoint's
-    /// own tick.
+    /// own tick. The narrower usurped verdict journals here too: the
+    /// tracked line's ownerlessness is the detected fact either way,
+    /// and the endpoint that could not prove the line's key is named by
+    /// the tracking-source refusal the diagnosis runs beside it.
     pub(super) fn note_field_orphaned(&mut self, orphan: OrphanReport) {
         self.push(
             orphan.tick,
             JournalEvent::FieldOrphaned {
                 aligned: orphan.aligned,
+            },
+        );
+    }
+
+    /// Journals a foreign-writer preemption — a promotion took the
+    /// field's write-ownership claim from a live standing writer this
+    /// run had diagnosed as unable to prove this line's pair key —
+    /// attributed to the run tick the promotion's claim ran at, naming
+    /// the monitor endpoint the field's arbitration gave that writer.
+    /// The audit counterpart of the fenced-out
+    /// [`JournalEvent::FieldClaimLost`]: together they say which
+    /// process held the field across the whole episode, which neither
+    /// record nor the role transitions do alone.
+    pub(super) fn note_foreign_claim_preempted(&mut self, preempt: ForeignClaimPreempt) {
+        self.push(
+            preempt.tick,
+            JournalEvent::ForeignClaimPreempted {
+                writer: preempt.writer,
             },
         );
     }

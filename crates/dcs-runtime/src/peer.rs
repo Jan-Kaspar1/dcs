@@ -147,6 +147,18 @@
 //! did not serve — so the budget-th orphaned pull self-promotes the
 //! peer that can prove convergence.
 //!
+//! The wedge's answer needs one more thing the checkpoint layer cannot
+//! supply: whether the writer standing on the field — the pair's own
+//! arbitration names it — belongs to this line at all. On a keyed pair
+//! the monitoring surface holds the only evidence, so it diagnoses the
+//! declared endpoint ([`note_foreign_writer`](Peer::note_foreign_writer))
+//! and the peer reports the narrower
+//! [`StandbySync::Usurped`] verdict, which routes a promotion onto the
+//! unconditional claim: an unattested incumbent has no applied state a
+//! takeover could roll back, so the conditional grant's live-incumbent
+//! refusal has nothing left to protect and would otherwise strand the
+//! pair behind the very process that preempted it.
+//!
 //! Convergence alone does not prove the standby would write the field the
 //! active writes, so a tracking peer also runs the standby-divergence
 //! check of [`crate::divergence`]: each non-field-owning scan's staged
@@ -405,9 +417,34 @@ pub struct Peer<'d> {
     /// live controller incumbent stands. `Err` where the field could
     /// not be asked.
     orphan_claim: Option<OrphanClaim<'d>>,
+    /// The monitor endpoint the monitoring surface diagnosed as the
+    /// field's standing writer while that writer could not prove this
+    /// line's pair key — the attestation the peer itself cannot
+    /// produce, since the key never leaves the monitoring surface's
+    /// own pulls. `Some` renders the orphaned verdict as
+    /// [`StandbySync::Usurped`] instead of
+    /// [`StandbySync::Orphaned`], which is what routes a promotion off
+    /// the conditional orphan grant and onto the unconditional claim:
+    /// an incumbent that cannot prove the line has no applied state a
+    /// takeover of the field could roll back, so the live-incumbent
+    /// refusal has nothing left to protect and only strands the pair.
+    /// Recorded from the field's own arbitration
+    /// ([`claimed_monitor`](Self::claimed_monitor)), re-earned per
+    /// bounded verification window by
+    /// [`note_foreign_writer`](Self::note_foreign_writer) rather than
+    /// latched, and cleared by every granted claim — this run holding
+    /// the field leaves no foreign writer to have preempted.
+    foreign_writer: Option<SocketAddr>,
     /// Orphan detections not yet consumed for journaling — one
-    /// [`OrphanReport`] per transition into [`StandbySync::Orphaned`].
+    /// [`OrphanReport`] per transition into the tracked line's
+    /// ownerless verdicts, [`StandbySync::Orphaned`] or
+    /// [`StandbySync::Usurped`].
     pending_orphans: Vec<OrphanReport>,
+    /// Granted preemptions of a diagnosed foreign writer's standing
+    /// claim not yet consumed for journaling — one
+    /// [`ForeignClaimPreempt`] each, the audit counterpart of the
+    /// [`FencingLoss`] naming the run that lost the claim.
+    pending_foreign_claims: Vec<ForeignClaimPreempt>,
     /// Refused armed self-promotions not yet consumed for journaling —
     /// one [`PromotionRefusal`] per distinct refusal cause a continuous
     /// refused streak produces, so a gate left armed and retrying does
@@ -816,6 +853,25 @@ pub struct OrphanReport {
     pub aligned: Tick,
 }
 
+/// A promotion took the field's write-ownership claim away from a live
+/// standing writer this run had diagnosed as unable to prove this
+/// line's pair key — the unconditional claim the
+/// [`StandbySync::Usurped`] verdict arms, queued on the grant that
+/// took it. The [`FencingLoss`] mirror image: that record names the run
+/// that lost the claim, this one names the endpoint it was taken from,
+/// so the journal says which process held the field across the whole
+/// episode. One report queues per granted claim taken this way — the
+/// takeover is a scan boundary, so a run that lands it once journals
+/// once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForeignClaimPreempt {
+    /// The run tick the promotion's claim ran at.
+    pub tick: Tick,
+    /// The monitor endpoint the field's arbitration named for the
+    /// standing writer whose claim this run's claim preempted.
+    pub writer: SocketAddr,
+}
+
 /// An orphan-cycle ensure probe landed — the field's write-ownership
 /// claim stands under this run's recorded token again, re-armed while
 /// the tracked line reported no field owner. The journal's durable
@@ -922,7 +978,8 @@ pub struct SourceRestart {
 /// first (a divergence, its resolution, a model-boundary crossing, an
 /// orphan detection), then the claim-domain evidence the peer
 /// gathered while responding (a fenced-out claim, a landed re-arm, an
-/// observed foreign owner, a refused startup grant), then the stream
+/// observed foreign owner, a preempted foreign writer, a refused
+/// startup grant), then the stream
 /// and switch evidence (a regressed source, a refused promotion), then
 /// the reported transition itself, then the command settlements that
 /// transition carried.
@@ -951,6 +1008,11 @@ pub enum PeerEvent {
     /// A refused conditional claim probe met a standing foreign owner —
     /// the observed-claimant record, one per distinct claimant.
     ClaimObservation(ClaimObservation),
+    /// A promotion took the field's claim from a live writer this run
+    /// had diagnosed as unable to prove this line's pair key — the
+    /// audit counterpart of [`FencingLoss`](PeerEvent::FencingLoss),
+    /// naming the endpoint the claim was taken from.
+    ForeignClaimPreempt(ForeignClaimPreempt),
     /// The pending born-active's deferred startup grant met the
     /// field's refusal — the durable record that the pending state's
     /// settle happened. The run's disposition is the shell's, carried
@@ -1005,6 +1067,7 @@ pub struct PeerEvents {
     fencing: Vec<FencingLoss>,
     rearms: Vec<ClaimRearm>,
     observations: Vec<ClaimObservation>,
+    foreign_claims: Vec<ForeignClaimPreempt>,
     startup_refusals: Vec<StartupRefusal>,
     restarts: Vec<SourceRestart>,
     promotion_refusals: Vec<PromotionRefusal>,
@@ -1026,6 +1089,7 @@ impl PeerEvents {
             fencing,
             rearms,
             observations,
+            foreign_claims,
             startup_refusals,
             restarts,
             promotion_refusals,
@@ -1041,6 +1105,7 @@ impl PeerEvents {
                 + fencing.len()
                 + rearms.len()
                 + observations.len()
+                + foreign_claims.len()
                 + startup_refusals.len()
                 + restarts.len()
                 + promotion_refusals.len()
@@ -1055,6 +1120,11 @@ impl PeerEvents {
         events.extend(fencing.into_iter().map(PeerEvent::FencingLoss));
         events.extend(rearms.into_iter().map(PeerEvent::ClaimRearm));
         events.extend(observations.into_iter().map(PeerEvent::ClaimObservation));
+        events.extend(
+            foreign_claims
+                .into_iter()
+                .map(PeerEvent::ForeignClaimPreempt),
+        );
         events.extend(startup_refusals.into_iter().map(PeerEvent::StartupRefusal));
         events.extend(restarts.into_iter().map(PeerEvent::SourceRestart));
         events.extend(
@@ -1085,6 +1155,7 @@ impl PeerEvents {
             + self.fencing.len()
             + self.rearms.len()
             + self.observations.len()
+            + self.foreign_claims.len()
             + self.startup_refusals.len()
             + self.restarts.len()
             + self.promotion_refusals.len()
@@ -1132,6 +1203,11 @@ impl PeerEvents {
     /// The drained foreign-claim observations.
     pub fn claim_observations(&self) -> &[ClaimObservation] {
         &self.observations
+    }
+
+    /// The drained preemptions of a diagnosed foreign writer's claim.
+    pub fn foreign_claims(&self) -> &[ForeignClaimPreempt] {
+        &self.foreign_claims
     }
 
     /// The drained deferred startup-grant refusals.
@@ -1454,7 +1530,9 @@ impl<'d> Peer<'d> {
             startup_refusal: None,
             pending_startup_refusals: Vec::new(),
             orphan_claim: None,
+            foreign_writer: None,
             pending_orphans: Vec::new(),
+            pending_foreign_claims: Vec::new(),
             pending_refusals: Vec::new(),
             open_refusal: None,
             revision: false,
@@ -1671,6 +1749,64 @@ impl<'d> Peer<'d> {
             .and_then(|claimed_monitor| (claimed_monitor.0)())
     }
 
+    /// Records the monitoring surface's diagnosis of the field's
+    /// standing writer: `Some(writer)` when the endpoint the field's
+    /// own arbitration named for the standing claim
+    /// ([`claimed_monitor`](Self::claimed_monitor)) has been shown to
+    /// be unable to prove this line's pair key, `None` when that
+    /// diagnosis no longer holds or was never earned.
+    ///
+    /// The peer holds no key itself — the deployment secret lives on the
+    /// monitoring surface's invocation and never crosses to the
+    /// controller, so this is the one attestation it cannot produce for
+    /// itself; the caller earns it by pulling the named endpoint's
+    /// checkpoint under a fresh nonce and refusing the document's
+    /// `line_proof`, and re-earns it per bounded verification window
+    /// rather than latching it.
+    ///
+    /// With a diagnosis standing, the tracked line's ownerless verdict
+    /// reports [`StandbySync::Usurped`] instead of
+    /// [`StandbySync::Orphaned`] — the narrower "the field's writer is
+    /// outside this line" the orphan state alone cannot express — and
+    /// both promotion gates read it as the unconditional claim rather
+    /// than the conditional orphan grant
+    /// ([`claim_gate`](Self::claim_gate)). Without one the verdict
+    /// returns to [`StandbySync::Orphaned`]: the diagnosis is a
+    /// per-window reading, not a property of the pair, so a writer that
+    /// starts proving the key, goes silent, or stops being the field's
+    /// writer each put the run back on the conditional path.
+    ///
+    /// Ignored while the reported convergence says the tracked line
+    /// *does* own the field: there is no owner to be outside it.
+    pub fn note_foreign_writer(&mut self, writer: Option<SocketAddr>) {
+        if self.owns_field() {
+            return;
+        }
+        // The diagnosis only reframes an ownerless verdict: any other
+        // convergence has its own claim shape, and none of them is the
+        // wedge's. A verdict that has stopped being ownerless therefore
+        // drops the diagnosis outright, rather than leaving it standing
+        // for the next orphaned apply to pick up unearned.
+        let unowned = self.line_unowned();
+        self.foreign_writer = writer.filter(|_| unowned);
+        let sync = std::mem::replace(&mut self.sync, StandbySync::Unsynchronized);
+        self.sync = match (self.foreign_writer, sync) {
+            (Some(_), StandbySync::Orphaned { aligned })
+            | (Some(_), StandbySync::Usurped { aligned }) => StandbySync::Usurped { aligned },
+            (None, StandbySync::Usurped { aligned }) => StandbySync::Orphaned { aligned },
+            (_, sync) => sync,
+        };
+    }
+
+    /// The endpoint the standing foreign-writer diagnosis names — the
+    /// writer whose standing claim the promotion gates are cleared to
+    /// preempt, and the one a granted such claim journals as the
+    /// [`ForeignClaimPreempt`] record's `writer`. `None` while no
+    /// diagnosis stands.
+    pub fn foreign_writer(&self) -> Option<SocketAddr> {
+        self.foreign_writer
+    }
+
     /// Arms the claim's fencing-loss counterpart — the *bound*
     /// conditional re-grant a fencing-demoted ex-owner probes each
     /// scan while its loss mark stands. `reclaim` takes the field's
@@ -1769,7 +1905,9 @@ impl<'d> Peer<'d> {
             startup_refusal: None,
             pending_startup_refusals: Vec::new(),
             orphan_claim: None,
+            foreign_writer: None,
             pending_orphans: Vec::new(),
+            pending_foreign_claims: Vec::new(),
             pending_refusals: Vec::new(),
             open_refusal: None,
             revision: false,
@@ -1997,6 +2135,7 @@ impl<'d> Peer<'d> {
             StandbySync::Tracking { .. }
                 | StandbySync::Reinitialized { .. }
                 | StandbySync::Orphaned { .. }
+                | StandbySync::Usurped { .. }
         ) {
             return Err(SwitchError::NotConverged {
                 sync: self.sync.clone(),
@@ -2532,14 +2671,27 @@ impl<'d> Peer<'d> {
                 // can never resolve.
                 if checkpoint.source_owns_field == Some(false) {
                     self.staged = None;
-                    if !matches!(self.sync, StandbySync::Orphaned { .. }) {
+                    if !self.line_unowned() {
                         self.pending_orphans.push(OrphanReport {
                             tick: landed,
                             aligned: checkpoint.tick,
                         });
                     }
-                    self.sync = StandbySync::Orphaned {
-                        aligned: checkpoint.tick,
+                    // The narrower verdict while a diagnosis stands:
+                    // the field's own arbitration named a writer that
+                    // could not prove this line's key, so the tracked
+                    // line's ownerlessness is a *foreign* claim on the
+                    // field rather than an ownerless one — and the two
+                    // read differently to every promotion gate, the
+                    // conditional orphan grant and the unconditional
+                    // claim being two different answers to it.
+                    self.sync = match self.foreign_writer {
+                        Some(_) => StandbySync::Usurped {
+                            aligned: checkpoint.tick,
+                        },
+                        None => StandbySync::Orphaned {
+                            aligned: checkpoint.tick,
+                        },
                     };
                     // `Orphaned` is the promotable verdict — the run it
                     // would resume is the same proven-converged one —
@@ -3231,7 +3383,9 @@ impl<'d> Peer<'d> {
         }
         if !matches!(
             self.sync,
-            StandbySync::Diverged { .. } | StandbySync::Orphaned { .. }
+            StandbySync::Diverged { .. }
+                | StandbySync::Orphaned { .. }
+                | StandbySync::Usurped { .. }
         ) {
             self.sync = StandbySync::Degraded {
                 detail: detail.to_string(),
@@ -3509,9 +3663,7 @@ impl<'d> Peer<'d> {
         // demotion's `yielded` mark keeps the probe off: the claim this
         // run handed back belongs to the successors' conditional paths,
         // not to this standby's re-take under its own token.
-        let armed = self.was_owner
-            && !self.yielded
-            && (self.fencing_lost || matches!(self.sync, StandbySync::Orphaned { .. }));
+        let armed = self.was_owner && !self.yielded && (self.fencing_lost || self.line_unowned());
         if self.role != Role::Standby || !armed {
             return;
         }
@@ -3862,6 +4014,7 @@ impl<'d> Peer<'d> {
             fencing: std::mem::take(&mut self.pending_fencing),
             rearms: std::mem::take(&mut self.pending_rearms),
             observations: std::mem::take(&mut self.pending_observations),
+            foreign_claims: std::mem::take(&mut self.pending_foreign_claims),
             startup_refusals: std::mem::take(&mut self.pending_startup_refusals),
             restarts: std::mem::take(&mut self.pending_restarts),
             promotion_refusals: std::mem::take(&mut self.pending_refusals),
@@ -3985,6 +4138,19 @@ impl<'d> Peer<'d> {
         self.executor
     }
 
+    /// Whether the reported convergence says the tracked line has no
+    /// field owner of its own — the wedge's two verdicts,
+    /// [`StandbySync::Orphaned`] and the narrower
+    /// [`StandbySync::Usurped`] alike. Every path that treats "the line
+    /// has no owner" as evidence reads this rather than naming one
+    /// variant, so the two cannot drift apart.
+    fn line_unowned(&self) -> bool {
+        matches!(
+            self.sync,
+            StandbySync::Orphaned { .. } | StandbySync::Usurped { .. }
+        )
+    }
+
     /// The claim a promotion runs before the gate lifts: the
     /// unconditional [`Claim`] for a proven `Tracking`/`Reinitialized`
     /// convergence — the deliberate takeover — but the conditional
@@ -3997,6 +4163,21 @@ impl<'d> Peer<'d> {
     /// [`SwitchError::FieldClaimFailed`] while one does — an islanded
     /// run whose stale image would otherwise preempt the real owner
     /// and silently roll its applied state and outputs back.
+    ///
+    /// `Usurped` is the one convergence the conditional grant does not
+    /// cover, and deliberately so. The refusal above protects a live
+    /// incumbent's applied state; a diagnosis has already established
+    /// that the standing writer cannot prove this line's key, so it is
+    /// no incumbent of this line whose state a takeover could roll back
+    /// — it is the foreign claim the unconditional claim was always the
+    /// answer to, and routing this verdict through the conditional
+    /// shape would leave the pair with no self-service path back to the
+    /// field while the process that preempted it lives: both the
+    /// requested `promote` and the armed `self_promote` read this gate,
+    /// so both recover. A granted claim taken this way queues the
+    /// [`ForeignClaimPreempt`] naming the endpoint it took the field
+    /// from — the journal counterpart of the [`FencingLoss`] that
+    /// started the episode.
     fn claim_gate(&mut self) -> Result<(), SwitchError> {
         if matches!(self.sync, StandbySync::Orphaned { .. })
             && let Some(claim) = &self.orphan_claim
@@ -4016,7 +4197,21 @@ impl<'d> Peer<'d> {
                 Err(detail) => Err(SwitchError::FieldClaimFailed { detail }),
             };
         }
-        self.lift_gate()
+        // Read before the lift: the granted claim spends the diagnosis,
+        // and the queued record names the writer it took the field from.
+        let usurped = self
+            .foreign_writer
+            .filter(|_| matches!(self.sync, StandbySync::Usurped { .. }));
+        self.lift_gate()?;
+        if let Some(writer) = usurped
+            && self.claim.is_some()
+        {
+            self.pending_foreign_claims.push(ForeignClaimPreempt {
+                tick: self.executor.tick(),
+                writer,
+            });
+        }
+        Ok(())
     }
 
     /// Takes the field's write-ownership claim when one is installed —
@@ -4039,6 +4234,11 @@ impl<'d> Peer<'d> {
         if let Some(gate) = self.gate {
             gate.open();
         }
+        // This run holds the field now, so nothing stands to have
+        // preempted it: the diagnosis is spent, and the next orphaned
+        // apply reports the plain ownerless verdict again until a fresh
+        // one is earned.
+        self.foreign_writer = None;
         // A fresh claim re-arms the loss report — a fenced write under
         // this ownership is a new event, not a repeat of a prior one.
         self.fencing_lost = false;
@@ -4298,6 +4498,10 @@ mod tests {
             point: PointId(1),
             claimant: 9,
         };
+        let foreign = ForeignClaimPreempt {
+            tick: Tick(9),
+            writer: "127.0.0.1:8080".parse().unwrap(),
+        };
         let startup = StartupRefusal {
             tick: Tick(10),
             error: SwitchError::FieldClaimFailed {
@@ -4350,6 +4554,7 @@ mod tests {
         peer.pending_fencing.push(loss);
         peer.pending_rearms.push(rearm);
         peer.pending_observations.push(observation);
+        peer.pending_foreign_claims.push(foreign);
         peer.pending_startup_refusals.push(startup.clone());
         peer.pending_restarts.push(restart);
         peer.pending_refusals.push(refusal.clone());
@@ -4372,6 +4577,7 @@ mod tests {
                 PeerEvent::FencingLoss(loss),
                 PeerEvent::ClaimRearm(rearm),
                 PeerEvent::ClaimObservation(observation),
+                PeerEvent::ForeignClaimPreempt(foreign),
                 PeerEvent::StartupRefusal(startup),
                 PeerEvent::SourceRestart(restart),
                 PeerEvent::PromotionRefusal(refusal.clone()),
@@ -7371,6 +7577,170 @@ mod tests {
         }
         assert!(!gate.is_open());
         assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
+    }
+
+    /// The QA finding
+    /// `unkeyed-claimant-preempts-keyed-pair-and-strands-it`: a
+    /// diagnosed foreign writer is not an incumbent the conditional
+    /// orphan grant must defer to, so a `Usurped` promotion runs the
+    /// *unconditional* claim against the live standing writer and
+    /// journals the preemption naming the endpoint it took the field
+    /// from. The orphan hook the plain `Orphaned` verdict runs is
+    /// never asked.
+    #[test]
+    fn a_usurped_promotion_takes_the_field_from_the_live_foreign_writer() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let writer: SocketAddr = "127.0.0.1:9099".parse().unwrap();
+        let claimed = AtomicBool::new(false);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_field_claim(|| {
+                claimed.store(true, Ordering::Relaxed);
+                Ok(())
+            })
+            .with_field_orphan_claim(|| {
+                panic!("a diagnosed foreign writer is preempted unconditionally")
+            });
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(5);
+        let mut orphaned = source.checkpoint();
+        orphaned.source_owns_field = Some(false);
+        peer.apply(&orphaned).unwrap();
+        assert_eq!(
+            peer.sync_state(),
+            &StandbySync::Orphaned { aligned: Tick(5) }
+        );
+
+        // The monitoring surface's diagnosis: the endpoint the field's
+        // own arbitration named could not prove the line's key.
+        peer.note_foreign_writer(Some(writer));
+        assert_eq!(
+            peer.sync_state(),
+            &StandbySync::Usurped { aligned: Tick(5) },
+            "the diagnosis must narrow the ownerless verdict on the wire"
+        );
+        assert_eq!(peer.foreign_writer(), Some(writer));
+
+        peer.promote().unwrap();
+        assert!(claimed.load(Ordering::Relaxed));
+        assert!(gate.is_open());
+        assert_eq!(
+            peer.drain_pending().foreign_claims(),
+            vec![ForeignClaimPreempt {
+                tick: Tick(5),
+                writer,
+            }],
+            "the granted takeover must name the endpoint it took the \
+             field from"
+        );
+        // The claim landed, so nothing stands to have preempted this
+        // run: the diagnosis is spent, and the next orphaned apply
+        // reports the plain ownerless verdict again.
+        assert_eq!(peer.foreign_writer(), None);
+        peer.scan();
+        peer.demote().unwrap();
+        source.run(1);
+        let mut next = source.checkpoint();
+        next.source_owns_field = Some(false);
+        peer.apply(&next).unwrap();
+        assert_eq!(
+            peer.sync_state(),
+            &StandbySync::Orphaned { aligned: Tick(6) }
+        );
+    }
+
+    /// The armed half of the same recovery: the budget-th orphaned pull
+    /// self-promotes off a `Usurped` verdict on the unconditional
+    /// claim, so a keyed pair whose failover is armed is not gated out
+    /// of its own field by the process that preempted it.
+    #[test]
+    fn armed_failover_reclaims_the_field_from_a_diagnosed_foreign_writer() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let writer: SocketAddr = "127.0.0.1:9099".parse().unwrap();
+        let claimed = AtomicBool::new(false);
+        let mut peer = Peer::standby(executor(&gate), Some(&gate))
+            .with_failover(1)
+            .with_field_claim(|| {
+                claimed.store(true, Ordering::Relaxed);
+                Ok(())
+            })
+            // The conditional gate, still armed: it is the grant the
+            // first budget-th orphaned pull meets, and the one the
+            // diagnosed verdict must route around rather than remove.
+            .with_field_orphan_claim(|| Ok(false));
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(3);
+        let mut orphaned = source.checkpoint();
+        orphaned.source_owns_field = Some(false);
+        match peer.track_once(|| Ok(orphaned.clone())) {
+            TrackReport::PromotionRefused { error, .. } => {
+                assert!(matches!(error, SwitchError::FieldClaimFailed { .. }));
+            }
+            other => panic!("an undiagnosed live writer must refuse the gate, got {other:?}"),
+        }
+        assert!(!gate.is_open());
+        assert!(matches!(peer.sync_state(), StandbySync::Orphaned { .. }));
+
+        // The diagnosis lands; the same armed gate fires on the next
+        // budget cycle, now off the unconditional claim.
+        peer.note_foreign_writer(Some(writer));
+        source.run(1);
+        let mut next = source.checkpoint();
+        next.source_owns_field = Some(false);
+        match peer.track_once(|| Ok(next)) {
+            TrackReport::Promoted { report, .. } => assert_eq!(report.role, Role::Promoting),
+            other => panic!("the armed gate must fire off the usurped verdict, got {other:?}"),
+        }
+        assert!(claimed.load(Ordering::Relaxed));
+        assert!(gate.is_open());
+        assert_eq!(peer.drain_pending().foreign_claims().len(), 1);
+    }
+
+    /// A diagnosis that stops holding is not latched: the writer
+    /// proving the line's key, going silent, or the tracked line
+    /// regaining an owner each drop the run back to the orphan verdict
+    /// and the conditional grant that protects whatever writer the
+    /// field does name.
+    #[test]
+    fn a_cleared_diagnosis_returns_the_run_to_the_conditional_claim() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let writer: SocketAddr = "127.0.0.1:9099".parse().unwrap();
+        let mut peer = Peer::standby(executor(&gate), Some(&gate));
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let mut source = executor(&source_driver);
+        source.run(5);
+        let mut orphaned = source.checkpoint();
+        orphaned.source_owns_field = Some(false);
+        peer.apply(&orphaned).unwrap();
+        peer.note_foreign_writer(Some(writer));
+        assert!(matches!(peer.sync_state(), StandbySync::Usurped { .. }));
+
+        peer.note_foreign_writer(None);
+        assert_eq!(
+            peer.sync_state(),
+            &StandbySync::Orphaned { aligned: Tick(5) },
+            "an unanswered re-verification is no diagnosis, so the \
+             conditional claim stands again"
+        );
+        assert_eq!(peer.foreign_writer(), None);
+
+        // A verdict that is no longer ownerless drops the diagnosis
+        // outright rather than leaving it for the next orphaned apply.
+        peer.note_foreign_writer(Some(writer));
+        assert!(matches!(peer.sync_state(), StandbySync::Usurped { .. }));
+        let mut owned = source.checkpoint();
+        owned.source_owns_field = Some(true);
+        peer.apply(&owned).unwrap();
+        assert!(matches!(peer.sync_state(), StandbySync::Tracking { .. }));
+        peer.note_foreign_writer(Some(writer));
+        assert_eq!(peer.foreign_writer(), None);
     }
 
     /// The QA finding

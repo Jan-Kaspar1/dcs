@@ -1124,6 +1124,18 @@ pub struct Monitor<'d> {
     /// a dead announced hint falls back within. Outside `shared`:
     /// request-path bookkeeping like `announced_verify`.
     claimed_verify: Mutex<Option<ClaimedVerify>>,
+    /// The last foreign-writer diagnosis pass the tracking path ran —
+    /// the monitor endpoint the field's standing claim named, when
+    /// the keyed pull ran, and what it answered. This is the pair
+    /// key's one job the rest of the platform cannot do: proving
+    /// whether the process holding the field belongs to the keyed line
+    /// at all. A pass inside its [`ANNOUNCED_VERIFY_RETRY`] window
+    /// suppresses the re-pull, so a dead or hostile declared endpoint
+    /// costs one bounded pull per window rather than one per scan,
+    /// while a changed declaration — a new owner — is diagnosed on the
+    /// next cycle. Outside `shared`: pull-path bookkeeping beside
+    /// `claimed_verify`.
+    foreign_verify: Mutex<Option<ForeignVerify>>,
     /// The last orphan-resolution probe pass's bookkeeping — the
     /// candidate set probed, in probe order, and the wall-clock time
     /// the pass ran. `track_cycle` runs the probe on every orphaned
@@ -1262,6 +1274,42 @@ struct ClaimedVerify {
     monitor: SocketAddr,
     /// When the pass ran.
     at: Instant,
+}
+
+/// What one diagnosis pass answered for the field's standing writer —
+/// the three readings [`Monitor::diagnose_foreign_writer`] can return.
+/// The distinction is between *no answer earned* and *an answer*, not
+/// between verdicts: a suppressed pass is not a cleared diagnosis, so
+/// the caller keeps whatever the last pass concluded.
+enum WriterDiagnosis {
+    /// No pass ran — an unkeyed run, a field owner, a claim declaring
+    /// no monitor, or the same declaration inside its retry window.
+    /// Whatever diagnosis stands keeps standing.
+    Unchanged,
+    /// A pass ran and answered: the named writer proved the line's
+    /// key, or could not be reached. Neither is evidence that it is
+    /// outside the line, so the run falls back to the orphan verdict's
+    /// conditional claim.
+    Absent,
+    /// A pass ran and diagnosed the named writer: it answered and its
+    /// document could not prove this line's pair key.
+    Foreign(SocketAddr),
+}
+
+/// One foreign-writer diagnosis pass's bookkeeping — the monitor
+/// endpoint the field's standing claim named, the wall-clock time the
+/// keyed pull ran, and what it answered. The tracking path re-pulls
+/// only a changed declaration, or one whose pass aged past
+/// [`ANNOUNCED_VERIFY_RETRY`]; a pass that answered is the peer's
+/// standing verdict, a suppressed one leaves it untouched.
+struct ForeignVerify {
+    /// The declared monitor endpoint the pass pulled.
+    monitor: SocketAddr,
+    /// When the pass ran.
+    at: Instant,
+    /// Whether the pass diagnosed the writer: the endpoint answered and
+    /// its document could not prove the line's pair key.
+    foreign: bool,
 }
 
 /// One orphan-resolution probe pass's bookkeeping — the candidate set
@@ -1428,6 +1476,7 @@ impl<'d> Monitor<'d> {
             announced: Mutex::new(VecDeque::new()),
             announced_verify: Mutex::new(None),
             claimed_verify: Mutex::new(None),
+            foreign_verify: Mutex::new(None),
             resolve_verify: Mutex::new(None),
             adopted: Mutex::new(None),
             resolved: Mutex::new(None),
@@ -2157,6 +2206,7 @@ impl<'d> Monitor<'d> {
                 | PeerEvent::ClaimRearm(_)
                 | PeerEvent::SourceRestart(_)
                 | PeerEvent::PromotionRefusal(_)
+                | PeerEvent::ForeignClaimPreempt(_)
                 | PeerEvent::SupersededCommand { .. }
                 | PeerEvent::AdoptionReceipt(_) => {}
             }
@@ -2203,6 +2253,7 @@ impl<'d> Monitor<'d> {
                 | PeerEvent::ClaimObservation(_)
                 | PeerEvent::StartupRefusal(_)
                 | PeerEvent::PromotionRefusal(_)
+                | PeerEvent::ForeignClaimPreempt(_)
                 | PeerEvent::RoleChange(_) => {}
             }
         }
@@ -2254,6 +2305,7 @@ impl<'d> Monitor<'d> {
                 | PeerEvent::ClaimObservation(_)
                 | PeerEvent::StartupRefusal(_)
                 | PeerEvent::PromotionRefusal(_)
+                | PeerEvent::ForeignClaimPreempt(_)
                 | PeerEvent::RoleChange(_) => {}
             }
         }
@@ -2366,15 +2418,53 @@ impl<'d> Monitor<'d> {
         let report = track_and_record(&mut self.shared.lock().unwrap(), &self.store, move || {
             pulled
         });
-        if matches!(report, TrackReport::Applied(_))
-            && matches!(
-                self.shared.lock().unwrap().peer.report().sync,
-                Some(StandbySync::Orphaned { .. })
-            )
-        {
+        let orphaned = matches!(
+            self.shared.lock().unwrap().peer.report().sync,
+            Some(StandbySync::Orphaned { .. } | StandbySync::Usurped { .. })
+        );
+        if matches!(report, TrackReport::Applied(_)) && orphaned {
             self.resolve_tracking_source();
         }
+        // The tracked line's ownerless verdict is where the pair key's
+        // one remaining question gets asked: is the writer the field
+        // does have a member of this line, or a process that took the
+        // field outright? The diagnosis runs on the same cycle as the
+        // orphan verdict it reframes — outside `shared`, so its bounded
+        // pull stalls this request and not the paced scan — and its
+        // answer lands on the peer, where both promotion gates read it.
+        // A run no longer reporting an ownerless verdict is not
+        // tracking a non-owner, so it keeps no diagnosis.
+        let diagnosis = if orphaned {
+            self.diagnose_foreign_writer()
+        } else {
+            WriterDiagnosis::Unchanged
+        };
+        if let WriterDiagnosis::Foreign(writer) = diagnosis {
+            self.note_foreign_writer(Some(writer));
+        } else if matches!(diagnosis, WriterDiagnosis::Absent) {
+            self.note_foreign_writer(None);
+        }
         report
+    }
+
+    /// Records the diagnosis of the field's standing writer — the
+    /// narrower ownerless verdict the served `sync` reports when the
+    /// endpoint the field's own arbitration named could not prove this
+    /// line's pair key, and the claim shape both promotion gates read
+    /// from it. `Some(writer)` records the diagnosis,
+    /// `None` clears it back to the plain
+    /// [`StandbySync::Orphaned`] verdict.
+    ///
+    /// [`track_cycle`](Self::track_cycle) runs
+    /// [`diagnose_foreign_writer`](Self::diagnose_foreign_writer) and
+    /// records through here on every ownerless cycle; a consumer that
+    /// asks the question on its own cadence — rather than per tracking
+    /// pull — records its answer through the same seam, and the served
+    /// report refreshes with it.
+    pub fn note_foreign_writer(&self, writer: Option<SocketAddr>) {
+        let mut shared = self.shared.lock().unwrap();
+        shared.peer.note_foreign_writer(writer);
+        self.store.sync_liveness(shared.peer.report());
     }
 
     /// Counts one produced-nothing pull against the learned pin the
@@ -2473,6 +2563,13 @@ impl<'d> Monitor<'d> {
             match event {
                 PeerEvent::RoleChange(change) => recorder.note_role_change(&change),
                 PeerEvent::PromotionRefusal(refusal) => recorder.note_promotion_refused(refusal),
+                // An armed gate that fired off a usurped verdict took
+                // the field from the standing writer the pair had
+                // diagnosed as outside its line — the audit record
+                // naming the endpoint the claim came from.
+                PeerEvent::ForeignClaimPreempt(preempt) => {
+                    recorder.note_foreign_claim_preempted(preempt);
+                }
                 PeerEvent::Divergence(_)
                 | PeerEvent::Resolution(_)
                 | PeerEvent::Reinitialization(_)
@@ -3000,6 +3097,7 @@ impl<'d> Monitor<'d> {
                         | PeerEvent::ClaimObservation(_)
                         | PeerEvent::StartupRefusal(_)
                         | PeerEvent::PromotionRefusal(_)
+                        | PeerEvent::ForeignClaimPreempt(_)
                         | PeerEvent::RoleChange(_) => {}
                     }
                 }
@@ -3048,6 +3146,15 @@ impl<'d> Monitor<'d> {
                 for event in peer.drain_pending() {
                     match event {
                         PeerEvent::RoleChange(change) => recorder.note_role_change(&change),
+                        // The granted promotion took the field from a
+                        // standing writer the pair had diagnosed as
+                        // unable to prove its line's key — journaled
+                        // beside the role transitions the request
+                        // walked, so the record names both ends of the
+                        // takeover.
+                        PeerEvent::ForeignClaimPreempt(preempt) => {
+                            recorder.note_foreign_claim_preempted(preempt);
+                        }
                         PeerEvent::Divergence(_)
                         | PeerEvent::Resolution(_)
                         | PeerEvent::Reinitialization(_)
@@ -3404,6 +3511,109 @@ impl<'d> Monitor<'d> {
         // successor still earns the pulls while a dead or foreign
         // endpoint cannot.
         self.resolve_tracking_source()
+    }
+
+    /// Diagnoses the field's standing writer against this line's pair
+    /// key — the one question no other path on this surface can ask,
+    /// and the one the pair's own recovery turns on. The field's own
+    /// arbitration names the writer ([`Peer::claimed_monitor`], the
+    /// endpoint the standing claim declared, refreshed by every claim
+    /// verdict this run's attachments meet); this asks *that endpoint*
+    /// for a checkpoint under a fresh `?prove=` nonce and reads the
+    /// answer. A member of this keyed line proves its line; a process
+    /// outside it cannot, whatever it serves.
+    ///
+    /// The verdict has exactly one shape that earns the diagnosis: the
+    /// endpoint **answered** and its document carried no valid
+    /// `line_proof`. Silence is not a verdict — a dead or frozen
+    /// writer is no proof of anything, and a probe that cannot reach it
+    /// leaves the run on the orphan verdict's conditional claim, where
+    /// the field's own arbitration decides. An endpoint that proves
+    /// the key is a legitimate pair member whatever the field says,
+    /// so the diagnosis clears. Suppressed inside the
+    /// [`ANNOUNCED_VERIFY_RETRY`] window on an unchanged declaration,
+    /// the same bound every other verify path here runs under, so a
+    /// hostile or dead endpoint costs one bounded pull per window
+    /// rather than one per scan.
+    ///
+    /// Keyed-only, and only while this run owns no field: an unkeyed
+    /// run holds no key to ask under, and a field owner has no writer
+    /// outside its line. [`WriterDiagnosis::Unchanged`] covers every
+    /// case where no fresh answer was earned — the caller keeps
+    /// whatever the last pass concluded rather than reading a
+    /// suppressed pass as a cleared verdict.
+    ///
+    /// A diagnosed writer journals its own refusal like every other
+    /// probe here ([`TrackingSourceRefused`](dcs_core::JournalEvent::TrackingSourceRefused)),
+    /// so the strand's cause is durable audit, and the peer's report
+    /// then names it as [`StandbySync::Usurped`] rather than
+    /// [`StandbySync::Orphaned`].
+    fn diagnose_foreign_writer(&self) -> WriterDiagnosis {
+        // Keyed-only: there is no line key to ask a candidate under on
+        // an unkeyed run, and an unkeyed run's peers never claimed a
+        // line in the first place.
+        if self.pair_key.is_none() {
+            return WriterDiagnosis::Unchanged;
+        }
+        let claimed = {
+            let shared = self.shared.lock().unwrap();
+            if shared.peer.owns_field() {
+                return WriterDiagnosis::Unchanged;
+            }
+            // The field named no endpoint for its claim — a tool's
+            // claim, or a build predating the declaration. That is no
+            // writer to diagnose, never a verdict that one is foreign.
+            match shared.peer.claimed_monitor() {
+                Some(claimed) => claimed,
+                None => return WriterDiagnosis::Unchanged,
+            }
+        };
+        // A verdict naming this run's own monitor names no other
+        // writer, and an undialable bind address is no endpoint at
+        // all — the same two refusals the adoption paths apply.
+        if claimed == self.local_addr() || claimed.ip().is_unspecified() {
+            return WriterDiagnosis::Unchanged;
+        }
+        {
+            // A pass inside its window stands as the verdict: the
+            // suppression bounds the *pull*, never the diagnosis, and a
+            // cleared answer keeps clearing until a fresh pass says
+            // otherwise.
+            let last = self.foreign_verify.lock().unwrap();
+            if let Some(last) = &*last
+                && last.monitor == claimed
+                && last.at.elapsed() < ANNOUNCED_VERIFY_RETRY
+            {
+                return if last.foreign {
+                    WriterDiagnosis::Foreign(claimed)
+                } else {
+                    WriterDiagnosis::Absent
+                };
+            }
+        }
+        let nonce = Some(mint_generation());
+        // The whole question in one bounded ask: an endpoint that
+        // answers without the key is outside this line, and one that
+        // does not answer at all is unknown.
+        let foreign = match MonitorClient::with_timeout(claimed, CHECKPOINT_PULL_TIMEOUT)
+            .checkpoint_tracking(None, nonce)
+        {
+            Ok(pulled) => !self.proven(&pulled, nonce),
+            Err(_) => false,
+        };
+        *self.foreign_verify.lock().unwrap() = Some(ForeignVerify {
+            monitor: claimed,
+            at: Instant::now(),
+            foreign,
+        });
+        if !foreign {
+            return WriterDiagnosis::Absent;
+        }
+        self.note_source_refusal(
+            claimed,
+            "the field's standing writer cannot prove this line's pair key".to_string(),
+        );
+        WriterDiagnosis::Foreign(claimed)
     }
 
     /// The field-arbitrated successor half of the tracking-source
@@ -4107,6 +4317,13 @@ fn track_and_record(
             // here, one entry per distinct refusal cause the streak
             // produced.
             PeerEvent::PromotionRefusal(refusal) => recorder.note_promotion_refused(refusal),
+            // The budget-th orphaned pull that self-promoted off a
+            // usurped verdict took the field from the standing writer
+            // the diagnosis named — the audit record the automatic
+            // half of the recovery owes beside its transitions.
+            PeerEvent::ForeignClaimPreempt(preempt) => {
+                recorder.note_foreign_claim_preempted(preempt);
+            }
             PeerEvent::RoleChange(change) => recorder.note_role_change(&change),
             // Pending commands an adopted checkpoint abandoned — the
             // demoted run's suspended queue the tracked line never
@@ -4175,6 +4392,7 @@ fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Tick {
             | PeerEvent::ClaimRearm(_)
             | PeerEvent::SourceRestart(_)
             | PeerEvent::PromotionRefusal(_)
+            | PeerEvent::ForeignClaimPreempt(_)
             | PeerEvent::SupersededCommand { .. }
             | PeerEvent::AdoptionReceipt(_) => {}
         }
