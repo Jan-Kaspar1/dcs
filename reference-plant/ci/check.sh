@@ -186,7 +186,7 @@
 #                workspace-side proof substitutes a file:// stand-in and
 #                rewrites this repository's Cargo.toml to match.
 #   DCS_REV      the pinned revision (default: the release tag this
-#                repository's manifest records — v0.7.0, resolving to
+#                repository's manifest records — v0.8.0, resolving to
 #                the recorded commit whose tooling serves the interface
 #                registry, declared commands and their live availability
 #                verdicts, and routed emitted events the surface stage
@@ -196,20 +196,22 @@
 #                tracking-source rediscovery, driven-scan bound,
 #                status-line label, history backfill, born-active
 #                startup-failure, and durable process-history contracts,
-#                and the demote released-claim hand-back,
-#                persistence-path distinctness, deferred startup-claim
-#                refusal, and remote correspondence-gate contracts the
+#                the demote released-claim hand-back, persistence-path
+#                distinctness, deferred startup-claim refusal, and
+#                remote correspondence-gate contracts, and the bounded
+#                contact backoff, convergence-gated reclaim,
+#                self-address refusal, sim-bus claim family, named
+#                standby remedy, announced-source verification, skew
+#                bound, and checkpoint-pull recovery contracts the
 #                mirror legs gate on).
 #   DCS_UPGRADE_REV
 #                the earlier compatible revision the upgrade stage
 #                materializes the tree at before repinning to $DCS_REV
 #                (default: the previous release's recorded rev — the
-#                v0.6.0 publish commit, the first release line whose
-#                builder API carries the composition's declared
-#                recording duties — so the stage proves the recorded
-#                rev → tag half of the v0.6.0 → v0.7.0 crossing the
-#                manifest names; the workspace-side proof seeds its
-#                stand-in remote to serve it).
+#                v0.7.0 publish commit — so the stage proves the
+#                recorded rev → tag half of the v0.7.0 → v0.8.0
+#                crossing the manifest names; the workspace-side proof
+#                seeds its stand-in remote to serve it).
 #   DCS_UPGRADE  set to 0 to skip the upgrade stage — the stage's own
 #                repinned re-run uses this internally.
 #   DCS_TOOLS    a directory holding prebuilt `dcs-model`,
@@ -238,8 +240,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DCS_REMOTE="${DCS_REMOTE:-https://github.com/Jan-Kaspar1/dcs.git}"
-DCS_REV="${DCS_REV:-v0.7.0}"
-DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-b0580bff9df23e009abdce15c241c4711c64a9c2}"
+DCS_REV="${DCS_REV:-v0.8.0}"
+DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-850edf6b9da8bfe13863fe863578b5b5531ad730}"
 DCS_TOOLS="${DCS_TOOLS:-}"
 DCS_RECORD_DIR="${DCS_RECORD_DIR:-}"
 TOOLS=""

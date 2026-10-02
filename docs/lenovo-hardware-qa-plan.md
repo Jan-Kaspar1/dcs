@@ -537,6 +537,62 @@ Implementation order: second, after [daily architecture review](daily-architectu
   closed through the writer lock alone — reports inconclusive;
   the pair leaves on its launch roles.
 
+### Landed 2026-10-01 (monitor-less foreign-claim release leg, #1224/#1167)
+
+- The amended intended-`unsynchronized` bound #1167 recorded is
+  exercised on the deployed rig by scenario leg
+  `2385_foreign_claim_release` — the per-revision lane evidence for the
+  scripted reproduction `field_attested_source.rs`'s
+  `unkeyed_fenced_demote_reclaims_the_released_field` drives, and the
+  one bound the adjacent legs cannot pin: 2350's claim-reclaim proves
+  the released-preemption re-seat, 2380's claim-monitor rendezvous the
+  dialable declared monitor and its journaled adoption, 2370's
+  stranded-standby the same-claim-monitor succession — none asserts
+  that the served un-converged reading covers exactly the monitor-less
+  claim's window and no more.
+- With the pair settled one active plus one tracking standby on the
+  unkeyed posture, a dedicated plant-socket attachment issues
+  `claim_writer` under a foreign token with `controller: false` and no
+  monitor declared — the monitor-less tool claim the shipped
+  `dcs-plant-ctl` does not expose — and holds it. The fenced ex-owner's
+  first write must demote it in place, its serving monitor answering
+  every poll rather than dying; the served journal and the peer's
+  durable `--journal-file` must carry exactly one `field_claim_lost`
+  attributed to the induction token; and the plant's non-mutating
+  claim surface must keep naming that token with no monitor declared.
+- While the monitor-less claim stands the fenced ex-owner must report
+  `standby` and un-converged on every poll of the claim's standing
+  window — `unsynchronized`, or the orphan-tracked cousin `orphaned`
+  for an ex-owner already carrying a verified tracking pin its own
+  journal records — never the clean `tracking` verdict. That window is
+  the claim's own: releasing it must resolve the field through one of
+  the two recorded paths, the ex-owner's loss-marked bound conditional
+  reclaim re-arming its token and walking back `standby → promoting →
+  active` under the `reclaim` origin with the sibling tracking, or a
+  successor's declared monitor adopted with the journaled
+  `tracking_source_adopted`. The resolved claim must name something to
+  track, the field's writes must land again (the watch point's tick
+  advancing past the release-time anchor), the durable journal must
+  open no new `run_boundary`, and the pair must return to its launch
+  roles. A peer still un-converged past the release bound is the
+  permanent strand the bound forbids; a peer reporting clean while the
+  monitor-less claim stands is the same verdict asserted past its
+  window.
+- Named diagnostics are `foreign-claim-release-failed` and
+  `foreign-claim-release-nondeterministic`, with the self-check's
+  `foreign-claim-release-unchecked` covering every planted clause —
+  the peer asserted resolved while stranded past the release, the
+  only-while-claimed verdict asserted while the served monitor reports
+  clean, the orphan-tracked reading with no learned pin behind it, the
+  silent or misattributed loss, the unjournaled re-seat, the durable
+  mirror going silent, the released field naming nothing to track; two
+  consecutive passes produce identical digests; a run whose claim
+  surface, declared monitor, claim-staging lever, claim-owner pins, or
+  journal files are absent, whose pair never settles or is unreachable,
+  or whose pair runs keyed reports inconclusive — the bound names the
+  unkeyed posture, where the announced verify hands a keyed demote
+  `orphaned` instead.
+
 ### Landed 2026-10-01 (sim-bus device server in the lane image set, #1368)
 
 - The sim-bus rig legs stage against the released protocol server: the
@@ -562,6 +618,57 @@ Implementation order: second, after [daily architecture review](daily-architectu
   document a leg mounts into the controller it points at the field.
   An enabler for the sim-bus rig legs (#1355/#1356/#1357); a leg
   needing the server itself to misbehave may still stage a double.
+
+### Landed 2026-10-01 (sim-bus born-active claim refusal leg, #1356)
+
+- The born-active startup-claim refusal now has per-revision lane
+  evidence over a sim-bus field, not only over the sim-tcp plant: leg
+  `2480_sim_bus_startup_claim_refusal` stages the lane's shipped
+  `dcs-sim-bus-device`, launches a first controller onto it and
+  asserts it takes the field's write-ownership claim, then stages a
+  second born-active declaring the same model with no `--peer` and
+  asserts it exits nonzero inside the documented bound carrying the
+  live-holder verdict — the sim-tcp refusal reproduced on the register
+  protocol, which the conditional `claim_writer_unless_held` grant
+  makes possible there, since a bus claim dies with its last holder's
+  link and a standing claim is therefore always a live incumbent to
+  name. A `--standby` launch in the same shape is the positive
+  control: it must converge `tracking` behind the incumbent with its
+  command gate closed and no tracking-source refusal journaled — the
+  arm the defect orphaned. The incumbent's claim and role must be
+  undisturbed throughout: no claim-owner flip, no fenced demotion
+  journaled on it, its scan still moving. Named diagnostics
+  `sim-bus-claim-refusal-failed` and
+  `sim-bus-claim-refusal-nondeterministic`, with
+  `sim-bus-claim-refusal-unchecked` covering the planted negatives;
+  two consecutive passes produce identical digests; a rig with no
+  staged device server, no pinned `--owner-token` for the incumbent
+  seat, an unsettled deployed pair, or a staged revision predating the
+  contract — the second born-active claiming the field and going
+  active — reports inconclusive. Each pass ends with the three born
+  seats and the device server removed, and the sweep is audited back
+  over the rig rather than assumed: each seat's presence read through
+  the read-only state lever, the device server's own removal error,
+  and the deployed pair framed once more with the leg's claim gone.
+  A seat or a device server that outlived the sweep is a claim the
+  legs behind this one would inherit, so it reports
+  `sim-bus-claim-refusal-nondeterministic` instead of leaving them a
+  dirty rig; the control's closed gate is read the same way, an
+  unreadable SignalIndex leaving the leg with nothing to submit
+  reported as an unread surface rather than a gate the control
+  crossed.
+- The leg rides the born-seat launcher's own field seam rather than
+  adding one: `start_born_controller(seat, remote, document=)` mounts
+  a staged model of the leg's choosing in place of the run's own, and
+  a `remote` of None launches with no `--remote` attachment at all —
+  the shape a `sim-bus`/`sim-cyclic` model needs, since the device
+  carries its address in its parameters. This leg is the second user
+  of the seam #1357's leg landed, and the return value's `model` is
+  what lets it evidence that both ends of the register protocol read
+  one declaration: the device server serves the document the seat
+  mounted. The leg runs after `2470` and before the revision legs,
+  sharing the driven/foreign born seats and the device server with it
+  and sweeping both behind itself.
 
 ### Landed 2026-10-01 (holderless-claim reclaim recovery leg, #1260)
 
