@@ -1060,6 +1060,115 @@ Implementation order: second, after [daily architecture review](daily-architectu
   present on that very monitor — and the leg names it as the contract
   failure it is.
 
+### Landed 2026-10-02 (demoted ex-owner's ahead-bound re-join leg, #1275)
+
+- The demoted ex-owner's ahead-bound line rejoin contract — the
+  per-revision lane evidence for the contract #1269's fix establishes
+  (WW-LCM-001's continuity clause) — is exercised per revision by
+  scenario leg `2375_own_tick_ahead_rejoin`. A fenced or demoted field
+  owner that declares no configured `--standby` must re-join the line
+  through the field-arbitrated claimed-monitor rendezvous
+  (`adopt_claimed_source`, dcs-monitor `lib.rs` ~L3059 — the unkeyed
+  pair's only provable rendezvous) *regardless of how far its own paced
+  tick has drifted from the line's*: `verify_owner_checkpoint` and
+  `verify_announced_checkpoint` must not treat the prober's own tick
+  plus the retired `MAX_ANNOUNCED_AHEAD` window (32) as the
+  line-membership reference, because a detached prober's own clock has
+  no authority over where the line moved — its `tick` and `stream_tick`
+  alike advance at its own scan cadence, so the gap measures pace
+  asymmetry, never line membership (#1336 retired the bound).
+- The defect the leg stages is self-reinforcing and journal-empty. A
+  tracking peer's paced clock keeps counting through every source
+  outage it survives while the pulled stream stands still, so the lead
+  it accrues is permanent and the promotion carries it: once the
+  promoted successor's served tick led the demoted ex-owner's own by
+  more than the thirty-two-tick window, the ex-owner read that lead as
+  a forged position, refused the field's own `Ahead` on every unkeyed
+  rejoin path, and — with no configured source, no proven announced
+  hint, and no line proof to fall back on — stranded
+  `standby`/`unsynchronized` with a silent journal, the conditional
+  startup grant refused while the claim stood, and the operator's only
+  recovery a restart-as-standby.
+- The staging rides the lane's own lifecycle seam on the deployed
+  paced pair: `active` (ctrl-a) is the field owner declaring no pair at
+  all, so the claim's declared monitor is the only candidate its
+  re-join can resolve, and `standby` (ctrl-b) is the pair's
+  `--standby` tracker. `stop_controller` on the owner holds its
+  container down while the tracker keeps its 100 ms cadence, so every
+  pull is a produced-nothing miss while the tracker's own run tick
+  advances a scan at a time against a frozen line; the leg waits for
+  the *measured* separation to clear the retired window plus a margin,
+  brings the owner back, waits for the pair to reconverge, and reads
+  both members' own served run ticks again to record the lead the
+  promotion will carry. A promotion computed inside the retired window
+  would prove nothing about one computed past it, so a staging that
+  never separated reports nondeterministic and stops there — the
+  launch owner's container is thawed either way.
+- The routine promote rides the lead-carrying tracker with no
+  `POST /demote` on the owner first, so the field's arbitration
+  preempts the standing claim and the owner's first fenced write
+  demotes it in place; the promote gate's own named refusals
+  (`not_converged`, `already_active`, `no_tracking_source`) answer
+  before any switchover is computed and name a race in the staging
+  rather than the contract, so they report nondeterministic. The
+  lead-carrying checkpoint must itself carry the declared stream
+  position (#1269's own surface) at or behind the run tick it rides;
+  a document declaring a position ahead of its own tick is the nonsense
+  shape and a contract failure, and a document declaring no position
+  at all is a pinned revision predating the contract, which the leg
+  reports inconclusive on rather than asserting.
+- The re-join is asserted through the demoted ex-owner's serving
+  monitor and its runner-owned `--journal-file`: the sync verdict
+  converging to `tracking` rather than parking `unsynchronized` past
+  the documented lane bound of 60 of its own paced scans, the
+  fenced-origin `active → demoting → standby` walk beside exactly one
+  `field_claim_lost` attributed to the promoted claim, the field's own
+  post-promotion fencing verdict naming that claim and its declared
+  monitor, exactly one `tracking_source_adopted` naming the successor's
+  declared endpoint, no `tracking_source_refused` naming the successor,
+  the re-joined peer's served document stamping the successor's
+  ownership honestly, and no further `run_boundary` — the operator's
+  restart-as-standby must not be what converged it. The adoption audit
+  reads the ex-owner's current *run*, not one switchover's cursor:
+  `adopt_claimed_source` is a process-lifetime pin, so one adoption
+  legitimately serves every re-join that run makes and a second
+  promotion in the same run owes none. A later `POST /promote` on the
+  converged ex-owner answers the converged path, and the pair's launch
+  roles restore; the launch-layout clauses ride a switch back that
+  actually took, since a refused or unanswered one leaves the leg
+  nothing to audit about the layout.
+- Named diagnostics are `ahead-bound-rejoin-failed` and
+  `ahead-bound-rejoin-nondeterministic`, with the self-check's
+  `ahead-bound-rejoin-unchecked` covering the planted negatives: the
+  issue's doctored case — the re-join asserted while the ex-owner stays
+  unsynchronized past the documented bound — a re-join that lands only
+  after a wait the bound does not admit, an adoption that is missing,
+  duplicated, foreign, or accompanied by a journaled source refusal, an
+  adoption a restart performed, a silent or duplicated or unattributed
+  claim loss, an unwalked or unattributed demotion, an off-script
+  served role walk, a promoted successor that never holds the field, a
+  fencing verdict that does not fence or names another claim or no
+  declared monitor or another member's port, a dishonest served
+  document, a refused switch back, unrestored launch roles, and every
+  instability class. Two consecutive passes produce identical digests.
+  A run context carrying no controller lifecycle seam, an unreachable
+  member, a bridge-placed endpoint, no journal file, no pinned owner
+  token, a pair off its launch layout, a served surface missing the
+  ownership stamps, an integer run tick, or the sync vocabulary, and a
+  lead-carrying document declaring no stream position report
+  inconclusive.
+- #1269's fix has no new served field beyond the declared stream
+  position and no new durable record, so the leg's pre-contract
+  signature is that surface's absence: a lead-carrying checkpoint that
+  declares no `stream_tick`, a role report with no sync vocabulary, or
+  a served document without the `source_owns_field`/`line_owner`
+  stamps the rendezvous rides. Every released and staged build predates
+  the contract until the fix lands, so that is the honest verdict for
+  them. A revision whose ex-owner re-joins through the claimed monitor
+  with the adoption journaled is not that signature — the contract was
+  demonstrated present on that very monitor — and the leg names it as
+  the contract failure it is.
+
 ### Landed 2026-10-02 (voluntary-demote released-claim leg, #1273)
 
 - The voluntary-demote released-claim contract — the per-revision lane
@@ -1138,6 +1247,97 @@ Implementation order: second, after [daily architecture review](daily-architectu
   the `yielded` suppression is then demonstrably absent while the
   durable record is present, and the leg names it as the contract
   failure it is.
+
+### Landed 2026-10-02 (self-standby startup-claim refusal leg, #1343)
+
+- The self-standby startup-claim refusal contract — the per-revision
+  lane evidence for the contract #1340's fix establishes (the
+  startup-claim arbitration WW-FND-002's redundant failover depends
+  on) — is exercised per revision by scenario leg
+  `2497_self_standby_refusal`. A tracking source must name a
+  *different* instance: a `--standby` (or `--peer`) target resolving
+  to this run's own `--listen` socket is a usage error at launch,
+  refused before the run exists. The condition the gate can only
+  catch by resolving, never by string-comparing, is the launch whose
+  tracking seat *is* its own announced address: the finding left that
+  declaration passing every check, so each pull returned the run's own
+  checkpoint — a standby's document always stamps
+  `source_owns_field: false`, so every apply scored a heartbeat miss —
+  and the run lived as a legitimate-looking seat in the pair,
+  indistinguishable on the monitor from a standby that tracks a real
+  peer, where the same class of verdict at boot (a startup claim a
+  live peer holds, a `--peer` naming this run, a persistence alias) is
+  a nonzero exit carrying the named refusal.
+- The leg stages exactly that on the deploy fixture's labeled
+  containers: a born seat launched `--standby` at *its own* rig-bridge
+  container name and monitor port, under its own pinned
+  `--owner-token` — the address its own checkpoint pulls announce
+  through `?peer=` to every participant that pulls from it, the seat
+  included, and the address the field sees it announce itself as.
+  Nothing in the launch spells "me": the name is a different string
+  from the wildcard `--listen` bind and resolves to the container's
+  bridge IP rather than loopback, so only the product's resolution
+  tells the two apart. Before judging anything the leg proves the
+  staging landed — the launch's own returned target must equal the
+  seat's own advertised address, else it reports the self-referential
+  condition as never staged and judges no launch.
+- The clauses: the launch is refused inside the bound by a nonzero
+  exit whose stderr names the verdict — the offending `--standby`
+  flag, the resolution that made the target this run's own socket,
+  that `--listen` socket, the "must be a different instance" reason,
+  and the staged address itself (the usage block the shell prints
+  below the refusal repeats the flag and the reason, so the
+  resolution clause and the address echo are what tell the verdict
+  line from the boilerplate — and the born seat's process-verdict
+  read takes a `docker logs` tail wide enough to hold that whole
+  error, the refusal line plus the controller's ~150-line usage
+  block); it never occupies a seat, so the process is gone, its
+  monitor never answered once across the refusal window, and its
+  durable journal carries no run boundary and no entry, which is
+  where the refusal classes' contract carries a boot refusal (the
+  process's own stderr, precisely because the run never existed to
+  journal); the field never moved, a read-only `probe_writer` still
+  naming the incumbent's own pinned owner token and never the refused
+  seat's; a legitimate `--standby` launch naming a *different*
+  instance is not refused and converges `tracking` on the incumbent
+  with the incumbent's claim observed and its own run boundary
+  journaled, so the gate cannot pass by refusing every tracking
+  source; and the deployed pair is undisturbed throughout — its field
+  owner `active` with the claim held and its tick advancing, its
+  member `standby` — with every staged seat removed afterwards. Two
+  consecutive passes produce identical digests.
+- Named diagnostics are `self-standby-refusal-failed` and
+  `self-standby-refusal-nondeterministic`, with the self-check's
+  `self-standby-refusal-unchecked` covering the planted negatives the
+  issue calls out (the self-standby asserting its own refusal while
+  it occupies a legitimate standby seat), the zero exit, the refusal
+  that never named itself or that dropped the resolution, the own
+  socket, or the staged address, the silent exit, the refused seat
+  that served a monitor anyway, the run record its journal should not
+  carry, the field that opened or moved off the incumbent or under the
+  refused seat's own token, the legitimate standby the gate
+  over-refused or that never tracked or unobserved the claim or
+  journaled no run boundary or was staged on the self-addressed target
+  itself, the incumbent's demotion or stall, the pair's disturbed
+  member, the seat left behind, and the instability shapes. A run
+  context carrying no born-seat staging levers, no published monitor
+  for a born seat or the pair, no per-seat journal files, no published
+  plant endpoint, a deployed pair that never settled on its launch
+  layout, a staging whose own-address identity cannot be proven, and
+  a read that dropped report inconclusive.
+- #1340's fix is a boot-time argument check with no served field and
+  no durable record, so the leg's pre-contract signature is
+  behavioural and is exactly the finding: the self-addressed launch
+  still running after the bound, serving `standby` under an honest
+  `unsynchronized` verdict — covering no peer at all — with its
+  journal's own run boundary present, and the pair otherwise
+  undisturbed, is a revision whose self-reference gate missed the
+  own-token announcement. Every released and staged build predates
+  the contract until the fix lands, and the leg names that shape as
+  the contract failure it is rather than a silent pass. A build that
+  refuses the launch but exits zero, leaves the address unnamed, or
+  has bound a monitor first is named the same way — the gate
+  demonstrably present, the verdict not yet the contract's.
 
 ### Landed 2026-10-02 (cross-peer shared-state-file refusal leg, #1347)
 

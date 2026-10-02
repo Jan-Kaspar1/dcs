@@ -406,6 +406,13 @@ class SharedStateFileTests(unittest.TestCase):
                          runner.CONTAINER_OWN_RUN_DIR + '/history.jsonl')
         inspect = next(args for args in calls if args[0] == 'inspect')
         self.assertIn('dcs-hw-qa-1-b', inspect)
+        # The refusal is read whole: a revision that reports the
+        # cross-peer check at option-parse time answers with the
+        # refusal line followed by the controller's usage block.
+        logs = next(argv for argv in calls if argv[0] == 'logs')
+        self.assertEqual(list(logs[:3]),
+                         ['logs', '--tail', str(runner.STATE_LOG_TAIL)])
+        self.assertGreaterEqual(runner.STATE_LOG_TAIL, 200)
         self.assertEqual(self.events, ['controller-relaunch',
                                        'controller-relaunched'])
 

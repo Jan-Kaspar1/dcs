@@ -1965,6 +1965,15 @@ def start_controller(run_id, name, timeline, pair='deployed'):
     timeline('controller-started', container + ' running')
 
 
+# The `docker logs --tail` bound the shared-state-file leg's exit read
+# uses, the same accounting BORN_LOG_TAIL states for the born seats: a
+# refusal the runtime reports on its own line is short, but a revision
+# that moves the cross-peer distinctness check to option-parse time
+# answers with the refusal line followed by the controller's usage
+# block, and a short tail drops the very line the leg must name.
+STATE_LOG_TAIL = 256
+
+
 def controller_state(run_id, name, pair='deployed'):
     """The pair member container's process verdict — the
     shared-state-file leg's exit evidence: `{'container', 'running',
@@ -1973,6 +1982,7 @@ def controller_state(run_id, name, pair='deployed'):
     Running=false with a nonzero exit and the named refusal on the
     log tail; an absent container reports `absent` rather than
     raising, since the read itself is the leg's evidence collection.
+    The tail is `STATE_LOG_TAIL` so a refusal's whole output is read.
     """
     container = _controller_container(run_id, name, pair)
     probe = docker('inspect', '-f', '{{.State.Running}} {{.State.ExitCode}}',
@@ -1986,7 +1996,8 @@ def controller_state(run_id, name, pair='deployed'):
         exit_code = int(parts[1])
     except (IndexError, ValueError):
         exit_code = None
-    logs = docker('logs', '--tail', '60', container, check=False)
+    logs = docker('logs', '--tail', str(STATE_LOG_TAIL), container,
+                  check=False)
     return {'container': container, 'running': running,
             'exit': exit_code, 'absent': False,
             'logs': (logs.stdout or '') + (logs.stderr or '')}
@@ -3354,13 +3365,24 @@ def stop_born_controller(run_id, seat, timeline):
     timeline('born-stopped', container + ' removed')
 
 
+# The `docker logs --tail` bound a born seat's process-verdict read
+# uses. It must hold a boot usage error whole: the shell answers an
+# argument-parse refusal with the refusal line followed by the
+# controller's ~150-line USAGE block (the self-addressed
+# `--standby`/`--peer` verdict #1340's fix adds is one), so a shorter
+# tail drops the very line the refusal contract names and reports the
+# seat's verdict as an unnameable exit.
+BORN_LOG_TAIL = 256
+
+
 def born_controller_state(run_id, seat):
     """The born seat container's process verdict — the
     undeclared-refusal class's evidence: `{'container', 'running',
     'exit', 'logs', 'absent'}` — Running=false with a nonzero exit and
-    the named refusal on the log tail is the recorded disposition; an
+    the     named refusal on the log tail is the recorded disposition; an
     absent container reports `absent` rather than raising, since the
-    read itself is the leg's evidence collection."""
+    read itself is the leg's evidence collection. The tail is
+    `BORN_LOG_TAIL` so a boot usage error's whole output is read."""
     container = _born_seat_container(run_id, seat)
     probe = docker('inspect', '-f', '{{.State.Running}} {{.State.ExitCode}}',
                    container, check=False)
@@ -3373,7 +3395,8 @@ def born_controller_state(run_id, seat):
         exit_code = int(parts[1])
     except (IndexError, ValueError):
         exit_code = None
-    logs = docker('logs', '--tail', '60', container, check=False)
+    logs = docker('logs', '--tail', str(BORN_LOG_TAIL), container,
+                  check=False)
     return {'container': container, 'running': running,
             'exit': exit_code, 'absent': False,
             'logs': (logs.stdout or '') + (logs.stderr or '')}
