@@ -143,7 +143,7 @@ import simulate
 # surface the named diagnostic on the honest converging run, never let a
 # defect pass silently.
 LEG = {
-    "order": 730,
+    "order": 740,
     "title": "the pending-source-pull latch leg",
     "passes": "pending-source-pull",
     "tampers": [
