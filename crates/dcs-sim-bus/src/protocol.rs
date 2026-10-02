@@ -47,6 +47,7 @@ const RESP_ERROR: u8 = 0x05;
 const RESP_DONE: u8 = 0x06;
 const RESP_EXCHANGED: u8 = 0x07;
 const RESP_CLAIM_STATUS: u8 = 0x08;
+const RESP_MISSED: u8 = 0x09;
 
 // Attribution flags on the block a `fenced` verdict and a `claim_status`
 // answer carry after their fixed fields: bit 0 marks the standing
@@ -338,9 +339,13 @@ pub enum ExchangeOutcome {
     /// The exchange completes: every carried output publishes, the
     /// answer serves every register.
     Complete,
-    /// The exchange never answers: the server drops the connection
-    /// without a frame, the link failure a dead device presents. The
-    /// staged image stays unpublished, the input census unlatched.
+    /// The exchange does not happen: the server answers
+    /// [`BusResponse::Missed`] — the in-band verdict a lost cycle
+    /// presents on a live link — and the staged image stays
+    /// unpublished, the input census unlatched. The connection stays
+    /// up: a missed cycle is not a severed link, so the exchange's
+    /// failure costs the attachment its cycle alone — not the
+    /// connection-bound write claim a severed link would release.
     Miss,
     /// The exchange completes but answers late: the response carries
     /// the full image and the late mark the driver's
@@ -413,6 +418,14 @@ pub enum BusResponse {
     /// [`BusRequest::InjectQuality`], and
     /// [`BusRequest::ClearQuality`]: the request applied.
     Done,
+    /// Answer to an [`BusRequest::Exchange`] that consumed a scripted
+    /// [`ExchangeOutcome::Miss`]: the exchange did not complete — no
+    /// staged output published, no census latched — and nothing else
+    /// happened. The answer is in-band rather than a severed link, so
+    /// the connection survives for the next exchange and the
+    /// attachment-bound writer claim is untouched: the script queue is
+    /// exchange tooling, not part of the arbitration vocabulary.
+    Missed,
     /// Answer to [`BusRequest::ProbeWriter`]: the standing claim's
     /// identity — the owner token it asserts and the monitor endpoint it
     /// declared, the two halves the plant protocol's fencing verdicts
@@ -973,6 +986,7 @@ pub(crate) fn encode_response(response: &BusResponse) -> Vec<u8> {
             }
         }
         BusResponse::Done => body.push(RESP_DONE),
+        BusResponse::Missed => body.push(RESP_MISSED),
         BusResponse::ClaimStatus { owner, monitor } => {
             body.push(RESP_CLAIM_STATUS);
             push_attribution(&mut body, *owner, *monitor);
@@ -1135,6 +1149,7 @@ pub(crate) fn decode_response(body: &[u8]) -> Result<BusResponse, String> {
             BusResponse::Exchanged { registers, late }
         }
         RESP_DONE => BusResponse::Done,
+        RESP_MISSED => BusResponse::Missed,
         RESP_CLAIM_STATUS => {
             let (owner, monitor) = reader.attribution().ok_or_else(short)?;
             BusResponse::ClaimStatus { owner, monitor }
@@ -1573,6 +1588,7 @@ mod tests {
                 },
             },
             BusResponse::Done,
+            BusResponse::Missed,
             BusResponse::ClaimStatus {
                 owner: None,
                 monitor: None,
@@ -1634,6 +1650,12 @@ mod tests {
             serde_json::to_string(&BusResponse::Done).unwrap(),
             r#"{"result":"done"}"#
         );
+        assert_eq!(
+            serde_json::to_string(&BusResponse::Missed).unwrap(),
+            r#"{"result":"missed"}"#
+        );
+        // The in-band missed-cycle answer is its tag alone.
+        assert_eq!(encode_response(&BusResponse::Missed), vec![0, 1, 0x09]);
         // The fenced verdict's spelling is unchanged when it names no
         // claimant — the shape every earlier build's answer carried.
         assert_eq!(
@@ -1854,6 +1876,7 @@ mod tests {
             &[0x08, 0x01][..], // claim status, truncated owner token
             &[0x08, 0x03, 0, 0, 0, 0, 0, 0, 0, 1][..], // claim status, truncated monitor
             &[0x06, 0][..],    // trailing byte after done
+            &[0x09, 0][..],    // trailing byte after missed
             &[0x07][..],       // exchanged, missing flags
             &[0x07, 0x09][..], // exchanged, unknown flag bits
             &[0x07, 0][..],    // exchanged, missing count

@@ -116,6 +116,7 @@
 //! | `0x06` | done | none — a claim, release, ensure, inject, clear, or script applied |
 //! | `0x07` | exchanged | `u8 flags`, `u16 count`, then per register `u16 register`, `u8 kind`, value bytes, `u64 tick`, quality bytes |
 //! | `0x08` | claim status | attribution block |
+//! | `0x09` | missed | none — the exchange consumed a scripted `miss` and completed nothing |
 //!
 //! The `exchanged` flags byte's bit 0 marks a late answer — the
 //! deadline miss the driver's `missed_deadlines` counter reads.
@@ -152,14 +153,19 @@
 //! bank, while a census-only exchange — a tracking standby's, which
 //! stages nothing — is open to every attachment. `script exchange`
 //! appends scripted outcomes the next exchanges consume one at a time:
-//! `complete` answers the full census, `miss` drops the connection
-//! unanswered (the link failure a dead device presents), `late`
-//! answers complete with the late flag, and the short outcomes
-//! withhold a named station's or an explicit list's registers — the
-//! withheld staged outputs unpublished, their input samples unlatched.
-//! Scripting is development tooling like quality injection: unfenced,
-//! and refused whole when it names a station the device does not
-//! declare or a register it does not serve.
+//! `complete` answers the full census, `miss` answers `missed` in-band
+//! — the exchange completed nothing, but the link a live attachment
+//! holds its writer claim through stays up — `late` answers complete
+//! with the late flag, and the short outcomes withhold a named
+//! station's or an explicit list's registers — the withheld staged
+//! outputs unpublished, their input samples unlatched. The in-band
+//! miss is deliberate: the script queue is exchange tooling, not part
+//! of the arbitration vocabulary, so queuing one can cost the
+//! consuming attachment its cycle but never the connection-bound
+//! writer claim a severed link would release. Scripting is
+//! development tooling like quality injection: unfenced, and refused
+//! whole when it names a station the device does not declare or a
+//! register it does not serve.
 //!
 //! Error codes: `0x01` unknown register (`u16 register`), `0x02` kind
 //! mismatch (`u16 register`, `u8 expected kind`, found value bytes),
