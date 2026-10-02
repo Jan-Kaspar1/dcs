@@ -1,8 +1,8 @@
 {
-  "dcs_release": "v0.7.0",
+  "dcs_release": "v0.8.0",
   "images": {
-    "controller": "dcs-controller:v0.7.0",
-    "plant_server": "dcs-plant-server:v0.7.0"
+    "controller": "dcs-controller:v0.8.0",
+    "plant_server": "dcs-plant-server:v0.8.0"
   },
   "model": {
     "path": "model/plant.json",
