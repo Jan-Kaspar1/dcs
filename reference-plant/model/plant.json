@@ -96,7 +96,8 @@
       "record": {
         "every_ticks": 5,
         "retain_days": 1095
-      }
+      },
+      "unit": "m"
     },
     {
       "id": 11,
@@ -109,7 +110,8 @@
       "record": {
         "every_ticks": 5,
         "retain_days": 1095
-      }
+      },
+      "unit": "m"
     },
     {
       "id": 12,
@@ -122,7 +124,8 @@
       "record": {
         "every_ticks": 5,
         "retain_days": 1095
-      }
+      },
+      "unit": "m3/h"
     },
     {
       "id": 13,
@@ -135,7 +138,8 @@
       "record": {
         "every_ticks": 5,
         "retain_days": 1095
-      }
+      },
+      "unit": "m3/h"
     },
     {
       "id": 14,
@@ -162,7 +166,8 @@
       "value_type": "float",
       "initial": {
         "float": 3.5
-      }
+      },
+      "unit": "m"
     },
     {
       "id": 201,
@@ -170,7 +175,8 @@
       "value_type": "float",
       "initial": {
         "float": 3.5
-      }
+      },
+      "unit": "m"
     },
     {
       "id": 202,
@@ -178,7 +184,8 @@
       "value_type": "float",
       "initial": {
         "float": 3.5
-      }
+      },
+      "unit": "m"
     },
     {
       "id": 203,
@@ -186,7 +193,8 @@
       "value_type": "float",
       "initial": {
         "float": 3.5
-      }
+      },
+      "unit": "m"
     },
     {
       "id": 204,
@@ -194,7 +202,8 @@
       "value_type": "int",
       "initial": {
         "int": 0
-      }
+      },
+      "unit": "pumps"
     },
     {
       "id": 205,
@@ -202,7 +211,8 @@
       "value_type": "int",
       "initial": {
         "int": 0
-      }
+      },
+      "unit": "pumps"
     },
     {
       "id": 206,
@@ -218,7 +228,8 @@
       "value_type": "int",
       "initial": {
         "int": 0
-      }
+      },
+      "unit": "pumps"
     },
     {
       "id": 211,
@@ -226,7 +237,8 @@
       "value_type": "int",
       "initial": {
         "int": 0
-      }
+      },
+      "unit": "pumps"
     },
     {
       "id": 212,
@@ -751,7 +763,8 @@
       "record": {
         "every_ticks": 5,
         "retain_days": 1095
-      }
+      },
+      "unit": "m3/h"
     },
     {
       "id": 40,
@@ -1226,7 +1239,8 @@
       "record": {
         "every_ticks": 5,
         "retain_days": 1095
-      }
+      },
+      "unit": "m3/h"
     },
     {
       "id": 41,
@@ -3231,7 +3245,8 @@
       "ports": {
         "backup": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "m"
         },
         "backup_active": {
           "direction": "out",
@@ -3239,11 +3254,13 @@
         },
         "out": {
           "direction": "out",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "m"
         },
         "primary": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "m"
         }
       }
     },
@@ -3277,7 +3294,8 @@
         },
         "demand": {
           "direction": "out",
-          "value_type": "int"
+          "value_type": "int",
+          "unit": "pumps"
         },
         "duty_call": {
           "direction": "out",
@@ -3293,8 +3311,16 @@
         },
         "level": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "m"
         }
+      },
+      "parameter_units": {
+        "cutoff": "m",
+        "high": "m",
+        "lag_start": "m",
+        "start": "m",
+        "stop": "m"
       }
     },
     {
@@ -3337,11 +3363,13 @@
         },
         "demand": {
           "direction": "in",
-          "value_type": "int"
+          "value_type": "int",
+          "unit": "pumps"
         },
         "duty": {
           "direction": "out",
-          "value_type": "int"
+          "value_type": "int",
+          "unit": "pumps"
         },
         "fault_1": {
           "direction": "in",
@@ -3365,8 +3393,14 @@
         },
         "staged": {
           "direction": "out",
-          "value_type": "int"
+          "value_type": "int",
+          "unit": "pumps"
         }
+      },
+      "parameter_units": {
+        "min_off_ticks": "ticks",
+        "restage_delay_ticks": "ticks",
+        "start_delay_ticks": "ticks"
       }
     },
     {
@@ -3480,7 +3514,8 @@
         },
         "in": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "m"
         },
         "out_of_service": {
           "direction": "out",
@@ -3502,6 +3537,13 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "high_limit": "m",
+        "hysteresis": "m",
+        "low_limit": "m",
+        "max_shelve_ticks": "ticks",
+        "response_ticks": "ticks"
       }
     },
     {
@@ -3546,7 +3588,8 @@
         },
         "in": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "m"
         },
         "out_of_service": {
           "direction": "out",
@@ -3568,6 +3611,13 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "high_limit": "m",
+        "hysteresis": "m",
+        "low_limit": "m",
+        "max_shelve_ticks": "ticks",
+        "response_ticks": "ticks"
       }
     },
     {
@@ -3625,6 +3675,10 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "max_shelve_ticks": "ticks",
+        "response_ticks": "ticks"
       }
     },
     {
@@ -3682,6 +3736,10 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "max_shelve_ticks": "ticks",
+        "response_ticks": "ticks"
       }
     },
     {
@@ -3735,6 +3793,10 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "max_shelve_ticks": "ticks",
+        "response_ticks": "ticks"
       }
     },
     {
@@ -3788,6 +3850,10 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "max_shelve_ticks": "ticks",
+        "response_ticks": "ticks"
       }
     },
     {
@@ -4008,11 +4074,13 @@
       "ports": {
         "in": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "m"
         },
         "out": {
           "direction": "out",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "m"
         },
         "permissive": {
           "direction": "in",
@@ -4038,6 +4106,9 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "safe_value": "m"
       }
     },
     {
@@ -4138,6 +4209,9 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "delay_ticks": "ticks"
       }
     },
     {
@@ -4165,6 +4239,9 @@
           "direction": "in",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "fault_ticks": "ticks"
       }
     },
     {
@@ -4226,6 +4303,10 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "max_shelve_ticks": "ticks",
+        "response_ticks": "ticks"
       }
     },
     {
@@ -4279,6 +4360,10 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "max_shelve_ticks": "ticks",
+        "response_ticks": "ticks"
       }
     },
     {
@@ -4332,6 +4417,10 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "max_shelve_ticks": "ticks",
+        "response_ticks": "ticks"
       }
     },
     {
@@ -4571,11 +4660,13 @@
       "ports": {
         "in": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "m"
         },
         "out": {
           "direction": "out",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "m"
         },
         "permissive": {
           "direction": "in",
@@ -4601,6 +4692,9 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "safe_value": "m"
       }
     },
     {
@@ -4701,6 +4795,9 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "delay_ticks": "ticks"
       }
     },
     {
@@ -4728,6 +4825,9 @@
           "direction": "in",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "fault_ticks": "ticks"
       }
     },
     {
@@ -4789,6 +4889,10 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "max_shelve_ticks": "ticks",
+        "response_ticks": "ticks"
       }
     },
     {
@@ -4842,6 +4946,10 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "max_shelve_ticks": "ticks",
+        "response_ticks": "ticks"
       }
     },
     {
@@ -4895,6 +5003,10 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "max_shelve_ticks": "ticks",
+        "response_ticks": "ticks"
       }
     },
     {
@@ -4957,6 +5069,10 @@
           "direction": "out",
           "value_type": "int"
         }
+      },
+      "parameter_units": {
+        "step_1_ticks": "ticks",
+        "step_2_ticks": "ticks"
       }
     }
   ],

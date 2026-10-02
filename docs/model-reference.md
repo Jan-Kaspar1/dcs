@@ -60,9 +60,10 @@ release contract in `docs/release-contract.md` (decisions 79–81).
   (decision 3): a document predating a field loads with the field unset,
   and an unset field serializes back without the key. `hardware` and
   `parameters` on a device,
-  `channel`/`initial`/`writable`/`journaled`/`record` on an io_point,
-  and `unit`/`description`/`group` on a signal all follow this
-  convention.
+  `channel`/`initial`/`writable`/`journaled`/`record`/`unit` on an
+  io_point, `unit` on a component port and `parameter_units` on a
+  component, and `unit`/`description`/`group` on a signal all follow
+  this convention.
 - The parser ignores keys it does not know, so tool-added annotation
   keys load harmlessly; they are not part of the contract and the
   canonical model document — what `PlantModel::fingerprint` hashes —
@@ -152,6 +153,7 @@ carried by the controller's scan image — decision 14).
 | `writable` | bool | Optional; unset means not writable. Valid on `in` points only — `writable` on an `out` point is `ValidationError::WritableOut`. |
 | `stale_after_ticks` | u64 | Optional; unset means no freshness check. Valid on field-bound `in` points only — on an `out` point it is `ValidationError::StaleOut`, on a channel-less internal point `StaleInternal`. A field-bound `in` point that leaves it unset is lint `field_input_without_freshness_budget`. |
 | `journaled` | bool | Optional; unset means the point's value transitions stay out of the durable journal. Valid on `bool`/`int` points of either direction — `journaled` on a `float` point is `ValidationError::JournaledFloat`. |
+| `unit` | string | Optional; the engineering unit the value is expressed in, e.g. `"m3/h"`, `"mg/L"`, `"ticks"`, `""` for a deliberately dimensionless value. Decision 106's dimensional discipline: a `connections` entry whose *other* end declares a different unit is `ValidationError::ConnectionUnitMismatch`, and a signal declaring a disagreeing unit is `SignalUnitMismatch`. An end declaring none stays uncheckable, so an undimensioned document and a unit-transparent port both remain admissible. `dcs-build` declares it through `PlantBuilder::unit`; `dcs_build::unit` names the shared vocabulary. |
 | `record` | `{"every_ticks": u64, "retain_days": u64?}` | Optional; unset means the point contributes only to the volatile history ring. Declares the point's durable recording duty (decision 102): the monitor's recorder samples its post-scan image into the durable history file every `every_ticks` run ticks. `every_ticks: 0` is `ValidationError::RecordZeroCadence` — a zero cadence would record the full-rate stream the durable record exists to avoid. `retain_days` declares the span the downstream records system must hold; deployment-sizing data the controller never enforces. Valid on any point. |
 
 ### Internal points
@@ -395,7 +397,7 @@ controller computes.
 | `id` | `SignalId` (u64) | Required; unique within `signals` — `DuplicateId { collection: "signal" }`. |
 | `name` | string | Required; the human-facing signal name. |
 | `source` | `PointId` | Required; must name a declared io_point (`ValidationError::UnknownSource`). Several signals may source one point; `SignalIndex` resolves the lowest signal id. |
-| `unit` | string | Optional; engineering unit of the carried value, e.g. `"degC"`. Display metadata — no wiring rule; absence is lint `signal_missing_unit`. |
+| `unit` | string | Optional; engineering unit of the carried value, e.g. `"degC"`. Since decision 106 it is a checked declaration, not free display text: it must equal the source point's `unit` where that point declares one (`ValidationError::SignalUnitMismatch`), and `dcs-build`'s compositions declare the unit once on the point and let each signal inherit it at emit. Absence is lint `signal_missing_unit`; `""` is the deliberate "dimensionless" marker beside an undeclared point. |
 | `description` | string | Optional; human-facing description. Absence is lint `signal_missing_description`. |
 | `group` | string | Optional; display group the monitoring page files the signal under — the plant area or unit it belongs to (decision 23). Pure display metadata: any string is a valid group and signals sharing a group name are simply listed together; ungrouped signals render under the documented `"ungrouped"` default. Absence is lint `signal_missing_group`. |
 
@@ -417,8 +419,9 @@ order.
 | `id` | `ComponentId` (u64) | Required; unique within `components` — `DuplicateId { collection: "component" }`. |
 | `kind` | string | Required; opaque to the model — the name a `dcs_assembly::ComponentRegistry` maps to a constructor at assembly (`AssemblyError::UnknownComponentKind`). The shipped controller registers the `dcs-blocks` kinds (`analog-input`, `pid`, `latching-alarm`, `pump-group`, `timer`, …); `dcs-controller`'s `registry()` is the list it deploys. |
 | `parameters` | object: name → tagged `Value` | Required; may be empty. Kind-specific construction data checked by the kind's `from_parameters` at assembly — a missing or invalid entry is `AssemblyError::Component` wrapping `ParameterError`. A kind's parameter names, value kinds, and ranges are published by its `describe()` `ComponentDescriptor` (served per instance in `TelemetrySnapshot.descriptors`) and mirrored as data by `dcs-build`'s specs. |
-| `ports` | object: name → `{"direction": "in"\|"out", "value_type": "bool"\|"int"\|"float"}` | Required; may be empty. The signature the model wires; `connections` bind ports to points or other ports. Assembly requires every declared port bound exactly once (`UnboundPort`, `PortBoundTwice`), and the constructed component's declared `IoRequirement`s are checked against the resolved point map — `UnmappedPoint`, `DirectionMismatch`, `TypeMismatch`. |
+| `ports` | object: name → `{"direction": "in"\|"out", "value_type": "bool"\|"int"\|"float", "unit"?: string}` | Required; may be empty. The signature the model wires; `connections` bind ports to points or other ports. Assembly requires every declared port bound exactly once (`UnboundPort`, `PortBoundTwice`), and the constructed component's declared `IoRequirement`s are checked against the resolved point map — `UnmappedPoint`, `DirectionMismatch`, `TypeMismatch`. A port's optional `unit` is decision 106's instance-level dimensional declaration for a kind whose port is unit-transparent — what the wired value is a measure of — and faces the same `ConnectionUnitMismatch` check as an io_point's `unit`. |
 || `rationalization` | object: `consequence`/`required_action`/`reference` strings | Optional; absent serializes to nothing. The decision-70 prose half of an alarm instance's rationalization record — the consequence of inaction, the required operator action, and the display/procedure reference. The model stores it uninterpreted; the alarm kinds' construction requires it (see below). |
+| `parameter_units` | object: name → string | Optional; an empty map serializes to nothing. The engineering unit of each named `parameters` entry beside its bare `Value` — `"ticks"` for a scan-interval parameter, `"mg/L"` for a dose bound. Every key must name a key `parameters` carries: a unit for an absent value is a dead declaration `ValidationError::UnknownParameter`. `dcs-build` declares it through `PlantBuilder::param_unit`. |
 
 The model does not validate `parameters` contents or that a `kind`
 exists: kind resolution and parameter checking are assembly's, because

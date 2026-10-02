@@ -656,10 +656,14 @@ A compatible upgrade is a repin: change the `rev`/`tag` in
 `ci/check.sh`. Within a compatible crossing the supported API and
 `MODEL_VERSION` are unchanged — the check passing is the upgrade's
 acceptance. `ci/check.sh` proves the path itself: its `upgrade` stage
-materializes this tree at the previous release's recorded rev —
-`v0.7.0`'s publish commit — repins it to this tree's recorded
-release, and re-runs the full check requiring a byte-identical
-`model/plant.json`.
+materializes this tree at the earliest release-line rev whose builder
+API carries this composition's declared dimensional metadata —
+`PlantBuilder::unit`/`port_unit`/`param_unit` — repins it to this
+tree's recorded release, and re-runs the full check requiring a
+byte-identical `model/plant.json`. The baseline advances whenever this
+tree's own source starts depending on a newer supported surface; the
+crossing it proves is always "this source, unchanged, across the
+repin".
 
 An **incompatible** crossing fails with named diagnostics, never
 silently: a pin that resolves no release crates is `pin-unresolvable`;
