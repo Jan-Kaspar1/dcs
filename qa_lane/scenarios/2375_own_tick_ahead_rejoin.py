@@ -84,10 +84,18 @@ RUNS_AFTER = frozenset({'scenario_stranded_standby_no_resync'})
 #   successor's declared endpoint, no `tracking_source_refused` naming
 #   the successor, the re-joined peer's served document stamping the
 #   successor's ownership honestly, and no further `run_boundary` — the
-#   operator's restart-as-standby must not be what converged it.
+#   operator's restart-as-standby must not be what converged it. The
+#   adoption audit reads the ex-owner's *current run* rather than one
+#   switchover's cursor: `adopt_claimed_source` is a process-lifetime
+#   pin, so one adoption legitimately serves every re-join that run
+#   makes, and a second promotion in the same run owes none.
 # - the documented switch back: `POST /promote` on the converged
 #   ex-owner answers `promoting` and the pair returns to its launch
-#   roles, framed again once the pass's own claim is gone.
+#   roles, framed again once the pass's own claim is gone. The
+#   launch-layout clauses ride a switch back that actually took — an
+#   unanswered or refused one, or a staging that never left the launch
+#   layout recoverable, leaves the leg nothing to audit about the
+#   layout, and the instability it names is the whole finding.
 #
 # Named diagnostics: ahead-bound-rejoin-failed tags the contract
 # clauses — a demoted ex-owner that never re-joins or re-joins past the
@@ -222,6 +230,21 @@ def _ahead_past(lead):
         and lead['lead'] > AHEAD_BOUND
 
 
+def _ahead_staged(stage):
+    """Whether one pass's staging carried the lead the contract's
+    shape needs: the outage stood, it accrued a measured lead past the
+    retired ahead bound, and the pair reconverged behind the thaw.
+    Every promote, supersede, and re-join clause rides this, so a
+    staging that never separated reports its instability and stops
+    there instead of promoting on a basis the contract says nothing
+    about."""
+    stage = stage or {}
+    return stage.get('outage') == 'restarted' \
+        and stage.get('accrued') is not None \
+        and stage.get('reconverged') is not None \
+        and _ahead_past(stage.get('lead'))
+
+
 def _ahead_endpoint(value, endpoint):
     """Whether a recorded monitor address resolves one pair member's
     declared endpoint — the address the field's own claim arbitration
@@ -244,14 +267,40 @@ def _ahead_records(ctx, name):
 
 def _ahead_durable(ctx, name, floor, kind):
     """The `kind` event bodies the peer's durable journal carries
-    since `floor` records — the audit surface the claimed monitor's
-    adoption, its refusals, the fenced loss, and the demote walk are
-    read on. None when the file or the floor never served."""
+    after the served-journal cursor `floor` — the audit surface the
+    fenced loss and the demote walk are read on. The cursor is a served
+    `seq`, so the durable records behind it are exactly the ones no
+    earlier read saw. None when the file or the floor never served."""
     records = _ahead_records(ctx, name)
     if records is None or not isinstance(floor, int):
         return None
     out = []
-    for item in records[floor:]:
+    for item in records:
+        entry = item.get('entry') or {}
+        if isinstance(entry.get('seq'), int) and entry['seq'] <= floor:
+            continue
+        event = entry.get('event') or {}
+        if isinstance(event.get(kind), dict):
+            out.append(event[kind])
+    return out
+
+
+def _ahead_run(ctx, name, kind):
+    """The `kind` event bodies the peer's durable journal carries in
+    the run it is serving — everything after its last `run_boundary`
+    marker, the process lifetime the records belong to. The
+    claimed-monitor adoption is a process-lifetime pin: one adoption
+    serves every re-join the run makes, so the audit reads the run and
+    not one switchover's cursor. None when the file never served."""
+    records = _ahead_records(ctx, name)
+    if records is None:
+        return None
+    start = 0
+    for index, item in enumerate(records):
+        if 'run_boundary' in item:
+            start = index + 1
+    out = []
+    for item in records[start:]:
         event = (item.get('entry') or {}).get('event') or {}
         if isinstance(event.get(kind), dict):
             out.append(event[kind])
@@ -433,9 +482,11 @@ def _ahead_outage(ctx, owner, peer):
     """The ahead-bound staging: the launch owner's tracking source goes
     down while the tracker keeps its cadence, so its own run tick
     accrues the permanent lead the promotion carries; the owner comes
-    back and the pair reconverges. Returns the record's `stage`
-    section; a refused lever or a lead that never separated leaves the
-    section's later keys absent for the judge to name."""
+    back and the pair reconverges. The thaw is unconditional — a lead
+    that never separated must not leave the launch owner's container
+    down behind the leg — so the section's later keys, not the restart,
+    are what a staging that never separated leaves absent for the
+    judge to name."""
     stage = {'outage': None, 'before': _ahead_posture(ctx, owner),
              'frozen': None, 'accrued': None, 'reconverged': None,
              'lead': None, 'document': None}
@@ -463,8 +514,6 @@ def _ahead_outage(ctx, owner, peer):
 
     stage['accrued'] = wait_for(accrued, time.monotonic() + LEAD_SETTLE,
                                 interval=AHEAD_POLL)
-    if stage['accrued'] is None:
-        return stage
     try:
         ctx['start_controller'](owner)
     except Exception as exc:
@@ -525,25 +574,44 @@ def _ahead_switchover(ctx, owner, peer):
 
     switch['demoted'] = wait_for(walked, time.monotonic() + SETTLE,
                                  interval=AHEAD_POLL)
-    switch['walk'] = [row['role'] for row in watch]
+    walk = []
+    for row in watch:
+        if not walk or walk[-1] != row['role']:
+            walk.append(row['role'])
+    switch['walk'] = walk[-8:]
     switch['promoted_after'] = _ahead_posture(ctx, peer)
     floor = (switch['floors'] or {}).get(owner)
     switch['losses'] = _ahead_durable(ctx, owner, floor,
                                       'field_claim_lost')
     walk = _ahead_durable(ctx, owner, floor, 'role_changed')
-    switch['roles'] = [(event.get('from'), event.get('to'),
-                        event.get('origin')) for event in walk or []]
+    switch['roles'] = None if walk is None else [
+        (event.get('from'), event.get('to'), event.get('origin'))
+        for event in walk]
     switch['verdict'] = _ahead_probe(ctx)
     return switch
+
+
+def _ahead_readings(rows):
+    """The watch's posture readings as the transitions they made — each
+    consecutive repeat collapsed, so the evidence says which verdict the
+    ex-owner crossed through, in order, without a scan a minute of
+    polling would repeat into the report."""
+    readings = []
+    for row in rows:
+        step = {'role': row.get('role'), 'sync': row.get('sync')}
+        if readings and readings[-1] == step:
+            continue
+        readings.append(step)
+    return readings[-8:]
 
 
 def _ahead_rejoin(ctx, owner, switch):
     """The bounded re-join: the demoted ex-owner's sync converging to
     `tracking` rather than parking `unsynchronized`, and the durable
-    evidence of the rendezvous it converged through — the claimed
-    monitor's adoption, the refusals naming the successor, and the
-    process lifetimes that must not have grown. Returns the record's
-    `rejoin` and `adoption` sections."""
+    evidence of the rendezvous it converged through — the run's
+    claimed-monitor adoption, the refusals naming the successor, and
+    the process lifetimes that must not have grown. Returns the
+    record's `rejoin` and `adoption` sections."""
     demoted = switch.get('demoted') or {}
     rows, tracked = [], None
     if demoted:
@@ -556,17 +624,17 @@ def _ahead_rejoin(ctx, owner, switch):
                 and report['sync'] == 'tracking' else None
         tracked = wait_for(rejoin, time.monotonic() + REJOIN_SETTLE,
                            interval=AHEAD_POLL)
-    rejoin = {'rows': rows, 'tracked': tracked, 'ticks': None}
+    rejoin = {'rows': _ahead_readings(rows), 'tracked': tracked,
+                 'ticks': None}
     settle = demoted.get('tick')
     landed = (tracked or {}).get('tick')
     if isinstance(settle, int) and isinstance(landed, int):
         rejoin['ticks'] = landed - settle
-    floor = (switch.get('floors') or {}).get(owner)
     adoption = {'boundaries': _ahead_boundaries(ctx, owner),
-                'adoptions': _ahead_durable(ctx, owner, floor,
-                                            'tracking_source_adopted'),
-                'refusals': _ahead_durable(ctx, owner, floor,
-                                           'tracking_source_refused'),
+                'adoptions': _ahead_run(ctx, owner,
+                                        'tracking_source_adopted'),
+                'refusals': _ahead_run(ctx, owner,
+                                       'tracking_source_refused'),
                 'document': _ahead_document(ctx, owner)}
     return rejoin, adoption
 
@@ -575,8 +643,14 @@ def _ahead_restore(ctx, owner, peer):
     """The documented switch back: the reconverged ex-owner's promote
     answers the converged path and the pair returns to its launch
     roles — the successor demoting in place behind the owner's own
-    configured source."""
-    return {'promote': _ahead_switch(ctx, owner),
+    configured source. An owner that already holds the field owes no
+    switch, and the record says which happened, so the judge never
+    audits a switch the pass did not perform."""
+    report = _ahead_posture(ctx, owner)
+    already = report if report \
+        and report['role'] in ('active', 'promoting') else None
+    answer = None if already else _ahead_switch(ctx, owner)
+    return {'promote': answer, 'already': already,
             'layout': _ahead_pair(ctx, owner, peer, RESTORE_SETTLE)}
 
 
@@ -586,25 +660,30 @@ def _ahead_pass(ctx, number, owner, peer):
     controller lifecycle, promote the lead-carrying tracker, assert the
     fenced ex-owner's claimed-monitor re-join, and put the pair back on
     its launch roles. The final framing belongs to the caller: the
-    restore only means anything once the switch back has landed."""
+    restore only means anything once the switch back has landed. A
+    staging that never separated leaves the rig on its launch layout
+    and stops there — the supersede rides the measured lead, never a
+    basis inside the retired bound — so the switch, re-join, and
+    adoption sections stay empty for the judge to leave unaudited."""
     record = {'pass': number, 'launch': {'owner': owner, 'peer': peer},
               'roles': {}, 'stage': {}, 'switch': {}, 'rejoin': {},
               'adoption': {}, 'restore': {}}
     record['roles']['before'] = {
         name: _ahead_posture(ctx, name) for name in (owner, peer)}
     stage = _ahead_outage(ctx, owner, peer)
-    if stage.get('outage') == 'restarted' and _ahead_past(stage.get('lead')):
+    if _ahead_staged(stage):
         stage.update(_ahead_stream(ctx, peer))
     record['stage'] = stage
     if stage.get('predates'):
         record['predates'] = stage['predates']
         record['roles']['after'] = dict(record['roles']['before'])
         return record
-    switch = _ahead_switchover(ctx, owner, peer)
-    record['switch'] = switch
-    rejoin, adoption = _ahead_rejoin(ctx, owner, switch)
-    record['rejoin'] = rejoin
-    record['adoption'] = adoption
+    if _ahead_staged(stage):
+        switch = _ahead_switchover(ctx, owner, peer)
+        record['switch'] = switch
+        rejoin, adoption = _ahead_rejoin(ctx, owner, switch)
+        record['rejoin'] = rejoin
+        record['adoption'] = adoption
     record['roles']['after'] = {
         name: _ahead_posture(ctx, name) for name in (owner, peer)}
     record['restore'] = _ahead_restore(ctx, owner, peer)
@@ -636,9 +715,10 @@ def _ahead_judge(record, note):
     tokens = record.get('tokens') or {}
     stage = record.get('stage') or {}
 
-    # ---- the staging: a measured lead past the retired bound on a pair
+# ---- the staging: a measured lead past the retired bound on a pair
     # that reconverged behind the thaw.
     outage = stage.get('outage')
+    staged = _ahead_staged(stage)
     if outage != 'restarted':
         nondet('stage-outage', 'the tracking-source outage never stood: '
                + str(outage))
@@ -653,7 +733,7 @@ def _ahead_judge(record, note):
         nondet('stage-converge', 'the pair never reconverged after the '
                'tracking source came back: '
                + json.dumps(stage.get('reconverged')))
-    elif not _ahead_past(stage.get('lead')):
+    elif not staged:
         nondet('stage-lead', 'the promoted successor\'s own tick read '
                + json.dumps(stage.get('lead')) + ' against the demoted '
                'ex-owner\'s own — short of the retired ahead bound of '
@@ -661,7 +741,7 @@ def _ahead_judge(record, note):
                'carried the lead the defect stranded on')
 
     document = stage.get('document')
-    if outage == 'restarted' and isinstance(document, dict) \
+    if isinstance(document, dict) \
             and document['stream'] is not None \
             and isinstance(document['tick'], int) \
             and document['stream'] > document['tick']:
@@ -675,7 +755,7 @@ def _ahead_judge(record, note):
     switch = record.get('switch') or {}
     answer = switch.get('promote')
     posture = switch.get('posture') or {}
-    if outage != 'restarted':
+    if not staged:
         pass
     elif posture.get('sync') != 'tracking':
         nondet('stage-promote-posture', 'the successor reported '
@@ -702,20 +782,31 @@ def _ahead_judge(record, note):
         _ahead_supersede(record, switch, owner, peer, tokens,
                          failed, nondet)
 
-    # ---- the documented switch back and the launch roles.
+    # ---- the documented switch back and the launch roles. The layout
+    # is owed only by a pass that could leave it: the staging carried
+    # the lead, or the pass's own switchover took the claim away from
+    # the launch layout. A pass that never moved the pair owes it
+    # nothing, and a switch back that never answered leaves the leg
+    # nothing to read.
     restore = record.get('restore') or {}
     if not restore:
         return
     answer = restore.get('promote')
-    if answer is None:
-        nondet('restore-unanswered', 'the documented switch back — '
-               'POST /promote on the converged ex-owner — produced no '
-               'readable answer')
-    elif not _ahead_granted(answer):
-        failed('restore-refused', 'POST /promote on the converged '
-               'ex-owner answered ' + str(answer.get('status')) + ' '
-               + json.dumps(answer.get('body'))[:300]
-               + ' — a re-joined line must answer the converged path')
+    if restore.get('already') is None and not _ahead_granted(answer):
+        if answer is None:
+            nondet('restore-unanswered', 'the documented switch back — '
+                   'POST /promote on the converged ex-owner — produced no '
+                   'readable answer')
+        else:
+            failed('restore-refused', 'POST /promote on the converged '
+                   'ex-owner answered ' + str(answer.get('status')) + ' '
+                   + json.dumps(answer.get('body'))[:300]
+                   + ' — a re-joined line must answer the converged path')
+        return
+    recoverable = staged or _ahead_granted((record.get('switch')
+                                            or {}).get('promote'))
+    if not recoverable:
+        return
     if restore.get('layout') is None:
         failed('layout-unrestored', 'the pair never returned to its '
                'launch roles after the documented switch: '
@@ -734,7 +825,9 @@ def _ahead_supersede(record, switch, owner, peer, tokens, failed, nondet):
     post-promotion verdict naming the promoted claim and its declared
     monitor, the ex-owner's bounded re-join through that declared
     monitor, and the durable adoption evidence — with no restart and no
-    refusal standing in for the rendezvous."""
+    refusal standing in for the rendezvous. A re-join watch the
+    ex-owner's monitor never answered ends the audit there: the
+    leg never watched a convergence whose journal it would judge."""
     walk = switch.get('walk') or []
     unexpected = [role for role in walk
                   if role not in ('active', 'promoting', 'demoting',
@@ -810,10 +903,15 @@ def _ahead_supersede(record, switch, owner, peer, tokens, failed, nondet):
     rows = rejoin.get('rows') or []
     tracked = rejoin.get('tracked')
     if not rows:
+        # A monitor that answered none of the watch's reads leaves the
+        # durable evidence unread in the sense that matters here: the
+        # leg never watched the convergence whose journal it would
+        # audit, so it names the starved watch and stops.
         nondet('rejoin-watch', 'the demoted ex-owner\'s monitor answered '
                'none of the re-join watch\'s reads — the bound the '
                'convergence owes was never observed')
-    elif tracked is None:
+        return
+    if tracked is None:
         failed('rejoin-stranded', 'the demoted ex-owner never re-joined '
                'the line — the ahead-bound strand the contract closed: '
                'its sync readings stayed '
@@ -1135,6 +1233,10 @@ def _ahead_self_check():
            record['switch']['promote'].update(
                status=409, cause='not_converged',
                body={'not_converged': {'sync': 'tracking'}}), DIAG_NONDET)
+    expect('promote-refused-outside-the-gate', lambda record:
+           record['switch']['promote'].update(
+               status=500, cause=None,
+               body={'error': 'the field refused the mutation'}))
     expect('promote-unanswered', lambda record:
            record['switch'].update(promote=None), DIAG_NONDET)
     expect('durable-loss-unreadable', lambda record:
@@ -1236,15 +1338,21 @@ def scenario_own_tick_ahead_rejoin(ctx):
                 '--owner-token for the pair — the superseded '
                 'ex-owner\'s journaled claim loss cannot be attributed '
                 'to the promoted successor')
+        reach = {name: _ahead_posture(ctx, name) for name in (owner, peer)}
+        if all(report is None for report in reach.values()):
+            return case.finish(
+                'inconclusive', 'the deployed pair is unreachable — '
+                'monitor endpoints ' + str(ctx.get(owner)) + ' and '
+                + str(ctx.get(peer)))
+        # The contract's own served surface next: a revision that
+        # predates it is declined before the leg drives the rig, so a
+        # pre-contract signature is never mistaken for the framing
+        # failing to settle.
+        predates = _ahead_surfaces(ctx, owner, peer)
+        if predates:
+            return case.finish('inconclusive', predates)
         seated = _ahead_pair(ctx, owner, peer, SETTLE)
         if seated is None:
-            reports = {name: _ahead_posture(ctx, name)
-                       for name in (owner, peer)}
-            if all(report is None for report in reports.values()):
-                return case.finish(
-                    'inconclusive', 'the deployed pair is unreachable — '
-                    'monitor endpoints ' + str(ctx.get(owner)) + ' and '
-                    + str(ctx.get(peer)))
             reseat = _ahead_reseat(ctx, owner, peer)
             seated = reseat.get('layout')
             if seated is None:
@@ -1260,9 +1368,6 @@ def scenario_own_tick_ahead_rejoin(ctx):
                      + ('keyed' if ctx.get('pair_token') else 'unkeyed')
                      + ' posture, miss budget '
                      + str(ctx.get('failover_misses')))
-        predates = _ahead_surfaces(ctx, owner, peer)
-        if predates:
-            return case.finish('inconclusive', predates)
         verdict = _ahead_probe(ctx)
         if verdict is None:
             return case.finish(

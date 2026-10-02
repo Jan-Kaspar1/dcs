@@ -1060,6 +1060,115 @@ Implementation order: second, after [daily architecture review](daily-architectu
   present on that very monitor — and the leg names it as the contract
   failure it is.
 
+### Landed 2026-10-02 (demoted ex-owner's ahead-bound re-join leg, #1275)
+
+- The demoted ex-owner's ahead-bound line rejoin contract — the
+  per-revision lane evidence for the contract #1269's fix establishes
+  (WW-LCM-001's continuity clause) — is exercised per revision by
+  scenario leg `2375_own_tick_ahead_rejoin`. A fenced or demoted field
+  owner that declares no configured `--standby` must re-join the line
+  through the field-arbitrated claimed-monitor rendezvous
+  (`adopt_claimed_source`, dcs-monitor `lib.rs` ~L3059 — the unkeyed
+  pair's only provable rendezvous) *regardless of how far its own paced
+  tick has drifted from the line's*: `verify_owner_checkpoint` and
+  `verify_announced_checkpoint` must not treat the prober's own tick
+  plus the retired `MAX_ANNOUNCED_AHEAD` window (32) as the
+  line-membership reference, because a detached prober's own clock has
+  no authority over where the line moved — its `tick` and `stream_tick`
+  alike advance at its own scan cadence, so the gap measures pace
+  asymmetry, never line membership (#1336 retired the bound).
+- The defect the leg stages is self-reinforcing and journal-empty. A
+  tracking peer's paced clock keeps counting through every source
+  outage it survives while the pulled stream stands still, so the lead
+  it accrues is permanent and the promotion carries it: once the
+  promoted successor's served tick led the demoted ex-owner's own by
+  more than the thirty-two-tick window, the ex-owner read that lead as
+  a forged position, refused the field's own `Ahead` on every unkeyed
+  rejoin path, and — with no configured source, no proven announced
+  hint, and no line proof to fall back on — stranded
+  `standby`/`unsynchronized` with a silent journal, the conditional
+  startup grant refused while the claim stood, and the operator's only
+  recovery a restart-as-standby.
+- The staging rides the lane's own lifecycle seam on the deployed
+  paced pair: `active` (ctrl-a) is the field owner declaring no pair at
+  all, so the claim's declared monitor is the only candidate its
+  re-join can resolve, and `standby` (ctrl-b) is the pair's
+  `--standby` tracker. `stop_controller` on the owner holds its
+  container down while the tracker keeps its 100 ms cadence, so every
+  pull is a produced-nothing miss while the tracker's own run tick
+  advances a scan at a time against a frozen line; the leg waits for
+  the *measured* separation to clear the retired window plus a margin,
+  brings the owner back, waits for the pair to reconverge, and reads
+  both members' own served run ticks again to record the lead the
+  promotion will carry. A promotion computed inside the retired window
+  would prove nothing about one computed past it, so a staging that
+  never separated reports nondeterministic and stops there — the
+  launch owner's container is thawed either way.
+- The routine promote rides the lead-carrying tracker with no
+  `POST /demote` on the owner first, so the field's arbitration
+  preempts the standing claim and the owner's first fenced write
+  demotes it in place; the promote gate's own named refusals
+  (`not_converged`, `already_active`, `no_tracking_source`) answer
+  before any switchover is computed and name a race in the staging
+  rather than the contract, so they report nondeterministic. The
+  lead-carrying checkpoint must itself carry the declared stream
+  position (#1269's own surface) at or behind the run tick it rides;
+  a document declaring a position ahead of its own tick is the nonsense
+  shape and a contract failure, and a document declaring no position
+  at all is a pinned revision predating the contract, which the leg
+  reports inconclusive on rather than asserting.
+- The re-join is asserted through the demoted ex-owner's serving
+  monitor and its runner-owned `--journal-file`: the sync verdict
+  converging to `tracking` rather than parking `unsynchronized` past
+  the documented lane bound of 60 of its own paced scans, the
+  fenced-origin `active → demoting → standby` walk beside exactly one
+  `field_claim_lost` attributed to the promoted claim, the field's own
+  post-promotion fencing verdict naming that claim and its declared
+  monitor, exactly one `tracking_source_adopted` naming the successor's
+  declared endpoint, no `tracking_source_refused` naming the successor,
+  the re-joined peer's served document stamping the successor's
+  ownership honestly, and no further `run_boundary` — the operator's
+  restart-as-standby must not be what converged it. The adoption audit
+  reads the ex-owner's current *run*, not one switchover's cursor:
+  `adopt_claimed_source` is a process-lifetime pin, so one adoption
+  legitimately serves every re-join that run makes and a second
+  promotion in the same run owes none. A later `POST /promote` on the
+  converged ex-owner answers the converged path, and the pair's launch
+  roles restore; the launch-layout clauses ride a switch back that
+  actually took, since a refused or unanswered one leaves the leg
+  nothing to audit about the layout.
+- Named diagnostics are `ahead-bound-rejoin-failed` and
+  `ahead-bound-rejoin-nondeterministic`, with the self-check's
+  `ahead-bound-rejoin-unchecked` covering the planted negatives: the
+  issue's doctored case — the re-join asserted while the ex-owner stays
+  unsynchronized past the documented bound — a re-join that lands only
+  after a wait the bound does not admit, an adoption that is missing,
+  duplicated, foreign, or accompanied by a journaled source refusal, an
+  adoption a restart performed, a silent or duplicated or unattributed
+  claim loss, an unwalked or unattributed demotion, an off-script
+  served role walk, a promoted successor that never holds the field, a
+  fencing verdict that does not fence or names another claim or no
+  declared monitor or another member's port, a dishonest served
+  document, a refused switch back, unrestored launch roles, and every
+  instability class. Two consecutive passes produce identical digests.
+  A run context carrying no controller lifecycle seam, an unreachable
+  member, a bridge-placed endpoint, no journal file, no pinned owner
+  token, a pair off its launch layout, a served surface missing the
+  ownership stamps, an integer run tick, or the sync vocabulary, and a
+  lead-carrying document declaring no stream position report
+  inconclusive.
+- #1269's fix has no new served field beyond the declared stream
+  position and no new durable record, so the leg's pre-contract
+  signature is that surface's absence: a lead-carrying checkpoint that
+  declares no `stream_tick`, a role report with no sync vocabulary, or
+  a served document without the `source_owns_field`/`line_owner`
+  stamps the rendezvous rides. Every released and staged build predates
+  the contract until the fix lands, so that is the honest verdict for
+  them. A revision whose ex-owner re-joins through the claimed monitor
+  with the adoption journaled is not that signature — the contract was
+  demonstrated present on that very monitor — and the leg names it as
+  the contract failure it is.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,
