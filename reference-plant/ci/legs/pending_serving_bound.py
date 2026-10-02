@@ -170,27 +170,28 @@ TAMPER_EVIDENCE = (
 FIELD_TIMEOUT = 5.0
 REATTACH_INTERVAL = 1.0
 
-# The serving bounds the pending seat owes across the frozen window.
-# The lock-free mirrors — the published read model `GET /role` and
-# `GET /health` serve without taking the executor's lock — answer
-# instantly and are held to a second. Each lock-taking endpoint is held
-# to a couple of field timeouts plus the re-attach spacing: the scan it
-# may queue behind, and its own bounded field stall, nowhere near the
-# recorded per-channel serialization.
+# The serving bounds the pending seat owes across the frozen window, the
+# platform's own statement of them: the controller crate's frozen-field
+# leg and the QA rig's leg both hold every lock-taking request to one
+# field timeout plus four seconds of slack — the scan a caller may queue
+# behind stalls once near one timeout per re-attach window on a fixed
+# revision, nowhere near the recorded per-channel serialization — and
+# the lock-free mirrors, `GET /role` and `GET /health`, to a second.
 MIRROR_BOUND = 1.0
-LOCK_BOUND = 2 * FIELD_TIMEOUT + REATTACH_INTERVAL + 4.0
-# The served scan age's ceiling: the paced scan's own completion
-# cadence on a field that answers nothing stays inside the same couple
-# of field timeouts — the defect let the age run for tens of seconds.
-SCAN_AGE_BOUND = int(1000 * (2 * FIELD_TIMEOUT + REATTACH_INTERVAL)) + 3000
+LOCK_BOUND = FIELD_TIMEOUT + 4.0
+# The served scan age's ceiling: one field timeout plus the crate's three
+# seconds of slack — the paced scan keeps completing near one timeout per
+# re-attach window, where the defect let the age run for tens of seconds.
+SCAN_AGE_BOUND = int(1000 * (FIELD_TIMEOUT + 3.0))
 # The floor the degraded cadence must clear across the window: the scan
 # keeps completing, and a run whose tick stands still while the serving
 # set starves is the recorded defect, not a slow machine.
 TICK_FLOOR = 4
-# The frozen observation window — several bounded scans on a field that
-# never answers, and long enough that the four lock-taking endpoints
-# each get their say inside the loop's rotation.
-FROZEN_WINDOW = 12.0
+# The frozen observation window — the QA rig's leg's declared span,
+# several bounded scans on a field that never answers and long enough
+# that the four lock-taking endpoints each get their say inside the
+# loop's rotation, while staying well under the defect's one ~70s scan.
+FROZEN_WINDOW = 20.0
 WINDOW_POLL = 0.4
 # The wall-clock bound on the pair settling, on each wait the leg
 # drives, and on the staged seat's serving.
@@ -620,7 +621,7 @@ def frozen_window(base, command):
 def predating(window):
     """The staged revision's pre-contract signature as `(reason,
     detail)`, or None when the record is the leg's to judge. Narrow by
-    contract: a container that stands while its monitor never serves is
+    contract: a launch that stands while its monitor never serves is
     an instability the leg names rather than a predating release — the
     pending state has always published its mirror — while an exit, a
     `/health` that never carries the liveness report, and the recorded
@@ -665,7 +666,8 @@ def predating(window):
             "signature: the pinned release predates the pending "
             "bounded-serving contract",
             f"its ticks ran {ticks}, its lock calls starved {starved}, "
-            f"and its served scan ages reached {max(ages) if ages else None}ms",
+            f"and its served scan ages reached "
+            f"{max(ages) if ages else None}ms",
         )
     return None
 
