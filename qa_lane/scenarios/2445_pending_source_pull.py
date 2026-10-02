@@ -2,12 +2,16 @@
 from .common import *
 
 # Ordering: the leg stages on the born seats 'driven'/'foreign'/
-# 'revised' and the scratch born field — it needs the ownerless-
-# backoff leg's seats released and must be done before the
-# fencing-loss leg's pair and the revision legs take the born seats
-# over.
-RUNS_AFTER = frozenset({'scenario_ownerless_remote_backoff'})
+# 'revised' and the scratch born field — it needs the pending-serving
+# bound leg's driven seat and scratch field released (it freezes the
+# same class (c) pending window that leg observes), which in turn runs
+# after the ownerless-backoff leg's seats, and it must be done before
+# the fencing-loss and sim-bus legs take the same born seats over and
+# the revision legs take them for good.
+RUNS_AFTER = frozenset({'scenario_pending_serving_bound',
+                        'scenario_ownerless_remote_backoff'})
 RUNS_BEFORE = frozenset({'scenario_sim_cyclic_fencing_loss_demote',
+                         'scenario_sim_bus_startup_claim_refusal',
                          'scenario_incompatible_revision',
                          'scenario_model_revision'})
 

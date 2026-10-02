@@ -1,4 +1,4 @@
-"""The 2440_pending_source_pull leg's scenario unit coverage —
+"""The 2445_pending_source_pull leg's scenario unit coverage —
 the feed fakes and TestCase classes for
 scenario_pending_source_pull, split out per the leg-module
 convention (#940). The shared fakes and helpers live in
@@ -484,18 +484,18 @@ class PendingSourcePullTests(unittest.TestCase):
     def test_registered_in_the_born_seat_window(self):
         order = list(scenarios.SCENARIOS)
         self.assertLess(
-            order.index(scenarios.scenario_ownerless_remote_backoff),
+            order.index(scenarios.scenario_pending_serving_bound),
             order.index(scenarios.scenario_pending_source_pull))
         self.assertLess(
-            order.index(scenarios.scenario_pending_source_pull),
-            order.index(
-                scenarios.scenario_sim_cyclic_fencing_loss_demote))
-        self.assertLess(
-            order.index(scenarios.scenario_pending_source_pull),
-            order.index(scenarios.scenario_incompatible_revision))
-        self.assertLess(
-            order.index(scenarios.scenario_pending_source_pull),
-            order.index(scenarios.scenario_model_revision))
+            order.index(scenarios.scenario_ownerless_remote_backoff),
+            order.index(scenarios.scenario_pending_source_pull))
+        for later in (scenarios.scenario_sim_cyclic_fencing_loss_demote,
+                      scenarios.scenario_sim_bus_startup_claim_refusal,
+                      scenarios.scenario_incompatible_revision,
+                      scenarios.scenario_model_revision):
+            self.assertLess(
+                order.index(scenarios.scenario_pending_source_pull),
+                order.index(later))
 
     def test_fixed_shape_passes_validates_and_tears_down(self):
         record = self.run_scenario()
