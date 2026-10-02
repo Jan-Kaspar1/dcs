@@ -9,8 +9,9 @@
 //! The rig is `failover_bus.rs`'s carried onto the cyclic kind: the
 //! same spawned-controller conventions, the same observer attachments,
 //! but the field's outcomes are scripted through the register
-//! protocol's `ScriptExchange` request — misses dropping the exchange
-//! connection unanswered, station-attributed and unattributable short
+//! protocol's `ScriptExchange` request — misses answering the in-band
+//! `missed` verdict without severing the attachment, station-attributed
+//! and unattributable short
 //! censuses — so the held input image's aging, the declared
 //! `exchange_miss_threshold`'s escalation, the staged output image's
 //! retention across a failed exchange, the once-per-boundary
