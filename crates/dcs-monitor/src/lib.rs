@@ -66,7 +66,7 @@
 //!   restart, so the stamp is what lets a since-cursor consumer tell
 //!   the restarted seq domain from an in-order empty answer — the
 //!   boundary the durable journal's `run_boundary` marker names for
-//!   the persisted stream
+//!   the persisted stream.
 //! - `GET /journal` → `200` `Vec<`[`JournalEntry`]`>` — the transition
 //!   journal in scan order; `?since=<seq>` filters likewise. The tail
 //!   is bounded, but `run_boundary` entries are pinned: evicting one
