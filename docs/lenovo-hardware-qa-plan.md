@@ -1535,6 +1535,77 @@ Implementation order: second, after [daily architecture review](daily-architectu
   recorded contract's precondition rather than a hope about the pinned
   copy.
 
+### Landed 2026-10-03 (usurped foreign-claim reclaim leg, #1417)
+
+- The usurped verdict and foreign-claim reclaim contract — the
+  per-revision lane evidence for the fix #1410 pins (decision 108's
+  keyed-pair self-service recovery, WW-FND-002's redundant failover
+  integrity) — is exercised on the lane's keyed probe pair by scenario
+  leg `2498_usurped_foreign_claim`. A `--pair-token` pair whose field
+  an unkeyed writer takes must tell a foreign held claim from true
+  ownerlessness: the field's own arbitration names the standing
+  writer's declared monitor, the keyed monitoring surface pulls that
+  endpoint under a fresh `?prove=` nonce, and a live endpoint that
+  cannot prove the line's key convicts the claim as `usurped` — not
+  the plain `orphaned` — because the two verdicts want opposite
+  answers from `POST /promote`: the conditional orphan grant refuses
+  a live incumbent, while the usurped diagnosis arms the
+  unconditional claim that takes the field back and journals
+  `foreign_claim_preempted` naming the endpoint it was taken from.
+  The pair-fault surface carries the new verdict as `standby_usurped`
+  under `PAIR_FAULT_KINDS_VERSION` 4.
+- The live usurper is a real unkeyed driven attachment —
+  `start_driven` with `keyed=False`, a launch posture the lever
+  gains for this leg — converged on the keyed owner through the
+  public, unkey-gated checkpoint pulls its tokenless shape still
+  allows, then promoted through the same unconditionally preempting
+  `claim_writer` the foreign-claim legs stage, paced through
+  `POST /scan` while the pair's own free-running scans fence, demote,
+  diagnose, and reclaim. The honest-absence halves stage the shapes
+  no launched controller can raise — a claim declaring no monitor at
+  all, and one declaring a routable address nothing serves — through
+  the runner's new raw field-attachment seam: `hold_field_claim`
+  keeps a labeled bridge container's `claim_writer` attachment open
+  so the claim's holder set stays occupied exactly as a live foreign
+  writer's would, `drop_field_claim` ends it holderless, and
+  `field_request`'s `probe_writer` reads the standing claim's
+  attributed verdict — the probe pair's plant is bridge-placed, so
+  no host socket reaches the claim surface these ops ride. The
+  unkeyed-run half relaunches a probe member without `--pair-token`
+  over a held claim declaring the usurper's *live* monitor — the
+  same claim the keyed sibling convicts.
+- The claims: the surviving keyed peers report `usurped` beside
+  `field_claim: held` — never `orphaned` — and the pair-fault
+  surface names `standby_usurped`; the demoted owner's
+  `POST /promote` routes to the unconditional claim and takes the
+  field back while the usurper lives, journaling
+  `foreign_claim_preempted` naming the usurper's declared endpoint
+  in both the served journal and the durable `--journal-file`; the
+  fenced usurper demotes but stays serving — the reclaim landed
+  while it lived; and the sibling's verdict clears to tracking
+  under the keyed writer, so the pair never reads its own member as
+  foreign. Each absence half keeps `orphaned` across the held
+  window and meets the conditional grant's named
+  `field_claim_failed` refusal while the foreign holder lives — no
+  preemption armed on evidence the pair key never produced — and
+  the holderless claim hands the field back through the ordinary
+  conditional grant.
+- Named diagnostics are `usurped-foreign-claim-failed` (a contract
+  miss: an `orphaned` verdict beside the live foreign writer, a
+  refused or conditional-gated reclaim, a missing or misattributed
+  `foreign_claim_preempted`, a surviving active usurper, a latched
+  `usurped` under the keyed writer, a preemption armed on the
+  monitor-less, dead-declared, or unkeyed shapes, or a holderless
+  claim the ordinary grant never took) and
+  `usurped-foreign-claim-nondeterministic` (a dropped probe, a
+  refused staging claim, an unsettled restore, two passes'
+  digests diverging), with the self-check's
+  `usurped-foreign-claim-unchecked` covering every planted
+  negative. Two consecutive passes produce identical digests; a run
+  carrying no keyed probe pair, no driven/unkeyed launch lever, no
+  raw claim seam, or no settled owner-plus-tracker layout reports
+  inconclusive.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,
