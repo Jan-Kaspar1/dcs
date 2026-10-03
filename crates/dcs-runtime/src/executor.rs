@@ -1897,10 +1897,12 @@ impl<'d> Executor<'d> {
             // The executor has no role view — the serving `Peer` stamps
             // `source_owns_field` over its own capture and the serving
             // `Monitor` stamps `line_owner`; `line_proof` exists only
-            // on `?prove=` responses, never on a capture.
+            // on `?prove=` responses, never on a capture. The tracking
+            // source is peer wiring too: `Peer::checkpoint` stamps it.
             source_owns_field: None,
             line_owner: None,
             line_proof: None,
+            tracking_source: None,
         }
     }
 
@@ -8888,6 +8890,7 @@ mod tests {
             source_owns_field: None,
             line_owner: None,
             line_proof: None,
+            tracking_source: None,
         }
     }
 
@@ -9053,6 +9056,7 @@ mod tests {
             source_owns_field: None,
             line_owner: None,
             line_proof: None,
+            tracking_source: None,
         }
     }
 

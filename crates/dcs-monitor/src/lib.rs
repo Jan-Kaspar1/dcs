@@ -585,8 +585,8 @@ pub use store::{Publication, PublicationGap, PublicationPage};
 use dcs_core::{
     CarryoverReport, Command, CommandError, CommandOutcome, CommandReceipt, DurableEntry,
     HistorySinkHealth, JournalEntry, JournalSinkHealth, PointHistory, PointId, PublicationHealth,
-    ResourceView, Role, RoleReport, SchemaView, StandbySync, StateSinkHealth, SwitchError,
-    TelemetrySnapshot, Tick,
+    ResourceView, RestartConsultOutcome, Role, RoleReport, SchemaView, StandbySync,
+    StateSinkHealth, SwitchError, TelemetrySnapshot, Tick,
 };
 use dcs_model::SignalIndex;
 use dcs_runtime::{
@@ -1498,14 +1498,20 @@ impl<'d> Monitor<'d> {
     /// Arms `POST /scan` with `driven` wiring and returns the monitor —
     /// see [`Driven`]. Meaningful only on an unpaced monitor: a paced
     /// one refuses `POST /scan`, so the wiring never runs. The `track`
-    /// address also becomes the promotion-boundary pull's source. A
-    /// driven peer whose tracking source is declared by *name* — the
-    /// `host:port` a `--standby`/`--peer` argument carries — installs
-    /// it through [`with_standby_target`](Self::with_standby_target)
-    /// instead, so each pull resolves the name anew rather than
-    /// pinning the address it resolved to once.
+    /// address also becomes the promotion-boundary pull's source, and
+    /// mirrors into the peer so every checkpoint it serves — and the
+    /// `after_scan` state-file persist — stamps it as
+    /// `tracking_source`. A driven peer whose tracking source is
+    /// declared by *name* — the `host:port` a `--standby`/`--peer`
+    /// argument carries — installs it through
+    /// [`with_standby_target`](Self::with_standby_target) instead, so
+    /// each pull resolves the name anew rather than pinning the address
+    /// it resolved to once.
     pub fn driven(mut self, driven: Driven<'d>) -> Self {
         self.standby_source = driven.track.map(TrackTarget::Addr);
+        if let Some(track) = driven.track {
+            self.shared.lock().unwrap().peer.note_tracking_source(track);
+        }
         self.driven = driven;
         self
     }
@@ -1514,7 +1520,9 @@ impl<'d> Monitor<'d> {
     /// a paced `--standby` run's target, which the pacing loop owns and
     /// `Driven` never sees. `POST /promote` runs one final pull against
     /// it so the promoted run carries every command the active admitted
-    /// up to the promote request.
+    /// up to the promote request. The same address mirrors into the
+    /// peer so its served and persisted checkpoints stamp it as
+    /// `tracking_source`.
     pub fn with_standby_source(self, source: SocketAddr) -> Self {
         self.with_standby_target(TrackTarget::Addr(source))
     }
@@ -1528,7 +1536,20 @@ impl<'d> Monitor<'d> {
     /// same tracking misses an unreachable endpoint produces until the
     /// peer returns under it.
     pub fn with_standby_target(mut self, target: TrackTarget) -> Self {
-        self.standby_source = Some(target);
+        self.standby_source = Some(target.clone());
+        // A configured `Addr` mirrors into the peer so its served and
+        // persisted checkpoints stamp it as `tracking_source`, naming
+        // the incumbent's checkpoint stream to a later restart-as-active
+        // consult. A `Name` carries no address until a pull resolves
+        // it, so it names no stamped source — the consult then falls
+        // back to whatever the served line announced.
+        if let TrackTarget::Addr(source) = target {
+            self.shared
+                .lock()
+                .unwrap()
+                .peer
+                .note_tracking_source(source);
+        }
         self
     }
 
@@ -2335,6 +2356,34 @@ impl<'d> Monitor<'d> {
             .note_reinitialized(report);
     }
 
+    /// Journals a restart-as-active incumbent consult that ran before
+    /// this monitor bound — the pre-claim check a relaunched
+    /// launched-active made against the checkpoint stream its persisted
+    /// state (or configured `--peer`) named — attributed to the run's
+    /// resumed tick. Landing it after the bind keeps the durable record
+    /// in process-lifetime order: the run-boundary marker first, the
+    /// consult's audit behind it, before the startup claim.
+    pub fn note_restart_consult(&self, source: String, outcome: RestartConsultOutcome) {
+        let mut shared = self.shared.lock().unwrap();
+        let tick = shared.peer.tick();
+        shared.recorder.note_restart_consult(tick, source, outcome);
+    }
+
+    /// Journals pending commands a restart-as-active consult's adoption
+    /// adjudicated — the restartee's own still-`Accepted` receipts the
+    /// adopted line's submission window passed without carrying, each
+    /// already settled `Rejected` carrying `Superseded` beside its
+    /// absolute submission index — so the settle dedup the ordinary
+    /// settle path runs on applies to them too — attributed to the
+    /// resumed tick, behind the consult's own entry.
+    pub fn note_superseded(&self, superseded: Vec<(u64, CommandReceipt)>) {
+        let mut shared = self.shared.lock().unwrap();
+        let tick = shared.peer.tick();
+        for (index, receipt) in superseded {
+            shared.recorder.note_settled(Some(index), receipt, tick);
+        }
+    }
+
     /// Marks a tracking peer degraded after a checkpoint fetch produced
     /// nothing — an unreachable active or a refused request — and counts
     /// the heartbeat miss toward the failover budget.
@@ -2668,6 +2717,16 @@ impl<'d> Monitor<'d> {
                     hints.retain(|&hint| hint != announced);
                     hints.push_front(announced);
                     hints.truncate(MAX_ANNOUNCED);
+                    // Mirror the newest accepted hint into the peer so
+                    // the checkpoints it serves — and a `--state-file`
+                    // persist — stamp it as `tracking_source`, naming
+                    // this instance's successor to a later
+                    // restart-as-active consult.
+                    self.shared
+                        .lock()
+                        .unwrap()
+                        .peer
+                        .note_announced_source(announced);
                 }
                 let mut checkpoint = self.shared.lock().unwrap().peer.checkpoint();
                 // Where this line's field ownership lives: a field
@@ -6060,6 +6119,7 @@ mod tests {
             source_owns_field: None,
             line_owner: None,
             line_proof: None,
+            tracking_source: None,
         };
         let own = checkpoint();
 
@@ -6228,6 +6288,7 @@ mod tests {
             source_owns_field: None,
             line_owner: None,
             line_proof: None,
+            tracking_source: None,
         };
         let own = checkpoint();
 
