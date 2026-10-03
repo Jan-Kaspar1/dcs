@@ -1879,6 +1879,10 @@ fn consult_incumbent(
                     },
                     actor: receipt.actor,
                     reason: receipt.reason,
+                    // The resume path's own admission never minted an
+                    // identity for this run (#775): the receipt is a
+                    // synthesized superseded record, not a served one.
+                    submission: receipt.submission,
                 },
             )
         })
@@ -2050,9 +2054,15 @@ fn main() -> ExitCode {
     // the source's cold restart — a fresh mint — from its own demotion's
     // tracking reset on the uninterrupted line. A `--state-file` resume
     // below adopts the file's generation instead: the resumed run
-    // continues the line it persisted.
+    // continues the line it persisted. The submission origin mints
+    // alongside but is never adopted: it names this run as the minter
+    // of the receipts its command admissions produce, so the redundant
+    // pair's submissions stay distinct however their absolute receipt
+    // indices collide across the promote/fence window.
     let mut executor = match assemble(&model, &registry(), io) {
-        Ok(executor) => executor.with_generation(mint_generation()),
+        Ok(executor) => executor
+            .with_generation(mint_generation())
+            .with_submission_origin(mint_generation()),
         Err(error) => return fail(error),
     };
 
@@ -2511,6 +2521,14 @@ fn main() -> ExitCode {
                                     "standby: pending command superseded at tick {}: {:?}",
                                     tick.0, receipt.command
                                 ),
+                                PeerEvent::RehomedReceipt {
+                                    prior,
+                                    index,
+                                    receipt,
+                                } => eprintln!(
+                                    "standby: settled receipt displaced by a submission-index collision moved from index {} to {}: {:?}",
+                                    prior, index, receipt.command
+                                ),
                                 PeerEvent::AdoptionReceipt(receipt) => eprintln!(
                                     "standby: checkpoint adoption changed receipted state at tick {}: {:?} (actor {:?})",
                                     tick.0, receipt.command, receipt.actor
@@ -2553,6 +2571,7 @@ fn main() -> ExitCode {
                                 | PeerEvent::PromotionRefusal(_)
                                 | PeerEvent::ForeignClaimPreempt(_)
                                 | PeerEvent::SupersededCommand { .. }
+                                | PeerEvent::RehomedReceipt { .. }
                                 | PeerEvent::AdoptionReceipt(_) => {}
                             }
                         }
@@ -2708,6 +2727,7 @@ fn main() -> ExitCode {
                                 | PeerEvent::PromotionRefusal(_)
                                 | PeerEvent::ForeignClaimPreempt(_)
                                 | PeerEvent::SupersededCommand { .. }
+                                | PeerEvent::RehomedReceipt { .. }
                                 | PeerEvent::AdoptionReceipt(_) => {}
                             }
                         }

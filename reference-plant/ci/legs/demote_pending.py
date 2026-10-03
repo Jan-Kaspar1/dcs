@@ -70,7 +70,6 @@ receipt surface and journal — the silent-loss shape.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -653,9 +652,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"demote-pending-digest {digest} — tracking by tick "
         f"{evidence['converged']}, demoted inside the pending window "

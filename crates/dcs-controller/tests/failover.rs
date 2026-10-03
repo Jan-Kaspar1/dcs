@@ -44,7 +44,7 @@ use std::thread::{self, JoinHandle};
 mod support;
 
 use support::{
-    CONTROLLER, SimTcp, controller_model, image_value, kill, pump, settled_receipts,
+    CONTROLLER, SimTcp, audit, controller_model, image_value, kill, pump, settled_receipts,
     sim_tcp_document, spawn_controller, spawn_controller_logged, spawn_plant, write_model,
 };
 
@@ -1742,10 +1742,36 @@ fn a_fenced_peer_suspends_the_commands_its_detection_scan_settled() {
     }
     standby.advance(1).unwrap();
     active.advance(1).unwrap();
+    // The demoted peer's served log carries the surviving line's audit
+    // verbatim and then its own passed-by admissions: the collision
+    // re-homes each one past the adopted window instead of letting the
+    // line's differing command at that index displace it (#775), so the
+    // superseded submission keeps a servable terminal record instead of
+    // vanishing from the window the journal still records. The identity
+    // each run minted is masked for the cross-process comparison — it
+    // names the minter, not the audit.
+    let superseded = |point| CommandOutcome::Rejected {
+        reason: CommandError::Superseded { point },
+    };
+    let line_audit = audit(standby.receipts().unwrap());
+    let demoted_audit = audit(active.receipts().unwrap());
+    assert!(
+        demoted_audit.starts_with(&line_audit),
+        "the demoted peer's log carries the surviving line's audit verbatim: \
+         {demoted_audit:?} vs {line_audit:?}"
+    );
+    let passed_by = &demoted_audit[line_audit.len()..];
     assert_eq!(
-        active.receipts().unwrap(),
-        standby.receipts().unwrap(),
-        "the demoted peer's log converges on the surviving line's audit"
+        passed_by
+            .iter()
+            .map(|receipt| (receipt.command.clone(), receipt.outcome.clone()))
+            .collect::<Vec<_>>(),
+        [
+            (held_write.clone(), superseded(Some(HELD))),
+            (tune.clone(), superseded(None)),
+            (field_write.clone(), superseded(Some(SETPOINT))),
+        ],
+        "each passed-by admission keeps its own servable superseded record"
     );
     let journal = active.journal(0).unwrap();
     for (command, point) in [

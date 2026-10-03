@@ -72,7 +72,6 @@ exit assertion fires on the honest run.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import socket
@@ -90,6 +89,7 @@ import born_active_failure
 import driver_recovery
 import failover
 import pair
+import simulate
 
 
 # The leg's stage registration — ci/legs.py reads this literal
@@ -659,9 +659,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"deferred-startup-refusal-digest {digest} — converged at "
         f"tick {evidence['converged']}, the pairless born-active's "

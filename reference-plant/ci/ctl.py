@@ -55,7 +55,6 @@ Usage:
 """
 
 import argparse
-import hashlib
 import json
 import os
 import socket
@@ -625,7 +624,7 @@ def run(args):
         for failure in failures:
             eprint(f"ctl: {failure}")
         return 1
-    digest = hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()
+    digest = simulate.stable_digest(record)
     print(
         f"ctl-digest {digest} — {len(record['submissions'])} receipted "
         f"submissions, {len(record.get('journaled', []))} settled/emitted "

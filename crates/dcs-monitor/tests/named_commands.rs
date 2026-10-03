@@ -450,6 +450,7 @@ fn sequencer_invokes_apply_at_the_boundary_and_journal() {
                     command: invoke("seq", "advance", &[]),
                     outcome: CommandOutcome::Applied { tick: Tick(1) },
                     actor: None,
+                    submission: None,
                     reason: None,
                 }
             }

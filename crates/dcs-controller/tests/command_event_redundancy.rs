@@ -39,8 +39,8 @@ use std::path::{Path, PathBuf};
 mod support;
 
 use support::{
-    SimTcp, image_sample, image_value, kill, settled_receipts, sim_tcp_document, spawn_controller,
-    spawn_controller_logged, spawn_plant, write_model,
+    SimTcp, audit, image_sample, image_value, kill, settled_receipts, sim_tcp_document,
+    spawn_controller, spawn_controller_logged, spawn_plant, write_model,
 };
 
 /// The shared plant's model — the dcs-plant tank loop.
@@ -390,11 +390,15 @@ fn declared_commands_and_emitted_events_survive_promotion() {
     // the uninterrupted reference run's — every `Journal`-retained
     // emission at the same tick with the same payload (the tick-4
     // carried-invoke lag rides the routed `History` records, never the
-    // durable stream) — its receipt log is identical, and the `reset`
-    // carried across the boundary settled exactly once at tick N+1:
-    // one receipt, one journaled outcome.
+    // durable stream) — its receipt log is identical once the run-local
+    // submission identity is masked (#775: each process mints its own
+    // origin), and the `reset` carried across the boundary settled
+    // exactly once at tick N+1: one receipt, one journaled outcome.
     assert_eq!(emitted(&standby), emitted(&reference));
-    assert_eq!(standby.receipts().unwrap(), reference.receipts().unwrap());
+    assert_eq!(
+        audit(standby.receipts().unwrap()),
+        audit(reference.receipts().unwrap())
+    );
     assert_eq!(
         settlements_of(&standby, &invoke("reset", None)),
         settlements_of(&reference, &invoke("reset", None)),

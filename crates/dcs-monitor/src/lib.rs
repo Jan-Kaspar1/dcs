@@ -2236,6 +2236,7 @@ impl<'d> Monitor<'d> {
                 | PeerEvent::PromotionRefusal(_)
                 | PeerEvent::ForeignClaimPreempt(_)
                 | PeerEvent::SupersededCommand { .. }
+                | PeerEvent::RehomedReceipt { .. }
                 | PeerEvent::AdoptionReceipt(_) => {}
             }
         }
@@ -2272,6 +2273,11 @@ impl<'d> Monitor<'d> {
                 PeerEvent::SupersededCommand { index, receipt } => {
                     recorder.note_settled(Some(index), receipt, tick);
                 }
+                PeerEvent::RehomedReceipt {
+                    prior,
+                    index,
+                    receipt,
+                } => recorder.note_rehomed(prior, index, receipt, tick),
                 PeerEvent::AdoptionReceipt(receipt) => {
                     recorder.note_settled(None, receipt, tick);
                 }
@@ -2325,6 +2331,11 @@ impl<'d> Monitor<'d> {
                 PeerEvent::SupersededCommand { index, receipt } => {
                     recorder.note_settled(Some(index), receipt, tick);
                 }
+                PeerEvent::RehomedReceipt {
+                    prior,
+                    index,
+                    receipt,
+                } => recorder.note_rehomed(prior, index, receipt, tick),
                 PeerEvent::AdoptionReceipt(receipt) => {
                     recorder.note_settled(None, receipt, tick);
                 }
@@ -2639,6 +2650,7 @@ impl<'d> Monitor<'d> {
                 | PeerEvent::StartupRefusal(_)
                 | PeerEvent::SourceRestart(_)
                 | PeerEvent::SupersededCommand { .. }
+                | PeerEvent::RehomedReceipt { .. }
                 | PeerEvent::AdoptionReceipt(_) => {}
             }
         }
@@ -2906,6 +2918,7 @@ impl<'d> Monitor<'d> {
                             },
                             actor,
                             reason,
+                            submission: None,
                         };
                         recorder.note_settled(None, receipt.clone(), peer.tick());
                         receipt
@@ -3158,6 +3171,11 @@ impl<'d> Monitor<'d> {
                         PeerEvent::SupersededCommand { index, receipt } => {
                             recorder.note_settled(Some(index), receipt, tick);
                         }
+                        PeerEvent::RehomedReceipt {
+                            prior,
+                            index,
+                            receipt,
+                        } => recorder.note_rehomed(prior, index, receipt, tick),
                         PeerEvent::AdoptionReceipt(receipt) => {
                             recorder.note_settled(None, receipt, tick);
                         }
@@ -3235,6 +3253,7 @@ impl<'d> Monitor<'d> {
                         | PeerEvent::SourceRestart(_)
                         | PeerEvent::PromotionRefusal(_)
                         | PeerEvent::SupersededCommand { .. }
+                        | PeerEvent::RehomedReceipt { .. }
                         | PeerEvent::AdoptionReceipt(_) => {}
                     }
                 }
@@ -4413,6 +4432,16 @@ fn track_and_record(
             PeerEvent::SupersededCommand { index, receipt } => {
                 recorder.note_settled(Some(index), receipt, tick);
             }
+            // A settled receipt the same adoption displaced by a
+            // submission-index collision and re-minted past the
+            // adopted window's high-water: its verdict journaled under
+            // the prior index already, so the settle record only
+            // re-keys onto the index the served window now carries.
+            PeerEvent::RehomedReceipt {
+                prior,
+                index,
+                receipt,
+            } => recorder.note_rehomed(prior, index, receipt, tick),
             PeerEvent::AdoptionReceipt(receipt) => {
                 recorder.note_settled(None, receipt, tick);
             }
@@ -4471,6 +4500,7 @@ fn scan_and_record(shared: &mut Shared<'_>, store: &Store) -> Tick {
             | PeerEvent::PromotionRefusal(_)
             | PeerEvent::ForeignClaimPreempt(_)
             | PeerEvent::SupersededCommand { .. }
+            | PeerEvent::RehomedReceipt { .. }
             | PeerEvent::AdoptionReceipt(_) => {}
         }
     }

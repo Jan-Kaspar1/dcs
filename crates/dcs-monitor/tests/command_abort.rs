@@ -406,6 +406,7 @@ fn an_abandoned_command_reports_indeterminate_then_the_journaled_settle() {
         },
         actor: None,
         reason: None,
+        submission: None,
     };
     let settle = JournalEntry {
         seq: 369,
@@ -416,6 +417,7 @@ fn an_abandoned_command_reports_indeterminate_then_the_journaled_settle() {
                 outcome: CommandOutcome::Applied { tick: Tick(8019) },
                 actor: None,
                 reason: None,
+                submission: None,
             },
         },
     };
@@ -478,6 +480,7 @@ fn an_answered_receipt_reports_normally() {
             apply_tick: Tick(1),
         },
         actor: None,
+        submission: None,
         reason: None,
     };
     let transport = StubTransport::start(Duration::ZERO, vec![], &receipt);
@@ -518,6 +521,7 @@ fn a_killed_response_path_reports_indeterminate_then_the_journaled_settle() {
                 outcome: CommandOutcome::Applied { tick: Tick(7864) },
                 actor: None,
                 reason: None,
+                submission: None,
             },
         },
     };

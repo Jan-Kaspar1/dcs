@@ -699,6 +699,46 @@ impl Recorder {
         self.push(tick, JournalEvent::CommandSettled { receipt });
     }
 
+    /// Re-keys the recorded settle of a receipt a checkpoint adoption
+    /// re-minted from `prior` to `index` — the submission-index
+    /// collision's re-home, where the receipt never left the served
+    /// audit and its verdict never changed.
+    ///
+    /// The settle was already journaled under `prior` — observed in the
+    /// window, emitted through a drain, or recorded by the replayed
+    /// file — so the move emits nothing; the mark under `index` is what
+    /// keeps the next [`record_scan`](Self::record_scan) window diff
+    /// from emitting the same settle a second time under the new
+    /// index. The local-submission mark follows the receipt: the index
+    /// the colliding submission now holds was never this run's own.
+    /// A re-home the record cannot account — one whose settle was
+    /// somehow never emitted — falls back to
+    /// [`note_settled`](Self::note_settled) so the audit never loses a
+    /// terminal verdict to a move.
+    pub(super) fn note_rehomed(
+        &mut self,
+        prior: u64,
+        index: u64,
+        receipt: CommandReceipt,
+        tick: Tick,
+    ) {
+        let recorded = self.receipt_outcomes.get(&prior) == Some(&receipt)
+            || self.settle_journaled(prior, &receipt)
+            || (!self.local_receipts.contains(&prior) && self.take_replayed_settled(&receipt));
+        if !recorded {
+            self.note_settled(Some(index), receipt, tick);
+            return;
+        }
+        if self.local_receipts.remove(&prior) {
+            self.local_receipts.insert(index);
+        }
+        self.journaled_settles
+            .entry(index)
+            .or_default()
+            .push(receipt.clone());
+        self.observe(index, receipt);
+    }
+
     /// Whether this exact `receipt` — command, outcome, and actor — was
     /// already journaled for absolute submission `index` — the dedup
     /// check every terminal emission shares, so a receipt re-admitted

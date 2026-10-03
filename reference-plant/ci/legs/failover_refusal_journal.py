@@ -75,7 +75,6 @@ unexercised contract.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -85,6 +84,7 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.dirname(_HERE))
 
 import pair
+import simulate
 
 
 # The leg's stage registration — ci/legs.py reads this literal
@@ -771,9 +771,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"failover-refusal-journal-digest {digest} — tracking by "
         f"tick {evidence['converged']}, the voided window counted "

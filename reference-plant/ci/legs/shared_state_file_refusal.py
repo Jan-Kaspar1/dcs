@@ -98,7 +98,6 @@ unexercised contract.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -908,9 +907,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"shared-state-file-refusal-digest {digest} — the declared "
         f"pair converged on its own rig definition at tick "
