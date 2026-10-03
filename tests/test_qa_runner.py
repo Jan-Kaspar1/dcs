@@ -2266,7 +2266,8 @@ class BornActiveActionTests(unittest.TestCase):
                     (event, detail)), mode)
         return calls, events, info
 
-    def _launch(self, seat='revised', docker=None, **kw):
+    def _launch(self, seat='revised', docker=None,
+                remote='dcs-hw-qa-1-born-plant:9003', **kw):
         calls, events = [], []
         if docker is None:
             def docker(*args, timeout=120, check=True):
@@ -2275,13 +2276,63 @@ class BornActiveActionTests(unittest.TestCase):
         with patch.object(runner, 'docker', docker):
             info = runner.start_born_controller(
                 self.cfg, self._record(), self.run_dir, self.model,
-                seat, 'dcs-hw-qa-1-born-plant:9003',
+                seat, remote,
                 lambda event, detail=None: events.append(
                     (event, detail)), **kw)
         return calls, events, info
 
     def _run(self, calls):
         return next(c for c in calls if c[0] == 'run')
+
+    def _launched(self, calls):
+        """The controller argv half of the seat's `docker run` — the
+        mounted document and everything after it."""
+        launch = self._run(calls)
+        return list(launch[launch.index('/model/plant.json'):])
+
+    def _pinned(self, seat, remote=None, scan_ms=None, tracking=(),
+                keyed=True):
+        """The born launch's argv as the lane staged it before the
+        builder owned it, written out literally: the pins below hold
+        the shared spec itself still, so the consolidation cannot trade
+        one silent drift for another."""
+        argv = ['/model/plant.json']
+        if remote is not None:
+            argv += ['--remote', remote]
+        argv += ['--owner-token',
+                 str(self.cfg['plant_owner_tokens'][seat])]
+        argv += list(tracking)
+        argv += ['--scan-ms',
+                 str(runner.BORN_SCAN_MS if scan_ms is None else scan_ms),
+                 '--listen',
+                 '0.0.0.0:' + str(runner.BORN_MONITOR_PORT),
+                 '--state-file', runner.CONTAINER_STATE_FILE,
+                 '--journal-file', runner.CONTAINER_JOURNAL_FILE,
+                 '--history-file', runner.CONTAINER_HISTORY_FILE]
+        if keyed:
+            argv += ['--pair-token', str(self.cfg['pair_token'])]
+        return argv
+
+    def _spec(self, seat, remote=None, scan_ms=None, **delta):
+        """The rig's one launch spec for a born seat: the born shape's
+        deltas over the contract every member launch shares."""
+        return runner._controller_argv(
+            self.cfg, runner.BORN_PAIR, seat, 'dcs-hw-qa-1',
+            remote=remote, monitor_port=runner.BORN_MONITOR_PORT,
+            scan_ms=runner.BORN_SCAN_MS if scan_ms is None else scan_ms,
+            **delta)
+
+    def _assert_born_spec(self, calls, seat, remote=None, scan_ms=None,
+                          tracking=(), keyed=True, **delta):
+        """The seat's launched argv is both the shape the lane staged
+        before the builder owned it and the builder's spec for that
+        seat — so the born launch reads as its delta and no flag can
+        leave the two apart."""
+        launched = self._launched(calls)
+        self.assertEqual(launched, self._pinned(seat, remote, scan_ms,
+                                                tracking, keyed))
+        self.assertEqual(launched, self._spec(seat, remote, scan_ms,
+                                              **delta))
 
     def test_silent_field_launches_placeholder(self):
         calls, events, info = self._field('silent')
@@ -2527,6 +2578,105 @@ class BornActiveActionTests(unittest.TestCase):
         launch = self._run(calls)
         index = launch.index('--standby')
         self.assertEqual(launch[index + 1], 'dcs-hw-qa-1-b:8081')
+
+    def test_the_remote_and_peer_shape_is_the_shared_launch_spec(self):
+        # The born launcher builds its argv through the rig's one
+        # launch spec, so the shape it stages is that spec's born
+        # delta — the scratch field, the seat's monitor port, the
+        # documented cadence, and the class's --peer declaration — and
+        # not a second enumeration of the member contract beside it.
+        field = 'dcs-hw-qa-1-born-plant:9003'
+        peer_flag = 'dcs-hw-qa-1-foreign:' + str(runner.BORN_MONITOR_PORT)
+        calls, _, _ = self._launch(seat='revised', peer='foreign')
+        self._assert_born_spec(calls, 'revised', field,
+                               tracking=['--peer', peer_flag],
+                               peer=peer_flag)
+
+    def test_the_remote_and_standby_shape_is_the_shared_launch_spec(self):
+        # The tracking-member class: --standby in place of --peer, and
+        # no --auto-promote — only the pair's own standby promotes.
+        field = 'dcs-hw-qa-1-born-plant:9003'
+        calls, _, _ = self._launch(seat='foreign', standby='active')
+        self._assert_born_spec(calls, 'foreign', field,
+                               tracking=['--standby',
+                                         'dcs-hw-qa-1-a:8080'],
+                               standby='dcs-hw-qa-1-a:8080')
+
+    def test_the_document_addressed_shape_is_the_shared_launch_spec(self):
+        # The register-protocol shape: no --remote at all, the staged
+        # document mounted in place of the run's model, and the rest of
+        # the seat's launch unchanged.
+        bus_model = self.run_dir / 'sim-bus' / 'model.json'
+        bus_model.parent.mkdir(parents=True, exist_ok=True)
+        bus_model.write_text(json.dumps({'version': 1}))
+        standby_flag = 'dcs-hw-qa-1-c:' + str(runner.BORN_MONITOR_PORT)
+        calls, _, info = self._launch(seat='driven', remote=None,
+                                      document=bus_model,
+                                      standby='revised')
+        self.assertIsNone(info['remote'])
+        self._assert_born_spec(calls, 'driven',
+                               tracking=['--standby', standby_flag],
+                               standby=standby_flag)
+
+    def test_the_scan_ms_shape_is_the_shared_launch_spec(self):
+        # The per-container skew lever rides the spec's own --scan-ms
+        # delta: the cadence and nothing else about the launch moves.
+        field = 'dcs-hw-qa-1-born-plant:9003'
+        peer_flag = 'dcs-hw-qa-1-d:' + str(runner.BORN_MONITOR_PORT)
+        calls, _, info = self._launch(seat='foreign', scan_ms=25,
+                                      peer='driven')
+        self.assertEqual(info['scan_ms'], 25)
+        self._assert_born_spec(calls, 'foreign', field, scan_ms=25,
+                               tracking=['--peer', peer_flag],
+                               peer=peer_flag)
+
+    def test_the_unkeyed_shape_is_the_shared_launch_spec(self):
+        # A run config with no pair key: the spec drops --pair-token
+        # for a born seat exactly as it does for the members, so the
+        # tokenless posture is the contract's, not the lever's.
+        self.cfg['pair_token'] = None
+        field = 'dcs-hw-qa-1-born-plant:9003'
+        peer_flag = 'dcs-hw-qa-1-c:' + str(runner.BORN_MONITOR_PORT)
+        calls, _, _ = self._launch(seat='driven', peer='revised')
+        self._assert_born_spec(calls, 'driven', field, keyed=False,
+                               tracking=['--peer', peer_flag],
+                               peer=peer_flag)
+
+    def test_the_pair_token_lookup_is_the_one_the_members_use(self):
+        # The born seats name their token through _pair_token, the
+        # lookup every member launch routes through — so a born seat
+        # cannot answer the staged probe pair's token even where the
+        # run config carries both, and the keyed posture is read in
+        # one place.
+        self.cfg['probe_pair'] = dict(self.cfg['probe_pair'],
+                                      pair_token='probe-only-secret')
+        calls, _, _ = self._launch(seat='revised', peer='foreign')
+        argv = self._launched(calls)
+        self.assertEqual(argv[argv.index('--pair-token') + 1],
+                         self.cfg['pair_token'])
+        self.assertNotIn('probe-only-secret', argv)
+        with patch.object(runner, '_pair_token',
+                          return_value='one-lookup-secret') as lookup:
+            calls, _, _ = self._launch(seat='foreign', standby='active')
+        self.assertEqual(lookup.call_args.args, (self.cfg, 'deployed'))
+        self.assertIn('one-lookup-secret', self._launched(calls))
+
+    def test_a_launch_spec_flag_reaches_the_born_launches(self):
+        # The structural guarantee this consolidation exists for: a
+        # flag added to the launch spec reaches a born seat's launch
+        # on every shape, so no site's second enumeration can drop it
+        # silently — a born seat is never a bypass of the contract.
+        real = runner._controller_argv
+
+        def extended(*args, **kwargs):
+            return real(*args, **kwargs) + ['--new-persistence-flag']
+
+        with patch.object(runner, '_controller_argv', extended):
+            attached = self._launch(seat='revised', peer='foreign')
+            addressed = self._launch(seat='driven', remote=None,
+                                     document=self.model)
+        for launch in (self._run(attached[0]), self._run(addressed[0])):
+            self.assertIn('--new-persistence-flag', launch)
 
     def test_peer_and_standby_together_rejected(self):
         with self.assertRaises(RuntimeError):
