@@ -597,6 +597,7 @@ fn setpoint_command_changes_output_at_the_tick_boundary() {
                     apply_tick: Tick(2)
                 },
                 actor: None,
+                submission: None,
                 reason: None,
             }
         );
@@ -623,6 +624,7 @@ fn setpoint_command_changes_output_at_the_tick_boundary() {
                 command,
                 outcome: CommandOutcome::Applied { tick: Tick(2) },
                 actor: None,
+                submission: None,
                 reason: None,
             }
         );
@@ -1167,6 +1169,7 @@ fn trend_and_journal_feeds_track_the_run() {
                         reason: CommandError::UnknownPoint { point: PointId(99) },
                     },
                     actor: None,
+                    submission: None,
                     reason: None,
                 },
             }
@@ -1477,12 +1480,14 @@ fn force_and_release_are_journaled_and_badged_in_the_snapshot() {
                     command: force,
                     outcome: CommandOutcome::Applied { tick: Tick(2) },
                     actor: None,
+                    submission: None,
                     reason: None,
                 },
                 CommandReceipt {
                     command: unforce,
                     outcome: CommandOutcome::Applied { tick: Tick(4) },
                     actor: None,
+                    submission: None,
                     reason: None,
                 },
             ]

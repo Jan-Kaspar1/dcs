@@ -184,6 +184,7 @@ fn an_attributed_command_settles_into_an_attributed_receipt_and_journal_entry() 
                     apply_tick: Tick(2)
                 },
                 actor: Some("operator-7".to_string()),
+                submission: None,
                 reason: None,
             }
         );
@@ -197,6 +198,7 @@ fn an_attributed_command_settles_into_an_attributed_receipt_and_journal_entry() 
                 command,
                 outcome: CommandOutcome::Applied { tick: Tick(2) },
                 actor: Some("operator-7".to_string()),
+                submission: None,
                 reason: None,
             }]
         );
@@ -310,6 +312,7 @@ fn a_reasoned_command_settles_into_a_reasoned_receipt_and_journal_entry() {
                 },
                 actor: Some("operator-7".to_string()),
                 reason: Some("nuisance trips during pump work".to_string()),
+                submission: None,
             }
         );
         client.advance(1).unwrap();
@@ -320,6 +323,7 @@ fn a_reasoned_command_settles_into_a_reasoned_receipt_and_journal_entry() {
                 outcome: CommandOutcome::Applied { tick: Tick(2) },
                 actor: Some("operator-7".to_string()),
                 reason: Some("nuisance trips during pump work".to_string()),
+                submission: None,
             }]
         );
 
@@ -406,6 +410,7 @@ fn a_not_active_rejection_stamps_the_actor_identically() {
                     },
                 },
                 actor: Some("operator-7".to_string()),
+                submission: None,
                 reason: Some("retry on the peer".to_string()),
             }
         );

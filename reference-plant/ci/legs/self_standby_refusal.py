@@ -86,7 +86,6 @@ unexercised contract.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import shutil
@@ -641,9 +640,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"self-standby-refusal-digest {digest} — the declared pair "
         f"converged on its own wiring at tick {evidence['converged']}, "

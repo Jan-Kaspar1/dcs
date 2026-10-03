@@ -526,6 +526,16 @@ pub struct Peer<'d> {
     /// the journal's settle dedup keys on, so a repeat drain of the
     /// same adjudication never re-journals it.
     pending_superseded: Vec<(u64, CommandReceipt)>,
+    /// Settled receipts a checkpoint adoption displaced by
+    /// submission-index collision and re-minted past the adopted
+    /// window's high-water — `(prior index, new index, receipt)`. The
+    /// receipt never left the served audit and its verdict never
+    /// changed, so nothing journals again: the recorder only re-marks
+    /// the settle it already emitted under the prior index against the
+    /// new one, keeping the window diff from re-emitting it.
+    /// Still-`Accepted` entries the re-mint settled `superseded` are
+    /// news instead and route through `pending_superseded`.
+    pending_rehomed: Vec<(u64, u64, CommandReceipt)>,
     /// Point-state changes a checkpoint adoption made that no settled
     /// receipt in the merged log accounts for — force-set changes and
     /// held-value reverts alike — each queued as a [`CommandReceipt`]
@@ -1165,6 +1175,24 @@ pub enum PeerEvent {
         /// The terminal receipt the adoption rewrote.
         receipt: CommandReceipt,
     },
+    /// A settled receipt a checkpoint adoption displaced by
+    /// submission-index collision and re-minted past the adopted
+    /// window's high-water — the submission-index collision's re-home,
+    /// carrying the index the receipt's verdict journaled under and
+    /// the index the served window now carries it at. Nothing re-emits
+    /// for it: the verdict is unchanged, so the consumer only re-keys
+    /// the settle it already recorded.
+    RehomedReceipt {
+        /// The absolute submission index the receipt's settle was
+        /// journaled under.
+        prior: u64,
+        /// The absolute submission index the served window now carries
+        /// the receipt at.
+        index: u64,
+        /// The receipt as re-minted — command, actor, and terminal
+        /// verdict unchanged.
+        receipt: CommandReceipt,
+    },
     /// A point-state change a checkpoint adoption made that no settled
     /// receipt in the merged log accounts for — a force-set change or a
     /// held-value revert — `Applied` at the landing tick with `actor`
@@ -1198,6 +1226,7 @@ pub struct PeerEvents {
     promotion_refusals: Vec<PromotionRefusal>,
     changes: Vec<RoleChange>,
     superseded: Vec<(u64, CommandReceipt)>,
+    rehomed: Vec<(u64, u64, CommandReceipt)>,
     adoption_receipts: Vec<CommandReceipt>,
 }
 
@@ -1220,6 +1249,7 @@ impl PeerEvents {
             promotion_refusals,
             changes,
             superseded,
+            rehomed,
             adoption_receipts,
         } = self;
         let mut events = Vec::with_capacity(
@@ -1236,6 +1266,7 @@ impl PeerEvents {
                 + promotion_refusals.len()
                 + changes.len()
                 + superseded.len()
+                + rehomed.len()
                 + adoption_receipts.len(),
         );
         events.extend(divergences.into_iter().map(PeerEvent::Divergence));
@@ -1263,6 +1294,13 @@ impl PeerEvents {
                 .into_iter()
                 .map(|(index, receipt)| PeerEvent::SupersededCommand { index, receipt }),
         );
+        events.extend(rehomed.into_iter().map(|(prior, index, receipt)| {
+            PeerEvent::RehomedReceipt {
+                prior,
+                index,
+                receipt,
+            }
+        }));
         events.extend(
             adoption_receipts
                 .into_iter()
@@ -1286,6 +1324,7 @@ impl PeerEvents {
             + self.promotion_refusals.len()
             + self.changes.len()
             + self.superseded.len()
+            + self.rehomed.len()
             + self.adoption_receipts.len()
     }
 
@@ -1359,6 +1398,13 @@ impl PeerEvents {
     /// submission index the settle journal's dedup keys on.
     pub fn superseded_commands(&self) -> &[(u64, CommandReceipt)] {
         &self.superseded
+    }
+
+    /// The drained collision re-homes, each beside the index its settle
+    /// journaled under and the index the served window now carries it
+    /// at.
+    pub fn rehomed_receipts(&self) -> &[(u64, u64, CommandReceipt)] {
+        &self.rehomed
     }
 
     /// The drained adoption-audit receipts.
@@ -1670,6 +1716,7 @@ impl<'d> Peer<'d> {
             fencing_lost: false,
             pending_fencing: Vec::new(),
             pending_superseded: Vec::new(),
+            pending_rehomed: Vec::new(),
             pending_adoption_receipts: Vec::new(),
             probe: None,
             claimant: None,
@@ -2082,6 +2129,7 @@ impl<'d> Peer<'d> {
             fencing_lost: false,
             pending_fencing: Vec::new(),
             pending_superseded: Vec::new(),
+            pending_rehomed: Vec::new(),
             pending_adoption_receipts: Vec::new(),
             probe: None,
             claimant: None,
@@ -3006,7 +3054,15 @@ impl<'d> Peer<'d> {
     /// settled — a still-`Accepted` own entry is the demotion's
     /// un-adjudicated submission, which the line may legitimately
     /// have passed by; the orphan-supersession machinery settles
-    /// those. And each checkpointed internal `In`
+    /// those. The one exception is the promote/fence window's split
+    /// mint (#775): where both entries carry distinct mint identities
+    /// ([`SubmissionId`](dcs_core::SubmissionId)) and the serving
+    /// document is the field-owning line, the disagreement names what
+    /// it is — two peers each admitted their own command at one
+    /// absolute index inside the window — so the adoption adjudicates
+    /// it by re-minting this run's displaced receipt past the adopted
+    /// window rather than refusing the document. Everything else
+    /// convicts. And each checkpointed internal `In`
     /// sample must be a value the audit produces: this run's own held
     /// value, the document's own pinned force, or the pulled window's
     /// newest settled write or force verdict — a link's carrier is
@@ -3045,6 +3101,23 @@ impl<'d> Peer<'d> {
                 // admission at the index, and the adoption's
                 // orphan-supersession machinery settles which.
                 && !matches!(own.outcome, CommandOutcome::Accepted { .. })
+                // The promote/fence window's split mint (#775): two
+                // *identified* submissions at one index, served by the
+                // field-owning line, are the window's own race — both
+                // peers admitted their command before the fence
+                // demoted the first, and the admission index is a
+                // claim on a sequence position rather than a minted
+                // fact until the claim settles. Rule (c) of decision
+                // 95 makes such a mint provisional and adjudicates it
+                // through the merge, which re-mints this run's
+                // displaced receipt past the adopted window; it is not
+                // the forged fork the check convicts. Anything else —
+                // an unidentified pair, equal identities, or a
+                // document no field owner stands behind — convicts.
+                && !(matches!(
+                    (own.submission, receipt.submission),
+                    (Some(this), Some(other)) if this != other
+                ) && checkpoint.source_owns_field == Some(true))
             {
                 return Some(UnaccountedDetail::Receipt {
                     index,
@@ -3231,8 +3304,15 @@ impl<'d> Peer<'d> {
     /// Reconciles the pending commands a successful adoption left
     /// behind: the adopted receipt log is the line's one audit, so an
     /// entry this run still held `Accepted` that the new log does not
-    /// carry — at its absolute index, as the same *submission* — can
-    /// never apply here: the gate quiesces this run's writes. It
+    /// carry — as the same submission, wherever the line's window holds
+    /// it — can never apply here: the gate quiesces this run's writes.
+    /// An absolute index is not an identity: inside the promote/fence
+    /// window the demoting peer and its successor can each mint a
+    /// receipt at one index for different submissions, so the
+    /// reconciliation compares [`CommandReceipt::same_submission`] —
+    /// the mint identity where one exists, the whole submission record
+    /// — command, actor, and the declared `reason` — where neither
+    /// does. It
     /// settles `Rejected` carrying [`CommandError::Superseded`] and
     /// queues for the journal rather than vanishing unaudited. A
     /// covered entry's outcome is the line's own — re-queued still
@@ -3244,16 +3324,19 @@ impl<'d> Peer<'d> {
     /// absolute index — the receipt this run minted and one the
     /// successor admitted to the same slot once it owned the sequence
     /// — and an identical command there means nothing on its own: an
-    /// operator's repeat write to the same point collides exactly.
-    /// The adopted entry *is* this submission only when it is this
-    /// receipt — the verbatim copy the line adopted, still `Accepted`
-    /// on the submission's own apply boundary — or the line's
-    /// settlement of it: a settled adopted entry counts as carried
-    /// only when the whole submission record matches — `actor` and
-    /// `reason` ride a receipt unchanged from submission to terminal
-    /// verdict, so a difference convicts a different admission and the
-    /// suspended entry resolves `superseded`, never absorbed as the
-    /// line's carry.
+    /// operator's repeat write to the same point collides exactly. The
+    /// adopted entry *is* this submission when it is this receipt — the
+    /// verbatim copy the line adopted, still `Accepted` on the
+    /// submission's own apply boundary — or the line's settlement of
+    /// it: a settled adopted entry counts as carried only when the
+    /// whole submission record matches, so a difference convicts a
+    /// different admission and the suspended entry resolves
+    /// `superseded`, never absorbed as the line's carry.
+    ///
+    /// An already-settled entry the collision displaced takes the other
+    /// route: its verdict is already journaled, so only the index the
+    /// served window now carries it at is news, reported as the re-home
+    /// the settle record re-keys against.
     ///
     /// Absent means adjudicated, not merely unseen: the adoption keeps
     /// every prior receipt at or beyond its window's high-water — the
@@ -3264,44 +3347,72 @@ impl<'d> Peer<'d> {
     /// never arrives here to settle `superseded` provisionally and be
     /// contradicted by the next, fresher adoption.
     fn note_abandoned_commands(&mut self, pending: Vec<(u64, CommandReceipt)>) {
-        let base = self.executor.receipt_base();
-        for (index, receipt) in pending {
-            let carried = index.checked_sub(base).is_some_and(|position| {
-                self.executor
-                    .receipts()
-                    .get(position as usize)
-                    .is_some_and(|adopted| {
-                        // The verbatim carry: the adopted entry is this
-                        // very receipt — still `Accepted` on its own
-                        // apply boundary, submission record and all.
-                        adopted == &receipt
-                            // Or its settlement: the line's terminal
-                            // verdict on the carried copy. The outcome
-                            // legitimately advanced, so the test is the
-                            // submission record — command, actor, and
-                            // reason, the fields a receipt carries
-                            // unchanged — never the command alone.
-                            || (!matches!(adopted.outcome, CommandOutcome::Accepted { .. })
-                                && adopted.command == receipt.command
-                                && adopted.actor == receipt.actor
-                                && adopted.reason == receipt.reason)
-                    })
-            });
-            if !carried {
-                self.pending_superseded.push((
-                    index,
-                    CommandReceipt {
-                        command: receipt.command.clone(),
-                        outcome: CommandOutcome::Rejected {
-                            reason: CommandError::Superseded {
-                                point: receipt.command.point(),
-                            },
-                        },
-                        actor: receipt.actor,
-                        reason: receipt.reason.clone(),
-                    },
-                ));
+        // The adoption's collision report first: a covered entry whose
+        // adopted counterpart was a *different* submission re-minted
+        // past the window's high-water rather than being silently
+        // overwritten. One this run still held `Accepted` settled
+        // `superseded` at the re-mint — that verdict is news and
+        // journals under the receipt's new index, where the served
+        // window now carries it. An already-settled entry only changed
+        // index — its verdict already journaled under the prior one —
+        // so it routes to the re-home marks the recorder re-keys with.
+        let mut consumed = vec![false; pending.len()];
+        for (prior, index, receipt) in self.executor.take_displaced_receipts() {
+            match pending
+                .iter()
+                .position(|(held, pending)| *held == prior && pending.same_submission(&receipt))
+            {
+                Some(position) => {
+                    consumed[position] = true;
+                    self.pending_superseded.push((index, receipt));
+                }
+                None => self.pending_rehomed.push((prior, index, receipt)),
             }
+        }
+        // A pending receipt the adopted log does not retain anywhere —
+        // covered below its base, the counterpart stretch the source
+        // already evicted — the line's high-water passed without
+        // carrying it: settle it `superseded` for the journal. The
+        // comparison is submission identity, not index-plus-command:
+        // an equal command minted as a different submission — the
+        // collision this run's own receipt lost — is not the pending
+        // entry's carry, and each retained receipt answers at most one
+        // pending entry so equal submissions cannot share one record.
+        // The unidentified fallback keeps the old positional rule —
+        // an equal command at a different index is a different
+        // submission the mint identity alone could tell apart.
+        let base = self.executor.receipt_base();
+        let mut matched = vec![false; self.executor.receipts().len()];
+        'pending: for (pending_at, (index, receipt)) in pending.iter().enumerate() {
+            if consumed[pending_at] {
+                continue;
+            }
+            for (position, retained) in self.executor.receipts().iter().enumerate() {
+                if matched[position] || !retained.same_submission(receipt) {
+                    continue;
+                }
+                if (retained.submission.is_none() || receipt.submission.is_none())
+                    && base + position as u64 != *index
+                {
+                    continue;
+                }
+                matched[position] = true;
+                continue 'pending;
+            }
+            self.pending_superseded.push((
+                *index,
+                CommandReceipt {
+                    command: receipt.command.clone(),
+                    outcome: CommandOutcome::Rejected {
+                        reason: CommandError::Superseded {
+                            point: receipt.command.point(),
+                        },
+                    },
+                    actor: receipt.actor.clone(),
+                    reason: receipt.reason.clone(),
+                    submission: receipt.submission,
+                },
+            ));
         }
     }
 
@@ -3349,6 +3460,10 @@ impl<'d> Peer<'d> {
                 outcome: CommandOutcome::Applied { tick: landed },
                 actor: Some(adoption_actor(checkpoint)),
                 reason: None,
+                // The adoption authored this record, not an admission:
+                // no minting run admitted the change, so it carries no
+                // submission identity (#775).
+                submission: None,
             });
         }
     }
@@ -3431,6 +3546,10 @@ impl<'d> Peer<'d> {
                 outcome: CommandOutcome::Applied { tick: landed },
                 actor: Some(adoption_actor(checkpoint)),
                 reason: None,
+                // The adoption authored this record, not an admission:
+                // no minting run admitted the change, so it carries no
+                // submission identity (#775).
+                submission: None,
             });
         }
     }
@@ -4267,6 +4386,7 @@ impl<'d> Peer<'d> {
             promotion_refusals: std::mem::take(&mut self.pending_refusals),
             changes: std::mem::take(&mut self.pending_changes),
             superseded: std::mem::take(&mut self.pending_superseded),
+            rehomed: std::mem::take(&mut self.pending_rehomed),
             adoption_receipts: std::mem::take(&mut self.pending_adoption_receipts),
         }
     }
@@ -4713,7 +4833,7 @@ mod tests {
         CommandArgument, CommandAvailability, CommandDecl, CommandError, CommandOutcome,
         ComponentDescriptor, Direction, Divergence, EmittedEvent, EventDecl, EventField,
         EventFieldKind, EventRetention, EventValue, IoDriver, IoError, IoFault, PointId, Sample,
-        StateMap, Value, ValueKind,
+        StateMap, SubmissionId, Value, ValueKind,
     };
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -4858,6 +4978,7 @@ mod tests {
             },
             actor: None,
             reason: None,
+            submission: None,
         };
         let adopted = CommandReceipt {
             command: Command::ForcePoint {
@@ -4868,6 +4989,7 @@ mod tests {
             outcome: CommandOutcome::Applied { tick: Tick(19) },
             actor: Some("checkpoint:1@19".to_string()),
             reason: None,
+            submission: None,
         };
         peer.pending_divergences.push(divergence.clone());
         peer.pending_resolutions.push(resolution.clone());
@@ -10016,7 +10138,11 @@ mod tests {
         // adopts a receipt log whose high-water passed the entry's
         // index carrying a different command: orphaned, it settles
         // superseded and queues for the journal rather than vanishing
-        // unaudited.
+        // unaudited. Neither run mints a submission identity here — an
+        // unminted pair cannot name a collision — so the merge keeps
+        // the line's window verbatim and the settlement journals under
+        // the orphan's own index; the identified case is the collision
+        // tests below.
         peer.submit_command(Clocked::bump(7));
         peer.demote().unwrap();
         peer.apply(&source.checkpoint()).unwrap();
@@ -10520,6 +10646,178 @@ mod tests {
         ));
     }
 
+    /// QA finding `receipt-index-collision-displaces-settled-receipt`
+    /// (#775): inside the promote/fence window the demoting peer and
+    /// its successor each mint a receipt at the same absolute index —
+    /// per-peer `attempts` converge only through adoption — and the
+    /// converging apply used to overwrite the demoted run's entry
+    /// silently. With minted submission identities the covered receipt
+    /// whose adopted counterpart is a *different* submission re-mints
+    /// past the adopted window instead: command, actor, and settled
+    /// outcome preserved, and the move reported for the journal's
+    /// dedup to re-key.
+    #[test]
+    fn a_settled_receipt_displaced_by_an_index_collision_stays_served() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::active(
+            Clocked::executor(&gate).with_submission_origin(1),
+            Some(&gate),
+        );
+        peer.activate().unwrap();
+        peer.scan();
+
+        // The successor converges on the pre-admission checkpoint, so
+        // both runs mint their next receipt at index 0.
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let source_gate = WriteGate::closed(&source_driver);
+        let mut source = Peer::standby(
+            Clocked::executor(&source_gate).with_submission_origin(2),
+            Some(&source_gate),
+        );
+        source.apply(&peer.checkpoint()).unwrap();
+
+        // The raced admission on the still-owning peer settles applied
+        // on its next scan; the promoted successor mints a different
+        // command at the same absolute index.
+        peer.submit_command_as(Clocked::bump(7), Some("op-a".to_string()));
+        peer.scan();
+        source.promote().unwrap();
+        source.submit_command_as(Clocked::bump(3), Some("op-b".to_string()));
+        source.scan();
+        assert_eq!(source.receipts().len(), 1);
+        assert_eq!(source.receipts()[0].command, Clocked::bump(3));
+
+        // The demoted peer's tracking apply adopts the successor's
+        // window: index 0 now names a different submission. The
+        // displaced receipt re-mints at index 1 — still served — and
+        // the re-home reports `(prior, new)` for the settle journal.
+        peer.demote().unwrap();
+        peer.apply(&source.checkpoint()).unwrap();
+        let receipts = peer.receipts().to_vec();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts[0], source.receipts()[0]);
+        assert_eq!(receipts[1].command, Clocked::bump(7));
+        assert_eq!(receipts[1].actor.as_deref(), Some("op-a"));
+        assert_eq!(
+            receipts[1].outcome,
+            CommandOutcome::Applied { tick: Tick(2) }
+        );
+        assert_eq!(
+            receipts[1].submission,
+            Some(SubmissionId { origin: 1, seq: 0 })
+        );
+        let drained = peer.drain_pending();
+        let rehomed = drained.rehomed_receipts();
+        assert_eq!(rehomed.len(), 1, "{rehomed:?}");
+        assert_eq!((rehomed[0].0, rehomed[0].1), (0, 1));
+        assert_eq!(rehomed[0].2, receipts[1]);
+        assert!(drained.superseded_commands().is_empty());
+
+        // The displaced receipt stays settled and served through
+        // further scans and adoptions — never re-queued, never
+        // re-settled, never evicted ahead of its turn.
+        peer.scan();
+        peer.apply(&source.checkpoint()).unwrap();
+        assert_eq!(peer.receipts().len(), 2);
+        assert_eq!(peer.receipts()[1].command, Clocked::bump(7));
+        let drained = peer.drain_pending();
+        assert!(drained.rehomed_receipts().is_empty());
+        assert!(drained.superseded_commands().is_empty());
+
+        // And the pair's audit reconciles on the far side too: a
+        // fail-back adopts the re-minted window verbatim — identity and
+        // all — so the successor serves the displaced submission at the
+        // same index the demoted peer does.
+        source.demote().unwrap();
+        source.apply(&peer.checkpoint()).unwrap();
+        assert_eq!(source.receipts(), peer.receipts());
+        assert_eq!(
+            source.receipts()[1].submission,
+            Some(SubmissionId { origin: 1, seq: 0 })
+        );
+    }
+
+    /// The consolidated #776 case: the colliding receipts carry the
+    /// *same* command — a suspended admission on the demoting peer and
+    /// an equal-valued successor on the promoted one. Command equality
+    /// must not merge them: the suspended submission was never carried
+    /// by the line, so it settles `superseded` under its own identity
+    /// and actor, served beside the successor's receipt rather than
+    /// being mistaken for it.
+    #[test]
+    fn an_equal_command_collision_does_not_merge_the_suspended_receipt() {
+        let driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let gate = WriteGate::closed(&driver);
+        let mut peer = Peer::active(
+            Clocked::executor(&gate).with_submission_origin(1),
+            Some(&gate),
+        );
+        peer.activate().unwrap();
+        peer.scan();
+
+        let source_driver = StubDriver::new(PointId(1), Value::Float(0.0));
+        let source_gate = WriteGate::closed(&source_driver);
+        let mut source = Peer::standby(
+            Clocked::executor(&source_gate).with_submission_origin(2),
+            Some(&source_gate),
+        );
+        source.apply(&peer.checkpoint()).unwrap();
+
+        // The raced admission lands on A inside the window and suspends
+        // at the demotion; the successor mints an *equal* command at the
+        // same index and applies it.
+        peer.submit_command_as(Clocked::bump(7), Some("op-a".to_string()));
+        peer.demote().unwrap();
+        source.promote().unwrap();
+        source.submit_command_as(Clocked::bump(7), Some("op-b".to_string()));
+        source.scan();
+
+        // Convergence: the suspended receipt is a different submission
+        // despite the equal command — displaced, settled `superseded`,
+        // re-minted to index 1, and journaled through the superseded
+        // drain exactly once.
+        peer.apply(&source.checkpoint()).unwrap();
+        let receipts = peer.receipts().to_vec();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts[0].command, Clocked::bump(7));
+        assert_eq!(receipts[0].actor.as_deref(), Some("op-b"));
+        assert_eq!(
+            receipts[0].submission,
+            Some(SubmissionId { origin: 2, seq: 0 })
+        );
+        assert!(matches!(
+            receipts[0].outcome,
+            CommandOutcome::Applied { .. }
+        ));
+        assert_eq!(receipts[1].command, Clocked::bump(7));
+        assert_eq!(receipts[1].actor.as_deref(), Some("op-a"));
+        assert_eq!(
+            receipts[1].submission,
+            Some(SubmissionId { origin: 1, seq: 0 })
+        );
+        assert_eq!(
+            receipts[1].outcome,
+            CommandOutcome::Rejected {
+                reason: CommandError::Superseded { point: None }
+            }
+        );
+        let drained = peer.drain_pending();
+        let superseded = drained.superseded_commands();
+        assert_eq!(superseded.len(), 1, "{superseded:?}");
+        assert_eq!(superseded[0].0, 1);
+        assert_eq!(superseded[0].1, receipts[1]);
+        assert!(drained.rehomed_receipts().is_empty());
+
+        // The suspended submission never ran — the count is the
+        // successor's own single bump, and nothing re-queues for it.
+        peer.scan();
+        assert_eq!(Clocked::count(&peer.checkpoint()), Value::Int(7));
+        peer.apply(&source.checkpoint()).unwrap();
+        assert!(peer.drain_pending().superseded_commands().is_empty());
+        assert_eq!(peer.receipts().len(), 2);
+    }
+
     /// QA finding `stale-checkpoint-resurrects-receipted-unforce`
     /// (#639): a standby restarting onto a staler peer's checkpoint
     /// must not re-stand a force its own journal already receipted as
@@ -10644,6 +10942,7 @@ mod tests {
                 outcome: CommandOutcome::Applied { tick: Tick(1) },
                 actor: Some("checkpoint@1".to_string()),
                 reason: None,
+                submission: None,
             }]
         );
         // The drain empties — one audit receipt per unbacked change.
@@ -10717,6 +11016,7 @@ mod tests {
                 outcome: CommandOutcome::Applied { tick: Tick(2) },
                 actor: Some("checkpoint@2".to_string()),
                 reason: None,
+                submission: None,
             }]
         );
     }
@@ -11085,6 +11385,7 @@ mod tests {
                 outcome: CommandOutcome::Applied { tick: Tick(3) },
                 actor: Some("checkpoint@3".to_string()),
                 reason: None,
+                submission: None,
             }]
         );
         assert!(b.drain_pending().adoption_receipts().is_empty());
@@ -11180,6 +11481,7 @@ mod tests {
                 outcome: CommandOutcome::Applied { tick: Tick(4) },
                 actor: Some("checkpoint@3".to_string()),
                 reason: None,
+                submission: None,
             }]
         );
         assert!(b.drain_pending().adoption_receipts().is_empty());

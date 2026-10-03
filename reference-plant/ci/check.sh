@@ -19,9 +19,13 @@
 #                lockfile that no longer records the pin is reported
 #                rather than silently re-resolved
 #                (lockfile-stale); the leg's own doctored copies —
-#                a lockfile recorded at another revision and one
-#                missing a release crate's package block — must each
-#                report that diagnostic (lockfile-stale-unchecked).
+#                a lockfile recorded at another revision, one missing
+#                a release crate's package block, and ones recording a
+#                release crate twice — a divergent `rev` record ahead
+#                of and behind the pinned block, and a path package's
+#                sourceless twin beside it — must each report their
+#                diagnostic (lockfile-stale-unchecked,
+#                path-dependency-leak-unchecked).
 #                The stage's digest of the file is what the resolve
 #                stage re-checks, naming a rewrite the fallback fetch
 #                performs on the committed artifact.
@@ -358,7 +362,15 @@ PY
 # the committed lockfile against the declared pin *before* any fetch
 # can rewrite it — the state a consumer's own CI could otherwise never
 # see, because the resolve stage's re-resolve fallback used to absorb
-# it. $1 is the lockfile to read: `Cargo.lock` itself in the positive
+# it. ci/lockfile.py is the leg, kept as a script beside the other
+# stage legs so it can run against a scratch manifest/lockfile pair on
+# its own: it reads the manifest through `cargo metadata --no-deps` —
+# Cargo's own TOML dialect, leaving the lockfile unread — and the
+# lockfile through stdlib `tomllib`, so key order, line wrapping, and
+# comments are inert and a TOML-equivalent respelling of the pinned
+# declaration is the same declaration rather than a stale lockfile or
+# a leaked path source.
+# $1 is the lockfile to read: `Cargo.lock` itself in the positive
 # leg, a doctored scratch copy in the self-check below; $2 is the
 # release record's `record.md` when one was substituted, else the
 # empty string. Exit status 2 is a release crate recorded from a
@@ -366,119 +378,7 @@ PY
 # checkout carries neither, and is `path-dependency-leak`'s finding —
 # and 1 every other disagreement, `lockfile-stale`'s.
 lockfile_leg() {
-    python3 - "${1:-Cargo.lock}" "$DCS_REMOTE" "${2:-}" <<'PY'
-import re, subprocess, sys
-
-lock_path, fetch_remote, record_path = sys.argv[1], sys.argv[2], sys.argv[3]
-manifest = open("Cargo.toml").read()
-lock = open(lock_path).read()
-release = ("dcs-build", "dcs-core", "dcs-model")
-
-# `leak` is the non-git-source finding — a recorded `path` into some
-# checkout, or a released crate recorded with no source at all — and
-# carries its own exit status so the shell reports `path-dependency-leak`
-# rather than the stale-pin diagnostic.
-def leak(message):
-    print(message, file=sys.stderr)
-    sys.exit(2)
-
-# The declared pin, as Cargo.toml spells it: the remote and the
-# `tag`/`rev` fragment both release crates carry.
-declared = {}
-for name in ("dcs-build", "dcs-model"):
-    match = re.search(
-        re.escape(name) + r' = \{ git = "([^"]+)",\s*(tag|rev) = "([^"]+)"', manifest
-    )
-    if match is None:
-        sys.exit(f"{name} declares no `git = ..., tag|rev = ...` pin in Cargo.toml")
-    declared[name] = (match.group(1), f"{match.group(2)}={match.group(3)}")
-if len({pin for pin in declared.values()}) != 1:
-    sys.exit(f"the release crates declare different pins: {sorted(declared.values())}")
-url, query = declared["dcs-build"]
-kind, value = query.split("=", 1)
-if url != fetch_remote:
-    sys.exit(f"Cargo.toml pins {url} while this check resolves {fetch_remote} — "
-             "repin the manifest, or drop the DCS_REMOTE substitution")
-
-# Every package block the lockfile records, as (name, source) pairs. The
-# block — not the source-bearing line — is the unit: Cargo writes a path
-# package with no `source` key at all, so a released crate reaching a
-# checkout through one leaves no line for a per-name dict built out of
-# source-bearing lines to collect, and a second same-name record at
-# another pin disappears into a last-wins one. Every record is kept, so
-# neither hides behind another.
-packages = []
-for block in lock.split("[[package]]")[1:]:
-    name = re.search(r'^name = "([^"]+)"', block, re.M)
-    if name is None:
-        sys.exit(f"{lock_path} records a package block with no name")
-    source = re.search(r'^source = "([^"]+)"', block, re.M)
-    packages.append((name.group(1), None if source is None else source.group(1)))
-
-# Every release crate's recorded source — git only, one source, on the
-# manifest's own remote and query, at one precise revision. A `dcs-*`
-# block carrying no `source` line at all resolves from a path into some
-# checkout, `path-dependency-leak`'s finding, as does a recorded
-# non-git source; a crate with no package block is absent entirely,
-# `lockfile-stale`'s: nothing is recorded, let alone a path source.
-for name, source in packages:
-    if not name.startswith("dcs-"):
-        continue
-    if source is None:
-        leak(f"{name} is recorded with no source in {lock_path} — a path into some checkout")
-    if not source.startswith("git+"):
-        leak(f"{name} resolved from {source} — only a git source satisfies a git pin")
-missing = [name for name in release if name not in {seen for seen, _ in packages}]
-if missing:
-    sys.exit(f"release crates missing from {lock_path}: {sorted(missing)}")
-# Every record of every release crate must agree on the one source: a
-# second same-name record at another remote or pin is the stale-pin
-# finding, not a record the first entry may stand in for.
-sources = {source for name, source in packages if name in release}
-if len(sources) != 1:
-    sys.exit(f"the release crates record different sources: {sorted(sources)}")
-source = sources.pop()
-prefix = f"git+{url}?{query}#"
-if not source.startswith(prefix):
-    sys.exit(f"{lock_path} records {source} for the release crates, but Cargo.toml "
-             f"declares {url} at {query}")
-precise = source[len(prefix):]
-if not re.fullmatch(r"[0-9a-f]{40}", precise):
-    sys.exit(f"{lock_path} records no precise revision for {url} at {query}: {source}")
-
-# The recorded revision must be the one the declared pin names. A tag
-# the remote does not serve yet is not this leg's finding: an
-# unresolvable pin is `pin-unresolvable`'s, and a remote that cannot
-# be reached at all leaves the query comparison above holding.
-if kind == "tag":
-    refs = subprocess.run(
-        ["git", "ls-remote", url, f"refs/tags/{value}", f"refs/tags/{value}^{{}}"],
-        capture_output=True, text=True, check=False,
-    ).stdout
-    served = {}
-    for line in refs.splitlines():
-        sha, _, ref = line.partition("\t")
-        served[ref] = sha
-    target = served.get(f"refs/tags/{value}^{{}}") or served.get(f"refs/tags/{value}")
-    if target is None:
-        print(f"  {value} is not published on {url} yet — an unresolvable pin is "
-              "pin-unresolvable's finding")
-    elif target != precise:
-        sys.exit(f"{lock_path} records {precise}, but {value} lands on {target}")
-elif re.fullmatch(r"[0-9a-f]{40}", value) and precise != value:
-    sys.exit(f"{lock_path} records {precise} for rev {value}")
-
-# The release record's Commit field names the same release when it is
-# filled: the tag's target and the record must not diverge, or the
-# shipped artifact pins a commit the record does not claim.
-if record_path:
-    commit = re.search(r"^\| Commit \| `([0-9a-f]{40})`", open(record_path).read(), re.M)
-    if commit and commit.group(1) != precise:
-        sys.exit(f"{lock_path} records {precise}, but {record_path} records "
-                 f"commit {commit.group(1)}")
-
-print(f"  the committed {lock_path} records {query} at {precise}")
-PY
+    python3 ci/lockfile.py "${1:-Cargo.lock}" "$DCS_REMOTE" "${2:-}"
 }
 
 # The leg's exit status named: a release crate recorded from a path
@@ -519,11 +419,23 @@ STALE_LOCK="$(mktemp)"
 python3 - Cargo.lock "$STALE_LOCK" "$DCS_UPGRADE_REV" <<'PY'
 import re, sys
 lock, stale, baseline = sys.argv[1], sys.argv[2], sys.argv[3]
+# Only the release crates' own `?query#sha` records are put back: a
+# consumer lockfile legitimately carries further git-pinned packages —
+# a vendored crate, a second release-crate version — which the leg
+# never reads, and a whole-file census of git sources would abort the
+# stage on exactly the state it must name. Fewer rewrites than the
+# release set means the lockfile's shape drifted under the doctor —
+# that is the self-check's own failure to name, not the leg's.
+release = ("dcs-build", "dcs-core", "dcs-model")
 doctored, count = re.subn(
-    r'\?[^#"]*#[0-9a-f]{40}"', lambda _: f'?rev={baseline}#{baseline}"', open(lock).read()
+    r'(\[\[package\]\]\nname = "(?:'
+    + "|".join(release)
+    + r')"\nversion = "[^"]+"\nsource = "[^?"]*)\?[^#"]*#[0-9a-f]{40}"',
+    lambda m: m.group(1) + f'?rev={baseline}#{baseline}"',
+    open(lock).read(),
 )
-if count != 3:
-    sys.exit(f"doctor: expected three git sources to doctor, rewrote {count}")
+if count < len(release):
+    sys.exit(f"doctor: expected at least {len(release)} release-crate sources to doctor, rewrote {count}")
 open(stale, "w").write(doctored)
 PY
 if out="$(lockfile_leg "$STALE_LOCK" 2>&1)"; then
@@ -545,14 +457,17 @@ MISSING_LOCK="$(mktemp)"
 python3 - Cargo.lock "$MISSING_LOCK" <<'PY'
 import re, sys
 lock, missing = sys.argv[1], sys.argv[2]
-doctored, count = re.subn(
-    r'\[\[package\]\]\nname = "dcs-core"\nversion = "[^"]+"\nsource = "[^"]+"\n(?:dependencies = \[[^\]]*\]\n)?',
-    "",
-    open(lock).read(),
-)
-if count != 1:
-    sys.exit(f"doctor: expected one dcs-core package block, rewrote {count}")
-open(missing, "w").write(doctored)
+text = open(lock).read()
+# The crate's [[package]] block, found by its header boundary rather
+# than one fixed field order: a merged or hand-edited lockfile may
+# carry the block's keys in another order — all of them are the same
+# block under TOML.
+header, *blocks = re.split(r"(?m)^\[\[package\]\]\n", text)
+kept = [block for block in blocks
+        if not re.search(r'(?m)^name = "dcs-core"$', block)]
+if len(kept) != len(blocks) - 1:
+    sys.exit(f"doctor: expected one dcs-core package block, found {len(blocks) - len(kept)}")
+open(missing, "w").write(header + "".join(f"[[package]]\n{block}" for block in kept))
 PY
 if out="$(lockfile_check "$MISSING_LOCK" 2>&1)"; then
     fail "lockfile-stale-unchecked: a lockfile missing a release crate passed the lockfile leg"
@@ -562,6 +477,65 @@ case "$out" in
     *) fail "lockfile-stale-unchecked: a lockfile missing a release crate was refused without the lockfile-stale diagnostic: $out" ;;
 esac
 echo "  a lockfile missing a release crate refused: lockfile-stale"
+
+# The per-name map's other face: a release crate recorded twice used
+# to be screened only through whichever block sorted last —
+# `dict(re.findall())` collapsed every same-name `[[package]]` record
+# to the last match, so a second `dcs-model` block at a divergent rev
+# pin — a recording a transitive dependency can legitimately
+# introduce — passed whenever the conforming block came later (Cargo's
+# canonical order sorts `?rev=` before `?tag=`, the reported hiding
+# order), and a path package's sourceless record never entered the map
+# at all. The leg keeps every record, so the doctored copies plant the
+# divergent record ahead of and behind the pinned one — the identical
+# content must refuse in both orders — and the sourceless twin the
+# same way, each `path-dependency-leak`.
+DUP_FIRST="$(mktemp)"; DUP_LAST="$(mktemp)"; TWIN_FIRST="$(mktemp)"; TWIN_LAST="$(mktemp)"
+python3 - Cargo.lock "$DUP_FIRST" "$DUP_LAST" "$TWIN_FIRST" "$TWIN_LAST" "$DCS_UPGRADE_REV" <<'PY'
+import re, sys
+lock, first, last, twin_first, twin_last, baseline = sys.argv[1:7]
+text = open(lock).read()
+header, *blocks = re.split(r"(?m)^\[\[package\]\]\n", text)
+pinned = [i for i, block in enumerate(blocks)
+          if re.search(r'(?m)^name = "dcs-model"$', block)]
+if len(pinned) != 1:
+    sys.exit(f"doctor: expected one dcs-model package block, found {len(pinned)}")
+i = pinned[0]
+divergent, count = re.subn(
+    r'\?[^#"]*#[0-9a-f]{40}"', f'?rev={baseline}#{baseline}"', blocks[i]
+)
+if count != 1:
+    sys.exit(f"doctor: expected one git source in the dcs-model block, rewrote {count}")
+sourceless, count = re.subn(r'(?m)^source = "[^"]*"\n', "", blocks[i])
+if count != 1:
+    sys.exit(f"doctor: expected one source line in the dcs-model block, dropped {count}")
+def emit(inserted, at):
+    kept = blocks[:at] + [inserted] + blocks[at:]
+    return header + "".join(f"[[package]]\n{block}" for block in kept)
+open(first, "w").write(emit(divergent, i))
+open(last, "w").write(emit(divergent, i + 1))
+open(twin_first, "w").write(emit(sourceless, i))
+open(twin_last, "w").write(emit(sourceless, i + 1))
+PY
+for dup in "$DUP_FIRST" "$DUP_LAST"; do
+    if out="$(lockfile_leg "$dup" 2>&1)"; then
+        fail "lockfile-stale-unchecked: a lockfile recording a release crate at a second, divergent pin passed the lockfile leg"
+    fi
+    case "$out" in
+        *"different sources"*) ;;
+        *) fail "lockfile-stale-unchecked: the duplicated divergent record was refused without naming the sources: $out" ;;
+    esac
+done
+for twin in "$TWIN_FIRST" "$TWIN_LAST"; do
+    if out="$(lockfile_check "$twin" 2>&1)"; then
+        fail "path-dependency-leak-unchecked: a lockfile recording a release crate through a sourceless package block passed the check"
+    fi
+    case "$out" in
+        *"path-dependency-leak:"*) ;;
+        *) fail "path-dependency-leak-unchecked: the sourceless duplicate was refused without the path-dependency-leak diagnostic: $out" ;;
+    esac
+done
+echo "  a lockfile recording a release crate twice refused"
 
 echo "== resolve =="
 # `cargo fetch --locked` is the fast path and, with a committed
@@ -581,7 +555,7 @@ if ! cargo fetch --locked 2>"$LOCKED_ERR"; then
         fail "lockfile-stale: the committed Cargo.lock did not satisfy the declared pin — the resolve stage re-resolved it; regenerate it with \`cargo update\` (README §7)"
     fi
 fi
-rm -f "$LOCKED_ERR" "$STALE_LOCK" "$MISSING_LOCK"
+rm -f "$LOCKED_ERR" "$STALE_LOCK" "$MISSING_LOCK" "$DUP_FIRST" "$DUP_LAST" "$TWIN_FIRST" "$TWIN_LAST"
 
 echo "== build =="
 cargo build --quiet || {

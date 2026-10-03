@@ -132,7 +132,6 @@ grant instead of passing an unexercised contract.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -1385,9 +1384,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"usurped-claim-reclaim-digest {digest} — an unkeyed attachment "
         f"took the keyed pair's field at tick {evidence['seized_at']}, "

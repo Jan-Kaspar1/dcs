@@ -50,8 +50,8 @@ use std::path::{Path, PathBuf};
 mod support;
 
 use support::{
-    SimTcp, image_value, kill, settled_receipts, sim_tcp_document, spawn_controller,
-    spawn_controller_logged, spawn_plant, write_model,
+    SimTcp, canonicalize_origins, image_value, kill, settled_receipts, sim_tcp_document,
+    spawn_controller, spawn_controller_logged, spawn_plant, write_model,
 };
 
 /// The shared plant's model — the dcs-plant tank loop: level raw (10)
@@ -788,6 +788,9 @@ fn run_operations(tag: &str) -> serde_json::Value {
             outcome: CommandOutcome::Applied { tick: apply_tick },
             actor: Some(OPERATOR.to_string()),
             reason: None,
+            // The journaled settle keeps the issued receipt's minted
+            // submission identity (#775).
+            submission: receipt.submission,
         },
         "the journaled CommandSettled must carry the declared actor"
     );
@@ -838,7 +841,7 @@ fn run_operations(tag: &str) -> serde_json::Value {
     .collect();
     masks.sort_by_key(|mask| std::cmp::Reverse(mask.0.len()));
 
-    let digest = serde_json::json!({
+    let mut digest = serde_json::json!({
         "field_trace": {
             "pair_a": trace_a.iter().map(|(valve, level)| [valve, level]).collect::<Vec<_>>(),
             "pair_b": trace_b.iter().map(|(valve, level)| [valve, level]).collect::<Vec<_>>(),
@@ -861,6 +864,7 @@ fn run_operations(tag: &str) -> serde_json::Value {
             "settled": settled_receipts(&served_journal),
         },
     });
+    canonicalize_origins(&mut digest, &mut Vec::new());
 
     let _ = std::fs::remove_dir_all(&dir);
     digest

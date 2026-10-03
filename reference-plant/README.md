@@ -32,6 +32,11 @@ model/plant.json       the emitted, approved plant model
 model/dynamics.json    the declared simulation dynamics
 ci/scenario.json       the generated scenario the CI drives
 ci/check.sh            the clean-CI check a fresh clone runs
+ci/lockfile.py         the committed-lockfile leg — the manifest's
+                       declared pin read through `cargo metadata
+                       --no-deps`, the lockfile parsed as TOML, the
+                       release crates' recorded sources held to the
+                       pin before any fetch can rewrite the artifact
 ci/alarm_validation.py the alarm-validation leg — the emitted model's
                        managed-alarm record audited, doctored copies
                        refused by the released `dcs-controller
