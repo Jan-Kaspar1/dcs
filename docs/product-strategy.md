@@ -48,6 +48,16 @@ APL comparisons may identify a behavior worth testing, such as explicit override
 
 ## Planning policy
 
+**Backlog cleanup phase, 2026-10-03:** Complete and reconcile the existing issues
+and PRs before expanding product scope. Automatic goal-driven planning and new
+roadmap/research/architecture task creation are disabled until Kaspar explicitly
+changes direction. The supervisor uses `planning.enabled: false`; an empty or
+blocked queue is a reason to report or resolve the blocker, not to manufacture
+replacement work. Concrete newly discovered defects may still become issues,
+with reproduction evidence and duplicate checks. QA defect routing remains
+available. The milestone plan retains context for current issues and future
+steering; they do not authorize new goal-driven tickets during cleanup.
+
 Every product issue cites one or more stable requirement IDs from `docs/requirements/`. A pure enabler may use `ENABLER`, but its scope must state which requirement or milestone it unlocks. If a requirement lacks enough evidence to write observable acceptance criteria, the planner creates a research issue first. Research issues update `docs/research/` and the applicable requirements file; implementation follows in a later planning pass.
 
 ## Product areas and investment allocation
