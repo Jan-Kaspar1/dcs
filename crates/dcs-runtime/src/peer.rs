@@ -622,6 +622,22 @@ pub struct Peer<'d> {
     /// read `false`, fail-closed like the served report's
     /// absent-vs-unclaimed distinction.
     unclaimed_observed: bool,
+    /// The configured tracking source — the `--standby`/`--peer`
+    /// target [`note_tracking_source`](Self::note_tracking_source)
+    /// records — taking precedence over `announced_source`. Peer-local
+    /// wiring: it never enters the executor's run state, only the
+    /// `tracking_source` stamp [`checkpoint`](Self::checkpoint) writes
+    /// so a `--state-file` resume can name the incumbent's stream to
+    /// the restart-as-active consult.
+    tracked_source: Option<SocketAddr>,
+    /// The monitor address a tracking peer announced through its
+    /// `GET /checkpoint?peer=` pulls — the follow-peer fallback
+    /// [`note_announced_source`](Self::note_announced_source) records
+    /// when the serving monitor accepts an announce. The same
+    /// resolution the demotion contract applies: the configured source
+    /// wins, the announced one answers "who tracks me" when nothing was
+    /// configured.
+    announced_source: Option<SocketAddr>,
 }
 
 /// The bound over the claim basis a promotion declares: the number of
@@ -1666,6 +1682,8 @@ impl<'d> Peer<'d> {
             field_claim: None,
             claim_lead_base: None,
             unclaimed_observed: false,
+            tracked_source: None,
+            announced_source: None,
         }
     }
 
@@ -1984,6 +2002,39 @@ impl<'d> Peer<'d> {
         self
     }
 
+    /// Records this peer's configured tracking source — the
+    /// `--standby`/`--peer` target the shell resolved — so
+    /// [`checkpoint`](Self::checkpoint) can stamp it as the persisted
+    /// `tracking_source`. It is peer-local wiring, never run state:
+    /// the value only answers "which monitor address would this
+    /// instance track when it does not own the field", letting a
+    /// `--state-file` resume name the incumbent's checkpoint stream to
+    /// the restart-as-active consult. The configured source takes
+    /// precedence over anything [`note_announced_source`](Self::note_announced_source)
+    /// records — the same resolution the demotion contract applies.
+    /// The monitor mirrors each configured source here when its
+    /// `driven`/`with_standby_source` wiring installs it.
+    pub fn note_tracking_source(&mut self, source: SocketAddr) {
+        self.tracked_source = Some(source);
+    }
+
+    /// Records the monitor address a tracking peer announced through
+    /// its `GET /checkpoint?peer=` pulls — the follow-peer fallback of
+    /// the tracking-source contract — so the stamped
+    /// `tracking_source` also names a peer this instance learned
+    /// rather than was configured with. The serving monitor mirrors
+    /// each accepted announce here.
+    pub fn note_announced_source(&mut self, source: SocketAddr) {
+        self.announced_source = Some(source);
+    }
+
+    /// The monitor address this peer would track while not owning the
+    /// field — the configured source when set, else the announced one —
+    /// the stamp [`checkpoint`](Self::checkpoint) persists.
+    pub fn tracking_source(&self) -> Option<SocketAddr> {
+        self.tracked_source.or(self.announced_source)
+    }
+
     /// An instance tracking an active peer: role `standby`, its gate
     /// closed — scans compute outputs but no write reaches the field.
     pub fn standby(executor: Executor<'d>, gate: Option<&'d WriteGate<'d>>) -> Self {
@@ -2043,6 +2094,8 @@ impl<'d> Peer<'d> {
             field_claim: None,
             claim_lead_base: None,
             unclaimed_observed: false,
+            tracked_source: None,
+            announced_source: None,
         }
     }
 
@@ -4320,10 +4373,17 @@ impl<'d> Peer<'d> {
     /// always stamps its own `owns_field`, so a checkpoint served by a
     /// run writing nothing tells the puller the tracked line has no
     /// field owner. A bare [`Executor::checkpoint`] leaves the stamp
-    /// absent, carrying no ownership claim.
+    /// absent, carrying no ownership claim — and with this peer's
+    /// resolved [`tracking_source`](Self::tracking_source), the monitor
+    /// address it would pull checkpoints from while not owning the
+    /// field, so a `--state-file` persist carries it and a restarted
+    /// launched-active's consult knows where the incumbent's checkpoint
+    /// stream lives. Both stamps are peer-local wiring, not run state:
+    /// an adopting peer ignores them.
     pub fn checkpoint(&self) -> Checkpoint {
         let mut checkpoint = self.executor.checkpoint();
         checkpoint.source_owns_field = Some(self.owns_field());
+        checkpoint.tracking_source = self.tracking_source();
         checkpoint
     }
 

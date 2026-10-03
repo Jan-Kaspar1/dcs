@@ -181,7 +181,11 @@ commit that release names — so a fresh clone resolves it under
 name before any fetch can quietly re-resolve it. A lockfile that
 records another revision is `lockfile-stale`; the documented remedy is
 `cargo update` in this tree (§7), which regenerates it against the pin
-above.
+above. Every record of a release crate in that file must carry a git
+source: a released crate reaching the tree through a `path`
+dependency — which Cargo records with no `source` line at all, and
+which `cargo fetch --locked` accepts over the very same file — is
+`path-dependency-leak`.
 
 ### 3. Compose and emit
 
@@ -688,7 +692,9 @@ silently: a pin that resolves no release crates is `pin-unresolvable`;
 a committed `Cargo.lock` that records another remote, another
 `rev`/`tag`, or another revision than the manifest declares is
 `lockfile-stale`; a release crate recorded from a `path` into a
-checkout rather than the pinned remote is `path-dependency-leak`;
+checkout rather than the pinned remote — a record carrying no `source`
+line at all, as Cargo writes a path package — is
+`path-dependency-leak`;
 a pin whose supported API no longer compiles your composition is
 `surface-incompatible`; a model document the release's tooling refuses
 is `tooling-rejected`; a model whose semantic content changed under a

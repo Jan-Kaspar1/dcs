@@ -6,8 +6,9 @@
 # failure (docs/release-contract.md):
 #
 #   lockfile     the committed Cargo.lock satisfies the manifest this
-#                repository ships — the release crates recorded from
-#                git sources only, never a path into a checkout
+#                repository ships — every `dcs-*` record of a release
+#                crate carried by a git source, never a path package
+#                into a checkout, which records no source at all
 #                (path-dependency-leak), on the pin's own remote and
 #                the same `tag`/`rev` fragment Cargo.toml spells, one
 #                precise revision across all three — at the revision
@@ -369,14 +370,16 @@ PY
 # leg, a doctored scratch copy in the self-check below; $2 is the
 # release record's `record.md` when one was substituted, else the
 # empty string. Exit status 2 is a release crate recorded from a
-# non-git source — `path-dependency-leak`'s finding — and 1 every
-# other disagreement, `lockfile-stale`'s.
+# non-git source or from no source at all — a `path` package into some
+# checkout carries neither, and is `path-dependency-leak`'s finding —
+# and 1 every other disagreement, `lockfile-stale`'s.
 lockfile_leg() {
     python3 ci/lockfile.py "${1:-Cargo.lock}" "$DCS_REMOTE" "${2:-}"
 }
 
 # The leg's exit status named: a release crate recorded from a path
-# into some checkout is `path-dependency-leak`, every other
+# into some checkout — or with no source at all, as a path package is
+# written — is `path-dependency-leak`; every other
 # disagreement between the committed lockfile and this repository's
 # declared pin is `lockfile-stale`.
 lockfile_check() {
@@ -384,7 +387,7 @@ lockfile_check() {
     lockfile_leg "${1:-Cargo.lock}" "${2:-}" || status=$?
     case "$status" in
         0) return 0 ;;
-        2) fail "path-dependency-leak: a release crate is recorded from a non-git source in ${1:-Cargo.lock}" ;;
+        2) fail "path-dependency-leak: a release crate is recorded from a non-git source — or from no source at all — in ${1:-Cargo.lock}" ;;
         *) fail "lockfile-stale: ${1:-Cargo.lock} does not record this repository's declared pin" ;;
     esac
 }

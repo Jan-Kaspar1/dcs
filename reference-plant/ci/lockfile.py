@@ -50,8 +50,9 @@ fetch_remote, record_path = arguments[1], arguments[2]
 release = ("dcs-build", "dcs-core", "dcs-model")
 
 # `leak` is the non-git-source finding — a recorded `path` into some
-# checkout — and carries its own exit status so the shell reports
-# `path-dependency-leak` rather than the stale-pin diagnostic.
+# checkout, or a released crate recorded with no source at all — and
+# carries its own exit status so the shell reports `path-dependency-leak`
+# rather than the stale-pin diagnostic.
 def leak(message):
     print(message, file=sys.stderr)
     sys.exit(2)
@@ -105,33 +106,40 @@ try:
 except (OSError, tomllib.TOMLDecodeError) as error:
     sys.exit(f"{lock_path} does not parse as a TOML lockfile: {error}")
 
-# Every release crate's recorded source: git only, one source, on the
-# manifest's own remote and query, at one precise revision. A crate
-# whose package entry carries no `source` field resolves from a path
-# into some checkout — `path-dependency-leak`'s finding — while a
-# crate with no package entry is absent entirely, `lockfile-stale`'s:
-# nothing is recorded, let alone a path source.
-packages = [
-    package
-    for package in lock.get("package", [])
-    if isinstance(package, dict) and isinstance(package.get("name"), str)
-]
-present = {package["name"] for package in packages}
-recorded = {
-    package["name"]: package["source"]
-    for package in packages
-    if isinstance(package.get("source"), str)
-}
-leaked = [name for name in release if name in present and name not in recorded]
-if leaked:
-    leak(f"release crates record no source in {lock_path} — a path into some checkout: {sorted(leaked)}")
-missing = [name for name in release if name not in present]
+# Every package entry the lockfile records, as (name, source) pairs.
+# The entry — not the source-bearing field — is the unit: Cargo writes
+# a path package with no `source` key at all, so a released crate
+# reaching a checkout through one leaves no field for a per-name map
+# built out of sourced entries to collect, and a second same-name
+# record at another pin disappears into a last-wins one. Every record
+# is kept, so neither hides behind another.
+packages = []
+for package in lock.get("package", []):
+    if not isinstance(package, dict) or not isinstance(package.get("name"), str):
+        sys.exit(f"{lock_path} records a package block with no name")
+    source = package.get("source")
+    packages.append((package["name"], source if isinstance(source, str) else None))
+
+# Every release crate's recorded source — git only, one source, on the
+# manifest's own remote and query, at one precise revision. A `dcs-*`
+# entry carrying no `source` field at all resolves from a path into
+# some checkout, `path-dependency-leak`'s finding, as does a recorded
+# non-git source; a crate with no package entry is absent entirely,
+# `lockfile-stale`'s: nothing is recorded, let alone a path source.
+for name, source in packages:
+    if not name.startswith("dcs-"):
+        continue
+    if source is None:
+        leak(f"{name} is recorded with no source in {lock_path} — a path into some checkout")
+    if not source.startswith("git+"):
+        leak(f"{name} resolved from {source} — only a git source satisfies a git pin")
+missing = [name for name in release if name not in {seen for seen, _ in packages}]
 if missing:
     sys.exit(f"release crates missing from {lock_path}: {sorted(missing)}")
-for name in release:
-    if not recorded[name].startswith("git+"):
-        leak(f"{name} resolved from {recorded[name]} — only a git source satisfies a git pin")
-sources = {recorded[name] for name in release}
+# Every record of every release crate must agree on the one source: a
+# second same-name record at another remote or pin is the stale-pin
+# finding, not a record the first entry may stand in for.
+sources = {source for name, source in packages if name in release}
 if len(sources) != 1:
     sys.exit(f"the release crates record different sources: {sorted(sources)}")
 source = sources.pop()

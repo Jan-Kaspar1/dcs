@@ -41,8 +41,8 @@ use crate::journal_file::{JournalFile, JournalRecord};
 use crate::store::Store;
 use dcs_core::{
     CarryoverReport, CommandOutcome, CommandReceipt, Divergence, DurableEntry, DurableEvent,
-    EventRetention, JournalEntry, JournalEvent, PointId, Quality, TelemetrySnapshot, Tick,
-    TickAnchor, Value,
+    EventRetention, JournalEntry, JournalEvent, PointId, Quality, RestartConsultOutcome,
+    TelemetrySnapshot, Tick, TickAnchor, Value,
 };
 use dcs_runtime::{
     ClaimObservation, ClaimRearm, Executor, ForeignClaimPreempt, OrphanReport, PromotionRefusal,
@@ -914,6 +914,20 @@ impl Recorder {
                 resumed_at: restart.resumed_at,
             },
         );
+    }
+
+    /// Journals a restart-as-active incumbent consult — the pre-claim
+    /// check a restarted launched-active ran against the checkpoint
+    /// stream its persisted state named — attributed to the tick the
+    /// consult ran at, carrying the consulted `source` and what the
+    /// consult did with what it found.
+    pub(super) fn note_restart_consult(
+        &mut self,
+        tick: Tick,
+        source: String,
+        outcome: RestartConsultOutcome,
+    ) {
+        self.push(tick, JournalEvent::RestartConsult { source, outcome });
     }
 
     /// Journals an adopted tracking source — a field owner demoted

@@ -419,6 +419,7 @@ mod tests {
             source_owns_field: None,
             line_owner: None,
             line_proof: None,
+            tracking_source: None,
         }
     }
 
