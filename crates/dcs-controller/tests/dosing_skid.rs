@@ -75,7 +75,8 @@ use dcs_build::dosing::{DosingSkidConfig, DosingSkidLayout, dosing_skid};
 use dcs_build::station::AlarmLayout;
 use dcs_core::{
     Command, CommandOutcome, CommandReceipt, IoDriver, JournalEntry, JournalEvent, PointId,
-    Quality, QualityReason, Role, Sample, StandbySync, TelemetrySnapshot, Tick, Value, ValueKind,
+    Quality, QualityReason, RestartConsultOutcome, Role, Sample, StandbySync, TelemetrySnapshot,
+    Tick, Value, ValueKind,
 };
 use dcs_model::PlantModel;
 use dcs_monitor::MonitorClient;
@@ -1238,7 +1239,27 @@ fn run_dosing(tag: &str) -> serde_json::Value {
         },
         "the restart marker must be served at the restored tick: {served:?}"
     );
-    assert_eq!(served.len(), before_restart.len() + 1);
+    // The restart-as-active consult trails the boundary: the persisted
+    // checkpoint stamped the standby's announced stream and the
+    // restarted run pulled it before claiming. The peer it found is the
+    // standby — a tracker of the interrupted line, not an incumbent —
+    // so the consult declines its stream by name rather than adopting
+    // a tracker's local ticks onto this run's own tick axis.
+    assert_eq!(
+        served[before_restart.len() + 1],
+        JournalEntry {
+            seq: before_restart.last().unwrap().seq + 2,
+            tick: interrupted,
+            event: JournalEvent::RestartConsult {
+                source: standby_process.addr.to_string(),
+                outcome: RestartConsultOutcome::Unadopted {
+                    detail: "the consulted peer reports it does not own the field".to_string(),
+                },
+            },
+        },
+        "the pre-claim consult must journal the declined tracker: {served:?}"
+    );
+    assert_eq!(served.len(), before_restart.len() + 2);
     assert_eq!(
         file_boundaries(&journal_active),
         vec![(1, 0), (2, interrupted.0)]
@@ -1649,7 +1670,7 @@ fn run_dosing(tag: &str) -> serde_json::Value {
         "trace": trace,
         "journal": {
             "before_restart": before_restart,
-            "after_restart": after_restart,
+            "after_restart": masked(serde_json::to_value(&after_restart).unwrap(), &masks),
             "boundaries": file_boundaries(&journal_active),
             "standby_boundaries": file_boundaries(&journal_standby),
             "settled": settled_receipts(&served),
