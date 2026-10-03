@@ -228,6 +228,27 @@ fn fault_and_clear_fault_roundtrip() {
 }
 
 #[test]
+fn ping_answers_the_plants_liveness() {
+    with_server(fixture_map(), |addr| {
+        // The container health contract's probe: `alive` carrying the
+        // plant's current tick — advancing as the plant steps, so a
+        // probe sees the freshness, not just the answer.
+        assert_eq!(
+            ctl_ok(addr, &["ping"]),
+            PlantResponse::Alive { tick: Tick::ZERO }
+        );
+        assert_eq!(
+            ctl_ok(addr, &["step", "0.5"]),
+            PlantResponse::Stepped { tick: Tick(1) }
+        );
+        assert_eq!(
+            ctl_ok(addr, &["ping"]),
+            PlantResponse::Alive { tick: Tick(1) }
+        );
+    });
+}
+
+#[test]
 fn an_injected_fault_is_visible_in_a_controllers_snapshot_and_journal() {
     with_server(fixture_map(), |addr| {
         // A connected controller: an executor scanning the shared plant
@@ -294,15 +315,25 @@ fn an_injected_fault_is_visible_in_a_controllers_snapshot_and_journal() {
 #[test]
 fn an_unreachable_server_exits_nonzero_naming_the_address() {
     // Bind once to learn a free port, then drop the listener so the
-    // address refuses connections.
-    let addr = TcpListener::bind(("127.0.0.1", 0))
-        .unwrap()
-        .local_addr()
-        .unwrap();
-    let output = ctl(addr, &["list"]);
-    assert!(!output.status.success());
-    let stderr = stderr(&output);
-    assert!(stderr.contains(&addr.to_string()), "{stderr}");
+    // address refuses connections. A concurrently bound fixture can
+    // legitimately take the freed port — the probe then answers —
+    // so retry until a probed port stays refused.
+    for _ in 0..20 {
+        let addr = TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let output = ctl(addr, &["list"]);
+        if output.status.success() {
+            continue;
+        }
+        let stderr = stderr(&output);
+        assert!(stderr.contains(&addr.to_string()), "{stderr}");
+        return;
+    }
+    panic!(
+        "twenty dead ports each answered — a concurrent listener keeps taking the freed port or the tool accepts a refused address"
+    );
 }
 
 #[test]
@@ -353,6 +384,7 @@ fn malformed_arguments_fail_with_usage_never_a_panic() {
         vec![dead, "step"],
         vec![dead, "step", "abc"],
         vec![dead, "step", "nan"],
+        vec![dead, "ping", "extra"],
     ];
     for args in &cases {
         let output = ctl_args(args);

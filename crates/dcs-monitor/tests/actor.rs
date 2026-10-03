@@ -9,7 +9,7 @@
 
 use dcs_core::{
     Command, CommandError, CommandOutcome, CommandReceipt, Direction, IoDriver, IoError,
-    JournalEvent, PointId, Role, Sample, Tick, Value, ValueKind,
+    JournalEvent, PointId, Role, Sample, SwitchOrigin, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{Monitor, MonitorClient, PAGE};
@@ -184,6 +184,7 @@ fn an_attributed_command_settles_into_an_attributed_receipt_and_journal_entry() 
                     apply_tick: Tick(2)
                 },
                 actor: Some("operator-7".to_string()),
+                reason: None,
             }
         );
 
@@ -196,6 +197,7 @@ fn an_attributed_command_settles_into_an_attributed_receipt_and_journal_entry() 
                 command,
                 outcome: CommandOutcome::Applied { tick: Tick(2) },
                 actor: Some("operator-7".to_string()),
+                reason: None,
             }]
         );
         // The receipt log carries the same attribution.
@@ -286,10 +288,113 @@ fn a_stray_actor_beside_a_bare_command_is_refused() {
 }
 
 #[test]
+fn a_reasoned_command_settles_into_a_reasoned_receipt_and_journal_entry() {
+    with_monitor(|_driver, client| {
+        client.advance(1).unwrap();
+        let command = write_value(10, Value::Float(5.0));
+        // The fully attributed envelope: actor and reason both declared,
+        // both stamped onto the receipt and both journaled.
+        let receipt = client
+            .command_attributed(
+                &command,
+                Some("operator-7"),
+                Some("nuisance trips during pump work"),
+            )
+            .unwrap();
+        assert_eq!(
+            receipt,
+            CommandReceipt {
+                command: command.clone(),
+                outcome: CommandOutcome::Accepted {
+                    apply_tick: Tick(2)
+                },
+                actor: Some("operator-7".to_string()),
+                reason: Some("nuisance trips during pump work".to_string()),
+            }
+        );
+        client.advance(1).unwrap();
+        assert_eq!(
+            settled_receipts(client),
+            vec![CommandReceipt {
+                command: command.clone(),
+                outcome: CommandOutcome::Applied { tick: Tick(2) },
+                actor: Some("operator-7".to_string()),
+                reason: Some("nuisance trips during pump work".to_string()),
+            }]
+        );
+
+        // The reason is independent submission metadata: declared
+        // without an actor it still rides the envelope and journals.
+        let receipt = client
+            .command_attributed(&command, None, Some("declared alone"))
+            .unwrap();
+        assert_eq!(receipt.actor, None);
+        assert_eq!(receipt.reason.as_deref(), Some("declared alone"));
+        client.advance(1).unwrap();
+        let settled = settled_receipts(client);
+        assert_eq!(settled.len(), 2);
+        assert_eq!(settled[1].reason.as_deref(), Some("declared alone"));
+        assert_eq!(settled[1].actor, None);
+    });
+}
+
+#[test]
+fn the_raw_reason_envelope_parses_and_a_stray_reason_is_refused() {
+    with_monitor(|_driver, client| {
+        // The reason-only envelope — `reason` alone selects the
+        // envelope shape; the reasonless half journals unattributed.
+        let (status, body) = client
+            .request(
+                "POST",
+                "/command",
+                Some(
+                    r#"{"command":{"write_value":{"point":10,"kind":"float","value":{"float":7.5}}},"reason":"shelved for the washdown"}"#,
+                ),
+            )
+            .unwrap();
+        assert_eq!(status, 200, "{body}");
+        let receipt: CommandReceipt = serde_json::from_str(&body).unwrap();
+        assert_eq!(receipt.actor, None);
+        assert_eq!(receipt.reason.as_deref(), Some("shelved for the washdown"));
+
+        // An envelope key the contract does not declare refuses —
+        // strict fields, never a silently dropped attribution.
+        let (status, _body) = client
+            .request(
+                "POST",
+                "/command",
+                Some(
+                    r#"{"command":{"write_value":{"point":10,"kind":"float","value":{"float":7.5}}},"operator":"console-a"}"#,
+                ),
+            )
+            .unwrap();
+        assert_eq!(status, 400);
+
+        // A stray top-level "reason" beside a bare command is the same
+        // refusal the stray "actor" takes.
+        let (status, _body) = client
+            .request(
+                "POST",
+                "/command",
+                Some(
+                    r#"{"write_value":{"point":10,"kind":"float","value":{"float":7.5}},"reason":"x"}"#,
+                ),
+            )
+            .unwrap();
+        assert_eq!(status, 400);
+        // Only the accepted submission reached the executor's receipt
+        // log — both refused envelopes were refused at the boundary.
+        assert_eq!(client.receipts().unwrap(), vec![receipt]);
+    });
+}
+
+#[test]
 fn a_not_active_rejection_stamps_the_actor_identically() {
     with_standby_monitor(|_driver, client| {
         let command = write_value(10, Value::Float(5.0));
-        let receipt = client.command_as(&command, Some("operator-7")).unwrap();
+        let receipt = client
+            .command_attributed(&command, Some("operator-7"), Some("retry on the peer"))
+            .unwrap();
         assert_eq!(
             receipt,
             CommandReceipt {
@@ -301,6 +406,7 @@ fn a_not_active_rejection_stamps_the_actor_identically() {
                     },
                 },
                 actor: Some("operator-7".to_string()),
+                reason: Some("retry on the peer".to_string()),
             }
         );
         // The refusal never entered the executor's receipt log, but the
@@ -318,9 +424,124 @@ fn the_served_page_supplies_the_configured_operator_identity() {
         // The ?operator= URL parameter is the configured identity…
         assert!(page.contains("urlParams.get(\"operator\")"), "{page}");
         // …stamped on every submission through the attributed envelope…
-        assert!(page.contains("actor: operator"), "{page}");
+        assert!(page.contains("body.actor = operator"), "{page}");
         // …and stated beside the command form.
         assert!(page.contains("command-actor"), "{page}");
+    });
+}
+
+/// The journaled `RoleChanged` events of the served journal: the
+/// transition beside the switch's attribution — `origin` marking a
+/// requested switch, `actor` the declared identity it carried.
+fn role_changes(client: &MonitorClient) -> Vec<(Role, Role, Option<SwitchOrigin>, Option<String>)> {
+    client
+        .journal(0)
+        .unwrap()
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            JournalEvent::RoleChanged {
+                from,
+                to,
+                origin,
+                actor,
+            } => Some((*from, *to, *origin, actor.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_switch_requests_journal_the_declared_actor_or_unattributed() {
+    let driver = StubDriver::new(&[
+        (PointId(10), Value::Float(0.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ]);
+    let peer = Peer::standby(executor(&driver), None);
+    // A configured standby source satisfies the demote guard — the
+    // demotion verifies nothing against it and the one tracking pull
+    // the settled standby's next scan runs misses instantly on the
+    // refused port.
+    let monitor = Monitor::bind_peer("127.0.0.1:0", peer, signal_index())
+        .unwrap()
+        .with_standby_source("127.0.0.1:1".parse().unwrap());
+
+    // A source run's checkpoint converges the standby — the promote
+    // contract's prerequisite.
+    let source_driver = StubDriver::new(&[
+        (PointId(10), Value::Float(0.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ]);
+    let mut source = executor(&source_driver);
+    source.run(3);
+    monitor.apply_checkpoint(&source.checkpoint()).unwrap();
+
+    serve(&monitor, &driver, |_driver, client| {
+        // The attributed shape — `{"actor":…}` — on `POST /promote`:
+        // both journaled transitions, the request's and the settle's,
+        // carry the declared actor beside `origin: request`.
+        let (status, body) = client
+            .request("POST", "/promote", Some(r#"{"actor":"operator-7"}"#))
+            .unwrap();
+        assert_eq!(status, 200, "{body}");
+        client.advance(1).unwrap();
+        assert_eq!(client.role().unwrap().role, Role::Active);
+        assert_eq!(
+            role_changes(client),
+            vec![
+                (
+                    Role::Standby,
+                    Role::Promoting,
+                    Some(SwitchOrigin::Request),
+                    Some("operator-7".to_string()),
+                ),
+                (
+                    Role::Promoting,
+                    Role::Active,
+                    Some(SwitchOrigin::Request),
+                    Some("operator-7".to_string()),
+                ),
+            ]
+        );
+
+        // The bare POST stays accepted and journals unattributed —
+        // `origin: request` with no actor, never a rejection.
+        let (status, body) = client.request("POST", "/demote", None).unwrap();
+        assert_eq!(status, 200, "{body}");
+        client.advance(1).unwrap();
+        assert_eq!(client.role().unwrap().role, Role::Standby);
+        assert_eq!(
+            role_changes(client)[2..].to_vec(),
+            vec![
+                (
+                    Role::Active,
+                    Role::Demoting,
+                    Some(SwitchOrigin::Request),
+                    None,
+                ),
+                (
+                    Role::Demoting,
+                    Role::Standby,
+                    Some(SwitchOrigin::Request),
+                    None,
+                ),
+            ]
+        );
+
+        // A body that fails the attributed shape is a 400 — an
+        // attribution the body meant to carry never silently drops —
+        // and a refused switch journals nothing either way.
+        let before = client.journal(0).unwrap().len();
+        let (status, _body) = client
+            .request("POST", "/demote", Some(r#"{"actor":"op","bogus":1}"#))
+            .unwrap();
+        assert_eq!(status, 400);
+        let (status, body) = client
+            .request("POST", "/demote", Some(r#"{"actor":"op"}"#))
+            .unwrap();
+        assert_eq!(status, 409, "{body}");
+        assert_eq!(client.journal(0).unwrap().len(), before);
     });
 }
 

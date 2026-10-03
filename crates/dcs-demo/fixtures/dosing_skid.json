@@ -138,7 +138,8 @@
       "channel": {
         "device": 1,
         "name": "flow"
-      }
+      },
+      "unit": "m3/h"
     },
     {
       "id": 11,
@@ -147,7 +148,8 @@
       "channel": {
         "device": 1,
         "name": "flow-src"
-      }
+      },
+      "unit": "m3/h"
     },
     {
       "id": 12,
@@ -156,7 +158,8 @@
       "channel": {
         "device": 1,
         "name": "tank-level"
-      }
+      },
+      "unit": "L"
     },
     {
       "id": 13,
@@ -165,7 +168,8 @@
       "channel": {
         "device": 1,
         "name": "discharge-rate"
-      }
+      },
+      "unit": "g/h"
     },
     {
       "id": 14,
@@ -174,7 +178,8 @@
       "channel": {
         "device": 1,
         "name": "net-draw"
-      }
+      },
+      "unit": "L/scan"
     },
     {
       "id": 15,
@@ -183,7 +188,8 @@
       "channel": {
         "device": 1,
         "name": "tank-refill"
-      }
+      },
+      "unit": "L/scan"
     },
     {
       "id": 16,
@@ -192,7 +198,8 @@
       "channel": {
         "device": 1,
         "name": "injection-rate"
-      }
+      },
+      "unit": "g/h"
     },
     {
       "id": 20,
@@ -230,7 +237,8 @@
       "value_type": "float",
       "initial": {
         "float": 0.0
-      }
+      },
+      "unit": "g/h"
     },
     {
       "id": 201,
@@ -238,7 +246,8 @@
       "value_type": "float",
       "initial": {
         "float": 0.0
-      }
+      },
+      "unit": "g/h"
     },
     {
       "id": 202,
@@ -401,7 +410,8 @@
       "value_type": "float",
       "initial": {
         "float": 0.0
-      }
+      },
+      "unit": "g/h"
     },
     {
       "id": 223,
@@ -409,7 +419,8 @@
       "value_type": "float",
       "initial": {
         "float": 0.0
-      }
+      },
+      "unit": "g/h"
     },
     {
       "id": 224,
@@ -426,7 +437,8 @@
       "value_type": "float",
       "initial": {
         "float": 0.0
-      }
+      },
+      "unit": "g/h"
     },
     {
       "id": 226,
@@ -434,7 +446,8 @@
       "value_type": "float",
       "initial": {
         "float": 0.0
-      }
+      },
+      "unit": "g/h"
     },
     {
       "id": 227,
@@ -442,7 +455,8 @@
       "value_type": "float",
       "initial": {
         "float": 0.0
-      }
+      },
+      "unit": "g/h"
     },
     {
       "id": 228,
@@ -450,7 +464,8 @@
       "value_type": "float",
       "initial": {
         "float": 0.0
-      }
+      },
+      "unit": "g/h"
     },
     {
       "id": 229,
@@ -467,7 +482,8 @@
       "value_type": "int",
       "initial": {
         "int": 0
-      }
+      },
+      "unit": "pumps"
     },
     {
       "id": 231,
@@ -475,7 +491,8 @@
       "value_type": "int",
       "initial": {
         "int": 0
-      }
+      },
+      "unit": "pumps"
     },
     {
       "id": 232,
@@ -483,7 +500,8 @@
       "value_type": "int",
       "initial": {
         "int": 0
-      }
+      },
+      "unit": "pumps"
     },
     {
       "id": 233,
@@ -491,7 +509,8 @@
       "value_type": "int",
       "initial": {
         "int": 0
-      }
+      },
+      "unit": "pumps"
     },
     {
       "id": 234,
@@ -541,7 +560,8 @@
       "initial": {
         "float": 2.0
       },
-      "writable": true
+      "writable": true,
+      "unit": "mg/L"
     },
     {
       "id": 241,
@@ -560,7 +580,8 @@
       "initial": {
         "float": 0.0
       },
-      "writable": true
+      "writable": true,
+      "unit": "g/h"
     },
     {
       "id": 243,
@@ -577,7 +598,8 @@
       "value_type": "float",
       "initial": {
         "float": 0.0
-      }
+      },
+      "unit": "g"
     },
     {
       "id": 245,
@@ -585,7 +607,8 @@
       "value_type": "float",
       "initial": {
         "float": 0.0
-      }
+      },
+      "unit": "fraction"
     },
     {
       "id": 246,
@@ -773,7 +796,8 @@
       "channel": {
         "device": 1,
         "name": "p201-draw"
-      }
+      },
+      "unit": "L/scan"
     },
     {
       "id": 34,
@@ -782,7 +806,8 @@
       "channel": {
         "device": 1,
         "name": "p201-rate"
-      }
+      },
+      "unit": "g/h"
     },
     {
       "id": 40,
@@ -839,7 +864,8 @@
       "channel": {
         "device": 4,
         "name": "p201-speed"
-      }
+      },
+      "unit": "%"
     },
     {
       "id": 300,
@@ -972,7 +998,8 @@
       "value_type": "float",
       "initial": {
         "float": 0.0
-      }
+      },
+      "unit": "g/h"
     },
     {
       "id": 316,
@@ -980,7 +1007,8 @@
       "value_type": "float",
       "initial": {
         "float": 0.0
-      }
+      },
+      "unit": "g/h"
     },
     {
       "id": 317,
@@ -988,7 +1016,8 @@
       "value_type": "float",
       "initial": {
         "float": 0.0
-      }
+      },
+      "unit": "g/h"
     },
     {
       "id": 318,
@@ -1005,7 +1034,8 @@
       "value_type": "int",
       "initial": {
         "int": 0
-      }
+      },
+      "unit": "strokes"
     },
     {
       "id": 320,
@@ -1076,7 +1106,8 @@
       "channel": {
         "device": 1,
         "name": "p202-draw"
-      }
+      },
+      "unit": "L/scan"
     },
     {
       "id": 35,
@@ -1085,7 +1116,8 @@
       "channel": {
         "device": 1,
         "name": "p202-rate"
-      }
+      },
+      "unit": "g/h"
     },
     {
       "id": 41,
@@ -1142,7 +1174,8 @@
       "channel": {
         "device": 4,
         "name": "p202-speed"
-      }
+      },
+      "unit": "%"
     },
     {
       "id": 332,
@@ -1275,7 +1308,8 @@
       "value_type": "float",
       "initial": {
         "float": 0.0
-      }
+      },
+      "unit": "g/h"
     },
     {
       "id": 348,
@@ -1283,7 +1317,8 @@
       "value_type": "float",
       "initial": {
         "float": 0.0
-      }
+      },
+      "unit": "g/h"
     },
     {
       "id": 349,
@@ -1291,7 +1326,8 @@
       "value_type": "float",
       "initial": {
         "float": 0.0
-      }
+      },
+      "unit": "g/h"
     },
     {
       "id": 350,
@@ -1308,7 +1344,8 @@
       "value_type": "int",
       "initial": {
         "int": 0
-      }
+      },
+      "unit": "strokes"
     },
     {
       "id": 352,
@@ -1802,7 +1839,7 @@
       "id": 10245,
       "name": "deviation",
       "source": 245,
-      "unit": "",
+      "unit": "fraction",
       "description": "Commanded-versus-measured relative deviation",
       "group": "dosing-skid"
     },
@@ -2561,11 +2598,13 @@
         },
         "demand": {
           "direction": "out",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "g/h"
         },
         "dose": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "mg/L"
         },
         "fallback_active": {
           "direction": "out",
@@ -2573,8 +2612,16 @@
         },
         "flow": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "m3/h"
         }
+      },
+      "parameter_units": {
+        "fallback_rate": "g/h",
+        "max_dose": "mg/L",
+        "max_rate": "g/h",
+        "min_dose": "mg/L",
+        "min_rate": "g/h"
       }
     },
     {
@@ -2718,11 +2765,13 @@
       "ports": {
         "in": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "g/h"
         },
         "out": {
           "direction": "out",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "g/h"
         },
         "permissive": {
           "direction": "in",
@@ -2752,6 +2801,9 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "safe_value": "g/h"
       }
     },
     {
@@ -2765,11 +2817,13 @@
       "ports": {
         "control": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "g/h"
         },
         "manual": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "g/h"
         },
         "manual_active": {
           "direction": "out",
@@ -2781,8 +2835,12 @@
         },
         "out": {
           "direction": "out",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "g/h"
         }
+      },
+      "parameter_units": {
+        "transfer_delta": "g/h"
       }
     },
     {
@@ -2815,7 +2873,8 @@
         },
         "demand": {
           "direction": "out",
-          "value_type": "int"
+          "value_type": "int",
+          "unit": "pumps"
         },
         "duty_call": {
           "direction": "out",
@@ -2831,8 +2890,16 @@
         },
         "level": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "g/h"
         }
+      },
+      "parameter_units": {
+        "cutoff": "g/h",
+        "high": "g/h",
+        "lag_start": "g/h",
+        "start": "g/h",
+        "stop": "g/h"
       }
     },
     {
@@ -2875,11 +2942,13 @@
         },
         "demand": {
           "direction": "in",
-          "value_type": "int"
+          "value_type": "int",
+          "unit": "pumps"
         },
         "duty": {
           "direction": "out",
-          "value_type": "int"
+          "value_type": "int",
+          "unit": "pumps"
         },
         "fault_1": {
           "direction": "in",
@@ -2903,8 +2972,14 @@
         },
         "staged": {
           "direction": "out",
-          "value_type": "int"
+          "value_type": "int",
+          "unit": "pumps"
         }
+      },
+      "parameter_units": {
+        "min_off_ticks": "ticks",
+        "restage_delay_ticks": "ticks",
+        "start_delay_ticks": "ticks"
       }
     },
     {
@@ -2914,7 +2989,8 @@
       "ports": {
         "rate": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "g/h"
         },
         "reset": {
           "direction": "in",
@@ -2922,7 +2998,8 @@
         },
         "total": {
           "direction": "out",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "g"
         }
       }
     },
@@ -2944,16 +3021,23 @@
         },
         "deviation": {
           "direction": "out",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "fraction"
         },
         "expected": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "g/h"
         },
         "measured": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "g/h"
         }
+      },
+      "parameter_units": {
+        "deviation_limit": "fraction",
+        "window_ticks": "ticks"
       }
     },
     {
@@ -2995,12 +3079,19 @@
         },
         "in": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "L"
         },
         "unacknowledged": {
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "high_limit": "L",
+        "hysteresis": "L",
+        "low_limit": "L",
+        "response_ticks": "ticks"
       }
     },
     {
@@ -3042,12 +3133,19 @@
         },
         "in": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "L"
         },
         "unacknowledged": {
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "high_limit": "L",
+        "hysteresis": "L",
+        "low_limit": "L",
+        "response_ticks": "ticks"
       }
     },
     {
@@ -3086,6 +3184,9 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "response_ticks": "ticks"
       }
     },
     {
@@ -3124,6 +3225,9 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "response_ticks": "ticks"
       }
     },
     {
@@ -3162,6 +3266,9 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "response_ticks": "ticks"
       }
     },
     {
@@ -3200,6 +3307,9 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "response_ticks": "ticks"
       }
     },
     {
@@ -3311,6 +3421,9 @@
           "direction": "in",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "fault_ticks": "ticks"
       }
     },
     {
@@ -3324,11 +3437,13 @@
       "ports": {
         "in": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "g/h"
         },
         "out": {
           "direction": "out",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "g/h"
         },
         "permissive": {
           "direction": "in",
@@ -3338,6 +3453,9 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "safe_value": "g/h"
       }
     },
     {
@@ -3360,12 +3478,20 @@
       "ports": {
         "eng": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "g/h"
         },
         "raw": {
           "direction": "out",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "%"
         }
+      },
+      "parameter_units": {
+        "eng_max": "g/h",
+        "eng_min": "g/h",
+        "raw_max": "%",
+        "raw_min": "%"
       }
     },
     {
@@ -3379,7 +3505,8 @@
       "ports": {
         "count": {
           "direction": "out",
-          "value_type": "int"
+          "value_type": "int",
+          "unit": "strokes"
         },
         "done": {
           "direction": "out",
@@ -3431,6 +3558,9 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "response_ticks": "ticks"
       }
     },
     {
@@ -3469,6 +3599,9 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "response_ticks": "ticks"
       }
     },
     {
@@ -3580,6 +3713,9 @@
           "direction": "in",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "fault_ticks": "ticks"
       }
     },
     {
@@ -3593,11 +3729,13 @@
       "ports": {
         "in": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "g/h"
         },
         "out": {
           "direction": "out",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "g/h"
         },
         "permissive": {
           "direction": "in",
@@ -3607,6 +3745,9 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "safe_value": "g/h"
       }
     },
     {
@@ -3629,12 +3770,20 @@
       "ports": {
         "eng": {
           "direction": "in",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "g/h"
         },
         "raw": {
           "direction": "out",
-          "value_type": "float"
+          "value_type": "float",
+          "unit": "%"
         }
+      },
+      "parameter_units": {
+        "eng_max": "g/h",
+        "eng_min": "g/h",
+        "raw_max": "%",
+        "raw_min": "%"
       }
     },
     {
@@ -3648,7 +3797,8 @@
       "ports": {
         "count": {
           "direction": "out",
-          "value_type": "int"
+          "value_type": "int",
+          "unit": "strokes"
         },
         "done": {
           "direction": "out",
@@ -3700,6 +3850,9 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "response_ticks": "ticks"
       }
     },
     {
@@ -3738,6 +3891,9 @@
           "direction": "out",
           "value_type": "bool"
         }
+      },
+      "parameter_units": {
+        "response_ticks": "ticks"
       }
     }
   ],

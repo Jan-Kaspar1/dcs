@@ -37,6 +37,9 @@ commands:
                             uncertain[:<reason>], or bad[:<reason>]
   clear-fault <point>       remove an injected fault
   step <dt>                 advance the plant one tick of <dt> time units
+  ping                      the liveness probe — the server answers its
+                            plant tick; the container health check's
+                            request
 
 quality reasons: unspecified, substituted, stale, out_of_range,
 communication_fault, device_fault, configuration_fault
@@ -86,6 +89,7 @@ enum Action {
     InjectFault(PointId, Fault),
     ClearFault(PointId),
     Step(f64),
+    Ping,
 }
 
 /// Validates the command line without touching the network, so malformed
@@ -108,7 +112,8 @@ fn parse(args: &[String]) -> Result<(&str, Action), String> {
         ),
         ("clear-fault", [point]) => Action::ClearFault(parse_point(point).map_err(usage)?),
         ("step", [dt]) => Action::Step(parse_dt(dt).map_err(usage)?),
-        ("list" | "read" | "write" | "fault" | "clear-fault" | "step", _) => {
+        ("ping", []) => Action::Ping,
+        ("list" | "read" | "write" | "fault" | "clear-fault" | "step" | "ping", _) => {
             return Err(usage(format!("wrong arguments for {command:?}")));
         }
         _ => return Err(usage(format!("unknown command {command:?}"))),
@@ -144,6 +149,7 @@ fn execute(driver: &RemoteDriver, action: &Action) -> Result<PlantResponse, Remo
         Action::Step(dt) => claimed(driver, || {
             driver.step(dt).map(|tick| PlantResponse::Stepped { tick })
         }),
+        Action::Ping => driver.ping().map(|tick| PlantResponse::Alive { tick }),
     }
 }
 

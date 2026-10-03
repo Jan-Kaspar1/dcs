@@ -157,6 +157,24 @@ pub enum ValidationError {
         /// The offending point.
         point: PointId,
     },
+    /// A point declares `requires_reason` but is not a writable `In`
+    /// point. The flag qualifies the command surface — a point the
+    /// command path never reaches takes no reason to declare, so the
+    /// mark on an `Out` point or an unmarked `In` point is a dead
+    /// declaration.
+    RequiresReasonNotWritable {
+        /// The offending point.
+        point: PointId,
+    },
+    /// A point's `record` duty declares `every_ticks: 0`. A zero
+    /// cadence would record every scan — reproducing the full-rate
+    /// stream the durable-history decision keeps volatile — so the
+    /// declared duty names a positive interval or does not declare
+    /// one.
+    RecordZeroCadence {
+        /// The offending point.
+        point: PointId,
+    },
     /// A point's value type disagrees with its bound channel's value type.
     ChannelTypeMismatch {
         /// The offending point.
@@ -176,6 +194,31 @@ pub enum ValidationError {
         signal: SignalId,
         /// The point it names.
         point: PointId,
+    },
+    /// A signal's declared `unit` disagrees with its source point's
+    /// declared `unit` — the display name consumers render would
+    /// describe a different unit than the point's value is wired in.
+    /// Both must declare a unit for the check to engage; a signal on an
+    /// undimensioned point declares its display unit freely, and a
+    /// dimensioned point's signal may leave `unit` unset.
+    SignalUnitMismatch {
+        /// The signal declaring the conflicting unit.
+        signal: SignalId,
+        /// Its source point.
+        point: PointId,
+        /// The unit the signal declares.
+        signal_unit: String,
+        /// The unit the point declares.
+        point_unit: String,
+    },
+    /// A component's `parameter_units` declares a unit for a parameter
+    /// the instance's parameter map does not carry — a dead
+    /// declaration, like a unit hung on a value that does not exist.
+    UnknownParameter {
+        /// The component carrying the dangling unit declaration.
+        component: ComponentId,
+        /// The parameter the unit names.
+        parameter: String,
     },
     /// A connection endpoint names a point the model does not declare.
     UnknownPoint {
@@ -227,6 +270,24 @@ pub enum ValidationError {
         from: ValueKind,
         /// The `to` end's value type.
         to: ValueKind,
+    },
+    /// A connection's two ends declare different engineering units —
+    /// the wire would carry a value in one unit into a consumer
+    /// engineered for another. Both ends must declare a unit for the
+    /// check to engage: an end declaring none is uncheckable rather
+    /// than mismatched, so unit-transparent ports and undimensioned
+    /// documents stay admissible.
+    ConnectionUnitMismatch {
+        /// Index of the offending connection in `connections`.
+        connection: usize,
+        /// The `from` end's endpoint.
+        from: Endpoint,
+        /// The unit the `from` end declares.
+        from_unit: String,
+        /// The `to` end's endpoint.
+        to: Endpoint,
+        /// The unit the `to` end declares.
+        to_unit: String,
     },
 }
 
@@ -298,6 +359,16 @@ impl fmt::Display for ValidationError {
                 "io point {} declares journaled but has value type float",
                 point.0
             ),
+            Self::RequiresReasonNotWritable { point } => write!(
+                f,
+                "io point {} declares requires_reason but is not a writable in point",
+                point.0
+            ),
+            Self::RecordZeroCadence { point } => write!(
+                f,
+                "io point {} declares a recording duty with every_ticks 0",
+                point.0
+            ),
             Self::ChannelTypeMismatch {
                 point,
                 device,
@@ -313,6 +384,25 @@ impl fmt::Display for ValidationError {
                 f,
                 "signal {} sources unknown io point {}",
                 signal.0, point.0
+            ),
+            Self::SignalUnitMismatch {
+                signal,
+                point,
+                signal_unit,
+                point_unit,
+            } => write!(
+                f,
+                "signal {signal} declares unit {signal_unit:?} but its source io point {point} declares {point_unit:?}",
+                signal = signal.0,
+                point = point.0,
+            ),
+            Self::UnknownParameter {
+                component,
+                parameter,
+            } => write!(
+                f,
+                "component {} declares a unit for parameter {parameter:?} it does not carry",
+                component.0
             ),
             Self::UnknownPoint {
                 connection,
@@ -365,6 +455,18 @@ impl fmt::Display for ValidationError {
                     "connection {connection} carries {from:?} into a {to:?} end"
                 )
             }
+            Self::ConnectionUnitMismatch {
+                connection,
+                from,
+                from_unit,
+                to,
+                to_unit,
+            } => {
+                write!(
+                    f,
+                    "connection {connection} carries {from_unit:?} from {from:?} into a {to_unit:?} end {to:?}"
+                )
+            }
         }
     }
 }
@@ -395,19 +497,19 @@ fn index_by_id<'m, T>(
     index
 }
 
-/// Resolves a connection endpoint to `(direction, value type, produces)`,
-/// where "produces" means the element feeds values into the connection:
-/// `In` points and `Out` ports produce, `Out` points and `In` ports consume.
-/// Pushes the matching `Unknown*` error and returns `None` when the endpoint
-/// does not resolve.
-fn resolve_endpoint(
+/// Resolves a connection endpoint to `(direction, value type, declared
+/// unit, produces)`, where "produces" means the element feeds values into
+/// the connection: `In` points and `Out` ports produce, `Out` points and
+/// `In` ports consume. Pushes the matching `Unknown*` error and returns
+/// `None` when the endpoint does not resolve.
+fn resolve_endpoint<'m>(
     endpoint: &Endpoint,
     connection: usize,
     end: End,
-    points: &HashMap<u64, &IoPoint>,
-    components: &HashMap<u64, &ComponentInstance>,
+    points: &HashMap<u64, &'m IoPoint>,
+    components: &HashMap<u64, &'m ComponentInstance>,
     errors: &mut Vec<ValidationError>,
-) -> Option<(Direction, ValueKind, bool)> {
+) -> Option<(Direction, ValueKind, Option<&'m str>, bool)> {
     match endpoint {
         Endpoint::Point(id) => {
             let Some(point) = points.get(&id.0) else {
@@ -421,6 +523,7 @@ fn resolve_endpoint(
             Some((
                 point.direction,
                 point.value_type,
+                point.unit.as_deref(),
                 point.direction == Direction::In,
             ))
         }
@@ -445,6 +548,7 @@ fn resolve_endpoint(
             Some((
                 port.direction,
                 port.value_type,
+                port.unit.as_deref(),
                 port.direction == Direction::Out,
             ))
         }
@@ -472,10 +576,21 @@ impl PlantModel {
     ///   is the low-volume record of discrete transitions, so a `Float`
     ///   point carrying the flag is reported — either direction, field
     ///   or internal;
+    /// - `requires_reason` marks only writable `In` points: the flag
+    ///   qualifies the command surface, so a point that takes no
+    ///   commands — an `Out` point or an unmarked `In` point —
+    ///   carrying it is reported;
     /// - each connection's `from` end produces a value (an `In` point or an
     ///   `Out` port) and its `to` end consumes one (an `Out` point or an `In`
     ///   port), with matching value types on both ends — internal points
-    ///   follow the same direction and type rules as bound points.
+    ///   follow the same direction and type rules as bound points;
+    /// - a connection whose ends both declare an engineering `unit`
+    ///   carries matching declarations — an end declaring none is
+    ///   uncheckable rather than mismatched,
+    /// - a signal declaring a `unit` agrees with its source point's
+    ///   declared unit, and
+    /// - every `parameter_units` key names a parameter the instance's
+    ///   map carries.
     ///
     /// Returns every error found; an empty vector means the model is valid.
     pub fn validate(&self) -> Vec<ValidationError> {
@@ -535,6 +650,21 @@ impl PlantModel {
             if point.journaled && point.value_type == ValueKind::Float {
                 errors.push(ValidationError::JournaledFloat { point: point.id });
             }
+            // `requires_reason` interacts with the command-surface
+            // rule: it qualifies a writable `In` point's command
+            // admission, so on a point that takes no commands — an
+            // `Out` point, or an `In` point the model never marked
+            // `writable` — the flag is a dead declaration.
+            if point.requires_reason && (point.direction == Direction::Out || !point.writable) {
+                errors.push(ValidationError::RequiresReasonNotWritable { point: point.id });
+            }
+            // `record` interacts with the durable-history rule: the
+            // duty names a positive cadence, since a zero `every_ticks`
+            // would record the full-rate stream the decision keeps
+            // volatile — a dead declaration on any point.
+            if point.record.is_some_and(|duty| duty.every_ticks == 0) {
+                errors.push(ValidationError::RecordZeroCadence { point: point.id });
+            }
             let Some(reference) = &point.channel else {
                 // An internal point's initial value is its whole declared
                 // state: it must exist and match the declared value type.
@@ -589,11 +719,40 @@ impl PlantModel {
             }
         }
 
+        for component in &self.components {
+            // A declared parameter unit hangs on a value: a `unit`
+            // naming a parameter the instance's map does not carry is
+            // a dead declaration.
+            for parameter in component.parameter_units.keys() {
+                if !component.parameters.contains_key(parameter) {
+                    errors.push(ValidationError::UnknownParameter {
+                        component: component.id,
+                        parameter: parameter.clone(),
+                    });
+                }
+            }
+        }
+
         for signal in &self.signals {
-            if !points.contains_key(&signal.source.0) {
+            let Some(point) = points.get(&signal.source.0) else {
                 errors.push(ValidationError::UnknownSource {
                     signal: signal.id,
                     point: signal.source,
+                });
+                continue;
+            };
+            // A signal declaring a unit different from its source
+            // point's would render a different unit than the value is
+            // wired in — the display side of the dimensional contract.
+            if let (Some(signal_unit), Some(point_unit)) =
+                (signal.unit.as_deref(), point.unit.as_deref())
+                && signal_unit != point_unit
+            {
+                errors.push(ValidationError::SignalUnitMismatch {
+                    signal: signal.id,
+                    point: signal.source,
+                    signal_unit: signal_unit.to_string(),
+                    point_unit: point_unit.to_string(),
                 });
             }
         }
@@ -620,7 +779,7 @@ impl PlantModel {
                 (End::From, from, &connection.from),
                 (End::To, to, &connection.to),
             ] {
-                if let Some((direction, _, produces)) = resolved {
+                if let Some((direction, _, _, produces)) = resolved {
                     let compatible = match end {
                         End::From => produces,
                         End::To => !produces,
@@ -636,13 +795,29 @@ impl PlantModel {
                 }
             }
 
-            if let (Some((_, from_type, _)), Some((_, to_type, _))) = (from, to)
+            if let (Some((_, from_type, _, _)), Some((_, to_type, _, _))) = (from, to)
                 && from_type != to_type
             {
                 errors.push(ValidationError::ConnectionTypeMismatch {
                     connection: index,
                     from: from_type,
                     to: to_type,
+                });
+            }
+
+            // Declared units agree or stay silent: only two ends that
+            // both declare disagreeing units are reported — an
+            // undeclared end is uncheckable, so unit-transparent ports
+            // and undimensioned documents stay admissible.
+            if let (Some((_, _, Some(from_unit), _)), Some((_, _, Some(to_unit), _))) = (from, to)
+                && from_unit != to_unit
+            {
+                errors.push(ValidationError::ConnectionUnitMismatch {
+                    connection: index,
+                    from: connection.from.clone(),
+                    from_unit: from_unit.to_string(),
+                    to: connection.to.clone(),
+                    to_unit: to_unit.to_string(),
                 });
             }
         }
@@ -1052,6 +1227,118 @@ mod tests {
             model
                 .validate()
                 .contains(&ValidationError::JournaledFloat { point: PointId(10) })
+        );
+    }
+
+    #[test]
+    fn requires_reason_marks_only_writable_in_points() {
+        // A writable `In` point — bound or internal — is a legal mark:
+        // the flag qualifies the admission check the point's command
+        // surface already answers.
+        let mut model = minimal();
+        model.io_points[0].writable = true;
+        model.io_points[0].requires_reason = true;
+        assert!(model.validate().is_empty());
+        let mut model = minimal();
+        make_internal(&mut model, 0, Some(Value::Float(25.0)));
+        model.io_points[0].writable = true;
+        model.io_points[0].requires_reason = true;
+        assert!(model.validate().is_empty());
+
+        // On an `Out` point the command path never reaches the mark —
+        // the flag is a dead declaration.
+        let mut model = minimal();
+        model.io_points[1].requires_reason = true;
+        assert!(
+            model
+                .validate()
+                .contains(&ValidationError::RequiresReasonNotWritable { point: PointId(11) })
+        );
+
+        // So is an `In` point the model never marked writable — the
+        // gate it names admits nothing.
+        let mut model = minimal();
+        model.io_points[0].requires_reason = true;
+        assert!(
+            model
+                .validate()
+                .contains(&ValidationError::RequiresReasonNotWritable { point: PointId(10) })
+        );
+    }
+
+    #[test]
+    fn declared_units_agreeing_and_absent_ones_validate() {
+        // Both ends declared, equal — the checked seam.
+        let mut model = minimal();
+        model.io_points[0].unit = Some("degC".to_string());
+        model.components[0].ports.get_mut("in").unwrap().unit = Some("degC".to_string());
+        model.components[0].ports.get_mut("out").unwrap().unit = Some("degC".to_string());
+        model.io_points[1].unit = Some("degC".to_string());
+        assert!(model.validate().is_empty());
+
+        // One end declared — uncheckable, not mismatched.
+        let mut model = minimal();
+        model.io_points[0].unit = Some("degC".to_string());
+        assert!(model.validate().is_empty());
+    }
+
+    #[test]
+    fn a_connection_whose_declared_units_disagree_is_rejected() {
+        let mut model = minimal();
+        model.io_points[0].unit = Some("degC".to_string());
+        model.components[0].ports.get_mut("in").unwrap().unit = Some("bar".to_string());
+        assert!(
+            model
+                .validate()
+                .contains(&ValidationError::ConnectionUnitMismatch {
+                    connection: 0,
+                    from: Endpoint::Point(PointId(10)),
+                    from_unit: "degC".to_string(),
+                    to: Endpoint::Port(PortRef {
+                        component: ComponentId(1),
+                        name: "in".to_string(),
+                    }),
+                    to_unit: "bar".to_string(),
+                })
+        );
+    }
+
+    #[test]
+    fn a_signal_unit_disagreeing_with_its_point_is_rejected() {
+        let mut model = minimal();
+        model.io_points[0].unit = Some("degC".to_string());
+        model.signals[0].unit = Some("degF".to_string());
+        assert!(
+            model
+                .validate()
+                .contains(&ValidationError::SignalUnitMismatch {
+                    signal: SignalId(100),
+                    point: PointId(10),
+                    signal_unit: "degF".to_string(),
+                    point_unit: "degC".to_string(),
+                })
+        );
+    }
+
+    #[test]
+    fn parameter_units_must_hang_on_carried_parameters() {
+        let mut model = minimal();
+        model.components[0]
+            .parameter_units
+            .insert("k".to_string(), "fraction".to_string());
+        assert!(model.validate().is_empty());
+
+        let mut model = minimal();
+        model.components[0]
+            .parameter_units
+            .insert("gone".to_string(), "degC".to_string());
+        assert!(
+            model
+                .validate()
+                .contains(&ValidationError::UnknownParameter {
+                    component: ComponentId(1),
+                    parameter: "gone".to_string(),
+                })
         );
     }
 }

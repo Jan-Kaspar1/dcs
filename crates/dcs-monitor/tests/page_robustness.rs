@@ -1,88 +1,94 @@
 //! The monitoring page's robustness contract — the consolidated QA
 //! findings on `dcs-monitor`'s served page: the page must recover when
 //! a restarted source's history seqs begin again at 1 instead of
-//! starving a stale since-cursor, bound every polling request with an
-//! abort deadline and name the feed disconnected rather than freezing,
-//! and parse Boolean command/force input strictly so arbitrary text is
-//! refused rather than coerced to `false`. These are source-level
-//! assertions over the single-page asset; `feed_state.rs` mirrors the
-//! detection rules behaviorally against a live rig, including a real
-//! monitor restart.
+//! starving a stale since-cursor, bound every request it issues with
+//! an abort deadline so a failed or hung read names the feed's
+//! degraded state rather than pinning last-known values, and parse
+//! Boolean command/force input strictly so arbitrary text is refused
+//! rather than coerced to `false`. These are source-level assertions
+//! over the single-page asset; `feed_state.rs` mirrors the detection
+//! rules behaviorally against a live rig, including a real monitor
+//! restart.
 
 use dcs_monitor::PAGE;
 
-/// A restarted source's served streams name a new per-boot
-/// `generation`; the page compares it — or, for a peer that cannot
-/// name one, the seq/tick domains' own regression — and answers the
-/// reset rather than starving on seqs the new lifetime never serves.
+/// A restarted source names its new process lifetime in-band: every
+/// `/history` envelope carries the serving run's `run` ordinal, the
+/// journal stream's `run_boundary` markers do the same for the durable
+/// record, and the publication identity itself regresses — published
+/// seq and tick both restart with the store. The page funnels all
+/// three observations into one restart note that resets every
+/// since-cursor rather than starving on seqs the new lifetime never
+/// serves.
 #[test]
 fn page_detects_the_sources_seq_domain_reset() {
     let page = PAGE;
-    // The served stamps the detector reads: the publication section's
-    // generation and each history answer's.
-    for needle in ["health.generation", "history.generation"] {
-        assert!(page.contains(needle), "page lacks {needle}");
-    }
-    // The reset rule: a changed generation is the certain mark, and
-    // the published-seq/tick regression is the fallback for a payload
-    // that cannot name one.
+    // The served marks the detector reads: the history envelope's run
+    // ordinal, the journal's run_boundary, the publication identity's
+    // regression.
     for needle in [
-        "function publicationReset(last, current)",
-        "last.generation !== current.generation",
+        "history.run",
+        "run_boundary",
         "current.published < last.published",
         "current.tick < last.tick",
     ] {
         assert!(page.contains(needle), "page lacks {needle}");
     }
-    // The recovery the mark triggers: every since-cursor returns to 0
-    // so the next read refetches the retained head of the new seq
-    // domain, the drawn trend series resets with its cursor, and the
-    // feed line names the restart.
+    // The one restart path every observation takes: the cursors and
+    // the caught-up flags reset so the streams re-read whole, and the
+    // feed line names the seam.
     for needle in [
-        "function resetStreams()",
+        "function noteRestart(detail)",
         "state.lastSeq = 0",
+        "state.run = null",
+        "state.caughtUp = false",
         "journalSince = 0",
-        "state.samples = []",
-        "feed.reset",
+        "feed.restart",
         "source restarted",
     ] {
         assert!(page.contains(needle), "page lacks {needle}");
     }
 }
 
-/// Every request the page issues rides `fetchBounded`'s abort
-/// deadline, and a poll that lands nothing marks the feed
-/// disconnected instead of pinning the page on a hung connection.
+/// Every request the page issues rides `pollFetch`'s abort deadline —
+/// polls, posts, and the one-time signal-index read alike — so a hung
+/// connection aborts inside one poll period, and a poll that lands
+/// nothing re-marks the feed stale rather than freezing on the last
+/// fresh publication's bookkeeping.
 #[test]
 fn page_bounds_every_request_and_names_disconnects() {
     let page = PAGE;
-    // The bounding machinery: one deadline, one controller per
-    // request, the abort translating into a named timeout.
+    // The bounding machinery: one deadline constant, the shared
+    // wrapper, the engine's abort signal on every request.
     for needle in [
-        "const POLL_DEADLINE_MS",
-        "new AbortController()",
-        "controller.abort()",
-        "signal: controller.signal",
-        "function fetchBounded(resource, options)",
-        "request timed out after",
+        "const POLL_MS",
+        "function pollFetch(url, options)",
+        "AbortSignal.timeout(POLL_MS)",
     ] {
         assert!(page.contains(needle), "page lacks {needle}");
     }
-    // Every issued request is bounded: the only bare `await fetch(`
-    // in the page is the one inside fetchBounded itself — polls,
-    // commands, and the signal index all go through it.
+    // Every issued request is bounded: the only bare `fetch(` in the
+    // page is the one inside pollFetch itself — the role and snapshot
+    // polls, the history and journal since-reads, the command and
+    // switch posts, and the signal index all go through it.
     assert_eq!(
-        page.matches("await fetch(").count(),
+        page.matches("fetch(").count(),
         1,
         "a request bypasses the bounded fetch"
     );
     assert!(
-        page.matches("fetchBounded(").count() >= 10,
-        "expected the polls and posts to ride fetchBounded"
+        page.matches("pollFetch(").count() >= 10,
+        "expected the polls and posts to ride pollFetch"
     );
-    // The failed poll's named state — and its clearing on the next
-    // served answer.
-    for needle in ["feed.offline", "feed disconnected", "\"offline\""] {
+    // The failed poll's named state: the standing publication takes
+    // the stale mark rather than the line hiding on stale
+    // bookkeeping, and the failed stream reads name themselves.
+    for needle in [
+        "feed.stale = feed.publication",
+        "stale publication",
+        "history read failed",
+        "journal read failed",
+    ] {
         assert!(page.contains(needle), "page lacks {needle}");
     }
 }
@@ -103,7 +109,7 @@ fn page_parses_boolean_input_strictly() {
         assert!(page.contains(needle), "page lacks {needle}");
     }
     // The coercion is gone: nothing maps non-`true` text to `false`,
-    // and the old "anything unmatched is false" test is absent.
+    // and the old "anything unmatched is false" tests are absent.
     for absent in ["/^(true|1|on)$/i", "{ bool: text === \"true\" }"] {
         assert!(!page.contains(absent), "page still coerces via {absent}");
     }

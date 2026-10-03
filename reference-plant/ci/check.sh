@@ -5,29 +5,56 @@
 # Stages, each reporting the release contract's named diagnostics on
 # failure (docs/release-contract.md):
 #
-#   resolve      cargo fetch — the pinned release crates resolve
-#                (pin-unresolvable)
+#   lockfile     the committed Cargo.lock satisfies the manifest this
+#                repository ships — the release crates recorded from
+#                git sources only, never a path into a checkout
+#                (path-dependency-leak), on the pin's own remote and
+#                the same `tag`/`rev` fragment Cargo.toml spells, one
+#                precise revision across all three — at the revision
+#                the declared pin names: the tag's target read back
+#                off the remote, the declared full-sha rev, or the
+#                release record's filled Commit field. Read before
+#                any fetch can rewrite the file, so a committed
+#                lockfile that no longer records the pin is reported
+#                rather than silently re-resolved
+#                (lockfile-stale); the leg's own doctored copy must
+#                report that diagnostic (lockfile-stale-unchecked).
+#                The stage's digest of the file is what the resolve
+#                stage re-checks, naming a rewrite the fallback fetch
+#                performs on the committed artifact.
+#   resolve      cargo fetch --locked — the pinned release crates
+#                resolve against the committed lockfile, so every
+#                build resolves the same sources
+#                (pin-unresolvable; lockfile-stale when the documented
+#                re-resolve fallback had to rewrite the artifact)
 #   build        cargo build — the composition compiles against the
 #                supported surface (surface-incompatible)
-#   lockfile     Cargo.lock records only git sources for the release
-#                crates — never a path into a checkout
-#                (path-dependency-leak)
 #   emit         the model and scenario emit byte-identically twice and
 #                match the checked-in artifacts (emit-nondeterministic,
 #                stale-artifact)
 #   tooling      the released tooling accepts the emitted model —
 #                `dcs-model validate`, `dcs-model lint`,
-#                `dcs-controller --check` — and exercises the contract's
-#                remaining dcs-model surfaces: `dcs-model schema` and
-#                `dcs-model interface-schema` emissions byte-identical
-#                to the release record's schema artifacts (fetched from
-#                the pinned revision through the same git remote the
-#                pins resolve over), `dcs-model diff` naming a doctored
+#                `dcs-controller --check` — and the dynamics document
+#                standalone, `dcs-plant-server --check-dynamics` merging
+#                and validating every element against the model's
+#                channel map with no server launched — and exercises the
+#                contract's
+#                remaining dcs-model surfaces: `dcs-model schema`,
+#                `dcs-model interface-schema`, `dcs-model deploy-schema`,
+#                and `dcs-plant-server --dynamics-schema` emissions
+#                byte-identical to the release record's schema artifacts
+#                (fetched from the pinned revision through the same git
+#                remote the pins resolve over), the checked-in
+#                deploy/manifest.json and model/dynamics.json screened
+#                against their declared schemas with doctored
+#                schema-violating copies refused, `dcs-model diff`
+#                naming a doctored
 #                compatible revision's changes and none on the
 #                identical document, and `dcs-model summary` /
 #                `dcs-model signal-index` outputs recorded to the run's
 #                evidence (tooling-rejected, pin-unresolvable,
-#                schema-drift, diff-mismatch)
+#                schema-drift, schema-mismatch,
+#                schema-mismatch-nondeterministic, diff-mismatch)
 #   alarm-validation
 #                the rejection half of decision 70's alarm record at
 #                the customer boundary — every managed alarm instance
@@ -39,8 +66,28 @@
 #                same record (alarm-validation-failed,
 #                alarm-validation-nondeterministic)
 #   fingerprint  the emitted model's fingerprint equals the manifest's
-#                recorded `model.fingerprint`
-#                (manifest-fingerprint-mismatch)
+#                recorded `model.fingerprint`, the deployed pair's
+#                served model digest — each peer's /checkpoint-stamped
+#                fingerprint on the manifest-declared deployment —
+#                equals it too, so the record authorizes the served
+#                model bytes rather than only the checked-in file; a
+#                doctored served document — every point id renumbered
+#                over identical components — reports the named
+#                mismatch carrying the expected vs served fingerprint
+#                and the first diverging section; and the dynamics
+#                document the manifest-declared deployment serves —
+#                the `dynamics.path` the rig mounts and
+#                `dcs-plant-server --dynamics` merges — fingerprints
+#                the recorded optional `dynamics.fingerprint` and the
+#                checked-in artifact identically on the launched
+#                pair, a doctored served document with renumbered
+#                point references over identical element content
+#                reporting the named mismatch; two passes produce
+#                identical digests (manifest-fingerprint-mismatch,
+#                fingerprint-failed, fingerprint-nondeterministic,
+#                fingerprint-unchecked, dynamics-fingerprint-failed,
+#                dynamics-fingerprint-nondeterministic,
+#                dynamics-fingerprint-unchecked)
 #   deploy       the checked-in rig definition deploy/compose.yaml
 #                instantiates every field of deploy/manifest.json —
 #                release, images, mounted model and dynamics paths,
@@ -49,11 +96,20 @@
 #                wiring, the standby's optional failover_budget
 #                declaration carried as its --auto-promote flag, and
 #                the optional per-controller persistence
-#                paths (state_file/journal_file) backed by writable
-#                mounts and flags — parsed and validated through
-#                `docker compose config` or the fallback parser, with
-#                the fields' divergence cases exercised against
-#                doctored copies
+#                paths (state_file/journal_file/history_file) backed
+#                by writable
+#                mounts and flags, the declared topology
+#                section's pairs — the checked-in manifest naming
+#                the deployed pair under topology.pairs, each pair
+#                naming two declared members whose standby wiring
+#                closes inside it — and the one-field-per-deployment
+#                bound (decision 99): at most one field-owning duty
+#                controller over the manifest's single plant, a
+#                second claimant — a second declared pair's duty
+#                member included — being undeployable; parsed and
+#                validated through `docker compose config` or the
+#                fallback parser, with the fields' divergence cases
+#                exercised against doctored copies
 #                (rig-invalid, rig-unverifiable, rig-mismatch)
 #   simulate     the scripted simulation's declared outcomes hold, and
 #                two runs produce identical digests (scenario-failed,
@@ -61,7 +117,8 @@
 #   restart      the restart-recovery leg (WW-LCM-001's
 #                lone-controller clause): the field-owning controller
 #                runs the deterministic scenario on the
-#                manifest-declared --state-file/--journal-file flags
+#                manifest-declared
+#                --state-file/--journal-file/--history-file flags
 #                pointed at runner-owned scratch paths, is stopped at
 #                a leg boundary, and relaunches onto the same files —
 #                the resumed run must continue at the persisted tick
@@ -87,543 +144,29 @@
 #                (surface-mismatch, schema-mismatch)
 #   pair         the consumer-declared redundant pair — the deployment
 #                the manifest actually declares, not just its
-#                definition: ci/pair.py reads the standby wiring and
-#                persistence fields out of deploy/manifest.json and
-#                spawns dcs-plant-server plus two released
-#                dcs-controller --driven --remote instances wired per
-#                the manifest, the declared --state-file/--journal-file
-#                paths under a runner-owned scratch directory. The
-#                standby converges to tracking through the served
-#                GET /role, scans driven through POST /scan keep the
-#                peers' images identical, a receipted demote/promote
-#                switches the roles, and the run continues bumplessly
-#                with the adopted receipts and the durable journal
-#                files' transition records intact; two passes produce
-#                identical digests (pair-failed, pair-nondeterministic).
-#                The stage's negotiation leg (ci/negotiation.py) then
-#                proves the deployed pair degrades honestly on the
-#                misconfiguration a customer writing their own
-#                manifests can produce: a third released
-#                dcs-controller launched --standby <active> on a
-#                foreign document — the emitted model doctored inside
-#                MODEL_VERSION to a fingerprint the pair does not
-#                serve, without --revised — reports the named
-#                non-converged negotiation state through GET /role for
-#                the observation window, POST /promote against it
-#                answers the named refusal, and the active's field
-#                writes, receipts, and journal stay undisturbed; the
-#                foreign peer tears down before later legs and a
-#                control peer on the pair's own model converges and
-#                promotes normally; two passes produce identical
-#                digests (negotiation-failed,
-#                negotiation-nondeterministic)
-#                The stage's startup-claim ordering leg,
-#                ci/startup_claim.py on the same declared deployment:
-#                with the pair switched so the field owner holds the
-#                plant's writer claim, a third released controller
-#                launched against the same plant address on a doomed
-#                --journal-file — a corrupt first record its startup
-#                replay cannot read — must abort before any preemptive
-#                claim: the incumbent keeps role, tick, field writes,
-#                and receipts, foreign probes stay fenced under the
-#                standing claim, the doomed peer's files prove the run
-#                never survived the failed replay, and the pair
-#                restores its launch roles once the process stops; two
-#                passes produce identical digests
-#                (startup-claim-failed, startup-claim-nondeterministic)
-#                The stage's refusal half, ci/refusal.py on the same
-#                declared deployment: a POST /promote on the freshly
-#                launched standby — before its first transfer — answers
-#                the named not_converged refusal with no field
-#                hand-off, a receipted write against a declared
-#                writable point submitted to the tracking standby's
-#                monitor answers the named not_active rejection with
-#                the point unchanged in the active's served snapshot
-#                and no command-side journal entry on either peer, and
-#                once tracking the same promote succeeds — the active's
-#                field writes, receipts, and journal undisturbed
-#                throughout; two passes produce identical digests
-#                (refusal-failed, refusal-nondeterministic)
-#                The stage's failure-handover leg, ci/handover.py on
-#                the same declared deployment: with the pair settled
-#                and the group holding a duty demand, a proven
-#                duty-pump failure — the p101-run field channel faulted
-#                through the plant protocol's declared inject_fault —
-#                hands duty to the standby pump inside the declared
-#                bound with staged reporting the survivor, the faulted
-#                pump's fault/avail reporting the exclusion, and the
-#                managed p101-fault alarm annunciating with journaled
-#                point_changed evidence; the remaining pump's channel
-#                then faults for the none_available/all_faulted
-#                annunciation, each input restores its declared
-#                recovery, and the pair's roles never move; two passes
-#                produce identical digests (handover-failed,
-#                handover-nondeterministic)
-#                The stage's takeover leg, ci/takeover.py on the same
-#                declared deployment: with the pair tracking and the
-#                pump group holding a duty demand on pump 1, the
-#                emitted model's declared per-pump mode seam is
-#                exercised through the receipted path — p101-mode
-#                cutting the delivered command off the group's cmd_1
-#                with the auto-leg carriers reporting the manual
-#                selection and the pump-group status reflecting the
-#                exclusion, p101-hand running the pump on the operator
-#                demand while the declared thermal/moisture guards
-#                still gate it — the protection input driven through
-#                the plant protocol asserting the proven fault and its
-#                managed alarm — p101-oos asserting the maintenance
-#                inhibit, and the restore returning the pump to group
-#                control with the served journal carrying each
-#                attributed transition in order; two passes produce
-#                identical digests (takeover-failed,
-#                takeover-nondeterministic)
-#                The stage's force-carryover leg, ci/force_carryover.py
-#                on the same declared deployment: with the pair
-#                tracking, a receipted force_point on a declared
-#                writable In point — the emitted model marks only
-#                internal In points writable, so the leg's p101-hand is
-#                the honest target — submitted through the active's
-#                POST /command; the forces entry and the
-#                Uncertain(Substituted) sample asserted on both peers'
-#                snapshots, the demote/promote switch issued, and the
-#                promoted peer asserted still carrying the force — the
-#                forced value at substituted quality — across scans; a
-#                receipted unforce on the new active settling applied,
-#                emptying forces, and resuming the point's unforced
-#                serve — for the internal target the held-value rule
-#                leaves the force's last stamp re-stamped Good; the
-#                pair restored to its declared roles; two passes
-#                produce identical digests
-#                (force-carryover-failed,
-#                force-carryover-nondeterministic)
-#                The stage's tune-carryover leg, ci/tune_carryover.py
-#                on the same declared deployment: with the pair
-#                tracking, a receipted set_parameter on a declared
-#                writable configuration point — the emitted model's
-#                exercise sequencer step_1_out, the honest sequence
-#                parameter whose parked table's demand lands on the
-#                out port's next sample while nothing downstream
-#                consumes it — submitted through the active's
-#                POST /command; the settled receipt recorded, the
-#                tuned value asserted live on both peers' served
-#                parameter reports and on the out port's bound point
-#                the declared signal sources, the demote/promote
-#                switch issued, and the promoted peer asserted still
-#                carrying the tune — the parameter report and the
-#                signal's reading — across scans, its served journal
-#                ordering the promotion's role_changed entries after
-#                the tune's command_settled; a further set_parameter
-#                on the new active settling applied with a fresh
-#                receipt, the pair restored to its declared roles;
-#                two passes produce identical digests
-#                (tune-carryover-failed,
-#                tune-carryover-nondeterministic)
-#                The stage's force-release leg, ci/force_release.py
-#                on the same declared deployment: with the pair
-#                tracking, a receipted force_point on a declared
-#                writable In point through the active's POST /command
-#                — asserting the substituted quality on both peers'
-#                snapshots across scans and the journaled applied
-#                settlement — then a receipted unforce_point asserted
-#                at its apply tick: the forces set empty, the point's
-#                live value resumed — for the internal target the
-#                force's last stamp re-stamped Good — a restore write
-#                proving the live path, the pair switched and its
-#                launch roles restored with the released state riding
-#                the checkpoint, and every transition journaled on
-#                the field owner's durable record with the standby's
-#                adopted log answering the same receipts; two passes
-#                produce identical digests
-#                (force-release-failed,
-#                force-release-nondeterministic)
-#                The stage's burst-order leg, ci/burst_order.py on the
-#                same declared deployment: with the pair tracking and
-#                the pump group holding a full demand, the emitted
-#                alarm set's deterministic consequential cascade
-#                (WW-ENG-003, WW-ALM-003, WW-ALM-004) is driven through
-#                the plant protocol's unfenced surface — a quality
-#                fault on level-primary so backup-active annunciates
-#                first, the power-fail contact written so the station
-#                permissives drop and the power alarm fires while the
-#                undrawn level climbs, then both run contacts faulted
-#                so none-available/all-faulted land last — every driven
-#                alarm's alarm/unacknowledged asserted through the
-#                active's monitor, the durable journal's ordered
-#                point_changed record preserving the driven activation
-#                order with no dropped or reordered entries, the
-#                restores journaling the returns in order, and the
-#                pair's roles unchanged; two passes produce identical
-#                digests (burst-order-failed,
-#                burst-order-nondeterministic)
-#                The stage's peer-announce leg, ci/peer_announce.py
-#                on the same declared deployment: with the pair
-#                tracking — the standby's per-scan pulls announcing
-#                its own monitor address on the field owner, the
-#                source a demoted owner later follows — a foreign
-#                GET /checkpoint?peer=<closed-port> naming an
-#                address that is not the pulling connection's own
-#                must still answer the checkpoint read while the
-#                crafted announce is refused, and the
-#                demote/promote switch must reconverge the demoted
-#                peer tracking on its real successor rather than
-#                stranding it unsynchronized on the planted address;
-#                the pair's launch roles then restore; two passes
-#                produce identical digests (peer-announce-failed,
-#                peer-announce-nondeterministic)
-#                The stage's command-availability leg,
-#                ci/availability.py on the same declared deployment:
-#                with the pair tracking, the active's GET /resources
-#                command rows audited self-consistent — every
-#                available: false row carrying a named refusal, every
-#                available row none — every served-unavailable
-#                bound-point-writable command submitted through the
-#                active's POST /command settling a named rejection
-#                rather than applied, the declared-bound probes'
-#                receipts naming the same refusal the row served, a
-#                served-available command settling applied into both
-#                peers' adopted receipt log, the emitted model's
-#                kind-declared advance exercised in both directions
-#                where the tooling publishes verdicts — its standing
-#                refusal carried verbatim through the settled
-#                command_refused — and the tracking standby's
-#                /resources reporting identical verdicts throughout;
-#                two passes produce identical digests
-#                (availability-failed, availability-nondeterministic)
-#                The stage's automatic-failover leg, ci/failover.py on
-#                the same declared deployment: the manifest's
-#                failover_budget arms the standby's --auto-promote —
-#                then the pair is converged, the field-owning
-#                container stopped, and the surviving peer's driven
-#                scans asserted through its served surface: GET /role
-#                reports the miss run under the degraded sync state,
-#                the self-promotion lands at the declared budget's
-#                scan boundary, the plant's writer claim fences a
-#                foreign attachment while the promoted peer's writes
-#                land (a fencing probe through the run's
-#                plant-protocol client), driven scans and receipted
-#                commands continue uninterrupted, and the durable
-#                journal records the transition distinguishably from
-#                an operator-requested switch; a variant severing the
-#                standby leaves the active's field writes undisturbed
-#                and reports no failover; a measurement run on the
-#                settled pair then walks decision 42's declared
-#                measurement contract — the emitted failover-select's
-#                primary/backup field points, out feeding the
-#                threshold chain, backup_active feeding the managed
-#                Bool alarm, the chain's on_bad_demand fallback —
-#                degrading the primary through the plant protocol's
-#                quality-fault surface so the backup serves with the
-#                chain still controlling on it and the managed alarm
-#                annunciating journaled point_changed evidence,
-#                degrading the backup as well so the declared
-#                all-sources-bad fallback drops demand to
-#                on_bad_demand rather than control on bad data, and
-#                restoring the backup then the primary so the
-#                selection and the alarms return per their declared
-#                lifecycle with the pair's roles unchanged; two
-#                passes produce identical
-#                digests (failover-failed, failover-nondeterministic)
-#                The stage's staged-vs-field divergence leg,
-#                ci/divergence.py on the same declared deployment: with
-#                the pair settled and the standby tracking, the
-#                standby's checkpoint pulls are withheld for an
-#                observation window — the driven run making the
-#                partition literal — while a field-side write lands
-#                through the run's dedicated plant-protocol client (the
-#                same connection the simulate stage's
-#                inject_fault/clear_fault ops use), the client joining
-#                the field's writer claim under the duty's recorded
-#                owner token so the write lands on the carried p101-cmd
-#                output. With the pull path resumed, the stale peer's
-#                served GET /role must report standby under the
-#                diverged sync state naming the perturbed output, its
-#                journal must carry the divergence_detected record, and
-#                POST /promote must answer the named not_converged
-#                refusal carrying the diverged report — no field
-#                hand-off, the active's writes, receipts, and journal
-#                undisturbed, the duty's continued writes restoring the
-#                field so the standby's next same-tick comparison
-#                resolves the verdict; a control leg runs the identical
-#                window without the field-side write — the standby
-#                reconverges and the documented demote/promote switch
-#                succeeds, the refusal naming the staged-vs-field
-#                divergence rather than partition staleness; two
-#                passes produce identical digests
-#                (divergence-missed, divergence-nondeterministic)
-#                The stage's standby-restart leg,
-#                ci/standby_restart.py on the same declared
-#                deployment: with the pair tracking and a receipted
-#                command settled, the tracking standby's container is
-#                stopped and relaunched onto its declared
-#                --state-file/--journal-file — the field owner driven
-#                through the downtime with its writes landing and a
-#                second command settling applied — the resumed peer
-#                reporting standby rather than claiming the field and
-#                reconverging to tracking inside the leg's declared
-#                window, its journal file carrying the restart
-#                boundary ordered after run 1's entries with seq
-#                order intact, the active's journal undisturbed, and
-#                the pair still promoting afterward; two passes
-#                produce identical digests (standby-restart-failed,
-#                standby-restart-nondeterministic)
-#                The stage's report leg, ci/report.py on the same
-#                declared deployment: with the pair tracking, one
-#                managed alarm is driven through its
-#                annunciation/ack/return lifecycle — the level-primary
-#                quality fault annunciating the failover's alarm, the
-#                receipted ack write pairing the annunciation to its
-#                attributed acknowledgment, the cleared instrument
-#                returning it — then the released dcs-alarm-report
-#                computes the declared AlarmReport metric set
-#                (WW-ALM-004) over the field owner's served journal
-#                and, with --journal-file, over its manifest-declared
-#                durable journal file — the emitted model's whole
-#                alarm set computed per instance, the driven
-#                lifecycle's measured counts and response pair
-#                asserted, and the durable file's report answering the
-#                served report's metric set identically; the tool's
-#                refusal modes — an unreachable monitor, an unreadable
-#                journal file — exit nonzero naming the failure; two
-#                passes produce identical digests
-#                (report-failed, report-nondeterministic)
-#                The stage's command-switch leg, ci/command_switch.py
-#                on the same declared deployment: with the pair settled
-#                and tracking, the exercise sequencer's kind-declared
-#                `advance` is invoked through the released `dcs-ctl
-#                invoke` consumer tooling before and after a receipted
-#                demote/promote — each submission settling exactly once
-#                with the applied receipt attributed to the serving peer
-#                and exactly one `command_settled` journal entry, no
-#                replay of the old peer's settlement — the emitted
-#                `step_completed` records continuing in tick order on
-#                the promoted peer with unchanged component attribution
-#                and no pre-promotion re-emission, a further invoke
-#                submitted immediately before the restore switch
-#                settling exactly once on the new active (never lost,
-#                never double-applied), and the pair's launch roles
-#                restored; two passes produce identical digests
-#                (command-switch-failed,
-#                command-switch-nondeterministic)
-#                The stage's demote-pending leg, ci/demote_pending.py
-#                on the same declared deployment — the consumer-side
-#                exercise of the demote-boundary pending-command
-#                settlement contract (WW-ENG-003, WW-LCM-001): with
-#                the pair settled and tracking, a receipted
-#                write_value admitted on the field owner and left
-#                pending while the documented demote lands inside its
-#                window and the converged standby promotes — the
-#                promote's final sync carrying the still-`Accepted`
-#                admission — the demoted peer's first quiesced scan,
-#                driven before the promoted peer's first field-owning
-#                scan, asserted journaling no command_settled for the
-#                admission, still holding its suspended receipt, and
-#                still reading the baseline image — never a phantom
-#                applied settle on the fenced image, never a vanished
-#                pending entry — then the admission settling exactly
-#                once: applied once per peer through the carry or the
-#                named superseded rejection journaled on the demoted
-#                peer alone, both peers' adopted receipt logs
-#                identical, the served images agreeing, and each
-#                manifest-declared durable journal file carrying the
-#                same settle record; the pair's launch roles
-#                restored; two passes produce identical digests
-#                (demote-pending-failed,
-#                demote-pending-nondeterministic)
-#                The stage's demote-reconvergence leg,
-#                ci/demote_reconvergence.py on the same declared
-#                deployment — the consumer-side exercise of the
-#                demote-follow tracking-source contract the
-#                #616/#618/#619/#620 defect fixes settle
-#                (WW-ENG-003, WW-LCM-001): each controller bound on
-#                the manifest's declared 0.0.0.0 listen host — the
-#                wildcard bind shape the defect family recorded
-#                verbatim — the pair converged and the documented
-#                demote/promote switch run in both directions, each
-#                demoted peer reconverging tracking on the source its
-#                successor's announced pulls resolved dialable —
-#                never the wildcard, never its own address, never a
-#                foreign endpoint — holding it across a driven pull
-#                train with snapshots, adopted receipt logs, and
-#                journaled role transitions consistent and no
-#                restart-like journal boundary, the launch roles
-#                restored; two passes produce identical digests
-#                (demote-reconvergence-failed,
-#                demote-reconvergence-nondeterministic)
-#                The stage's managed-lifecycle leg,
-#                ci/managed_lifecycle.py on the same declared
-#                deployment: with the pair tracking, the emitted
-#                model's whole managed-alarm surface exercises on the
-#                customer-owned pair (WW-ENG-003, WW-ALM-001,
-#                WW-ALM-002) — a field-held fault annunciating the
-#                backup-active managed Bool alarm's
-#                alarm/unacknowledged with the journaled point_changed
-#                record; the receipted ack settling applied under the
-#                leg's actor and clearing the latch; the shelvable
-#                low-level alarm's writable shelve point reporting
-#                shelved and auto-releasing at the declared
-#                max_shelve_ticks while the request still stands, the
-#                journaled edges measuring the bound; the
-#                never-shelvable high-level alarm's bound-but-
-#                unwritable shelve point answering the named
-#                not_writable refusal — journaled as a settled
-#                rejection, no state changed; the pump's oos point
-#                driving the declared out_of_service/suppressed wiring
-#                while the alarms the model wires without those inputs
-#                report neither, a driven fault proving alarm still
-#                reports process truth while suppression withholds the
-#                latch, and the return to service evaluating the
-#                standing condition as a fresh trip cleared by the
-#                receipted ack — every transition settled with actor
-#                attribution, the durable journal carrying the
-#                lifecycle in order, the pair's roles and driven
-#                inputs restored; two passes produce identical digests
-#                (managed-lifecycle-failed,
-#                managed-lifecycle-nondeterministic)
-#                The stage's managed-carryover leg,
-#                ci/managed_carryover.py on the same declared
-#                deployment — the consumer-side proof that the managed
-#                alarm kinds' checkpointed run state carries across a
-#                takeover on the customer-owned pair (WW-ENG-003,
-#                WW-ALM-002, WW-LCM-001): with the pair tracking, a
-#                per-pump fault alarm put out of service through its
-#                wired oos point and tripped suppressed so its alarm
-#                reports process truth with the latch withheld, and
-#                the shelvable low-level alarm shelved mid-run through
-#                its writable journaled shelve point, the documented
-#                demote/promote landing inside the declared
-#                max_shelve_ticks bound — the promoted peer asserting
-#                shelved still stands and releases at the tick the
-#                continued countdown expires, never a bound restarted
-#                at the switch, out_of_service and suppressed standing
-#                with evaluation held, every written point carried,
-#                and both durable journals' ordered records continuous
-#                across the switch — then every driven input and the
-#                pair's roles restored; two passes produce identical
-#                digests (carry-failed, carry-nondeterministic)
-#                The stage's staging leg, ci/staging.py on the same
-#                declared deployment — the consumer-side proof that
-#                the deployed pair stages and de-stages on level
-#                through the emitted model's declared setpoint chain
-#                (WW-ENG-003, WW-CTL-001, WW-CTL-002): both pumps held
-#                out of service through receipted write_value on their
-#                declared writable oos points so the declared inflow
-#                raises the wet-well level unopposed, the active's
-#                monitor asserting demand moves 0→1→2 only at the
-#                chain's own declared start/lag_start crossings with
-#                duty_call/lag_call reporting and the group's staged
-#                count and motor commands held at zero, the high
-#                crossing annunciating the managed high-level alarm
-#                with the journaled evidence; the releases restoring
-#                the driven inputs so the standing demand stages the
-#                group — the duty pump first, the lag inside the
-#                declared start_delay_ticks, each pump's cmd/run field
-#                outputs proving the delivered start — then the staged
-#                pumps drawing the level down through the declared
-#                de-stage order, the lag's run releasing before the
-#                duty's and the journaled transitions landing in the
-#                same order down to the below-cutoff floor; the
-#                receipted ack clearing the alarm's latch, every
-#                driven input restored, the pair's roles unchanged,
-#                and the durable journal audited for the ordered
-#                record the served journal answers identically; two
-#                passes produce identical digests
-#                (staging-failed, staging-nondeterministic)
-#                The stage's out-of-service leg, ci/oos.py on the
-#                same declared deployment — the consumer-side proof
-#                that a receipted maintenance inhibit on the duty
-#                pump's declared writable journaled oos point
-#                excludes it on the customer-owned pair (WW-ENG-003,
-#                WW-OPS-001, WW-ALM-002): with the pair tracking at
-#                an idle assigned-duty baseline — duty naming the
-#                pump whose oos the leg drives — the attributed
-#                write drops the in-service cone (oos-ok through
-#                oos-ok-avail-in and oos-ok-guard-in), the aggregated
-#                avail and its delivered copy, handing duty to the
-#                sibling inside the declared wiring bound with staged
-#                reporting the available count and the held pump's
-#                command released for the whole of the sibling's
-#                service; each managed per-pump alarm reports the
-#                out_of_service/suppressed states its declared
-#                lifecycle bindings select — the bound fault alarm,
-#                the unbound thermal/moisture kinds and the sibling's
-#                set untouched — while a mid-OOS run-contact fault
-#                still asserts alarm as process truth with the
-#                unacknowledged latch withheld; the false write
-#                returns the pump to availability and re-annunciates
-#                the outlasted trip on suppression's release, the
-#                receipted ack settles the latch, and the next
-#                completed cycle's declared rotation hands duty back;
-#                every managed transition journaled as ordered
-#                point_changed entries beside the attributed receipts
-#                with the tick-domain ordering the declared bound
-#                measures, and the pair's roles unmoved throughout;
-#                two passes produce identical digests (oos-failed,
-#                oos-nondeterministic)
-#                The stage's power-fail interlock leg,
-#                ci/power_trip.py on the same declared deployment:
-#                with the pair settled and the group holding a full
-#                duty demand, the station power-fail contact driven
-#                through the plant protocol drops `power-ok` and both
-#                pumps' availability aggregates — the motor commands
-#                releasing while the chain's `demand` still stands,
-#                `none-available` annunciating, and the managed
-#                `power-fail` alarm's `alarm`/`unacknowledged`
-#                asserting with journaled `point_changed` evidence;
-#                a receipted `power-fail-ack` clears the latch while
-#                the condition stands, and the released contact
-#                returns the permissives and re-stages the demand
-#                inside the declared `min_off_ticks`/`start_delay_ticks`
-#                bounds with the field outputs moving only on the
-#                driven scan sequence and the pair's roles unchanged;
-#                two passes produce identical digests
-#                (power-trip-failed, power-trip-nondeterministic)
-#                The stage's alarm-rationalization leg,
-#                ci/alarm_rationalization.py on the same declared
-#                deployment — the declared-once half of decision 70's
-#                contract at the consumer boundary (WW-ENG-003,
-#                WW-ALM-001): the emitted model's managed alarm
-#                instances' declared record asserted verbatim on both
-#                peers' served surfaces — GET /signals' components
-#                section carrying each instance's rationalization
-#                block, GET /snapshot's parameters section serving
-#                each alarm's declared priority/class/response_ticks
-#                live — then the documented demote/promote switch and
-#                the same audit again on the switched pair, the single
-#                declaration reaching the operator boundary unchanged
-#                on whichever peer serves; mismatches or a dropped
-#                record fail by instance name, the pair's launch roles
-#                restored; two passes produce identical digests
-#                (alarm-rationalization-failed,
-#                alarm-rationalization-nondeterministic)
-#                The stage's claim-fencing leg, ci/claim_fencing.py on
-#                the same declared deployment — the consumer-side
-#                mirror of the lane's standing field-claim scenario
-#                (WW-ENG-003, WW-OPS-003): with the pair settled and a
-#                field-owning peer holding the plant's writer claim —
-#                the launched active's startup claim where the release
-#                records its owner token, else the documented switch
-#                stands the promoted peer's claim up first — a
-#                dedicated third sim-net attachment's write and step
-#                answer the named fencing refusal — the same mutations
-#                driven through the shipped dcs-plant-ctl exiting
-#                nonzero on the refusal while its unfenced reads
-#                answer — and the field owner's own writes keep
-#                landing; the lifecycle verbs answer per contract
-#                where the release speaks them — a foreign token's
-#                ensure_writer refused fenced, the owner's token
-#                answering claimed_shared with a write landing under
-#                the shared hold, release_writer dropping only the
-#                caller's hold with the standing claim still fencing
-#                probes, and a holder-of-nothing's release a harmless
-#                done; and a rogue claim_writer resolving per the
-#                settled contract, never silently — a refusal leaving
-#                the claim and owner untouched, the unconditional
-#                preempt journaling field_claim_lost on the superseded
-#                owner and demoting it in place with its monitor
-#                serving, then the leg re-promoting the demoted owner
-#                so the pair's launch roles and the claim's owner
-#                stand unchanged; two passes produce identical digests
-#                (claim-fencing-failed, claim-fencing-nondeterministic)
+#                definition, run on the released tooling. The stage's
+#                legs are the ci/legs/*.py files — one file per leg,
+#                each carrying its explanatory prose in its own
+#                docstring and its stage registration in a module-level
+#                LEG literal (its declared order, its titles, any extra
+#                tool flags, and its doctored cases). ci/legs.py
+#                discovers the legs in declared order, runs each twice
+#                requiring identical digests, then runs each declared
+#                tamper requiring its named evidence; the legs share
+#                the launch/settle/restore harness consolidated under
+#                #647 — ci/legs/pair.py's launch_pair/PairRig — and
+#                each restores the pair's launch roles for the next.
+#                Every leg reports its own <stem>-failed /
+#                <stem>-nondeterministic / <stem>-unchecked
+#                diagnostics, the stem its file name with underscores
+#                turned to dashes; adding a leg is one new file under
+#                ci/legs/ — this script, the boundary lint, and the
+#                README need no edit. A leg declaring `upgrade_tools`
+#                additionally runs its flag arguments against the
+#                recorded upgrade-from revision's tooling, resolved
+#                through the same cargo-install mechanism at
+#                $DCS_UPGRADE_REV — the rolling-upgrade leg's
+#                predecessor-release binaries.
 #   consumers    the replaceable-consumer boundary: the simulate
 #                stage's deterministic driven run replays under each
 #                consumer schedule — no UI attached, normal polling, a
@@ -644,11 +187,13 @@
 #                produce identical digests (ctl-failed,
 #                ctl-nondeterministic)
 #   upgrade      the documented repin upgrade (README §7): this tree's
-#                composition is materialized pinned at the recorded
-#                release rev, repinned to a later compatible revision,
-#                and re-emitted — the bytes must equal the checked-in
-#                model/plant.json — and the full pipeline re-runs under
-#                the repin; the named incompatible crossings are refused
+#                composition is materialized pinned at the previous
+#                release's recorded rev, repinned to the recorded
+#                release rev — the crossing the manifest's dcs_release
+#                names — and re-emitted; the bytes must equal the
+#                checked-in model/plant.json, and the full pipeline
+#                re-runs under the repin; the named incompatible
+#                crossings are refused
 #                (emit-divergent, pin-unresolvable, crossing-unrefused)
 #
 # Environment:
@@ -656,18 +201,42 @@
 #   DCS_REMOTE   the git remote the release crates and tooling resolve
 #                from (default: the published origin below). The
 #                workspace-side proof substitutes a file:// stand-in and
-#                rewrites this repository's Cargo.toml to match.
-#   DCS_REV      the pinned revision (default: the release-line rev
-#                this repository's manifest records — the v0.2.0
-#                commit whose tooling serves the interface registry,
-#                declared commands and their live availability
-#                verdicts, and emitted events the surface stage
-#                proves).
+#                rewrites this repository's Cargo.toml — and its
+#                committed Cargo.lock, whose recorded remote must keep
+#                matching the manifest's — to match.
+#   DCS_REV      the pinned revision (default: the release tag this
+#                repository's manifest records — v0.10.0, resolving to
+#                the recorded commit whose tooling serves the interface
+#                registry, declared commands and their live availability
+#                verdicts, and routed emitted events the surface stage
+#                proves, beside the pair and receipt contracts the legs
+#                exercise, the corrected claim/tracking/failover
+#                arbitration and bounded-liveness contracts, the
+#                tracking-source rediscovery, driven-scan bound,
+#                status-line label, history backfill, born-active
+#                startup-failure, and durable process-history contracts,
+#                the demote released-claim hand-back, persistence-path
+#                distinctness, deferred startup-claim refusal, and
+#                remote correspondence-gate contracts, and the bounded
+#                contact backoff, convergence-gated reclaim,
+#                self-address refusal, sim-bus claim family, named
+#                standby remedy, announced-source verification, skew
+#                bound, and checkpoint-pull recovery contracts the
+#                mirror legs gate on, beside the checkpoint path's
+#                cross-peer single-writer refusal and the promotion
+#                claim's basis skew bound this pin's mirror legs
+#                gate on).
 #   DCS_UPGRADE_REV
-#                the later compatible revision the upgrade stage repins
-#                to (default: $DCS_REV — a same-revision repin, still
-#                proving the mechanics; the workspace-side proof
-#                substitutes the checkout's HEAD).
+#                the earlier compatible revision the upgrade stage
+#                materializes the tree at before repinning to $DCS_REV
+#                (default: the earliest release-line rev whose builder
+#                API carries the composition's declared dimensional
+#                metadata — `PlantBuilder::unit`/`port_unit`/
+#                `param_unit` — so the stage proves the recorded
+#                rev → tag crossing the manifest names from a
+#                baseline this tree's own source still compiles
+#                against; the workspace-side proof seeds its stand-in
+#                remote to serve it).
 #   DCS_UPGRADE  set to 0 to skip the upgrade stage — the stage's own
 #                repinned re-run uses this internally.
 #   DCS_TOOLS    a directory holding prebuilt `dcs-model`,
@@ -676,14 +245,30 @@
 #                unset, the check installs them from $DCS_REMOTE at
 #                $DCS_REV — the contract's `cargo install --git`
 #                mechanism — into a scratch root.
+#   DCS_RECORD_DIR
+#                a directory holding the release record tree
+#                (`docs/releases/<tag>/…`) the schema-drift leg
+#                compares the tooling's emissions against. When unset
+#                — the contract's own shape — the record is fetched
+#                from $DCS_REMOTE at $DCS_REV. The workspace-side
+#                proof substitutes the checkout's own docs/releases:
+#                its tooling stand-ins emit the checkout's schemas,
+#                which legitimately drift from the pinned release's
+#                recorded artifacts between cuts (the contract's
+#                additive serde-optional fields land without a version
+#                bump), so the record the checkout carries is the
+#                comparator. The pinned-rev fetch still runs either
+#                way, proving the record stays reachable through the
+#                consumer mechanism.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DCS_REMOTE="${DCS_REMOTE:-https://github.com/Jan-Kaspar1/dcs.git}"
-DCS_REV="${DCS_REV:-c2b5694d9fd6f6168b85c1dfc2e1542b369b3a3f}"
-DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-$DCS_REV}"
+DCS_REV="${DCS_REV:-v0.10.0}"
+DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-07ec24f94dfaf5ff42d56a614718190da3403fd5}"
 DCS_TOOLS="${DCS_TOOLS:-}"
+DCS_RECORD_DIR="${DCS_RECORD_DIR:-}"
 TOOLS=""
 TOOLS_REV=""
 UPGRADE_DIR=""
@@ -761,12 +346,185 @@ open(path, "w").write(toml)
 PY
 }
 
-echo "== resolve =="
-cargo fetch --locked 2>/dev/null || {
-    # --locked is the fast path; a materialized copy whose Cargo.toml was
-    # rewritten to a transport stand-in re-resolves once.
-    cargo fetch || fail "pin-unresolvable: cargo fetch failed for the pinned release"
+# The committed Cargo.lock is this repository's reproducibility
+# artifact: README §2's promise is that a tag pin resolves once and the
+# committed lockfile records the commit it landed on, so a fresh clone
+# must resolve under `cargo fetch --locked` without a resolver quietly
+# repairing the file first. Cargo refuses a lockfile whose recorded
+# query disagrees with the manifest's pin at all, so this leg compares
+# the committed lockfile against the declared pin *before* any fetch
+# can rewrite it — the state a consumer's own CI could otherwise never
+# see, because the resolve stage's re-resolve fallback used to absorb
+# it. $1 is the lockfile to read: `Cargo.lock` itself in the positive
+# leg, a doctored scratch copy in the self-check below; $2 is the
+# release record's `record.md` when one was substituted, else the
+# empty string. Exit status 2 is a release crate recorded from a
+# non-git source — `path-dependency-leak`'s finding — and 1 every
+# other disagreement, `lockfile-stale`'s.
+lockfile_leg() {
+    python3 - "${1:-Cargo.lock}" "$DCS_REMOTE" "${2:-}" <<'PY'
+import re, subprocess, sys
+
+lock_path, fetch_remote, record_path = sys.argv[1], sys.argv[2], sys.argv[3]
+manifest = open("Cargo.toml").read()
+lock = open(lock_path).read()
+release = ("dcs-build", "dcs-core", "dcs-model")
+
+# `leak` is the non-git-source finding — a recorded `path` into some
+# checkout — and carries its own exit status so the shell reports
+# `path-dependency-leak` rather than the stale-pin diagnostic.
+def leak(message):
+    print(message, file=sys.stderr)
+    sys.exit(2)
+
+# The declared pin, as Cargo.toml spells it: the remote and the
+# `tag`/`rev` fragment both release crates carry.
+declared = {}
+for name in ("dcs-build", "dcs-model"):
+    match = re.search(
+        re.escape(name) + r' = \{ git = "([^"]+)",\s*(tag|rev) = "([^"]+)"', manifest
+    )
+    if match is None:
+        sys.exit(f"{name} declares no `git = ..., tag|rev = ...` pin in Cargo.toml")
+    declared[name] = (match.group(1), f"{match.group(2)}={match.group(3)}")
+if len({pin for pin in declared.values()}) != 1:
+    sys.exit(f"the release crates declare different pins: {sorted(declared.values())}")
+url, query = declared["dcs-build"]
+kind, value = query.split("=", 1)
+if url != fetch_remote:
+    sys.exit(f"Cargo.toml pins {url} while this check resolves {fetch_remote} — "
+             "repin the manifest, or drop the DCS_REMOTE substitution")
+
+# Every release crate's recorded source: git only, one source, on the
+# manifest's own remote and query, at one precise revision.
+recorded = dict(re.findall(
+    r'\[\[package\]\]\nname = "([^"]+)"\nversion = "[^"]+"\nsource = "([^"]+)"', lock
+))
+missing = [name for name in release if name not in recorded]
+if missing:
+    leak(f"release crates missing from {lock_path}: {sorted(missing)}")
+for name in release:
+    if not recorded[name].startswith("git+"):
+        leak(f"{name} resolved from {recorded[name]} — only a git source satisfies a git pin")
+sources = {recorded[name] for name in release}
+if len(sources) != 1:
+    sys.exit(f"the release crates record different sources: {sorted(sources)}")
+source = sources.pop()
+prefix = f"git+{url}?{query}#"
+if not source.startswith(prefix):
+    sys.exit(f"{lock_path} records {source} for the release crates, but Cargo.toml "
+             f"declares {url} at {query}")
+precise = source[len(prefix):]
+if not re.fullmatch(r"[0-9a-f]{40}", precise):
+    sys.exit(f"{lock_path} records no precise revision for {url} at {query}: {source}")
+
+# The recorded revision must be the one the declared pin names. A tag
+# the remote does not serve yet is not this leg's finding: an
+# unresolvable pin is `pin-unresolvable`'s, and a remote that cannot
+# be reached at all leaves the query comparison above holding.
+if kind == "tag":
+    refs = subprocess.run(
+        ["git", "ls-remote", url, f"refs/tags/{value}", f"refs/tags/{value}^{{}}"],
+        capture_output=True, text=True, check=False,
+    ).stdout
+    served = {}
+    for line in refs.splitlines():
+        sha, _, ref = line.partition("\t")
+        served[ref] = sha
+    target = served.get(f"refs/tags/{value}^{{}}") or served.get(f"refs/tags/{value}")
+    if target is None:
+        print(f"  {value} is not published on {url} yet — an unresolvable pin is "
+              "pin-unresolvable's finding")
+    elif target != precise:
+        sys.exit(f"{lock_path} records {precise}, but {value} lands on {target}")
+elif re.fullmatch(r"[0-9a-f]{40}", value) and precise != value:
+    sys.exit(f"{lock_path} records {precise} for rev {value}")
+
+# The release record's Commit field names the same release when it is
+# filled: the tag's target and the record must not diverge, or the
+# shipped artifact pins a commit the record does not claim.
+if record_path:
+    commit = re.search(r"^\| Commit \| `([0-9a-f]{40})`", open(record_path).read(), re.M)
+    if commit and commit.group(1) != precise:
+        sys.exit(f"{lock_path} records {precise}, but {record_path} records "
+                 f"commit {commit.group(1)}")
+
+print(f"  the committed {lock_path} records {query} at {precise}")
+PY
 }
+
+# The leg's exit status named: a release crate recorded from a path
+# into some checkout is `path-dependency-leak`, every other
+# disagreement between the committed lockfile and this repository's
+# declared pin is `lockfile-stale`.
+lockfile_check() {
+    local status=0
+    lockfile_leg "${1:-Cargo.lock}" "${2:-}" || status=$?
+    case "$status" in
+        0) return 0 ;;
+        2) fail "path-dependency-leak: a release crate is recorded from a non-git source in ${1:-Cargo.lock}" ;;
+        *) fail "lockfile-stale: ${1:-Cargo.lock} does not record this repository's declared pin" ;;
+    esac
+}
+
+echo "== lockfile =="
+# The digest the resolve stage re-checks: a committed lockfile this
+# stage proved records the declared pin must come out of the resolve
+# byte-identical, so the documented re-resolve fallback cannot absorb
+# a stale artifact.
+LOCK_DIGEST="$(sha256sum Cargo.lock | cut -d' ' -f1)"
+LOCK_RECORD=""
+if [ -n "$DCS_RECORD_DIR" ]; then
+    DCS_RELEASE="$(python3 -c 'import json; print(json.load(open("deploy/manifest.json"))["dcs_release"])')"
+    [ -f "$DCS_RECORD_DIR/$DCS_RELEASE/record.md" ] \
+        && LOCK_RECORD="$DCS_RECORD_DIR/$DCS_RELEASE/record.md"
+fi
+lockfile_check Cargo.lock "$LOCK_RECORD"
+
+# The leg must report its own diagnostic — a stale lockfile is named,
+# never repaired. The doctored copy is the reported defect put back:
+# the release crates recorded at an earlier revision's `rev` pin while
+# this tree's manifest declares its own pin. It lives under the
+# scratch root, so the committed artifact stays pristine.
+STALE_LOCK="$(mktemp)"
+python3 - Cargo.lock "$STALE_LOCK" "$DCS_UPGRADE_REV" <<'PY'
+import re, sys
+lock, stale, baseline = sys.argv[1], sys.argv[2], sys.argv[3]
+doctored, count = re.subn(
+    r'\?[^#"]*#[0-9a-f]{40}"', lambda _: f'?rev={baseline}#{baseline}"', open(lock).read()
+)
+if count != 3:
+    sys.exit(f"doctor: expected three git sources to doctor, rewrote {count}")
+open(stale, "w").write(doctored)
+PY
+if out="$(lockfile_leg "$STALE_LOCK" 2>&1)"; then
+    fail "lockfile-stale-unchecked: a lockfile recorded at another revision passed the lockfile leg"
+fi
+case "$out" in
+    *"but Cargo.toml declares"*) ;;
+    *) fail "lockfile-stale-unchecked: the stale lockfile was refused without naming the pin it should record: $out" ;;
+esac
+echo "  a lockfile recorded at another revision refused: lockfile-stale"
+
+echo "== resolve =="
+# `cargo fetch --locked` is the fast path and, with a committed
+# lockfile that satisfies the manifest, it is what makes every build
+# resolve the same sources. README §7's `cargo update` is the
+# documented remedy for a tree whose lockfile has not been regenerated
+# yet, so the fallback re-resolves once — and the digest the lockfile
+# stage recorded names that rewrite on the committed artifact instead
+# of absorbing it.
+LOCKED_ERR="$(mktemp)"
+if ! cargo fetch --locked 2>"$LOCKED_ERR"; then
+    cargo fetch || {
+        sed 's/^/  /' "$LOCKED_ERR" >&2
+        fail "pin-unresolvable: cargo fetch failed for the pinned release"
+    }
+    if [ "$(sha256sum Cargo.lock | cut -d' ' -f1)" != "$LOCK_DIGEST" ]; then
+        fail "lockfile-stale: the committed Cargo.lock did not satisfy the declared pin — the resolve stage re-resolved it; regenerate it with \`cargo update\` (README §7)"
+    fi
+fi
+rm -f "$LOCKED_ERR" "$STALE_LOCK"
 
 echo "== build =="
 cargo build --quiet || {
@@ -776,21 +534,6 @@ cargo build --quiet || {
 TARGET_DIR="$(cargo metadata --format-version 1 --no-deps \
     | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
 BIN="$TARGET_DIR/debug/pump-station"
-
-echo "== lockfile =="
-python3 - <<'PY' || fail "path-dependency-leak: Cargo.lock records a non-git source for a release crate"
-import re, sys
-lock = open("Cargo.lock").read()
-sections = re.findall(r'\[\[package\]\]\nname = "([^"]+)"\nversion = "[^"]+"\nsource = "([^"]+)"', lock)
-release = {name: source for name, source in sections if name.startswith("dcs-")}
-missing = {"dcs-build", "dcs-core", "dcs-model"} - release.keys()
-if missing:
-    sys.exit(f"release crates missing from Cargo.lock: {sorted(missing)}")
-for name, source in sections:
-    if name.startswith("dcs-") and not source.startswith("git+"):
-        sys.exit(f"{name} resolved from {source}")
-PY
-echo "  release crates resolve from git sources only"
 
 echo "== emit =="
 EMIT_1="$(mktemp)"; EMIT_2="$(mktemp)"; SCEN_1="$(mktemp)"; SCEN_2="$(mktemp)"
@@ -815,11 +558,20 @@ ensure_tools "$DCS_REV" \
     || fail "tooling-rejected: dcs-model validate refused the checked-in model"
 LINT="$("$TOOLS/dcs-model" lint model/plant.json)" \
     || fail "tooling-rejected: dcs-model lint refused the checked-in model"
-[[ "$LINT" == *"no findings"* ]] \
-    || fail "tooling-rejected: dcs-model lint reports findings: $LINT"
+# The checked-in model's only advisories are undeclared
+# `stale_after_ticks` budgets — freshness stays an opt-in per-point
+# declaration; any other finding class fails the stage.
+if [[ "$LINT" != *"no findings"* ]]; then
+    UNEXPECTED="$(printf '%s\n' "$LINT" \
+        | grep -v '^field_input_without_freshness_budget ' || true)"
+    [[ -z "$UNEXPECTED" ]] \
+        || fail "tooling-rejected: dcs-model lint reports findings: $LINT"
+fi
 "$TOOLS/dcs-controller" model/plant.json --check \
     || fail "tooling-rejected: dcs-controller --check refused the checked-in model"
-echo "  validate, lint, and --check accept the checked-in model"
+"$TOOLS/dcs-plant-server" model/plant.json --check-dynamics model/dynamics.json \
+    || fail "tooling-rejected: dcs-plant-server --check-dynamics refused the checked-in dynamics document"
+echo "  validate, lint, --check, and --check-dynamics accept the checked-in documents"
 
 # The release record's schema artifacts: `docs/releases/<tag>/` lives
 # in the same repository the crate and tooling pins resolve from, so
@@ -833,35 +585,50 @@ git -C "$SCRATCH" fetch --depth 1 --quiet "$DCS_REMOTE" "$DCS_REV" \
     || fail "pin-unresolvable: the pinned rev $DCS_REV could not be fetched for the release record"
 RECORD="$SCRATCH/record"
 mkdir -p "$RECORD"
-for artifact in block-interfaces.schema.json plant-model.schema.json; do
+RECORD_ARTIFACTS="block-interfaces.schema.json plant-model.schema.json deploy-manifest.schema.json dynamics.schema.json"
+for artifact in $RECORD_ARTIFACTS; do
     git -C "$SCRATCH" show "FETCH_HEAD:docs/releases/$DCS_RELEASE/$artifact" \
         > "$RECORD/$artifact" \
         || fail "pin-unresolvable: the pinned rev serves no docs/releases/$DCS_RELEASE/$artifact"
 done
+if [ -n "$DCS_RECORD_DIR" ]; then
+    # The workspace-side proof's tooling stand-ins emit the checkout's
+    # schemas, so the checkout's own record tree is the comparator;
+    # the fetch above still proves the record stays fetchable at the
+    # pinned rev through the consumer mechanism.
+    for artifact in $RECORD_ARTIFACTS; do
+        cp "$DCS_RECORD_DIR/$DCS_RELEASE/$artifact" "$RECORD/$artifact" \
+            || fail "record-missing: $DCS_RECORD_DIR serves no $DCS_RELEASE/$artifact"
+    done
+fi
 
-# `dcs-model <subcommand>` emitted at the pinned rev must equal the
-# recorded artifact byte-for-byte — the consumer's non-drift leg for
-# the served-registry and plant-model schemas the contract records as
-# fetchable release artifacts. A divergence reports schema-drift on
-# stderr and returns 1.
+# Each recorded schema's emitting tool run at the pinned rev must
+# reproduce the recorded artifact byte-for-byte — the consumer's
+# non-drift leg for the served-registry, plant-model,
+# deployment-manifest, and dynamics-document schemas the contract
+# records as fetchable release artifacts. $1 is the tool invocation
+# (binary plus its mode arguments); $2 the recorded artifact; $3 its
+# name. A divergence reports schema-drift on stderr and returns 1.
 schema_nondrift() {
     local emitted
     emitted="$(mktemp)"
-    if ! "$TOOLS/dcs-model" "$1" > "$emitted"; then
+    if ! $1 > "$emitted"; then
         rm -f "$emitted"
-        echo "tooling-rejected: dcs-model $1 failed at the pinned rev" >&2
+        echo "tooling-rejected: $1 failed at the pinned rev" >&2
         return 1
     fi
     if ! cmp -s "$emitted" "$2"; then
         rm -f "$emitted"
-        echo "schema-drift: dcs-model $1 at the pinned rev does not emit the recorded $DCS_RELEASE artifact $3" >&2
+        echo "schema-drift: $1 at the pinned rev does not emit the recorded $DCS_RELEASE artifact $3" >&2
         return 1
     fi
     rm -f "$emitted"
 }
-schema_nondrift interface-schema "$RECORD/block-interfaces.schema.json" block-interfaces.schema.json || exit 1
-schema_nondrift schema "$RECORD/plant-model.schema.json" plant-model.schema.json || exit 1
-echo "  schema and interface-schema emit the $DCS_RELEASE record's artifacts byte-identically"
+schema_nondrift "$TOOLS/dcs-model interface-schema" "$RECORD/block-interfaces.schema.json" block-interfaces.schema.json || exit 1
+schema_nondrift "$TOOLS/dcs-model schema" "$RECORD/plant-model.schema.json" plant-model.schema.json || exit 1
+schema_nondrift "$TOOLS/dcs-model deploy-schema" "$RECORD/deploy-manifest.schema.json" deploy-manifest.schema.json || exit 1
+schema_nondrift "$TOOLS/dcs-plant-server --dynamics-schema" "$RECORD/dynamics.schema.json" dynamics.schema.json || exit 1
+echo "  schema, interface-schema, deploy-schema, and --dynamics-schema emit the $DCS_RELEASE record's artifacts byte-identically"
 
 # A drifted artifact must report the diagnostic — the same leg against
 # a doctored copy, so the recorded file stays pristine.
@@ -872,12 +639,105 @@ document = json.load(open(sys.argv[1]))
 document["required"].remove("tick")
 json.dump(document, open(sys.argv[2], "w"), indent=2)
 PY
-if out="$(schema_nondrift interface-schema "$DOCTORED_SCHEMA" block-interfaces.schema.json 2>&1)"; then
+if out="$(schema_nondrift "$TOOLS/dcs-model interface-schema" "$DOCTORED_SCHEMA" block-interfaces.schema.json 2>&1)"; then
     fail "schema-drift-unchecked: a drifted record artifact passed the interface-schema non-drift leg"
 fi
 [[ "$out" == *"schema-drift"* ]] \
     || fail "schema-drift-unchecked: a drifted record artifact did not report schema-drift: $out"
 echo "  a drifted record artifact refused: schema-drift"
+
+# The screening half of the same contract: the checked-in consumer
+# documents against the record artifacts declaring their shapes —
+# deploy/manifest.json against deploy-manifest.schema.json (the
+# screening the contract records before the deploy stage's
+# rig-agreement check runs) and model/dynamics.json against
+# dynamics.schema.json (before the merge's own validation runs).
+# ci/schema_conformance.py runs the consumer-side
+# required-keys/field-shape conformance and reports schema-mismatch
+# itself; two consecutive passes must produce identical digests.
+schema_screen() {
+    python3 ci/schema_conformance.py \
+        --schema "$RECORD/$1" --document "$2" --what "$3"
+}
+FIRST="$(schema_screen deploy-manifest.schema.json deploy/manifest.json "deployment manifest")"
+SECOND="$(schema_screen deploy-manifest.schema.json deploy/manifest.json "deployment manifest")"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "schema-mismatch-nondeterministic: two manifest-screening passes produced different digests"
+echo "  $FIRST"
+FIRST="$(schema_screen dynamics.schema.json model/dynamics.json "dynamics document")"
+SECOND="$(schema_screen dynamics.schema.json model/dynamics.json "dynamics document")"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "schema-mismatch-nondeterministic: two dynamics-screening passes produced different digests"
+echo "  $FIRST"
+
+# A consumer document violating its declared schema must report the
+# diagnostic — doctored copies under the scratch root, so the
+# checked-in pair stays pristine.
+manifest_case() {
+    local doctored="$SCRATCH/manifest-$1.json" out
+    python3 - deploy/manifest.json "$doctored" "$1" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+case = sys.argv[3]
+if case == "missing-required":
+    del document["model"]["fingerprint"]
+elif case == "mistyped-field":
+    document["controllers"][1]["failover_budget"] = "high"
+elif case == "mistyped-history-file":
+    # The durable-history mount is a path field — a non-string value
+    # violates its shape the same way a mistyped journal_file would.
+    document["controllers"][0]["history_file"] = 7
+elif case == "undeclared-field":
+    # The pair's shared tracking secret is a deployment secret the
+    # manifest shape deliberately never records.
+    document["pair_token"] = "not-for-the-record"
+else:
+    sys.exit("unknown manifest case " + case)
+json.dump(document, open(sys.argv[2], "w"), indent=2)
+PY
+    if out="$(python3 ci/schema_conformance.py \
+            --schema "$RECORD/deploy-manifest.schema.json" \
+            --document "$doctored" \
+            --what "deployment manifest" 2>&1)"; then
+        fail "schema-mismatch-unchecked: the manifest's $1 case passed the schema conformance check"
+    fi
+    [[ "$out" == *"schema-mismatch"* ]] \
+        || fail "schema-mismatch-unchecked: the manifest's $1 case did not report schema-mismatch: $out"
+    echo "  manifest $1 refused: schema-mismatch"
+}
+dynamics_case() {
+    local doctored="$SCRATCH/dynamics-$1.json" out
+    python3 - model/dynamics.json "$doctored" "$1" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+case = sys.argv[3]
+if case == "missing-required":
+    del document[0]["bool_flow"]["initial"]
+elif case == "mistyped-field":
+    document[0]["bool_flow"]["input"] = "fifteen"
+elif case == "undeclared-element":
+    document.append({"not_an_element": {"input": 1, "output": 2}})
+else:
+    sys.exit("unknown dynamics case " + case)
+json.dump(document, open(sys.argv[2], "w"), indent=2)
+PY
+    if out="$(python3 ci/schema_conformance.py \
+            --schema "$RECORD/dynamics.schema.json" \
+            --document "$doctored" \
+            --what "dynamics document" 2>&1)"; then
+        fail "schema-mismatch-unchecked: the dynamics document's $1 case passed the schema conformance check"
+    fi
+    [[ "$out" == *"schema-mismatch"* ]] \
+        || fail "schema-mismatch-unchecked: the dynamics document's $1 case did not report schema-mismatch: $out"
+    echo "  dynamics $1 refused: schema-mismatch"
+}
+for case in missing-required mistyped-field mistyped-history-file \
+        undeclared-field; do
+    manifest_case "$case"
+done
+for case in missing-required mistyped-field undeclared-element; do
+    dynamics_case "$case"
+done
 
 # One `dcs-model diff` leg: $3 is `no changes` — the documents must
 # diff clean — or a field the diff listing must name on the element $4
@@ -1002,17 +862,127 @@ MANIFEST_FP="$(python3 -c 'import json; print(json.load(open("deploy/manifest.js
     || fail "manifest-fingerprint-mismatch: emitted model fingerprints $EMITTED_FP but deploy/manifest.json records $MANIFEST_FP"
 echo "  fingerprint $EMITTED_FP matches the manifest"
 
+# The served-bytes half of the model authorization: the recorded
+# fingerprint must name what the deployed pair actually serves, not
+# just the checked-in artifact — ci/fingerprint.py launches the
+# manifest-declared pair on the released tooling and pulls each peer's
+# stamped model digest through GET /checkpoint, reporting the named
+# manifest-fingerprint-mismatch with the expected vs served fingerprint
+# and the first diverging document section on any divergence. Two
+# passes must produce identical digests.
+run_fingerprint() {
+    python3 ci/fingerprint.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_fingerprint)" \
+    || fail "fingerprint-failed: the manifest-fingerprint leg did not hold — its evidence lines are above"
+SECOND="$(run_fingerprint)" \
+    || fail "fingerprint-failed: the manifest-fingerprint leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "fingerprint-nondeterministic: two fingerprint-leg passes produced different digests"
+echo "  $FIRST"
+
+# The doctored case: the pair serving a model whose point ids were
+# renumbered — identical component content — must surface the named
+# diagnostic; a silent pass would leave the authorization unproven.
+if out="$(run_fingerprint --tamper renumber-points 2>&1)"; then
+    fail "fingerprint-unchecked: a served model with renumbered point ids passed the fingerprint leg"
+fi
+[[ "$out" == *"manifest-fingerprint-mismatch"* && "$out" == *"io_points"* ]] \
+    || fail "fingerprint-unchecked: the renumber-points case did not report its named diagnostic: $out"
+echo "  renumber-points: reported, manifest-fingerprint-mismatch"
+
+# The dynamics half of the authorization, under the same canonical
+# fingerprint contract: the optional `dynamics.fingerprint` must name
+# the dynamics document the deployment serves — the manifest's
+# declared `dynamics.path`, the read-only mount the rig instantiates
+# and `dcs-plant-server --dynamics` merges — and the checked-in
+# artifact must fingerprint it identically. A manifest omitting the
+# optional field declares no pin; the served-vs-checked-in comparison
+# still stands.
+DYN_FP="$(python3 ci/dynamics_fingerprint.py --fingerprint model/dynamics.json)"
+MANIFEST_DYN_FP="$(python3 -c 'import json; print(json.load(open("deploy/manifest.json")).get("dynamics", {}).get("fingerprint") or "")')"
+if [ -n "$MANIFEST_DYN_FP" ]; then
+    [ "$DYN_FP" = "$MANIFEST_DYN_FP" ] \
+        || fail "manifest-fingerprint-mismatch: the checked-in dynamics fingerprints $DYN_FP but deploy/manifest.json records $MANIFEST_DYN_FP"
+    echo "  dynamics fingerprint $DYN_FP matches the manifest"
+else
+    echo "  the manifest records no dynamics.fingerprint — the pin is undeclared"
+fi
+
+# The served-bytes half: ci/dynamics_fingerprint.py launches the
+# manifest-declared pair on the released tooling serving the
+# deployment's declared dynamics.path, fingerprints the document it
+# actually runs, and holds it equal to the recorded fingerprint and
+# the checked-in artifact — reporting manifest-fingerprint-mismatch
+# with the expected vs served fingerprint and the first diverging
+# element on any divergence. Two passes must produce identical
+# digests.
+run_dynamics_fingerprint() {
+    python3 ci/dynamics_fingerprint.py \
+        --plant-server "$TOOLS/dcs-plant-server" \
+        --controller "$TOOLS/dcs-controller" \
+        --model model/plant.json \
+        --dynamics model/dynamics.json \
+        --scenario ci/scenario.json \
+        --manifest deploy/manifest.json "$@"
+}
+FIRST="$(run_dynamics_fingerprint)" \
+    || fail "dynamics-fingerprint-failed: the dynamics-fingerprint leg did not hold — its evidence lines are above"
+SECOND="$(run_dynamics_fingerprint)" \
+    || fail "dynamics-fingerprint-failed: the dynamics-fingerprint leg did not hold — its evidence lines are above"
+[ "$FIRST" = "$SECOND" ] \
+    || fail "dynamics-fingerprint-nondeterministic: two dynamics-fingerprint passes produced different digests"
+echo "  $FIRST"
+
+# The doctored case: the pair serving a dynamics document whose point
+# references were renumbered — identical element content — must
+# surface the named diagnostic; a silent pass would leave the
+# authorization unproven.
+if out="$(run_dynamics_fingerprint --tamper renumber-points 2>&1)"; then
+    fail "dynamics-fingerprint-unchecked: a served dynamics document with renumbered points passed the fingerprint leg"
+fi
+[[ "$out" == *"manifest-fingerprint-mismatch"* && "$out" == *"element 0"* ]] \
+    || fail "dynamics-fingerprint-unchecked: the renumber-points case did not report its named diagnostic: $out"
+echo "  renumber-points: reported, manifest-fingerprint-mismatch"
+
 echo "== deploy =="
 # The rig-definition consistency check reports its own named
 # diagnostics (rig-invalid, rig-unverifiable, rig-mismatch) on stderr.
 python3 ci/deploy_rig.py
 
+# The overview-URL generator's rig-resolution half — ci/overview_url.py
+# reads the manifest's declared topology and resolves each declared
+# member to the monitor endpoint the rig definition publishes, printing
+# the deployment's ?pair= overview URL (the pair stage's pair-overview
+# leg asserts the generated names and serving endpoints against the
+# launched pair). It reports its own `overview-url: …` diagnostics —
+# a declared member with no published endpoint fails by name.
+python3 ci/overview_url.py
+
 # The persistence fields' divergence cases, exercised against doctored
 # scratch copies so the checked-in pair stays pristine: each must
 # report rig-mismatch — a declared path missing its mount or flag, a
 # flag or writable mount the manifest does not declare, a persistence
-# mount left read-only — while the fields omitted outright (with their
-# mounts and flags) stay a valid deployment.
+# mount left read-only, one controller's journal_file aliased with its
+# state_file — while the fields omitted outright (with their
+# mounts and flags) stay a valid deployment. The same harness proves
+# the checked-in manifest's declared topology section — the deployed
+# pair named under `topology.pairs`: the declaration validates under
+# another pair name, while a member the rig does not declare, a
+# member two pairs share, a pair whose standby edge leaves it, a
+# pair carrying two standby declarations, or a declared pair whose
+# standby wiring does not close inside it each report rig-mismatch —
+# and the one-field-per-deployment bound (decision 99) refuses the
+# planted undeployable shapes: a second declared pair over the
+# manifest's one plant and a second duty controller the section
+# never names, each a second field-owning claimant on the
+# single-writer claim.
 RIG_DIR="$(mktemp -d)"
 mkdir -p "$RIG_DIR/deploy" "$RIG_DIR/ci" "$RIG_DIR/model"
 cp deploy/manifest.json deploy/compose.yaml "$RIG_DIR/deploy/"
@@ -1041,6 +1011,15 @@ elif case == "persistence-flag-divergence":
     # ctrl-a's --journal-file argument diverges from the manifest.
     compose = compose.replace(
         "- /var/tmp/journal.jsonl", "- /var/tmp/other.jsonl", 1)
+elif case == "persistence-history-flag-divergence":
+    # ctrl-a's --history-file argument diverges from the manifest.
+    compose = compose.replace(
+        "- /var/tmp/history.jsonl", "- /var/tmp/other.jsonl", 1)
+elif case == "persistence-history-flag-missing":
+    # ctrl-a keeps its declared history_file while the rig
+    # definition drops the --history-file flag.
+    compose = compose.replace(
+        "      - --history-file\n      - /var/tmp/history.jsonl\n", "", 1)
 elif case == "persistence-mount-read-only":
     compose = compose.replace(
         "ctrl-a-data:/var/tmp", "ctrl-a-data:/var/tmp:ro", 1)
@@ -1049,6 +1028,12 @@ elif case == "undeclared-persistence-flag":
     # field — an undeclared flag.
     document = json.loads(manifest)
     del document["controllers"][0]["journal_file"]
+    manifest = json.dumps(document, indent=2)
+elif case == "undeclared-history-flag":
+    # ctrl-a keeps its --history-file while the manifest drops the
+    # field — an undeclared flag.
+    document = json.loads(manifest)
+    del document["controllers"][0]["history_file"]
     manifest = json.dumps(document, indent=2)
 elif case == "undeclared-writable-mount":
     # ctrl-a gains writable storage the manifest declares nothing
@@ -1081,21 +1066,167 @@ elif case == "failover-wrong-peer":
     document["controllers"][0]["failover_budget"] = \
         document["controllers"][1].pop("failover_budget")
     manifest = json.dumps(document, indent=2)
+elif case == "persistence-aliased-paths":
+    # ctrl-a's journal_file aliases its state_file — the checkpoint's
+    # write-then-rename would orphan the append writer's descriptor
+    # (finding state-file-alias-clobbers-append-durable-files). The
+    # flag follows the field so flag/field parity still holds and the
+    # only divergence is the alias itself.
+    document = json.loads(manifest)
+    document["controllers"][0]["journal_file"] = "/var/tmp/state.json"
+    manifest = json.dumps(document, indent=2)
+    compose = compose.replace(
+        "- /var/tmp/journal.jsonl", "- /var/tmp/state.json", 1)
 elif case == "persistence-omitted":
-    # Both fields omitted together with their flags and mounts — the
-    # optional deployment a consumer without durable storage declares.
+    # All three fields omitted together with their flags and mounts —
+    # the optional deployment a consumer without durable storage
+    # declares.
     document = json.loads(manifest)
     for controller in document["controllers"]:
         controller.pop("state_file", None)
         controller.pop("journal_file", None)
+        controller.pop("history_file", None)
     manifest = json.dumps(document, indent=2)
     for line in (
         "      - ctrl-a-data:/var/tmp\n",
         "      - ctrl-b-data:/var/tmp\n",
         "      - --state-file\n      - /var/tmp/state.json\n",
         "      - --journal-file\n      - /var/tmp/journal.jsonl\n",
+        "      - --history-file\n      - /var/tmp/history.jsonl\n",
     ):
         compose = compose.replace(line, "")
+elif case == "topology-declared":
+    # The checked-in manifest declares the deployed pair; the
+    # declaration stays valid under another pair name — the name is
+    # the deployment's free index entry, the membership and the
+    # wiring what must close.
+    document = json.loads(manifest)
+    document["topology"] = {
+        "pairs": [{"name": "pump-pair", "members": ["ctrl-a", "ctrl-b"]}]
+    }
+    manifest = json.dumps(document, indent=2)
+elif case == "topology-multi-pair":
+    # Two named pairs over a four-controller rig on the manifest's
+    # one plant — the planted undeployable topology decision 99
+    # rules out: each pair needs a duty member, and two duty
+    # claimants cannot both hold the field's single-writer claim.
+    # The rig grows the matching second pair's services and volumes,
+    # cloned from the first pair's blocks on fresh names and ports.
+    document = json.loads(manifest)
+    document["controllers"] += [
+        {
+            "name": "ctrl-c",
+            "listen": "0.0.0.0:8082",
+            "state_file": "/var/tmp/state.json",
+            "journal_file": "/var/tmp/journal.jsonl",
+            "history_file": "/var/tmp/history.jsonl",
+        },
+        {
+            "name": "ctrl-d",
+            "listen": "0.0.0.0:8083",
+            "standby": "ctrl-c:8082",
+            "state_file": "/var/tmp/state.json",
+            "journal_file": "/var/tmp/journal.jsonl",
+            "history_file": "/var/tmp/history.jsonl",
+        },
+    ]
+    document["topology"] = {
+        "pairs": [
+            {"name": "station-a", "members": ["ctrl-a", "ctrl-b"]},
+            {"name": "station-b", "members": ["ctrl-c", "ctrl-d"]},
+        ]
+    }
+    manifest = json.dumps(document, indent=2)
+    block_a = compose[
+        compose.index("  ctrl-a:"):compose.index("  ctrl-b:")
+    ]
+    block_b = compose[compose.index("  ctrl-b:"):compose.index("\nnetworks:")]
+    block_c = block_a.replace("ctrl-a", "ctrl-c").replace("8080", "8082")
+    block_d = (
+        block_b.replace("ctrl-b", "ctrl-d")
+        .replace("ctrl-a:8080", "ctrl-c:8082")
+        .replace("ctrl-a:", "ctrl-c:")
+        .replace("8081", "8083")
+        .replace('      - --auto-promote\n      - "3"\n', "")
+    )
+    compose = compose.replace(
+        "\nnetworks:",
+        "\n" + block_c + "\n" + block_d + "\nnetworks:",
+        1,
+    )
+    compose = compose.replace(
+        "  ctrl-a-data:\n  ctrl-b-data:\n",
+        "  ctrl-a-data:\n  ctrl-b-data:\n  ctrl-c-data:\n  ctrl-d-data:\n",
+        1,
+    )
+elif case == "undeployable-second-duty":
+    # The same undeployable shape with no topology section at all:
+    # a second duty controller — an entry without `standby` — is a
+    # second field-owning claimant on the manifest's one plant.
+    document = json.loads(manifest)
+    document["controllers"].append(
+        {
+            "name": "ctrl-c",
+            "listen": "0.0.0.0:8082",
+            "state_file": "/var/tmp/state.json",
+            "journal_file": "/var/tmp/journal.jsonl",
+            "history_file": "/var/tmp/history.jsonl",
+        }
+    )
+    manifest = json.dumps(document, indent=2)
+    block_c = compose[
+        compose.index("  ctrl-a:"):compose.index("  ctrl-b:")
+    ].replace("ctrl-a", "ctrl-c").replace("8080", "8082")
+    compose = compose.replace(
+        "\nnetworks:", "\n" + block_c + "\nnetworks:", 1
+    )
+    compose = compose.replace(
+        "  ctrl-a-data:\n  ctrl-b-data:\n",
+        "  ctrl-a-data:\n  ctrl-b-data:\n  ctrl-c-data:\n",
+        1,
+    )
+elif case == "topology-undeclared-member":
+    # A named pair member the rig does not declare.
+    document = json.loads(manifest)
+    document["topology"] = {
+        "pairs": [{"name": "station", "members": ["ctrl-a", "ctrl-z"]}]
+    }
+    manifest = json.dumps(document, indent=2)
+elif case == "topology-shared-member":
+    # Two named pairs claiming the same member.
+    document = json.loads(manifest)
+    document["topology"] = {
+        "pairs": [
+            {"name": "station-a", "members": ["ctrl-a", "ctrl-b"]},
+            {"name": "station-b", "members": ["ctrl-a", "ctrl-b"]},
+        ]
+    }
+    manifest = json.dumps(document, indent=2)
+elif case == "topology-external-standby":
+    # The declared pair's standby edge leaves it: the pair's tracking
+    # member names a peer outside the pair — wiring that does not
+    # close inside the declaration.
+    document = json.loads(manifest)
+    document["controllers"][1]["standby"] = "ctrl-c:8082"
+    manifest = json.dumps(document, indent=2)
+elif case == "topology-two-standbys":
+    # Both members declare standby: a pair is one duty controller
+    # tracked by one standby, and the second declaration diverges.
+    document = json.loads(manifest)
+    document["controllers"][0]["standby"] = "ctrl-b:8081"
+    manifest = json.dumps(document, indent=2)
+elif case == "topology-unwired-pair":
+    # The declared pair's wiring does not close inside it: dropping
+    # the standby field and flag leaves two duty controllers the
+    # section still calls a pair.
+    document = json.loads(manifest)
+    document["topology"] = {
+        "pairs": [{"name": "station", "members": ["ctrl-a", "ctrl-b"]}]
+    }
+    del document["controllers"][1]["standby"]
+    manifest = json.dumps(document, indent=2)
+    compose = compose.replace(
+        "      - --standby\n      - ctrl-a:8080\n", "", 1)
 else:
     sys.exit("unknown rig case " + case)
 open(compose_path, "w").write(compose)
@@ -1103,23 +1234,36 @@ open(manifest_path, "w").write(manifest)
 PY
     local out
     if out="$(cd "$RIG_DIR" && python3 ci/deploy_rig.py 2>&1)"; then
-        [ "$1" = "persistence-omitted" ] \
-            || fail "rig-mismatch-unchecked: the $1 divergence passed the rig check"
-        echo "  $1: declared fields optional — the pair still agrees"
-        return
+        case "$1" in
+            persistence-omitted|topology-declared)
+                echo "  $1: optional declaration — the manifest and the rig agree"
+                return
+                ;;
+        esac
+        fail "rig-mismatch-unchecked: the $1 divergence passed the rig check"
     fi
-    [ "$1" = "persistence-omitted" ] \
-        && fail "rig-mismatch-unchecked: omitting the persistence fields reported: $out"
+    case "$1" in
+        persistence-omitted|topology-declared)
+            fail "rig-mismatch-unchecked: the $1 case reported: $out"
+            ;;
+    esac
     [[ "$out" == *"rig-mismatch"* ]] \
         || fail "rig-mismatch-unchecked: the $1 divergence did not report rig-mismatch: $out"
     echo "  $1 refused: rig-mismatch"
 }
 
 for divergence in persistence-mount-divergence persistence-flag-divergence \
+        persistence-history-flag-divergence \
+        persistence-history-flag-missing \
         persistence-mount-read-only undeclared-persistence-flag \
+        undeclared-history-flag \
         undeclared-writable-mount failover-flag-missing \
         failover-flag-undeclared failover-wrong-peer \
-        persistence-omitted; do
+        persistence-aliased-paths persistence-omitted \
+        topology-declared topology-multi-pair \
+        undeployable-second-duty topology-undeclared-member \
+        topology-shared-member topology-external-standby \
+        topology-two-standbys topology-unwired-pair; do
     rig_case "$divergence"
 done
 
@@ -1239,1272 +1383,54 @@ done
 echo "== pair =="
 # The redundant-pair half of WW-LCM-001's switchover evidence — the
 # deployment the manifest declares, run: the deploy stage proves the
-# wiring statically; this leg runs it. ci/pair.py reads the standby
-# target and the persistence fields out of deploy/manifest.json, spawns
-# dcs-plant-server plus the two declared controllers as released
-# --driven --remote instances — the standby wired --standby at its
-# named peer, each controller's declared --state-file/--journal-file
-# at runner-owned scratch paths — converges the standby to tracking,
-# drives scans through POST /scan on each peer, issues the receipted
-# demote/promote switch, and asserts the run continues bumplessly with
-# the adopted receipt log identical and each peer's durable journal
-# file carrying the transition records. Two passes must produce
-# identical digests.
-run_pair() {
-    python3 ci/pair.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_pair)" \
-    || fail "pair-failed: the redundant-pair leg did not hold — its evidence lines are above"
-SECOND="$(run_pair)" \
-    || fail "pair-failed: the redundant-pair leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "pair-nondeterministic: two pair-leg passes produced different digests"
-echo "  $FIRST"
-
-# The doctored case: a standby wired at a peer that never serves must
-# surface the named diagnostic — never a silently unconverged pass.
-if out="$(run_pair --tamper broken-peer-flag 2>&1)"; then
-    fail "pair-unchecked: a broken peer flag passed the pair leg"
-fi
-[[ "$out" == *"never reported tracking"* ]] \
-    || fail "pair-unchecked: the broken-peer-flag case did not report its named diagnostic: $out"
-echo "  broken-peer-flag: reported, pair-failed"
-
-# The negotiation leg: the checkpoint-negotiation refusal a
-# misconfigured deployment earns — the consumer-side half of
-# WW-LCM-001's named rejection of incompatible state. A third released
-# controller launches --standby at the pair's field owner on a
-# foreign-fingerprint document — the emitted model doctored inside
-# MODEL_VERSION, launched without --revised, exactly the manifest
-# mistake a customer writing their own manifests can produce. The peer
-# must report standby plus the named degraded negotiation state
-# through GET /role for the whole observation window — the pulled
-# checkpoint's fingerprint named against its own — while the declared
-# pair's images stay identical and the field owner's tick advances;
-# POST /promote against it must answer the named refusal — 409
-# not_converged carrying the degraded state, never a silent or wrong
-# verdict — leaving the peer's reported state untouched. The active
-# stays undisturbed throughout: the receipt log identical to the
-# pre-attempt baseline and the journal's window additions carrying no
-# role, fencing, divergence, restart, or command records. The foreign
-# peer tears down before the declared pair's convergence is re-proven,
-# and the control leg — the same third controller on the pair's own
-# model — converges to tracking and promotes normally, proving the
-# refusal names the negotiation failure rather than a rig defect. Two
-# passes must produce identical digests.
-run_negotiation() {
-    python3 ci/negotiation.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_negotiation)" \
-    || fail "negotiation-failed: the checkpoint-negotiation leg did not hold — its evidence lines are above"
-SECOND="$(run_negotiation)" \
-    || fail "negotiation-failed: the checkpoint-negotiation leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "negotiation-nondeterministic: two negotiation-leg passes produced different digests"
-echo "  $FIRST"
-
-# The doctored case: requiring convergence on the foreign-fingerprint
-# peer must surface the named diagnostic — the leg reporting the
-# degraded negotiation state it actually saw, never a silent pass.
-if out="$(run_negotiation --tamper expect-tracking 2>&1)"; then
-    fail "negotiation-unchecked: an expect-tracking pass succeeded — the leg never noticed the wrong expectation"
-fi
-[[ "$out" == *"never reported tracking"* && "$out" == *"degraded"* ]] \
-    || fail "negotiation-unchecked: the expect-tracking case did not report the degraded negotiation state it saw: $out"
-echo "  expect-tracking: reported, negotiation-failed"
-
-# The pair contract's startup-claim ordering leg, on the same
-# manifest-declared deployment: ci/startup_claim.py settles the pair
-# and issues the documented demote/promote switch so the field owner
-# holds the plant's writer claim, then launches a third released
-# controller against the same plant address whose startup inputs are
-# doomed by construction — a corrupt first record in its declared
-# --journal-file that the startup replay cannot read. The spawn must
-# abort at startup validation naming the replay failure — never
-# reporting a listener, never logging the preemptive claim — while
-# the incumbent stays active, its tick advances, its writes and a
-# mid-window receipted command keep landing, a foreign attachment's
-# mutation probe stays fenced under the standing claim, and the
-# incumbent's journal gains no disturbance records; the doomed peer's
-# journal file must still hold exactly the corrupt record and its
-# state file must never appear, and the pair restores its launch
-# roles once the foreign process is gone. Two passes must produce
-# identical digests.
-run_startup_claim() {
-    python3 ci/startup_claim.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_startup_claim)" \
-    || fail "startup-claim-failed: the startup-claim ordering leg did not hold — its evidence lines are above"
-SECOND="$(run_startup_claim)" \
-    || fail "startup-claim-failed: the startup-claim ordering leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "startup-claim-nondeterministic: two startup-claim passes produced different digests"
-echo "  $FIRST"
-
-# The doctored case: a dead foreign claim stranded over the incumbent —
-# the pre-fix defect's observable shape — must surface the named
-# diagnostic rather than pass.
-if out="$(run_startup_claim --tamper stranded-claim 2>&1)"; then
-    fail "startup-claim-unchecked: a stranded foreign claim passed the startup-claim leg"
-fi
-[[ "$out" == *"disturbed the incumbent"* ]] \
-    || fail "startup-claim-unchecked: the stranded-claim case did not report its named diagnostic: $out"
-echo "  stranded-claim: reported, startup-claim-failed"
-
-# The pair contract's refusal half, on the same manifest-declared
-# deployment: ci/refusal.py catches the freshly launched standby before
-# its first transfer — the documented induction — where POST /promote
-# must answer the named not_converged refusal with no field hand-off;
-# submits a receipted write against a declared writable point to the
-# tracking standby's monitor, which must answer the named not_active
-# rejection with the point unchanged in the active's served snapshot,
-# the write absent from both peers' adopted receipt logs, and no
-# command-side journal entry on either peer recording it as anything
-# but the refusal; and promotes once tracking, where the same request
-# succeeds — the active's field writes, receipts, and journal
-# undisturbed throughout. Two passes must produce identical digests.
-run_refusal() {
-    python3 ci/refusal.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_refusal)" \
-    || fail "refusal-failed: the role-gated refusal leg did not hold — its evidence lines are above"
-SECOND="$(run_refusal)" \
-    || fail "refusal-failed: the role-gated refusal leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "refusal-nondeterministic: two refusal-leg passes produced different digests"
-echo "  $FIRST"
-
-# The doctored case: a leg asserting the standby-directed write settles
-# applied must surface the named diagnostic — never a silently
-# unrefused pass.
-if out="$(run_refusal --tamper expect-applied 2>&1)"; then
-    fail "refusal-unchecked: a doctored write expectation passed the refusal leg"
-fi
-[[ "$out" == *"expected an applied receipt"* ]] \
-    || fail "refusal-unchecked: the expect-applied case did not report its named diagnostic: $out"
-echo "  expect-applied: reported, refusal-failed"
-
-# The pair contract's failure-handover leg, on the same
-# manifest-declared deployment: ci/handover.py settles the pair, waits
-# for the group to hold a duty demand with pump 1 proven running,
-# faults the duty pump's run-feedback field channel through the plant
-# protocol's declared inject_fault, and asserts through the active's
-# monitor that duty moves to the standby pump inside the declared
-# bound, staged reports the survivor against the standing demand, the
-# faulted pump's fault/avail report the exclusion, and the managed
-# p101-fault alarm annunciates with journaled point_changed evidence;
-# faults the remaining pump's channel asserting none_available and
-# all_faulted annunciate with their managed alarms; and clears each
-# injected fault asserting the declared recovery — fault flags clear,
-# annunciation returns, the duty designation reassigns under the
-# declared rotation, the unacknowledged latches hold — with the pair's
-# controller roles unmoved throughout. Two passes must produce
-# identical digests.
-run_handover() {
-    python3 ci/handover.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_handover)" \
-    || fail "handover-failed: the duty-pump failure-handover leg did not hold — its evidence lines are above"
-SECOND="$(run_handover)" \
-    || fail "handover-failed: the duty-pump failure-handover leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "handover-nondeterministic: two handover-leg passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a leg expecting the failed pump to keep duty, or
-# expecting none_available never to report, must surface the named
-# diagnostic — never a silently wrong pass.
-if out="$(run_handover --tamper keeps-duty 2>&1)"; then
-    fail "handover-unchecked: a doctored duty expectation passed the handover leg"
-fi
-[[ "$out" == *"keep duty"* ]] \
-    || fail "handover-unchecked: the keeps-duty case did not report its named diagnostic: $out"
-echo "  keeps-duty: reported, handover-failed"
-
-if out="$(run_handover --tamper none-available-silent 2>&1)"; then
-    fail "handover-unchecked: a doctored none_available expectation passed the handover leg"
-fi
-[[ "$out" == *"never to report"* ]] \
-    || fail "handover-unchecked: the none-available-silent case did not report its named diagnostic: $out"
-echo "  none-available-silent: reported, handover-failed"
-
-# The pair contract's manual-takeover leg, on the same
-# manifest-declared deployment: ci/takeover.py converges the pair and
-# drives the simulated well until the pump group holds a duty demand on
-# pump 1, then exercises the emitted model's declared per-pump mode
-# seam (WW-ENG-003, WW-OPS-001, WW-CTL-002) through the receipted path
-# — p101-mode cutting the delivered command off the group's cmd_1 with
-# the auto-leg carriers reporting the manual selection and the
-# pump-group status handing the standing demand to pump 2; p101-hand
-# running the pump on the operator demand while the declared
-# thermal/moisture guards still gate it, the protection input driven
-# through the plant protocol asserting the proven fault and its
-# managed alarm; p101-oos asserting the maintenance inhibit — then
-# restores the pump to group control, auditing the active's served
-# journal for each attributed transition in order. Two passes must
-# produce identical digests.
-run_takeover() {
-    python3 ci/takeover.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_takeover)" \
-    || fail "takeover-failed: the manual-takeover leg did not hold — its evidence lines are above"
-SECOND="$(run_takeover)" \
-    || fail "takeover-failed: the manual-takeover leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "takeover-nondeterministic: two takeover-leg passes produced different digests"
-echo "  $FIRST"
-
-# The doctored case: a leg asserting the delivered command still
-# follows the group while mode stands manual must surface the named
-# diagnostic — never a silently unexercised pass.
-if out="$(run_takeover --tamper follows-group 2>&1)"; then
-    fail "takeover-unchecked: a doctored follows-group expectation passed the takeover leg"
-fi
-[[ "$out" == *"did not follow the group"* ]] \
-    || fail "takeover-unchecked: the follows-group case did not report its named diagnostic: $out"
-echo "  follows-group: reported, takeover-failed"
-
-# The pair contract's force-carryover leg, on the same
-# manifest-declared deployment: ci/force_carryover.py converges the
-# pair, submits a receipted force_point on a declared writable In
-# point through the active's POST /command — the emitted model marks
-# only internal In points writable, so the leg's p101-hand is the
-# honest target — asserts the snapshot's forces entry and the
-# Uncertain(Substituted) sample on both peers while tracking, issues
-# the demote/promote switch, and asserts the promoted peer still
-# carries the force — the forced value at substituted quality —
-# across scans. A receipted unforce on the new active must settle
-# applied, empty the forces list, and resume the point's unforced
-# serve — for the internal target the held-value rule leaves the
-# force's last stamp re-stamped Good; the leg then restores the pair's
-# declared roles. Two passes must produce identical digests.
-run_force() {
-    python3 ci/force_carryover.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_force)" \
-    || fail "force-carryover-failed: the force-carryover leg did not hold — its evidence lines are above"
-SECOND="$(run_force)" \
-    || fail "force-carryover-failed: the force-carryover leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "force-carryover-nondeterministic: two force-carryover passes produced different digests"
-echo "  $FIRST"
-
-# The doctored case: a leg asserting the unforced value after
-# promotion must surface the named diagnostic — the force rides the
-# checkpoint, never a silently released pass.
-if out="$(run_force --tamper expect-unforced 2>&1)"; then
-    fail "force-carryover-unchecked: a doctored unforced expectation passed the carryover leg"
-fi
-[[ "$out" == *"expected the unforced value"* ]] \
-    || fail "force-carryover-unchecked: the expect-unforced case did not report its named diagnostic: $out"
-echo "  expect-unforced: reported, force-carryover-failed"
-
-# The pair contract's tune-carryover leg, on the same
-# manifest-declared deployment: ci/tune_carryover.py converges the
-# pair, submits a receipted set_parameter on a declared writable
-# configuration point — the emitted model's exercise sequencer
-# step_1_out, the honest sequence parameter whose out port feeds a
-# declared signal — through the active's POST /command, records the
-# settled receipt, issues the demote/promote switch, and asserts on
-# the promoted peer's served surface that the tuned value is live:
-# the snapshot's parameters report and the out point's
-# declared-signal reading holding across driven scans, the promoted
-# peer's served journal ordering the promotion's role_changed
-# entries after the tune's command_settled, and a further
-# set_parameter on the new active settling applied with a fresh
-# receipt — the promoted peer's own command path live. The leg then
-# restores the pair's declared roles. Two passes must produce
-# identical digests.
-run_tune() {
-    python3 ci/tune_carryover.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_tune)" \
-    || fail "tune-carryover-failed: the tune-carryover leg did not hold — its evidence lines are above"
-SECOND="$(run_tune)" \
-    || fail "tune-carryover-failed: the tune-carryover leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "tune-carryover-nondeterministic: two tune-carryover passes produced different digests"
-echo "  $FIRST"
-
-# The doctored case: a leg asserting the parameter's original value
-# after the tune must surface the named diagnostic — the tuned value
-# rides the checkpoint, never a silently reverted pass.
-if out="$(run_tune --tamper expect-original 2>&1)"; then
-    fail "tune-carryover-unchecked: a doctored original-value expectation passed the carryover leg"
-fi
-[[ "$out" == *"expected the original value"* ]] \
-    || fail "tune-carryover-unchecked: the expect-original case did not report its named diagnostic: $out"
-echo "  expect-original: reported, tune-carryover-failed"
-
-# The pair contract's force-release leg, on the same
-# manifest-declared deployment: ci/force_release.py converges the
-# pair, submits a receipted force_point on a declared writable In
-# point through the active's POST /command — the emitted model marks
-# only internal In points writable, so the leg's p101-hand is the
-# honest target — asserting the Uncertain(Substituted) sample and the
-# forces badge on both peers while the force stands across scans, and
-# the journaled applied settlement. A receipted unforce_point must
-# settle applied at the next scan boundary — the forces set emptying
-# and the point resuming its unforced serve: for the internal target
-# the held-value rule leaves the force's last stamp re-stamped Good,
-# and the leg's restore write returns the pre-force held value. The
-# pair then switches and restores its launch roles — the released
-# state riding the checkpoint like any run state, never resurrecting
-# a released force — and the field owner's durable journal file must
-# carry each attributed transition in seq order with the standby's
-# adopted log answering the same receipts. Two passes must produce
-# identical digests.
-run_force_release() {
-    python3 ci/force_release.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_force_release)" \
-    || fail "force-release-failed: the force-release leg did not hold — its evidence lines are above"
-SECOND="$(run_force_release)" \
-    || fail "force-release-failed: the force-release leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "force-release-nondeterministic: two force-release passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a release expectation left standing — the
-# substitution asserted still badged after the unforce — and a record
-# settling the release without its journaled transition must each
-# surface the named diagnostic rather than pass silently.
-for tamper in expect-standing unjournaled-release; do
-    if out="$(run_force_release --tamper "$tamper" 2>&1)"; then
-        fail "force-release-unchecked: a $tamper passed the release leg"
-    fi
-    case "$tamper" in
-        expect-standing) evidence="expected the substitution still standing" ;;
-        unjournaled-release) evidence="missing or out of order" ;;
-    esac
-    [[ "$out" == *"$evidence"* ]] \
-        || fail "force-release-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, force-release-failed"
-done
-
-# The pair contract's alarm-burst leg, on the same manifest-declared
-# deployment: ci/burst_order.py converges the pair and drives the
-# simulated well until the pump group holds a full demand — both pumps
-# staged and running — then drives the emitted alarm set's
-# consequential cascade (WW-ENG-003, WW-ALM-003, WW-ALM-004) through
-# the plant protocol's unfenced surface: a quality fault on
-# level-primary so backup-active annunciates first, the power-fail
-# contact written so the station permissives drop and the power alarm
-# fires while the undrawn level climbs, then both run contacts'
-# quality faulted so the proven motor faults roll up to all-faulted
-# last. The leg asserts every driven alarm's alarm/unacknowledged
-# through the active's monitor, audits the field owner's durable
-# journal for the driven activations and their returns in seq order —
-# the first-out record, with no dropped or reordered entries — and the
-# pair's roles unchanged. Two passes must produce identical digests.
-run_burst() {
-    python3 ci/burst_order.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_burst)" \
-    || fail "burst-order-failed: the alarm-burst leg did not hold — its evidence lines are above"
-SECOND="$(run_burst)" \
-    || fail "burst-order-failed: the alarm-burst leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "burst-order-nondeterministic: two burst-order passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a record missing a driven transition, or one
-# carrying them out of order, must surface the named diagnostic —
-# never a silently unexercised first-out proof.
-for tamper in dropped-transition reordered-transition; do
-    if out="$(run_burst --tamper "$tamper" 2>&1)"; then
-        fail "burst-order-unchecked: a $tamper journal passed the burst leg"
-    fi
-    [[ "$out" == *"missing or out of order"* ]] \
-        || fail "burst-order-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, burst-order-failed"
-done
-
-# The pair contract's peer-announce leg, on the same
-# manifest-declared deployment: ci/peer_announce.py converges the
-# pair — the standby's per-scan checkpoint pulls announcing its own
-# monitor address on the field owner, the tracking source a demoted
-# owner later follows — then issues a foreign GET
-# /checkpoint?peer=<closed-port> naming an address that is not the
-# pulling connection's own. The checkpoint read must still answer
-# while the crafted announce is refused — it cannot overwrite the
-# recorded tracking source. The demote/promote switch then proves
-# the record: the crafted announce is issued again at the decisive
-# point — after the promote's own re-announce, before the demoted
-# peer's first tracking pull, the last write its fallback would
-# follow — and the demoted peer reconverges tracking on its real
-# successor rather than stranding unsynchronized on the planted
-# address. The leg restores the pair's launch roles; two passes
-# must produce identical digests.
-run_peer_announce() {
-    python3 ci/peer_announce.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_peer_announce)" \
-    || fail "peer-announce-failed: the peer-announce leg did not hold — its evidence lines are above"
-SECOND="$(run_peer_announce)" \
-    || fail "peer-announce-failed: the peer-announce leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "peer-announce-nondeterministic: two peer-announce passes produced different digests"
-echo "  $FIRST"
-
-# The doctored case: a crafted announce naming the pulling
-# connection's own source — a closed local port — lands exactly as it
-# would on a controller whose acceptance check regressed. The
-# hardened contract answers it at the demote: the planted hint names
-# an endpoint no checkpoint pull can verify, so `POST /demote`
-# refuses `no_tracking_source` rather than stranding the demoted
-# peer on the dead pull; the leg must surface the named diagnostic —
-# never a silently poisoned pass.
-if out="$(run_peer_announce --tamper landed-announce 2>&1)"; then
-    fail "peer-announce-unchecked: a landed foreign announce passed the peer-announce leg"
-fi
-[[ "$out" == *"no_tracking_source"* ]] \
-    || fail "peer-announce-unchecked: the landed-announce case did not report its named diagnostic: $out"
-echo "  landed-announce: reported, peer-announce-failed"
-
-# The pair contract's command-availability leg, on the same
-# manifest-declared deployment: ci/availability.py converges the pair,
-# then proves the per-command availability verdicts the active's
-# GET /resources serves agree with what the receipted path settles —
-# the consumer-facing honesty the served-interface contract owes
-# (WW-ENG-003, WW-FND-003): every command row self-consistent — an
-# available: false row carrying a named refusal, an available row none
-# — every served-unavailable bound-point-writable command submitted
-# through the active's POST /command settling a named rejection rather
-# than applied, each declared-bound probe's receipt naming the same
-# refusal the row served, and one served-available command settling
-# applied identically into both peers' adopted receipt log. The
-# emitted model's kind-declared advance is exercised in both
-# directions where the tooling publishes verdicts — invocable
-# mid-table, then the kind's named refusal carried verbatim through
-# the settled command_refused once the table completes — and the
-# tracking standby's /resources must report identical verdicts
-# throughout: the same-adopted-state rule means availability never
-# diverges across the pair. Two passes must produce identical digests.
-run_availability() {
-    python3 ci/availability.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_availability)" \
-    || fail "availability-failed: the command-availability leg did not hold — its evidence lines are above"
-SECOND="$(run_availability)" \
-    || fail "availability-failed: the command-availability leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "availability-nondeterministic: two availability-leg passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a served-available command settling a refusal —
-# the available probe submitted to the tracking standby's role gate —
-# and a standby reporting different verdicts must each surface the
-# named diagnostic rather than pass silently.
-for tamper in refused-available diverged-standby; do
-    if out="$(run_availability --tamper "$tamper" 2>&1)"; then
-        fail "availability-unchecked: a $tamper passed the availability leg"
-    fi
-    case "$tamper" in
-        refused-available) evidence="expected an accepted receipt" ;;
-        diverged-standby) evidence="availability diverged across the pair" ;;
-    esac
-    [[ "$out" == *"$evidence"* ]] \
-        || fail "availability-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, availability-failed"
-done
-
-# The pair contract's automatic-failover leg, on the same
-# manifest-declared deployment: ci/failover.py arms the declared
-# standby with the manifest's failover_budget — the deployment
-# vocabulary's --auto-promote half — converges the pair, stops the
-# field-owning container, and asserts through the surviving peer's
-# monitor and the plant protocol: the served role path reports the
-# miss run under the degraded sync state then active at the declared
-# budget's scan boundary, the plant's writer claim fences a foreign
-# attachment while the promoted peer's own writes land, subsequent
-# driven scans and receipted commands continue uninterrupted, and
-# the promoted peer's durable journal records the transition
-# distinguishably from an operator-requested switch. A variant run
-# severs the standby instead: the field owner's writes run
-# undisturbed and nothing reports a failover. A measurement run on
-# a freshly converged pair then exercises decision 42's declared
-# measurement contract — the emitted model's failover-select,
-# threshold chain, and managed backup-active alarm resolved from
-# the artifact's wiring: the primary level source's quality fault
-# asserts backup_active while the chain keeps controlling on the
-# selected backup measurement and the managed alarm annunciates;
-# the backup's fault as well engages the declared on_bad_demand
-# fallback rather than control on bad data; restoring the backup
-# then the primary returns the selection and the alarm per its
-# declared lifecycle — the receipted ack clearing the standing
-# latch — the durable journal carrying the transitions in driven
-# order and the pair's roles unchanged. Two passes must produce
-# identical digests.
-run_failover() {
-    python3 ci/failover.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_failover)" \
-    || fail "failover-failed: the failover leg did not hold — its evidence lines are above"
-SECOND="$(run_failover)" \
-    || fail "failover-failed: the failover leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "failover-nondeterministic: two failover-leg passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: legs expecting the standby promoted before the
-# declared budget, the station still controlling on the bad primary,
-# or a nonzero fallback demand must surface the named diagnostic —
-# never a silently unexercised contract.
-for tamper in early-promotion controls-on-bad nonzero-fallback; do
-    if out="$(run_failover --tamper "$tamper" 2>&1)"; then
-        fail "failover-unchecked: a doctored $tamper expectation passed the failover leg"
-    fi
-    case "$tamper" in
-        early-promotion) evidence="expected the standby active at miss" ;;
-        controls-on-bad) evidence="expected the station still controlling on the bad primary" ;;
-        nonzero-fallback) evidence="expected the fallback demand nonzero" ;;
-    esac
-    [[ "$out" == *"$evidence"* ]] \
-        || fail "failover-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, failover-failed"
-done
-
-# The pair contract's staged-vs-field divergence leg, on the same
-# manifest-declared deployment: ci/divergence.py converges the pair,
-# then withholds the tracking standby's checkpoint pulls for an
-# observation window — the driven run making the partition literal —
-# while a field-side write lands through the run's dedicated
-# plant-protocol client (the connection the simulate stage's
-# inject_fault/clear_fault ops use), the client joining the field's
-# writer claim under the duty's recorded owner token so the write
-# lands on the carried p101-cmd output the standby's staged image
-# covers. With the pull path resumed, the stale peer's served GET
-# /role must report standby under the diverged sync state naming the
-# perturbed output, its served and durable journals must carry the
-# divergence_detected record, and POST /promote must answer the named
-# not_converged refusal carrying the diverged report — never a silent
-# or wrong verdict and never a field hand-off of the stale image —
-# while the active's writes, receipts, and journal run undisturbed,
-# the duty's continued writes restoring the field so the standby's
-# next same-tick comparison resolves the verdict. A control leg runs
-# the identical window with no field-side write: the standby
-# reconverges and the documented demote/promote switch succeeds —
-# the refusal names the staged-vs-field divergence, not the
-# partition's staleness. Two passes must produce identical digests.
-run_divergence() {
-    python3 ci/divergence.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_divergence)" \
-    || fail "divergence-missed: the staged-vs-field divergence leg did not hold — its evidence lines are above"
-SECOND="$(run_divergence)" \
-    || fail "divergence-missed: the staged-vs-field divergence leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "divergence-nondeterministic: two divergence-leg passes produced different digests"
-echo "  $FIRST"
-
-# The doctored case: the field-side write skipped while the leg still
-# asserts the diverged report and the refused promote must surface the
-# named diagnostic — never a silently unconvinced pass.
-if out="$(run_divergence --tamper skip-field-write 2>&1)"; then
-    fail "divergence-unchecked: a skipped field-side write passed the divergence leg"
-fi
-[[ "$out" == *"expected the diverged report"* ]] \
-    || fail "divergence-unchecked: the skip-field-write case did not report its named diagnostic: $out"
-echo "  skip-field-write: reported, divergence-missed"
-
-# The pair contract's standby-restart leg, on the same
-# manifest-declared deployment: ci/standby_restart.py converges the
-# pair and settles a receipted command into the adopted log, then
-# stops the tracking standby's container and relaunches it onto its
-# declared --state-file/--journal-file — the standby half of
-# WW-LCM-001's restart-recovery clause on the deployed pair. The
-# relaunch must report the resume at the persisted tick — never a
-# silent cold start — rejoin in standby rather than claiming the
-# field, and reconverge to tracking inside the leg's declared window
-# while the field owner's driven scans keep writing and a second
-# command settles applied. The standby's durable journal must carry
-# the restart boundary ordered after run 1's entries with seq order
-# intact, the active's journal runs undisturbed, and the documented
-# switch must still promote the restarted peer — the restart left no
-# wedge for later legs. Two passes must produce identical digests.
-run_standby_restart() {
-    python3 ci/standby_restart.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_standby_restart)" \
-    || fail "standby-restart-failed: the standby-restart leg did not hold — its evidence lines are above"
-SECOND="$(run_standby_restart)" \
-    || fail "standby-restart-failed: the standby-restart leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "standby-restart-nondeterministic: two standby-restart passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a state file gone missing at the restart point,
-# and the restart's assertions held against a peer never restarted,
-# must each surface the named diagnostic — never a silently
-# unrestarted pass.
-for tamper in missing-state-file skip-restart; do
-    if out="$(run_standby_restart --tamper "$tamper" 2>&1)"; then
-        fail "standby-restart-unchecked: a $tamper passed the standby-restart leg"
-    fi
-    [[ "$out" == *"never reported a resume"* ]] \
-        || fail "standby-restart-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, standby-restart-failed"
-done
-
-# The pair contract's alarm-report leg, on the same
-# manifest-declared deployment: ci/report.py converges the pair, then
-# drives one managed alarm through its lifecycle — the level-primary
-# quality fault annunciating the failover's alarm, a receipted `ack`
-# write through the active's POST /command pairing the annunciation to
-# its attributed acknowledgment, the cleared instrument returning it —
-# so the durable record carries one measured episode. The released
-# dcs-alarm-report then computes the declared AlarmReport metric set
-# (WW-ALM-004) twice: over the field owner's served journal, and over
-# its manifest-declared durable journal file — the emitted model's
-# whole alarm set computed per instance, the driven lifecycle's
-# measured counts and response pair asserted, and the file's report
-# answering the served report's metric set identically with only its
-# run-boundary accounting added. The tool's refusal modes — an
-# unreachable monitor and an unreadable journal file — must exit
-# nonzero naming the failure. Two passes must produce identical
-# digests.
-run_report() {
-    python3 ci/report.py \
-        --alarm-report "$TOOLS/dcs-alarm-report" \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-[ -x "$TOOLS/dcs-alarm-report" ] \
-    || fail "report-failed: the release tooling ships no dcs-alarm-report binary"
-FIRST="$(run_report)" \
-    || fail "report-failed: the alarm-report leg did not hold — its evidence lines are above"
-SECOND="$(run_report)" \
-    || fail "report-failed: the alarm-report leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "report-nondeterministic: two report-leg passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: each tamper must surface the named diagnostic —
-# a leg asserting the driven alarm left no activation must fail on the
-# computed report's honest count, and the doctored invocations — a
-# dead monitor address, a missing journal path — must fail the leg
-# naming the refusal, never a silent pass.
-for tamper in expect-quiet unreachable-monitor unreadable-journal; do
-    if out="$(run_report --tamper "$tamper" 2>&1)"; then
-        fail "report-unchecked: a $tamper case passed the report leg"
-    fi
-    case "$tamper" in
-        expect-quiet) expected="expected zero activations" ;;
-        unreachable-monitor) expected="unreachable monitor" ;;
-        unreadable-journal) expected="unreadable journal file" ;;
-    esac
-    [[ "$out" == *"$expected"* ]] \
-        || fail "report-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, report-failed"
-done
-
-# The pair contract's command-switch leg, on the same
-# manifest-declared deployment: ci/command_switch.py converges the
-# pair, holds the exercise sequencer's `run` so one `step_completed`
-# emits, invokes the kind-declared `advance` through the released
-# `dcs-ctl invoke` on the field owner — asserting the accepted
-# submission settles applied with exactly one `command_settled`
-# journal entry — switches, invokes the same declared command on the
-# promoted peer with the same exactly-once attribution and no replay
-# of the old peer's settlement, joins the emitted-event records
-# continuing in tick order with unchanged attribution and no
-# pre-promotion re-emission, carries a further invoke submitted
-# immediately before the restore switch to exactly one applied
-# settlement on the new active, and restores the launch roles. Two
-# passes must produce identical digests.
-run_command_switch() {
-    python3 ci/command_switch.py \
-        --ctl "$TOOLS/dcs-ctl" \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-[ -x "$TOOLS/dcs-ctl" ] \
-    || fail "command-switch-failed: the release tooling ships no dcs-ctl binary"
-FIRST="$(run_command_switch)" \
-    || fail "command-switch-failed: the command-switch leg did not hold — its evidence lines are above"
-SECOND="$(run_command_switch)" \
-    || fail "command-switch-failed: the command-switch leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "command-switch-nondeterministic: two command-switch passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a submission settling zero times and one
-# settling twice must each surface the named diagnostic — never a
-# silently miscounted exactly-once proof.
-for tamper in zero-settlement double-settlement; do
-    if out="$(run_command_switch --tamper "$tamper" 2>&1)"; then
-        fail "command-switch-unchecked: a $tamper case passed the command-switch leg"
-    fi
-    [[ "$out" == *"expected exactly one settlement"* ]] \
-        || fail "command-switch-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, command-switch-failed"
-done
-
-# The pair contract's demote-boundary pending-command leg, on the
-# same manifest-declared deployment: ci/demote_pending.py converges
-# the pair, submits a receipted write_value on a declared writable
-# internal In point through the field owner's POST /command and leaves
-# it pending, then lands the documented demote on the owner and the
-# promote on the converged standby inside that window — the demoted
-# peer's first quiesced scan, driven before the promoted peer's first
-# field-owning scan, audited for the suspended admission: no
-# command_settled journaled on the fenced image, the accepted receipt
-# still held, the baseline image unchanged — then the promoted peer
-# settling the carried admission exactly once and both peers' served
-# journals, adopted receipt logs, images, and durable journal files
-# audited for the single audited settle, before the pair's launch
-# roles restore. Two passes must produce identical digests.
-run_demote_pending() {
-    python3 ci/demote_pending.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_demote_pending)" \
-    || fail "demote-pending-failed: the demote-pending leg did not hold — its evidence lines are above"
-SECOND="$(run_demote_pending)" \
-    || fail "demote-pending-failed: the demote-pending leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "demote-pending-nondeterministic: two demote-pending passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a leg expecting the phantom applied settle the
-# fenced image must never journal, and one expecting the pending
-# entry vanished from every receipt surface and journal — the
-# unaudited-drop shape — must each surface the named diagnostic
-# rather than passing silently.
-for tamper in phantom-applied unaudited-drop; do
-    if out="$(run_demote_pending --tamper "$tamper" 2>&1)"; then
-        fail "demote-pending-unchecked: a $tamper case passed the demote-pending leg"
-    fi
-    case "$tamper" in
-        phantom-applied) expected="phantom applied settle" ;;
-        unaudited-drop) expected="unaudited drop" ;;
-    esac
-    [[ "$out" == *"$expected"* ]] \
-        || fail "demote-pending-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, demote-pending-failed"
-done
-
-# The pair contract's demote-follow reconvergence leg, on the same
-# manifest-declared deployment: ci/demote_reconvergence.py binds each
-# controller's --listen on the manifest's declared 0.0.0.0 host — the
-# wildcard bind shape the #616/#618/#619/#620 defect fixes settle —
-# converges the pair, and runs the documented demote/promote switch
-# in both directions: the launched active demotes onto the tracking
-# source the standby's wildcard-announcing pulls recorded — resolved
-# to the dialable peer address, never the wildcard, never the demoted
-# peer's own address, never a foreign endpoint — reconverging
-# tracking and holding it across a driven pull train, then the
-# reverse switch restores the launch roles and the second demoted
-# peer holds the same way. Served snapshots and adopted receipt logs
-# stay identical throughout, each durable journal file carries its
-# own role_changed transitions under the single cold-start boundary,
-# and the declared persistence files hold the run's final tick. Two
-# passes must produce identical digests.
-run_demote_reconvergence() {
-    python3 ci/demote_reconvergence.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_demote_reconvergence)" \
-    || fail "demote-reconvergence-failed: the demote-reconvergence leg did not hold — its evidence lines are above"
-SECOND="$(run_demote_reconvergence)" \
-    || fail "demote-reconvergence-failed: the demote-reconvergence leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "demote-reconvergence-nondeterministic: two demote-reconvergence passes produced different digests"
-echo "  $FIRST"
-
-# The doctored case: a crafted ?peer= announce naming the field
-# owner's own monitor address — a claim the pulling connection's own
-# source proves, so it lands exactly as a self-claim — plants a
-# self-addressed demotion hint: the self-pin defect shape this leg
-# exists to catch. The demotion adopts the peer's own address, and
-# the leg's adopted-source audit must surface the named evidence
-# rather than letting a self-pinned demotion pass silently.
-if out="$(run_demote_reconvergence --tamper self-announce 2>&1)"; then
-    fail "demote-reconvergence-unchecked: a self-addressed announce passed the demote-reconvergence leg"
-fi
-[[ "$out" == *"a self tracking source"* ]] \
-    || fail "demote-reconvergence-unchecked: the self-announce case did not report its named diagnostic: $out"
-echo "  self-announce: reported, demote-reconvergence-failed"
-
-# The pair contract's managed-alarm lifecycle leg, on the same
-# manifest-declared deployment: ci/managed_lifecycle.py converges the
-# pair and exercises the emitted model's declared managed-alarm
-# surface end to end — the field-driven activation asserting
-# alarm/unacknowledged with the journaled record, the receipted ack
-# clearing the latch under the leg's actor, the bounded shelve
-# reporting shelved and auto-releasing at the declared
-# max_shelve_ticks, the never-shelvable shelve write answering the
-# named not_writable refusal with no state change, and the pump's oos
-# driving the declared out_of_service/suppressed wiring through the
-# suppressed trip and the return to service — then restores every
-# driven input and audits the durable journal's ordered record. Two
-# passes must produce identical digests.
-run_managed_lifecycle() {
-    python3 ci/managed_lifecycle.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_managed_lifecycle)" \
-    || fail "managed-lifecycle-failed: the managed-alarm lifecycle leg did not hold — its evidence lines are above"
-SECOND="$(run_managed_lifecycle)" \
-    || fail "managed-lifecycle-failed: the managed-alarm lifecycle leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "managed-lifecycle-nondeterministic: two managed-lifecycle passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a leg asserting the never-shelvable shelve
-# write settled applied — shelving landing where the model declares
-# none — and a leg asserting the shelved flag still stands after the
-# declared bound's auto-release must each surface the named
-# diagnostic rather than passing silently.
-for tamper in expect-applied expect-standing; do
-    if out="$(run_managed_lifecycle --tamper "$tamper" 2>&1)"; then
-        fail "managed-lifecycle-unchecked: a $tamper case passed the managed-lifecycle leg"
-    fi
-    case "$tamper" in
-        expect-applied) expected="expected an applied receipt" ;;
-        expect-standing) expected="still standing" ;;
-    esac
-    [[ "$out" == *"$expected"* ]] \
-        || fail "managed-lifecycle-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, managed-lifecycle-failed"
-done
-
-# The pair contract's managed run-state carryover leg, on the same
-# manifest-declared deployment: ci/managed_carryover.py converges the
-# pair, puts the per-pump fault alarm out of service through its wired
-# oos point and trips it suppressed, shelves the declared shelvable
-# alarm through its writable journaled shelve point mid-run, and lands
-# the documented demote/promote inside the declared max_shelve_ticks
-# bound — the promoted peer asserting shelved stands carried and
-# releases at the tick the continued countdown expires rather than a
-# bound restarted at the switch, out_of_service and suppressed
-# standing with evaluation held, and both durable journals' ordered
-# records continuous across the switch — then restores every driven
-# input and the pair's roles. Two passes must produce identical
-# digests.
-run_managed_carryover() {
-    python3 ci/managed_carryover.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_managed_carryover)" \
-    || fail "carry-failed: the managed run-state carryover leg did not hold — its evidence lines are above"
-SECOND="$(run_managed_carryover)" \
-    || fail "carry-failed: the managed run-state carryover leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "carry-nondeterministic: two managed-carryover passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a leg expecting the promoted peer to expire the
-# shelve a fresh bound after the switch — the countdown restarted —
-# and a leg expecting the promoted peer to have dropped the carried
-# out-of-service must each surface the named diagnostic rather than
-# passing silently.
-for tamper in restarted-bound dropped-oos; do
-    if out="$(run_managed_carryover --tamper "$tamper" 2>&1)"; then
-        fail "carry-unchecked: a $tamper case passed the managed-carryover leg"
-    fi
-    case "$tamper" in
-        restarted-bound) expected="expected the restarted bound's expiry" ;;
-        dropped-oos) expected="expected the dropped carry" ;;
-    esac
-    [[ "$out" == *"$expected"* ]] \
-        || fail "carry-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, carry-failed"
-done
-
-# The pair contract's staging leg, on the same manifest-declared
-# deployment: ci/staging.py holds both pumps out of service through
-# receipted writes on their declared oos points so the declared inflow
-# raises the wet-well level unopposed — the active's monitor asserting
-# the emitted threshold chain's demand moves 0→1→2 only at the
-# declared start/lag_start crossings with duty_call/lag_call
-# reporting, the high crossing annunciating the managed high-level
-# alarm with journaled evidence — then the releases restore the driven
-# inputs and the standing demand stages the group, the lag answering
-# inside the declared start_delay_ticks with each pump's cmd/run field
-# outputs proving the start, before the staged pumps draw the level
-# down through the declared de-stage order — the lag's run releasing
-# before the duty's — to the below-cutoff floor; the receipted ack
-# clears the alarm's latch, every driven input is restored, the pair's
-# roles are unchanged, and the durable journal is audited for the
-# ordered record. Two passes must produce identical digests.
-run_staging() {
-    python3 ci/staging.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_staging)" \
-    || fail "staging-failed: the staging leg did not hold — its evidence lines are above"
-SECOND="$(run_staging)" \
-    || fail "staging-failed: the staging leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "staging-nondeterministic: two staging passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a leg asserting the wrong demand at the
-# lag_start crossing and a leg asserting the lag start landed inside
-# a shortened delay bound must each surface the named diagnostic —
-# never a silently unexercised contract.
-for tamper in wrong-demand immediate-lag; do
-    if out="$(run_staging --tamper "$tamper" 2>&1)"; then
-        fail "staging-unchecked: a $tamper case passed the staging leg"
-    fi
-    case "$tamper" in
-        wrong-demand) expected="expected the demand at 1" ;;
-        immediate-lag) expected="outside the declared start_delay_ticks bound" ;;
-    esac
-    [[ "$out" == *"$expected"* ]] \
-        || fail "staging-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, staging-failed"
-done
-
-# The pair contract's out-of-service leg, on the same
-# manifest-declared deployment: ci/oos.py settles the pair at an idle
-# assigned-duty baseline, submits the attributed receipted write on the
-# duty pump's declared oos point, and asserts the exclusion — the
-# in-service cone and the aggregated availability dropping, duty
-# handing to the sibling inside the declared wiring bound, staged
-# reporting the available count, the held pump's command staying
-# released while the sibling serves the demand — then each managed
-# per-pump alarm reporting the states its declared lifecycle bindings
-# select, a mid-OOS run-contact fault asserting alarm as process truth
-# with the unacknowledged latch withheld, the false write returning the
-# pump to availability and re-annunciating the outlasted trip, the
-# receipted ack settling the latch, and the next cycle's rotation
-# handing duty back — every managed transition journaled beside the
-# attributed receipts and the pair's roles unmoved throughout. Two
-# passes must produce identical digests.
-run_oos() {
-    python3 ci/oos.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_oos)" \
-    || fail "oos-failed: the pump out-of-service leg did not hold — its evidence lines are above"
-SECOND="$(run_oos)" \
-    || fail "oos-failed: the pump out-of-service leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "oos-nondeterministic: two out-of-service passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a leg asserting the held-out pump keeps duty —
-# the honest handover to the sibling failing it — and a leg asserting
-# the managed alarms never report their declared states must each
-# surface the named diagnostic rather than passing silently.
-for tamper in keeps-duty managed-silent; do
-    if out="$(run_oos --tamper "$tamper" 2>&1)"; then
-        fail "oos-unchecked: a $tamper case passed the out-of-service leg"
-    fi
-    case "$tamper" in
-        keeps-duty) expected="expected the held-out pump to keep duty" ;;
-        managed-silent) expected="expected them never to report" ;;
-    esac
-    [[ "$out" == *"$expected"* ]] \
-        || fail "oos-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, oos-failed"
-done
-
-# The pair contract's power-fail interlock leg, on the same
-# manifest-declared deployment: ci/power_trip.py converges the pair
-# and drives the simulated well until the pump group holds a full
-# demand — both pumps staged and running — then drives the station
-# power-fail contact through the plant protocol's field write, the
-# emitted model's protection-layer wiring (power-fail → power-ok →
-# each pump's power-ok-in feeding avail_i) dropping every pump's
-# availability while the chain's demand still stands: the motor
-# commands release, none-available annunciates, and the managed
-# power-fail alarm's alarm/unacknowledged assert with journaled
-# point_changed evidence. A receipted power-fail-ack must clear the
-# latch while the condition still stands; the released contact then
-# returns power-ok and both availability legs and re-stages the
-# standing demand inside the declared min_off_ticks/start_delay_ticks
-# bounds — no motor command re-asserting inside its holdout, the
-# lag's start inside the declared delay, the field outputs moving
-# only on the driven scan sequence, and the pair's roles unchanged.
-# Two passes must produce identical digests.
-run_power_trip() {
-    python3 ci/power_trip.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_power_trip)" \
-    || fail "power-trip-failed: the power-fail interlock leg did not hold — its evidence lines are above"
-SECOND="$(run_power_trip)" \
-    || fail "power-trip-failed: the power-fail interlock leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "power-trip-nondeterministic: two power-trip passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a leg asserting the motor commands still stand
-# under the driven power-fail, and one asserting the pumps'
-# availability never dropped, must each surface the named diagnostic
-# — never a silently untripped interlock.
-for tamper in commands-standing availability-holds; do
-    if out="$(run_power_trip --tamper "$tamper" 2>&1)"; then
-        fail "power-trip-unchecked: a $tamper case passed the power-trip leg"
-    fi
-    case "$tamper" in
-        commands-standing) expected="expected the commands standing" ;;
-        availability-holds) expected="expected availability still reporting" ;;
-    esac
-    [[ "$out" == *"$expected"* ]] \
-        || fail "power-trip-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, power-trip-failed"
-done
-
-# The pair contract's alarm-rationalization leg, on the same
-# manifest-declared deployment — the declared-once half of decision
-# 70's contract at the consumer boundary: ci/alarm_rationalization.py
-# converges the pair and audits both peers' served surfaces against
-# the emitted model's managed-alarm record — GET /signals' components
-# section carrying each instance's declared rationalization block
-# verbatim, GET /snapshot's parameters section serving each alarm's
-# declared priority/class/response_ticks live — then issues the
-# documented demote/promote switch and re-audits both peers: the
-# single declared record reaching the operator boundary unchanged on
-# whichever peer serves. Two passes must produce identical digests.
-run_alarm_rationalization() {
-    python3 ci/alarm_rationalization.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_alarm_rationalization)" \
-    || fail "alarm-rationalization-failed: the alarm-rationalization leg did not hold — its evidence lines are above"
-SECOND="$(run_alarm_rationalization)" \
-    || fail "alarm-rationalization-failed: the alarm-rationalization leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "alarm-rationalization-nondeterministic: two alarm-rationalization passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a served record dropping a managed alarm's
-# component record and parameter report, and one rewriting a declared
-# field's served value, must each surface the named diagnostic by
-# instance name — never a silently unmatched pass.
-for tamper in dropped-record rewritten-field; do
-    if out="$(run_alarm_rationalization --tamper "$tamper" 2>&1)"; then
-        fail "alarm-rationalization-unchecked: a $tamper case passed the alarm-rationalization leg"
-    fi
-    case "$tamper" in
-        dropped-record) expected="is declared but not served" ;;
-        rewritten-field) expected="served rationalization=" ;;
-    esac
-    [[ "$out" == *"$expected"* ]] \
-        || fail "alarm-rationalization-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, alarm-rationalization-failed"
-done
-
-# The pair contract's claim-fencing leg, on the same manifest-declared
-# deployment — the consumer-side mirror of the lane's standing
-# field-claim scenario: ci/claim_fencing.py settles the pair with a
-# field-owning peer holding the spawned plant's writer claim — the
-# launched active's startup claim where the release records its owner
-# token, else the documented switch stands the promoted peer's claim up
-# first — then attaches a dedicated third sim-net client whose write
-# and step must answer the named fencing refusal — the same mutations
-# driven through the shipped dcs-plant-ctl exiting nonzero — while the
-# field owner's writes keep landing; exercises the lifecycle verbs
-# where the release speaks them — a foreign token's ensure_writer
-# refused fenced, the owner's token answering claimed_shared with a
-# write landing under the shared hold, release_writer dropping only the
-# caller's hold with the standing claim still fencing probes, and a
-# holder-of-nothing's release a harmless done; then drives a rogue
-# claim_writer, which must resolve per the settled contract — never
-# silently: a preempt's evidence is the superseded owner's journaled
-# field_claim_lost and in-place demotion with its monitor serving,
-# after which the leg re-promotes the demoted owner so the pair's
-# launch roles and the claim's owner stand unchanged. Two passes must
-# produce identical digests.
-run_claim_fencing() {
-    python3 ci/claim_fencing.py \
-        --plant-server "$TOOLS/dcs-plant-server" \
-        --controller "$TOOLS/dcs-controller" \
-        --plant-ctl "$TOOLS/dcs-plant-ctl" \
-        --model model/plant.json \
-        --dynamics model/dynamics.json \
-        --scenario ci/scenario.json \
-        --manifest deploy/manifest.json "$@"
-}
-FIRST="$(run_claim_fencing)" \
-    || fail "claim-fencing-failed: the claim-fencing leg did not hold — its evidence lines are above"
-SECOND="$(run_claim_fencing)" \
-    || fail "claim-fencing-failed: the claim-fencing leg did not hold — its evidence lines are above"
-[ "$FIRST" = "$SECOND" ] \
-    || fail "claim-fencing-nondeterministic: two claim-fencing passes produced different digests"
-echo "  $FIRST"
-
-# The doctored cases: a probe attachment writing through the claim, a
-# foreign ensure_writer granted, and a rogue claim succeeding with no
-# supersession evidence must each surface the named diagnostic — never
-# a silently unmatched pass.
-for tamper in write-through foreign-ensure-granted rogue-silent; do
-    if out="$(run_claim_fencing --tamper "$tamper" 2>&1)"; then
-        fail "claim-fencing-unchecked: a $tamper case passed the claim-fencing leg"
-    fi
-    case "$tamper" in
-        write-through) expected="was not refused fenced" ;;
-        foreign-ensure-granted) expected="a foreign token's ensure_writer was not refused" ;;
-        rogue-silent) expected="the rogue claim answered" ;;
-    esac
-    [[ "$out" == *"$expected"* ]] \
-        || fail "claim-fencing-unchecked: the $tamper case did not report its named diagnostic: $out"
-    echo "  $tamper: reported, claim-fencing-failed"
-done
+# wiring statically; the stage's legs run it. Each leg is one file
+# under ci/legs/ — self-registering through its module-level LEG
+# literal, its explanatory comment carried in its own docstring —
+# discovered and driven by ci/legs.py in the recorded order: each leg
+# runs twice requiring identical digests, then each declared doctored
+# case runs requiring its named evidence. The legs share the
+# launch/settle/restore harness consolidated under #647 —
+# ci/legs/pair.py's launch_pair/PairRig — and each restores the pair's
+# launch roles for the next. Adding a leg is one new file under
+# ci/legs/ — nothing in this script changes. The driver reports each
+# leg's named diagnostics itself.
+# The legs' upgrade_from half: a leg declaring `upgrade_tools` runs
+# its flag arguments against the recorded upgrade-from revision's
+# tooling — the same `cargo install` resolution the pinned release's
+# went through, here at $DCS_UPGRADE_REV (the upgrade stage's recorded
+# baseline). Under a `DCS_TOOLS` substitution the directory resolves
+# to the substituted set, so the leg rolls the substituted binaries.
+PINNED_TOOLS="$TOOLS"
+ensure_tools "$DCS_UPGRADE_REV" \
+    || fail "pin-unresolvable: cargo install --git $DCS_REMOTE --rev $DCS_UPGRADE_REV failed"
+UPGRADE_TOOLS="$TOOLS"
+TOOLS="$PINNED_TOOLS"
+TOOLS_REV="$DCS_REV"
+python3 ci/legs.py \
+    --plant-server "$TOOLS/dcs-plant-server" \
+    --controller "$TOOLS/dcs-controller" \
+    --model model/plant.json \
+    --dynamics model/dynamics.json \
+    --scenario ci/scenario.json \
+    --manifest deploy/manifest.json \
+    --tools "$TOOLS" \
+    --upgrade-tools "$UPGRADE_TOOLS" || exit 1
 
 echo "== consumers =="
 # The boundary lint half, alongside the lockfile stage's rule: the
 # stage's driver and the README's consumer obligations name only
 # released artifacts and documented endpoints — never a path into a
 # platform checkout.
+# The ci/legs/*.py glob is the directory rule covering the pair
+# stage's leg convention — a new leg registers by file and needs no
+# edit here.
 for file in ci/alarm_rationalization.py ci/alarm_validation.py \
-        ci/availability.py \
-        ci/burst_order.py ci/claim_fencing.py ci/command_switch.py \
-        ci/consumers.py \
-        ci/ctl.py ci/demote_pending.py ci/demote_reconvergence.py \
-        ci/deploy_rig.py \
-        ci/divergence.py ci/failover.py \
-        ci/force_carryover.py ci/force_release.py ci/handover.py \
-        ci/managed_carryover.py ci/managed_lifecycle.py \
-        ci/negotiation.py ci/oos.py ci/pair.py \
-        ci/peer_announce.py ci/power_trip.py \
-        ci/refusal.py ci/report.py ci/restart.py \
-        ci/schema_conformance.py ci/simulate.py ci/staging.py \
-        ci/standby_restart.py ci/startup_claim.py \
-        ci/takeover.py ci/tune_carryover.py README.md; do
+        ci/claim_fencing.py ci/consumers.py ci/ctl.py ci/deploy_rig.py \
+        ci/dynamics_fingerprint.py ci/fingerprint.py ci/legs.py \
+        ci/managed_carryover.py ci/oos.py ci/overview_url.py \
+        ci/power_trip.py \
+        ci/restart.py ci/schema_conformance.py ci/simulate.py \
+        ci/staging.py ci/legs/*.py README.md; do
     if grep -nE 'crates/|\.\./|file://|/home/|target/debug' "$file"; then
         fail "path-dependency-leak: $file references a platform-checkout path"
     fi
@@ -2571,49 +1497,51 @@ if [ "${DCS_UPGRADE:-1}" != "0" ]; then
 
 echo "== upgrade =="
 # README §7's customer path exercised against this repository's own
-# composition: materialize the tree pinned at the recorded release rev,
-# repin to a later compatible revision, move the lockfile, and re-run
-# the check — a same-minor repin is a drop-in upgrade, so the emitted
-# bytes must not change (emit-divergent). The copy keeps the working
-# tree untouched.
+# composition: materialize the tree pinned at the previous release's
+# recorded rev — the release this tree upgraded from — repin to the
+# recorded release rev, move the lockfile, and re-run the check — a
+# compatible crossing is a drop-in upgrade, so the emitted bytes must
+# not change (emit-divergent). The copy keeps the working tree
+# untouched.
 UPGRADE_DIR="$(mktemp -d)"
 for path in Cargo.toml Cargo.lock rust-toolchain.toml README.md src model deploy ci; do
     cp -r "$path" "$UPGRADE_DIR/"
 done
 export CARGO_TARGET_DIR="$UPGRADE_DIR/target"
 
-# The baseline: the composition as the recorded release rev emits it.
+# The baseline: the composition as the previous release's recorded rev
+# emits it — the pinned side of the crossing this tree already ran.
+repin "rev = \"$DCS_UPGRADE_REV\""
+( cd "$UPGRADE_DIR" && cargo fetch ) \
+    || fail "pin-unresolvable: the upgrade-from revision $DCS_UPGRADE_REV did not resolve"
+( cd "$UPGRADE_DIR" && cargo build --quiet ) \
+    || fail "surface-incompatible: the composition does not compile against the upgrade-from revision"
+UPGRADE_BIN="$UPGRADE_DIR/target/debug/pump-station"
+"$UPGRADE_BIN" > "$UPGRADE_DIR/emit-released.json"
+cmp -s "$UPGRADE_DIR/emit-released.json" model/plant.json \
+    || fail "emit-divergent: the previous release's recorded rev emits different bytes than the approved model/plant.json"
+
+# The repin to the recorded release: only the pin changes — src/,
+# deploy/, and model/ are the unchanged tree. The fetch re-resolves
+# and moves the copied lockfile, README §7's `cargo update` step.
 repin "rev = \"$DCS_REV\""
 ( cd "$UPGRADE_DIR" && cargo fetch ) \
     || fail "pin-unresolvable: the recorded release rev $DCS_REV did not resolve"
 ( cd "$UPGRADE_DIR" && cargo build --quiet ) \
     || fail "surface-incompatible: the composition does not compile against the recorded release rev"
-UPGRADE_BIN="$UPGRADE_DIR/target/debug/pump-station"
-"$UPGRADE_BIN" > "$UPGRADE_DIR/emit-released.json"
-cmp -s "$UPGRADE_DIR/emit-released.json" model/plant.json \
-    || fail "emit-divergent: the recorded release rev emits different bytes than the approved model/plant.json"
-
-# The repin: only the pin changes — src/, deploy/, and model/ are the
-# unchanged tree. The fetch re-resolves and moves the copied lockfile,
-# README §7's `cargo update` step.
-repin "rev = \"$DCS_UPGRADE_REV\""
-( cd "$UPGRADE_DIR" && cargo fetch ) \
-    || fail "pin-unresolvable: the repinned revision $DCS_UPGRADE_REV did not resolve"
-( cd "$UPGRADE_DIR" && cargo build --quiet ) \
-    || fail "surface-incompatible: the composition does not compile against the repinned revision"
 "$UPGRADE_BIN" > "$UPGRADE_DIR/emit-upgraded.json"
 cmp -s "$UPGRADE_DIR/emit-upgraded.json" model/plant.json \
-    || fail "emit-divergent: the unchanged composition emitted different model bytes under $DCS_UPGRADE_REV"
-echo "  byte-identical emit across the repin $DCS_REV -> $DCS_UPGRADE_REV"
+    || fail "emit-divergent: the unchanged composition emitted different model bytes under $DCS_REV"
+echo "  byte-identical emit across the repin $DCS_UPGRADE_REV -> $DCS_REV"
 
 # The full pipeline under the repin — this check's own stages re-run
 # against the repinned materialization, with the release tooling
-# resolved at the repinned revision.
-ensure_tools "$DCS_UPGRADE_REV" \
-    || fail "pin-unresolvable: cargo install --git $DCS_REMOTE --rev $DCS_UPGRADE_REV failed"
+# resolved at the recorded release rev.
+ensure_tools "$DCS_REV" \
+    || fail "pin-unresolvable: cargo install --git $DCS_REMOTE --rev $DCS_REV failed"
 (
     cd "$UPGRADE_DIR"
-    DCS_UPGRADE=0 DCS_REMOTE="$DCS_REMOTE" DCS_REV="$DCS_UPGRADE_REV" \
+    DCS_UPGRADE=0 DCS_REMOTE="$DCS_REMOTE" DCS_REV="$DCS_REV" \
         DCS_TOOLS="$TOOLS" bash ci/check.sh
 ) || { echo "the repinned pipeline failed — its named diagnostic is above" >&2; exit 1; }
 echo "  the full pipeline passes under the repin"

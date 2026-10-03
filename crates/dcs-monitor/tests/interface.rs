@@ -244,6 +244,7 @@ fn entry(point: PointId, direction: Direction, kind: ValueKind, writable: bool) 
         description: None,
         group: None,
         writable,
+        requires_reason: false,
     }
 }
 
@@ -345,12 +346,11 @@ fn the_page_carries_the_generic_five_category_renderers() {
         let page = client.page().unwrap();
 
         // The fetch half: the schema and resource views ride the same
-        // poll as the snapshot — through the same deadline-bounded
-        // fetch every request takes — tolerating a peer that predates
-        // the endpoints — the absent-section convention.
+        // poll as the snapshot, tolerating a peer that predates the
+        // endpoints — the absent-section convention.
         for needle in [
-            "fetchBounded(base + \"/schema\")",
-            "fetchBounded(base + \"/resources\")",
+            "pollFetch(base + \"/schema\")",
+            "pollFetch(base + \"/resources\")",
             "(r.ok ? r.json() : null)",
             "interfaceByName",
             "resourcesByName",
@@ -442,6 +442,7 @@ fn the_page_carries_the_generic_five_category_renderers() {
             "\"event_emitted\" in event",
             "\"invoke\" in command",
             "\"unknown_command\" in reason",
+            "\"unknown_argument\" in reason",
             "\"argument_type_mismatch\" in reason",
             "\"command_refused\" in reason",
         ] {

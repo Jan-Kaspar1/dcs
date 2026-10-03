@@ -97,6 +97,34 @@ fn is_false(flag: &bool) -> bool {
     !*flag
 }
 
+/// A point's declared recording duty — the durable-history decision's
+/// model-data declaration of which series carry regulatory weight. The
+/// recorder samples the point's post-scan image into the durable
+/// history file every `every_ticks` run ticks; `retain_days` declares
+/// the retention span the downstream records system must hold so a
+/// deployment can size, rotate, and archive the file — engineering
+/// data the controller itself never enforces: the platform's duty is
+/// faithful, quality-stamped, honestly-gapped capture, and the
+/// multi-year term belongs to the historian/report layer the file
+/// feeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingDuty {
+    /// The recording cadence in run ticks: one durable sample lands
+    /// whenever the scan tick has advanced at least this far past the
+    /// point's last recorded sample. Must be `1` or greater —
+    /// [`PlantModel::validate`](crate::PlantModel::validate) reports a
+    /// zero cadence.
+    pub every_ticks: u64,
+    /// The declared retention span the records system must hold, in
+    /// days — the per-filter turbidity "at least 3 years" class of
+    /// requirement. Deployment-sizing data: the durable file's growth
+    /// is a deployment-managed bound, so the controller never enforces
+    /// the span; it is declared so rotation and archival can be
+    /// engineered against it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain_days: Option<u64>,
+}
+
 /// A logical I/O point: the unit control logic binds to.
 ///
 /// [`PointId`], direction, and value type form the component-facing
@@ -141,6 +169,41 @@ fn is_false(flag: &bool) -> bool {
 /// point: a continuously moving measurement belongs to the volatile
 /// history ring, not the low-volume durable record, and an operator's
 /// `Float` write is already durable in its attributed settled receipt.
+///
+/// `requires_reason` marks a writable point's commands reason-carrying:
+/// the operator's submission must declare a `reason` beside `actor` on
+/// the attributed envelope, and a reasonless command on the marked
+/// point refuses at admission with `reason_required` — the per-alarm
+/// mandatory-reason declaration the managed-lifecycle decision records
+/// for the shelve/out-of-service request points. The flag qualifies
+/// the command surface, so validation rejects it on any point that is
+/// not a writable `In` point — on one the command path never reaches,
+/// the mark is a dead declaration.
+///
+/// `record` declares the point's durable recording duty: the monitor's
+/// recorder samples its post-scan image into the durable history file
+/// at the declared cadence — the durable-history decision's narrowing
+/// of the volatile-ring rule, so a compliance series (the per-filter
+/// turbidity record, the daily disinfection/CT record, interval
+/// energy data) persists across restart rather than living only in
+/// the diagnostic window. The flag is opt-in per point and valid on
+/// any point — a field measurement's stream or an internal computed
+/// value alike — while a point declaring no `record` contributes only
+/// to the volatile ring. Validation bounds the declaration's shape: a
+/// zero `every_ticks` is a dead declaration — every scan would record,
+/// reproducing the full-rate stream the decision keeps volatile.
+///
+/// `unit` declares the engineering unit the point's value is expressed
+/// in — `"m3/h"`, `"L"`, `"g/h"`. Where a `value_type` answers "what
+/// representation does the value carry", `unit` answers "what is it a
+/// measure of". The declaration joins the dimensional-discipline
+/// checks: a connection whose other end declares a different unit is
+/// rejected, and a `Signal` declaring a `unit` that disagrees with its
+/// source point's is rejected — see
+/// [`PlantModel::validate`](crate::PlantModel::validate). An end
+/// declaring no unit stays uncheckable, so unit-transparent points and
+/// values the document never dimensioned remain admissible; the
+/// declared form is what the checks guard.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IoPoint {
     /// Unique point identifier.
@@ -174,6 +237,16 @@ pub struct IoPoint {
     /// documents predating the flag load with `writable` unset.
     #[serde(default, skip_serializing_if = "is_false")]
     pub writable: bool,
+    /// Whether commands on the point must carry a declared `reason` —
+    /// the per-alarm mandatory-reason mark; see the type docs. Valid
+    /// only on `writable` `In` points —
+    /// [`PlantModel::validate`](crate::PlantModel::validate) reports the
+    /// flag on a point that takes no commands.
+    ///
+    /// Optional like [`IoPoint::writable`]: documents predating the flag
+    /// load with `requires_reason` unset.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub requires_reason: bool,
     /// The point's freshness budget in ticks, if declared: how far the
     /// driver-stamped tick on a returned sample may lag the scan tick
     /// before the image sample lands `Uncertain(Stale)` — `0` demands a
@@ -194,6 +267,22 @@ pub struct IoPoint {
     /// documents predating the flag load with `journaled` unset.
     #[serde(default, skip_serializing_if = "is_false")]
     pub journaled: bool,
+    /// The point's durable recording duty, if declared; see the type
+    /// docs. Valid on any point —
+    /// [`PlantModel::validate`](crate::PlantModel::validate) reports a
+    /// duty whose `every_ticks` is zero.
+    ///
+    /// Optional like [`Signal::unit`]; see its note on schema versioning:
+    /// documents predating the field load with `record` unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<RecordingDuty>,
+    /// The declared engineering unit of the carried value — see the
+    /// type docs. `None` declares no unit: the point stays uncheckable
+    /// on connections, the gradual-adoption half of the discipline.
+    ///
+    /// Optional like [`Signal::unit`]; see its note on schema versioning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
 }
 
 impl IoPoint {
@@ -214,7 +303,11 @@ pub struct Signal {
     pub name: String,
     /// The I/O point carrying this signal's value.
     pub source: PointId,
-    /// Engineering unit of the carried value, e.g. `"degC"`.
+    /// Engineering unit of the carried value, e.g. `"degC"` — the
+    /// display-side declaration of the unit the source [`IoPoint`]
+    /// declares. Validation rejects a signal whose `unit` disagrees
+    /// with its point's declared `unit`: the name consumers render
+    /// cannot drift from the unit the value is wired in.
     ///
     /// `unit`, `description`, and `group` extend the version-1 schema as
     /// optional fields: documents written before they existed deserialize
@@ -283,6 +376,18 @@ pub struct ComponentInstance {
     /// the model wires; the runtime checks it against the component kind's
     /// definition.
     pub ports: BTreeMap<String, Port>,
+    /// The declared engineering units of `parameters` entries, keyed by
+    /// parameter name — `"ticks"` for a declared scan-interval parameter,
+    /// `"mg/L"` for a dose bound. Parameter values stay bare [`Value`]s;
+    /// this map carries the dimension beside them so the document
+    /// records what a number is a measure of. Every key must name a key
+    /// present in `parameters` — a unit for an absent value is a dead
+    /// declaration validation rejects.
+    ///
+    /// Optional like [`Signal::unit`]; see its note on schema versioning:
+    /// documents predating the field load with the map empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameter_units: BTreeMap<String, String>,
 }
 
 impl ComponentInstance {
@@ -297,12 +402,23 @@ impl ComponentInstance {
 }
 
 /// A named component port with a fixed direction and value type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Port {
     /// `In` ports consume a connection's value; `Out` ports produce one.
     pub direction: Direction,
     /// The port's value type.
     pub value_type: ValueKind,
+    /// The declared engineering unit the port's value is expressed in
+    /// — the instance-level declaration the composition made on the
+    /// spec's port declaration. A connection joining this port to
+    /// an end declaring a different unit is rejected — see
+    /// [`PlantModel::validate`](crate::PlantModel::validate); an
+    /// undeclared unit stays uncheckable, matching
+    /// [`IoPoint::unit`]'s convention.
+    ///
+    /// Optional like [`Signal::unit`]; see its note on schema versioning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
 }
 
 /// A reference to one named port on one component instance.
@@ -601,6 +717,88 @@ mod tests {
         let reloaded = PlantModel::load(&json).unwrap();
         assert!(!reloaded.io_points[0].journaled);
         assert!(reloaded.io_points[1].journaled);
+        assert_eq!(reloaded, model);
+        assert_eq!(serde_json::to_string_pretty(&reloaded).unwrap(), json);
+    }
+
+    #[test]
+    fn documents_predating_record_load_unchanged() {
+        // Points without the optional field deserialize `record` as
+        // `None`, and `None` serializes back without the key — a point
+        // declaring no duty stays volatile-ring only.
+        let model = PlantModel::load(MINIMAL).unwrap();
+        assert!(model.io_points.iter().all(|point| point.record.is_none()));
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(!json.contains("\"record\""), "{json}");
+    }
+
+    #[test]
+    fn record_duty_parses_and_roundtrips() {
+        // `record` declares the durable recording duty on a point of
+        // either direction and either kind — the declared cadence and
+        // the deployment-sizing retention span both ride the model.
+        let mut model = PlantModel::load(MINIMAL).unwrap();
+        model.io_points[1].record = Some(RecordingDuty {
+            every_ticks: 60,
+            retain_days: Some(1095),
+        });
+        let json = serde_json::to_string_pretty(&model).unwrap();
+        assert!(json.contains("\"record\""), "{json}");
+        assert!(json.contains("\"every_ticks\": 60"), "{json}");
+        assert!(json.contains("\"retain_days\": 1095"), "{json}");
+
+        let reloaded = PlantModel::load(&json).unwrap();
+        assert_eq!(reloaded.io_points[1].record.unwrap().every_ticks, 60);
+        assert_eq!(reloaded, model);
+        assert_eq!(serde_json::to_string_pretty(&reloaded).unwrap(), json);
+    }
+
+    #[test]
+    fn record_zero_cadence_is_rejected_by_load() {
+        // A zero `every_ticks` would record every scan — the full-rate
+        // duplication the durable record exists to avoid — so the load
+        // refuses it.
+        let mut model = PlantModel::load(MINIMAL).unwrap();
+        model.io_points[0].record = Some(RecordingDuty {
+            every_ticks: 0,
+            retain_days: None,
+        });
+        let json = serde_json::to_string(&model).unwrap();
+        match PlantModel::load(&json) {
+            Err(LoadError::Invalid(errors)) => assert!(
+                errors.contains(&ValidationError::RecordZeroCadence { point: PointId(10) }),
+                "{errors:?}"
+            ),
+            other => panic!("expected invalid model, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn documents_predating_requires_reason_load_unchanged() {
+        // Points without the optional field deserialize
+        // `requires_reason` as `false`, and `false` serializes back
+        // without the key.
+        let model = PlantModel::load(MINIMAL).unwrap();
+        assert!(model.io_points.iter().all(|point| !point.requires_reason));
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(!json.contains("\"requires_reason\""), "{json}");
+    }
+
+    #[test]
+    fn requires_reason_flag_parses_and_roundtrips() {
+        // The mark qualifies a writable `In` point's command admission:
+        // declare it on the writable internal point shape.
+        let mut model = PlantModel::load(MINIMAL).unwrap();
+        model.io_points[0].channel = None;
+        model.io_points[0].initial = Some(Value::Float(25.0));
+        model.io_points[0].writable = true;
+        model.io_points[0].requires_reason = true;
+        let json = serde_json::to_string_pretty(&model).unwrap();
+        assert!(json.contains("\"requires_reason\": true"), "{json}");
+
+        let reloaded = PlantModel::load(&json).unwrap();
+        assert!(reloaded.io_points[0].requires_reason);
+        assert!(!reloaded.io_points[1].requires_reason);
         assert_eq!(reloaded, model);
         assert_eq!(serde_json::to_string_pretty(&reloaded).unwrap(), json);
     }

@@ -91,7 +91,7 @@ pub struct ComponentParameters {
 /// hit.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct IoFault {
-    /// The scan tick the failure hit.
+    /// The run tick the failure hit.
     pub tick: Tick,
     /// The point the failure was attributed to — the error's
     /// [`IoError::point`], carried explicitly so a consumer reads the
@@ -183,18 +183,205 @@ pub struct PublicationHealth {
     pub depth: u64,
     /// The retained window's configured bound.
     pub window: u64,
-    /// The publication store's per-boot generation — the identity of
-    /// the `seq` domain `published` counts in, shared with the
-    /// volatile history rings `GET /history` serves. A store mints one
-    /// at construction, so a monitor restart — every volatile `seq`
-    /// domain beginning again at 1 — reads to a cursor consumer as a
-    /// generation change rather than an in-order answer that starves
-    /// the stale cursor silently; the durable journal's `run_boundary`
-    /// marker names the same process-lifetime boundary for the
-    /// persisted stream. `None` — and absent on the wire — in
-    /// snapshots serialized before the field existed.
+    /// The durable journal sink's drain report when the monitor
+    /// appends the journal to a file — `None` (absent on the wire)
+    /// without one. The sink drains on its own writer off the
+    /// executor lock: `lagging` reports records still queued for it,
+    /// `failed` a sink write that is already failing the run at its
+    /// next push. Absent from snapshots serialized before the section
+    /// existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub generation: Option<u64>,
+    pub journal_sink: Option<JournalSinkHealth>,
+    /// The `--state-file` checkpoint sink's drain report when the run
+    /// persists its checkpoints — `None` (absent on the wire) without
+    /// one. The capture rides the executor lock at its scan or
+    /// admission boundary; the serialize-and-replace itself drains on
+    /// the sink's own writer off the lock: `lagging` reports captured
+    /// checkpoints still queued, `failed` a write that is already
+    /// failing the run at its next push. Absent from snapshots
+    /// serialized before the section existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_sink: Option<StateSinkHealth>,
+    /// The `--history-file` durable process-history sink's drain
+    /// report when the monitor appends declared-duty samples to a file
+    /// — `None` (absent on the wire) without one. The append rides the
+    /// recorder's post-scan point; the file write drains on the sink's
+    /// own writer off the executor lock: `lagging` reports records
+    /// still queued, `failed` a sink write that is already failing the
+    /// run at its next push — the durable-history decision extending
+    /// decision 36's append rule to the sibling file. Absent from
+    /// snapshots serialized before the section existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_sink: Option<HistorySinkHealth>,
+}
+
+/// The named health state of the durable journal sink's drain — the
+/// backpressure report the journal-append isolation decision
+/// requires. The queue's bound is declared in `capacity`: a sink
+/// behind the run's recording rate reports `Lagging`, and a sink
+/// write that failed reports `Failed` — the run dies at its next
+/// journaled entry naming the file, the fatal-on-append-failure rule
+/// moved to the queue's handoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JournalSinkState {
+    /// The writer is keeping up — no record waits in the drain queue.
+    Healthy,
+    /// Records wait for the writer — the sink is behind the run's
+    /// recording rate. A lag that fills `capacity` is fatal at the
+    /// next journaled entry rather than silently dropping one.
+    Lagging,
+    /// A sink write failed — the run is failing fatally at the
+    /// recorded point; `lost` accounts the accepted records the file
+    /// never took.
+    Failed,
+}
+
+/// The durable journal sink's drain accounting — the overload
+/// surface beside the publication store's own counters, stamped into
+/// the snapshot's `publication` section as of each publish and
+/// readable live through the monitor.
+///
+/// The queue sits between the executor lock's recording point and the
+/// writer thread that appends records to the file in `seq` order:
+/// `accepted` counts every record handed over, `drained` the ones the
+/// file durably took, and `lost` the ones a failed writer consumed
+/// without appending — the honest loss accounting for a record the
+/// run's audit trail claimed but the file never held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalSinkHealth {
+    /// The sink's standing state.
+    pub state: JournalSinkState,
+    /// Journaled records handed to the drain queue since bind.
+    pub accepted: u64,
+    /// Records the writer has appended — `accepted` minus `lost`
+    /// minus the in-flight and queued remainder.
+    pub drained: u64,
+    /// Records the queue admitted but the sink never appended —
+    /// nonzero only after a writer failure: the loss the durable file
+    /// cannot carry, counted rather than hidden.
+    pub lost: u64,
+    /// Records waiting in the queue now — what `lagging` reports on.
+    pub depth: u64,
+    /// The deepest the queue has run.
+    pub high_water: u64,
+    /// The queue's configured bound — a journaled entry finding it
+    /// full fails the run fatally at the push.
+    pub capacity: u64,
+}
+
+/// The named health state of the `--state-file` checkpoint sink's
+/// drain — the state-file persist isolation fix's (#982) backpressure
+/// report, the same shape the journal sink's carries. The queue's
+/// bound is declared in `capacity`: a sink behind the run's capture
+/// rate reports `Lagging`, and a write that failed reports `Failed` —
+/// the run dies at its next persist push naming the file, the
+/// fatal-on-write-failure rule moved to the queue's handoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateSinkState {
+    /// The writer is keeping up — no checkpoint waits in the drain
+    /// queue.
+    Healthy,
+    /// Checkpoints wait for the writer — the sink is behind the run's
+    /// persist rate. A lag that fills `capacity` is fatal at the next
+    /// capture's push rather than lengthening a scan.
+    Lagging,
+    /// A sink write failed — the run is failing fatally at the
+    /// recorded point; `lost` accounts the queued checkpoints the
+    /// file never took.
+    Failed,
+}
+
+/// The `--state-file` checkpoint sink's drain accounting — the
+/// overload surface beside the journal sink's, stamped into the
+/// snapshot's `publication` section as of each publish and readable
+/// live through the monitor.
+///
+/// The queue sits between the executor lock's capture point and the
+/// writer thread that serializes each pushed `Checkpoint` and
+/// atomically replaces the file in push order: `accepted` counts
+/// every checkpoint handed over, `drained` the ones the file durably
+/// took, and `lost` the ones a failed writer consumed without
+/// writing — the honest loss accounting for a capture the file never
+/// held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateSinkHealth {
+    /// The sink's standing state.
+    pub state: StateSinkState,
+    /// Captured checkpoints handed to the drain queue since bind.
+    pub accepted: u64,
+    /// Checkpoints the writer durably replaced the file with —
+    /// `accepted` minus `lost` minus the in-flight and queued
+    /// remainder.
+    pub drained: u64,
+    /// Checkpoints the queue admitted but the sink never wrote —
+    /// nonzero only after a writer failure: the loss the durable file
+    /// cannot carry, counted rather than hidden.
+    pub lost: u64,
+    /// Checkpoints waiting in the queue now — what `lagging` reports
+    /// on.
+    pub depth: u64,
+    /// The deepest the queue has run.
+    pub high_water: u64,
+    /// The queue's configured bound — a checkpoint capture finding it
+    /// full fails the run fatally at the push.
+    pub capacity: u64,
+}
+
+/// The named health state of the durable process-history sink's drain
+/// — the backpressure report the durable-history decision requires of
+/// the sibling file. The queue's bound is declared in `capacity`: a
+/// sink behind the run's recording rate reports `Lagging`, and a sink
+/// write that failed reports `Failed` — the run dies at its next
+/// recorded sample naming the file, the fatal-on-append rule decision
+/// 36 recorded for the journal extended to declared-duty history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistorySinkState {
+    /// The writer is keeping up — no record waits in the drain queue.
+    Healthy,
+    /// Records wait for the writer — the sink is behind the run's
+    /// recording rate. A lag that fills `capacity` is fatal at the
+    /// next recorded sample rather than silently dropping one.
+    Lagging,
+    /// A sink write failed — the run is failing fatally at the
+    /// recorded point; `lost` accounts the accepted records the file
+    /// never took.
+    Failed,
+}
+
+/// The durable process-history sink's drain accounting — the overload
+/// surface beside the journal sink's, stamped into the snapshot's
+/// `publication` section as of each publish and readable live through
+/// the monitor.
+///
+/// The queue sits between the recorder's post-scan point and the
+/// writer thread that appends records to the file in `seq` order:
+/// `accepted` counts every record handed over, `drained` the ones the
+/// file durably took, and `lost` the ones a failed writer consumed
+/// without appending — the honest loss accounting for a recorded
+/// sample the file never held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistorySinkHealth {
+    /// The sink's standing state.
+    pub state: HistorySinkState,
+    /// History records handed to the drain queue since bind.
+    pub accepted: u64,
+    /// Records the writer has appended — `accepted` minus `lost`
+    /// minus the in-flight and queued remainder.
+    pub drained: u64,
+    /// Records the queue admitted but the sink never appended —
+    /// nonzero only after a writer failure: the loss the durable file
+    /// cannot carry, counted rather than hidden.
+    pub lost: u64,
+    /// Records waiting in the queue now — what `lagging` reports on.
+    pub depth: u64,
+    /// The deepest the queue has run.
+    pub high_water: u64,
+    /// The queue's configured bound — a recorded sample finding it
+    /// full fails the run fatally at the push.
+    pub capacity: u64,
 }
 
 /// The snapshot's command-ingress section: admission metrics for the
@@ -287,8 +474,8 @@ pub struct ComponentCommands {
 /// runs serialize identically.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelemetrySnapshot {
-    /// The producer's tick when the snapshot was taken; [`Tick::ZERO`]
-    /// before the first scan.
+    /// The producer's run tick when the snapshot was taken;
+    /// [`Tick::ZERO`] before the first scan.
     pub tick: Tick,
     /// The latest sample of every point the producer knows, ordered by
     /// point id.
@@ -535,7 +722,9 @@ mod tests {
                 coalesced: 3,
                 depth: 4,
                 window: 8,
-                generation: Some(11),
+                journal_sink: None,
+                state_sink: None,
+                history_sink: None,
             }),
         };
         let json = serde_json::to_string(&snapshot).unwrap();

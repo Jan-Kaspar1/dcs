@@ -10,13 +10,14 @@
 
 use dcs_core::{
     Command, CyclicIoDriver, Direction, ExchangeDiagnostics, IoDriver, IoError, LinkState, PointId,
-    Quality, QualityReason, Sample, Tick, Value, ValueKind,
+    Quality, QualityReason, Role, Sample, StandbySync, SwitchOrigin, Tick, Value, ValueKind,
 };
 use dcs_runtime::{
-    Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, PointMap, StepError, WriteGate,
+    Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap, StepError,
+    WriteGate,
 };
 use dcs_sim_bus::{
-    BusDriver, BusServer, CyclicBusDriver, CyclicPoint, ExchangeOutcome, PointRegister,
+    BusDriver, BusServer, CyclicBusDriver, CyclicPoint, ExchangeOutcome, LinkError, PointRegister,
     RegisterBank, RegisterDecl,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -95,9 +96,9 @@ fn fixture_points() -> Vec<CyclicPoint> {
 /// The declared `exchange_miss_threshold` every fixture driver runs
 /// under — three consecutive misses escalate reads.
 const MISS_THRESHOLD: u64 = 3;
-/// A short request timeout keeps the scripted-miss path fast: the
-/// failed connection drops outright rather than waiting a real read
-/// timeout out.
+/// A short request timeout keeps a genuinely unanswerable request —
+/// a stalled or dead endpoint — from stalling the suite on a real
+/// read timeout.
 const TIMEOUT: Duration = Duration::from_millis(500);
 
 /// `shutdown` on drop, so a panicking test still lets the scoped serve
@@ -235,7 +236,10 @@ fn a_missed_exchange_holds_the_image_and_escalates_at_the_threshold() {
                 "tick {tick}: the held image still serves"
             );
         }
-        assert!(!driver.connected(), "a scripted miss drops the link");
+        // The misses answer in-band: the link stays up — it is the
+        // exchange's missed cycle, not a sever — while diagnostics
+        // still report the exchange health as disconnected.
+        assert!(driver.connected(), "a scripted miss answers in-band");
         let diagnostics = driver.diagnostics().unwrap();
         assert_eq!(diagnostics.link, LinkState::Disconnected);
         assert!(diagnostics.last_error.is_some());
@@ -265,9 +269,9 @@ fn a_missed_exchange_holds_the_image_and_escalates_at_the_threshold() {
             );
         }
 
-        // The script exhausted, the next exchange reconnects lazily and
-        // completes: misses reset, the field's asserted value latches
-        // fresh, the link recovers.
+        // The script exhausted, the next exchange on the still-live
+        // link completes: misses reset, the field's asserted value
+        // latches fresh, the link health recovers.
         cyclic(&driver).exchange(Tick(5)).unwrap();
         assert_eq!(
             driver.read(PointId(10)),
@@ -475,6 +479,107 @@ fn a_fenced_exchange_completes_nothing_but_the_census_stays_open() {
 }
 
 #[test]
+fn the_conditional_claim_refuses_a_live_different_owner() {
+    with_server(|server, addr| {
+        let holder = driver(addr);
+        let starter = driver(addr);
+        // Another attachment owns the field's write claim — a live
+        // incumbent.
+        let owner = observer(
+            addr,
+            &[PointRegister {
+                point: PointId(10),
+                register: 4,
+                kind: ValueKind::Float,
+            }],
+        );
+        owner.claim_writer(7).unwrap();
+
+        // The born-active ask under a different token refuses — the
+        // incumbent's claim untouched: the refusing attachment's
+        // staged outputs still fence at the exchange, the owner still
+        // mutates.
+        assert_eq!(starter.claim_writer_unless_held(8), Err(LinkError::Fenced));
+        starter.write(PointId(20), Value::Float(5.0)).unwrap();
+        assert_eq!(
+            cyclic(&starter).exchange(Tick(1)),
+            Err(IoError::Fenced(PointId(10)))
+        );
+        assert_eq!(server.bank().read(9).unwrap().value, Value::Float(0.0));
+        owner.write(PointId(10), Value::Float(1.0)).unwrap();
+
+        // The same owner's own conditional ask joins the holders —
+        // its staged outputs now publish.
+        holder.claim_writer_unless_held(7).unwrap();
+        holder.write(PointId(20), Value::Float(5.0)).unwrap();
+        cyclic(&holder).exchange(Tick(2)).unwrap();
+        assert_eq!(server.bank().read(9).unwrap().value, Value::Float(5.0));
+    });
+}
+
+#[test]
+fn the_cyclic_claim_probe_and_verdicts_name_the_incumbent() {
+    with_server(|server, addr| {
+        let ex_owner = driver(addr);
+        let observer = driver(addr);
+        // The pre-claim device reports itself unclaimed: on this
+        // protocol that is the open field, not a closed one.
+        assert_eq!(observer.probe_writer().unwrap().owner, None);
+        assert_eq!(
+            observer.probe_writer().unwrap().claim(),
+            dcs_core::FieldClaim::Unclaimed
+        );
+
+        // The standing claim declares its tracking surface; the probe
+        // reports both halves of its identity.
+        ex_owner.set_claim_monitor("127.0.0.1:4190".parse().unwrap());
+        ex_owner.claim_writer(7).unwrap();
+        let held = observer.probe_writer().unwrap();
+        assert_eq!(held.owner, Some(7));
+        assert_eq!(held.monitor, Some("127.0.0.1:4190".parse().unwrap()));
+        assert_eq!(held.claim(), dcs_core::FieldClaim::Held);
+
+        // A fenced image exchange — the cyclic surface's own claim-loss
+        // verdict — names the standing claim's claimant and its
+        // declared monitor, so the ex-owner's journal record can
+        // attribute the preemption and re-join the successor.
+        let fenced = driver(addr);
+        fenced.write(PointId(20), Value::Float(5.0)).unwrap();
+        assert_eq!(
+            cyclic(&fenced).exchange(Tick(1)),
+            Err(IoError::Fenced(PointId(10)))
+        );
+        assert_eq!(fenced.fenced_by(), Some(7));
+        assert_eq!(
+            fenced.claimed_monitor(),
+            Some("127.0.0.1:4190".parse().unwrap())
+        );
+        // Nothing published: the verdict is the field's own ruling,
+        // not a severed link's.
+        assert_eq!(server.bank().read(9).unwrap().value, Value::Float(0.0));
+        assert!(fenced.connected());
+
+        // The re-arm ask under a different token is refused with the
+        // same attribution, and the recorded owner's own re-arm grants
+        // — the same live incumbent, named both times.
+        assert_eq!(fenced.ensure_writer(9), Err(LinkError::Fenced));
+        assert_eq!(fenced.fenced_by(), Some(7));
+        ex_owner.ensure_writer(7).unwrap();
+        assert_eq!(
+            observer.probe_writer().unwrap().owner,
+            Some(7),
+            "the owner's re-arm must not change who the field serves"
+        );
+
+        // The retained staged image publishes once the claim frees —
+        // the deliberate takeover's own claim, exactly as before.
+        fenced.claim_writer(9).unwrap();
+        cyclic(&fenced).exchange(Tick(2)).unwrap();
+        assert_eq!(server.bank().read(9).unwrap().value, Value::Float(5.0));
+    });
+}
+
+#[test]
 fn a_closed_gate_exchanges_but_never_stages() {
     with_server(|server, addr| {
         let driver = driver(addr);
@@ -651,8 +756,10 @@ fn point_map() -> PointMap {
                 kind: ValueKind::Float,
                 internal: None,
                 writable: false,
+                requires_reason: false,
                 stale_after_ticks: Some(1),
                 journaled: false,
+                record_every_ticks: None,
             },
         )
         .with_writable_point(PointId(11), Direction::In, ValueKind::Float)
@@ -734,5 +841,143 @@ fn the_executor_runs_the_exchange_at_the_boundary_over_the_wire() {
         assert_eq!(exchange.attempted, 4);
         assert_eq!(exchange.succeeded, 2);
         assert_eq!(exchange.last_exchange_tick, Some(Tick(2)));
+    });
+}
+
+// ── Fencing-loss demotion over the cyclic surface ───────────────────
+
+/// The QA link-flap reproduction (the `sim-cyclic` fenced-exchange
+/// finding): the connection-bound writer claim dies with the dropped
+/// connection, the reconnected ex-owner's output-bearing exchanges
+/// answer `Fenced` at the attribution point — and the verdict must
+/// demote the superseded owner exactly as a fenced point write does,
+/// so a promoted peer never leaves a second controller reporting
+/// `active`.
+///
+/// Two `Peer`s over `CyclicBusDriver` attachments play the redundant
+/// pair, wired the way `dcs-assembly`/`dcs-controller` wire the claim
+/// hooks: the claim is the field's arbitration, and the release
+/// forgets the pending output image a demoted owner would otherwise
+/// keep re-presenting into the fence.
+#[test]
+fn a_link_flap_fenced_exchange_demotes_the_ex_owner() {
+    with_server(|server, addr| {
+        const OWNER_A: u64 = 1;
+        const OWNER_B: u64 = 2;
+        let components = || -> Vec<Box<dyn Component>> {
+            vec![Box::new(WriteOnce {
+                output: PointId(20),
+                value: 9.0,
+                done: false,
+            })]
+        };
+
+        // CA — the field owner: the claim taken under its token at
+        // activation, two scans staging then publishing its output.
+        let a_driver = driver(addr);
+        let a_gate = WriteGate::closed(&a_driver);
+        let mut a = Peer::active(
+            Executor::new(&a_gate, point_map(), components()).unwrap(),
+            Some(&a_gate),
+        )
+        .with_field_claim(|| {
+            a_driver
+                .claim_writer(OWNER_A)
+                .map_err(|error| error.to_string())
+        })
+        .with_field_release(|| a_driver.drop_pending_outputs());
+        a.activate().unwrap();
+        a.scan();
+        a.scan();
+        assert_eq!(a.role(), Role::Active);
+        assert_eq!(server.bank().read(9).unwrap().value, Value::Float(9.0));
+
+        // CB — the tracking standby on the same field, converged on
+        // the owner's checkpoint.
+        let b_driver = driver(addr);
+        let b_gate = WriteGate::closed(&b_driver);
+        let mut b = Peer::standby(
+            Executor::new(&b_gate, point_map(), components()).unwrap(),
+            Some(&b_gate),
+        )
+        .with_field_claim(|| {
+            b_driver
+                .claim_writer(OWNER_B)
+                .map_err(|error| error.to_string())
+        })
+        .with_field_release(|| b_driver.drop_pending_outputs());
+        b.scan();
+        b.track_once(|| Ok(a.checkpoint()));
+        assert!(matches!(b.sync_state(), StandbySync::Tracking { .. }));
+
+        // The link flap: every client connection drops, and the
+        // connection-bound claim releases with its dead holders.
+        server.drop_connections();
+
+        // Each driver's next request re-attaches lazily: the first
+        // exchange meets the dead socket — an ordinary transport miss,
+        // not fencing, since nobody holds the claim — and nothing
+        // silently re-arms it.
+        a.scan();
+        b.scan();
+        assert_eq!(a.role(), Role::Active);
+        assert!(a.drain_pending().fencing_losses().is_empty());
+
+        // The standby promotes on the freed field — its claim lands on
+        // the reconnected attachment — and settles `active` on its
+        // first owning scan. For the window until CA's next scan the
+        // field legitimately reports one owner superseded but not yet
+        // observed gone: CA's demotion is what ends it, inside its
+        // next scan.
+        b.promote().unwrap();
+        b.scan();
+        assert_eq!(b.role(), Role::Active);
+
+        // CA's next scan presents the outputs its write phase keeps
+        // staging — on a reconnected attachment holding no claim, the
+        // field answers `Fenced` at the attribution point, and the
+        // claim-loss mark demotes the ex-owner in place. The loss is
+        // journaled unattributed: the verdict named no claimant.
+        a.scan();
+        assert_eq!(a.role(), Role::Demoting);
+        let drained = a.drain_pending();
+        let losses = drained.fencing_losses();
+        assert_eq!(losses.len(), 1, "one fencing loss per held claim");
+        assert_eq!(losses[0].point, PointId(10));
+        assert_eq!(losses[0].claimant, None);
+        // The one drain takes the demotion the loss drove too — the
+        // walked role changes accumulate across the path's drains.
+        let mut walked: Vec<SwitchOrigin> = drained
+            .role_changes()
+            .iter()
+            .map(|change| change.origin)
+            .collect();
+
+        // The quiesced settle scan completes the demotion: the gate
+        // is closed and the release hook dropped the pending output
+        // image, so the demoted run's exchange runs census-only —
+        // completing again instead of re-presenting into the fence.
+        a.scan();
+        assert_eq!(a.role(), Role::Standby);
+        assert_eq!(a.sync_state(), &StandbySync::Unsynchronized);
+
+        // The invariant QA saw violated: after promotion exactly one
+        // peer reports `active`. The journaled transitions name the
+        // fencing verdict, not an unattributed operator request.
+        assert_eq!(b.role(), Role::Active);
+        walked.extend(
+            a.drain_pending()
+                .role_changes()
+                .iter()
+                .map(|change| change.origin),
+        );
+        assert_eq!(walked, vec![SwitchOrigin::Fenced, SwitchOrigin::Fenced]);
+        // And the demoted attachment's link is healthy again — a
+        // census-only exchange completes rather than fencing forever.
+        assert_eq!(
+            a_driver.diagnostics().unwrap().link,
+            LinkState::Connected,
+            "the demoted run's exchanges must go census-only, not keep fencing"
+        );
     });
 }

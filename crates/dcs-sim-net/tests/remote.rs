@@ -4,21 +4,22 @@
 //! a scripted executor run local and remote.
 
 use dcs_core::{
-    Direction, DriverDiagnostics, IoDriver, IoError, IoFault, LinkState, PointId, Quality,
-    QualityReason, Role, Sample, Tick, Value, ValueKind,
+    Direction, DriverDiagnostics, FieldClaim, IoDriver, IoError, IoFault, LinkState, PointId,
+    Quality, QualityReason, Role, Sample, StandbySync, SwitchError, Tick, Value, ValueKind,
 };
 use dcs_runtime::{
-    Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap, PointSpec,
-    StepError, WriteGate,
+    Activation, Component, ComponentIo, ComponentIoExt, Executor, IoRequirement, Peer, PointMap,
+    PointSpec, StepError, TrackReport, WriteGate,
 };
 use dcs_sim::{
-    ChannelId, ChannelMap, Fault, FirstOrderLag, Loopback, PointBinding, ProcessElement, SimDriver,
+    BoolFlow, ChannelId, ChannelMap, Fault, FirstOrderLag, FlowSum, Integrator, Loopback,
+    PointBinding, ProcessElement, SimDriver,
 };
 use dcs_sim_net::{ClaimGrant, PlantError, PlantResponse, PlantServer, RemoteDriver, RemoteError};
 use std::io::{self, BufRead, BufReader, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn binding(point: u64, direction: Direction, initial: Value) -> PointBinding {
     PointBinding {
@@ -42,6 +43,16 @@ fn loopback_map() -> ChannelMap {
             output: PointId(20),
             input: PointId(10),
         })
+}
+
+/// A plant whose `In` point is a bare channel — no loopback routes onto
+/// it and no element output owns it: the scanned-input-card shape the
+/// driver's step re-stamps every tick. Point 20 stays bound so the
+/// `Accumulator` component's output write has a field point to land on.
+fn bare_map() -> ChannelMap {
+    ChannelMap::new()
+        .with_point(binding(10, Direction::In, Value::Float(0.0)))
+        .with_point(binding(20, Direction::Out, Value::Float(0.0)))
 }
 
 /// The scripted executor scenario: a stateful component reads the
@@ -210,6 +221,26 @@ fn a_second_client_observes_the_same_stepped_point_values() {
 }
 
 #[test]
+fn ping_reports_the_plants_tick_on_every_attachment() {
+    with_server(loopback_map(), |addr| {
+        // The container health contract's probe: the server answers
+        // its plant tick to an attachment holding no claim — the
+        // liveness half is the answer at all, the tick the freshness
+        // half.
+        let probe = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(probe.ping().unwrap(), Tick::ZERO);
+
+        // A stepping plant's tick advances between probes — and a
+        // non-owning attachment's probe reads the same freshness.
+        let owner = RemoteDriver::connect(addr).unwrap();
+        owner.claim_writer(1).unwrap();
+        owner.step(0.5).unwrap();
+        assert_eq!(owner.ping().unwrap(), Tick(1));
+        assert_eq!(probe.ping().unwrap(), Tick(1));
+    });
+}
+
+#[test]
 fn protocol_answers_map_to_named_io_errors() {
     with_server(loopback_map(), |addr| {
         let remote = RemoteDriver::connect(addr).unwrap();
@@ -263,6 +294,219 @@ fn protocol_answers_map_to_named_io_errors() {
             Err(RemoteError::InvalidRequest(_))
         ));
         assert_eq!(remote.step(0.1), Ok(Tick(1)));
+    });
+}
+
+/// An integrator plant: point 1 is the writable inflow, point 10 the
+/// level it integrates — the shape the QA reproduction drives.
+fn integrator_map() -> ChannelMap {
+    ChannelMap::new()
+        .with_point(binding(1, Direction::In, Value::Float(0.0)))
+        .with_point(binding(10, Direction::In, Value::Float(0.0)))
+        .with_element(ProcessElement::Integrator(Integrator {
+            input: PointId(1),
+            output: PointId(10),
+            initial: 0.0,
+        }))
+}
+
+#[test]
+fn a_legal_step_that_overflows_an_element_degrades_the_sample_and_recovers() {
+    // QA `sim-net-nonfinite-plant-state-poisons-wire-permanently`:
+    // claim -> write 1e308 -> step dt=1e308 drove the integrator's
+    // accumulator past the f64 range; the stored non-finite sample
+    // serialized `{"float":null}` — a frame this protocol's own client
+    // must reject — and the element stayed corrupt under every later
+    // step until the server restarted. The field now holds the last
+    // finite state instead: the served sample decodes, marked
+    // `Bad`/`out_of_range`, and a finite input write plus a finite
+    // step recovers the element in place.
+    with_server(integrator_map(), |addr| {
+        let remote = RemoteDriver::connect(addr).unwrap();
+        remote.claim_writer(1).unwrap();
+        let driver: &dyn IoDriver = &remote;
+
+        driver.write(PointId(1), Value::Float(1e308)).unwrap();
+        remote.step(1e308).unwrap();
+        remote.step(1e308).unwrap();
+
+        // The frame decodes — the defect's Disconnected is gone — and
+        // the overflowed point reports its held finite value bad
+        // instead of an unrepresentable one.
+        let sample = driver.read(PointId(10)).unwrap();
+        assert_eq!(sample.value, Value::Float(0.0));
+        assert_eq!(sample.quality, Quality::Bad(QualityReason::OutOfRange));
+
+        // The census decodes wholesale — one bad point no longer
+        // poisons the whole response.
+        assert_eq!(remote.list_points().unwrap().len(), 2);
+
+        // A second attachment reads the same decodable degradation.
+        let standby = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(standby.read(PointId(10)).unwrap(), sample);
+
+        // The documented recovery path: a finite input write followed
+        // by a finite step resumes the element from the state it held —
+        // no plant restart.
+        driver.write(PointId(1), Value::Float(2.0)).unwrap();
+        remote.step(1.0).unwrap();
+        let recovered = driver.read(PointId(10)).unwrap();
+        assert_eq!(recovered.value, Value::Float(2.0));
+        assert!(recovered.quality.is_good());
+    });
+}
+
+#[test]
+fn a_non_finite_write_payload_is_refused_at_the_field_boundary() {
+    with_server(loopback_map(), |addr| {
+        // The wire is symmetric: JSON cannot spell a non-finite f64,
+        // and serde_json refuses an out-of-range literal at parse.
+        // A `{"float": 1e999}` write dies as InvalidRequest before any
+        // driver call — the stored sample is untouched and the
+        // connection stays up.
+        let mut stream = BufReader::new(TcpStream::connect(addr).unwrap());
+        stream
+            .get_mut()
+            .write_all(b"{\"op\":\"claim_writer\",\"owner\":1}\n")
+            .unwrap();
+        let mut line = String::new();
+        stream.read_line(&mut line).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<PlantResponse>(&line).unwrap(),
+            PlantResponse::Done
+        ));
+        stream
+            .get_mut()
+            .write_all(b"{\"op\":\"write\",\"point\":10,\"value\":{\"float\":1e999}}\n")
+            .unwrap();
+        line.clear();
+        stream.read_line(&mut line).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<PlantResponse>(&line).unwrap(),
+            PlantResponse::Error {
+                error: PlantError::InvalidRequest { .. }
+            }
+        ));
+
+        let remote = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(remote.read(PointId(10)).unwrap().value, Value::Float(0.0));
+    });
+}
+
+/// The pump-station dynamics chain the QA lane deploys: the gate
+/// points 100/101 drive the pump draws 20/21, the sum of the draws
+/// with the writable inflow 12 stands on net flow 13, the level
+/// integrator 10 accumulates it, and the backup lag 11 follows — the
+/// `pump_station_dynamics` fixture's shape, points included.
+fn pump_dynamics_map() -> ChannelMap {
+    ChannelMap::new()
+        .with_point(binding(10, Direction::In, Value::Float(0.8)))
+        .with_point(binding(11, Direction::In, Value::Float(0.8)))
+        .with_point(binding(12, Direction::In, Value::Float(0.0)))
+        .with_point(binding(13, Direction::In, Value::Float(0.2)))
+        .with_point(binding(20, Direction::In, Value::Float(0.0)))
+        .with_point(binding(21, Direction::In, Value::Float(0.0)))
+        .with_point(binding(100, Direction::In, Value::Bool(false)))
+        .with_point(binding(101, Direction::In, Value::Bool(false)))
+        .with_element(ProcessElement::BoolFlow(BoolFlow {
+            input: PointId(100),
+            output: PointId(20),
+            on_rate: -1.0,
+            off_rate: 0.0,
+            initial: 0.0,
+        }))
+        .with_element(ProcessElement::BoolFlow(BoolFlow {
+            input: PointId(101),
+            output: PointId(21),
+            on_rate: -1.0,
+            off_rate: 0.0,
+            initial: 0.0,
+        }))
+        .with_element(ProcessElement::FlowSum(FlowSum {
+            inputs: vec![PointId(12), PointId(20), PointId(21)],
+            output: PointId(13),
+            bias: 0.2,
+            initial: 0.2,
+        }))
+        .with_element(ProcessElement::Integrator(Integrator {
+            input: PointId(13),
+            output: PointId(10),
+            initial: 0.8,
+        }))
+        .with_element(ProcessElement::FirstOrderLag(FirstOrderLag {
+            input: PointId(10),
+            output: PointId(11),
+            time_constant: 0.5,
+            initial: 0.8,
+        }))
+}
+
+#[test]
+fn an_overflowed_level_chain_stays_finite_and_decodable_for_fresh_clients() {
+    // QA `sim-net-nonfinite-write-poisons-plant-permanently` (verif #4
+    // replay): claim -> write inflow 12 = 1e308 -> step until the level
+    // integrator overflows -> release -> a fresh client reading 10/11
+    // got `{"float":null}` forever — a frame this protocol cannot spell
+    // — until the plant restarted. The chain now degrades in place:
+    // every stored value stays finite, the overflowed elements report
+    // their held state `Bad`/`out_of_range`, and the served frames
+    // decode for every later attachment.
+    with_server(pump_dynamics_map(), |addr| {
+        let remote = RemoteDriver::connect(addr).unwrap();
+        remote.claim_writer(1).unwrap();
+        let driver: &dyn IoDriver = &remote;
+
+        driver.write(PointId(12), Value::Float(1e308)).unwrap();
+        // The first step still sums finite — 13 stands at 1e308 and the
+        // integrator commits it — so the second step is the one whose
+        // accumulation would pass the f64 range; the element refuses
+        // the commit and holds its last finite state instead.
+        remote.step(1.0).unwrap();
+        remote.step(1.0).unwrap();
+        remote.release_writer().unwrap();
+
+        // The overflowed integrator reports the finite level it held,
+        // degraded — never an unrepresentable sample.
+        let level = driver.read(PointId(10)).unwrap();
+        assert_eq!(level.quality, Quality::Bad(QualityReason::OutOfRange));
+        let Value::Float(held) = level.value else {
+            panic!("a level sample is always a Float")
+        };
+        assert!(held.is_finite());
+
+        // The downstream lag propagates the input's quality onto its
+        // own held finite value — the whole chain degrades, nothing
+        // stores non-finite.
+        let backup = driver.read(PointId(11)).unwrap();
+        assert_eq!(backup.quality, Quality::Bad(QualityReason::OutOfRange));
+        let Value::Float(followed) = backup.value else {
+            panic!("a level sample is always a Float")
+        };
+        assert!(followed.is_finite());
+
+        // The defect's verdict: a fresh client connecting after the
+        // writer released reads real samples — `{"float":null}` never
+        // reaches the wire, on the census either.
+        let fresh = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(fresh.read(PointId(10)).unwrap(), level);
+        assert_eq!(fresh.read(PointId(11)).unwrap(), backup);
+        assert!(
+            fresh
+                .list_points()
+                .unwrap()
+                .iter()
+                .all(|info| match info.sample.value {
+                    Value::Float(v) => v.is_finite(),
+                    _ => true,
+                })
+        );
+
+        // A finite inflow write plus a finite step resumes the chain in
+        // place — no plant restart.
+        remote.claim_writer(2).unwrap();
+        driver.write(PointId(12), Value::Float(0.0)).unwrap();
+        remote.step(1.0).unwrap();
+        assert!(driver.read(PointId(10)).unwrap().quality.is_good());
     });
 }
 
@@ -375,7 +619,68 @@ fn a_killed_server_reports_link_disconnected_health_in_the_snapshot() {
 }
 
 #[test]
-fn an_unresponsive_peer_surfaces_timeout_on_every_access() {
+fn a_recovered_link_clears_the_standing_failure_from_diagnostics() {
+    let server =
+        PlantServer::bind(("127.0.0.1", 0), SimDriver::new(loopback_map()).unwrap()).unwrap();
+    let addr = server.local_addr().unwrap();
+    let remote = thread::scope(|scope| {
+        scope.spawn(|| server.serve());
+        let remote = RemoteDriver::connect(addr).unwrap();
+        assert!(remote.read(PointId(10)).is_ok());
+        server.shutdown();
+        // The severed link records the failure it stands under.
+        assert_eq!(
+            remote.read(PointId(10)),
+            Err(IoError::Disconnected(PointId(10)))
+        );
+        let diagnostics = remote.diagnostics().unwrap();
+        assert_eq!(diagnostics.link, LinkState::Disconnected);
+        assert_eq!(
+            diagnostics.last_error.as_deref(),
+            Some("no live connection to the plant server")
+        );
+        remote
+    });
+    // The plant returns on the same port: the first exchange that
+    // answers — here the re-attach probe's own read — clears the
+    // standing record, so the health surface reports the link as it is.
+    let restarted = PlantServer::bind(addr, SimDriver::new(loopback_map()).unwrap()).unwrap();
+    thread::scope(|scope| {
+        scope.spawn(|| restarted.serve());
+        let _guard = ShutdownOnDrop(&restarted);
+
+        wait_for_reattach(&remote, Duration::from_secs(10));
+        assert_eq!(
+            remote.diagnostics().unwrap(),
+            DriverDiagnostics {
+                link: LinkState::Connected,
+                last_error: None,
+                exchange: None,
+            }
+        );
+
+        // A request failing again re-records, and continued failures
+        // keep the newest error: the fresh field's unclaimed refusal
+        // stands until the next failure replaces it.
+        assert_eq!(remote.step(0.1), Err(RemoteError::Unclaimed));
+        assert_eq!(
+            remote.diagnostics().unwrap().last_error.as_deref(),
+            Some("field mutation refused: no attachment owns field writes")
+        );
+        restarted.shutdown();
+        assert_eq!(
+            remote.read(PointId(10)),
+            Err(IoError::Disconnected(PointId(10)))
+        );
+        assert_eq!(
+            remote.diagnostics().unwrap().last_error.as_deref(),
+            Some("no live connection to the plant server")
+        );
+    });
+}
+
+#[test]
+fn an_unresponsive_peer_pays_one_timeout_per_reattach_window() {
     // A listener that never answers: the handshake completes out of the
     // backlog but no response ever arrives.
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -384,13 +689,30 @@ fn an_unresponsive_peer_surfaces_timeout_on_every_access() {
 
     assert_eq!(remote.read(PointId(1)), Err(IoError::Timeout(PointId(1))));
     // A late answer could pair with a later request, so the link is
-    // dropped — but the peer is still listening, so the lazy re-attach
-    // lands a fresh stream and the next access waits out its own
-    // timeout rather than failing fast.
+    // dropped — and the timed-out exchange counts as the interval's
+    // contact attempt: a burst of accesses against a peer that
+    // handshakes but never answers pays one timeout per
+    // REATTACH_INTERVAL window rather than one per request — the bound
+    // that keeps a scan's probe-plus-reads burst to a single stall
+    // instead of serializing into one per point.
+    let started = Instant::now();
+    assert_eq!(
+        remote.read(PointId(1)),
+        Err(IoError::Disconnected(PointId(1)))
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "an access inside the re-attach window must fail fast, not wait out another timeout"
+    );
+
+    // The window past, the next access retries the contact — a
+    // still-silent peer answers it with the same timeout again.
+    std::thread::sleep(RemoteDriver::REATTACH_INTERVAL + Duration::from_millis(200));
     assert_eq!(remote.read(PointId(1)), Err(IoError::Timeout(PointId(1))));
     drop(listener);
-    // With the listener gone the re-attach itself is refused — the
-    // endpoint now reports not-answerable at connect time.
+    // With the listener gone the next window's re-attach is refused at
+    // connect time — the endpoint reports not-answerable at the socket.
+    std::thread::sleep(RemoteDriver::REATTACH_INTERVAL + Duration::from_millis(200));
     assert_eq!(
         remote.read(PointId(1)),
         Err(IoError::Disconnected(PointId(1)))
@@ -398,15 +720,123 @@ fn an_unresponsive_peer_surfaces_timeout_on_every_access() {
 }
 
 #[test]
+fn an_ownerless_attachment_pays_the_owner_attachments_frozen_field_bound() {
+    // QA `ownerless-remote-attachment-no-reattach-backoff`: against a
+    // peer that completes the handshake but never answers — the
+    // `docker pause` socket shape — a claim-recording attachment paid
+    // one `ensure_writer` timeout per re-attach window while the
+    // ownerless one paid the request timeout on every access: its
+    // re-attach skipped the ensure, so nothing armed the backoff, and
+    // a pending born-active's scan serialized ~one stall per point
+    // into a minutes-long cycle. A failed exchange now counts as the
+    // window's contact attempt for every attachment shape — both
+    // seats stall once per window and fail every in-window access
+    // fast.
+    let timeout = Duration::from_millis(200);
+    let server =
+        PlantServer::bind(("127.0.0.1", 0), SimDriver::new(loopback_map()).unwrap()).unwrap();
+    let addr = server.local_addr().unwrap();
+    thread::scope(|scope| {
+        scope.spawn(|| server.serve());
+
+        // The owner shape: the claim recorded on the live plant runs
+        // the re-attach's `ensure_writer` exchange before the pending
+        // request — the only exchange the defect build's backoff came
+        // from.
+        let owner = RemoteDriver::connect_with_timeout(addr, timeout).unwrap();
+        owner.claim_writer(1).unwrap();
+
+        // Freeze the field `docker pause`-style: the server stops
+        // answering and the rebound listener accepts handshakes into
+        // its backlog without ever responding. The shutdown severed
+        // the owner's live link, so its first access fails fast and
+        // arms the window like any dropped link's.
+        server.shutdown();
+        let _frozen = TcpListener::bind(addr).unwrap();
+        assert_eq!(
+            owner.read(PointId(10)),
+            Err(IoError::Disconnected(PointId(10)))
+        );
+
+        // The ownerless shape — the finding's pending born-active —
+        // assembles link-down and attaches through the backlog on its
+        // first request, paying the single timeout on its own
+        // exchange rather than the ensure the owner paid.
+        let ownerless = RemoteDriver::connect_deferred(addr, timeout).unwrap();
+        let stalled = Instant::now();
+        assert_eq!(
+            ownerless.read(PointId(10)),
+            Err(IoError::Timeout(PointId(10)))
+        );
+        assert!(stalled.elapsed() >= timeout && stalled.elapsed() < timeout * 4);
+
+        // The failed exchange armed the window: the ownerless
+        // attachment's next accesses fail fast instead of each paying
+        // the timeout — the per-request bound the defect denied it.
+        let burst = Instant::now();
+        for _ in 0..8 {
+            assert_eq!(
+                ownerless.read(PointId(10)),
+                Err(IoError::Disconnected(PointId(10)))
+            );
+        }
+        assert!(
+            burst.elapsed() < timeout,
+            "in-window accesses must fail fast, not each pay the timeout"
+        );
+
+        // The owner seat pays the same one stall per window: past the
+        // backoff its re-attach connects and times the ensure out
+        // once — the request reports the standing failure's
+        // Disconnected — and its in-window accesses fail fast too.
+        thread::sleep(RemoteDriver::REATTACH_INTERVAL + timeout);
+        let stalled = Instant::now();
+        assert_eq!(
+            owner.read(PointId(10)),
+            Err(IoError::Disconnected(PointId(10)))
+        );
+        assert!(stalled.elapsed() >= timeout && stalled.elapsed() < timeout * 4);
+        let burst = Instant::now();
+        for _ in 0..8 {
+            assert_eq!(
+                owner.read(PointId(10)),
+                Err(IoError::Disconnected(PointId(10)))
+            );
+        }
+        assert!(burst.elapsed() < timeout);
+
+        // And each new window costs the ownerless attachment one more
+        // timeout — never one per access.
+        thread::sleep(RemoteDriver::REATTACH_INTERVAL + timeout);
+        let stalled = Instant::now();
+        assert_eq!(
+            ownerless.read(PointId(10)),
+            Err(IoError::Timeout(PointId(10)))
+        );
+        assert!(stalled.elapsed() >= timeout && stalled.elapsed() < timeout * 4);
+    });
+}
+
+#[test]
 fn connecting_to_a_dead_port_fails_cleanly() {
     // Bind once to learn a free port, then drop the listener so the
-    // address refuses connections.
-    let addr = TcpListener::bind(("127.0.0.1", 0))
-        .unwrap()
-        .local_addr()
-        .unwrap();
-    let error = RemoteDriver::connect(addr).unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+    // address refuses connections. A concurrently bound fixture can
+    // legitimately take the freed port — the connect then succeeds —
+    // so retry until a probed port stays refused.
+    for _ in 0..20 {
+        let addr = TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        match RemoteDriver::connect(addr) {
+            Err(error) => {
+                assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+                return;
+            }
+            Ok(_) => continue,
+        }
+    }
+    panic!("twenty dead ports each connected — a concurrent listener keeps taking the freed port");
 }
 
 #[test]
@@ -473,8 +903,10 @@ fn budgeted_map(point: u64, budget: u64) -> PointMap {
                 kind: ValueKind::Float,
                 internal: None,
                 writable: false,
+                requires_reason: false,
                 stale_after_ticks: Some(budget),
                 journaled: false,
+                record_every_ticks: None,
             },
         )
         .with_point(PointId(20), Direction::Out, ValueKind::Float)
@@ -542,6 +974,51 @@ fn a_resumed_field_owner_clears_the_stale_an_unstepped_window_left() {
 }
 
 #[test]
+fn a_bare_field_input_reads_fresh_while_the_plant_steps_and_stales_when_it_stops() {
+    // The QA finding's shared-plant half: a `sim-tcp` input no
+    // loopback or element drives re-stamps every step the field owner
+    // calls, so a budgeted bare point stays fresh while the plant
+    // steps — and the held report ages out on the declared budget once
+    // stepping stops.
+    with_server(bare_map(), |addr| {
+        let remote = RemoteDriver::connect(addr).unwrap();
+        remote.claim_writer(1).unwrap();
+        let mut executor = Executor::new(
+            &remote,
+            budgeted_map(10, 2),
+            vec![Box::new(Accumulator {
+                input: PointId(10),
+                output: PointId(20),
+                total: 0.0,
+            })],
+        )
+        .unwrap();
+
+        // Each plant step re-stamps the bare channel's held sample —
+        // a changed report every scan, fresh forever under the budget.
+        for _ in 0..5 {
+            remote.step(0.1).unwrap();
+            executor.scan();
+            assert_eq!(executor.sample(PointId(10)).unwrap().quality, Quality::Good);
+        }
+
+        // The owner stops stepping: the report freezes and the run's
+        // own lag accrues — past the budget the point presents stale.
+        executor.run(3);
+        assert_eq!(
+            executor.sample(PointId(10)).unwrap().quality,
+            Quality::Uncertain(QualityReason::Stale)
+        );
+
+        // Resumed stepping re-stamps on the next step; the changed
+        // report restores the driver's own quality on the first read.
+        remote.step(0.1).unwrap();
+        executor.scan();
+        assert_eq!(executor.sample(PointId(10)).unwrap().quality, Quality::Good);
+    });
+}
+
+#[test]
 fn a_run_resumed_behind_the_plant_domain_still_marks_stale() {
     with_server(loopback_map(), |addr| {
         let remote = RemoteDriver::connect(addr).unwrap();
@@ -579,6 +1056,131 @@ fn a_run_resumed_behind_the_plant_domain_still_marks_stale() {
         assert_eq!(
             executor.sample(PointId(10)).unwrap().quality,
             Quality::Uncertain(QualityReason::Stale)
+        );
+    });
+}
+
+#[test]
+fn a_reader_outpacing_the_field_owners_step_cadence_never_flaps_stale() {
+    // The freshness finding's reproduction over the real remote driver:
+    // one peer scanning ten times faster than the field owner steps the
+    // shared plant. Every plant step re-stamps the bare channel's held
+    // sample, so nine of every ten reads serve the byte-identical
+    // plant-stamped report — and the declared budget, five reader
+    // ticks, must not read that pace asymmetry as staleness.
+    with_server(bare_map(), |addr| {
+        let remote = RemoteDriver::connect(addr).unwrap();
+        remote.claim_writer(1).unwrap();
+        let mut executor = Executor::new(
+            &remote,
+            budgeted_map(10, 5),
+            vec![Box::new(Accumulator {
+                input: PointId(10),
+                output: PointId(20),
+                total: 0.0,
+            })],
+        )
+        .unwrap();
+
+        // Sixty scans, the owner stepping every tenth of them.
+        for scan in 1..=60 {
+            if scan % 10 == 1 {
+                remote.step(0.1).unwrap();
+            }
+            executor.scan();
+            // The cold start is judged on the declared budget alone —
+            // the run had not yet watched the owner publish. From the
+            // arrival period the first publication demonstrated on, the
+            // held reports between two steps are the field keeping its
+            // own pace, and no scan may present the stale verdict.
+            if scan > 10 {
+                assert_eq!(
+                    executor.sample(PointId(10)).unwrap().quality,
+                    Quality::Good,
+                    "scan {scan} read a report the owner was about to \
+                     refresh as stale — the reader's pace, not the \
+                     field's freshness"
+                );
+            }
+        }
+
+        // The owner stops stepping: the report freezes at the last
+        // plant step and the run's own clock is the only evidence left.
+        // The held report reads fresh while its lag sits inside the
+        // demonstrated arrival period — the owner's own ten-scan step
+        // cadence — and presents stale one tick past it: the
+        // frozen-field verdict, reached on the source's pace rather than
+        // on the reader's.
+        executor.scan();
+        assert_eq!(executor.sample(PointId(10)).unwrap().quality, Quality::Good);
+        executor.scan();
+        assert_eq!(
+            executor.sample(PointId(10)).unwrap().quality,
+            Quality::Uncertain(QualityReason::Stale)
+        );
+
+        // The owner resumes stepping: the re-stamped report is a
+        // changed report, and the driver's own quality lands with it.
+        remote.step(0.1).unwrap();
+        executor.scan();
+        assert_eq!(executor.sample(PointId(10)).unwrap().quality, Quality::Good);
+    });
+}
+
+#[test]
+fn a_standby_peer_outpacing_the_field_owner_never_flaps_stale() {
+    // The finding's own reproduction shape: the reader is a *standby*
+    // peer — a seat tracking the field owner over the shared plant,
+    // scanning far faster than the owner steps it. The standby scan is
+    // the quiesced one, so this drives the exact path the rig's fast
+    // seat runs, and reads the verdict the fast seat's journal and
+    // page would carry.
+    with_server(bare_map(), |addr| {
+        let remote = RemoteDriver::connect(addr).unwrap();
+        remote.claim_writer(1).unwrap();
+        let mut peer = Peer::standby(
+            Executor::new(
+                &remote,
+                budgeted_map(10, 5),
+                vec![Box::new(Accumulator {
+                    input: PointId(10),
+                    output: PointId(20),
+                    total: 0.0,
+                })],
+            )
+            .unwrap(),
+            None,
+        );
+
+        // The owner steps every eighth standby scan. The field's own
+        // period — eight reader ticks — is wider than the declared
+        // five-tick budget, so every publication used to present stale
+        // on the way in and good on the way out.
+        let mut stale_scans = Vec::new();
+        for scan in 1..=64u64 {
+            if scan % 8 == 1 {
+                remote.step(0.1).unwrap();
+            }
+            peer.scan();
+            if peer.executor().sample(PointId(10)).unwrap().quality
+                == Quality::Uncertain(QualityReason::Stale)
+            {
+                stale_scans.push(scan);
+            }
+        }
+
+        // Only the cold start: the two scans past the declared budget
+        // and before the run has watched the field publish at all —
+        // the run has nothing demonstrated to widen the budget with.
+        // From the owner's own step period on, every publication the
+        // owner has not sent yet sits inside the reader's patience and
+        // the peer presents no stale verdict on a field that keeps
+        // stepping.
+        assert_eq!(
+            stale_scans,
+            vec![7, 8],
+            "a standby peer outpacing the field owner must not flap stale \
+             on every owner step"
         );
     });
 }
@@ -724,6 +1326,206 @@ fn the_shared_flag_tracks_live_holders_not_the_standing_claim() {
     });
 }
 
+#[test]
+fn the_conditional_startup_claim_refuses_a_live_incumbent_only() {
+    with_server(loopback_map(), |addr| {
+        // The incumbent claims as a controller — only a live
+        // *controller's* unyielded claim is the incumbent the
+        // conditional grant refuses; a tool's claim never blocks it.
+        let incumbent = RemoteDriver::connect(addr).unwrap().as_controller();
+        let restart = RemoteDriver::connect(addr).unwrap();
+        let same_owner = RemoteDriver::connect(addr).unwrap();
+        let tool = RemoteDriver::connect(addr).unwrap();
+
+        // The incumbent's unconditional claim stands with a live holder.
+        assert_eq!(incumbent.claim_writer(7).unwrap(), ClaimGrant::Exclusive);
+
+        // A different token's conditional startup grant is refused — the
+        // stale-checkpoint takeover the grant exists to prevent. The
+        // refusal changed nothing: the incumbent keeps writing and
+        // stepping, and the refused attachment holds no claim.
+        assert_eq!(
+            restart.claim_writer_unless_held(9),
+            Err(RemoteError::Fenced)
+        );
+        assert_eq!(
+            restart.write(PointId(20), Value::Float(9.0)),
+            Err(IoError::Fenced(PointId(20)))
+        );
+        incumbent.write(PointId(20), Value::Float(1.0)).unwrap();
+        incumbent.step(0.1).unwrap();
+
+        // The incumbent's own token still joins — a second live holder
+        // of the same owner is the shared grant, never a refusal.
+        assert_eq!(
+            same_owner.claim_writer_unless_held(7).unwrap(),
+            ClaimGrant::Shared
+        );
+
+        // Once the incumbent's last holder drops, the standing claim's
+        // holder set empties — the dead-owner state — and the
+        // conditional grant preempts it legitimately: the
+        // restart-as-active recovery of a crashed owner keeps working.
+        drop(incumbent);
+        drop(same_owner);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match restart.claim_writer_unless_held(9) {
+                Ok(ClaimGrant::Exclusive) => break,
+                Err(RemoteError::Fenced) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the dead owner's claim was never reaped"
+                    );
+                    thread::sleep(Duration::from_millis(50));
+                }
+                other => panic!("a dead owner's claim must preempt: {other:?}"),
+            }
+        }
+        // The granted restart owns the field outright.
+        restart.write(PointId(20), Value::Float(3.0)).unwrap();
+        restart.step(0.1).unwrap();
+        let observer = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(observer.read(PointId(20)).unwrap().value, Value::Float(3.0));
+
+        // The other half of the verdict: a field tool's claim is never
+        // an incumbent — its live hold does not refuse the conditional
+        // grant, so a rogue `claim_writer` can never wedge a peer's
+        // documented promote recovery the way the unconditional
+        // live-holder refusal did.
+        tool.claim_writer(0xF0_21_61_6E).unwrap();
+        let peer = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(
+            peer.claim_writer_unless_held(9).unwrap(),
+            ClaimGrant::Exclusive
+        );
+        assert_eq!(tool.step(0.1), Err(RemoteError::Fenced));
+    });
+}
+
+/// The QA finding `yielded-claim-regrant-leaves-live-incumbent-preemptable`
+/// (#1123): `release_writer` with `keep_claim` marks the standing claim
+/// yielded — the deliberate hand-off a successor's conditional claim
+/// may preempt despite lingering holders. The same owner's re-grant —
+/// the orphan failover's conditional promote, a manual promote's
+/// unconditional claim, or a re-attaching attachment's bound
+/// `ensure_writer` — joined the holder set but left the mark standing,
+/// so every later different-owner `claim_writer_unless_held` preempted
+/// a *live* re-bound incumbent: the restarted demoted peer took the
+/// field back from the failover successor that had re-claimed it. A
+/// bound controller re-grant must end the hand-off: the claim reads
+/// unyielded again and refuses the conditional grant exactly like a
+/// claim that never yielded — while the hand-off a tool's hold or the
+/// unbound orphan probe touches stays yielded for the successor.
+#[test]
+fn a_yielded_claim_re_grant_restores_the_live_incumbent_refusal() {
+    with_server(loopback_map(), |addr| {
+        const OWNER: u64 = 7;
+        const SUCCESSOR: u64 = 9;
+
+        let owner = RemoteDriver::connect(addr).unwrap().as_controller();
+        let restart = RemoteDriver::connect(addr).unwrap().as_controller();
+        owner.claim_writer(OWNER).unwrap();
+        owner.write(PointId(20), Value::Float(1.0)).unwrap();
+        owner.step(0.1).unwrap();
+
+        // The conditional same-owner re-grant — the orphan failover
+        // promote's shape: the yielded claim's own owner re-claims,
+        // writes, and steps as the live incumbent, and a different
+        // owner's conditional grant is refused naming it. On the defect
+        // build the successor's claim answered DONE and the incumbent's
+        // next step was fenced.
+        owner.release_writer_keep_claim().unwrap();
+        assert_eq!(
+            owner.claim_writer_unless_held(OWNER).unwrap(),
+            ClaimGrant::Exclusive
+        );
+        owner.write(PointId(20), Value::Float(2.0)).unwrap();
+        owner.step(0.1).unwrap();
+        assert_eq!(
+            restart.claim_writer_unless_held(SUCCESSOR),
+            Err(RemoteError::Fenced),
+            "the re-granted incumbent must refuse a different owner's \
+             conditional claim"
+        );
+        assert_eq!(restart.fenced_by(), Some(OWNER));
+        assert_eq!(restart.step(0.1), Err(RemoteError::Fenced));
+
+        // The unconditional same-owner re-grant — a manual promote over
+        // one's own yielded claim — restores the same refusal.
+        owner.release_writer_keep_claim().unwrap();
+        owner.claim_writer(OWNER).unwrap();
+        assert_eq!(
+            restart.claim_writer_unless_held(SUCCESSOR),
+            Err(RemoteError::Fenced),
+            "the unconditionally re-granted incumbent must refuse \
+             the conditional claim"
+        );
+
+        // The bound `ensure_writer` re-join — the re-attaching
+        // attachment's shape — ends the hand-off identically, on the
+        // owner's own connection and on a fresh same-token attachment.
+        owner.release_writer_keep_claim().unwrap();
+        owner.ensure_writer(OWNER).unwrap();
+        assert_eq!(
+            restart.claim_writer_unless_held(SUCCESSOR),
+            Err(RemoteError::Fenced),
+            "the bound ensure re-grant must restore the refusal"
+        );
+        owner.release_writer_keep_claim().unwrap();
+        let reattach = RemoteDriver::connect(addr).unwrap().as_controller();
+        assert_eq!(
+            reattach.ensure_writer(OWNER).unwrap(),
+            ClaimGrant::Exclusive
+        );
+        assert_eq!(
+            restart.claim_writer_unless_held(SUCCESSOR),
+            Err(RemoteError::Fenced),
+            "a second attachment's bound re-join must restore the refusal"
+        );
+
+        // The re-grant still un-yields while a tool lingers on the
+        // yielded token: the re-bound controller owner is the live
+        // incumbent again despite the other hold.
+        reattach.release_writer_keep_claim().unwrap();
+        let lingerer = RemoteDriver::connect(addr).unwrap();
+        lingerer.ensure_writer(OWNER).unwrap();
+        assert_eq!(
+            owner.claim_writer_unless_held(OWNER).unwrap(),
+            ClaimGrant::Shared
+        );
+        assert_eq!(
+            restart.claim_writer_unless_held(SUCCESSOR),
+            Err(RemoteError::Fenced),
+            "a lingering tool hold must not keep the re-bound claim \
+             preemptable"
+        );
+
+        // The other half of the contract: only a controller's bound
+        // re-join ends the hand-off. The unbound orphan probe joins no
+        // holder, and a field tool's bound ensure is no incumbent —
+        // the yielded claim stays preemptable for the successor's
+        // conditional claim.
+        owner.release_writer_keep_claim().unwrap();
+        owner.ensure_writer_unbound(OWNER).unwrap();
+        let tool = RemoteDriver::connect(addr).unwrap();
+        tool.ensure_writer(OWNER).unwrap();
+        assert_eq!(
+            restart.claim_writer_unless_held(SUCCESSOR).unwrap(),
+            ClaimGrant::Exclusive,
+            "the yielded claim must stay preemptable until a live \
+             controller re-binds it"
+        );
+        // The successor now holds the live claim outright; the
+        // lingering tool hold fenced exactly like the yielded mark's
+        // preempted owner would have been.
+        assert_eq!(tool.step(0.1), Err(RemoteError::Fenced));
+        assert_eq!(owner.step(0.1), Err(RemoteError::Fenced));
+        restart.write(PointId(20), Value::Float(3.0)).unwrap();
+        restart.step(0.1).unwrap();
+    });
+}
+
 /// Polls `remote`'s link until the re-attach lands or `deadline`
 /// expires — the returned-plant half of every restart test.
 fn wait_for_reattach(remote: &RemoteDriver, deadline: Duration) {
@@ -796,11 +1598,12 @@ fn a_restarted_server_is_re_served_by_the_same_attachment() {
         remote.write(PointId(20), Value::Float(2.0)).unwrap();
         remote.step(0.1).unwrap();
         assert_eq!(remote.read(PointId(20)).unwrap().value, Value::Float(2.0));
-        // Diagnostics report the link live again while retaining the
-        // outage's failure record.
+        // Diagnostics report the link live again with the outage's
+        // failure record cleared — the first successful exchange after
+        // recovery drops it, so the surface describes current health.
         let diagnostics = remote.diagnostics().unwrap();
         assert_eq!(diagnostics.link, LinkState::Connected);
-        assert!(diagnostics.last_error.is_some());
+        assert_eq!(diagnostics.last_error, None);
     });
 }
 
@@ -1132,11 +1935,812 @@ fn an_unclaimed_window_does_not_demote_the_standing_owner() {
         // again under the standing token.
         peer.scan();
         assert_eq!(peer.role(), Role::Active);
-        assert!(peer.take_fencing_losses().is_empty());
-        assert!(peer.take_role_changes().is_empty());
+        let drained = peer.drain_pending();
+        assert!(drained.fencing_losses().is_empty());
+        assert!(drained.role_changes().is_empty());
 
         // The write landed on the shared field under the re-armed claim.
         let probe = RemoteDriver::connect(addr).unwrap();
         assert_eq!(probe.step(0.1), Err(RemoteError::Fenced));
+    });
+}
+
+/// The QA finding `demoted-ex-owner-orphan-probe-reseizes-field-claim`
+/// (#835): a foreign `claim_writer` preempts the active's claim, the
+/// first fenced write demotes the ex-owner in place, and the foreign
+/// claim's release leaves the field unclaimed — the mutual-standby
+/// wedge where the demoted ex-owner's orphan cycle re-arms its released
+/// token through `ensure_writer`. The defect had the probe *binding*
+/// the ex-owner's still-live connection into the claim's holder set, so
+/// the re-armed claim read as a live incumbent and refused the
+/// restart-as-active grant `claim_writer_unless_held` — foreclosing the
+/// documented recovery for any new token. The probe must stay unbound:
+/// the re-armed claim stands with an empty holder set, fencing every
+/// attachment — the ex-owner's own included — while staying preemptable
+/// exactly like a dead owner's standing claim.
+///
+/// Two `Peer`s over `RemoteDriver` attachments play the redundant pair,
+/// wired the way `dcs-controller` wires the claim hooks; the foreign
+/// attachment's claim-and-release drives the fencing-loss demote.
+#[test]
+fn an_orphaned_ex_owners_rearm_holds_no_live_holder_and_stays_preemptable() {
+    with_server(loopback_map(), |addr| {
+        const OWNER_A: u64 = 7;
+        const OWNER_B: u64 = 8;
+        const FOREIGN: u64 = 999;
+        const RESTARTED: u64 = 4242;
+
+        let point_map = || -> PointMap {
+            [
+                (PointId(10), Direction::In, ValueKind::Float),
+                (PointId(20), Direction::Out, ValueKind::Float),
+            ]
+            .into_iter()
+            .collect()
+        };
+        let component = || -> Box<dyn Component> {
+            Box::new(Accumulator {
+                input: PointId(10),
+                output: PointId(20),
+                total: 0.0,
+            })
+        };
+        // The claim hooks as `dcs-controller` wires them: the orphan
+        // probe is the *unbound* ensure — it re-arms the released claim
+        // for the recorded token without the probing attachment ever
+        // joining the holder set.
+        let conditional =
+            |remote: &RemoteDriver, owner: u64| match remote.claim_writer_unless_held(owner) {
+                Ok(_) => Ok(true),
+                Err(RemoteError::Fenced) => Ok(false),
+                Err(error) => Err(error.to_string()),
+            };
+
+        let a = RemoteDriver::connect(addr).unwrap().as_controller();
+        let a_gate = WriteGate::closed(&a);
+        let mut a_peer = Peer::active(
+            Executor::new(&a_gate, point_map(), vec![component()]).unwrap(),
+            Some(&a_gate),
+        )
+        .with_field_claim(|| {
+            a.claim_writer(OWNER_A)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .with_field_release(|| {
+            let _ = a.release_writer_keep_claim();
+        })
+        .with_field_ensure(|| match a.ensure_writer_unbound(OWNER_A) {
+            Ok(()) => Ok(true),
+            Err(RemoteError::Fenced) => Ok(false),
+            Err(error) => Err(error.to_string()),
+        })
+        .with_field_orphan_claim(|| conditional(&a, OWNER_A))
+        .with_field_startup_claim(|| conditional(&a, OWNER_A));
+        a_peer.activate().unwrap();
+        a_peer.scan();
+        assert_eq!(a_peer.role(), Role::Active);
+
+        let b = RemoteDriver::connect(addr).unwrap().as_controller();
+        let b_gate = WriteGate::closed(&b);
+        let mut b_peer = Peer::standby(
+            Executor::new(&b_gate, point_map(), vec![component()]).unwrap(),
+            Some(&b_gate),
+        )
+        .with_field_claim(|| {
+            b.claim_writer(OWNER_B)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .with_field_release(|| {
+            let _ = b.release_writer_keep_claim();
+        })
+        .with_field_ensure(|| match b.ensure_writer_unbound(OWNER_B) {
+            Ok(()) => Ok(true),
+            Err(RemoteError::Fenced) => Ok(false),
+            Err(error) => Err(error.to_string()),
+        })
+        .with_field_orphan_claim(|| conditional(&b, OWNER_B))
+        .with_field_startup_claim(|| conditional(&b, OWNER_B));
+        // Converge the standby on the owner's line.
+        b_peer.scan();
+        b_peer.track_once(|| Ok(a_peer.checkpoint()));
+        assert!(matches!(b_peer.sync_state(), StandbySync::Tracking { .. }));
+
+        // The reproduction's trigger: a foreign attachment claims the
+        // field, holds it across the owner's fenced write — which
+        // demotes the superseded owner in place — then releases,
+        // leaving the field unclaimed.
+        let interposer = RemoteDriver::connect(addr).unwrap();
+        interposer.claim_writer(FOREIGN).unwrap();
+        a_peer.scan();
+        assert_eq!(a_peer.role(), Role::Demoting);
+        a_peer.scan();
+        assert_eq!(a_peer.role(), Role::Standby);
+        assert_eq!(a_peer.drain_pending().fencing_losses().len(), 1);
+        interposer.release_writer().unwrap();
+
+        let probe = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(
+            probe.probe_writer().unwrap(),
+            FieldClaim::Unclaimed,
+            "the released foreign claim leaves the field unclaimed"
+        );
+
+        // The wedge: both peers settle standby, each pulling the
+        // other's ownerless checkpoints. The never-owner's orphaned
+        // apply probes nothing — it has no claim to re-arm — so the
+        // field stays unclaimed through its pull alone.
+        b_peer.scan();
+        b_peer.track_once(|| Ok(a_peer.checkpoint()));
+        assert!(matches!(b_peer.sync_state(), StandbySync::Orphaned { .. }));
+        assert_eq!(
+            probe.probe_writer().unwrap(),
+            FieldClaim::Unclaimed,
+            "a peer that never owned has no claim to re-arm"
+        );
+
+        // The ex-owner's orphaned apply runs the unbound ensure probe:
+        // the claim stands again for its token — the field closed to a
+        // foreign grab — but with no live holder.
+        a_peer.track_once(|| Ok(b_peer.checkpoint()));
+        assert!(matches!(a_peer.sync_state(), StandbySync::Orphaned { .. }));
+        assert_eq!(
+            probe.probe_writer().unwrap(),
+            FieldClaim::Held,
+            "the re-armed claim must stand"
+        );
+        assert_eq!(probe.step(0.1), Err(RemoteError::Fenced));
+        assert_eq!(
+            probe.write(PointId(20), Value::Float(9.0)),
+            Err(IoError::Fenced(PointId(20)))
+        );
+        // The wire's holder verdict, directly: the ex-owner's own
+        // still-live attachment is fenced like every other non-holder
+        // — on the defect build the bound probe had made it a live
+        // holder and this step answered `Stepped`.
+        assert_eq!(
+            a.step(0.1),
+            Err(RemoteError::Fenced),
+            "the probing ex-owner must not read as a live holder"
+        );
+
+        // The defect's foreclosure, asserted clear: the conditional
+        // startup grant a restarted controller's activation runs
+        // preempts the holderless claim — as it does a dead owner's —
+        // instead of refusing a live incumbent.
+        let restart = RemoteDriver::connect(addr).unwrap().as_controller();
+        assert_eq!(
+            restart.claim_writer_unless_held(RESTARTED).unwrap(),
+            ClaimGrant::Exclusive
+        );
+        restart.write(PointId(20), Value::Float(4.0)).unwrap();
+        restart.step(0.1).unwrap();
+        assert_eq!(restart.read(PointId(20)).unwrap().value, Value::Float(4.0));
+
+        // And the probe's other half still stands: a granted
+        // `claim_writer_unless_held` is itself a live controller claim,
+        // so the ex-owner's next conditional re-arm — and its orphaned
+        // promote, which runs the same grant — refuse the live
+        // incumbent rather than preempting it.
+        assert_eq!(a.ensure_writer_unbound(OWNER_A), Err(RemoteError::Fenced));
+        assert!(matches!(
+            a_peer.promote(),
+            Err(SwitchError::FieldClaimFailed { .. })
+        ));
+        assert!(matches!(a_peer.sync_state(), StandbySync::Orphaned { .. }));
+
+        // Once the restart hands the field back the documented escape
+        // returns: the orphaned ex-owner's promote takes the holderless
+        // field and the pair converges on one active.
+        restart.release_writer().unwrap();
+        a_peer.promote().unwrap();
+        a_peer.scan();
+        assert_eq!(a_peer.role(), Role::Active);
+        b_peer.track_once(|| Ok(a_peer.checkpoint()));
+        assert!(matches!(b_peer.sync_state(), StandbySync::Tracking { .. }));
+    });
+}
+
+/// The QA finding `yielded-claim-regrant-leaves-live-incumbent-preemptable`
+/// (#1123) at the role-machine level — the reported end-to-end
+/// reproduction: an armed field owner is demoted under the keep-claim
+/// release, so its standing claim goes yielded; its orphan failover
+/// then re-promotes it over its *own* yielded claim — the same-owner
+/// conditional re-grant — and the peer it was demoted away from
+/// restarts as active. On the defect build the re-grant left the mark
+/// standing, so the restartee's startup `claim_writer_unless_held`
+/// preempted the failover successor's *live* claim and fenced it off
+/// the field mid-run: the stale-resume seizure the conditional grant
+/// exists to refuse. The re-grant must re-arm the live-incumbent
+/// refusal — the restartee's activation is refused and the successor
+/// keeps writing.
+///
+/// Two `Peer`s over `RemoteDriver` attachments play the redundant pair,
+/// wired the way `dcs-controller` wires the claim hooks, the tracking
+/// peer armed with the failover budget.
+#[test]
+fn an_orphan_failover_regrant_rearms_the_live_incumbent_refusal() {
+    with_server(loopback_map(), |addr| {
+        const OWNER_A: u64 = 7;
+        const OWNER_C: u64 = 9;
+        const FAILOVER_BUDGET: u32 = 2;
+
+        let point_map = || -> PointMap {
+            [
+                (PointId(10), Direction::In, ValueKind::Float),
+                (PointId(20), Direction::Out, ValueKind::Float),
+            ]
+            .into_iter()
+            .collect()
+        };
+        let component = || -> Box<dyn Component> {
+            Box::new(Accumulator {
+                input: PointId(10),
+                output: PointId(20),
+                total: 0.0,
+            })
+        };
+        // The claim hooks as `dcs-controller` wires them: startup and
+        // orphan promotion take the conditional grant, demotion
+        // releases with keep_claim, the orphan probe is the unbound
+        // ensure.
+        let conditional =
+            |remote: &RemoteDriver, owner: u64| match remote.claim_writer_unless_held(owner) {
+                Ok(_) => Ok(true),
+                Err(RemoteError::Fenced) => Ok(false),
+                Err(error) => Err(error.to_string()),
+            };
+
+        // a — the pair's launched field owner.
+        let a = RemoteDriver::connect(addr).unwrap().as_controller();
+        let a_gate = WriteGate::closed(&a);
+        let mut a_peer = Peer::active(
+            Executor::new(&a_gate, point_map(), vec![component()]).unwrap(),
+            Some(&a_gate),
+        )
+        .with_field_claim(|| {
+            a.claim_writer(OWNER_A)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .with_field_release(|| {
+            let _ = a.release_writer_keep_claim();
+        })
+        .with_field_ensure(|| match a.ensure_writer_unbound(OWNER_A) {
+            Ok(()) => Ok(true),
+            Err(RemoteError::Fenced) => Ok(false),
+            Err(error) => Err(error.to_string()),
+        })
+        .with_field_orphan_claim(|| conditional(&a, OWNER_A))
+        .with_field_startup_claim(|| conditional(&a, OWNER_A));
+        a_peer.activate().unwrap();
+        a_peer.scan();
+        assert_eq!(a_peer.role(), Role::Active);
+
+        // c — the failover-armed standby tracking a.
+        let c = RemoteDriver::connect(addr).unwrap().as_controller();
+        let c_gate = WriteGate::closed(&c);
+        let mut c_peer = Peer::standby(
+            Executor::new(&c_gate, point_map(), vec![component()]).unwrap(),
+            Some(&c_gate),
+        )
+        .with_field_claim(|| {
+            c.claim_writer(OWNER_C)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .with_field_release(|| {
+            let _ = c.release_writer_keep_claim();
+        })
+        .with_field_ensure(|| match c.ensure_writer_unbound(OWNER_C) {
+            Ok(()) => Ok(true),
+            Err(RemoteError::Fenced) => Ok(false),
+            Err(error) => Err(error.to_string()),
+        })
+        .with_field_orphan_claim(|| conditional(&c, OWNER_C))
+        .with_field_startup_claim(|| conditional(&c, OWNER_C))
+        .with_failover(FAILOVER_BUDGET);
+        c_peer.scan();
+        c_peer.track_once(|| Ok(a_peer.checkpoint()));
+        assert!(matches!(c_peer.sync_state(), StandbySync::Tracking { .. }));
+
+        // The reproduction's setup: c is the armed field owner — the
+        // documented switch moves the field to it — and a demotes to
+        // standby on its fenced write.
+        c_peer.promote().unwrap();
+        c_peer.scan();
+        assert_eq!(c_peer.role(), Role::Active);
+        a_peer.scan();
+        assert_eq!(a_peer.role(), Role::Demoting);
+        a_peer.scan();
+        assert_eq!(a_peer.role(), Role::Standby);
+
+        // POST /demote c: the keep-claim release marks the standing
+        // claim yielded under c's own token — the deliberate hand-off.
+        c_peer.demote().unwrap();
+        c_peer.scan();
+        assert_eq!(c_peer.role(), Role::Standby);
+
+        // The orphan failover: c tracks a's ownerless checkpoints —
+        // each orphaned apply counts the miss, the unbound ensure
+        // probe confirms the yielded claim still stands, and the
+        // budget-th apply self-promotes c over its own yielded claim,
+        // the same-owner conditional re-grant of the reproduction.
+        c_peer.scan();
+        let reports: Vec<_> = (0..FAILOVER_BUDGET)
+            .map(|_| c_peer.track_once(|| Ok(a_peer.checkpoint())))
+            .collect();
+        assert!(
+            matches!(reports.last(), Some(TrackReport::Promoted { .. })),
+            "the armed orphan's budget-th apply must self-promote: \
+             {reports:?}"
+        );
+        c_peer.scan();
+        assert_eq!(c_peer.role(), Role::Active);
+        // The re-granted owner is live again: its writes and steps
+        // land through its own attachment.
+        c.write(PointId(20), Value::Float(5.0)).unwrap();
+        c.step(0.1).unwrap();
+
+        // The reproduction's trigger: a restarts as active — a fresh
+        // active peer over a fresh attachment running the conditional
+        // startup claim under the demoted peer's token. The re-granted
+        // claim stands unyielded again, so the grant refuses instead
+        // of preempting the live failover successor — the
+        // stale-resume seizure the startup claim exists to refuse.
+        let a2 = RemoteDriver::connect(addr).unwrap().as_controller();
+        let a2_gate = WriteGate::closed(&a2);
+        let mut a2_peer = Peer::active(
+            Executor::new(&a2_gate, point_map(), vec![component()]).unwrap(),
+            Some(&a2_gate),
+        )
+        .with_field_claim(|| {
+            a2.claim_writer(OWNER_A)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .with_field_release(|| {
+            let _ = a2.release_writer_keep_claim();
+        })
+        .with_field_ensure(|| match a2.ensure_writer_unbound(OWNER_A) {
+            Ok(()) => Ok(true),
+            Err(RemoteError::Fenced) => Ok(false),
+            Err(error) => Err(error.to_string()),
+        })
+        .with_field_orphan_claim(|| conditional(&a2, OWNER_A))
+        .with_field_startup_claim(|| conditional(&a2, OWNER_A));
+        assert!(
+            matches!(
+                a2_peer.activate(),
+                Ok(Activation::Refused {
+                    error: SwitchError::FieldClaimFailed { .. }
+                })
+            ),
+            "the restartee's startup claim must refuse the live \
+             re-granted incumbent"
+        );
+        // The born-active contract settles the refused launch onto the
+        // pair's standby surface rather than failing or leaving an
+        // unpaired active.
+        assert_eq!(a2_peer.role(), Role::Standby);
+        // The refusal names the incumbent the field's arbitration
+        // holds — the failover successor's token, not a foreign
+        // claimant.
+        assert_eq!(a2.fenced_by(), Some(OWNER_C));
+        // And the successor's live claim was never preempted: it keeps
+        // writing and stepping through the restart attempt.
+        c.write(PointId(20), Value::Float(6.0)).unwrap();
+        c.step(0.1).unwrap();
+        c_peer.scan();
+        assert_eq!(c_peer.role(), Role::Active);
+        assert_eq!(c_peer.drain_pending().fencing_losses().len(), 0);
+        // The refused restartee holds no claim — its own mutations
+        // fence against the incumbent's standing claim.
+        assert_eq!(a2.step(0.1), Err(RemoteError::Fenced));
+    });
+}
+
+/// The claimant-attribution the fencing-loss journal rides on: a
+/// write fenced by a standing foreign claim records the claim's owner
+/// token as `fenced_by`, and the record holds until a verdict names
+/// another owner or the field reports unclaimed.
+#[test]
+fn a_fenced_write_records_the_standing_claims_owner_as_fenced_by() {
+    with_server(loopback_map(), |addr| {
+        let owner = RemoteDriver::connect(addr).unwrap();
+        owner.claim_writer(1).unwrap();
+        assert_eq!(owner.fenced_by(), None);
+
+        let rogue = RemoteDriver::connect(addr).unwrap();
+        rogue.claim_writer(2).unwrap();
+
+        // The superseded owner's next write meets the point's fenced
+        // verdict — carrying the rogue claim's owner token, which the
+        // attachment records as the claimant its audit names.
+        assert_eq!(
+            owner.write(PointId(20), Value::Float(1.0)),
+            Err(IoError::Fenced(PointId(20)))
+        );
+        assert_eq!(owner.fenced_by(), Some(2));
+
+        // A step fenced by the same claim attributes identically; a
+        // probe of the standing claim does not clear the record.
+        assert_eq!(owner.step(0.1), Err(RemoteError::Fenced));
+        assert_eq!(owner.fenced_by(), Some(2));
+        assert_eq!(owner.probe_writer().unwrap(), FieldClaim::Held);
+        assert_eq!(owner.fenced_by(), Some(2));
+
+        // The release's unclaimed verdict clears the record — the field
+        // names no claimant once no claim stands.
+        rogue.release_writer().unwrap();
+        assert_eq!(owner.probe_writer().unwrap(), FieldClaim::Unclaimed);
+        assert_eq!(owner.fenced_by(), None);
+    });
+}
+
+/// The monitor half of the fencing verdict: a claimant that declares
+/// its monitor endpoint on the claim arms the field's arbitration to
+/// name that endpoint to every attachment it fences — the
+/// field-arbitrated successor a fencing-demoted peer verifies and
+/// tracks on the unkeyed pair (#1045). A claim declared without a
+/// monitor carries `None`, exactly like `fenced_by` on an
+/// unattributed verdict.
+#[test]
+fn a_fenced_write_carries_the_standing_claims_declared_monitor() {
+    with_server(loopback_map(), |addr| {
+        let owner = RemoteDriver::connect(addr).unwrap().as_controller();
+        let declared = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7741);
+        owner.set_claim_monitor(declared);
+        owner.claim_writer(1).unwrap();
+
+        let intruder = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(intruder.claimed_monitor(), None);
+
+        // The intruder's write meets the point's fenced verdict —
+        // carrying the standing claim's declared monitor alongside its
+        // owner token.
+        assert_eq!(
+            intruder.write(PointId(20), Value::Float(1.0)),
+            Err(IoError::Fenced(PointId(20)))
+        );
+        assert_eq!(intruder.fenced_by(), Some(1));
+        assert_eq!(intruder.claimed_monitor(), Some(declared));
+
+        // The conditional grant's live-incumbent refusal and the
+        // claim probe carry the same endpoint — every fencing verdict
+        // reports what the standing claim declared.
+        assert_eq!(
+            intruder.claim_writer_unless_held(9),
+            Err(RemoteError::Fenced)
+        );
+        assert_eq!(intruder.claimed_monitor(), Some(declared));
+        assert_eq!(intruder.probe_writer().unwrap(), FieldClaim::Held);
+        assert_eq!(intruder.claimed_monitor(), Some(declared));
+
+        // A claim declared without a monitor carries no endpoint: the
+        // foreign takeover's verdicts report `None` exactly where
+        // `fenced_by` reports the token.
+        let rogue = RemoteDriver::connect(addr).unwrap();
+        rogue.claim_writer(2).unwrap();
+        assert_eq!(
+            owner.write(PointId(20), Value::Float(1.0)),
+            Err(IoError::Fenced(PointId(20)))
+        );
+        assert_eq!(owner.fenced_by(), Some(2));
+        assert_eq!(owner.claimed_monitor(), None);
+
+        // The unclaimed verdict clears both records — the field names
+        // neither claimant nor monitor once no claim stands.
+        rogue.release_writer().unwrap();
+        assert_eq!(owner.probe_writer().unwrap(), FieldClaim::Unclaimed);
+        assert_eq!(owner.claimed_monitor(), None);
+    });
+}
+
+/// The wildcard-bind half of the declared-monitor contract — the QA
+/// finding `field-claimed-monitor-undialable-under-wildcard-bind`: the
+/// documented container deployment binds `--listen 0.0.0.0`, so the
+/// claimant declares its *bind* address, which every fenced peer dials
+/// as its own loopback, stranding the field-arbitrated rendezvous the
+/// declaration exists to serve. The server stores the claiming
+/// connection's proven source in the wildcard's place — the same
+/// substitute a `?peer=` wildcard announce gets — so the stored
+/// monitor is never unspecified, on every claim op that carries the
+/// declaration.
+#[test]
+fn a_wildcard_claim_monitor_is_stored_as_the_claim_connections_source() {
+    with_server(loopback_map(), |addr| {
+        let dialable = |port| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+        let intruder = RemoteDriver::connect(addr).unwrap();
+        let stored = |intruder: &RemoteDriver| {
+            assert_eq!(
+                intruder.write(PointId(20), Value::Float(1.0)),
+                Err(IoError::Fenced(PointId(20)))
+            );
+            let monitor = intruder.claimed_monitor().unwrap();
+            assert!(
+                !monitor.ip().is_unspecified(),
+                "the stored monitor must never be the undialable wildcard"
+            );
+            monitor
+        };
+
+        // `claim_writer` — the unconditional takeover a promotion runs.
+        let owner = RemoteDriver::connect(addr).unwrap().as_controller();
+        owner.set_claim_monitor(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 7741));
+        owner.claim_writer(1).unwrap();
+        assert_eq!(stored(&intruder), dialable(7741));
+        // The owner's disconnect leaves its claim standing dead — the
+        // conditional grant still preempts it.
+        drop(owner);
+
+        // `claim_writer_unless_held` — the startup/orphan takeover. An
+        // IPv6 wildcard normalizes the same way, onto the connection's
+        // IPv4 source.
+        let orphan = RemoteDriver::connect(addr).unwrap().as_controller();
+        orphan.set_claim_monitor(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 7742));
+        orphan.claim_writer_unless_held(2).unwrap();
+        assert_eq!(stored(&intruder), dialable(7742));
+        orphan.release_writer().unwrap();
+
+        // `ensure_writer` — the re-attach re-arm, which refreshes the
+        // claim's declaration.
+        let returning = RemoteDriver::connect(addr).unwrap().as_controller();
+        returning.set_claim_monitor(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 7743));
+        returning.ensure_writer(3).unwrap();
+        assert_eq!(stored(&intruder), dialable(7743));
+        returning.release_writer().unwrap();
+
+        // `ensure_writer`'s unbound probe shape — the demoted
+        // ex-owner's orphan-cycle re-arm — declares the same way.
+        let probe = RemoteDriver::connect(addr).unwrap().as_controller();
+        probe.set_claim_monitor(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 7744));
+        probe.ensure_writer_unbound(4).unwrap();
+        assert_eq!(stored(&intruder), dialable(7744));
+    });
+}
+
+/// The QA finding `dual-exowner-holderless-rearm-starves-reclaim`
+/// (#1255): two successive ex-owners wedge the pair ownerless. An
+/// operator promote moves the field a → b, then a foreign tool claim
+/// preempts b and releases — both peers stand orphaned, and the
+/// field's freeing races their unbound `ensure_writer` probes: the
+/// winner leaves a *holderless* claim standing under its stale token.
+/// On the defect build the loss-marked peer's bound reclaim ran
+/// `ensure_writer`, which refuses *any* standing different owner —
+/// holders or none — so the reclaim refused the placeholder on every
+/// scan and the pair lost all field ownership until an operator
+/// promoted. The reclaim's own grant, `reclaim_writer`, refuses only
+/// a different-owner claim with *live* holders: a holderless claim —
+/// the dead-owner shape or the orphan sibling's placeholder — protects
+/// no attachment, so the marked peer's reclaim preempts it, re-seats
+/// the field owner, and the pair recovers unattended — the failover
+/// goal a redundant pair exists for.
+///
+/// Two `Peer`s over `RemoteDriver` attachments play the redundant
+/// pair, wired the way `dcs-controller` wires the claim hooks; the
+/// foreign tool attachment's claim-and-release drives the second
+/// fencing-loss demotion.
+#[test]
+fn the_fencing_loss_reclaim_preempts_the_orphan_placeholder() {
+    with_server(loopback_map(), |addr| {
+        const OWNER_A: u64 = 7;
+        const OWNER_B: u64 = 8;
+        const FOREIGN: u64 = 999;
+        /// The bounded window the issue's acceptance names: the pair
+        /// must regain a field owner within this many post-release
+        /// scans — the defect build never did.
+        const RECLAIM_BOUND: u32 = 4;
+
+        let point_map = || -> PointMap {
+            [
+                (PointId(10), Direction::In, ValueKind::Float),
+                (PointId(20), Direction::Out, ValueKind::Float),
+            ]
+            .into_iter()
+            .collect()
+        };
+        let component = || -> Box<dyn Component> {
+            Box::new(Accumulator {
+                input: PointId(10),
+                output: PointId(20),
+                total: 0.0,
+            })
+        };
+        // The claim hooks as `dcs-controller` wires them: the orphan
+        // probe is the unbound ensure, the startup/orphan promotion
+        // grant is `claim_writer_unless_held`, and the loss-marked
+        // reclaim is the bound `reclaim_writer`.
+        let conditional =
+            |remote: &RemoteDriver, owner: u64| match remote.claim_writer_unless_held(owner) {
+                Ok(_) => Ok(true),
+                Err(RemoteError::Fenced) => Ok(false),
+                Err(error) => Err(error.to_string()),
+            };
+        let reclaim = |remote: &RemoteDriver, owner: u64| match remote.reclaim_writer(owner) {
+            Ok(_) => Ok(true),
+            Err(RemoteError::Fenced) => Ok(false),
+            Err(error) => Err(error.to_string()),
+        };
+        let claimant = |remote: &RemoteDriver| remote.fenced_by();
+        let observer = |remote: &RemoteDriver| remote.fenced_by().into_iter().collect();
+
+        let a = RemoteDriver::connect(addr).unwrap().as_controller();
+        let a_gate = WriteGate::closed(&a);
+        let mut a_peer = Peer::active(
+            Executor::new(&a_gate, point_map(), vec![component()]).unwrap(),
+            Some(&a_gate),
+        )
+        .with_field_claim(|| {
+            a.claim_writer(OWNER_A)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .with_field_release(|| {
+            let _ = a.release_writer_keep_claim();
+        })
+        .with_field_ensure(|| match a.ensure_writer_unbound(OWNER_A) {
+            Ok(()) => Ok(true),
+            Err(RemoteError::Fenced) => Ok(false),
+            Err(error) => Err(error.to_string()),
+        })
+        .with_field_orphan_claim(|| conditional(&a, OWNER_A))
+        .with_field_startup_claim(|| conditional(&a, OWNER_A))
+        .with_field_claimant(|_| claimant(&a))
+        .with_claim_observer(|| observer(&a));
+        a_peer.activate().unwrap();
+        a_peer.scan();
+        assert_eq!(a_peer.role(), Role::Active);
+
+        let b = RemoteDriver::connect(addr).unwrap().as_controller();
+        let b_gate = WriteGate::closed(&b);
+        let mut b_peer = Peer::standby(
+            Executor::new(&b_gate, point_map(), vec![component()]).unwrap(),
+            Some(&b_gate),
+        )
+        .with_field_claim(|| {
+            b.claim_writer(OWNER_B)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .with_field_release(|| {
+            let _ = b.release_writer_keep_claim();
+        })
+        .with_field_ensure(|| match b.ensure_writer_unbound(OWNER_B) {
+            Ok(()) => Ok(true),
+            Err(RemoteError::Fenced) => Ok(false),
+            Err(error) => Err(error.to_string()),
+        })
+        .with_field_orphan_claim(|| conditional(&b, OWNER_B))
+        .with_field_startup_claim(|| conditional(&b, OWNER_B))
+        .with_field_reclaim(|| reclaim(&b, OWNER_B))
+        .with_field_claimant(|_| claimant(&b))
+        .with_claim_observer(|| observer(&b));
+        b_peer.scan();
+        b_peer.track_once(|| Ok(a_peer.checkpoint()));
+        assert!(matches!(b_peer.sync_state(), StandbySync::Tracking { .. }));
+
+        // The reproduction's first move — `POST /promote b`: the
+        // unconditional claim preempts a's, a's fenced write demotes
+        // it in place, and its first pull on the now-owning successor
+        // clears its loss mark: a is the ex-owner whose mark already
+        // cleared, the peer whose stale token wins the re-arm race.
+        b_peer.promote().unwrap();
+        b_peer.scan();
+        assert_eq!(b_peer.role(), Role::Active);
+        a_peer.scan();
+        assert_eq!(a_peer.role(), Role::Demoting);
+        a_peer.scan();
+        assert_eq!(a_peer.role(), Role::Standby);
+        a_peer.track_once(|| Ok(b_peer.checkpoint()));
+
+        // The plant-socket tool's claim preempts b — the QA run's
+        // `claim_writer{controller:false}` — and b's fenced write
+        // demotes it in place, the loss mark armed.
+        let tool = RemoteDriver::connect(addr).unwrap();
+        tool.claim_writer(FOREIGN).unwrap();
+        b_peer.scan();
+        assert_eq!(b_peer.role(), Role::Demoting);
+        b_peer.scan();
+        assert_eq!(b_peer.role(), Role::Standby);
+        assert_eq!(b_peer.drain_pending().fencing_losses().len(), 1);
+
+        // While the tool's claim stands *held*, the reclaim refuses
+        // every scan — the never-preempts-a-live-holder half of the
+        // grant's rule.
+        for _ in 0..2 {
+            b_peer.scan();
+            assert_eq!(
+                b_peer.role(),
+                Role::Standby,
+                "a live foreign holder must refuse the reclaim"
+            );
+        }
+
+        // The tool hands the field back — the reproduction's
+        // claim-then-release — and the freeing races both ex-owners'
+        // unbound probes. a's orphaned apply lands first: its probe
+        // re-arms token A as a holderless placeholder — the claim
+        // stands, fencing every attachment, with nobody behind it.
+        tool.release_writer().unwrap();
+        let probe = RemoteDriver::connect(addr).unwrap();
+        assert_eq!(
+            probe.probe_writer().unwrap(),
+            FieldClaim::Unclaimed,
+            "the released tool claim leaves the field unclaimed"
+        );
+        a_peer.track_once(|| Ok(b_peer.checkpoint()));
+        assert_eq!(
+            probe.probe_writer().unwrap(),
+            FieldClaim::Held,
+            "the winning unbound probe re-arms a placeholder"
+        );
+        assert_eq!(
+            a.step(0.1),
+            Err(RemoteError::Fenced),
+            "the placeholder holds no live attachment — the ex-owner's \
+             own connection is fenced like every other non-holder"
+        );
+
+        // b's own orphan probe meets the placeholder and refuses —
+        // `ensure_writer` never preempts a standing owner — journaling
+        // the observed claimant the way the QA run's `b` did.
+        b_peer.track_once(|| Ok(a_peer.checkpoint()));
+        assert_eq!(
+            b_peer
+                .drain_pending()
+                .claim_observations()
+                .iter()
+                .map(|observation| observation.claimant)
+                .collect::<Vec<_>>(),
+            vec![OWNER_A],
+            "the refused unbound probe must attribute the placeholder's token"
+        );
+
+        // The wedge the defect left: on the bound `ensure_writer`
+        // grant this placeholder refused b's reclaim on every scan —
+        // `Ok(false)` forever, the pair ownerless until an operator
+        // promoted. The reclaim's own grant preempts a holderless
+        // different-owner claim: b's next standby scans re-seat it.
+        let mut reclaimed = false;
+        for _ in 0..RECLAIM_BOUND {
+            b_peer.scan();
+            if b_peer.role() == Role::Active {
+                reclaimed = true;
+                break;
+            }
+        }
+        assert!(
+            reclaimed,
+            "the loss-marked peer's reclaim must land within \
+             {RECLAIM_BOUND} scans of the release — the defect left it \
+             refused on the holderless placeholder forever"
+        );
+
+        // The reclaimed claim is a real hold: b's own attachment
+        // steps and writes through it while every non-holder — the
+        // tool, the probe, and the placeholder's own ex-owner —
+        // stays fenced.
+        b.step(0.1).unwrap();
+        b.write(PointId(20), Value::Float(5.0)).unwrap();
+        assert_eq!(
+            b.read(PointId(20)).unwrap().value,
+            Value::Float(5.0),
+            "the reclaimed owner's writes must pass the claim it re-took"
+        );
+        assert_eq!(tool.step(0.1), Err(RemoteError::Fenced));
+        assert_eq!(probe.step(0.1), Err(RemoteError::Fenced));
+        assert_eq!(a.step(0.1), Err(RemoteError::Fenced));
+
+        // And the pair recovers its redundant shape unattended: a
+        // stays standby and re-converges on the restored owner — the
+        // field owner the QA run only regained through `POST /promote`.
+        assert_eq!(a_peer.role(), Role::Standby);
+        assert!(matches!(
+            a_peer.track_once(|| Ok(b_peer.checkpoint())),
+            TrackReport::Applied(_)
+        ));
+        assert!(matches!(a_peer.sync_state(), StandbySync::Tracking { .. }));
     });
 }

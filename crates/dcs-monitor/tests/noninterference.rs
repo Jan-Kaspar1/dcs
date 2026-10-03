@@ -680,11 +680,12 @@ impl Case {
 
     fn config(&self, journal_path: &Path) -> MonitorConfig {
         MonitorConfig {
+            journal_file: Some(journal_path.to_path_buf()),
             history_capacity: self.history_capacity,
             journal_capacity: self.journal_capacity,
             event_history_capacity: self.journal_capacity,
             publication_capacity: self.publication_capacity,
-            journal_file: Some(journal_path.to_path_buf()),
+            ..MonitorConfig::default()
         }
     }
 }
@@ -1103,6 +1104,7 @@ fn bounded_eviction_exposes_named_gaps_never_silent_loss() {
             event_history_capacity: 4,
             publication_capacity: 3,
             journal_file: None,
+            ..MonitorConfig::default()
         },
     )
     .unwrap();
@@ -1188,8 +1190,13 @@ fn published_reads_cover_every_execution_mode() {
         // stands — visible between scans.
         assert_eq!(client.receipts().unwrap(), monitor.checkpoint().receipts);
         // The executor's between-scans capture — the standby's pull
-        // target — is consistent with the in-process view.
-        assert_eq!(client.checkpoint().unwrap(), monitor.checkpoint());
+        // target — is consistent with the in-process view, modulo
+        // `line_owner`: the serving monitor stamps its own address on
+        // the wire form as owner-propagation decoration, never part of
+        // the captured run state.
+        let mut served = client.checkpoint().unwrap();
+        served.line_owner = None;
+        assert_eq!(served, monitor.checkpoint());
         // The bounded streams answer from the store.
         let history = client.history(&[PointId(10), PointId(20)], 0).unwrap();
         assert!(history.iter().all(|history| !history.samples.is_empty()));
@@ -1277,7 +1284,12 @@ fn published_reads_cover_every_execution_mode() {
                     report.sync,
                     Some(StandbySync::Tracking { aligned: Tick(4) })
                 );
-                assert_published_surfaces(&standby, &standby_client, Tick(5));
+                // Tick 6, not 5: the second pull repeats the tick-4
+                // checkpoint and a tracking apply never rewinds the
+                // run's clock — it lands at the run's own tick, so the
+                // second requested scan produces tick 6 rather than
+                // re-recording tick 5.
+                assert_published_surfaces(&standby, &standby_client, Tick(6));
                 // The role gate holds: a command on the tracking peer
                 // takes the named `not_active` rejection receipt, never
                 // a phantom application.

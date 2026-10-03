@@ -59,8 +59,10 @@ release contract in `docs/release-contract.md` (decisions 79–81).
 - **Optional fields** extend the version-1 schema without a version bump
   (decision 3): a document predating a field loads with the field unset,
   and an unset field serializes back without the key. `hardware` and
-  `parameters` on a device, `channel`/`initial`/`writable`/`journaled` on
-  an io_point, and `unit`/`description`/`group` on a signal all follow
+  `parameters` on a device,
+  `channel`/`initial`/`writable`/`journaled`/`record`/`unit` on an
+  io_point, `unit` on a component port and `parameter_units` on a
+  component, and `unit`/`description`/`group` on a signal all follow
   this convention.
 - The parser ignores keys it does not know, so tool-added annotation
   keys load harmlessly; they are not part of the contract and the
@@ -149,8 +151,10 @@ carried by the controller's scan image — decision 14).
 | `channel` | `{"device": <device id>, "name": "<channel>"}` | Optional. Present → a field point: the device must be declared (`ValidationError::UnknownDevice`), the channel must exist on it (`UnknownChannel`), and the point's `direction` and `value_type` must agree with the channel's (`ChannelDirectionMismatch`, `ChannelTypeMismatch`). Absent → an internal point. |
 | `initial` | tagged `Value`, e.g. `{"float": 25.0}` | Optional; required when `channel` is absent (`MissingInitial`), and its variant must equal `value_type` (`InitialKindMismatch`). Forbidden when `channel` is present (`FieldInitial`) — the field owns a bound point's value. |
 | `writable` | bool | Optional; unset means not writable. Valid on `in` points only — `writable` on an `out` point is `ValidationError::WritableOut`. |
-| `stale_after_ticks` | u64 | Optional; unset means no freshness check. Valid on field-bound `in` points only — on an `out` point it is `ValidationError::StaleOut`, on a channel-less internal point `StaleInternal`. |
+| `stale_after_ticks` | u64 | Optional; unset means no freshness check. Valid on field-bound `in` points only — on an `out` point it is `ValidationError::StaleOut`, on a channel-less internal point `StaleInternal`. A field-bound `in` point that leaves it unset is lint `field_input_without_freshness_budget`. |
 | `journaled` | bool | Optional; unset means the point's value transitions stay out of the durable journal. Valid on `bool`/`int` points of either direction — `journaled` on a `float` point is `ValidationError::JournaledFloat`. |
+| `unit` | string | Optional; the engineering unit the value is expressed in, e.g. `"m3/h"`, `"mg/L"`, `"ticks"`, `""` for a deliberately dimensionless value. Decision 106's dimensional discipline: a `connections` entry whose *other* end declares a different unit is `ValidationError::ConnectionUnitMismatch`, and a signal declaring a disagreeing unit is `SignalUnitMismatch`. An end declaring none stays uncheckable, so an undimensioned document and a unit-transparent port both remain admissible. `dcs-build` declares it through `PlantBuilder::unit`; `dcs_build::unit` names the shared vocabulary. |
+| `record` | `{"every_ticks": u64, "retain_days": u64?}` | Optional; unset means the point contributes only to the volatile history ring. Declares the point's durable recording duty (decision 102): the monitor's recorder samples its post-scan image into the durable history file every `every_ticks` run ticks. `every_ticks: 0` is `ValidationError::RecordZeroCadence` — a zero cadence would record the full-rate stream the durable record exists to avoid. `retain_days` declares the span the downstream records system must hold; deployment-sizing data the controller never enforces. Valid on any point. |
 
 ### Internal points
 
@@ -185,9 +189,15 @@ only. Per point kind:
 - a writable *field* `in` point's command write is forwarded to the
   driver at the scan boundary and the same scan's input phase reads it
   back — documented operator substitution of the input image, holding
-  until the field side asserts a different value;
+  until the field side asserts a different value; while the point is
+  forced the write still reaches the driver, which holds it for the
+  release to observe;
 - a writable *internal* `in` point takes the write in the image and
-  holds it until the next command — the common setpoint target.
+  holds it until the next command — the common setpoint target; while
+  the point is forced the write refuses with
+  `CommandError::PointForced`, because the image the force owns is the
+  point's only store — a staged value could never land. Release the
+  force, then write.
 
 A channel-bound `writable` point is part of the operator surface worth
 reviewing, so lint flags it (`writable_field_point`); writable internal
@@ -204,22 +214,23 @@ availability: every bound `In` port's adapted `write_value:<port>`,
 
 ### `stale_after_ticks` and input freshness
 
-`stale_after_ticks` declares how fresh a field `in` point's samples must
-stay: the number of executor scan ticks the point's driver-returned
-report may go unchanged before the point's data is stale (decision 45).
-The budget lives in the point map assembly produces, and the *executor's
-input phase* applies the rule in the run's own tick domain — each scan,
-for a budgeted field `in` point, it compares the sample the driver
-returned against the report last observed on that point:
+`stale_after_ticks` declares how patient a run may be with a field `in`
+point's data: the number of executor scan ticks the point's
+driver-returned report may go unchanged before the point's data is stale
+(decision 45). The budget lives in the point map assembly produces, and
+the *executor's input phase* applies the rule in the run's own tick
+domain — each scan, for a budgeted field `in` point, it compares the
+sample the driver returned against the report last observed on that
+point:
 
 - a changed report — value, quality, or stamp — is fresh evidence: the
   observation age restarts at the current scan tick and the
   driver-returned quality lands untouched;
-- a report unchanged for more scan ticks than the budget merges
-  `Uncertain(Stale)` by the worst-of rule, so a driver-reported `Bad`
-  or worse-named `Uncertain` is never improved, while a held `Good`
-  value degrades to `Uncertain(Stale)` until the next changed report
-  returns it to `Good`;
+- a report unchanged for more scan ticks than the point's *patience*
+  merges `Uncertain(Stale)` by the worst-of rule, so a driver-reported
+  `Bad` or worse-named `Uncertain` is never improved, while a held
+  `Good` value degrades to `Uncertain(Stale)` until the next changed
+  report returns it to `Good`;
 - the landed image sample always carries the scan tick — the executor
   is the only timestamp authority; the driver-returned sample is
   freshness evidence, never an image timestamp;
@@ -237,16 +248,55 @@ forever, and a run resumed behind the driver's domain as fresh forever;
 change-tracking marks both correctly — stale while the report holds,
 the driver's own quality the scan it moves again.
 
-A budget of `0` requires a changed report every scan — the strictest
-declaration, for sources expected to refresh every scan. The sim bank,
-the remote plant, and the sim-bus register bank all stamp their writes
-with a device tick the driver protocols carry, so field devices
-integrated through them supply freshness evidence without protocol
-changes. A driver whose samples carry no usable freshness signal — one
-that returns a changed report every read, or one whose report never
-varies — simply makes the declaration inert or always-stale; declare
-the field only where the source distinguishes fresh samples from held
-ones.
+The patience a report is held to is the **greater of the declared
+budget and the arrival period the run has demonstrated on that point**:
+the reader-tick gaps between the report changes the run has watched. The
+budget is a floor, because a run tick measures the *reader's* patience
+and a reader cannot see a publication it has not been sent yet — a peer
+scanning faster than the field owner steps its inputs reads the same
+report on every scan in between, and a budget below the owner's step
+period would present a healthy field as stale on every step. What the
+declaration buys is therefore a bound on how long the reader tolerates
+silence, not a bound on how old the data may be in wall time; a field
+that stops publishing ages to stale one demonstrated period past its
+last report, and a point whose report has never moved answers to the
+declared budget alone.
+
+Two gaps decide that period, not one, so a source's own jitter cannot
+make the verdict flap under a report that keeps arriving. Two rather than
+every gap, so one unusually long silence does not relax the verdict for
+good, and a gap spanning the run's own failed exchange or failed read
+demonstrates nothing at all — a report held across the run’s own
+transport trouble is not evidence about how fast the field publishes, and
+a forced point’s window ends the arrival evidence outright because it
+answers to no driver report. Before the run has watched a point publish,
+nothing is demonstrated and the declared budget judges the report alone:
+a peer that starts observing a slower field may see one stale interval
+there, and none after its first two publications.
+
+A budget of `0` asks for a changed report every scan — the strictest
+declaration, for sources expected to refresh every scan. The floor is a
+floor: the demonstrated period widens `0` like any other budget, so a
+declaration of zero judges the cold start alone and defers to what the
+field has already shown from then on. The sim bank, the remote plant,
+and the sim-bus register bank all stamp their writes with a device tick
+the driver protocols carry, so field devices integrated through them
+supply freshness evidence without protocol changes. A driver whose
+samples carry no usable freshness signal — one that returns a changed
+report every read, or one whose report never varies — simply makes the
+declaration inert or always-stale; declare the field only where the
+source distinguishes fresh samples from held ones, and size the budget
+to the reader's scan period rather than to the field's own step period —
+the arrival period covers the difference on a reader that paces itself,
+but a budget far below the demonstrated period is a declaration the
+runtime cannot honour.
+
+A channel-bound `in` point that declares no budget is lint
+`field_input_without_freshness_budget`: the stale-data honesty rule
+binds only where the model declares it, so an undeclared field input
+keeps serving a stalled source's last-known value as `Good` and nothing
+else names the omission. The finding is advisory — budgets stay opt-in
+per point — not a validation error.
 
 ### `journaled` and the durable transition record
 
@@ -294,6 +344,81 @@ typed payload — beside the adapted `point_changed`/`quality_changed`/
 `journaled` mark surfaces as the `when_journaled` emission rule on each
 `Bool`/`Int` port's adapted `point_changed:<port>` event entry.
 
+The `EventDecl`'s `retention` names the store the serving layer routes
+the emission to — all three classes are live, and no emission is
+recorded in two stores:
+
+- `journal` — the durable transition journal: `Journal`-retained (and
+  undeclared) emissions land as `event_emitted` entries at the
+  producing tick, replayed by a cold restart like every journaled
+  event. The audit-grade record — the class for run-level boundaries
+  and other low-volume, keep-forever events.
+- `history` — the read model's bounded event-history ring: one
+  `EventRecord` per emission, evicting oldest-first at its bound under
+  the same numbering-gap convention the point-history and journal
+  rings follow. The class for per-cycle operational records a
+  diagnostic reads back — frequent enough that the durable record
+  should not accumulate them.
+- `latest` — the latest-emission view: the newest `EventRecord` per
+  (component, declared event name), superseded by each newer emission.
+  The class for standing publications where only the newest value
+  matters.
+
+`GET /resources`'s per-instance `events` serves all three classes
+beside the attributed journal tail — each entry's `retention` mark
+naming the store the record came from — and a tracking peer's published
+read model carries the same routed events (decision 84's emit-identical
+parity). The `sequencer` kind declares one event per class and sets the
+convention: `step_completed` (`history`) the per-step operational
+record, `sequence_completed` (`journal`) the durable run-level
+boundary, `progress` (`latest`) the superseding standing-position
+publication.
+
+### `record` and the durable process history
+
+`record` declares a point's durable *recording duty* — the
+durable-history decision's one narrowing of the volatile-ring rule
+(decision 102, narrowing decision 36). Every point's samples already
+land in the bounded per-point history ring; that ring is a volatile
+diagnostic window a restart erases. A point declaring
+`{"record": {"every_ticks": N}}` additionally lands its post-scan image
+sample in the monitor's durable history file (`--history-file`) once
+every `N` run ticks — the faithful, quality-stamped, honestly-gapped
+capture a compliance series needs: the per-filter turbidity record, the
+daily disinfection/CT record, interval energy data (`WW-REP-001`'s
+retention clauses).
+
+The declaration is deliberately opt-in and cadenced:
+
+- any point may carry it — a field measurement's stream or an internal
+  computed value alike, either direction, any value kind;
+- `every_ticks` is the recording cadence in run ticks — a sample lands
+  whenever the scan tick has advanced at least that far past the
+  point's last recorded sample; `0` is rejected
+  (`RecordZeroCadence`), since recording every scan would duplicate
+  the full-rate stream the durable record exists to avoid;
+- `retain_days` is the declared retention span the downstream records
+  system must hold — deployment-sizing data the durable file's
+  rotation and archival are engineered against, never a bound the
+  controller enforces: the multi-year regulatory term belongs to the
+  historian/report layer the file feeds.
+
+Recording happens at the recorder's post-scan point — never mid-scan,
+never in the executor — and the file append drains on a bounded queue
+off the monitor lock, so a slow or stalled sink reads as the
+publication's `history_sink` health state (`lagging`, then `failed`)
+and a queue-full or failed append is fatal at the recorded point
+rather than a silent gap or a lengthened scan. The durable stream's
+served window (`GET /history/durable`) is capacity-bounded like every
+retained stream: `seq`s are never reused, eviction reads as a
+numbering gap, and `run_boundary`/`domain` markers are pinned so
+process lifetimes and tick-domain crossings stay attributable under
+retention. A `--state-file` resume keeps appending in the restored
+tick domain and continues the cadence intervals the file already
+paced out; each tick domain's declared civil-time anchor stamps the
+file's boundary markers so exported records self-describe their
+tick-to-civil mapping.
+
 ## `signals`
 
 A list of plant signals: the monitoring/UI-facing names for the values
@@ -305,7 +430,7 @@ controller computes.
 | `id` | `SignalId` (u64) | Required; unique within `signals` — `DuplicateId { collection: "signal" }`. |
 | `name` | string | Required; the human-facing signal name. |
 | `source` | `PointId` | Required; must name a declared io_point (`ValidationError::UnknownSource`). Several signals may source one point; `SignalIndex` resolves the lowest signal id. |
-| `unit` | string | Optional; engineering unit of the carried value, e.g. `"degC"`. Display metadata — no wiring rule; absence is lint `signal_missing_unit`. |
+| `unit` | string | Optional; engineering unit of the carried value, e.g. `"degC"`. Since decision 106 it is a checked declaration, not free display text: it must equal the source point's `unit` where that point declares one (`ValidationError::SignalUnitMismatch`), and `dcs-build`'s compositions declare the unit once on the point and let each signal inherit it at emit. Absence is lint `signal_missing_unit`; `""` is the deliberate "dimensionless" marker beside an undeclared point. |
 | `description` | string | Optional; human-facing description. Absence is lint `signal_missing_description`. |
 | `group` | string | Optional; display group the monitoring page files the signal under — the plant area or unit it belongs to (decision 23). Pure display metadata: any string is a valid group and signals sharing a group name are simply listed together; ungrouped signals render under the documented `"ungrouped"` default. Absence is lint `signal_missing_group`. |
 
@@ -327,8 +452,9 @@ order.
 | `id` | `ComponentId` (u64) | Required; unique within `components` — `DuplicateId { collection: "component" }`. |
 | `kind` | string | Required; opaque to the model — the name a `dcs_assembly::ComponentRegistry` maps to a constructor at assembly (`AssemblyError::UnknownComponentKind`). The shipped controller registers the `dcs-blocks` kinds (`analog-input`, `pid`, `latching-alarm`, `pump-group`, `timer`, …); `dcs-controller`'s `registry()` is the list it deploys. |
 | `parameters` | object: name → tagged `Value` | Required; may be empty. Kind-specific construction data checked by the kind's `from_parameters` at assembly — a missing or invalid entry is `AssemblyError::Component` wrapping `ParameterError`. A kind's parameter names, value kinds, and ranges are published by its `describe()` `ComponentDescriptor` (served per instance in `TelemetrySnapshot.descriptors`) and mirrored as data by `dcs-build`'s specs. |
-| `ports` | object: name → `{"direction": "in"\|"out", "value_type": "bool"\|"int"\|"float"}` | Required; may be empty. The signature the model wires; `connections` bind ports to points or other ports. Assembly requires every declared port bound exactly once (`UnboundPort`, `PortBoundTwice`), and the constructed component's declared `IoRequirement`s are checked against the resolved point map — `UnmappedPoint`, `DirectionMismatch`, `TypeMismatch`. |
+| `ports` | object: name → `{"direction": "in"\|"out", "value_type": "bool"\|"int"\|"float", "unit"?: string}` | Required; may be empty. The signature the model wires; `connections` bind ports to points or other ports. Assembly requires every declared port bound exactly once (`UnboundPort`, `PortBoundTwice`), and the constructed component's declared `IoRequirement`s are checked against the resolved point map — `UnmappedPoint`, `DirectionMismatch`, `TypeMismatch`. A port's optional `unit` is decision 106's instance-level dimensional declaration for a kind whose port is unit-transparent — what the wired value is a measure of — and faces the same `ConnectionUnitMismatch` check as an io_point's `unit`. |
 || `rationalization` | object: `consequence`/`required_action`/`reference` strings | Optional; absent serializes to nothing. The decision-70 prose half of an alarm instance's rationalization record — the consequence of inaction, the required operator action, and the display/procedure reference. The model stores it uninterpreted; the alarm kinds' construction requires it (see below). |
+| `parameter_units` | object: name → string | Optional; an empty map serializes to nothing. The engineering unit of each named `parameters` entry beside its bare `Value` — `"ticks"` for a scan-interval parameter, `"mg/L"` for a dose bound. Every key must name a key `parameters` carries: a unit for an absent value is a dead declaration `ValidationError::UnknownParameter`. `dcs-build` declares it through `PlantBuilder::param_unit`. |
 
 The model does not validate `parameters` contents or that a `kind`
 exists: kind resolution and parameter checking are assembly's, because
@@ -346,8 +472,9 @@ the instance's whole engineering surface is its declared `kind`,
 `ports`, and `parameters`. Operator submissions arrive at runtime as
 `Command::Invoke` on the receipted path, validated against the
 declaration and dispatched to the component's `invoke_command` at the
-scan boundary; emissions drain after each `step` and journal per their
-declared retention (see `journaled` above). `GET /schema` serves each
+scan boundary; emissions drain after each `step` and route to the
+store their declared `retention` names (see `journaled` above).
+`GET /schema` serves each
 instance's derived `BlockInterface` — ports as measurements/state,
 parameters as configuration, the adapted generic and declared native
 commands, and the adapted and declared events — and `GET /resources`
@@ -409,10 +536,11 @@ one fixed-arity kind. `bool-latching-alarm` keeps `latching-alarm`'s
 `in`/`ack`/`alarm`/`unacknowledged` vocabulary exactly, with `in` a
 `Bool`: `alarm` follows the input directly — no hysteresis and no
 standing-limit parameter — and
-`unacknowledged` latches the input's false-to-true edge, clearing while
-the model-wired writable `ack` point reads `true` under the same
-level-sensitive, ack-dominates rule (a held `ack` suppresses a fresh
-latch). Both outputs carry the worst of the two inputs' qualities.
+`unacknowledged` latches the input's false-to-true edge, clearing on
+the model-wired writable `ack` point's rising edge under the same
+consumed-pulse rule — a held `ack` level acknowledges once and cannot
+pre-acknowledge a later trip. Both outputs carry the worst of the two
+inputs' qualities.
 `crates/dcs-assembly/fixtures/bool_latching_alarm.json` is the recorded
 composition — a `motor`'s `fault` output carried through a declared
 internal point pair into `in`; per-port semantics live beside
@@ -457,9 +585,12 @@ instance declares only where the model wires one, and the `Int`
 commands ride the receipted `WriteValue` path: a `true` level requests
 the state, `false` returns it manually — out-of-service has no
 automatic return. Shelving asserts `shelved` while the request stands
-inside the bound, counts the request's asserting scan as the first,
-and drops at `max_shelve_ticks` even while the request still stands —
-a re-shelve requires the request to cycle through `false`. A zero
+inside the bound, counts the request's asserting scan as the first —
+aging the request from its sample's line stamp, the admitting run's
+`apply_tick`, which a receipt-carried replay on a promoted peer
+preserves — and drops at `max_shelve_ticks` even while the request
+still stands — a re-shelve requires the request to cycle through
+`false`. A zero
 `max_shelve_ticks` declares never-shelvable; an unbound or unwritable
 `shelve` point rejects stronger still, `NotWritable` at submission.
 `suppress` binds declared wiring — designed or state-based — asserting
@@ -473,7 +604,11 @@ normally, a trip mid-OOS evaluates and latches, and an unbound
 managed input reports its flag standing-clear. The shelve-expiry
 countdown, the out-of-service state, and the suppression state all
 ride `capture_state`, so a tracking standby promoted mid-shelve
-continues the remaining bound identically.
+continues the remaining bound identically — including across a
+promotion whose final-sync checkpoint predates the write's
+application, where the carried write replays under its original
+schedule stamp rather than restarting the countdown at the replay
+scan.
 `crates/dcs-assembly/fixtures/managed_alarms.json` is the recorded
 composition — three instances covering the full surface, a
 bound-but-unwritable `shelve`, and an unbound `suppress`; per-port
@@ -995,6 +1130,16 @@ What each shape means at assembly:
 `crates/dcs-assembly/fixtures/internal_points.json` shows declared
 internal-point wiring.
 
+A channel-bound `out` point named as no connection's `to` end is dead
+engineering: the command path refuses `out` points outright, so
+nothing can ever write the point and the bound channel is never
+written while the model asserts a driven actuator — the
+forgotten-connection case `writable` (`WritableOut`) and
+`unbound_channel` do not cover. Lint flags it
+`undriven_field_output`, advisory only — a deliberately undriven
+output stays valid. Internal `out` points are image-carried values
+and stay silent; the field drives `in` points.
+
 ## Device kinds and their `parameters`
 
 `Device.kind` resolves through the deployment's `DriverRegistry`;
@@ -1237,6 +1382,14 @@ it into the resolved `sim_channel_map`, and test rigs do the same by
 adding `ProcessElement`s to a `ChannelMap` before constructing
 `SimDriver`.
 
+`dcs-plant-server --dynamics-schema` prints the document's draft
+2020-12 JSON Schema — the `ProcessElement::json_schema` emission
+(decision 93) — so non-Rust tooling can check a document against the
+recorded artifact: structure, field types, and the numeric bounds the
+schema language can express. The merge-time rules below stay with
+`ChannelMap::validate`; the schema is a first screen, not the
+validator.
+
 Each list entry is one `dcs_sim::ProcessElement` — an externally tagged
 object whose single key is the snake_case element name:
 
@@ -1264,6 +1417,12 @@ point it drives):
   `bool_flow`'s gate `input`, which must be a `bool` point
   (`ElementGateKind`), and a `threshold`'s contact `output`, which must
   be a `bool` point (`ElementContactKind`);
+- an element's `output` must be an `in` point — the field-side value
+  the controller reads (`ElementOutputDirection`). Elements model
+  physics *answering* commands: a `bool_flow`'s gate or a
+  `scaled_flow`'s demand reads the `out` command point, but driving an
+  `out` point would rewrite the operator's command each step — the
+  merge rejects it;
 - `time_constant`, `damping_ratio`, and `delay` must be finite and
   positive (`InvalidTimeConstant`, `InvalidDamping`, `InvalidDelay`),
   `amplitude` finite and non-negative (`InvalidAmplitude`), `on_rate`,
@@ -1324,7 +1483,7 @@ next sees it; lint never blocks anything.
 | Version | `PlantModel::load` | `LoadError::UnsupportedVersion` — `version` other than `MODEL_VERSION` |
 | Validation | `PlantModel::validate` (inside `load`, or standalone for programmatically built models) | Every `ValidationError`, all reported together: `DuplicateId`, `UnknownDevice`, `UnknownChannel`, `ChannelDirectionMismatch`, `ChannelTypeMismatch`, `FieldInitial`, `MissingInitial`, `InitialKindMismatch`, `WritableOut`, `UnknownSource`, `UnknownPoint`, `UnknownComponent`, `UnknownPort`, `ConnectionDirectionMismatch`, `ConnectionTypeMismatch` |
 | Assembly | `dcs_assembly::resolve_drivers` + `DriverPlan::build` + `assemble` | Every `AssemblyError`: kind resolution — `UnknownDeviceKind`, `UnknownComponentKind`; device `parameters` and backends — `InvalidDeviceParameters`, `DeviceBackend`; the merged local sim map's consistency — `InvalidChannelMap` (`ConfigError`); port wiring — `PortBoundTwice`, `UnboundPort`; requirement verification — `UnmappedPoint`, `DirectionMismatch`, `TypeMismatch`; constructor failures — `Component`; executor wiring — `Wiring`; and `UnroutedPoint`, `InvalidInternalPoint`, `MixedPointLink`, `UnresolvedEndpoint`, the mirrors reachable for a model assembled without validation |
-| Lint | `PlantModel::lint`, `dcs-model lint` | Advisory `LintFinding`s over a validated document, in rule order: `point_without_signal`, `signal_missing_unit`, `signal_missing_description`, `signal_missing_group`, `writable_field_point`, `unbound_channel`. Findings exit zero unless `--strict`; a document failing validation is never linted |
+| Lint | `PlantModel::lint`, `dcs-model lint` | Advisory `LintFinding`s over a validated document, in rule order: `point_without_signal`, `signal_missing_unit`, `signal_missing_description`, `signal_missing_group`, `writable_field_point`, `field_input_without_freshness_budget`, `undriven_field_output`, `unbound_channel`. Findings exit zero unless `--strict`; a document failing validation is never linted |
 | Dynamics merge | `dcs-plant-server --dynamics`, or a rig extending a `ChannelMap` | A malformed document is a startup parse error; each element's merge is `ChannelMap::validate` — `ConfigError` naming the element index and the point it drives |
 
 The deliberate split: the model validates structure — ids, references,
@@ -1334,10 +1493,12 @@ that depends on the registered kinds: which `kind` strings exist, what
 `parameters` each kind accepts, whether every port is bound, and whether
 each constructed component's declared I/O matches the point map. Lint
 checks engineering completeness the contract does not require — signals
-for points, display metadata, the writable field surface, dead channel
-declarations. Runtime failures are a different surface entirely: a
-component `step` error lands in `ComponentDiagnostics`, and driver
-problems surface as `IoError`s — never as document errors.
+for points, display metadata, the writable field surface, undeclared
+input freshness budgets, undriven field outputs, dead channel
+declarations. Runtime failures
+are a different surface entirely: a component `step` error lands in
+`ComponentDiagnostics`, and driver problems surface as `IoError`s —
+never as document errors.
 
 ## Authoring and checking a document
 

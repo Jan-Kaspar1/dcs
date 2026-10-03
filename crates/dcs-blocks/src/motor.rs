@@ -396,6 +396,7 @@ mod tests {
             parameters,
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let mut motor =
             Motor::from_parameters("mtr", CMD, OUT, RUN, FAULT, &instance.parameters).unwrap();

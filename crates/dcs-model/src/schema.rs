@@ -21,12 +21,18 @@
 //!   `initial`, a bound point forbids a non-null `initial`, `initial`'s
 //!   [`Value`](dcs_core::Value) variant must match `value_type`, and
 //!   `writable` may mark `In` points only;
+//! - the reason-requirement rule: `requires_reason: true` may mark a
+//!   writable `In` point only — the flag qualifies the command surface,
+//!   so it requires `direction: "in"` and `writable: true`;
 //! - the freshness-budget rule: a non-null `stale_after_ticks` may mark a
 //!   field `In` point only — it requires `direction: "in"` and a non-null
 //!   `channel`;
 //! - the journaled-flag rule: `journaled: true` may mark a `bool`/`int`
 //!   point only — the durable journal records discrete state transitions,
 //!   so a `float` point's per-scan stream is rejected from it;
+//! - the recording-duty rule: a non-null `record` names an `every_ticks`
+//!   of at least `1` — a zero cadence would record the full-rate stream
+//!   the durable-history decision keeps volatile;
 //! - the standard registry's known device-kind parameter shapes (decision
 //!   29): `sim-tcp` requires `address` and allows `timeout_ms`, `sim-bus`
 //!   additionally requires the `registers` map, `sim-cyclic` requires the
@@ -122,6 +128,17 @@ const SCHEMA_SOURCE: &str = r##"{
     "direction": { "enum": ["in", "out"] },
     "value-kind": { "enum": ["bool", "int", "float"] },
     "nonneg-int": { "type": "integer", "minimum": 0 },
+    "recording-duty": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["every_ticks"],
+      "properties": {
+        "every_ticks": { "type": "integer", "minimum": 1 },
+        "retain_days": {
+          "anyOf": [{ "$ref": "#/$defs/nonneg-int" }, { "type": "null" }]
+        }
+      }
+    },
     "u32-int": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
     "register-index": { "type": "integer", "minimum": 0, "maximum": 65535 },
     "image-offset": {
@@ -194,6 +211,16 @@ const SCHEMA_SOURCE: &str = r##"{
       "properties": {
         "direction": { "$ref": "#/$defs/direction" },
         "value_type": { "$ref": "#/$defs/value-kind" }
+      }
+    },
+    "port": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["direction", "value_type"],
+      "properties": {
+        "direction": { "$ref": "#/$defs/direction" },
+        "value_type": { "$ref": "#/$defs/value-kind" },
+        "unit": { "type": ["string", "null"] }
       }
     },
     "channel-ref": {
@@ -490,10 +517,15 @@ const SCHEMA_SOURCE: &str = r##"{
           "anyOf": [{ "$ref": "#/$defs/value" }, { "type": "null" }]
         },
         "writable": { "type": "boolean" },
+        "requires_reason": { "type": "boolean" },
         "stale_after_ticks": {
           "anyOf": [{ "$ref": "#/$defs/nonneg-int" }, { "type": "null" }]
         },
-        "journaled": { "type": "boolean" }
+        "journaled": { "type": "boolean" },
+        "record": {
+          "anyOf": [{ "$ref": "#/$defs/recording-duty" }, { "type": "null" }]
+        },
+        "unit": { "type": ["string", "null"] }
       },
       "allOf": [
         {
@@ -527,6 +559,19 @@ const SCHEMA_SOURCE: &str = r##"{
           },
           "then": {
             "properties": { "direction": { "const": "in" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["requires_reason"],
+            "properties": { "requires_reason": { "const": true } }
+          },
+          "then": {
+            "required": ["writable"],
+            "properties": {
+              "direction": { "const": "in" },
+              "writable": { "const": true }
+            }
           }
         },
         {
@@ -616,9 +661,13 @@ const SCHEMA_SOURCE: &str = r##"{
         "rationalization": {
           "anyOf": [{ "$ref": "#/$defs/rationalization" }, { "type": "null" }]
         },
+        "parameter_units": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
         "ports": {
           "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/endpoint-shape" }
+          "additionalProperties": { "$ref": "#/$defs/port" }
         }
       },
       "allOf": [

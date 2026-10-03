@@ -329,6 +329,7 @@ mod tests {
             parameters: Parameters::new(),
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let block = SrLatch::from_parameters("srl", SET, RESET, OUT, &instance.parameters).unwrap();
         assert!(!block.state);

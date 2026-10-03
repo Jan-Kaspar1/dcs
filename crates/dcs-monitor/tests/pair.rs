@@ -9,8 +9,8 @@
 //! dropped so its port refuses connections.
 
 use dcs_core::{
-    Command, CommandError, CommandOutcome, CommandReceipt, Direction, IoDriver, IoError,
-    JournalEvent, PointId, Role, Sample, StandbySync, Tick, Value, ValueKind,
+    Command, CommandError, CommandOutcome, CommandReceipt, Direction, FailoverEvidence, FieldClaim,
+    IoDriver, IoError, JournalEvent, PointId, Role, Sample, StandbySync, Tick, Value, ValueKind,
 };
 use dcs_model::{PlantModel, SignalIndex};
 use dcs_monitor::{
@@ -131,6 +131,30 @@ impl PeerRig {
     /// tracking source — the configured `--peer`/`--standby` half of
     /// the follow-peer contract a demotion tracks.
     fn start_tracking(role: Role, source: Option<SocketAddr>) -> Self {
+        Self::assemble(role, source, None, None)
+    }
+
+    /// [`start`](Self::start) with a scripted field-claim probe: the
+    /// peer's per-scan claim observation answers whatever `claim`
+    /// currently holds, so a test drives `field_claim` through `held` /
+    /// `unclaimed` without field-side arbitration.
+    fn start_probed(role: Role, claim: Arc<Mutex<FieldClaim>>) -> Self {
+        Self::assemble(role, None, Some(claim), None)
+    }
+
+    /// [`start`](Self::start) with the peer's failover budget armed —
+    /// `budget` as `--auto-promote N` — so the served report carries
+    /// the gate's standing proof and miss accounting.
+    fn start_failover(role: Role, budget: u32) -> Self {
+        Self::assemble(role, None, None, Some(budget))
+    }
+
+    fn assemble(
+        role: Role,
+        source: Option<SocketAddr>,
+        claim: Option<Arc<Mutex<FieldClaim>>>,
+        failover: Option<u32>,
+    ) -> Self {
         let driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
             (PointId(10), Value::Float(0.0)),
             (PointId(20), Value::Float(0.0)),
@@ -144,6 +168,14 @@ impl PeerRig {
         let peer = match role {
             Role::Active => Peer::active(executor, None),
             _ => Peer::standby(executor, None),
+        };
+        let peer = match claim {
+            Some(claim) => peer.with_field_probe(move || Ok(*claim.lock().unwrap())),
+            None => peer,
+        };
+        let peer = match failover {
+            Some(budget) => peer.with_failover(budget),
+            None => peer,
         };
         let monitor = Monitor::bind_peer("127.0.0.1:0", peer, signal_index()).unwrap();
         let monitor = match source {
@@ -207,7 +239,7 @@ fn pair_health_fault_kinds_roundtrip() {
             fault_kinds: vec![kind],
         };
         let json = serde_json::to_value(&health).unwrap();
-        assert_eq!(json["fault_kinds_version"], 1);
+        assert_eq!(json["fault_kinds_version"], 4);
         assert_eq!(json["fault_kinds"], serde_json::json!([kind]));
         assert_eq!(serde_json::from_value::<PairHealth>(json).unwrap(), health);
     }
@@ -238,7 +270,7 @@ fn healthy_pair_health_omits_empty_fault_kinds_and_roundtrips() {
         fault_kinds: vec![],
     };
     let json = serde_json::to_value(&health).unwrap();
-    assert_eq!(json["fault_kinds_version"], 1);
+    assert_eq!(json["fault_kinds_version"], 4);
     assert!(json.get("fault_kinds").is_none());
     assert_eq!(serde_json::from_value::<PairHealth>(json).unwrap(), health);
 }
@@ -324,6 +356,7 @@ fn commands_route_only_to_the_peer_reporting_active() {
                 apply_tick: Tick(2)
             },
             actor: None,
+            reason: None,
         }]
     );
     assert!(standby.client.receipts().unwrap().is_empty());
@@ -516,6 +549,7 @@ fn role_flip_moves_the_command_target_and_the_tick_domain_continues() {
             JournalEvent::RoleChanged {
                 from: Role::Promoting,
                 to: Role::Active,
+                ..
             }
         )),
         "the promoted peer's settle is journaled"
@@ -704,6 +738,316 @@ fn an_unsynchronized_standby_past_the_convergence_grace_is_a_named_fault() {
     standby.stop();
 }
 
+/// The mutual-standby wedge as pair health: a standby whose tracked
+/// line has no field owner reports `orphaned`, and the pair verdict
+/// names it `standby_orphaned` rather than rendering a healthy pair —
+/// the `tracking` report that used to hide the outage.
+#[test]
+fn an_orphaned_standby_is_a_named_fault() {
+    let active = PeerRig::start(Role::Active);
+    let standby = PeerRig::start(Role::Standby);
+    let mut pair = PairClient::new([active.addr, standby.addr]);
+
+    // The wedge's signature: a checkpoint that applies cleanly but
+    // whose serving run owns no field writes.
+    active.client.advance(1).unwrap();
+    let mut orphaned = active.client.checkpoint().unwrap();
+    orphaned.source_owns_field = Some(false);
+    standby.monitor.apply_checkpoint(&orphaned).unwrap();
+
+    pair.poll_roles();
+    match status_of(&pair, standby.addr) {
+        PeerStatus::Reporting(report) => assert!(
+            matches!(report.sync, Some(StandbySync::Orphaned { .. })),
+            "the orphaned standby must not report healthy tracking: {report:?}"
+        ),
+        other => panic!("expected the standby's report, got {other:?}"),
+    }
+    let health = pair.health();
+    assert_eq!(health.active, Some(active.addr));
+    assert_fault_kinds(&health, &[PairFaultKind::StandbyOrphaned]);
+    assert!(
+        health
+            .faults
+            .iter()
+            .any(|fault| fault.contains(&standby.addr.to_string())
+                && fault.contains("no field owner")),
+        "expected the orphaned standby named as a redundancy fault, got {:?}",
+        health.faults
+    );
+
+    // A checkpoint from a field-owning source ends the fault — the
+    // verdict is poll-driven, not sticky.
+    active.client.advance(1).unwrap();
+    standby
+        .monitor
+        .apply_checkpoint(&active.client.checkpoint().unwrap())
+        .unwrap();
+    pair.poll_roles();
+    let health = pair.health();
+    assert_eq!(health.active, Some(active.addr));
+    assert!(health.faults.is_empty(), "{:?}", health.faults);
+    assert_fault_kinds(&health, &[]);
+
+    active.stop();
+    standby.stop();
+}
+
+/// The narrower ownerless verdict as pair health: a standby whose
+/// tracked line has no field owner *while the field's own arbitration
+/// names a writer outside the pair* is `standby_usurped`, not
+/// `standby_orphaned`. The two read differently to an operator and to
+/// the remedy — an ownerless field is taken by promoting onto it, an
+/// usurped one by promoting *against* the writer standing on it — so a
+/// pair view that collapsed them would ask for the wrong action. The
+/// verdict is poll-driven like every other: a writer that starts owning
+/// the line again ends the fault.
+#[test]
+fn an_usurped_standby_is_a_named_fault() {
+    let active = PeerRig::start(Role::Active);
+    let claim = Arc::new(Mutex::new(FieldClaim::Held));
+    let standby = PeerRig::start_probed(Role::Standby, Arc::clone(&claim));
+    let mut pair = PairClient::new([active.addr, standby.addr]);
+
+    active.client.advance(1).unwrap();
+    let mut orphaned = active.client.checkpoint().unwrap();
+    orphaned.source_owns_field = Some(false);
+    standby.monitor.apply_checkpoint(&orphaned).unwrap();
+    // The field's own arbitration holds — under a writer that cannot
+    // prove the pair's key, which is the half the sync verdict cannot
+    // see and the diagnosis supplies.
+    *claim.lock().unwrap() = FieldClaim::Held;
+    standby.client.advance(1).unwrap();
+    standby
+        .monitor
+        .note_foreign_writer(Some("127.0.0.1:9099".parse().unwrap()));
+
+    pair.poll_roles();
+    match status_of(&pair, standby.addr) {
+        PeerStatus::Reporting(report) => {
+            assert!(
+                matches!(report.sync, Some(StandbySync::Usurped { .. })),
+                "the usurped standby must not read as ownerless: {report:?}"
+            );
+            assert_eq!(
+                report.field_claim,
+                Some(FieldClaim::Held),
+                "the pair has a writer — that is what the verdict names"
+            );
+        }
+        other => panic!("expected the standby's report, got {other:?}"),
+    }
+    let health = pair.health();
+    assert_eq!(health.active, Some(active.addr));
+    assert_fault_kinds(&health, &[PairFaultKind::StandbyUsurped]);
+    assert!(
+        health
+            .faults
+            .iter()
+            .any(|fault| fault.contains(&standby.addr.to_string())
+                && fault.contains("outside its pair")),
+        "expected the usurped standby named as a redundancy fault, got {:?}",
+        health.faults
+    );
+
+    // Not sticky: a writer inside the line clears the diagnosis, the
+    // narrower verdict falls back to the ownerless one, and the pair
+    // fault with it.
+    standby.monitor.note_foreign_writer(None);
+    pair.poll_roles();
+    assert_fault_kinds(&pair.health(), &[PairFaultKind::StandbyOrphaned]);
+
+    active.stop();
+    standby.stop();
+}
+
+/// The unclaimed-field verdict as pair health: a reporting peer whose
+/// served `field_claim` stands `unclaimed` — the field's own
+/// arbitration answering "no owner stands" — is named the
+/// `field_unclaimed` redundancy fault, distinctly from the
+/// orphaned/degraded sync verdicts, and clears on the first poll after
+/// a holder claims. `POST /promote` on a converged peer is the
+/// documented remedy the fault names.
+#[test]
+fn an_unclaimed_field_report_is_a_named_fault_until_a_holder_claims() {
+    let active = PeerRig::start(Role::Active);
+    let claim = Arc::new(Mutex::new(FieldClaim::Held));
+    let standby = PeerRig::start_probed(Role::Standby, Arc::clone(&claim));
+    let mut pair = PairClient::new([active.addr, standby.addr]);
+
+    // A held claim is no fault: one scan lands the probe's `held`
+    // answer in the served report and the pair reads healthy — the
+    // unprobed active serves no `field_claim` at all, rendering
+    // exactly as before.
+    standby.client.advance(1).unwrap();
+    pair.poll_roles();
+    match status_of(&pair, standby.addr) {
+        PeerStatus::Reporting(report) => {
+            assert_eq!(report.field_claim, Some(FieldClaim::Held))
+        }
+        other => panic!("expected the standby's report, got {other:?}"),
+    }
+    match status_of(&pair, active.addr) {
+        PeerStatus::Reporting(report) => assert_eq!(report.field_claim, None),
+        other => panic!("expected the active's report, got {other:?}"),
+    }
+    let health = pair.health();
+    assert_eq!(health.active, Some(active.addr));
+    assert!(health.faults.is_empty(), "{:?}", health.faults);
+    assert_fault_kinds(&health, &[]);
+
+    // The claim released — no field owner stands: the next polled
+    // report names the unclaimed field as its own redundancy fault.
+    *claim.lock().unwrap() = FieldClaim::Unclaimed;
+    standby.client.advance(1).unwrap();
+    pair.poll_roles();
+    match status_of(&pair, standby.addr) {
+        PeerStatus::Reporting(report) => {
+            assert_eq!(report.field_claim, Some(FieldClaim::Unclaimed))
+        }
+        other => panic!("expected the standby's report, got {other:?}"),
+    }
+    let health = pair.health();
+    assert_eq!(health.active, Some(active.addr));
+    assert_fault_kinds(&health, &[PairFaultKind::FieldUnclaimed]);
+    assert!(
+        health
+            .faults
+            .iter()
+            .any(|fault| fault.contains(&standby.addr.to_string()) && fault.contains("unclaimed")),
+        "expected the unclaimed field named as a redundancy fault, got {:?}",
+        health.faults
+    );
+
+    // The first poll after a holder claims clears the fault —
+    // poll-driven, not sticky.
+    *claim.lock().unwrap() = FieldClaim::Held;
+    standby.client.advance(1).unwrap();
+    pair.poll_roles();
+    let health = pair.health();
+    assert_eq!(health.active, Some(active.addr));
+    assert!(health.faults.is_empty(), "{:?}", health.faults);
+    assert_fault_kinds(&health, &[]);
+
+    // The page's pair-health section names the same verdict
+    // distinctly from the orphaned and degraded sync faults: the
+    // versioned kind, the report field it reads, and the named
+    // remedy.
+    let page = dcs_monitor::PAGE;
+    for needle in [
+        "\"field_unclaimed\"",
+        "field_claim === \"unclaimed\"",
+        "the field unclaimed",
+        "promote is the documented remedy",
+    ] {
+        assert!(page.contains(needle), "page lacks {needle}");
+    }
+
+    active.stop();
+    standby.stop();
+}
+
+/// The failover gate's evidence served through the pair view: an armed
+/// standby mid-miss-window reports `degraded` while its standing proof
+/// holds, and the view's named fault carries the accounting — "proof
+/// stands, misses k of N" — beside the verdict the requested-promote
+/// path refuses on, so the two gates' recorded divergence is legible
+/// from the served report.
+#[test]
+fn an_armed_standbys_miss_window_surfaces_the_failover_accounting() {
+    let active = PeerRig::start(Role::Active);
+    let standby = PeerRig::start_failover(Role::Standby, 2);
+    let mut pair = PairClient::new([active.addr, standby.addr]);
+
+    // Converge the armed standby, then one produced-nothing pull — the
+    // mid-window the finding names: verdict degraded, proof stands.
+    active.client.advance(3).unwrap();
+    standby
+        .monitor
+        .apply_checkpoint(&active.client.checkpoint().unwrap())
+        .unwrap();
+    standby.monitor.note_transfer_failed("fetch refused");
+
+    pair.poll_roles();
+    match status_of(&pair, standby.addr) {
+        PeerStatus::Reporting(report) => {
+            assert!(matches!(report.sync, Some(StandbySync::Degraded { .. })));
+            assert_eq!(
+                report.failover,
+                Some(FailoverEvidence {
+                    converged: true,
+                    misses: 1,
+                    budget: 2,
+                })
+            );
+        }
+        other => panic!("expected the standby's report, got {other:?}"),
+    }
+    let health = pair.health();
+    assert_eq!(health.active, Some(active.addr));
+    assert_fault_kinds(&health, &[PairFaultKind::StandbyDegraded]);
+    assert!(
+        health.faults[0].contains(&standby.addr.to_string())
+            && health.faults[0].contains("failover proof stands, misses 1 of 2")
+            && health.faults[0].contains("failover fires at 2"),
+        "expected the failover accounting on the degraded fault, got {:?}",
+        health.faults
+    );
+
+    // Past the boundary the served proof reads voided: the window
+    // closed with it and the fault's accounting says so.
+    standby.monitor.note_transfer_failed("fetch refused");
+    standby.monitor.note_transfer_failed("fetch refused");
+    pair.poll_roles();
+    let health = pair.health();
+    assert!(
+        health
+            .faults
+            .iter()
+            .any(|fault| fault.contains("failover proof voided, misses 3 of 2")),
+        "expected the voided proof's accounting, got {:?}",
+        health.faults
+    );
+
+    // The page surfaces the same accounting: the report field it reads,
+    // the proof's standing, the miss count against its budget, and the
+    // armed fire point.
+    let page = dcs_monitor::PAGE;
+    for needle in [
+        "report.failover",
+        "failoverNote",
+        "failover proof ",
+        "misses ",
+        " of ",
+        "failover fires at ",
+    ] {
+        assert!(page.contains(needle), "page lacks {needle}");
+    }
+
+    active.stop();
+    standby.stop();
+}
+
+/// The QA header finding
+/// (`monitor-header-names-nonactive-source-as-active-peer`): the
+/// status line's "active peer" label may name only a peer whose own
+/// role report says settled active — through the failover gap the
+/// serving fallback is titled by the role its report carries, never
+/// "active" above its own standby row.
+#[test]
+fn the_status_line_labels_the_source_by_its_reported_role() {
+    let page = dcs_monitor::PAGE;
+    for needle in [
+        "function sourcePeerNote()",
+        "sourcePeerNote()",
+        "\" — active peer \"",
+        "\" — serving peer \"",
+        "state.report.role",
+    ] {
+        assert!(page.contains(needle), "page lacks {needle}");
+    }
+}
+
 #[test]
 fn page_carries_the_pair_view_and_answers_cross_origin_role_reads() {
     let active = PeerRig::start(Role::Active);
@@ -723,7 +1067,11 @@ fn page_carries_the_pair_view_and_answers_cross_origin_role_reads() {
         "function pollRoles()",
         "function selectSource()",
         "function switchSource(next)",
-        "function submitCommand(command)",
+        "async function submitCommand(command, reason)",
+        "async function postSwitch(peer, verb)",
+        "class=\\\"switch\\\"",
+        "data-verb=\\\"promote\\\"",
+        "data-verb=\\\"demote\\\"",
         "not_active",
         "role_changed",
     ] {

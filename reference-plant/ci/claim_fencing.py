@@ -5,7 +5,7 @@ the consumer-side proof that the declared pair's spawned
 a third attachment while a pair peer owns the field (WW-ENG-003,
 WW-OPS-003).
 
-The pair leg (`ci/pair.py`) proves convergence, the receipted switch,
+The pair leg (`ci/legs/pair.py`) proves convergence, the receipted switch,
 and the declared persistence — but no pair-stage leg attaches a third
 plant-protocol client to the consumer plant, so the claim surface the
 redundancy contract stands on went unexercised here. This leg mirrors
@@ -37,8 +37,19 @@ whole lifecycle:
   silently: a refusal leaves the claim and the owner untouched, and
   the unconditional preempt the contract grants must surface its
   supersession — on the current release the superseded owner journals
-  `field_claim_lost` and demotes in place (degrade, never death), then
-  the leg re-promotes it so the pair's launch roles stand unchanged;
+  `field_claim_lost` — attributed to the rogue's owner token, the
+  claimant the field's own fencing verdict named — and demotes in
+  place (degrade, never death); then the rogue's release lets the
+  demoted owner's bound conditional reclaim take the field back
+  without an operator call, so the pair's launch roles stand
+  unchanged. The preempt window also carries the state-vs-receipt
+  audit: a receipted write on the model's writable internal `In`
+  point admitted after the preempt lands but before the superseded
+  owner's detection scan must settle `superseded` on both peers'
+  receipt logs while every image — the demoted peer's, the tracking
+  peer's adopted checkpoint, and the reclaimed line's — still reads
+  the baseline; a superseded write that landed would contradict the
+  journal both peers record;
   on the older claim-only release the superseded owner stays `active`
   but its scans start refusing on the fenced write — the disturbance
   the leg restores with the documented switch back. The dead-owner
@@ -71,12 +82,19 @@ each must fail the pass naming the evidence it saw.
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "legs")
+)
+
 import failover
+import force_carryover
 import pair
 import simulate
+import takeover
 
 
 def eprint(*args):
@@ -106,6 +124,11 @@ CLAIM_ROGUE = 0xF00E
 # another attachment owns field writes"). The same IoError display
 # stands on both release surfaces.
 FENCED_DETAIL = "another attachment owns field writes"
+
+# The actor the fenced-boundary admission declares — the
+# state-vs-receipt audit's submission, unique in both peers' receipt
+# logs.
+ACTOR = "ci-claim-fencing"
 
 
 def mutation_fenced(verdict):
@@ -172,6 +195,23 @@ def tracking(report):
     return report.get("role") == "standby" and (
         isinstance(sync, dict) and "tracking" in sync
     )
+
+
+def converged_sync(report):
+    """Whether a served RoleReport carries `standby` under a converged
+    sync state — `tracking`, or the `orphaned` verdict the
+    ownership-stamped checkpoint contract reports while the tracked
+    line's serving run holds no field claim. In this leg's restore
+    window the rogue token owns the field and the successor's run
+    serves checkpoints without one, so the demoted owner's honest
+    report is `orphaned` — a promotable convergence — until the
+    rogue's release lets its fencing-loss reclaim re-take the field.
+    A release line that predates the stamp reports `tracking` for the
+    same convergence."""
+    sync = report.get("sync") if isinstance(report, dict) else None
+    return report.get("role") == "standby" and isinstance(
+        sync, dict
+    ) and ("tracking" in sync or "orphaned" in sync)
 
 
 def claim_fencing_pass(args, tamper):
@@ -552,14 +592,68 @@ def claim_fencing_pass(args, tamper):
             # scan must journal `field_claim_lost` and demote it in
             # place — the monitor answering throughout, because a
             # degrade is not a death.
+            #
+            # The preempt window also admits a receipted command: a
+            # write on the model's writable internal `In` point
+            # submitted after the preempt lands but before the
+            # superseded owner's detection scan. That scan applies
+            # the admission at its command boundary, then fences on
+            # its field write and demotes — the superseded receipt is
+            # the settle both journals must carry, and the state-vs-
+            # receipt audit the contract demands: a rejected
+            # superseded write never lands, so the demoted image and
+            # every checkpoint it serves must read the baseline.
+            internal = force_carryover.force_target(model)
+            admission = baseline = None
+            if internal is not None:
+                baseline = simulate.snapshot_point(owner, internal)
+                if baseline is None or "bool" not in baseline:
+                    failures.append(
+                        f"the internal write target point {internal} "
+                        f"serves {baseline} — a bool baseline the leg "
+                        "can flip is required"
+                    )
+                    raise Abort
+                admission = takeover.write_value(
+                    internal, not baseline["bool"]
+                )
+                status, receipt = pair.request(
+                    f"{owner_url}/command",
+                    {"command": admission, "actor": ACTOR},
+                )
+                if (
+                    status != 200
+                    or simulate.receipt_outcome(receipt) != "accepted"
+                ):
+                    failures.append(
+                        f"the preempt-window write {admission} "
+                        f"answered {status} {receipt}, expected an "
+                        "accepted receipt"
+                    )
+                    raise Abort
             roles = []
             settled = None
+            adopted = None
             for _ in range(WATCH_SCANS):
                 pair.scan(owner_url, failures)
                 report = pair.get(
                     f"{owner_url}/role", "GET /role", failures
                 )
                 roles.append(report.get("role"))
+                if (
+                    admission is not None
+                    and adopted is None
+                    and report.get("role") == "demoting"
+                ):
+                    # The detection scan just fenced the boundary —
+                    # the demoted peer now serves its superseded
+                    # image. Drive one tracking scan so the standby's
+                    # pull adopts that checkpoint before the demoted
+                    # peer's own pull can overwrite its image with
+                    # the standby's older one: whatever value the
+                    # fenced boundary left, this adoption is the hop
+                    # the QA finding rode to the surviving line.
+                    adopted = pair.scan(tracker_url, failures)
                 if report.get("role") == "standby":
                     settled = report
                     break
@@ -583,6 +677,19 @@ def claim_fencing_pass(args, tamper):
                 failures.append(
                     "the preemption was silent — the superseded "
                     "owner's journal recorded no field_claim_lost"
+                )
+                raise Abort
+            # The audit half of the finding: every loss record names
+            # the claimant — the owner token the field's own fencing
+            # verdict reported, so the takeover attributes to the rogue
+            # rather than an anonymous "another".
+            if any(
+                loss.get("claimant") != rogue_token for loss in losses
+            ):
+                failures.append(
+                    "the field_claim_lost records do not attribute "
+                    f"the takeover to the rogue token {rogue_token:#x}: "
+                    f"{losses}"
                 )
                 raise Abort
             transitions = [
@@ -624,6 +731,75 @@ def claim_fencing_pass(args, tamper):
                         "evidence never persisted"
                     )
                     raise Abort
+            # The state-vs-receipt audit: the admission's receipt
+            # settles `superseded` on both peers' logs — and both
+            # peers' images read the baseline, the adopted checkpoint
+            # included. A superseded write that landed would read the
+            # flipped value on the surviving line while the journals
+            # claim it never applied.
+            outcomes = {}
+            fenced_images = {}
+            if admission is not None:
+                receipts = {
+                    name: pair.get(f"{url}/receipts", "GET /receipts", failures)
+                    for name, url in (
+                        ("owner", owner_url),
+                        ("tracker", tracker_url),
+                    )
+                }
+                for name, log in receipts.items():
+                    entries = [
+                        entry
+                        for entry in log
+                        if entry.get("command") == admission
+                        and entry.get("actor") == ACTOR
+                    ]
+                    if len(entries) != 1:
+                        failures.append(
+                            f"the {name} peer's receipt log carries "
+                            f"{len(entries)} entries for the preempt-"
+                            "window admission — the superseded settle "
+                            "must land exactly once on both peers"
+                        )
+                        continue
+                    outcomes[name] = simulate.receipt_outcome(entries[0])
+                    if outcomes[name] != "superseded":
+                        failures.append(
+                            f"the {name} peer settled the admission "
+                            f"{outcomes[name]} — the fenced boundary "
+                            "must settle it rejected superseded"
+                        )
+                if adopted is not None:
+                    fenced_images["tracker_adopted"] = (
+                        simulate.snapshot_point(adopted, internal)
+                    )
+                    if fenced_images["tracker_adopted"] != baseline:
+                        failures.append(
+                            "the tracking peer adopted "
+                            f"{fenced_images['tracker_adopted']} for "
+                            f"point {internal} from the fenced "
+                            f"checkpoint, expected the baseline "
+                            f"{baseline} — the superseded write "
+                            "propagated through the quiesced image"
+                        )
+                for name, url in (
+                    ("owner", owner_url),
+                    ("tracker", tracker_url),
+                ):
+                    snapshot = pair.get(
+                        f"{url}/snapshot", "GET /snapshot", failures
+                    )
+                    fenced_images[name] = simulate.snapshot_point(
+                        snapshot, internal
+                    )
+                    if fenced_images[name] != baseline:
+                        failures.append(
+                            f"the {name} peer's image reads "
+                            f"{fenced_images[name]} for point "
+                            f"{internal}, expected the baseline "
+                            f"{baseline} — a superseded write landed "
+                            "on the line the receipt says rejected it"
+                        )
             digest_entries.append(
                 {
                     "phase": "rogue",
@@ -631,32 +807,68 @@ def claim_fencing_pass(args, tamper):
                     "watch": roles,
                     "claim_losses": losses,
                     "transitions": transitions,
+                    "admission": admission,
+                    "settled_outcomes": outcomes,
+                    "fenced_images": fenced_images,
                 }
             )
             evidence["rogue"] = "preempted"
 
-            # The restore: the demoted owner reconverges tracking on
-            # the monitor address its peer's pulls announced, then
-            # re-promotes — the promotion claim preempts the rogue
-            # token, so the field stays claimed throughout.
+            # The restore: the demoted owner reconverges on the
+            # monitor address its peer's pulls announced — `orphaned`
+            # while the rogue's claim stands (the tracked line's
+            # serving run owns nothing, the named verdict the wedge
+            # fix reports instead of healthy tracking), `tracking` on
+            # a stamp-less release line — then the rogue attachment
+            # hands the field back, and the wedge escapes by itself:
+            # the demoted owner's fencing-loss mark drives the bound
+            # conditional reclaim every standby scan — refused while
+            # the rogue token stood, granted the first scan the field
+            # stands unclaimed — so the run re-takes the claim under
+            # its own token and walks standby → promoting → active
+            # with no operator call. The claim is genuinely the
+            # owner's again: the grant bound the run's attachments to
+            # its holders, so the re-lifted gate's writes pass it.
             report = None
             for _ in range(RECONVERGE_SCANS):
                 report = pair.get(
                     f"{owner_url}/role", "GET /role", failures
                 )
-                if tracking(report):
+                if converged_sync(report):
                     break
                 pair.scan(owner_url, failures)
             else:
                 failures.append(
-                    "the demoted owner never reconverged tracking on "
+                    "the demoted owner never reconverged on "
                     f"its announced successor — GET /role answers "
                     f"{report}"
                 )
                 raise Abort
-            promoted = rig.promote(
-                owner_url, failures, what="the demoted field owner"
-            )
+            released = probe_io.request({"op": "release_writer"})
+            if released.get("result") != "done":
+                failures.append(
+                    f"the rogue claim's release_writer refused: "
+                    f"{released}"
+                )
+                raise Abort
+            watch = []
+            promoted = None
+            for _ in range(RECONVERGE_SCANS):
+                pair.scan(owner_url, failures)
+                report = pair.get(
+                    f"{owner_url}/role", "GET /role", failures
+                )
+                watch.append(report.get("role"))
+                if report.get("role") == "active":
+                    promoted = report
+                    break
+            if promoted is None:
+                failures.append(
+                    "the demoted owner never reclaimed the released "
+                    f"field — the reclaim left GET /role walking "
+                    f"{watch}"
+                )
+                raise Abort
             handover = []
             for _ in range(pair.HANDOVER_TICKS):
                 _tracked, owner = rig.tick(
@@ -664,7 +876,7 @@ def claim_fencing_pass(args, tamper):
                     owner_url,
                     failures,
                     diverged="the restored pair's images diverged at "
-                    "tick {tick} — the re-promotion was not bumpless",
+                    "tick {tick} — the reclaim was not bumpless",
                 )
                 handover.append(owner["tick"])
             owner_role = pair.get(
@@ -675,7 +887,7 @@ def claim_fencing_pass(args, tamper):
             )
             if owner_role.get("role") != "active":
                 failures.append(
-                    "the re-promoted owner never settled active — "
+                    "the reclaimed owner never settled active — "
                     f"GET /role answers {owner_role}"
                 )
                 raise Abort
@@ -723,9 +935,21 @@ def claim_fencing_pass(args, tamper):
                     f"{simulate.snapshot_point(owner, cmd)}"
                 )
                 raise Abort
+            if admission is not None:
+                promoted_value = simulate.snapshot_point(
+                    owner, internal
+                )
+                if promoted_value != baseline:
+                    failures.append(
+                        f"the re-promoted line carries "
+                        f"{promoted_value} for point {internal}, "
+                        f"expected the baseline {baseline} — the "
+                        "superseded write survived the restore"
+                    )
             digest_entries.append(
                 {
                     "phase": "restore",
+                    "reclaim": watch,
                     "promote": promoted,
                     "ticks": handover,
                     "owner_role": owner_role,

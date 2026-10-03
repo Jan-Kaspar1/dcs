@@ -221,22 +221,14 @@ fn driven_runs_across_kinds_produce_identical_snapshots_and_journals() {
         // `io_health.driver` is the driver's own volunteered transport
         // diagnostics — legitimately kind-specific (the module documents
         // this): the bus link reports itself, the scripted backend has
-        // no transport. `publication.generation` is each monitor's
-        // per-boot seq-domain identity — deliberately a fresh identity
-        // per store. Normalize both; everything the control plane
+        // no transport. Normalize it; everything the control plane
         // observed — every point's value, quality, and tick, component
-        // diagnostics, descriptors, live parameters, forces, the
-        // executor's I/O-health counters, and the publication counters —
-        // must be identical.
+        // diagnostics, descriptors, live parameters, forces, and the
+        // executor's I/O-health counters — must be identical.
         let mut scripted = scripted.clone();
         let mut bus = bus.clone();
         scripted.io_health.driver = None;
         bus.io_health.driver = None;
-        for snapshot in [&mut scripted, &mut bus] {
-            if let Some(publication) = snapshot.publication.as_mut() {
-                publication.generation = Some(0);
-            }
-        }
         assert_eq!(
             serde_json::to_value(&scripted).unwrap(),
             serde_json::to_value(&bus).unwrap(),
@@ -260,13 +252,6 @@ fn driven_runs_across_kinds_produce_identical_snapshots_and_journals() {
                 exchange: None,
             })
         );
-    }
-
-    // The served publication section stamps the monitor's per-boot
-    // generation — normalized above because each run's store mints a
-    // fresh identity.
-    for snapshot in scripted.snapshots.iter().chain(&bus.snapshots) {
-        assert!(snapshot.publication.is_some_and(|p| p.generation.is_some()));
     }
 
     // The transition journal — sequence numbers, attributed ticks, and

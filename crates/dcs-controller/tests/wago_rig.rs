@@ -169,27 +169,6 @@ fn monitor_sample(snapshot: &TelemetrySnapshot, point: PointId) -> Sample {
         .unwrap_or_else(|| panic!("no sample for {point:?}"))
 }
 
-/// Redacts the served per-boot `generation` stamps — deliberately a
-/// fresh identity per store, so two equal runs genuinely differ in
-/// it; everything the run *produces* must still compare equal.
-fn redact_generations(text: &str) -> String {
-    const KEY: &str = "\"generation\":";
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = rest.find(KEY) {
-        let value = at + KEY.len();
-        let digits = rest[value..]
-            .find(|c: char| !(c.is_ascii_digit() || c.is_whitespace()))
-            .map(|i| value + i)
-            .unwrap_or(rest.len());
-        out.push_str(&rest[..value]);
-        out.push('0');
-        rest = &rest[digits..];
-    }
-    out.push_str(rest);
-    out
-}
-
 /// Writes `value` to `point` through the attributed, receipted
 /// operator command path the monitor exposes.
 fn operator_write(client: &MonitorClient, point: PointId, value: bool) {
@@ -442,9 +421,7 @@ fn scripted_run(
             Run {
                 scans,
                 receipts: client.receipts().unwrap(),
-                snapshot: redact_generations(
-                    &serde_json::to_string(&client.snapshot().unwrap()).unwrap(),
-                ),
+                snapshot: serde_json::to_string(&client.snapshot().unwrap()).unwrap(),
             }
         }));
         monitor.shutdown();

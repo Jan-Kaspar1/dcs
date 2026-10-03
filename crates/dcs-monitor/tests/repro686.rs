@@ -63,6 +63,12 @@ fn signal_index() -> SignalIndex {
 /// bounded window's base — the eviction the defect keyed on.
 const RECEIPT_CAPACITY: usize = 4;
 
+/// The pair's shared tracking secret both monitors key with — the
+/// `--pair-token` deployment a real redundant pair declares: the
+/// demote-then-track-back legs below verify and pull against the
+/// keyed `line_proof` it signs.
+const PAIR_KEY: u64 = 0x517c_c1b7_2722_0a95;
+
 fn executor(driver: &'static StubDriver) -> Executor<'static> {
     Executor::new(
         driver,
@@ -155,7 +161,8 @@ fn checkpoint_adoption_does_not_rejournal_evicted_settles() {
             Peer::active(executor(driver_a), None),
             signal_index(),
         )
-        .unwrap(),
+        .unwrap()
+        .with_pair_key(PAIR_KEY),
     );
     let driver_b: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[])));
     let b = Serving::start(
@@ -164,7 +171,8 @@ fn checkpoint_adoption_does_not_rejournal_evicted_settles() {
             Peer::standby(executor(driver_b), None),
             signal_index(),
         )
-        .unwrap(),
+        .unwrap()
+        .with_pair_key(PAIR_KEY),
     );
 
     let sync = |from: &Serving, to: &Serving| {
@@ -247,7 +255,8 @@ fn demote_promote_cycles_journal_each_admission_once() {
             Peer::active(executor(driver_a), None),
             signal_index(),
         )
-        .unwrap(),
+        .unwrap()
+        .with_pair_key(PAIR_KEY),
     );
     let driver_b: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[])));
     let b = Serving::start(
@@ -257,6 +266,7 @@ fn demote_promote_cycles_journal_each_admission_once() {
             signal_index(),
         )
         .unwrap()
+        .with_pair_key(PAIR_KEY)
         .driven(Driven {
             track: Some(a.monitor.local_addr()),
             after_scan: None,

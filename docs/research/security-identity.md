@@ -89,7 +89,7 @@ What the implemented mechanisms already cover, needing no contract work:
 - **Role and lifecycle transitions are journaled events.** `RoleChanged`, divergence verdicts, reinitializations, quality transitions, and step failures all journal (decisions 19, 25–26; #46, #87) — the state-change audit content, alongside the commands.
 - **The declared-actor fronting seam.** `POST /command` accepts the attributed envelope and a fronting authenticating proxy can fill `actor` from authenticated context with no contract change (decisions 39, 48; #165) — matching the owner pattern where authentication machinery is the site's directory/VPN layer [16, 22, 23] and the product-side share is carrying verified identity into the journaled record.
 - **Nothing blocks the owner's custody expectations.** Model documents are deployment-supplied files the owner holds (decision 46), and the journal file is a plain line-delimited record — the no-lockout posture owner standards require [17, 24] is intrinsic to the artifact set.
-- **Bounded state surfaces for zoning.** Every externally reachable path is one of three documented transports — the monitor's HTTP surface, the peer checkpoint link, and the remote-driver link (decisions 8, 12; `docs/packaging.md`) — so a deployment's conduit boundaries have named places to sit [2; 8; 26].
+- **Bounded state surfaces for zoning.** Every externally reachable path is one of the five transports the conduit-boundary list enumerates — the monitor's HTTP surface, the peer checkpoint link, the remote-driver plant link, the sim-bus register protocol, and the EtherCAT cyclic binding (decisions 8, 12, 32, 78; `docs/conduit-boundaries.md`) — so a deployment's conduit boundaries have named places to sit [2; 8; 26].
 
 What would need contract work or a recorded decision — the gap list implementation tickets would consume:
 
@@ -100,7 +100,7 @@ What would need contract work or a recorded decision — the gap list implementa
 5. **Read-side access control.** Every monitor GET is unauthenticated today; owner matrices grade read/browse too [21]. If a client requires in-product read restriction — versus the proxy denying unauthenticated reads — that is contract surface.
 6. **Session semantics.** Session lock, inactivity logout, remote-session termination, and concurrent-session limits [1 SR 2.5–2.7; 22] presuppose sessions the stateless HTTP surface does not have; the evidence so far places them at the HMI/OS layer [22], not the controller — a recorded-position question.
 7. **Access-denied visibility.** Unsuccessful-login handling and failed-attempt tracking [1 SR 1.11; 8] apply to the authenticating layer — currently the proxy, whose logs are outside the journal. Whether denied commands should journal inside the product is a contract question only if enforcement moves in-product.
-8. **Zone/conduit documentation.** The product's conduit map is implicit in `docs/packaging.md` rather than a declared artifact; an owner zoning deliverable [18 §16.7] would consume a documented boundary list — documentation work, not contract work.
+8. **Zone/conduit documentation.** *Closed as documentation:* `docs/conduit-boundaries.md` is the declared artifact — the conduit-boundary list naming every externally reachable transport with its bind posture and the decision-48 boundary — that an owner zoning deliverable [18 §16.7] consumes. Documentation work, no contract work; it does not promote `WW-SEC-001`.
 
 ## Proposed DCS implications
 
@@ -110,7 +110,7 @@ What would need contract work or a recorded decision — the gap list implementa
 - If a client's specification requires the product to know roles, prefer declaring a required privilege tier on `writable` points and component parameters — model data the proxy enforces and the UI dims — over in-contract accounts. That extends decision 18's declaration pattern to the graded permission matrices the owner documents specify [16, 21, 23] without moving identity storage into the controller.
 - Extend the attributed envelope to `promote`/`demote` (gap 2) so every journaled action class carries a declared actor; whether switch authority needs gating beyond attribution is the same client question as gap 1.
 - Record journal handling as deployment convention rather than machinery: a rotation/archival procedure over the append-only file feeds the availability and retrievability expectations [1 SR 6.1; 6 2.T–2.U; 25 §3.7.4], and tamper-evidence stays an open question until a client audit-integrity specification reopens decision 48.
-- Document the product's conduit set — monitor surface, peer link, remote-driver link — as a named boundary list in the packaging documentation, giving a zone designer [2; 18 §16.7; 26] the partition points without the product claiming to own zoning.
+- Document the product's conduit set as a named boundary list giving a zone designer [2; 18 §16.7; 26] the partition points without the product claiming to own zoning — landed as `docs/conduit-boundaries.md` (gap 8).
 
 ## Assumptions needing customer validation
 

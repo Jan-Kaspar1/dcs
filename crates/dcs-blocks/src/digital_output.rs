@@ -195,6 +195,7 @@ mod tests {
             parameters,
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let mut block =
             DigitalOutput::from_parameters("do", IN, OUT, &instance.parameters).unwrap();

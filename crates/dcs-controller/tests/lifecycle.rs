@@ -441,31 +441,13 @@ impl Drop for Relay {
 
 /// Replaces the run-varying strings inside a serialized value —
 /// fingerprints carry the plant's ephemeral address, degraded details
-/// name the configured pull source, and the served publication stamps
-/// a per-boot `generation` — so two runs' digests compare.
+/// name the configured pull source — so two runs' digests compare.
 fn masked(value: serde_json::Value, masks: &[(String, String)]) -> serde_json::Value {
     let mut text = serde_json::to_string(&value).unwrap();
     for (from, to) in masks {
         text = text.replace(from.as_str(), to);
     }
-    // The generation stamp is deliberately a fresh identity per store:
-    // two equal runs genuinely differ in it, so it masks to a fixed
-    // value like the addresses do.
-    const KEY: &str = "\"generation\":";
-    let mut redacted = String::with_capacity(text.len());
-    let mut rest = text.as_str();
-    while let Some(at) = rest.find(KEY) {
-        let value = at + KEY.len();
-        let digits = rest[value..]
-            .find(|c: char| !(c.is_ascii_digit() || c.is_whitespace()))
-            .map(|i| value + i)
-            .unwrap_or(rest.len());
-        redacted.push_str(&rest[..value]);
-        redacted.push('0');
-        rest = &rest[digits..];
-    }
-    redacted.push_str(rest);
-    serde_json::from_str(&redacted).unwrap()
+    serde_json::from_str(&text).unwrap()
 }
 
 /// The role transitions a peer's journal recorded.
@@ -475,7 +457,7 @@ fn role_changes(client: &MonitorClient) -> Vec<(Role, Role)> {
         .unwrap()
         .iter()
         .filter_map(|entry| match entry.event {
-            JournalEvent::RoleChanged { from, to } => Some((from, to)),
+            JournalEvent::RoleChanged { from, to, .. } => Some((from, to)),
             _ => None,
         })
         .collect()
@@ -884,7 +866,7 @@ fn run_lifecycle(tag: &str) -> serde_json::Value {
     assert!(
         resumed.journal(0).unwrap().iter().any(|entry| matches!(
             entry.event,
-            JournalEvent::FieldClaimLost { point } if point == VALVE
+            JournalEvent::FieldClaimLost { point, .. } if point == VALVE
         )),
         "the fenced owner's journal must record the claim loss"
     );

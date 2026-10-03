@@ -17,3 +17,6 @@ serde_json = "1.0.151"
 
 [dev-dependencies]
 dcs-blocks = { path = "../dcs-blocks" }
+# The integration guide's worked examples compile as doctests in this
+# crate's context; the dynamics-composition walkthrough needs dcs-build.
+dcs-build = { path = "../dcs-build" }

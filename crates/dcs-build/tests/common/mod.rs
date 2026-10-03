@@ -39,7 +39,9 @@ fn main() {
     let valve = plant.channel::<f64>(sim, "valve", Direction::Out);
 
     let sp = plant.internal_input::<f64>(PointId(10), 50.0, true);
-    let level = plant.field_input::<f64>(PointId(11), level_raw, false);
+    // The field input declares its freshness budget — the model's
+    // lint names channel-bound `in` points that leave it unset.
+    let level = plant.field_input_stale_after::<f64>(PointId(11), level_raw, false, 5);
     let cmd = plant.field_output::<f64>(PointId(12), valve);
 
     plant
@@ -298,7 +300,8 @@ pub(crate) fn released_tooling(model: &Path) {
     }
     // The composed model is lint-clean: every point is signaled, every
     // signal carries unit/description/group, the writable point is an
-    // internal setpoint, and every channel is bound.
+    // internal setpoint, the field input declares its freshness budget,
+    // and every channel is bound.
     assert!(
         outputs[1].contains("no findings"),
         "expected a lint-clean model, got:\n{}",

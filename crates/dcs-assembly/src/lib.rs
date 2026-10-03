@@ -67,7 +67,7 @@ pub use assembly::{SIM_DEVICE_PREFIX, assemble, sim_channel_map, sim_driver};
 pub use drivers::{
     ClaimHook, DeviceBackend, DeviceDriver, DeviceError, DevicePoint, DeviceSpec, DriverPlan,
     DriverRegistry, ETHERCAT_KIND, FanoutDriver, SIM_BUS_KIND, SIM_CYCLIC_KIND, SIM_SCRIPTED_KIND,
-    SIM_TCP_KIND, StepError, StepHook, resolve_drivers,
+    SIM_TCP_KIND, StartupClaimHook, StepError, StepHook, resolve_drivers,
 };
 pub use error::{AssemblyError, BuildError, InternalPointError, MissingRationalization};
 pub use registry::{ComponentRegistry, ComponentSpec};

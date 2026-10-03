@@ -32,7 +32,13 @@ did not cover. In INPUT, established replies to host-originated
 monitor connections are accepted, then every other packet from a QA
 bridge addressed to the host itself is dropped — that denies access
 to host services and to other stacks' published ports via the host
-address, while leaving monitor replies working.
+address, while leaving monitor replies working. That INPUT drop is
+the rig bridge-to-host reachability rule the qax-20260922-001,
+qax-20260922-005, and qax-20260923-001 runs demonstrated: no socket
+bound on the host is reachable from a rig bridge, so a lane endpoint
+a rig container must dial runs bridge-placed in a labeled
+rig-network container — the selection the run config records under
+endpoint_placement (qa_lane.runner).
 
 apply() is idempotent (the policy chain is rebuilt and hook rules
 inserted once); verify() returns the list of missing required rules

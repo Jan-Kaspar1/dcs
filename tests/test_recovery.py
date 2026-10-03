@@ -1,8 +1,10 @@
+import json
 import shutil
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from agent_pool import planning
 from agent_pool.runtime import Runtime
@@ -12,7 +14,7 @@ from agent_pool.supervisor import Supervisor
 def issue(number=1, group='core', dependencies=()):
     item = dict(key=f'issue-{number}', title=f'Task {number}', scope='s', acceptance='a',
                 tests='t', dependencies=list(dependencies), priority=2,
-                milestone='m', group=group)
+                milestone='m', group=group, area='control-runtime')
     return dict(number=number, title=item['title'], body=planning.body(item),
                 state='OPEN', labels=[{'name': 'agent:ready'}])
 
@@ -87,6 +89,110 @@ class RecoveryTests(unittest.TestCase):
         self.sup.state.reserve(number, worker, 'g' + str(number))
         if clone_name:
             self.sup.state.update_job(number, clone=str(self.runtime.pool_root / clone_name))
+
+    def timeout_factory(self):
+        self.sup.state.close()
+        self.config['factory'] = dict(worker_slots=4, workspace_slots=8,
+                                     daily_merge_goal=50)
+        self.sup = Supervisor(self.config)
+        self.sup.github, self.sup.runtime = self.gh, self.runtime
+        self.gh.update_issue = Mock()
+        self.gh.comment = Mock()
+        self.sup.clock = lambda: 10000
+        self.sup.admission.clock = self.sup.clock
+        self.sup.state.set('last_plan', time.time())
+        return self.sup
+
+    def timeout_receipt(self, status='timeout', number=1):
+        process = self.sup.state.get('process:' + str(number))
+        receipt = Path(process['receipt'])
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text(json.dumps(dict(status=status, exit_code=-15)))
+
+    def test_factory_timeout_resumes_saved_work_after_delay_and_restart(self):
+        s = self.timeout_factory()
+        _, clone = self.start_job()
+        (clone / 'wip.rs').write_text('implementation ready for verification')
+        s.state.update_job(1, repairs=2)
+        self.timeout_receipt()
+        s.factory.advance(self.gh.items, [])
+        self.assertEqual(s.state.job(1)['status'], 'blocked')
+        self.assertEqual(s.state.get('factory:status')['waiting_work'],
+                         [dict(issue=1, kind='retry', not_before=10060)])
+        self.assertTrue(s.state.get('recovery:1')['work'])
+        self.assertFalse(self.git(clone, 'status', '--porcelain'))
+        s.state.close()
+        self.sup = Supervisor(self.config)
+        self.sup.github, self.sup.runtime = self.gh, self.runtime
+        self.sup.clock = lambda: 10059
+        self.sup.admission.clock = self.sup.clock
+        self.sup.factory.advance(self.gh.items, [])
+        self.assertEqual(self.sup.state.job(1)['status'], 'blocked')
+        self.sup.clock = lambda: 10060
+        self.sup.admission.clock = self.sup.clock
+        self.sup.factory.advance(self.gh.items, [])
+        self.assertEqual(self.sup.state.job(1)['status'], 'working')
+        self.assertEqual(self.sup.state.job(1)['repairs'], 2)
+        self.assertEqual((Path(self.sup.state.job(1)['clone']) / 'wip.rs').read_text(),
+                         'implementation ready for verification')
+        events = [json.loads(e['payload']) for e in self.sup.state.events(1)
+                  if e['kind'] == 'redispatch']
+        self.assertEqual(events[-1]['cause'], 'timeout-requeue')
+        self.assertEqual(len(self.runtime.spawned), 2)
+
+    def test_factory_timeout_recovery_is_bounded_across_restart(self):
+        s = self.timeout_factory()
+        _, clone = self.start_job()
+        (clone / 'wip.rs').write_text('unfinished work')
+        for count in range(1, 4):
+            self.timeout_receipt()
+            s.factory.advance(self.gh.items, [])
+            self.assertEqual(s.state.job(1)['status'], 'blocked')
+            if count == 3:
+                self.assertFalse(s.state.get('retry:1'))
+                self.assertEqual(s.state.get('factory:status')['waiting_work'], [])
+                break
+            s.state.close()
+            self.sup = s = Supervisor(self.config)
+            s.github, s.runtime = self.gh, self.runtime
+            s.clock = lambda count=count: 10000 + count * 60
+            s.admission.clock = s.clock
+            s.factory.advance(self.gh.items, [])
+            self.assertEqual(s.state.job(1)['status'], 'working')
+        self.assertEqual(len(self.runtime.spawned), 3)
+        self.assertEqual((clone / 'wip.rs').read_text(), 'unfinished work')
+
+    def test_factory_does_not_retry_other_failures_or_unsafe_timeouts(self):
+        s = self.timeout_factory()
+        cases = [('failed', True, 0, 2, False),
+                 ('lost', True, 0, 2, False),
+                 ('stopped', True, 0, 2, False),
+                 ('timeout', False, 0, 2, False),
+                 ('timeout', True, 3, 2, False),
+                 ('timeout', True, 0, 0, False),
+                 ('timeout', True, 0, 2, True)]
+        for n, (status, work, repairs, limit, uncertain) in enumerate(cases, 1):
+            with self.subTest(status=status, work=work, repairs=repairs,
+                              limit=limit, uncertain=uncertain):
+                if n != 1:
+                    self.gh.items.append(issue(n))
+                self.config['factory']['max_timeout_retries'] = limit
+                _, clone = self.start_job(n)
+                if work:
+                    (clone / 'wip.rs').write_text('saved work')
+                s.state.update_job(n, repairs=repairs)
+                self.timeout_receipt(status, n)
+                if uncertain:
+                    with patch.object(self.runtime, 'run_git',
+                                      side_effect=OSError('Git inventory unavailable')):
+                        s.factory.advance(self.gh.items, [])
+                    self.assertIsNone(s.state.get('recovery:' + str(n))['work'])
+                else:
+                    s.factory.advance(self.gh.items, [])
+                self.assertEqual(s.state.job(n)['status'], 'blocked')
+                self.assertFalse(s.state.get('retry:' + str(n)))
+                self.assertEqual(s.state.get('factory:status')['waiting_work'], [])
+                self.assertEqual(len(self.runtime.spawned), n)
 
     def test_retry_restores_branch_switched_clone(self):
         """The reported failure: clone reused onto another branch, then retried."""

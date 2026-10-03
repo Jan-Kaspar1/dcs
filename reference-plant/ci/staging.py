@@ -4,7 +4,7 @@ consumer-side proof that the deployed redundant pair stages and
 de-stages on level through the emitted model's declared setpoint
 chain (WW-ENG-003, WW-CTL-001, WW-CTL-002).
 
-The pair leg (`ci/pair.py`) proves the manifest-declared pair runs and
+The pair leg (`ci/legs/pair.py`) proves the manifest-declared pair runs and
 switches; the takeover leg proves the receipted operator seam. This
 leg exercises the process behavior those deployments exist to run:
 the emitted consumer model's `threshold-chain` — its declared
@@ -70,6 +70,10 @@ import hashlib
 import json
 import os
 import sys
+
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "legs")
+)
 
 import pair
 import simulate

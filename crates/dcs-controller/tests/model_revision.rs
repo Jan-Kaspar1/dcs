@@ -173,29 +173,6 @@ fn reinit_report(standby: &MonitorClient) -> CarryoverReport {
     }
 }
 
-/// The peer's served snapshot as a digest value, its `generation`
-/// stamp masked — deliberately a fresh per-boot identity per store, so
-/// two equal runs genuinely differ in it; everything else the run
-/// produces must compare equal.
-fn served(client: &MonitorClient) -> serde_json::Value {
-    const KEY: &str = "\"generation\":";
-    let text = serde_json::to_string(&client.snapshot().unwrap()).unwrap();
-    let mut redacted = String::with_capacity(text.len());
-    let mut rest = text.as_str();
-    while let Some(at) = rest.find(KEY) {
-        let value = at + KEY.len();
-        let digits = rest[value..]
-            .find(|c: char| !(c.is_ascii_digit() || c.is_whitespace()))
-            .map(|i| value + i)
-            .unwrap_or(rest.len());
-        redacted.push_str(&rest[..value]);
-        redacted.push('0');
-        rest = &rest[digits..];
-    }
-    redacted.push_str(rest);
-    serde_json::from_str(&redacted).unwrap()
-}
-
 /// One scripted run of the full revision roll: v1 active, v2
 /// `--revised` standby, the documented demote-then-promote switchover,
 /// and M ticks of the promoted peer's field writes. Returns the run's
@@ -411,7 +388,7 @@ fn run_roll(tag: &str) -> serde_json::Value {
             .unwrap()
             .iter()
             .filter_map(|entry| match entry.event {
-                JournalEvent::RoleChanged { from, to } => Some((from, to)),
+                JournalEvent::RoleChanged { from, to, .. } => Some((from, to)),
                 _ => None,
             })
             .collect()
@@ -420,10 +397,7 @@ fn run_roll(tag: &str) -> serde_json::Value {
     // The digest's fingerprints are masked: each run's plant listens on
     // an ephemeral port whose address is part of the fingerprinted
     // document, so the hash values legitimately differ run to run — the
-    // assertions above already pinned them to the loaded models. The
-    // served snapshots' `generation` stamp masks likewise: deliberately
-    // a fresh per-boot identity per store, so two equal runs genuinely
-    // differ in it.
+    // assertions above already pinned them to the loaded models.
     let mut masked_report = serde_json::to_value(&report).unwrap();
     masked_report["from"] = "v1".into();
     masked_report["to"] = "v2".into();
@@ -436,8 +410,8 @@ fn run_roll(tag: &str) -> serde_json::Value {
         "report": masked_report,
         "transitions": [role_changes(&active), role_changes(&standby)],
         "final": [
-            served(&active),
-            served(&standby),
+            active.snapshot().unwrap(),
+            standby.snapshot().unwrap(),
             field.read(VALVE).unwrap(),
             field.read(LEVEL).unwrap(),
         ],

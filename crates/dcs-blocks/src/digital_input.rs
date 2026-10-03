@@ -394,6 +394,7 @@ mod tests {
             parameters,
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let mut block = DigitalInput::from_parameters("di", IN, OUT, &instance.parameters).unwrap();
         assert!(block.invert);

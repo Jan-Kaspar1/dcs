@@ -23,8 +23,9 @@
 //! command reports the scan tick it is scheduled to apply at and later an
 //! [`CommandOutcome::Applied`] receipt at that tick; a refused command is
 //! [`CommandOutcome::Rejected`] with a [`CommandError`] naming the
-//! reason — unknown point, not model-declared writable, type mismatch, or
-//! driver rejection for point commands; unknown component, unknown or
+//! reason — unknown point, not model-declared writable, type mismatch,
+//! driver rejection, or a write to a force-held internal point for point
+//! commands; unknown component, unknown or
 //! unsupported parameter, type mismatch, or out-of-range for parameter
 //! commands; a full pending-command queue refusing admission for either —
 //! and carrying the offending point or component.
@@ -57,6 +58,14 @@ pub enum Command {
     /// `kind`, or when `kind` differs from the kind the point map declares
     /// for `point`. Matching is strict, never coercing, mirroring the I/O
     /// contract.
+    ///
+    /// A write to a point a [`ForcePoint`](Self::ForcePoint) currently
+    /// pins is honored only where a store exists for the release to
+    /// observe: a forced *field* point's write still reaches the driver
+    /// — the force overrides the image, not the field — while a forced
+    /// *internal* point has no store but the image the force owns, so
+    /// its write refuses with [`CommandError::PointForced`] rather than
+    /// settling `applied` for an effect that could never land.
     WriteValue {
         /// The logical point to write.
         point: PointId,
@@ -95,7 +104,11 @@ pub enum Command {
     /// `value` stamped
     /// [`Quality::Uncertain`](crate::Quality::Uncertain)`(`[`QualityReason::Substituted`](crate::QualityReason::Substituted)`)`
     /// — substitution, never false `Good` data — and the driver's read
-    /// is bypassed; a force writes nothing to the field.
+    /// is bypassed; a force writes nothing to the field. While the
+    /// force stands, a [`WriteValue`](Self::WriteValue) to a *field*
+    /// point still reaches the driver for the release to observe; the
+    /// same write to a force-held *internal* point refuses with
+    /// [`CommandError::PointForced`].
     ForcePoint {
         /// The logical point to force.
         point: PointId,
@@ -130,11 +143,15 @@ pub enum Command {
     /// diagnostics report; `command` is the declared
     /// [`CommandSpec`](crate::CommandSpec)'s `name`; `arguments` is
     /// keyed by the declared [`CommandArgument`](crate::CommandArgument)
-    /// names — each supplied value's variant must equal the argument's
-    /// declared [`ValueKind`], strict and never coercing like the rest
-    /// of the command surface. The named refusals are
-    /// [`UnknownComponent`](CommandError::UnknownComponent),
+    /// names — every supplied name must be one the request schema
+    /// declares, and each supplied value's variant must equal the
+    /// argument's declared [`ValueKind`], strict and never coercing
+    /// like the rest of the command surface. A declared argument left
+    /// absent stays legal: the kind owns absent-argument defaults — the
+    /// schema bounds names and kinds, not presence. The named refusals
+    /// are [`UnknownComponent`](CommandError::UnknownComponent),
     /// [`UnknownCommand`](CommandError::UnknownCommand),
+    /// [`UnknownArgument`](CommandError::UnknownArgument),
     /// [`ArgumentTypeMismatch`](CommandError::ArgumentTypeMismatch), and
     /// [`CommandRefused`](CommandError::CommandRefused).
     ///
@@ -208,12 +225,39 @@ pub enum CommandError {
         /// The offending point.
         point: PointId,
     },
+    /// The point's `io_point` declaration marks its commands
+    /// reason-carrying — the `requires_reason` flag the managed-state
+    /// record obligation lands on — and the submission declared none.
+    /// The reason is the receipt's audit field beside `actor`: a
+    /// command targeting a marked point must submit it in the
+    /// attributed envelope, or the admission check refuses it here —
+    /// the same surface-level rejection tier as
+    /// [`NotWritable`](Self::NotWritable), decided before the payload
+    /// is examined. Which points declare the flag is the per-alarm
+    /// customer policy the shelving-reason decision leaves open.
+    ReasonRequired {
+        /// The offending point.
+        point: PointId,
+    },
     /// The field driver refused the write at the scan boundary.
     DriverRejected {
         /// The offending point.
         point: PointId,
         /// The error the driver returned.
         error: IoError,
+    },
+    /// The write targets an image-held (internal) `In` point while a
+    /// force stands on it. The force owns the point's image until
+    /// release — the input phase re-stamps the forced value every scan —
+    /// and the executor keeps no second store for the release to
+    /// observe, so nothing the write staged could ever land: settling
+    /// `Applied` would journal an effect that never happened. Release
+    /// the force, then write. Forced *field* points refuse nothing
+    /// here: their write still reaches the driver, which holds it for
+    /// the release to observe.
+    PointForced {
+        /// The offending point.
+        point: PointId,
     },
     /// The controller hosts no component of this name.
     UnknownComponent {
@@ -280,6 +324,22 @@ pub enum CommandError {
         component: String,
         /// The rejected command identity.
         command: String,
+    },
+    /// An [`Invoke`](crate::Command::Invoke) carries an argument name
+    /// the declared command's [`request`](crate::CommandSpec) schema
+    /// does not declare — the schema bounds the names a submission may
+    /// carry, so an undeclared argument refuses at submission rather
+    /// than settle `applied` for a payload outside the declared
+    /// request. Only presence is bounded this way: a *declared*
+    /// argument left out of the submission stays legal, the kind
+    /// owning its absent-argument default.
+    UnknownArgument {
+        /// The offending component name.
+        component: String,
+        /// The invoked command's identity.
+        command: String,
+        /// The argument name the request schema does not declare.
+        argument: String,
     },
     /// An [`Invoke`](crate::Command::Invoke) argument's kind differs
     /// from the kind the declared command's
@@ -358,8 +418,10 @@ impl CommandError {
         match self {
             CommandError::UnknownPoint { point }
             | CommandError::NotWritable { point }
+            | CommandError::ReasonRequired { point }
             | CommandError::TypeMismatch { point, .. }
-            | CommandError::DriverRejected { point, .. } => Some(*point),
+            | CommandError::DriverRejected { point, .. }
+            | CommandError::PointForced { point } => Some(*point),
             CommandError::NotActive { point, .. }
             | CommandError::QueueFull { point, .. }
             | CommandError::Superseded { point } => *point,
@@ -378,6 +440,7 @@ impl CommandError {
             | CommandError::OutOfRange { component, .. }
             | CommandError::InvalidParameter { component, .. }
             | CommandError::UnknownCommand { component, .. }
+            | CommandError::UnknownArgument { component, .. }
             | CommandError::ArgumentTypeMismatch { component, .. }
             | CommandError::CommandRefused { component, .. } => Some(component),
             _ => None,
@@ -402,9 +465,20 @@ impl fmt::Display for CommandError {
             CommandError::NotWritable { point } => {
                 write!(f, "I/O point {point:?} is not declared writable")
             }
+            CommandError::ReasonRequired { point } => write!(
+                f,
+                "I/O point {point:?} requires a declared reason: its io_point \
+                 declaration marks the command reason-carrying"
+            ),
             CommandError::DriverRejected { point, error } => {
                 write!(f, "driver rejected command on I/O point {point:?}: {error}")
             }
+            CommandError::PointForced { point } => write!(
+                f,
+                "I/O point {point:?} is forced: the force owns the image-held \
+                 point until release, so the write cannot land; release the \
+                 force, then write"
+            ),
             CommandError::UnknownComponent { component } => {
                 write!(f, "unknown component {component:?}")
             }
@@ -451,6 +525,14 @@ impl fmt::Display for CommandError {
             CommandError::UnknownCommand { component, command } => {
                 write!(f, "component {component:?} declares no command {command:?}")
             }
+            CommandError::UnknownArgument {
+                component,
+                command,
+                argument,
+            } => write!(
+                f,
+                "command {component:?}.{command:?} declares no argument {argument:?}"
+            ),
             CommandError::ArgumentTypeMismatch {
                 component,
                 command,
@@ -524,14 +606,14 @@ impl std::error::Error for CommandError {}
 #[serde(rename_all = "snake_case")]
 pub enum CommandOutcome {
     /// The command passed validation and is queued to apply at `apply_tick`
-    /// — the tick the next scan runs at.
+    /// — the run tick the next scan runs at.
     Accepted {
-        /// The scan tick the command is scheduled to apply at.
+        /// The run tick the command is scheduled to apply at.
         apply_tick: Tick,
     },
-    /// The command was applied at the recorded scan tick.
+    /// The command was applied at the recorded run tick.
     Applied {
-        /// The scan tick the command applied at.
+        /// The run tick the command applied at.
         tick: Tick,
     },
     /// The command was refused; `reason` names why.
@@ -575,6 +657,33 @@ pub struct CommandReceipt {
     /// receipt serializes without the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<String>,
+    /// The reason the submitter declared for the command, when it
+    /// declared one.
+    ///
+    /// The shelving-reason record's in-contract carriage: the reason is
+    /// an attribute of the settled command, so it joins `actor` on the
+    /// attributed `POST /command` envelope, rides this receipt
+    /// unchanged through the scan boundary, and echoes into the
+    /// journaled [`CommandSettled`](crate::JournalEvent::CommandSettled)
+    /// entry — one durable record carrying actor, action, outcome, and
+    /// reason. The field is generic — any command's envelope may
+    /// declare a reason — while the record obligation attaches to the
+    /// operator-driven managed writes (`shelve`/`oos` in both
+    /// directions); a refused command journals its receipt with
+    /// whatever reason was declared, the refused attempt as auditable
+    /// as the applied one.
+    ///
+    /// The reason is *declared* free text, never authenticated — the
+    /// `actor` convention. An absent reason journals as `None`, never
+    /// a rejection, except where the point's `io_point` declaration
+    /// marks the command reason-carrying (`requires_reason`), which
+    /// answers [`CommandError::ReasonRequired`] — the per-alarm
+    /// mandatory-reason declaration the decision records. Serde-
+    /// optional like `actor`: receipts and journaled entries predating
+    /// the field deserialize with `None`, and a reasonless receipt
+    /// serializes without the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[cfg(test)]
@@ -705,6 +814,14 @@ mod tests {
                 r#"{"unknown_command":{"component":"vlv:1","command":"stroke_test"}}"#,
             ),
             (
+                CommandError::UnknownArgument {
+                    component: "vlv:1".to_string(),
+                    command: "stroke_test".to_string(),
+                    argument: "rate".to_string(),
+                },
+                r#"{"unknown_argument":{"component":"vlv:1","command":"stroke_test","argument":"rate"}}"#,
+            ),
+            (
                 CommandError::ArgumentTypeMismatch {
                     component: "vlv:1".to_string(),
                     command: "stroke_test".to_string(),
@@ -769,6 +886,11 @@ mod tests {
             CommandError::UnknownCommand {
                 component: "vlv:1".to_string(),
                 command: "stroke_test".to_string(),
+            },
+            CommandError::UnknownArgument {
+                component: "vlv:1".to_string(),
+                command: "stroke_test".to_string(),
+                argument: "rate".to_string(),
             },
             CommandError::ArgumentTypeMismatch {
                 component: "vlv:1".to_string(),
@@ -847,8 +969,18 @@ mod tests {
                 },
             },
             CommandOutcome::Rejected {
+                reason: CommandError::PointForced { point: PointId(7) },
+            },
+            CommandOutcome::Rejected {
                 reason: CommandError::UnknownComponent {
                     component: "ghost".to_string(),
+                },
+            },
+            CommandOutcome::Rejected {
+                reason: CommandError::UnknownArgument {
+                    component: "vlv:1".to_string(),
+                    command: "stroke_test".to_string(),
+                    argument: "rate".to_string(),
                 },
             },
             CommandOutcome::Rejected {
@@ -894,6 +1026,7 @@ mod tests {
                 command: set_parameter(),
                 outcome,
                 actor: None,
+                reason: None,
             };
             let json = serde_json::to_string(&receipt).unwrap();
             assert_eq!(
@@ -909,6 +1042,7 @@ mod tests {
             command: write_value(),
             outcome: CommandOutcome::Applied { tick: Tick(4) },
             actor: Some("operator-7".to_string()),
+            reason: None,
         };
         let json = serde_json::to_string(&attributed).unwrap();
         assert!(json.contains("\"actor\":\"operator-7\""), "{json}");
@@ -921,6 +1055,7 @@ mod tests {
         // a receipt predating the field still deserializes.
         let bare = CommandReceipt {
             actor: None,
+            reason: None,
             ..attributed.clone()
         };
         let json = serde_json::to_string(&bare).unwrap();
@@ -933,11 +1068,72 @@ mod tests {
     }
 
     #[test]
+    fn receipt_reason_is_serde_optional_beside_actor() {
+        let reasoned = CommandReceipt {
+            command: write_value(),
+            outcome: CommandOutcome::Applied { tick: Tick(4) },
+            actor: Some("operator-7".to_string()),
+            reason: Some("nuisance trips during pump work".to_string()),
+        };
+        let json = serde_json::to_string(&reasoned).unwrap();
+        assert!(
+            json.contains("\"reason\":\"nuisance trips during pump work\""),
+            "{json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<CommandReceipt>(&json).unwrap(),
+            reasoned
+        );
+
+        // A reason rides unattributed commands too — the field is
+        // independent of actor.
+        let reason_only = CommandReceipt {
+            actor: None,
+            ..reasoned.clone()
+        };
+        let json = serde_json::to_string(&reason_only).unwrap();
+        assert!(!json.contains("actor"), "{json}");
+        assert!(json.contains("\"reason\""), "{json}");
+        assert_eq!(
+            serde_json::from_str::<CommandReceipt>(&json).unwrap(),
+            reason_only
+        );
+
+        // A reasonless receipt serializes without the key, and the
+        // pre-reason wire shape — command, outcome, optional actor —
+        // still deserializes with `None`.
+        let bare = CommandReceipt {
+            reason: None,
+            ..reasoned.clone()
+        };
+        let json = serde_json::to_string(&bare).unwrap();
+        assert!(!json.contains("reason"), "{json}");
+        let legacy = serde_json::from_str::<CommandReceipt>(
+            r#"{"command":{"write_value":{"point":7,"kind":"float","value":{"float":2.5}}},
+                "outcome":{"applied":{"tick":4}},"actor":"operator-7"}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.actor.as_deref(), Some("operator-7"));
+        assert_eq!(legacy.reason, None);
+    }
+
+    #[test]
+    fn reason_required_serializes_in_the_command_contract() {
+        let error = CommandError::ReasonRequired { point: PointId(9) };
+        let json = serde_json::to_string(&error).unwrap();
+        assert_eq!(json, r#"{"reason_required":{"point":9}}"#);
+        assert_eq!(serde_json::from_str::<CommandError>(&json).unwrap(), error);
+        assert_eq!(error.point(), Some(PointId(9)));
+        assert!(error.to_string().contains("9"));
+    }
+
+    #[test]
     fn error_carries_offending_point() {
         let point = PointId(9);
         for error in [
             CommandError::UnknownPoint { point },
             CommandError::NotWritable { point },
+            CommandError::ReasonRequired { point },
             CommandError::TypeMismatch {
                 point,
                 expected: ValueKind::Int,
@@ -947,6 +1143,7 @@ mod tests {
                 point,
                 error: IoError::Disconnected(point),
             },
+            CommandError::PointForced { point },
             CommandError::QueueFull {
                 point: Some(point),
                 capacity: 4,
@@ -1018,6 +1215,7 @@ mod tests {
                 reason: CommandError::UnknownPoint { point: PointId(7) },
             },
             actor: None,
+            reason: None,
         };
         let json = serde_json::to_string(&receipt).unwrap();
         assert!(json.contains("\"rejected\""), "{json}");

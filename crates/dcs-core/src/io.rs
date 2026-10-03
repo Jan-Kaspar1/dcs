@@ -24,8 +24,8 @@ use std::marker::PhantomData;
 /// retrieves it uniformly.
 ///
 /// Variants serialize in `snake_case` (`{"unknown_point": …}`,
-/// `{"type_mismatch": {…}}`, …); the legacy PascalCase spellings remain
-/// accepted on read.
+/// `{"type_mismatch": {…}}`, `{"invalid_value": {…}}`, …); the legacy
+/// PascalCase spellings remain accepted on read.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IoError {
@@ -58,6 +58,17 @@ pub enum IoError {
     /// promoted standby takes the field. Reads are never fenced.
     #[serde(alias = "Fenced")]
     Fenced(PointId),
+    /// The value's kind matched but the field cannot represent it: a
+    /// `Float` carrying NaN or an infinity. Non-finite floats have no
+    /// JSON spelling — serde emits `null` — so a driver that stored
+    /// one would serve samples its own wire contracts cannot carry
+    /// back; the refusal keeps the representability invariant at the
+    /// storage boundary rather than letting the field go corrupt.
+    #[serde(alias = "InvalidValue")]
+    InvalidValue {
+        /// The offending point.
+        point: PointId,
+    },
 }
 
 impl IoError {
@@ -68,7 +79,7 @@ impl IoError {
             | IoError::Disconnected(point)
             | IoError::Timeout(point)
             | IoError::Fenced(point) => point,
-            IoError::TypeMismatch { point, .. } => point,
+            IoError::TypeMismatch { point, .. } | IoError::InvalidValue { point } => point,
         }
     }
 }
@@ -91,6 +102,9 @@ impl fmt::Display for IoError {
                 f,
                 "I/O point {point:?} expects {expected:?}, found {found:?}"
             ),
+            IoError::InvalidValue { point } => {
+                write!(f, "I/O point {point:?} refused an unrepresentable value")
+            }
         }
     }
 }
@@ -184,7 +198,7 @@ pub struct ExchangeDiagnostics {
     /// driver attributes the shortfall to a station and degrades only
     /// that station's points; the rest of the image latched.
     pub working_counter_mismatches: u64,
-    /// The scan tick of the most recent completed exchange — the
+    /// The run tick of the most recent completed exchange — the
     /// acquisition stamp the currently latched input samples carry.
     /// `None` before the first completed exchange.
     pub last_exchange_tick: Option<Tick>,
@@ -207,13 +221,22 @@ pub struct ExchangeDiagnostics {
 pub trait IoDriver {
     /// Reads the most recent sample for `point`.
     ///
+    /// The returned [`Sample::tick`] is stamped in the driver's own tick
+    /// domain — a remote simulated plant's *plant tick*, the scan's *run
+    /// tick* for a [`CyclicIoDriver`]'s latched image — which need not be
+    /// the caller's: the executor treats it as change evidence and
+    /// re-stamps the landed sample with the scan's run tick rather than
+    /// comparing the domains directly.
+    ///
     /// Returns [`IoError::UnknownPoint`] when the driver serves no such point.
     fn read(&self, point: PointId) -> Result<Sample, IoError>;
 
     /// Writes `value` to `point`.
     ///
     /// Returns [`IoError::TypeMismatch`] when `value`'s kind differs from the
-    /// kind the plant model declared for the point.
+    /// kind the plant model declared for the point, and may return
+    /// [`IoError::InvalidValue`] when the kind matches but the value is not
+    /// representable in the field — a non-finite `Float`.
     fn write(&self, point: PointId, value: Value) -> Result<(), IoError>;
 
     /// Captures the driver's internal state for checkpointing, or `None`
@@ -336,8 +359,8 @@ pub trait IoDriver {
 /// The trait is deliberately open: device integrations implement it
 /// from their own crates, like [`IoDriver`] itself.
 pub trait CyclicIoDriver: IoDriver {
-    /// Runs one process-image exchange for scan `tick`, per the
-    /// contract above.
+    /// Runs one process-image exchange for run tick `tick` — the
+    /// caller's scan tick — per the contract above.
     fn exchange(&self, tick: Tick) -> Result<(), IoError>;
 }
 
@@ -422,7 +445,9 @@ pub struct TypedSample<T> {
     pub value: T,
     /// How much the value can be trusted.
     pub quality: Quality,
-    /// The logical tick at which the value was sampled.
+    /// The logical tick at which the value was sampled — same domain as
+    /// the [`Sample`] it was decoded from: a run tick on scan-image
+    /// samples, the driver's own domain on driver-returned ones.
     pub tick: Tick,
 }
 
@@ -692,6 +717,7 @@ mod tests {
                 found: Value::Int(1),
             },
             IoError::Fenced(PointId(5)),
+            IoError::InvalidValue { point: PointId(6) },
         ] {
             let json = serde_json::to_string(&error).unwrap();
             assert_eq!(serde_json::from_str::<IoError>(&json).unwrap(), error);
@@ -715,6 +741,10 @@ mod tests {
                 r#"{"type_mismatch":{"point":4,"expected":"float","found":{"int":1}}}"#,
             ),
             (IoError::Fenced(PointId(5)), r#"{"fenced":5}"#),
+            (
+                IoError::InvalidValue { point: PointId(6) },
+                r#"{"invalid_value":{"point":6}}"#,
+            ),
         ] {
             assert_eq!(serde_json::to_string(&error).unwrap(), emitted);
         }
@@ -735,6 +765,10 @@ mod tests {
                 },
             ),
             (r#"{"Fenced":5}"#, IoError::Fenced(PointId(5))),
+            (
+                r#"{"InvalidValue":{"point":6}}"#,
+                IoError::InvalidValue { point: PointId(6) },
+            ),
         ] {
             assert_eq!(serde_json::from_str::<IoError>(legacy).unwrap(), error);
         }

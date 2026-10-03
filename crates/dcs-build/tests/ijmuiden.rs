@@ -81,8 +81,12 @@ const DYNAMICS_JSON: &str = concat!(
 /// The plant step each scan period covers, in seconds.
 const DT: f64 = 1.0;
 /// The scripted run length — the second excursion's re-latch plus
-/// settling.
-const SCANS: u64 = 78;
+/// settling, and one scan past the playback's last remote update: the
+/// run's closing freshness evidence needs the repeater's held reading
+/// one tick older than the arrival period its own playback
+/// demonstrated (`schedule::REMOTE_PERIOD`), which is where the
+/// declared budget no longer stands alone.
+const SCANS: u64 = 79;
 /// The actor every operator command carries — the attributed, receipted
 /// path decision 77 names for the bypass.
 const OPERATOR: &str = "operator";
@@ -221,27 +225,6 @@ fn bool_(sample: Sample) -> bool {
         Value::Bool(value) => value,
         other => panic!("expected a Bool sample, got {other:?}"),
     }
-}
-
-/// Redacts the served per-boot `generation` stamps — deliberately a
-/// fresh identity per store, so two equal runs genuinely differ in
-/// it; everything the run *produces* must still compare equal.
-fn redact_generations(text: &str) -> String {
-    const KEY: &str = "\"generation\":";
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = rest.find(KEY) {
-        let value = at + KEY.len();
-        let digits = rest[value..]
-            .find(|c: char| !(c.is_ascii_digit() || c.is_whitespace()))
-            .map(|i| value + i)
-            .unwrap_or(rest.len());
-        out.push_str(&rest[..value]);
-        out.push('0');
-        rest = &rest[digits..];
-    }
-    out.push_str(rest);
-    out
 }
 
 fn telemetry(snapshot: &TelemetrySnapshot, point: PointId) -> &PointTelemetry {
@@ -514,9 +497,7 @@ fn run() -> Run {
                 scans,
                 journal: client.journal(0).unwrap(),
                 receipts: client.receipts().unwrap(),
-                snapshot: redact_generations(
-                    &serde_json::to_string(&client.snapshot().unwrap()).unwrap(),
-                ),
+                snapshot: serde_json::to_string(&client.snapshot().unwrap()).unwrap(),
             }
         }));
         monitor.shutdown();
@@ -562,12 +543,19 @@ fn checked_in_document_validates_and_documents_its_lint() {
     let model = fixture_model();
     assert_eq!(model.version, dcs_model::MODEL_VERSION);
     assert!(model.validate().is_empty(), "{:?}", model.validate());
-    // The document's one finding: the protection layer's bypass is a
-    // writable field point — decision 77's declared operator path,
-    // deliberately a finding rather than an internal command point.
+    // The document's one non-freshness finding: the protection layer's
+    // bypass is a writable field point — decision 77's declared
+    // operator path, deliberately a finding rather than an internal
+    // command point. Its remaining advisories are undeclared
+    // `stale_after_ticks` budgets on the field inputs — freshness stays
+    // an opt-in per-point declaration (decision 45).
     let lint = model.lint();
-    assert_eq!(lint.len(), 1, "{lint:?}");
-    let finding = &lint[0];
+    let findings: Vec<_> = lint
+        .iter()
+        .filter(|finding| finding.rule != dcs_model::LintRule::FieldInputWithoutFreshnessBudget)
+        .collect();
+    assert_eq!(findings.len(), 1, "{lint:?}");
+    let finding = findings[0];
     assert_eq!(finding.rule, dcs_model::LintRule::WritableFieldPoint);
     assert!(
         finding
@@ -957,7 +945,7 @@ fn scripted_run_shows_the_consequential_annunciation() {
         Quality::Good
     );
     assert!(
-        scans[schedule::REMOTE_LAST_UPDATE as usize + 3..schedule::REMOTE_RECOVERY as usize - 1]
+        scans[schedule::REMOTE_FIRST_STALE as usize - 1..schedule::REMOTE_RECOVERY as usize - 1]
             .iter()
             .all(|scan| scan.remote_quality == Quality::Uncertain(QualityReason::Stale)),
         "the frozen repeater must present stale, not a healthy last-known value"
@@ -969,13 +957,13 @@ fn scripted_run_shows_the_consequential_annunciation() {
     // unacknowledged until the scan-28 ack, clearing on the repeater's
     // recovery.
     assert!(
-        scans[..schedule::REMOTE_LAST_UPDATE as usize + 3]
+        scans[..schedule::REMOTE_FIRST_STALE as usize - 1]
             .iter()
             .all(|scan| !scan.backup_unhealthy),
         "a healthy standby must not annunciate"
     );
     assert!(
-        scans[schedule::REMOTE_LAST_UPDATE as usize + 3..schedule::REMOTE_RECOVERY as usize - 1]
+        scans[schedule::REMOTE_FIRST_STALE as usize - 1..schedule::REMOTE_RECOVERY as usize - 1]
             .iter()
             .all(|scan| scan.backup_unhealthy),
         "the standby leg must annunciate while the repeater's own sample is untrusted"

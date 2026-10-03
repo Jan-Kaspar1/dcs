@@ -3,10 +3,32 @@
 # `[workspace]` table makes it a self-contained package whose only DCS
 # dependencies are the pinned release crates. The pin is the release
 # contract's recorded mechanism: `git = "<published origin>"` at an
-# immutable revision on the release line — the rev recorded below is
-# the `v0.2.0` release's recorded commit
-# (docs/releases/v0.2.0/record.md), whose tooling serves the
-# block-interface registry, declared commands, and emitted events the
+# immutable revision on the release line — the tag recorded below is
+# the `v0.10.0` release
+# (docs/releases/v0.10.0/record.md — the recorded commit, filled at the
+# cut, is the same pin as a `rev`), whose tooling serves the
+# block-interface registry, declared commands, routed emitted events,
+# the redundant-pair claim and suspended-receipt contracts the legs
+# exercise, the corrected claim/tracking/failover arbitration and the
+# published-mirror bounded liveness, the tracking-source per-pull
+# rediscovery, the bounded driven-scan batch, the honest status-line
+# label, the bounded history backfill, the born-active's recorded
+# startup-failure dispositions, and the declared-duty durable
+# process-history store — beside the voluntary demotion's
+# released-claim hand-back, the persistence paths' startup
+# distinctness refusal, the deferred startup-claim refusal's named
+# dispositions, and the remote born-active's deferred correspondence
+# gate — and the remote attachment's bounded contact backoff, the
+# convergence-gated fencing-loss reclaim, the self-address
+# tracking-source refusal, the sim-bus claim family's conditional
+# grant and claim-introspection surface with the point-wise driver's
+# re-attach and the cyclic exchange's claim-loss demotion, the
+# deferred refusal's `--standby` remedy, the announced-source
+# checkpoint verification, the announced/owner skew bound, and the
+# checkpoint puller's transient-miss recovery the mirror legs gate
+# on — and the checkpoint path's cross-peer single-writer refusal
+# and the promotion claim's basis skew bound this pin's mirror legs
+# gate on — and the shipped `dcs-ctl`/`dcs-alarm-report` tooling the
 # clean check proves; `docs/release-contract.md` records the
 # mechanism.
 [package]
@@ -20,6 +42,6 @@ description = "Reference duty/standby lift station — a DCS consumer plant"
 [workspace]
 
 [dependencies]
-dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "c2b5694d9fd6f6168b85c1dfc2e1542b369b3a3f" }
-dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", rev = "c2b5694d9fd6f6168b85c1dfc2e1542b369b3a3f" }
+dcs-build = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.10.0" }
+dcs-model = { git = "https://github.com/Jan-Kaspar1/dcs.git", tag = "v0.10.0" }
 serde_json = "1"

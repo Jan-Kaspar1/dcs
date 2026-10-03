@@ -35,17 +35,23 @@
 //! store as the completed scan's immutable read model rather than
 //! rebuilding it per request.
 
-use crate::journal_file::JournalFile;
+use crate::drain::Drain;
+use crate::history_file::{HistoryFile, HistoryRecord};
+use crate::journal_file::{JournalFile, JournalRecord};
 use crate::store::Store;
 use dcs_core::{
-    CarryoverReport, CommandOutcome, CommandReceipt, Divergence, EventRetention, JournalEntry,
-    JournalEvent, PointId, Quality, Role, TelemetrySnapshot, Tick, Value,
+    CarryoverReport, CommandOutcome, CommandReceipt, Divergence, DurableEntry, DurableEvent,
+    EventRetention, JournalEntry, JournalEvent, PointId, Quality, TelemetrySnapshot, Tick,
+    TickAnchor, Value,
 };
-use dcs_runtime::{Executor, ResolutionReport, SourceRestart};
-use std::collections::{BTreeMap, HashMap};
+use dcs_runtime::{
+    ClaimObservation, ClaimRearm, Executor, ForeignClaimPreempt, OrphanReport, PromotionRefusal,
+    ResolutionReport, RoleChange, SourceRestart, StartupRefusal,
+};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Retention bounds for a [`Monitor`](crate::Monitor)'s recorded and
 /// published streams, plus the journal's optional durable sink.
@@ -78,12 +84,96 @@ pub struct MonitorConfig {
     /// served journal answers continuously across a restart; a file
     /// that cannot be replayed fails the bind naming the file and the
     /// offending record, and a missing file is a cold start. Point
-    /// history stays volatile — only the journal persists. The sink is
+    /// history stays volatile — only the journal persists — but the
+    /// file's run count is the lifetime ordinal served history
+    /// envelopes carry, so a restart's restarted seq axis is
+    /// attributable there too. The sink is
     /// single-writer: the bind takes an exclusive lock on the path for
     /// the monitor's lifetime, so a second live process configured with
     /// the same path fails its bind naming the conflict rather than
-    /// interleaving a corrupted record.
+    /// interleaving a corrupted record. The append itself drains on a
+    /// dedicated writer off the executor lock — the journal-append
+    /// isolation decision (#942) — bounded by `journal_drain_capacity`.
     pub journal_file: Option<PathBuf>,
+    /// The bound on journaled records queued for the file sink's
+    /// writer — the journal-append isolation decision's declared
+    /// bound (#942, adopting unmanaged finding #546). The recording
+    /// point never waits on the sink: a push finding the queue full —
+    /// the writer stalled or slower than the run's recording rate —
+    /// fails fatally at that push naming the file, rather than
+    /// lengthening a scan or silently dropping an entry. The bound
+    /// must absorb a burst — an adoption draining its superseded
+    /// commands emits a stretch of entries in one call — so it sits
+    /// well above the command queue's, at the served journal's own
+    /// default.
+    pub journal_drain_capacity: usize,
+    /// When set, every durable-history entry is also appended to this
+    /// line-delimited JSON file — the durable-history decision's
+    /// monitor-local store: the declared-`record` points' post-scan
+    /// samples captured at their declared cadence, the run-boundary
+    /// markers separating process lifetimes, and the mid-lifetime
+    /// `domain` seams a checkpoint adoption opens. Startup replays the
+    /// file into the bounded served window and continues `seq`
+    /// numbering where it left off, so `GET /history/durable` answers
+    /// continuously across a restart; a file that cannot be replayed
+    /// fails the bind naming the file and the offending record, and a
+    /// missing file is a cold start. The sink is single-writer under
+    /// the same exclusive advisory lock the journal file takes. The
+    /// append itself drains on a dedicated writer off the executor
+    /// lock — the journal-append isolation the durable record
+    /// extends — bounded by `history_drain_capacity`.
+    pub history_file: Option<PathBuf>,
+    /// Entries retained in the durable-history served window;
+    /// `0` retains none. `run_boundary` and `domain` markers are
+    /// exempt under the same pinning rule the journal applies: an
+    /// evicted one migrates to a pinned stream the served answer still
+    /// merges in, since the markers are the only record a consumer
+    /// has that a new process lifetime or tick domain began.
+    pub durable_capacity: usize,
+    /// The bound on durable records queued for the file sink's writer
+    /// — the durable-history decision's declared bound, the journal's
+    /// rule extended to the sibling file. The recording point never
+    /// waits on the sink: a push finding the queue full — the writer
+    /// stalled or slower than the run's recording rate — fails
+    /// fatally at that push naming the file, rather than lengthening
+    /// a scan or silently dropping an entry. The bound sits at the
+    /// served journal's own default.
+    pub history_drain_capacity: usize,
+    /// When set, the run's transferable checkpoint persists to this
+    /// path at its documented boundaries — every completed scan
+    /// cycle's close and every accepted command's admission — the
+    /// fault-tolerance foundation's recovery state a restarted
+    /// runtime resumes through. The write itself runs off the
+    /// executor lock — the state-file persist isolation fix (#982),
+    /// the same shape the journal sink's drain landed: the capture
+    /// rides the lock at the boundary, then a bounded queue hands it
+    /// to the sink's dedicated writer, which serializes and
+    /// atomically replaces the file in push order — a stalled disk
+    /// surfaces as the `state_sink` health section, never as a
+    /// lengthened scan.
+    pub state_file: Option<PathBuf>,
+    /// The bound on captured checkpoints queued for the state-file
+    /// sink's writer — the persist-isolation decision's declared
+    /// bound. The capture-and-queue never waits on the sink: a push
+    /// finding the queue full — the writer stalled or slower than
+    /// the run's capture rate — fails fatally at that push naming
+    /// the file, rather than lengthening a scan or silently dropping
+    /// a checkpoint the restart path would have resumed. The bound
+    /// must absorb the burst the producing side can emit between
+    /// writer beats — an admission wave bounded by the executor's
+    /// own command-queue capacity, a `POST /scan` batch's one push
+    /// per scan — so it sits at the command queue's own default.
+    pub state_drain_capacity: usize,
+    /// The checkpoint's single-writer lock when the caller already holds
+    /// it for this process — QA finding
+    /// `state-file-shared-between-processes-not-detected` (#1341). The
+    /// controller's `--state-file` run takes the claim before it reads
+    /// the checkpoint to resume, so the resume and every later save are
+    /// one guard; handing it here joins the sink to that claim instead
+    /// of colliding with the caller's own process. `None` — the default
+    /// — leaves the sink to take the claim itself, refusing a second
+    /// live writer on the same path exactly as a bind without one does.
+    pub state_writer: Option<crate::state_file::StateWriterLock>,
 }
 
 impl Default for MonitorConfig {
@@ -96,8 +186,163 @@ impl Default for MonitorConfig {
             event_history_capacity: 1024,
             publication_capacity: 16,
             journal_file: None,
+            journal_drain_capacity: 1024,
+            history_file: None,
+            durable_capacity: 1024,
+            history_drain_capacity: 1024,
+            state_file: None,
+            state_drain_capacity: crate::state_file::DEFAULT_STATE_DRAIN_CAPACITY,
+            state_writer: None,
         }
     }
+}
+
+impl MonitorConfig {
+    /// Refuses a config naming one file for two of the three
+    /// persistence sinks — the same refusal the controller's option
+    /// parse applies to its flags, held at the bind so a
+    /// programmatically assembled `MonitorConfig` cannot build the
+    /// misconfiguration either. The append sinks' single-writer
+    /// advisory lock cannot cover the state sink: its checkpoint
+    /// lands by write-then-rename, so an aliased path detaches the
+    /// append writer's descriptor from the path — the durable record
+    /// landing on an orphaned inode while the visible file reads as
+    /// checkpoint JSON the next startup's strict replay refuses
+    /// (finding state-file-alias-clobbers-append-durable-files). The
+    /// journal/history alias already fails closed at the file lock
+    /// when the second sink opens; naming every pair here fails the
+    /// bind before any sink opens.
+    ///
+    /// The checkpoint's writer lock is a fourth path — the `.lock`
+    /// sidecar its single-writer claim takes (finding
+    /// `state-file-shared-between-processes-not-detected`), which the
+    /// checkpoint's rename can never replace. An append sink pointed at
+    /// that sidecar would hold the lock every state-file run needs, so
+    /// its pair is named here too: the misconfiguration then fails at
+    /// the bind instead of surfacing later as a state-file run that
+    /// refuses to start for a reason its own configuration does not
+    /// explain.
+    pub(crate) fn check_persistence_paths(&self) -> io::Result<()> {
+        let configured = [
+            ("state_file", self.state_file.as_deref()),
+            ("journal_file", self.journal_file.as_deref()),
+            ("history_file", self.history_file.as_deref()),
+        ];
+        for (index, (field, path)) in configured.iter().enumerate() {
+            let Some(path) = *path else { continue };
+            for (other_field, other_path) in &configured[index + 1..] {
+                let Some(other_path) = *other_path else {
+                    continue;
+                };
+                if same_persistence_file(path, other_path) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "monitor persistence paths must be distinct files: \
+                             {field} and {other_field} both name {} — the \
+                             checkpoint's write-then-rename orphans an append \
+                             writer's descriptor, diverting its durable record \
+                             onto an unreachable inode",
+                            path.display()
+                        ),
+                    ));
+                }
+            }
+        }
+        // Every append sink's own file against the checkpoint's
+        // writer-lock sidecar — the one alias the file locks cannot
+        // catch, because the append sink takes the sidecar first and
+        // the checkpoint then finds it held. Only the checkpoint sink
+        // has a sidecar: the two append sinks lock the file they
+        // append to.
+        if let Some(lock_path) = state_writer_lock(self.state_file.as_deref()) {
+            for (field, path) in [
+                ("journal_file", self.journal_file.as_deref()),
+                ("history_file", self.history_file.as_deref()),
+            ] {
+                let Some(path) = path else { continue };
+                if same_persistence_file(path, &lock_path) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "monitor persistence paths must be distinct files: {field} and \
+                             state_file's writer lock both name {} — the append sink would \
+                             hold the checkpoint's single-writer lock and refuse every run \
+                             that persists there",
+                            lock_path.display()
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The writer-lock sidecar a configured checkpoint path claims — the
+/// path the single-writer guard actually locks, so the configuration
+/// checks compare configured paths against the one the runtime holds.
+fn state_writer_lock(path: Option<&Path>) -> Option<PathBuf> {
+    path.map(crate::state_file::StateWriterLock::lock_path)
+}
+
+/// Whether two configured persistence paths name the same file —
+/// resolved through [`resolve_persistence_file`] so spellings that
+/// differ textually yet land on one file still compare equal.
+fn same_persistence_file(a: &Path, b: &Path) -> bool {
+    resolve_persistence_file(a) == resolve_persistence_file(b)
+}
+
+/// The identity the persistence-path distinctness check compares: the
+/// filesystem's canonical answer for the deepest prefix of `path`
+/// that resolves — catching spellings that differ textually yet name
+/// one file (`./x` beside `x`, a `..` detour, a path through a
+/// symlinked directory) — with the not-yet-existing tail reattached
+/// and its `.`/`..` components folded, so equal spellings still
+/// compare equal before a cold start creates the file.
+fn resolve_persistence_file(path: &Path) -> PathBuf {
+    // Canonicalize the deepest existing ancestor — an absolute path
+    // always bottoms out at the root — then reattach the missing
+    // tail. A relative path no ancestor of which resolves folds into
+    // the working directory textually.
+    let mut tail = Vec::new();
+    let mut cursor = path;
+    let mut resolved = loop {
+        if let Ok(resolved) = std::fs::canonicalize(cursor) {
+            break resolved;
+        }
+        match cursor.components().next_back() {
+            Some(std::path::Component::Normal(name)) => tail.push(name.to_os_string()),
+            Some(std::path::Component::ParentDir) => tail.push("..".into()),
+            _ => {
+                return fold_components(
+                    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
+                );
+            }
+        }
+        cursor = cursor.parent().unwrap_or_else(|| Path::new(""));
+    };
+    for component in tail.iter().rev() {
+        resolved.push(component);
+    }
+    fold_components(resolved)
+}
+
+/// `path` with `.` components dropped and each `..` collapsing the
+/// component before it — the textual half of the path identity the
+/// distinctness check compares.
+fn fold_components(path: PathBuf) -> PathBuf {
+    let mut folded = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                folded.pop();
+            }
+            component => folded.push(component),
+        }
+    }
+    folded
 }
 
 /// Records bounded per-point history and the transition journal, one scan
@@ -140,10 +385,11 @@ pub(super) struct Recorder {
     /// against; observations the served window no longer covers leave
     /// on each record, keeping the map bounded with the log.
     receipt_outcomes: HashMap<u64, CommandReceipt>,
-    /// The terminal receipts this run already journaled per absolute
-    /// submission index, kept for receipts the served window no longer
-    /// covers — `receipt_outcomes` dropping an observation on eviction
-    /// must not turn journaled state back into unseen state: checkpoint
+    /// The terminal receipts already journaled — or already accounted
+    /// against the replayed file — per absolute submission index, kept
+    /// for receipts the served window no longer covers:
+    /// `receipt_outcomes` dropping an observation on eviction must not
+    /// turn journaled state back into unseen state: checkpoint
     /// adoption can re-admit the same receipt at the same index after
     /// the window moved, and this map is what keeps that re-admission
     /// from re-journaling a settle the run already emitted. The
@@ -160,12 +406,73 @@ pub(super) struct Recorder {
     /// couple of window spans behind the served window — entries lower
     /// than that can never re-enter and evict lowest-index first.
     journaled_settles: BTreeMap<u64, Vec<CommandReceipt>>,
+    /// The settled receipts the replayed journal file already carries,
+    /// keyed by their serialized form and counted — the whole record's
+    /// fold like `replayed_qualities`, a multiset because identical
+    /// receipts can settle distinct submissions. The file is the run's
+    /// own audit record: a receipt this run did not itself submit —
+    /// adopted inside a checkpoint or drained superseded by one —
+    /// whose settlement the file already holds accounts against this
+    /// count rather than journaling the one settlement a second time
+    /// across the run boundary. The index-keyed dedup cannot reach
+    /// these records: the journaled entry carries no submission index,
+    /// and a restart's `journaled_settles` begins empty.
+    replayed_settled: HashMap<Vec<u8>, usize>,
+    /// The submission indices this run's own
+    /// [`note_command`](Self::note_command) marked — the receipts that
+    /// entered through this run's command path rather than a
+    /// checkpoint's adoption. Their settlement is this run's news even
+    /// when byte-identical to a journaled one, so `replayed_settled`
+    /// accounting never reaches them. Retained for the run's lifetime —
+    /// an evicted index re-admitted inside an adopted window keeps its
+    /// provenance — and bounded by the run's own submission count.
+    local_receipts: HashSet<u64>,
     /// Per-component `step_errors` counts at the last record, in scan
     /// order — what step-failure entries diff against.
     step_counts: Vec<u64>,
-    /// The durable journal sink, when a path is configured — every
-    /// journaled entry is appended there too.
-    sink: Option<JournalFile>,
+    /// The tick the journal's append axis last stamped — the run's own
+    /// clock's standing mark. Entry attribution never rewinds within a
+    /// run: a stamp arriving below the mark — a checkpoint-carried
+    /// `Applied` receipt still naming the *line's* apply tick, adopted
+    /// while this run's clock held past a degraded window's stream —
+    /// attributes at the mark instead. The receipt itself keeps the
+    /// line's tick; only the entry's axis position rides the mark. A
+    /// restart's own run begins unmarked: its `run_boundary` entry —
+    /// and any restored run's first stamps — carry the run's true start
+    /// tick, the seam a consumer attributes the lifetimes around.
+    last_pushed: Option<Tick>,
+    /// The durable journal sink's drain, when a path is configured —
+    /// every journaled entry queues to its writer, which appends off
+    /// the executor lock. Dropping the recorder drains and joins the
+    /// writer, so a graceful shutdown's file is complete.
+    sink: Option<Drain<JournalRecord>>,
+    /// The durable history-file sink's drain, when a path is
+    /// configured — every durable entry queues to its writer under the
+    /// same isolation the journal's takes. `None` without a
+    /// configured file: the durable stream is the file's served
+    /// window, so an unconfigured run records nothing durable.
+    history_sink: Option<Drain<HistoryRecord>>,
+    /// The `seq` the next durable-history entry takes — continued
+    /// from the replayed file's numbering across restarts, never
+    /// reused, so bounded eviction reads as a numbering gap.
+    history_next_seq: u64,
+    /// The last run tick each declared-`record` point's durable
+    /// samples were attributed to — the cadence bookkeeping the
+    /// recording point diffs against; absent until the point's first
+    /// durable record, which the standing census's `from: None`-like
+    /// first observation covers. A run resuming its own tick domain —
+    /// `--state-file`, the anchor matching — adopts the replayed
+    /// file's baselines so the interval the file already paced out
+    /// continues across the restart rather than re-recording the
+    /// census; a new or foreign domain starts empty, and a mid-run
+    /// domain adoption clears it.
+    history_last_ticks: BTreeMap<PointId, Tick>,
+    /// The tick domain's declared civil-time anchor the run records
+    /// under — handed at bind for the durable files' boundary stamp
+    /// and tracked each scan: a checkpoint adoption's new anchor — or
+    /// an unanchored landing — records the mid-lifetime `domain` seam
+    /// the mapping on either side attributes to.
+    anchor: Option<TickAnchor>,
 }
 
 impl Recorder {
@@ -180,21 +487,61 @@ impl Recorder {
     /// marker also journals once as a served `run_boundary` entry — the
     /// file marker's served form — so a `GET /journal` consumer can
     /// attribute the entries on either side of the seam to their
-    /// process lifetime.
-    pub(super) fn new(config: MonitorConfig, tick: Tick) -> io::Result<Self> {
+    /// process lifetime. The same run ordinal stamps every served
+    /// history envelope, so a `GET /history` consumer detects the seam
+    /// even while its `since` cursor still filters the restarted seq
+    /// axis's samples out. `anchor` is the run's tick domain's declared
+    /// civil-time anchor — `None` on an unanchored domain — stamped
+    /// into both durable files' run-boundary markers and tracked each
+    /// scan for the durable stream's mid-lifetime `domain` seam.
+    pub(super) fn new(
+        config: MonitorConfig,
+        tick: Tick,
+        anchor: Option<TickAnchor>,
+    ) -> io::Result<Self> {
         let (sink, replay) = match &config.journal_file {
             Some(path) => {
-                let (sink, replay) = JournalFile::open(path, config.journal_capacity, tick)?;
-                (Some(sink), replay)
+                let (file, replay) =
+                    JournalFile::open(path, config.journal_capacity, tick, anchor)?;
+                (Some(file.into_drain(config.journal_drain_capacity)), replay)
             }
             None => (None, crate::journal_file::Replay::default()),
         };
+        // The durable process-history file — the declared-duty sample
+        // record — opens in the same pattern: replay into the bounded
+        // served window, continue `seq` numbering, stamp this run's
+        // boundary marker with the domain's anchor.
+        let (history_sink, durable_replay) = match &config.history_file {
+            Some(path) => {
+                let (file, replay) =
+                    HistoryFile::open(path, config.durable_capacity, tick, anchor)?;
+                (Some(file.into_drain(config.history_drain_capacity)), replay)
+            }
+            None => (None, crate::history_file::HistoryReplay::default()),
+        };
+        // This run's lifetime ordinal — the same count the run-boundary
+        // marker names — stamps every served `PointHistory` envelope, so
+        // a `since`-cursor history consumer detects a restarted seq axis
+        // by the changed `run` even while the cursor still filters every
+        // sample out.
         let store = Store::new(
             config.history_capacity,
             config.journal_capacity,
+            config.durable_capacity,
             config.publication_capacity,
             config.event_history_capacity,
+            replay.runs + 1,
         );
+        // The store carries the sink's drain counters: every
+        // publication stamps the standing backpressure health, and the
+        // monitor's durability-attesting answers wait on the same
+        // shared counters.
+        if let Some(sink) = &sink {
+            store.set_journal_sink(sink.shared());
+        }
+        if let Some(sink) = &history_sink {
+            store.set_history_sink(sink.shared());
+        }
         // The replay seeds the ring in `seq` order: boundary markers
         // the file's retained tail already aged out push first, so the
         // store's pinning stream picks them up the same way live
@@ -202,6 +549,26 @@ impl Recorder {
         for entry in replay.boundaries.into_iter().chain(replay.entries) {
             store.push_journal(entry);
         }
+        for entry in durable_replay
+            .boundaries
+            .into_iter()
+            .chain(durable_replay.entries)
+        {
+            store.push_durable(entry);
+        }
+        // A run resuming its own tick domain — the state-file resume,
+        // where the file's last recorded anchor is this run's own —
+        // adopts the replayed cadence baselines so a point inside its
+        // interval across the restart records nothing until the
+        // interval the file already paced out expires. Every other
+        // bind — a cold start, a foreign domain's file — starts the
+        // census fresh: the old domain's ticks mean nothing under a
+        // new one.
+        let durable_baselines = if tick > Tick::ZERO && durable_replay.anchor == anchor {
+            durable_replay.last_ticks
+        } else {
+            BTreeMap::new()
+        };
         let mut recorder = Self {
             store,
             next_seq: replay.next_seq,
@@ -211,8 +578,21 @@ impl Recorder {
             replayed_values: replay.values,
             receipt_outcomes: HashMap::new(),
             journaled_settles: BTreeMap::new(),
+            replayed_settled: replay
+                .settled
+                .iter()
+                .fold(HashMap::new(), |mut counts, receipt| {
+                    *counts.entry(settled_key(receipt)).or_insert(0) += 1;
+                    counts
+                }),
+            local_receipts: HashSet::new(),
             step_counts: Vec::new(),
+            last_pushed: None,
             sink,
+            history_sink,
+            history_next_seq: durable_replay.next_seq,
+            history_last_ticks: durable_baselines,
+            anchor,
         };
         // A file that already records earlier lifetimes makes this run
         // a restart: its boundary journals as an ordinary entry — the
@@ -226,6 +606,20 @@ impl Recorder {
                 JournalEvent::RunBoundary {
                     run: replay.runs + 1,
                 },
+            );
+        }
+        // The same restart marker enters the durable stream as its
+        // own `run_boundary` entry — the file marker's served form —
+        // carrying the domain's anchor so a `GET /history/durable`
+        // consumer attributes the samples on either side of the seam
+        // to their process lifetime and tick domain.
+        if durable_replay.runs > 0 {
+            recorder.push_durable(
+                DurableEvent::RunBoundary {
+                    run: durable_replay.runs + 1,
+                    anchor,
+                },
+                tick,
             );
         }
         Ok(recorder)
@@ -244,7 +638,11 @@ impl Recorder {
     ///
     /// A command refused at submission is already final and is journaled
     /// at the run's current tick; an accepted one is marked observed and
-    /// the next record journals the outcome its boundary settled.
+    /// the next record journals the outcome its boundary settled. The
+    /// index is also marked local: the receipt entered through this
+    /// run's own command path, so the replayed journal's settled fold
+    /// never suppresses its settlement — however byte-identical a
+    /// journaled receipt may be, this run's submission is its own news.
     pub(super) fn note_command(&mut self, receipt_index: u64, receipt: CommandReceipt, tick: Tick) {
         match receipt.outcome {
             CommandOutcome::Accepted { .. } => {}
@@ -257,6 +655,7 @@ impl Recorder {
                 );
             }
         }
+        self.local_receipts.insert(receipt_index);
         self.observe(receipt_index, receipt);
     }
 
@@ -277,6 +676,19 @@ impl Recorder {
             if self.receipt_outcomes.get(&index) == Some(&receipt)
                 || self.settle_journaled(index, &receipt)
             {
+                return;
+            }
+            // A drain the replayed file already recorded — the same
+            // superseded settlement an earlier lifetime emitted —
+            // accounts against the fold instead of journaling again;
+            // a locally submitted index's drain is always this run's
+            // news. Marking the index keeps a repeated drain on the
+            // shared dedup rather than spending the fold twice.
+            if !self.local_receipts.contains(&index) && self.take_replayed_settled(&receipt) {
+                self.journaled_settles
+                    .entry(index)
+                    .or_default()
+                    .push(receipt);
                 return;
             }
             self.journaled_settles
@@ -305,11 +717,40 @@ impl Recorder {
         self.receipt_outcomes.insert(index, receipt);
     }
 
-    /// Journals a reported-role transition at `tick` — a promotion or
-    /// demotion applied at its boundary, or a transition settling on the
-    /// first scan under the new mode.
-    pub(super) fn note_role_change(&mut self, tick: Tick, from: Role, to: Role) {
-        self.push(tick, JournalEvent::RoleChanged { from, to });
+    /// Accounts one settled receipt against the fold the replayed
+    /// journal file seeded: when the file already records the receipt's
+    /// settlement, consumes one recorded instance and answers `true` —
+    /// re-observing it must not journal the one settlement a second
+    /// time. Answers `false` when the file holds none, so the caller
+    /// journals the settlement as this run's news.
+    fn take_replayed_settled(&mut self, receipt: &CommandReceipt) -> bool {
+        let key = settled_key(receipt);
+        let Some(remaining) = self.replayed_settled.get_mut(&key) else {
+            return false;
+        };
+        *remaining -= 1;
+        if *remaining == 0 {
+            self.replayed_settled.remove(&key);
+        }
+        true
+    }
+
+    /// Journals one reported-role transition — a promotion or demotion
+    /// applied at its boundary, or a transition settling on the first
+    /// scan under the new mode — carrying the switch's attribution:
+    /// `origin` distinguishing a requested switch from the peer's
+    /// failover self-promotion, `actor` the declared identity a
+    /// request carried.
+    pub(super) fn note_role_change(&mut self, change: &RoleChange) {
+        self.push(
+            change.tick,
+            JournalEvent::RoleChanged {
+                from: change.from,
+                to: change.to,
+                origin: Some(change.origin),
+                actor: change.actor.clone(),
+            },
+        );
     }
 
     /// Journals a standby-divergence transition at `tick` — the tick the
@@ -343,9 +784,121 @@ impl Recorder {
     /// Journals a field-claim loss — the shared field fenced a write of
     /// this instance's, meaning another attachment preempted the
     /// single-writer claim — attributed to the tick the fenced scan was
-    /// observed at.
-    pub(super) fn note_field_claim_lost(&mut self, tick: Tick, point: PointId) {
-        self.push(tick, JournalEvent::FieldClaimLost { point });
+    /// observed at, `claimant` carrying the owner token the field's
+    /// arbitration named when it fenced, so the audit trail attributes
+    /// the takeover rather than an anonymous loss. `None` where no
+    /// verdict named a claimant — a driver surface whose fencing
+    /// answer carries no owner identity — and the entry records the
+    /// loss unattributed rather than guessing.
+    pub(super) fn note_field_claim_lost(
+        &mut self,
+        tick: Tick,
+        point: PointId,
+        claimant: Option<u64>,
+    ) {
+        self.push(tick, JournalEvent::FieldClaimLost { point, claimant });
+    }
+
+    /// Journals a foreign-claim observation — a conditional grant
+    /// probe (the orphan cycle's re-arm or the fencing-loss reclaim)
+    /// was refused while the field's arbitration named a different
+    /// owner standing — attributed to the tick the probe was refused
+    /// at, `claimant` carrying the observed owner token. One entry per
+    /// distinct claimant the run observes: a standing foreign claim
+    /// journals once, not once per refused probe.
+    pub(super) fn note_claim_observed(&mut self, observation: ClaimObservation) {
+        self.push(
+            observation.tick,
+            JournalEvent::FieldClaimObserved {
+                point: observation.point,
+                claimant: observation.claimant,
+            },
+        );
+    }
+
+    /// Journals a startup-grant refusal — the born-active's conditional
+    /// ask met a live incumbent's claim — attributed to the tick the
+    /// verdict landed on and carrying the named `FieldClaimFailed`. The
+    /// verdict answers at activation or at a pending run's first
+    /// answered field contact; either timing queues the same record,
+    /// so the journal names the refused settle whether the run's shell
+    /// saw it — the driven run's shell never does, making this entry
+    /// the only durable trace that the pending state's settle happened.
+    /// One entry per refused startup grant: the ask never re-issues
+    /// after a verdict.
+    pub(super) fn note_startup_claim_refused(&mut self, refusal: StartupRefusal) {
+        self.push(
+            refusal.tick,
+            JournalEvent::StartupClaimRefused {
+                error: refusal.error,
+            },
+        );
+    }
+
+    /// Journals a landed orphan-cycle re-arm — the conditional ensure
+    /// probe took the field's write-ownership claim back under this
+    /// run's recorded token while the tracked line reported no owner —
+    /// attributed to the run tick the grant landed at, `point` naming
+    /// the field point the claim domain arbitrates through. One entry
+    /// per landing: a standing re-arm's confirming probes journal once.
+    pub(super) fn note_claim_rearmed(&mut self, rearm: ClaimRearm) {
+        self.push(
+            rearm.tick,
+            JournalEvent::FieldClaimRearmed { point: rearm.point },
+        );
+    }
+
+    /// Journals an orphan detection — a tracking peer's applied
+    /// checkpoint stamped its serving run as owning no field writes,
+    /// the mutual-standby wedge — attributed to the tick the orphaned
+    /// apply landed at, `aligned` carrying the applied checkpoint's
+    /// own tick. The narrower usurped verdict journals here too: the
+    /// tracked line's ownerlessness is the detected fact either way,
+    /// and the endpoint that could not prove the line's key is named by
+    /// the tracking-source refusal the diagnosis runs beside it.
+    pub(super) fn note_field_orphaned(&mut self, orphan: OrphanReport) {
+        self.push(
+            orphan.tick,
+            JournalEvent::FieldOrphaned {
+                aligned: orphan.aligned,
+            },
+        );
+    }
+
+    /// Journals a foreign-writer preemption — a promotion took the
+    /// field's write-ownership claim from a live standing writer this
+    /// run had diagnosed as unable to prove this line's pair key —
+    /// attributed to the run tick the promotion's claim ran at, naming
+    /// the monitor endpoint the field's arbitration gave that writer.
+    /// The audit counterpart of the fenced-out
+    /// [`JournalEvent::FieldClaimLost`]: together they say which
+    /// process held the field across the whole episode, which neither
+    /// record nor the role transitions do alone.
+    pub(super) fn note_foreign_claim_preempted(&mut self, preempt: ForeignClaimPreempt) {
+        self.push(
+            preempt.tick,
+            JournalEvent::ForeignClaimPreempted {
+                writer: preempt.writer,
+            },
+        );
+    }
+
+    /// Journals a refused armed self-promotion — the failover gate
+    /// fired at the miss boundary and the field's arbitration or the
+    /// convergence proof refused the attempt — attributed to the run
+    /// tick the attempt ran at. The refusal leaves no role transition
+    /// of its own, so this entry is what makes the episode durable;
+    /// the peer queues one per distinct refusal cause a continuous
+    /// refused streak produces, a retrying gate not journaling the
+    /// standing refusal once per scan.
+    pub(super) fn note_promotion_refused(&mut self, refusal: PromotionRefusal) {
+        self.push(
+            refusal.tick,
+            JournalEvent::PromotionRefused {
+                error: refusal.error,
+                misses: refusal.misses,
+            },
+        );
     }
 
     /// Journals a tracked-source restart — the checkpoint stream
@@ -371,6 +924,23 @@ impl Recorder {
     /// demotion moved the run onto.
     pub(super) fn note_tracking_source(&mut self, tick: Tick, source: SocketAddr) {
         self.push(tick, JournalEvent::TrackingSourceAdopted { source });
+    }
+
+    /// Journals a refused tracking-source probe — a successor
+    /// candidate's served checkpoint failed the line-membership
+    /// verification — attributed to the run tick the probe ran at and
+    /// naming both the endpoint and the named refusal, so a strand on
+    /// a persistently refusing source is durable audit rather than
+    /// journal silence. Callers dedup per (source, reason) signature —
+    /// the bound on how often one standing refusal journals lives in
+    /// `Monitor::note_source_refusal`, not here.
+    pub(super) fn note_tracking_source_refused(
+        &mut self,
+        tick: Tick,
+        source: SocketAddr,
+        detail: String,
+    ) {
+        self.push(tick, JournalEvent::TrackingSourceRefused { source, detail });
     }
 
     /// Marks the executor's standing state already observed — the
@@ -401,6 +971,16 @@ impl Recorder {
         let base = executor.receipt_base();
         for (offset, receipt) in executor.receipts().iter().enumerate() {
             self.observe(base + offset as u64, receipt.clone());
+            // A restored receipt already settled stands in the journaled
+            // file this run replayed — account it against the fold so its
+            // remaining counts name only settlements no restored receipt
+            // covers.
+            if matches!(
+                receipt.outcome,
+                CommandOutcome::Applied { .. } | CommandOutcome::Rejected { .. }
+            ) {
+                self.take_replayed_settled(receipt);
+            }
         }
         let snapshot = executor.snapshot();
         let journaled = |point: PointId| {
@@ -444,9 +1024,11 @@ impl Recorder {
         // receipt journals on the outcome transition this record
         // observes — whether the command was submitted here or arrived
         // adopted inside a checkpoint, so the run's command audit reads
-        // the same on either peer. An applied receipt reports the tick
-        // it applied at; a boundary rejection is attributed to this
-        // scan.
+        // the same on either peer. An applied receipt's entry rides the
+        // append axis — `push` holds it at the standing mark when the
+        // carried apply tick lags the run's journaled clock — while the
+        // receipt itself keeps the tick it applied at; a boundary
+        // rejection is attributed to this scan.
         // Entries key on the absolute submission index, not the served
         // position: the bounded log's evictions shift positions, while
         // the index is stable for the receipt's lifetime. Observations
@@ -493,26 +1075,34 @@ impl Recorder {
             // The same terminal receipt already journaled for the
             // index — however the window moved between the
             // observations — does not journal again: each admission's
-            // settle emits once per journal.
+            // settle emits once per journal. A settled receipt this
+            // run did not itself submit accounts the same way against
+            // the replayed file's fold: the durable record is the
+            // pair's one command audit trail across the run boundary,
+            // so a restart onto a checkpoint whose receipt window did
+            // not cover a journaled settlement — a missing
+            // `--state-file`, an evicted settled prefix — must not
+            // re-record it.
+            let journaled = matches!(
+                receipt.outcome,
+                CommandOutcome::Applied { .. } | CommandOutcome::Rejected { .. }
+            ) && (self.settle_journaled(index, receipt)
+                || (!self.local_receipts.contains(&index) && self.take_replayed_settled(receipt)));
             match receipt.outcome {
                 CommandOutcome::Accepted { .. } => {}
-                CommandOutcome::Applied { tick } if !self.settle_journaled(index, receipt) => {
-                    self.push(
-                        tick,
-                        JournalEvent::CommandSettled {
-                            receipt: receipt.clone(),
-                        },
-                    );
-                }
-                CommandOutcome::Rejected { .. } if !self.settle_journaled(index, receipt) => {
-                    self.push(
-                        scan_tick,
-                        JournalEvent::CommandSettled {
-                            receipt: receipt.clone(),
-                        },
-                    );
-                }
-                _ => {}
+                _ if journaled => {}
+                CommandOutcome::Applied { tick } => self.push(
+                    tick,
+                    JournalEvent::CommandSettled {
+                        receipt: receipt.clone(),
+                    },
+                ),
+                CommandOutcome::Rejected { .. } => self.push(
+                    scan_tick,
+                    JournalEvent::CommandSettled {
+                        receipt: receipt.clone(),
+                    },
+                ),
             }
             self.observe(index, receipt.clone());
         }
@@ -522,7 +1112,7 @@ impl Recorder {
             let Some(sample) = telemetry.sample else {
                 continue;
             };
-            self.store.push_sample(telemetry.point, sample);
+            self.store.push_sample(telemetry.point, scan_tick, sample);
             let from = self.qualities.insert(telemetry.point, sample.quality);
             if from != Some(sample.quality) {
                 self.push(
@@ -566,6 +1156,17 @@ impl Recorder {
                 );
             }
         }
+
+        // The declared-`record` points' durable capture — the
+        // durable-history decision's store, at the same post-scan
+        // point: each declared point whose cadence interval elapsed
+        // since its last attributed run tick records its post-scan
+        // image sample at the scan's tick — the faithful,
+        // quality-stamped capture its declared duty names. The
+        // tick-domain check inside runs first, so a checkpoint
+        // adoption's new domain lands its `domain` seam before the
+        // first samples it attributes.
+        self.record_durable(executor, point_map, &snapshot, scan_tick);
 
         // The kind-declared events the scan's components emitted — the
         // executor drained each after its `step` — route here in
@@ -629,6 +1230,106 @@ impl Recorder {
         snapshot
     }
 
+    /// Records one scan's durable-duty samples — the durable-history
+    /// decision's store, at the documented post-scan point. Each
+    /// declared-`record` point whose cadence interval elapsed since
+    /// its last attributed run tick captures its post-scan image
+    /// sample at the scan's tick — the cadence rides run ticks, not
+    /// sample stamps, so the field's own staleness never schedules the
+    /// record and a stale sample still lands its declared quality.
+    /// No-op without a configured history file: the durable stream is
+    /// the file's served window, so an unconfigured run records
+    /// nothing.
+    ///
+    /// The tick-domain check runs first: an anchor the executor
+    /// reports that differs from the run's standing mark — a
+    /// checkpoint adoption carrying the tracked line's newer domain —
+    /// records the `domain` seam carrying the adopted anchor before
+    /// the first samples attributed to it, and clears the cadence
+    /// baselines: the old domain's ticks mean nothing under the new
+    /// one, so the adoption's first scan re-records the standing
+    /// census exactly as a cold run's first scan does.
+    fn record_durable(
+        &mut self,
+        executor: &Executor<'_>,
+        point_map: &dcs_runtime::PointMap,
+        snapshot: &TelemetrySnapshot,
+        scan_tick: Tick,
+    ) {
+        if self.history_sink.is_none() {
+            return;
+        }
+        let anchor = executor.anchor();
+        if anchor != self.anchor {
+            self.anchor = anchor;
+            self.history_last_ticks.clear();
+            self.push_durable(DurableEvent::Domain { anchor }, scan_tick);
+        }
+        for telemetry in &snapshot.points {
+            let Some(sample) = telemetry.sample else {
+                continue;
+            };
+            let Some(cadence) = point_map
+                .get(telemetry.point)
+                .and_then(|spec| spec.record_every_ticks)
+            else {
+                continue;
+            };
+            let due = match self.history_last_ticks.get(&telemetry.point) {
+                // The first observation records — the standing census
+                // a new domain or cold run opens its durable record
+                // with.
+                None => true,
+                Some(&last) => scan_tick.0.saturating_sub(last.0) >= cadence,
+            };
+            if !due {
+                continue;
+            }
+            self.history_last_ticks.insert(telemetry.point, scan_tick);
+            self.push_durable(
+                DurableEvent::Sampled {
+                    point: telemetry.point,
+                    sample,
+                },
+                scan_tick,
+            );
+        }
+    }
+
+    /// Appends one durable-history entry — queued to the configured
+    /// file sink's writer first, then the store's served window. The
+    /// handoff never waits on the file: the drain's bounded queue
+    /// either takes the record or refuses it, and a refusal is fatal —
+    /// the run dies naming the file at this push rather than running
+    /// on while its durable record silently stops or lengthening the
+    /// scan behind a stalled sink — the durable-history decision
+    /// applying decision 36's fatal rule to the sibling file. A sink
+    /// write that failed on the writer turns every later push into
+    /// the same fatal refusal naming the error, so the run fails at
+    /// the recorded point instead of claiming entries the file never
+    /// took; the partial record a crash can leave is what the next
+    /// startup's replay rejects by name. The entry's `seq` continues
+    /// the file's axis — never reused, so served-window eviction
+    /// reads as a numbering gap.
+    fn push_durable(&mut self, event: DurableEvent, tick: Tick) {
+        let entry = DurableEntry {
+            seq: self.history_next_seq,
+            tick,
+            event,
+        };
+        if let Some(sink) = &mut self.history_sink
+            && let Err(error) = sink.push(HistoryRecord::Entry(Box::new(entry.clone())))
+        {
+            let seq = match &error.record {
+                HistoryRecord::Entry(entry) => entry.seq,
+                HistoryRecord::RunBoundary { .. } => self.history_next_seq,
+            };
+            panic!("{error} — refused durable history seq {seq}");
+        }
+        self.history_next_seq += 1;
+        self.store.push_durable(entry);
+    }
+
     /// Retained journal entries with a `seq` above `since`, oldest first
     /// — the store's served ring. Test-only: the served `GET /journal`
     /// answer reads the store directly.
@@ -637,23 +1338,114 @@ impl Recorder {
         self.store.journal(since)
     }
 
-    /// Appends one journal entry — to the configured file sink first,
-    /// then the store's served ring and pending publication delta. An
-    /// append the file cannot take is fatal: the run dies naming the
-    /// file rather than running on while its audit trail silently
-    /// stops, and the partial record a crash can leave is what the next
+    /// Retained durable-history entries with a `seq` above `since`,
+    /// oldest first — the store's served window. Test-only: the
+    /// served `GET /history/durable` answer reads the store directly.
+    #[cfg(test)]
+    pub(super) fn durable(&self, since: u64) -> Vec<DurableEntry> {
+        self.store.durable(since)
+    }
+
+    /// Test seam: swap in a constructed drain — the stalled and
+    /// failing-sink coverage drives the writer through closures a real
+    /// file cannot produce deterministically.
+    #[cfg(test)]
+    pub(super) fn with_sink(&mut self, sink: Drain<JournalRecord>) {
+        self.store.set_journal_sink(sink.shared());
+        self.sink = Some(sink);
+    }
+
+    /// Test seam: swap in a constructed durable-history drain — the
+    /// stalled and failing-sink coverage drives the writer through
+    /// closures a real file cannot produce deterministically.
+    #[cfg(test)]
+    pub(super) fn with_history_sink(&mut self, sink: Drain<HistoryRecord>) {
+        self.store.set_history_sink(sink.shared());
+        self.history_sink = Some(sink);
+    }
+
+    /// The sink's live drain report — test-only; the served surface
+    /// reads the same counters through the publication store.
+    #[cfg(test)]
+    pub(super) fn sink_health(&self) -> Option<crate::drain::DrainHealth> {
+        self.sink.as_ref().map(|sink| sink.shared().health())
+    }
+
+    /// Waits the sink's writer out — test-only; the served surface
+    /// waits through the store's `wait_journal_drained`.
+    #[cfg(test)]
+    pub(super) fn flush_sink(&self) {
+        if let Some(sink) = &self.sink {
+            sink.shared()
+                .wait_drained(std::time::Duration::from_secs(30));
+        }
+    }
+
+    /// Waits the history sink's writer out — test-only; the served
+    /// surface waits through the store's `wait_history_drained`.
+    #[cfg(test)]
+    pub(super) fn flush_history_sink(&self) {
+        if let Some(sink) = &self.history_sink {
+            sink.shared()
+                .wait_drained(std::time::Duration::from_secs(30));
+        }
+    }
+
+    /// Appends one journal entry — queued to the configured file
+    /// sink's writer first, then the store's served ring and pending
+    /// publication delta. The handoff never waits on the file: the
+    /// drain's bounded queue either takes the record or refuses it,
+    /// and a refusal is fatal — the run dies naming the file at this
+    /// push rather than running on while its audit trail silently
+    /// stops or lengthening the scan behind a stalled sink (the
+    /// journal-append isolation decision, #942). A sink write that
+    /// fails on the writer turns every later push into the same
+    /// fatal refusal naming the error, so the run fails at the
+    /// recorded point instead of claiming entries the file never
+    /// took; the partial record a crash can leave is what the next
     /// startup's replay rejects by name.
+    ///
+    /// The append axis never rewinds within the run: the durable
+    /// journal is the audit trail's one ordering, and an entry stamped
+    /// below its predecessor's tick would read to a tick-order consumer
+    /// as having happened first. A stamp that lags the axis — a
+    /// carried receipt naming the line's apply tick while this run's
+    /// clock holds ahead of the stream — lands at the standing mark;
+    /// the event payload still carries its own domain's truth.
     pub(super) fn push(&mut self, tick: Tick, event: JournalEvent) {
+        let tick = match self.last_pushed {
+            Some(last) => tick.max(last),
+            None => tick,
+        };
+        self.last_pushed = Some(tick);
         let entry = JournalEntry {
             seq: self.next_seq,
             tick,
             event,
         };
-        if let Some(sink) = &mut self.sink {
-            sink.append(&entry)
-                .unwrap_or_else(|error| panic!("{error}"));
+        if let Some(sink) = &self.sink {
+            // The handoff never waits on the sink: the drain either
+            // takes the record into its bounded queue or refuses it —
+            // the refusal hands the record back and is fatal at this
+            // push, naming the drain and the `seq` the file will never
+            // carry.
+            if let Err(error) = sink.push(JournalRecord::Entry(Box::new(entry.clone()))) {
+                let seq = match &error.record {
+                    JournalRecord::Entry(entry) => entry.seq,
+                    JournalRecord::RunBoundary { .. } => self.next_seq,
+                };
+                panic!("{error} — refused journal seq {seq}");
+            }
         }
         self.next_seq += 1;
         self.store.push_journal(entry);
     }
+}
+
+/// The identity a journaled `command_settled` receipt and an observed
+/// receipt share — the receipt's serialized form: byte-identical
+/// receipts name the same recorded settlement, so the replayed file's
+/// fold keys on the same bytes it appended.
+fn settled_key(receipt: &CommandReceipt) -> Vec<u8> {
+    serde_json::to_vec(receipt).expect("a CommandReceipt serializes")
 }
