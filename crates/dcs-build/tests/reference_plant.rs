@@ -584,6 +584,10 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         stdout.contains("a lockfile recorded at another revision refused: lockfile-stale"),
         "the lockfile stage's doctored case did not report its named diagnostic:\n{stdout}"
     );
+    assert!(
+        stdout.contains("a lockfile missing a release crate refused: lockfile-stale"),
+        "the lockfile stage's missing-crate doctored case did not report its named diagnostic:\n{stdout}"
+    );
     let lock_line = stdout
         .lines()
         .find(|line| line.contains("the committed Cargo.lock records"))
@@ -1381,6 +1385,60 @@ dcs-model = { path = \"../dcs-model\" }
         stderr.contains("path-dependency-leak"),
         "a duplicate non-git record of a released crate was refused without its named \
          diagnostic:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&lock).unwrap(),
+        doctored,
+        "the refused run repaired the doctored lockfile instead of reporting it"
+    );
+}
+
+/// The contract's other `lockfile-stale` case — the reported
+/// `lockfile-missing-crate-reported-as-path-leak` defect: a release
+/// crate whose `[[package]]` block is absent from the committed
+/// lockfile entirely is stale, not `path-dependency-leak` — nothing is
+/// recorded, from a path source or otherwise, while the leak diagnostic
+/// names a crate *recorded* from a `path` source or with no source at
+/// all. The materialization drops `dcs-core`'s package block — the
+/// reported reproduction — and asserts the `lockfile` stage names the
+/// stale diagnostic before `resolve` can repair the file.
+#[test]
+fn a_lockfile_missing_a_release_crate_reports_lockfile_stale() {
+    let copy = Materialized::new();
+    let lock = copy.dir.join("Cargo.lock");
+    let committed = std::fs::read_to_string(&lock).unwrap();
+    let start = committed
+        .find("[[package]]\nname = \"dcs-core\"\n")
+        .expect("the committed lockfile records a dcs-core package block");
+    let end = committed[start..]
+        .find("\n[[package]]")
+        .map(|i| start + i + 1)
+        .unwrap_or(committed.len());
+    let doctored = format!("{}{}", &committed[..start], &committed[end..]);
+    assert!(
+        !doctored.contains("name = \"dcs-core\""),
+        "the doctor left a dcs-core package block in the lockfile"
+    );
+    std::fs::write(&lock, &doctored).unwrap();
+
+    let refused = copy.check_without_tooling();
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "a Cargo.lock missing a release crate passed the check"
+    );
+    assert!(
+        stderr.contains("lockfile-stale"),
+        "a lockfile missing a release crate was refused without its named diagnostic:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("path-dependency-leak"),
+        "a lockfile missing a release crate reported the leak diagnostic — \
+         nothing is recorded, let alone a path source:\n{stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&refused.stdout).contains("== resolve =="),
+        "the incomplete lockfile was caught only after the resolve stage re-resolved it:\n{stderr}"
     );
     assert_eq!(
         std::fs::read_to_string(&lock).unwrap(),

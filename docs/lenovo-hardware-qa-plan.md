@@ -1606,6 +1606,69 @@ Implementation order: second, after [daily architecture review](daily-architectu
   raw claim seam, or no settled owner-plus-tracker layout reports
   inconclusive.
 
+### Landed 2026-10-03 (stale-budget cadence-domain leg, #1411)
+
+- The declared freshness budget's measurement domain — the per-revision
+  lane evidence for the contract #1411's fix declares (decision 45's
+  `stale_after_ticks`, WW-OPS-003's stale-data surface, the tick domains
+  CONTEXT.md separates) — is exercised on the lane's own scratch fields
+  by scenario leg `2499_stale_budget_cadence`. A declared budget is
+  measured in the *reader's* run ticks, so a peer scanning faster than
+  the field owner's step cadence reads the identical driver report on
+  every scan in between; before the fix a budget below the owner's step
+  period paced a `quality_changed` pair per field step on that peer — the
+  recorded ~118 stale/good flap pairs in ~6 s and ~40 journal records per
+  second — while the field stayed healthy. The filed legs so far pinned
+  the symmetric case only (#434's rig leg, #704's consumer mirror),
+  where the two domains happen to agree.
+- Two arms, two scratch fields, one pass, staged through the
+  per-container `scan_ms` lever `2490_claim_skew_bound` introduced, so
+  the cadence is the only variable between them. The control arm paces
+  its reader exactly like the field owner, stops that owner (the only
+  way the shared plant's stepping stops under the single-writer claim),
+  and requires the declared-budget input to age to `Uncertain(Stale)`
+  while the undeclared input beside it keeps Good — the declared
+  staleness behavior the widening must leave alone, and the leg's
+  measurement of the declared budget off the rig. The subject arm
+  launches the same reader shape at a tenth of the owner's pace on a
+  fresh field and, once that reader has watched the field publish twice
+  (the two-gap arrival evidence the contract's own cold-start limit
+  names), judges its window: the declared-budget input Good on every
+  served sample.
+- The pace witness is what makes the cadence-domain claim measurable on
+  the served surface: the reader cannot see the driver report's own
+  stamp, which is minted in the field owner's step domain, but it sees
+  every value that step moves — so the undeclared level input doubles as
+  the witness, and the reader-tick gaps between its served changes are
+  the field's demonstrated step period in the reader's own domain. The
+  claims are the contract's two directions: a stale presentation inside
+  the patience floor (the greater of the measured declared budget and the
+  last two witnessed gaps) is the recorded defect — the reader called a
+  publication the field had not sent yet stale — and a witnessed silence
+  longer than that floor and than any gap the field itself demonstrated,
+  with the budgeted input still Good, is the opposite doctoring: the leg
+  asserting freshness over a genuine starvation. The durable half rides
+  the reader's own `--journal-file`: only the transitions the contract
+  names — the cold-start pair before the arrival evidence exists, and
+  nothing after it.
+- Named diagnostics are `stale-budget-cadence-failed` (a frozen field
+  whose declared-budget input never presented stale, a verdict leaked
+  onto an undeclared point, a declared staleness transition that reached
+  no durable record, a stale presentation inside the declared patience,
+  journaled quality_changed traffic past the arrival evidence, freshness
+  asserted over a starvation longer than the declared budget, or the
+  control reader's budgeted input stale before any induction) and
+  `stale-budget-cadence-nondeterministic` (refused staging calls, an
+  owner that never claimed, a reader that never converged or never paced
+  as declared, a freeze that never took effect, a declared budget or
+  arrival period the rig never showed, a starved watch, an empty judged
+  window, an unreadable journal, a degradation the freshness contract
+  does not name, a moved pair, a rig the sweep did not restore), with
+  the self-check's `stale-budget-cadence-unchecked` covering every
+  planted negative. Two consecutive passes produce identical digests; a
+  run carrying no born staging lever, no per-seat journal file, or no
+  settled pair reports inconclusive.
+
 ## Outcome
 
 Add a QA agent on the Lenovo ThinkCentre that evaluates an exact main revision,
