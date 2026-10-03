@@ -17,7 +17,9 @@
 #                any fetch can rewrite the file, so a committed
 #                lockfile that no longer records the pin is reported
 #                rather than silently re-resolved
-#                (lockfile-stale); the leg's own doctored copy must
+#                (lockfile-stale); the leg's own doctored copies —
+#                a lockfile recorded at another revision and one
+#                missing a release crate's package block — must each
 #                report that diagnostic (lockfile-stale-unchecked).
 #                The stage's digest of the file is what the resolve
 #                stage re-checks, naming a rewrite the fallback fetch
@@ -396,13 +398,21 @@ if url != fetch_remote:
              "repin the manifest, or drop the DCS_REMOTE substitution")
 
 # Every release crate's recorded source: git only, one source, on the
-# manifest's own remote and query, at one precise revision.
+# manifest's own remote and query, at one precise revision. A crate
+# whose package block carries no `source` line at all resolves from a
+# path into some checkout — `path-dependency-leak`'s finding — while a
+# crate with no package block is absent entirely, `lockfile-stale`'s:
+# nothing is recorded, let alone a path source.
 recorded = dict(re.findall(
     r'\[\[package\]\]\nname = "([^"]+)"\nversion = "[^"]+"\nsource = "([^"]+)"', lock
 ))
-missing = [name for name in release if name not in recorded]
+present = set(re.findall(r'\[\[package\]\]\nname = "([^"]+)"', lock))
+leaked = [name for name in release if name in present and name not in recorded]
+if leaked:
+    leak(f"release crates record no source in {lock_path} — a path into some checkout: {sorted(leaked)}")
+missing = [name for name in release if name not in present]
 if missing:
-    leak(f"release crates missing from {lock_path}: {sorted(missing)}")
+    sys.exit(f"release crates missing from {lock_path}: {sorted(missing)}")
 for name in release:
     if not recorded[name].startswith("git+"):
         leak(f"{name} resolved from {recorded[name]} — only a git source satisfies a git pin")
@@ -518,6 +528,34 @@ case "$out" in
 esac
 echo "  a lockfile recorded at another revision refused: lockfile-stale"
 
+# The stale row's other case: a release crate with no `[[package]]`
+# block at all is `lockfile-stale`, never the leak diagnostic —
+# nothing is recorded, from a path source or otherwise. The doctored
+# copy drops dcs-core's package block, the reported reproduction; the
+# diagnostic is asserted on the check's own report, not the leg's exit
+# status, so a reversion to the leak path is caught here.
+MISSING_LOCK="$(mktemp)"
+python3 - Cargo.lock "$MISSING_LOCK" <<'PY'
+import re, sys
+lock, missing = sys.argv[1], sys.argv[2]
+doctored, count = re.subn(
+    r'\[\[package\]\]\nname = "dcs-core"\nversion = "[^"]+"\nsource = "[^"]+"\n(?:dependencies = \[[^\]]*\]\n)?',
+    "",
+    open(lock).read(),
+)
+if count != 1:
+    sys.exit(f"doctor: expected one dcs-core package block, rewrote {count}")
+open(missing, "w").write(doctored)
+PY
+if out="$(lockfile_check "$MISSING_LOCK" 2>&1)"; then
+    fail "lockfile-stale-unchecked: a lockfile missing a release crate passed the lockfile leg"
+fi
+case "$out" in
+    *"lockfile-stale:"*) ;;
+    *) fail "lockfile-stale-unchecked: a lockfile missing a release crate was refused without the lockfile-stale diagnostic: $out" ;;
+esac
+echo "  a lockfile missing a release crate refused: lockfile-stale"
+
 echo "== resolve =="
 # `cargo fetch --locked` is the fast path and, with a committed
 # lockfile that satisfies the manifest, it is what makes every build
@@ -536,7 +574,7 @@ if ! cargo fetch --locked 2>"$LOCKED_ERR"; then
         fail "lockfile-stale: the committed Cargo.lock did not satisfy the declared pin — the resolve stage re-resolved it; regenerate it with \`cargo update\` (README §7)"
     fi
 fi
-rm -f "$LOCKED_ERR" "$STALE_LOCK"
+rm -f "$LOCKED_ERR" "$STALE_LOCK" "$MISSING_LOCK"
 
 echo "== build =="
 cargo build --quiet || {

@@ -1,5 +1,15 @@
 # Rolling milestone plan
 
+**Backlog cleanup phase, 2026-10-03:** Complete and reconcile the existing issues
+and PRs before expanding product scope. Automatic goal-driven planning and new
+roadmap/research/architecture task creation are disabled until Kaspar explicitly
+changes direction. The supervisor uses `planning.enabled: false`; an empty or
+blocked queue is a reason to report or resolve the blocker, not to manufacture
+replacement work. Concrete newly discovered defects may still become issues,
+with reproduction evidence and duplicate checks. QA defect routing remains
+available. The milestones below retain context for current issues and future
+steering; they do not authorize new goal-driven tickets during cleanup.
+
 ## Product direction and traceability
 
 `docs/product-strategy.md` and `docs/market-roadmap.md` set the ordered market sequence: water and wastewater, food and beverage, cement, chemical, pharmaceutical, then oil and gas. Water and wastewater remains the active implementation market; this plan continues to follow its accepted requirements and existing pre-pilot tranche. Later market scope advances only through its evidence gate. Batch control remains deferred under `docs/requirements/batch-control.md`. The current foundation is validated through `docs/requirements/water-wastewater.md`, beginning with a simulated duty/standby pumping station. Product tickets cite requirement IDs in their scope; an enabling ticket states which requirement or milestone it unlocks. When evidence is insufficient for observable acceptance criteria, research lands in `docs/research/` before implementation is planned.
