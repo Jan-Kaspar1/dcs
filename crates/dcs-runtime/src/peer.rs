@@ -1153,12 +1153,24 @@ impl<'d> Peer<'d> {
     /// Reconciles the pending commands a successful adoption left
     /// behind: the adopted receipt log is the line's one audit, so an
     /// entry this run still held `Accepted` that the new log does not
-    /// carry — at its absolute index, as the same command — can never
-    /// apply here: the gate quiesces this run's writes. It settles
-    /// `Rejected` carrying [`CommandError::Superseded`] and queues for
-    /// the journal rather than vanishing unaudited. A covered entry's
-    /// outcome is the line's own — re-queued still `Accepted`, or
-    /// already settled on the tracked run — and needs nothing.
+    /// carry — as the same submission, wherever the line's window holds
+    /// it — can never apply here: the gate quiesces this run's writes.
+    /// An absolute index is not an identity: inside the promote/fence
+    /// window the demoting peer and its successor can each mint a
+    /// receipt at one index for different submissions, so the
+    /// reconciliation compares
+    /// [`CommandReceipt::same_submission`] — the mint identity where
+    /// one exists, the index plus command where neither does. It
+    /// settles `Rejected` carrying [`CommandError::Superseded`] and
+    /// queues for the journal rather than vanishing unaudited. A
+    /// covered entry's outcome is the line's own — re-queued still
+    /// `Accepted`, or already settled on the tracked run — and needs
+    /// nothing.
+    ///
+    /// An already-settled entry the collision displaced takes the other
+    /// route: its verdict is already journaled, so only the index the
+    /// served window now carries it at is news, reported as the re-home
+    /// the settle record re-keys against.
     ///
     /// Absent means adjudicated, not merely unseen: the adoption keeps
     /// every prior receipt at or beyond its window's high-water — the
@@ -4278,6 +4290,18 @@ mod tests {
         assert_eq!(peer.receipts()[1].command, Clocked::bump(7));
         assert!(peer.take_rehomed_receipts().is_empty());
         assert!(peer.take_superseded_commands().is_empty());
+
+        // And the pair's audit reconciles on the far side too: a
+        // fail-back adopts the re-minted window verbatim — identity and
+        // all — so the successor serves the displaced submission at the
+        // same index the demoted peer does.
+        source.demote().unwrap();
+        source.apply(&peer.checkpoint()).unwrap();
+        assert_eq!(source.receipts(), peer.receipts());
+        assert_eq!(
+            source.receipts()[1].submission,
+            Some(SubmissionId { origin: 1, seq: 0 })
+        );
     }
 
     /// The consolidated #776 case: the colliding receipts carry the
