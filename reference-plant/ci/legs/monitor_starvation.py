@@ -56,7 +56,6 @@ pass.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import socket
@@ -583,9 +582,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     pulls = digest_entries[1]["pulls"]
     print(
         f"monitor-starvation-digest {digest} — serving lane bounded "

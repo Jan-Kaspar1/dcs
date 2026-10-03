@@ -59,7 +59,6 @@ silently.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -620,9 +619,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"journal-boundary-digest {digest} — {evidence['flood_a']}+"
         f"{evidence['flood_b']} receipted commands flooded past the "

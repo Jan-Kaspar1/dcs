@@ -60,7 +60,6 @@ assertions fire rather than passing an unexercised contract.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -612,9 +611,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"startup-claim-digest {digest} — switched at tick "
         f"{evidence['switched_at']}, the doomed startup refused at "

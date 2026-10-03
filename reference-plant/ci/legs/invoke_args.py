@@ -70,7 +70,6 @@ unexercised contract.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import subprocess
@@ -822,9 +821,7 @@ def main():
     if inconclusive is not None:
         print(f"invoke-args-inconclusive — {inconclusive}")
         return 0
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"invoke-args-digest {digest} — the undeclared argument "
         f"refused unknown_argument at tick {evidence['refused_at']}, "

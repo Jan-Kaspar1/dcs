@@ -54,7 +54,6 @@ exist, so the invocation must fail naming the unreadable file.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import subprocess
@@ -780,9 +779,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"report-digest {digest} — tracking by tick "
         f"{evidence['converged']}, annunciated at tick "

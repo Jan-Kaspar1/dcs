@@ -1439,6 +1439,7 @@ mod tests {
                     },
                     actor: None,
                     reason: None,
+                    submission: None,
                 },
             },
         }
@@ -1468,6 +1469,7 @@ mod tests {
                     outcome,
                     actor: actor.map(str::to_string),
                     reason: reason.map(str::to_string),
+                    submission: None,
                 },
             },
         }
