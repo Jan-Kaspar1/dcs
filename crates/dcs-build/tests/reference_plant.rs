@@ -1162,6 +1162,136 @@ fn the_committed_lockfile_satisfies_the_declared_pin() {
     );
 }
 
+/// A consumer lockfile that legitimately carries a further git-pinned
+/// package must still pass the `lockfile` stage end to end: the
+/// positive leg judges only the release crates' records, and the
+/// stage's self-check doctors only their `?query#sha` sources — never
+/// a whole-file census of git sources. This is the reported defect
+/// (`lockfile-doctor-hardcoded-git-source-count`): the doctor rewrote
+/// every `?query#sha` source in the file and hard-aborted on any count
+/// but three, so a consumer extending the template with a pinned git
+/// dependency — or a lockfile recording a second version of a release
+/// crate — crashed the stage with an opaque `doctor:` message and a
+/// real stale or duplicate lockfile state never reached its named
+/// diagnostic.
+///
+/// The materialized tree gains a `vendored-widget` dependency pinned
+/// `tag = "v0.1.0"` against its own `file://` remote — a tiny crate
+/// repository built in the scratch, tagged, and recorded in the
+/// committed lockfile exactly as `cargo update` would have written it
+/// — then runs the full clean check: the positive leg accepts the
+/// recorded release pin beside the foreign source, and the doctored
+/// copy still reports `lockfile-stale`.
+#[test]
+fn a_foreign_git_pin_beside_the_release_pins_passes_the_lockfile_stage() {
+    let tools = build_tools();
+    let copy = Materialized::new();
+
+    // The vendored crate the template does not ship: a tiny library in
+    // its own repository inside the materialized scratch — swept with
+    // it — committed and tagged like a real consumer's pinned git
+    // dependency.
+    let vendored = copy.dir.join("vendored-widget");
+    std::fs::create_dir_all(vendored.join("src")).unwrap();
+    std::fs::write(
+        vendored.join("Cargo.toml"),
+        "[package]\nname = \"vendored-widget\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(vendored.join("src/lib.rs"), "pub fn vendored() {}\n").unwrap();
+    git(&vendored, &["init"]);
+    git(&vendored, &["add", "-A"]);
+    git(
+        &vendored,
+        &[
+            "-c",
+            "user.name=dcs-ci",
+            "-c",
+            "user.email=dcs-ci@example.invalid",
+            "commit",
+            "-m",
+            "vendored widget",
+        ],
+    );
+    git(&vendored, &["tag", "v0.1.0"]);
+    let sha = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&vendored)
+            .output()
+            .expect("git rev-parse runs")
+            .stdout,
+    )
+    .expect("git rev-parse answers utf8");
+    let remote = format!("file://{}", vendored.display());
+
+    // The manifest declares the pin beside the release crates, and the
+    // committed lockfile records it — the root package's dependency
+    // list and a name-sorted `[[package]]` entry, the bytes
+    // `cargo update` would have written for the added dependency.
+    let manifest_path = copy.dir.join("Cargo.toml");
+    let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+    let edited = manifest.replace(
+        "serde_json = \"1\"",
+        &format!(
+            "serde_json = \"1\"\nvendored-widget = {{ git = \"{remote}\", tag = \"v0.1.0\" }}"
+        ),
+    );
+    assert_ne!(
+        edited, manifest,
+        "the template's Cargo.toml no longer records the serde_json dependency"
+    );
+    std::fs::write(&manifest_path, edited).unwrap();
+
+    let lock_path = copy.dir.join("Cargo.lock");
+    let mut lock = std::fs::read_to_string(&lock_path).unwrap();
+    let root_at = lock
+        .find("name = \"pump-station\"")
+        .expect("the template lockfile records no pump-station package");
+    let deps_end = lock[root_at..]
+        .find("\n]")
+        .map(|at| root_at + at + 1)
+        .expect("the pump-station package records no dependency list");
+    lock.insert_str(deps_end, " \"vendored-widget\",\n");
+    let zmij_at = lock
+        .find("[[package]]\nname = \"zmij\"")
+        .expect("the template lockfile no longer records the zmij package");
+    lock.insert_str(
+        zmij_at,
+        &format!(
+            "[[package]]\nname = \"vendored-widget\"\nversion = \"0.1.0\"\nsource = \"git+{remote}?tag=v0.1.0#{}\"\n\n",
+            sha.trim()
+        ),
+    );
+    std::fs::write(&lock_path, &lock).unwrap();
+    // The reproduction shape: four git-pinned sources in the file —
+    // the three release crates' and the consumer's own — where the
+    // doctor's census used to abort.
+    assert_eq!(
+        lock.matches("?tag=").count(),
+        4,
+        "the doctored fixture does not carry a fourth git-pinned source"
+    );
+
+    let output = copy.check(&tools);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "a consumer lockfile carrying an extra git-pinned package failed \
+         the template's ci/check.sh:\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("== lockfile =="),
+        "the lockfile stage did not run:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("a lockfile recorded at another revision refused: lockfile-stale"),
+        "the lockfile stage's doctored case did not report its named diagnostic \
+         beside the foreign pin:\n{stdout}"
+    );
+}
+
 /// The `upgrade` stage is the executable assertion of the documented
 /// repin upgrade (README §7): under the same `file://`-remote and
 /// binary substitutions as the other stages, the stage materializes
