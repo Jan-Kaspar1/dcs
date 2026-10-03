@@ -186,7 +186,7 @@
 #                workspace-side proof substitutes a file:// stand-in and
 #                rewrites this repository's Cargo.toml to match.
 #   DCS_REV      the pinned revision (default: the release tag this
-#                repository's manifest records — v0.8.0, resolving to
+#                repository's manifest records — v0.9.0, resolving to
 #                the recorded commit whose tooling serves the interface
 #                registry, declared commands and their live availability
 #                verdicts, and routed emitted events the surface stage
@@ -203,7 +203,10 @@
 #                self-address refusal, sim-bus claim family, named
 #                standby remedy, announced-source verification, skew
 #                bound, and checkpoint-pull recovery contracts the
-#                mirror legs gate on).
+#                mirror legs gate on, beside the checkpoint path's
+#                cross-peer single-writer refusal and the promotion
+#                claim's basis skew bound this pin's mirror legs
+#                gate on).
 #   DCS_UPGRADE_REV
 #                the earlier compatible revision the upgrade stage
 #                materializes the tree at before repinning to $DCS_REV
@@ -243,7 +246,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DCS_REMOTE="${DCS_REMOTE:-https://github.com/Jan-Kaspar1/dcs.git}"
-DCS_REV="${DCS_REV:-v0.8.0}"
+DCS_REV="${DCS_REV:-v0.9.0}"
 DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-07ec24f94dfaf5ff42d56a614718190da3403fd5}"
 DCS_TOOLS="${DCS_TOOLS:-}"
 DCS_RECORD_DIR="${DCS_RECORD_DIR:-}"
