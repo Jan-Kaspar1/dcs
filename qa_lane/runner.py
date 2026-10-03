@@ -30,6 +30,7 @@ import ctypes.util
 import json
 import os
 import platform
+import shlex
 import shutil
 import socket
 import stat
@@ -1493,7 +1494,7 @@ def cold_restart_controller(run_id, run_dir, name, timeline,
 
 def relaunch_controller(cfg, record, run_dir, model, name, timeline,
                         track=None, pair='deployed',
-                        share_state_with=None):
+                        share_state_with=None, keyed=True):
     """The scenario-callable flag-doctoring relaunch: `docker rm -f`
     on the pair member's container, then a fresh `docker run`
     rebuilding the member's launch through the same _controller_argv
@@ -1539,6 +1540,13 @@ def relaunch_controller(cfg, record, run_dir, model, name, timeline,
     never from an append sink's lock. The member's own files are
     untouched, so a track=None relaunch afterward restores the
     correctly-pathed member exactly.
+
+    `keyed=False` drops the recreated member's --pair-token — the
+    tokenless posture the usurped-verdict leg's unkeyed-run half
+    relaunches a probe member into: the same member observing the
+    same foreign-held field must report orphaned where a keyed peer
+    reports usurped, the pair key being the only thing the
+    foreign-writer diagnosis can ask under.
     """
     run_id, sha = record['run_id'], record['attempted_sha']
     prefix = 'dcs-hw-' + run_id
@@ -1558,7 +1566,8 @@ def relaunch_controller(cfg, record, run_dir, model, name, timeline,
     peer = peers[name]
     container = prefix + '-' + peer
     monitor_port = PAIR_MONITOR_PORTS[name]
-    command = _controller_argv(cfg, pair, name, prefix, track=track)
+    command = _controller_argv(cfg, pair, name, prefix, track=track,
+                               keyed=keyed)
     track_flag = '' if track is None else (
         ('--peer ' if name == 'active' else '--standby ') + track)
     # The shared-state alias: the member's declared CONTAINER_RUN_DIR
@@ -2569,7 +2578,7 @@ def stop_foreign_controller(run_id, timeline):
 
 
 def start_driven_controller(cfg, record, run_dir, model, active,
-                            timeline, pair='deployed'):
+                            timeline, pair='deployed', keyed=True):
     """The scenario-callable driven-standby launch — the
     dead-peer-latency case's second survivor: the run's labeled
     driven controller on the same mounted model, `--standby <peer>
@@ -2592,11 +2601,21 @@ def start_driven_controller(cfg, record, run_dir, model, active,
     directory, binds the pair's own plant's --remote, and carries the
     pair's --pair-token so its checkpoint
     answers sign the keyed line_proof an orphan-resolution probe's
-    ?prove= pull demands. The launch is recorded on the run's action
-    timeline; a docker failure raises so the calling scenario reports
-    the action never completed.
+    ?prove= pull demands. `keyed=False` drops the --pair-token — the
+    tokenless posture the foreign-writer leg stages for the probe
+    pair's driven seat: a driven third attachment outside the keyed
+    line whose unconditional promotion claim preempts the pair's
+    field while its monitor serves unsigned checkpoints the pair's
+    foreign-writer diagnosis convicts. The launch is recorded on the
+    run's action timeline; a docker failure raises so the calling
+    scenario reports the action never completed.
 
-    Returns the launched container's name.
+    Returns {'container', 'owner', 'address'} — the container name,
+    the launched peer's pinned --owner-token, and the rig-bridge
+    monitor address the field's arbitration records for its claim:
+    the claim's declared monitor is the peer's wildcard --listen, so
+    the field substitutes this attachment's source address onto the
+    driven monitor port.
     """
     run_id, sha = record['run_id'], record['attempted_sha']
     prefix = 'dcs-hw-' + run_id
@@ -2616,7 +2635,8 @@ def start_driven_controller(cfg, record, run_dir, model, active,
     remote = _pair_plant_remote(cfg, pair, prefix)
     timeline('driven-start', 'launch ' + container + ' --standby '
              + standby + ' --driven --remote ' + remote
-             + ' --owner-token ' + str(owner_token))
+             + ' --owner-token ' + str(owner_token)
+             + (' keyed' if keyed else ' unkeyed'))
     docker(*_docker_run_args(cfg, run_id, container),
            '--network', 'dcs-hwtest-' + run_id,
            '-p', '127.0.0.1:'
@@ -2630,11 +2650,15 @@ def start_driven_controller(cfg, record, run_dir, model, active,
            # its checkpoint with ?prove= — under the keyed contract
            # only a peer carrying the pair's token can sign the
            # line_proof those verify pulls demand, so the launch keeps
-           # the pair's keyed posture.
+           # the pair's keyed posture unless a leg explicitly stages
+           # the tokenless foreign shape.
            *_controller_argv(cfg, pair, 'driven', prefix,
-                             standby=standby, driven=True))
+                             standby=standby, driven=True,
+                             keyed=keyed))
     timeline('driven-up', container + ' serving a driven standby')
-    return {'container': container}
+    return {'container': container, 'owner': owner_token,
+            'address': _container_bridge_address(container)
+            + ':' + str(DRIVEN_MONITOR_PORT)}
 
 
 def stop_driven_controller(run_id, timeline, pair='deployed'):
@@ -2650,6 +2674,158 @@ def stop_driven_controller(run_id, timeline, pair='deployed'):
     timeline('driven-stop', 'docker rm -f ' + container)
     docker('rm', '-f', container, timeout=90)
     timeline('driven-stopped', container + ' removed')
+
+
+# --------------------------------------------------------------------
+# The raw field-attachment seam the usurped-verdict leg stages: a pair
+# plant's sim-serve listener may be rig-dialed only — the probe pair's
+# plant publishes no host port (recorded endpoint_placement 'bridge'),
+# so no host-side socket can hold or probe its claim surface. The
+# requests the shipped dcs-plant-ctl cannot express — an unconditional
+# claim_writer held open as a live holder, a read-only probe_writer —
+# ride a bash /dev/tcp attachment inside a rig container, the one
+# raw-TCP client the bookworm-slim images carry.
+FIELD_REQUEST_GRACE = 30   # bound on one raw request's answer
+HOLDER_REPLY_GRACE = 15    # bound on the held claim's grant answer
+
+
+def _pair_plant_port(cfg, pair):
+    """The in-container sim-serve port pair `pair`'s plant binds —
+    the loopback target a `docker exec` inside its container dials."""
+    if pair == 'probe':
+        probe = _probe_pair(cfg)
+        if probe is None:
+            raise RuntimeError('the run config stages no probe pair')
+        return probe['plant_port']
+    return cfg['plant_port']
+
+
+def field_request(run_id, cfg, request, pair='deployed'):
+    """One raw plant-protocol request/response against pair `pair`'s
+    plant — the claim-arbitration surface a bridge-placed plant offers
+    no host socket for: `docker exec` inside the pair's plant container
+    opens a loopback TCP attachment (bash's /dev/tcp), writes the one
+    request line `request` carries, and prints the reply. The shipped
+    dcs-plant-ctl covers none of the claim ops a leg needs to *observe*
+    — `probe_writer` is a request the tool does not expose — so the
+    field's own arbitration answers stay on the raw client.
+
+    The attachment is a fresh connection per call, so a `probe_writer`
+    verdict reads as a non-holder's — `fenced` naming the standing
+    claim's owner and declared monitor while one stands, `unclaimed`
+    while none does. Returns the docker-exec CompletedProcess: the
+    reply line on stdout at exit 0; a refused exec or a dead listener
+    leaves the nonzero exit and stderr for the caller to classify — one
+    lost probe, never a staged verdict.
+    """
+    container = 'dcs-hw-' + run_id + '-' + PAIRS[pair]['plant']
+    port = _pair_plant_port(cfg, pair)
+    script = ('exec 3<>/dev/tcp/127.0.0.1/' + str(port)
+              + " && printf '%s\\n' " + shlex.quote(json.dumps(request))
+              + ' >&3 && head -n 1 <&3')
+    return docker('exec', container, 'bash', '-c', script,
+                  check=False, timeout=FIELD_REQUEST_GRACE)
+
+
+def _field_claim_holder(run_id, pair):
+    """The held foreign-claim attachment's container name — one per
+    pair, launched with the run's managed and run labels so teardown
+    reconciles it even when a pass aborts before drop_field_claim
+    runs."""
+    return 'dcs-hw-' + run_id + ('-claimhold' if pair == 'deployed'
+                                 else '-probe-claimhold')
+
+
+def hold_field_claim(cfg, record, request, timeline, pair='deployed'):
+    """The scenario-callable held foreign field claim — the live
+    attachment the usurped-verdict leg's honest-absence halves stage:
+    a labeled container on the run's rig bridge opens a TCP attachment
+    to the pair's plant, writes the one request line `request`
+    carries, echoes the reply to its container log, and sleeps — the
+    live connection keeping the claim's holder set occupied for as
+    long as the container runs, so the standing claim fences the pair
+    exactly as a live foreign writer's would.
+
+    `request` is a plant-protocol op object the shipped surfaces
+    cannot produce — {'op': 'claim_writer', 'owner': token,
+    'controller': True, 'monitor': addr-or-omitted}: the claim's
+    controller mark and declared monitor ride the request verbatim, so
+    a leg stages the monitor-less or dead-declared claim shapes no
+    launched controller can raise — a real --listen always declares
+    its own live monitor. An unconditional claim_writer preempts the
+    field exactly as the foreign-claim legs stage.
+
+    Returns {'container', 'address', 'plant', 'request', 'reply'} —
+    the holder container, its rig-bridge address, the plant
+    container's bridge address (a routable IP whose closed ports make
+    a dead declared monitor), the staged request, and the parsed reply
+    the plant answered it with — None when no reply came (the
+    attachment refused or the plant unreachable), so the calling leg
+    reports the staged claim never landed rather than auditing a claim
+    that isn't standing. The launch is recorded on the run's action
+    timeline; a docker failure raises.
+    """
+    run_id, sha = record['run_id'], record['attempted_sha']
+    container = _field_claim_holder(run_id, pair)
+    net = 'dcs-hwtest-' + run_id
+    remote = _pair_plant_remote(cfg, pair, 'dcs-hw-' + run_id)
+    host, _, port = remote.rpartition(':')
+    plant = 'dcs-hw-' + run_id + '-' + PAIRS[pair]['plant']
+    line = json.dumps(request)
+    docker('rm', '-f', container, check=False, timeout=60)
+    script = ('exec 3<>/dev/tcp/' + host + '/' + port
+              + " && printf '%s\\n' " + shlex.quote(line) + ' >&3'
+              + ' && head -n 1 <&3 && sleep infinity')
+    timeline('field-claim-hold', 'launch ' + container + ' on '
+             + remote + ': ' + line[:200])
+    docker(*_docker_run_args(cfg, run_id, container),
+           '--network', net, '--entrypoint', 'bash',
+           IMAGE_PREFIX + 'plant:' + sha, '-c', script)
+    reply = None
+    deadline = time.monotonic() + HOLDER_REPLY_GRACE
+    while reply is None and time.monotonic() < deadline:
+        logs = docker('logs', container, check=False, timeout=30)
+        lines = [entry for entry in (logs.stdout or '').splitlines()
+                 if entry.strip()]
+        if lines:
+            reply = lines[-1]
+        else:
+            probe = docker('inspect', '-f', '{{.State.Running}}',
+                           container, check=False, timeout=30)
+            if probe.stdout.strip() != 'true':
+                break   # the attachment exited — no grant came
+            time.sleep(0.25)
+    parsed = None
+    if reply is not None:
+        try:
+            parsed = json.loads(reply)
+        except ValueError:
+            pass
+    timeline('field-claim-held', container + ' answered '
+             + str(reply)[:200])
+
+    def _address_of(name):
+        try:
+            return _container_bridge_address(name)
+        except Exception:
+            return None
+
+    return {'container': container, 'address': _address_of(container),
+            'plant': _address_of(plant), 'request': request,
+            'reply': parsed}
+
+
+def drop_field_claim(run_id, timeline, pair='deployed'):
+    """The held claim's teardown: `docker rm -f` on the holder
+    container — the connection's end drops the attachment's hold,
+    leaving the claim standing holderless (the field's never-release
+    rule) for the pair's own reclaim path to preempt. Tolerant of an
+    already-absent container so a failed staging's cleanup re-runs.
+    Recorded on the run's action timeline; a docker failure raises."""
+    container = _field_claim_holder(run_id, pair)
+    timeline('field-claim-drop', 'docker rm -f ' + container)
+    docker('rm', '-f', container, check=False, timeout=60)
+    timeline('field-claim-dropped', container + ' removed')
 
 
 # The forged-checkpoint endpoint's monitor port inside the rig bridge —
@@ -3623,9 +3799,10 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
         # own — the shared-state-file leg's deployment alias, both
         # peers' identical --state-file resolving to one file.
         'relaunch_controller': lambda name, track=None,
-                share_state_with=None: relaunch_controller(
+                share_state_with=None, keyed=True: relaunch_controller(
                 cfg, record, run_dir, src / cfg['model_fixture'], name,
-                timeline, track, share_state_with=share_state_with),
+                timeline, track, share_state_with=share_state_with,
+                keyed=keyed),
         # The tracking-source address-move staging — the
         # rediscovery leg's reproduction of the stale-IP-pin
         # finding: the runner removes the named member's container,
@@ -3700,11 +3877,24 @@ def _scenario_ctx(cfg, record, src, run_dir, evidence_dir, deadline,
             timeline),
         'stop_foreign': lambda: stop_foreign_controller(
             run_id, timeline),
-        'start_driven': lambda name: start_driven_controller(
-            cfg, record, run_dir, src / cfg['model_fixture'], name,
-            timeline),
+        'start_driven': lambda name, keyed=True:
+            start_driven_controller(
+                cfg, record, run_dir, src / cfg['model_fixture'], name,
+                timeline, keyed=keyed),
         'stop_driven': lambda: stop_driven_controller(
             run_id, timeline),
+        # The raw field-attachment seam for the claim ops the shipped
+        # plant tool does not expose: a one-shot request/response
+        # (probe_writer's claim observation), and the held
+        # unconditional claim a leg stages as a live foreign writer —
+        # the shapes a rig-dialed plant's claim surface needs a bridge
+        # attachment for. See field_request/hold_field_claim for the
+        # seam shape.
+        'field_request': lambda request: field_request(
+            run_id, cfg, request),
+        'hold_field_claim': lambda request: hold_field_claim(
+            cfg, record, request, timeline),
+        'drop_field_claim': lambda: drop_field_claim(run_id, timeline),
         # The born-active startup-failure leg's staging surface
         # (decision 103, #1033): the scratch sim-serve field the leg
         # silences, serves, and freezes — never the deployed pair's own
@@ -3879,10 +4069,10 @@ def _probe_ctx(ctx, cfg, record, src, run_dir, probe, mounts,
             cold_restart_controller(run_id, run_dir, name, timeline,
                                     pair='probe'),
         'relaunch_controller': lambda name, track=None,
-                share_state_with=None: relaunch_controller(
+                share_state_with=None, keyed=True: relaunch_controller(
                 cfg, record, run_dir, src / probe['model_fixture'],
                 name, timeline, track, pair='probe',
-                share_state_with=share_state_with),
+                share_state_with=share_state_with, keyed=keyed),
         'move_controller_address': lambda name: move_controller_address(
             cfg, record, run_dir, src / probe['model_fixture'], name,
             timeline, pair='probe'),
@@ -3932,10 +4122,20 @@ def _probe_ctx(ctx, cfg, record, src, run_dir, probe, mounts,
         'start_revised': None,
         'start_foreign': None,
         'stop_foreign': None,
-        'start_driven': lambda name: start_driven_controller(
-            cfg, record, run_dir, src / probe['model_fixture'],
-            name, timeline, pair='probe'),
+        'start_driven': lambda name, keyed=True:
+            start_driven_controller(
+                cfg, record, run_dir, src / probe['model_fixture'],
+                name, timeline, pair='probe', keyed=keyed),
         'stop_driven': lambda: stop_driven_controller(
+            run_id, timeline, pair='probe'),
+        # The same raw field-attachment seam, bound to the probe
+        # pair's bridge-placed plant — the only way a leg reaches its
+        # claim surface at all, since no host port publishes it.
+        'field_request': lambda request: field_request(
+            run_id, cfg, request, pair='probe'),
+        'hold_field_claim': lambda request: hold_field_claim(
+            cfg, record, request, timeline, pair='probe'),
+        'drop_field_claim': lambda: drop_field_claim(
             run_id, timeline, pair='probe'),
         # The probe pair's shared --pair-token — always set: the
         # keyed legs the deployed pair's posture cannot serve run

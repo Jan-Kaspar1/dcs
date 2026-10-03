@@ -64,6 +64,16 @@ pub struct PointSpec {
     /// domain; `None` disables the check, and the budget is
     /// inert on internal points (never driver-read) and `Out` points
     /// (never read).
+    ///
+    /// The budget is a floor rather than the whole patience: the input
+    /// phase widens it to the arrival period the run has watched this
+    /// point's report demonstrate — the reader-tick gaps between
+    /// observed report changes — so a reader scanning faster than the
+    /// field owner steps its inputs does not call each not-yet-arrived
+    /// publication stale. The frozen-field verdict the budget exists for
+    /// stands: a field that stops publishing ages out one demonstrated
+    /// period past its last report, and a point that never published at
+    /// all ages out one budget past its first observation.
     pub stale_after_ticks: Option<u64>,
     /// Whether the point's observed value transitions join the durable
     /// journal — the `journaled` flag a model `io_point` declaration
@@ -416,6 +426,66 @@ struct Freshness {
     /// in a domain running ahead of the run seeds at the observation
     /// itself — the freshest thing the run has seen.
     since: Tick,
+    /// The point's demonstrated arrival period — what the run has
+    /// learned of the field's own publishing pace, in the run's ticks,
+    /// measured from the run's first observation of the point and
+    /// grown by every report the run watches change since.
+    arrival: Arrival,
+}
+
+/// One budgeted point's demonstrated arrival period: how often the
+/// field publishes, as the run — never the field — measures it.
+///
+/// A freshness budget in run ticks answers a question about the
+/// *reader's* patience, and a reader cannot see a publication it has
+/// not been sent yet: a peer scanning faster than the field owner
+/// steps its inputs reads the same report on every scan in between, and
+/// a budget below the owner's step period would call each of those
+/// publications stale. So the run also remembers the pace the field has
+/// actually demonstrated — the reader-tick gaps between the report
+/// changes it has observed — and never judges the report stale before
+/// the longer of the declared budget and that demonstrated period has
+/// passed. The gaps are same-domain measures (two run ticks, and both
+/// recorded from observed changes, never from the driver-stamped seed
+/// `since` may carry), so the period reads no cross-domain subtraction
+/// the age beside it does not.
+#[derive(Debug, Clone, Copy)]
+struct Arrival {
+    /// The run tick of the most recent observed report change: the
+    /// origin the next gap is measured from. Seeded with the run's
+    /// first observation of the point, so the first gap opens from
+    /// wherever the reader joined — short when it joined just ahead of
+    /// a publication. The gap after it runs between two consecutive
+    /// publications and is a whole period wherever the reader joined,
+    /// which is what the two-deep window beneath buys.
+    last: Tick,
+    /// The two most recent gaps between observed report changes, older
+    /// first — the demonstrated period is the longer of the two. Two
+    /// gaps rather than one so a source's own jitter — publications
+    /// landing one scan early and one late — cannot make the window
+    /// flap under a report that keeps arriving; two rather than every
+    /// gap so one unusually long silence does not relax the verdict
+    /// for good.
+    gaps: [u64; 2],
+    /// The run's input-side failure counters as of `last` — the sum of
+    /// `failed_exchanges` and `failed_reads`. A gap spanning a failed
+    /// exchange or a failed read is the run's own I/O trouble, not the
+    /// field's publishing pace, and a gap measured across one
+    /// demonstrates nothing: it records as no gap at all.
+    failures: u64,
+}
+
+impl Freshness {
+    /// The reader-tick budget this point is judged against: the
+    /// declared `stale_after_ticks` floor, widened to the field's
+    /// demonstrated arrival period where the run has watched it
+    /// publish at least once since its first observation. A point whose
+    /// report has never moved demonstrates no pace at all and answers
+    /// to the declared budget alone — the verdict a frozen field gets
+    /// from its first scan on.
+    fn patience(&self, budget: u64) -> u64 {
+        budget.max(self.arrival.gaps[0].max(self.arrival.gaps[1]))
+    }
 }
 
 /// Runtime diagnostics for one registered component.
@@ -928,8 +998,9 @@ pub struct Executor<'d> {
     /// it from the driver's `diagnostics` hook at reporting time.
     io_health: IoHealth,
     /// Per-point freshness evidence for field `In` points carrying a
-    /// `stale_after_ticks` budget — the driver sample last observed and
-    /// the run tick that observation last changed, kept in the run-tick
+    /// `stale_after_ticks` budget — the driver sample last observed, the
+    /// run tick that observation last changed, and the arrival period
+    /// the observed changes have demonstrated, kept in the run-tick
     /// domain so a driver stamping in a foreign domain (a remote
     /// plant's plant ticks, say) cannot strand the verdict. Run-local
     /// observation state: checkpoints neither carry nor reset it.
@@ -3439,18 +3510,31 @@ impl<'d> Executor<'d> {
     ///
     /// A field `In` point carrying a `stale_after_ticks` budget gets the
     /// freshness check before the re-stamp: when the sample the driver
-    /// returns has not changed in more than `budget` run ticks, the
+    /// returns has not changed in more than the point's patience, the
     /// landed sample's quality merges
     /// [`Quality::Uncertain`]`(`[`QualityReason::Stale`]`)` — the
     /// worst-of merge, so a driver-reported `Bad` or worse-named
     /// `Uncertain` is never improved to `Stale`, and the first changed
-    /// sample inside the budget again returns the driver's own quality.
+    /// sample inside the patience again returns the driver's own quality.
     /// The lag is measured in the run-tick domain — the scans since the
     /// driver report last changed — not against the stamp the sample
     /// carries: a remote driver stamps plant ticks, whose offset from
     /// the run tick a stopped-then-resumed field leaves permanently
     /// lagging, so a cross-domain comparison would latch stale on fresh
     /// data. The image stamp stays the run tick either way.
+    ///
+    /// The patience is the declared budget widened to the field's
+    /// demonstrated arrival period — the reader-tick gaps between the
+    /// report changes this run has watched on that point. The budget is
+    /// the engineer's floor, but a run tick measures the *reader's*
+    /// patience, and a reader scanning faster than the field owner steps
+    /// its inputs sees the same report on every scan in between: judged
+    /// on the declared budget alone, a healthy field paces a stale/good
+    /// flap on every publication. The widened window keeps a merely slow
+    /// publication fresh while the field keeps publishing, and still
+    /// reaches stale one demonstrated period past the last report that
+    /// did arrive — the frozen-field verdict the budget exists for,
+    /// from the first scan on for a point that never published at all.
     ///
     /// A forced `In` point skips both channels: the driver is not read
     /// — so a field fault on a forced point counts no failed read —
@@ -3468,6 +3552,12 @@ impl<'d> Executor<'d> {
                     point,
                     Sample::new(value, Quality::Uncertain(QualityReason::Substituted), tick),
                 );
+                // The forced window answers to no driver report at
+                // all, so what the run learned about the field's
+                // publishing pace does not survive it: the next
+                // observed change starts the arrival evidence fresh
+                // rather than measuring a gap the force manufactured.
+                self.freshness.remove(&point);
                 continue;
             }
             if spec.internal.is_some() {
@@ -3483,21 +3573,53 @@ impl<'d> Executor<'d> {
                     // tick a stopped-then-resumed field leaves
                     // permanently lagging, so comparing the two
                     // domains directly would latch stale on fresh data.
-                    // The subtraction below stays same-domain — `tick`
-                    // and `freshness.since` are both run ticks.
+                    // Both subtractions below stay same-domain — `tick`,
+                    // `freshness.since`, and the arrival gaps are all
+                    // run ticks, none of them a driver stamp.
                     let quality = match spec.stale_after_ticks {
                         Some(budget) => {
+                            // The input-side failure counters the
+                            // arrival record is read against: a gap
+                            // spanning a failed exchange or a failed
+                            // read says nothing about how fast the
+                            // field publishes.
+                            let failures =
+                                self.io_health.failed_exchanges + self.io_health.failed_reads;
                             let freshness = self.freshness.entry(point).or_insert(Freshness {
                                 observed: sample,
                                 since: sample.tick.min(tick),
+                                arrival: Arrival {
+                                    last: tick,
+                                    gaps: [0, 0],
+                                    failures,
+                                },
                             });
                             if freshness.observed != sample {
+                                // A changed report restarts the age and
+                                // measures the gap since the previous
+                                // change — same-domain run ticks, the
+                                // only measure of the field's own pace
+                                // a reader has.
+                                let previous = freshness.arrival;
                                 *freshness = Freshness {
                                     observed: sample,
                                     since: tick,
+                                    arrival: Arrival {
+                                        last: tick,
+                                        gaps: [
+                                            previous.gaps[1],
+                                            if failures == previous.failures {
+                                                tick.0.saturating_sub(previous.last.0)
+                                            } else {
+                                                0
+                                            },
+                                        ],
+                                        failures,
+                                    },
                                 };
                             }
-                            if tick.0.saturating_sub(freshness.since.0) > budget {
+                            if tick.0.saturating_sub(freshness.since.0) > freshness.patience(budget)
+                            {
                                 sample
                                     .quality
                                     .merge(Quality::Uncertain(QualityReason::Stale))
@@ -4788,6 +4910,262 @@ mod tests {
         assert_eq!(
             executor.snapshot().points[0].sample.unwrap().quality,
             Quality::Good
+        );
+    }
+
+    /// A field whose owner publishes on its own cadence: `gaps` are the
+    /// reader-tick distances between consecutive publications, cycled,
+    /// so a run reading every tick meets a fresh report on the
+    /// publication and the byte-identical held one in between. The
+    /// report's stamp is the owner's own step counter — the source's
+    /// tick domain, advancing only when the owner publishes, which is
+    /// the shape a peer scanning faster than the field owner sees.
+    struct PacedField {
+        point: PointId,
+        gaps: Vec<u64>,
+        state: Mutex<Paced>,
+    }
+
+    /// The `PacedField`'s read counter, publication counter, and
+    /// publication schedule position.
+    #[derive(Debug, Clone, Copy)]
+    struct Paced {
+        /// How many reads the driver has served.
+        reads: u64,
+        /// How many publications it has made — the owner's own step
+        /// count, and the value and stamp both carry.
+        step: u64,
+        /// The read index the next publication lands on.
+        next: u64,
+        /// Which entry of `gaps` sizes the next publication.
+        gap: usize,
+    }
+
+    impl PacedField {
+        /// A field publishing on the cycled reader-tick `gaps`.
+        fn new(gaps: &[u64]) -> Self {
+            Self {
+                point: PointId(10),
+                gaps: gaps.to_vec(),
+                state: Mutex::new(Paced {
+                    reads: 0,
+                    step: 0,
+                    next: gaps[0],
+                    gap: 0,
+                }),
+            }
+        }
+
+        /// Stops publishing: the owner is paused or demoted, and the
+        /// field serves its last report from here on.
+        fn stop(&self) {
+            self.state.lock().unwrap().next = u64::MAX;
+        }
+
+        /// Resumes publishing — the owner's next step lands on the very
+        /// next read, back on the same cadence from there.
+        fn resume(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.gap = 0;
+            state.next = state.reads;
+        }
+    }
+
+    impl IoDriver for PacedField {
+        fn read(&self, point: PointId) -> Result<Sample, IoError> {
+            if point != self.point {
+                return Err(IoError::UnknownPoint(point));
+            }
+            let mut state = self.state.lock().unwrap();
+            let reads = state.reads;
+            state.reads += 1;
+            if reads >= state.next {
+                state.step += 1;
+                state.next = reads + self.gaps[state.gap];
+                state.gap = (state.gap + 1) % self.gaps.len();
+            }
+            Ok(Sample::good(
+                Value::Float(state.step as f64),
+                Tick(state.step),
+            ))
+        }
+
+        /// The field carries its one point as an input: there is no
+        /// output image to stage, so a write is the timeout a driver
+        /// answers for a point whose device never acknowledged one —
+        /// and the input-only point maps under test never ask.
+        fn write(&self, point: PointId, _value: Value) -> Result<(), IoError> {
+            Err(IoError::Timeout(point))
+        }
+    }
+
+    /// The quality `executor` last landed on its budgeted point.
+    fn budgeted_quality(executor: &Executor) -> Quality {
+        executor.snapshot().points[0].sample.unwrap().quality
+    }
+
+    /// The freshness finding's reproduction, in the executor: a peer
+    /// scanning ten times faster than the field owner steps its inputs,
+    /// observing a healthy remote field. The owner publishes every ten
+    /// reader ticks, so nine of every ten reads are the identical held
+    /// report — and the declared five-tick budget must not read that
+    /// as a stale/good flap on every publication.
+    #[test]
+    fn a_reader_outpacing_the_field_owners_pace_presents_no_stale_verdict() {
+        let field = PacedField::new(&[10]);
+        let mut executor = Executor::new(
+            &field,
+            stale_map(PointId(10), 5),
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        // Ten publications over a hundred scans. Every scan reads the
+        // owner's report; from the pace the run has demonstrated, no
+        // scan may present the stale verdict.
+        let mut stale_scans = Vec::new();
+        for scan in 1..=100 {
+            executor.scan();
+            if budgeted_quality(&executor) == Quality::Uncertain(QualityReason::Stale) {
+                stale_scans.push(scan);
+            }
+        }
+
+        // The only stale scans are the cold start — scans 6 through 10,
+        // the reads past the declared five-tick budget and before the
+        // field's first publication, which the run has to judge on that
+        // budget alone: it had not yet watched the field publish. Every
+        // scan from the demonstrated pace on reads the field's report
+        // Good, however long the reader waits for the next one.
+        assert_eq!(
+            stale_scans,
+            (6..=10).collect::<Vec<u64>>(),
+            "a demonstrated arrival period must stand in for the reader's \
+             patience once the run has measured it"
+        );
+    }
+
+    /// The other half of the same contract: the demonstrated period
+    /// relaxes the reader's patience, it never retires the verdict. A
+    /// field that stops publishing ages to stale one demonstrated
+    /// arrival period past its last report, and a resumed publication
+    /// clears it.
+    #[test]
+    fn a_slow_field_that_stops_publishing_ages_out_past_its_demonstrated_pace() {
+        let field = PacedField::new(&[10]);
+        let mut executor = Executor::new(
+            &field,
+            stale_map(PointId(10), 5),
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        // Four publications establish the pace — ten reader ticks
+        // between changed reports, wider than the declared budget.
+        executor.run(44);
+        assert_eq!(budgeted_quality(&executor), Quality::Good);
+
+        // The owner stops stepping. Ten more scans sit inside the
+        // demonstrated arrival period — the point keeps serving the
+        // owner's last report — and the eleventh presents stale.
+        field.stop();
+        executor.run(11);
+        assert_eq!(
+            budgeted_quality(&executor),
+            Quality::Uncertain(QualityReason::Stale)
+        );
+
+        // A resumed publication is a changed report: the driver's own
+        // quality lands on the first scan after it.
+        field.resume();
+        executor.scan();
+        assert_eq!(budgeted_quality(&executor), Quality::Good);
+    }
+
+    /// A field whose own cadence jitters around the reader's patience —
+    /// publications one scan early and one late — keeps its verdict
+    /// steady: the arrival window spans the two most recent gaps, so a
+    /// report that keeps arriving is never called stale between two
+    /// arrivals the field has already shown it makes.
+    #[test]
+    fn a_jittering_source_pace_does_not_flap_the_freshness_verdict() {
+        let field = PacedField::new(&[11, 9]);
+        let mut executor = Executor::new(
+            &field,
+            stale_map(PointId(10), 5),
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        let mut stale_scans = Vec::new();
+        for scan in 1..=80 {
+            executor.scan();
+            if budgeted_quality(&executor) == Quality::Uncertain(QualityReason::Stale) {
+                stale_scans.push(scan);
+            }
+        }
+
+        // The cold start only — scans 6 through 11, the reads past the
+        // declared budget and before the field's first publication. The
+        // 9-tick publication lands inside the 11-tick gap beside it,
+        // and the 11-tick gap inside the window that one demonstrated,
+        // so the field's own cadence never trips the verdict.
+        assert_eq!(stale_scans, (6..=11).collect::<Vec<u64>>());
+    }
+
+    /// A gap the run's own failed I/O opened demonstrates nothing: the
+    /// point's demonstrated period is evidence about how fast the
+    /// *field* publishes, and a report held across a failed exchange
+    /// or a failed read is the run's transport talking. The stale
+    /// verdict still arrives on the declared budget alone.
+    #[test]
+    fn a_gap_spanning_a_failed_read_demonstrates_no_arrival_period() {
+        let driver = StubDriver::new(&[float(10)], &[]);
+        let mut executor = Executor::new(
+            &driver,
+            stale_map(PointId(10), 1),
+            vec![Box::new(Declared {
+                name: "idle",
+                requirements: vec![IoRequirement::input::<f64>("in", PointId(10))],
+            })],
+        )
+        .unwrap();
+
+        // Two publications one tick apart: the demonstrated period is
+        // the one reader tick, and the declared budget of one asks for
+        // the same patience.
+        executor.scan();
+        stamp(&driver, 10, Sample::good(Value::Float(1.0), Tick(1)));
+        executor.scan();
+        assert_eq!(budgeted_quality(&executor), Quality::Good);
+
+        // A read fails, and the next report lands two ticks after the
+        // last change — a gap that spans the failure. It demonstrates
+        // no pace, so the patience stays the declared one tick.
+        driver.faults.lock().unwrap().insert(PointId(10));
+        executor.scan();
+        stamp(&driver, 10, Sample::good(Value::Float(2.0), Tick(3)));
+        driver.faults.lock().unwrap().remove(&PointId(10));
+        executor.scan();
+        assert_eq!(budgeted_quality(&executor), Quality::Good);
+
+        // The field holds from there: one lagging scan inside the
+        // budget, the second past it.
+        executor.scan();
+        assert_eq!(budgeted_quality(&executor), Quality::Good);
+        executor.scan();
+        assert_eq!(
+            budgeted_quality(&executor),
+            Quality::Uncertain(QualityReason::Stale)
         );
     }
 

@@ -1129,6 +1129,10 @@ class OwnerTokenPinTests(unittest.TestCase):
     def _docker(calls):
         def fake_docker(*args, timeout=120, check=True):
             calls.append(args)
+            # The driven launch records its claim's declared monitor
+            # off a bridge-address inspect.
+            if args[0] == 'inspect' and 'IPAddress' in str(args):
+                return Result('172.18.0.7\n')
             return Result('')
         return fake_docker
 
@@ -2073,6 +2077,8 @@ class DrivenActionTests(unittest.TestCase):
 
         def fake_docker(*args, timeout=120, check=True):
             calls.append(args)
+            if args[0] == 'inspect' and 'IPAddress' in str(args):
+                return Result('172.18.0.7\n')
             return Result('')
 
         with patch.object(runner, 'docker', fake_docker):
@@ -2115,9 +2121,14 @@ class DrivenActionTests(unittest.TestCase):
         # ?prove= answers then run unsigned like the pair's own.
         self.cfg['pair_token'] = None
         calls = []
-        with patch.object(runner, 'docker',
-                          lambda *a, **k: calls.append(a)
-                          or Result('')):
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            if args[0] == 'inspect' and 'IPAddress' in str(args):
+                return Result('172.18.0.7\n')
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
             runner.start_driven_controller(
                 self.cfg, self._record(), self.run_dir, self.model,
                 'active', lambda e, d=None: None)
@@ -2127,9 +2138,14 @@ class DrivenActionTests(unittest.TestCase):
 
     def test_standby_endpoint_standbys_on_ctrl_b(self):
         calls = []
-        with patch.object(runner, 'docker',
-                          lambda *a, **k: calls.append(a)
-                          or Result('')):
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            if args[0] == 'inspect' and 'IPAddress' in str(args):
+                return Result('172.18.0.7\n')
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
             runner.start_driven_controller(
                 self.cfg, self._record(), self.run_dir, self.model,
                 'standby', lambda e, d=None: None)
@@ -2192,9 +2208,14 @@ class DrivenActionTests(unittest.TestCase):
     def test_scenario_ctx_carries_driven_actions_and_endpoint(self):
         calls = []
         record = self._record()
-        with patch.object(runner, 'docker',
-                          lambda *a, **k: calls.append(a)
-                          or Result('')):
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            if args[0] == 'inspect' and 'IPAddress' in str(args):
+                return Result('172.18.0.7\n')
+            return Result('')
+
+        with patch.object(runner, 'docker', fake_docker):
             ctx = runner._scenario_ctx(
                 self.cfg, record, self.src, self.run_dir,
                 self.run_dir / 'evidence', 0,
@@ -4169,6 +4190,10 @@ class ProbePairTests(unittest.TestCase):
     def _docker(calls):
         def fake_docker(*args, timeout=120, check=True):
             calls.append(args)
+            # The driven launch records its claim's declared monitor
+            # off a bridge-address inspect.
+            if args[0] == 'inspect' and 'IPAddress' in str(args):
+                return Result('172.18.0.7\n')
             return Result('')
         return fake_docker
 

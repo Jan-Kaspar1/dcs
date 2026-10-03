@@ -81,8 +81,12 @@ const DYNAMICS_JSON: &str = concat!(
 /// The plant step each scan period covers, in seconds.
 const DT: f64 = 1.0;
 /// The scripted run length — the second excursion's re-latch plus
-/// settling.
-const SCANS: u64 = 78;
+/// settling, and one scan past the playback's last remote update: the
+/// run's closing freshness evidence needs the repeater's held reading
+/// one tick older than the arrival period its own playback
+/// demonstrated (`schedule::REMOTE_PERIOD`), which is where the
+/// declared budget no longer stands alone.
+const SCANS: u64 = 79;
 /// The actor every operator command carries — the attributed, receipted
 /// path decision 77 names for the bypass.
 const OPERATOR: &str = "operator";
@@ -941,7 +945,7 @@ fn scripted_run_shows_the_consequential_annunciation() {
         Quality::Good
     );
     assert!(
-        scans[schedule::REMOTE_LAST_UPDATE as usize + 3..schedule::REMOTE_RECOVERY as usize - 1]
+        scans[schedule::REMOTE_FIRST_STALE as usize - 1..schedule::REMOTE_RECOVERY as usize - 1]
             .iter()
             .all(|scan| scan.remote_quality == Quality::Uncertain(QualityReason::Stale)),
         "the frozen repeater must present stale, not a healthy last-known value"
@@ -953,13 +957,13 @@ fn scripted_run_shows_the_consequential_annunciation() {
     // unacknowledged until the scan-28 ack, clearing on the repeater's
     // recovery.
     assert!(
-        scans[..schedule::REMOTE_LAST_UPDATE as usize + 3]
+        scans[..schedule::REMOTE_FIRST_STALE as usize - 1]
             .iter()
             .all(|scan| !scan.backup_unhealthy),
         "a healthy standby must not annunciate"
     );
     assert!(
-        scans[schedule::REMOTE_LAST_UPDATE as usize + 3..schedule::REMOTE_RECOVERY as usize - 1]
+        scans[schedule::REMOTE_FIRST_STALE as usize - 1..schedule::REMOTE_RECOVERY as usize - 1]
             .iter()
             .all(|scan| scan.backup_unhealthy),
         "the standby leg must annunciate while the repeater's own sample is untrusted"
