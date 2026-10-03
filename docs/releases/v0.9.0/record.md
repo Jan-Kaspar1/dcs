@@ -264,25 +264,30 @@ non-registry half:
   schema non-drift legs continue to cover all four recorded
   artifacts — `deploy-schema` and `--dynamics-schema` beside
   `schema`/`interface-schema`.
-
-The remaining items are the release procedure's mechanical fills and
-the supervisor's publication operations:
-
-- Bump `[workspace.package]` to `0.9.0` and regenerate the workspace
-  `Cargo.lock` — one crate version across the release set; the
-  Crate versions field above names the version the bump lands.
-- Repin the reference plant: `Cargo.toml`'s `tag = "v0.9.0"`,
-  `ci/check.sh`'s `DCS_REV` default `v0.9.0` and `DCS_UPGRADE_REV`
-  default at the `v0.8.0` recorded rev — the `upgrade` stage
-  materializes the tree at the `v0.8.0` pin and repins to `v0.9.0`,
-  proving the named crossing — `deploy/manifest.json`'s
+- `[workspace.package]` version `0.9.0` and the regenerated workspace
+  `Cargo.lock` — one crate version across the release set, the Crate
+  versions field above.
+- The reference plant's repin: `Cargo.toml`'s `tag = "v0.9.0"`,
+  `ci/check.sh`'s `DCS_REV` default `v0.9.0`, `deploy/manifest.json`'s
   `dcs_release: "v0.9.0"` and `v0.9.0` image tags, and
-  `deploy/compose.yaml`'s `x-dcs-release` and images.
+  `deploy/compose.yaml`'s `x-dcs-release` and images. Its
+  `DCS_UPGRADE_REV` default stays at `07ec24f` — #983's baseline, the
+  earliest `v0.8.0`-line rev whose builder API carries this
+  composition's declared dimensional metadata, so the `upgrade` stage
+  materializes the tree there, repins it to `v0.9.0`, and proves the
+  named crossing from a baseline this tree's own source still compiles
+  against.
+
+The remaining items are the release procedure's mechanical fill the
+tag's own coordinates decide, and the supervisor's publication
+operations — the fields this record still marks *pending*:
+
 - Cut `v0.9.0` on the `main` commit carrying this record once
   `rust-proofs` is green on that exact commit; fill the Commit field
-  with the tagged sha.
+  with the tagged sha and clear the Tag field's *pending* marker.
 - Build and publish the `dcs-controller` and `dcs-plant-server`
-  images; fill the two digest fields above.
+  images; fill the two digest fields above and the Images entry under
+  Consumer pins.
 - Regenerate `reference-plant/Cargo.lock` against the published tag
   (`cargo update` in the consumer tree, README §7's documented step)
   so the committed lockfile records the `tag = "v0.9.0"` source — the
