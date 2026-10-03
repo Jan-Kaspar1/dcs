@@ -347,13 +347,13 @@
 use dcs_assembly::{DriverRegistry, FanoutDriver, StepError, assemble, resolve_drivers};
 use dcs_controller::registry;
 use dcs_core::{
-    CarryoverReport, FieldClaim, IoDriver, IoError, PointId, SwitchError, TelemetrySnapshot, Tick,
-    TickAnchor, ValueKind,
+    CarryoverReport, CommandError, CommandOutcome, CommandReceipt, FieldClaim, IoDriver, IoError,
+    PointId, RestartConsultOutcome, SwitchError, TelemetrySnapshot, Tick, TickAnchor, ValueKind,
 };
 use dcs_model::PlantModel;
 use dcs_monitor::{
-    CheckpointPuller, DEFAULT_STATE_DRAIN_CAPACITY, Driven, Monitor, MonitorConfig, StateSink,
-    StateWriterLock, TrackTarget,
+    CheckpointPuller, DEFAULT_STATE_DRAIN_CAPACITY, Driven, Monitor, MonitorClient, MonitorConfig,
+    StateSink, StateWriterLock, TrackTarget,
 };
 use dcs_runtime::{
     Activation, Checkpoint, Executor, Peer, PeerEvent, TrackReport, WriteGate, mint_generation,
@@ -812,6 +812,29 @@ fn degrade_step(stepped: Result<(), StepError>) -> Result<(), String> {
 fn report_claim(driver: &Driver, owner: u64) {
     if driver.has_shared_field() {
         eprintln!("field write-ownership claim held under owner token {owner}");
+    }
+}
+
+/// Lands the transitions startup produced before this monitor bound
+/// into the durable record, behind the run-boundary marker the bind
+/// journaled — the state-file resume's model-boundary crossing, then
+/// the restart-as-active consult's outcome with the crossing and
+/// superseded commands its adoption ran, so the journal reads in
+/// process-lifetime order ahead of the startup claim.
+fn note_pre_bind(
+    monitor: &Monitor<'_>,
+    crossings: &[CarryoverReport],
+    consult: Option<RestartConsult>,
+) {
+    for report in crossings {
+        monitor.note_reinitialized(report.clone());
+    }
+    if let Some(consult) = consult {
+        monitor.note_restart_consult(consult.source.to_string(), consult.outcome);
+        if let Some(report) = consult.crossing {
+            monitor.note_reinitialized(report);
+        }
+        monitor.note_superseded(consult.superseded);
     }
 }
 
@@ -1643,14 +1666,21 @@ enum Resume {
 /// — like every refused resume — leaves the file untouched; a matching
 /// fingerprint still resumes ordinarily through `apply`, and an
 /// unarmed mismatch still refuses on `RestoreError::FingerprintMismatch`.
+///
+/// The loaded checkpoint returns beside the verdict — the resume
+/// applied it rather than consuming it — so the restart-as-active
+/// consult can read the `tracking_source` it was stamped with: the
+/// incumbent peer this instance would track when not owning the field.
 fn resume_state_file(
     path: &Path,
     executor: &mut Executor<'_>,
     revised: bool,
-) -> Result<Resume, String> {
+) -> Result<(Resume, Option<Checkpoint>), String> {
     let body = match std::fs::read(path) {
         Ok(body) => body,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Resume::Cold),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Resume::Cold, None));
+        }
         Err(error) => {
             return Err(format!(
                 "cannot read state file {}: {error}",
@@ -1669,7 +1699,7 @@ fn resume_state_file(
             .reinitialize(&checkpoint)
             .map(|report| {
                 executor.suspend_restored_commands(&checkpoint);
-                Resume::Reinitialized(Box::new(report))
+                (Resume::Reinitialized(Box::new(report)), Some(checkpoint))
             })
             .map_err(|error| {
                 format!(
@@ -1690,7 +1720,178 @@ fn resume_state_file(
     // letting the first field-owning scan mint a second settlement
     // beside the carried copy's.
     executor.suspend_restored_commands(&checkpoint);
-    Ok(Resume::Applied)
+    Ok((Resume::Applied, Some(checkpoint)))
+}
+
+/// The bound on a restart-as-active consult's incumbent fetch — the
+/// same one-second bound the tracking pull carries, so a dead or slow
+/// peer delays startup by one bounded wait, never hangs it.
+const RESTART_CONSULT_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// What a restart-as-active incumbent consult produced — the durable
+/// record's input: the journal outcome itself plus the audit the
+/// adoption still owes — a model-boundary crossing's carryover report
+/// and the pending commands the adopted line adjudicated as superseded.
+struct RestartConsult {
+    /// The peer's monitor address the consult pulled from.
+    source: SocketAddr,
+    /// What the consult found and did.
+    outcome: RestartConsultOutcome,
+    /// The crossing report a foreign-fingerprint adoption owes the
+    /// durable record.
+    crossing: Option<CarryoverReport>,
+    /// Pending commands the adoption abandoned — this run's still-
+    /// `Accepted` receipts the incumbent's submission window passed
+    /// without carrying — each already settled `Rejected` carrying
+    /// `Superseded` beside its absolute submission index, the same
+    /// adjudication a tracking peer's adoption runs, so the receipts
+    /// never vanish unaudited and the journal's settle dedup applies.
+    superseded: Vec<(u64, CommandReceipt)>,
+}
+
+/// The restart-as-active incumbent consult — run before a relaunched
+/// launched-active's startup claim. The claim preempts unconditionally,
+/// the documented dead-active recovery, and cannot tell that relaunch
+/// apart from a duty container restarting while the promoted peer holds
+/// the field — the difference being exactly whether the incumbent's
+/// line moved ahead of the restartee's persisted checkpoint across the
+/// gap. So the restart pulls `source`'s served checkpoint first: a
+/// strictly newer one from a run that *owns the field* carries the
+/// receipts, forces, and tuning the gap accumulated, and adopting it in
+/// place — through the same
+/// [`Executor::apply`]/[`Executor::reinitialize`] routing the state-file
+/// resume runs — keeps the takeover from rolling the field back.
+///
+/// Ownership is the gate, because a tracker is not an incumbent: a peer
+/// that reports `source_owns_field: false` serves this same line's
+/// state continued by its own quiesced scans, and adopting that would
+/// move the resumed run's tick axis onto a tracker's local ticks —
+/// decision 26's own-tick-ahead rule forbids exactly that — while
+/// rolling nothing back, the field having no owner to take state from.
+///
+/// The answer classifies for the durable record:
+/// [`RestartConsultOutcome::Adopted`] a newer field-owning incumbent's
+/// checkpoint landed, [`RestartConsultOutcome::Standing`] the incumbent
+/// answered but held nothing newer than the resumed state, and
+/// [`RestartConsultOutcome::Unadopted`] no adoptable checkpoint
+/// arrived — the pull failed, the peer declared itself a non-owner, or
+/// the strict restore negotiation refused it — in which case the
+/// restart proceeds on its own persisted state exactly as before, the
+/// consult's audit being the difference.
+/// `resumed` marks whether a state file was restored at all, so the
+/// outcome can tell "superseded a resumed checkpoint" from "cold start
+/// that found a live incumbent". A foreign-fingerprint incumbent on a
+/// `revised` run crosses the model boundary under the documented
+/// carryover rule, its [`CarryoverReport`] returning for the journal.
+fn consult_incumbent(
+    source: SocketAddr,
+    executor: &mut Executor<'_>,
+    revised: bool,
+    resumed: bool,
+) -> RestartConsult {
+    let unadopted = |detail: String| RestartConsult {
+        source,
+        outcome: RestartConsultOutcome::Unadopted { detail },
+        crossing: None,
+        superseded: Vec::new(),
+    };
+    let incumbent = match MonitorClient::with_timeout(source, RESTART_CONSULT_TIMEOUT).checkpoint()
+    {
+        Ok(checkpoint) => checkpoint,
+        Err(error) => {
+            return unadopted(format!("incumbent checkpoint pull failed: {error}"));
+        }
+    };
+    // A peer that positively reports it does not own the field is not
+    // an incumbent: it is this run's own line continued by a tracker,
+    // whose stream leads the persisted checkpoint only because it
+    // scanned on past a frozen or unclaimed field with its writes
+    // quiesced. Adopting it would rewrite this run's tick axis onto a
+    // tracker's local scans — decision 26's own-tick-ahead rule and the
+    // warm-resume contract both forbid that — and nothing is rolled back
+    // by declining: the field has no owner to take state from. Only a
+    // positive non-ownership statement refuses; an unstamped checkpoint
+    // carries no ownership claim at all and stays adoptable.
+    if incumbent.source_owns_field == Some(false) {
+        return unadopted("the consulted peer reports it does not own the field".to_string());
+    }
+    if incumbent.tick <= executor.tick() {
+        return RestartConsult {
+            source,
+            outcome: RestartConsultOutcome::Standing {
+                incumbent_at: incumbent.tick,
+            },
+            crossing: None,
+            superseded: Vec::new(),
+        };
+    }
+    let superseded_at = resumed.then_some(executor.tick());
+    // The pending set the adoption below either covers or abandons —
+    // the same reconciliation `Peer::apply` runs on a tracked pull.
+    let base = executor.receipt_base();
+    let pending: Vec<(u64, CommandReceipt)> = executor
+        .receipts()
+        .iter()
+        .enumerate()
+        .filter(|(_, receipt)| matches!(receipt.outcome, CommandOutcome::Accepted { .. }))
+        .map(|(index, receipt)| (base + index as u64, receipt.clone()))
+        .collect();
+    let adopted = if revised && incumbent.model_fingerprint != executor.model_fingerprint() {
+        executor
+            .reinitialize(&incumbent)
+            .map(Some)
+            .map_err(|error| format!("incumbent checkpoint carryover failed: {error}"))
+    } else {
+        executor
+            .apply(&incumbent)
+            .map(|()| None)
+            .map_err(|error| format!("incumbent checkpoint refused: {error}"))
+    };
+    let crossing = match adopted {
+        Ok(crossing) => crossing,
+        Err(detail) => return unadopted(detail),
+    };
+    // A pending receipt the adopted window passed without carrying —
+    // its absolute index below the incumbent's high-water addressing a
+    // different command — can never apply on the adopted line: settle
+    // it `Rejected`/`Superseded` for the journal rather than dropping
+    // it unaudited.
+    let base = executor.receipt_base();
+    let superseded = pending
+        .into_iter()
+        .filter(|(index, receipt)| {
+            !index.checked_sub(base).is_some_and(|position| {
+                executor
+                    .receipts()
+                    .get(position as usize)
+                    .is_some_and(|adopted| adopted.command == receipt.command)
+            })
+        })
+        .map(|(index, receipt)| {
+            (
+                index,
+                CommandReceipt {
+                    command: receipt.command.clone(),
+                    outcome: CommandOutcome::Rejected {
+                        reason: CommandError::Superseded {
+                            point: receipt.command.point(),
+                        },
+                    },
+                    actor: receipt.actor,
+                    reason: receipt.reason,
+                },
+            )
+        })
+        .collect();
+    RestartConsult {
+        source,
+        outcome: RestartConsultOutcome::Adopted {
+            superseded_at,
+            resumed_at: incumbent.tick,
+        },
+        crossing,
+        superseded,
+    }
 }
 
 /// The `--state-file` persist a monitorless run owns directly: the
@@ -1897,22 +2098,28 @@ fn main() -> ExitCode {
     // scheduled-outage resume — and the crossing's report is the run's
     // record of what carried: printed here, journaled into the
     // monitor's durable record below when one binds.
-    let mut resumed_crossing = None;
+    let mut resumed_crossings: Vec<CarryoverReport> = Vec::new();
+    let mut resumed_checkpoint = None;
     if let Some(path) = &options.state_file {
         match resume_state_file(path, &mut executor, options.revised) {
-            Ok(Resume::Applied) => eprintln!(
-                "resumed from state file {} at tick {}",
-                path.display(),
-                executor.tick().0
-            ),
-            Ok(Resume::Reinitialized(report)) => {
-                eprintln!(
-                    "resumed from state file {} across the model boundary: {report}",
-                    path.display()
-                );
-                resumed_crossing = Some(report);
+            Ok((resume, checkpoint)) => {
+                resumed_checkpoint = checkpoint;
+                match resume {
+                    Resume::Applied => eprintln!(
+                        "resumed from state file {} at tick {}",
+                        path.display(),
+                        executor.tick().0
+                    ),
+                    Resume::Reinitialized(report) => {
+                        eprintln!(
+                            "resumed from state file {} across the model boundary: {report}",
+                            path.display()
+                        );
+                        resumed_crossings.push(*report);
+                    }
+                    Resume::Cold => {}
+                }
             }
-            Ok(Resume::Cold) => {}
             Err(error) => return fail(error),
         }
     }
@@ -1933,6 +2140,56 @@ fn main() -> ExitCode {
             .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
             .unwrap_or(0);
         executor = executor.with_anchor(TickAnchor { epoch_ms });
+    }
+
+    // The restart-as-active consult — run before the startup claim,
+    // which preempts unconditionally. A resume whose checkpoint was
+    // stamped with a tracking source — or a configured `--peer` —
+    // names the incumbent's checkpoint stream: pull it and adopt a
+    // strictly newer line so the restart cannot roll the field back to
+    // its stale persisted state. A standby-launched peer needs no
+    // consult — it returns to tracking its configured source. The
+    // outcome joins the durable record through `note_restart_consult`
+    // once a monitor binds; without one it is the stderr line here.
+    let mut restart_consult = None;
+    if options.standby.is_none() {
+        let consult_source = resumed_checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.tracking_source)
+            .or_else(|| options.peer.as_deref().and_then(|peer| resolve(peer).ok()));
+        if let Some(source) = consult_source {
+            let consult = consult_incumbent(
+                source,
+                &mut executor,
+                options.revised,
+                resumed_checkpoint.is_some(),
+            );
+            match &consult.outcome {
+                RestartConsultOutcome::Adopted {
+                    superseded_at,
+                    resumed_at,
+                } => eprintln!(
+                    "restart consult {source}: adopted the incumbent's checkpoint at tick {} \
+                     (superseded {:?})",
+                    resumed_at.0,
+                    superseded_at.map(|tick| tick.0)
+                ),
+                RestartConsultOutcome::Standing { incumbent_at } => eprintln!(
+                    "restart consult {source}: incumbent at tick {} holds nothing newer",
+                    incumbent_at.0
+                ),
+                RestartConsultOutcome::Unadopted { detail } => {
+                    eprintln!("restart consult {source}: {detail}")
+                }
+            }
+            for (_, receipt) in &consult.superseded {
+                eprintln!(
+                    "restart consult {source}: pending command superseded by the adopted line: {:?}",
+                    receipt.command
+                );
+            }
+            restart_consult = Some(consult);
+        }
     }
 
     // The role machine: a --standby instance tracks its active's
@@ -2063,10 +2320,9 @@ fn main() -> ExitCode {
             None => monitor,
         };
         // The armed-resume crossing's report joins the durable record
-        // behind the run-boundary marker the bind journaled.
-        if let Some(report) = &resumed_crossing {
-            monitor.note_reinitialized(report.as_ref().clone());
-        }
+        // behind the run-boundary marker the bind journaled — with the
+        // restart-as-active consult's audit behind it.
+        note_pre_bind(&monitor, &resumed_crossings, restart_consult.take());
         // A launched active owns the field from startup: activation
         // runs the claim-then-lift sequence — the conditional startup
         // grant under this instance's token first, the gate second —
@@ -2148,9 +2404,7 @@ fn main() -> ExitCode {
                 // The armed-resume crossing's report joins the durable
                 // record behind the run-boundary marker the bind
                 // journaled.
-                if let Some(report) = &resumed_crossing {
-                    monitor.note_reinitialized(report.as_ref().clone());
-                }
+                note_pre_bind(&monitor, &resumed_crossings, restart_consult.take());
                 eprintln!("listening on {}", monitor.local_addr());
                 let step = || driver.step(dt, monitor.owns_field());
                 let mut puller = None;
@@ -2347,10 +2601,9 @@ fn main() -> ExitCode {
                 };
                 // The armed-resume crossing's report joins the durable
                 // record behind the run-boundary marker the bind
-                // journaled.
-                if let Some(report) = &resumed_crossing {
-                    monitor.note_reinitialized(report.as_ref().clone());
-                }
+                // journaled — with the restart-as-active consult's
+                // audit behind it, ahead of the startup claim.
+                note_pre_bind(&monitor, &resumed_crossings, restart_consult.take());
                 // The launched active's deferred startup activation —
                 // the same conditional-grant sequence the driven path
                 // runs: the claim lands only now, the journal replayed,
