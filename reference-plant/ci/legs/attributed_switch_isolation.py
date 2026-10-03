@@ -108,7 +108,6 @@ report the named diagnostic rather than pass an unexercised contract.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import socket
@@ -123,6 +122,7 @@ sys.path.insert(0, os.path.dirname(_HERE))
 
 import driver_recovery
 import pair
+import simulate
 
 
 # The leg's stage registration — ci/legs.py reads this literal
@@ -866,9 +866,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     phases = {entry["phase"]: entry for entry in digest_entries}
     attributed = phases["isolation"]["attributed"]
     print(

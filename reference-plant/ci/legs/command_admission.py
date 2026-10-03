@@ -65,7 +65,6 @@ drain boundary lands a tick late.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -608,9 +607,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"command-admission-digest {digest} — {evidence['drained'] - evidence['converged']} "
         f"boundary landed the {2 * digest_entries[1]['capacity']}-command "

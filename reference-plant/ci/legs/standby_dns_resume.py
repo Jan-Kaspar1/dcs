@@ -72,7 +72,6 @@ run rather than passing an unexercised contract.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -593,9 +592,7 @@ def main():
         return 1
     if failures:
         return 1
-    digest = hashlib.sha256(
-        json.dumps(digest_entries, sort_keys=True).encode()
-    ).hexdigest()
+    digest = simulate.stable_digest(digest_entries)
     print(
         f"standby-dns-resume-digest {digest} — the field owner "
         f"resumed at tick {evidence['resumed_tick']} on the doctored "

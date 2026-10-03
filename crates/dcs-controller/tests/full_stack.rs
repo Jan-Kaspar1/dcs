@@ -121,7 +121,8 @@ use std::process::Command as Process;
 mod support;
 
 use support::{
-    SimTcp, controller_model, settle_sink_health, spawn_controller, spawn_plant, workspace_binary,
+    SimTcp, controller_model, scrub_submissions, settle_sink_health, spawn_controller, spawn_plant,
+    workspace_binary,
 };
 
 /// The showcase plant model the plant servers load — the #69 fixture.
@@ -992,7 +993,8 @@ fn run_full_stack(tag: &str) -> Outcome {
     // And in the journal: the quality transition is a recorded event on
     // the field owner — and on the tracking peer, which observed the
     // same transition behind its gate.
-    let owner_journal = active.journal(0).unwrap();
+    let mut owner_journal = active.journal(0).unwrap();
+    scrub_submissions(&mut owner_journal);
     assert!(
         journals_fault(&owner_journal, points::PUMP_RUN),
         "the injected fault is journaled on the field owner"
@@ -1171,7 +1173,11 @@ fn run_full_stack(tag: &str) -> Outcome {
         field: trace,
         stages,
         owner_journal,
-        promoted_journal: standby.journal(0).unwrap(),
+        promoted_journal: {
+            let mut journal = standby.journal(0).unwrap();
+            scrub_submissions(&mut journal);
+            journal
+        },
     }
 }
 
