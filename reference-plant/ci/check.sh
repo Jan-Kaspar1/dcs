@@ -419,11 +419,23 @@ STALE_LOCK="$(mktemp)"
 python3 - Cargo.lock "$STALE_LOCK" "$DCS_UPGRADE_REV" <<'PY'
 import re, sys
 lock, stale, baseline = sys.argv[1], sys.argv[2], sys.argv[3]
+# Only the release crates' own `?query#sha` records are put back: a
+# consumer lockfile legitimately carries further git-pinned packages —
+# a vendored crate, a second release-crate version — which the leg
+# never reads, and a whole-file census of git sources would abort the
+# stage on exactly the state it must name. Fewer rewrites than the
+# release set means the lockfile's shape drifted under the doctor —
+# that is the self-check's own failure to name, not the leg's.
+release = ("dcs-build", "dcs-core", "dcs-model")
 doctored, count = re.subn(
-    r'\?[^#"]*#[0-9a-f]{40}"', lambda _: f'?rev={baseline}#{baseline}"', open(lock).read()
+    r'(\[\[package\]\]\nname = "(?:'
+    + "|".join(release)
+    + r')"\nversion = "[^"]+"\nsource = "[^?"]*)\?[^#"]*#[0-9a-f]{40}"',
+    lambda m: m.group(1) + f'?rev={baseline}#{baseline}"',
+    open(lock).read(),
 )
-if count != 3:
-    sys.exit(f"doctor: expected three git sources to doctor, rewrote {count}")
+if count < len(release):
+    sys.exit(f"doctor: expected at least {len(release)} release-crate sources to doctor, rewrote {count}")
 open(stale, "w").write(doctored)
 PY
 if out="$(lockfile_leg "$STALE_LOCK" 2>&1)"; then
