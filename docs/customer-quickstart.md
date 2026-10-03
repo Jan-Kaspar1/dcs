@@ -2,7 +2,7 @@
 
 The entry point for engineering a customer plant is the
 **`reference-plant/` tree** in this repository — a complete,
-verbatim-publishable consumer repository pinning the v0.2.0 release
+verbatim-publishable consumer repository pinning the v0.10.0 release
 contract (`docs/release-contract.md`). Copy it into a new repository and
 it becomes your plant project: no platform checkout, no path
 dependencies, only the pinned release crates.
@@ -11,7 +11,7 @@ Its `README.md` walks the full customer path:
 
 1. **Create the repository** from the tree — every file it needs is
    inside it.
-2. **Pin a release** — `Cargo.toml`'s `git`/`rev` dependency on the
+2. **Pin a release** — `Cargo.toml`'s `git`/`tag` dependency on the
    release crates, locked by the committed `Cargo.lock`.
 3. **Compose and emit** — edit `src/station.rs` against the supported
    `dcs-build` primitives; `cargo run` emits the model deterministically.
@@ -26,13 +26,16 @@ Its `README.md` walks the full customer path:
    fingerprint to the release's images and the redundant controller
    pair, and `deploy/compose.yaml` instantiates the manifest as a
    checked-in rig definition the check holds in lockstep. The
-   manifest's optional per-controller `state_file`/`journal_file`
-   fields name container paths on writable volumes that the rig
-   definition mounts and carries to the invocation's
-   `--state-file`/`--journal-file` flags: `state_file` lets a
-   restarted container resume in place at its persisted checkpoint,
-   `journal_file` keeps the attributed operator-action record durable
-   past the process lifetime. The standby entry's optional
+   manifest's optional per-controller
+   `state_file`/`journal_file`/`history_file` fields name container
+   paths on writable volumes that the rig definition mounts and
+   carries to the invocation's
+   `--state-file`/`--journal-file`/`--history-file` flags:
+   `state_file` lets a restarted container resume in place at its
+   persisted checkpoint, `journal_file` keeps the attributed
+   operator-action record durable past the process lifetime, and
+   `history_file` keeps the durable process-history store — replayed
+   into the bounded served window at bind — across runs. The standby entry's optional
    `failover_budget` is the declaration that arms automatic failover:
    it instantiates as the invocation's `--auto-promote` flag — the
    consecutive-missed-pull budget at which the tracking standby
@@ -46,26 +49,37 @@ Its `README.md` walks the full customer path:
    deliberate path is restarting a fresh active, whose unconditional
    startup claim preempts the dead owner's field claim (decision 86,
    `docs/architecture.md`). A consumer without durable storage
-   omits both fields and the flags stay absent.
+   omits the fields and the flags stay absent. A deployment
+   may carry the optional top-level `topology` section naming its
+   pair — each entry listing its two member `controllers`, the
+   pair's standby wiring closing inside it — the declared pair
+   index a `?pair=` overview URL is generated from. One deployment
+   binds one field, so a manifest carries at most one field-owning
+   pair: a second duty controller — a second pair's duty member
+   included — is undeployable and the deploy stage refuses it
+   `rig-mismatch` (decision 99), while a site running several pairs
+   deploys one manifest per field and names their addresses across
+   them in the overview URL. A single-pair deployment omits the
+   section and configures the overview by URL exactly as before.
 7. **Upgrade** by repinning to a compatible release; an incompatible
    crossing surfaces as a named diagnostic (`pin-unresolvable`,
    `surface-incompatible`, `tooling-rejected`,
    `manifest-fingerprint-mismatch`, …) rather than silent misbehavior.
 
 The check's `pair` stage proves the declared redundant pair runs — not
-just that its definition parses: `ci/pair.py` reads the standby wiring
+just that its definition parses: `ci/legs/pair.py` reads the standby wiring
 and persistence fields out of `deploy/manifest.json` and spawns the two
 declared controllers on released tooling, converging the standby to
 `tracking`, issuing the receipted `demote`/`promote` switchover, and
 asserting the run continues bumplessly with the adopted receipts and
 the durable journal files' transition records intact. The stage's
-refusal half (`ci/refusal.py`) proves the deployed pair refuses
+refusal half (`ci/legs/refusal.py`) proves the deployed pair refuses
 honestly at its role boundaries: `POST /promote` before the standby's
 first transfer answers the named `not_converged` refusal with no field
 hand-off, a receipted write to the tracking standby answers the named
 `not_active` rejection with no field effect or phantom audit, and the
 same promote succeeds once the standby tracks — the active undisturbed
-throughout. The stage's failure-handover leg (`ci/handover.py`) proves
+throughout. The stage's failure-handover leg (`ci/legs/handover.py`) proves
 the duty-failure behavior on the deployed pair: a proven duty-pump
 field-channel fault hands `duty` to the standby pump inside the
 declared bound while the operator surface annunciates it — the
@@ -74,7 +88,7 @@ fault alarm carrying journaled `point_changed` evidence — losing every
 pump raises `none_available`/`all_faulted` with their managed alarms,
 and restoring each input produces the declared recovery with the
 pair's controller roles unmoved throughout. The stage's
-automatic-failover leg (`ci/failover.py`) then
+automatic-failover leg (`ci/legs/failover.py`) then
 proves the unattended half: the declared `failover_budget` arms the
 standby's `--auto-promote`, the field-owning container is stopped, and
 the surviving peer self-promotes at the declared miss budget — its

@@ -8,7 +8,14 @@ import time
 import unittest
 from unittest.mock import patch
 
-from agent_pool.runtime import Runtime, atomic_json, is_alive, process_identity, runner
+from agent_pool.runtime import (Runtime, atomic_json, is_alive, process_activity,
+                                process_identity, process_tree, runner)
+
+# agent_pool.runtime is a Linux/WSL runtime: process identity reads /proc,
+# timeout and stop paths signal process groups via os.killpg, and spawn
+# fixtures rely on /bin/true.
+posix_only = unittest.skipUnless(os.name == 'posix',
+                                 'agent_pool runtime is Linux/WSL only')
 
 
 class RuntimeTests(unittest.TestCase):
@@ -69,10 +76,12 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result['exit_code'], 7)
         self.assertEqual(result['status'], 'failed')
 
+    @posix_only
     def test_runner_timeout(self):
         result = self.run_spec([sys.executable, '-c', 'import time; time.sleep(30)'], .1)
         self.assertEqual(result['status'], 'timeout')
 
+    @posix_only
     def test_process_identity_detects_reused_and_missing_pid(self):
         meta = {'pid': os.getpid(), 'identity': process_identity(os.getpid())}
         self.assertTrue(is_alive(meta))
@@ -80,6 +89,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(is_alive(meta))
         self.assertIsNone(process_identity(999999999))
 
+    @posix_only
     def test_restart_reads_durable_completion(self):
         clone = self.runtime.prepare_clone('worker-01')
         self.runtime.devin = '/bin/true'
@@ -97,6 +107,24 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn('dangerous', spec['command'])
         self.assertNotIn('smart', spec['command'])
 
+    @posix_only
+    def test_session_starts_are_spaced_across_runtime_restart(self):
+        # Actual child starts, including a recreated runtime, must avoid bursts.
+        starts = []
+        for n in range(4):
+            if n == 2:
+                self.runtime = Runtime(self.runtime.pool_root, self.runtime.state_root,
+                                       str(self.source))
+            self.runtime.devin = '/bin/true'
+            self.runtime.launch_spacing_seconds = .2
+            clone = self.runtime.prepare_clone('worker-' + str(n))
+            meta = self.runtime.spawn('paced-' + str(n), clone, 'test')
+            starts.append(meta['started_at'])
+            deadline = time.monotonic() + 5
+            while self.runtime.poll(meta) is None and time.monotonic() < deadline:
+                time.sleep(.01)
+        self.assertTrue(all(b - a >= .19 for a, b in zip(starts, starts[1:])), starts)
+
     def test_spawn_selects_opencode_backend(self):
         clone = self.runtime.prepare_clone('worker-01')
         self.runtime.opencode = '/bin/true'
@@ -113,6 +141,29 @@ class RuntimeTests(unittest.TestCase):
         deadline = time.monotonic() + 5
         while self.runtime.poll(metadata) is None and time.monotonic() < deadline:
             time.sleep(.05)
+
+    @posix_only
+    def test_opencode_session_uses_checkout_even_with_inherited_pwd(self):
+        clone = self.runtime.prepare_clone('worker-01')
+        # OpenCode 1.18.31 honors inherited PWD unless run --dir is explicit.
+        # This executable fixture implements that external CLI directory contract.
+        client = self.root / 'opencode-fixture'
+        client.write_text('#!/usr/bin/env python3\n'
+                          'import os, sys\nfrom pathlib import Path\n'
+                          'args = sys.argv\n'
+                          'directory = args[args.index("--dir")+1] if "--dir" in args else os.environ["PWD"]\n'
+                          'Path(directory, "session-directory.txt").write_text(directory)\n')
+        client.chmod(0o755)
+        self.runtime.opencode = str(client)
+        with patch.dict(os.environ, {'PWD': str(self.source)}):
+            meta = self.runtime.spawn('directory-contract', clone, 'test',
+                                      model='opencode/space-bunny-free')
+            deadline = time.monotonic() + 5
+            while self.runtime.poll(meta) is None and time.monotonic() < deadline:
+                time.sleep(.01)
+        self.assertTrue((clone / 'session-directory.txt').exists())
+        self.assertEqual((clone / 'session-directory.txt').read_text(), str(clone))
+        self.assertFalse((self.source / 'session-directory.txt').exists())
 
     def test_spawn_resumes_opencode_session(self):
         clone = self.runtime.prepare_clone('worker-01')
@@ -142,6 +193,7 @@ class RuntimeTests(unittest.TestCase):
         self.runtime.opencode_db = self.root / 'missing.db'
         self.assertIsNone(self.runtime.session_id(self.source, model='opencode/muse', key='issue-1-2-0'))
 
+    @posix_only
     def test_runner_stall_kills_silent_child(self):
         spec = {'command': [sys.executable, '-c', 'import time; time.sleep(30)'],
                 'cwd': str(self.source), 'timeout': 30, 'stall_seconds': .5,
@@ -157,6 +209,116 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result['status'], 'failed')
         self.assertIn('hang', result.get('error', ''))
 
+    @posix_only
+    def test_runner_busy_descendant_survives_stall_window(self):
+        probes = []
+
+        def activity(pid):
+            probes.append(pid)
+            return True, {pid: 'busy-child'}
+
+        spec = {'command': [sys.executable, '-c', 'import time; time.sleep(1)'],
+                'cwd': str(self.source), 'timeout': 30, 'stall_seconds': .3,
+                'error_stall_seconds': .2,
+                'log': str(self.root / 'log'), 'receipt': str(self.root / 'receipt.json'),
+                'metadata': str(self.root / 'process.json')}
+        path = self.root / 'spec.json'
+        atomic_json(path, spec)
+        runner(path, activity=activity)
+        result = json.loads(Path(spec['receipt']).read_text())
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['exit_code'], 0)
+        self.assertNotIn('error', result)
+        self.assertTrue(probes)
+
+    @posix_only
+    def test_runner_idle_tree_stall_records_process_tree(self):
+        tree = {4321: 'opencode', 4322: 'cargo', 4323: 'rustc'}
+        spec = {'command': [sys.executable, '-c', 'import time; time.sleep(30)'],
+                'cwd': str(self.source), 'timeout': 30, 'stall_seconds': .4,
+                'error_stall_seconds': .3,
+                'log': str(self.root / 'log'), 'receipt': str(self.root / 'receipt.json'),
+                'metadata': str(self.root / 'process.json')}
+        path = self.root / 'spec.json'
+        atomic_json(path, spec)
+        started = time.monotonic()
+        runner(path, activity=lambda pid: (False, tree))
+        result = json.loads(Path(spec['receipt']).read_text())
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(result['status'], 'failed')
+        error = result.get('error', '')
+        self.assertIn('No agent output for', error)
+        self.assertIn('treating as hang', error)
+        for member, comm in tree.items():
+            self.assertIn('%d(%s)' % (member, comm), error)
+        self.assertIn('log tail at byte 0', error)
+
+    @posix_only
+    def test_runner_stream_error_fast_path_ignores_busy_tree(self):
+        spec = {'command': [sys.executable, '-c',
+                            'print("stream error: rate limit exceeded", flush=True); '
+                            'import time; time.sleep(30)'],
+                'cwd': str(self.source), 'timeout': 30, 'stall_seconds': 60,
+                'error_stall_seconds': .4,
+                'log': str(self.root / 'log'), 'receipt': str(self.root / 'receipt.json'),
+                'metadata': str(self.root / 'process.json')}
+        path = self.root / 'spec.json'
+        atomic_json(path, spec)
+        started = time.monotonic()
+        runner(path, activity=lambda pid: (True, {pid: 'busy'}))
+        result = json.loads(Path(spec['receipt']).read_text())
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(result['status'], 'failed')
+        self.assertIn('treating as hang', result.get('error', ''))
+
+    @posix_only
+    def test_process_activity_detects_idle_and_busy_children(self):
+        if not Path('/proc/self/stat').exists():
+            self.skipTest('process activity probe requires Linux /proc')
+        sleeper = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+                                   start_new_session=True)
+        try:
+            deadline = time.monotonic() + 5
+            while sleeper.pid not in process_tree(sleeper.pid):
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(.02)
+            # The child is tree-visible while its interpreter still starts;
+            # wait until it is blocked inside time.sleep ('S' sustained across
+            # two samples) so startup CPU under CI load is not misread as
+            # tree activity.
+            stat = Path('/proc/%d/stat' % sleeper.pid)
+            while True:
+                self.assertLess(time.monotonic(), deadline)
+                try:
+                    state = stat.read_text()
+                except OSError:
+                    self.fail('sleeper exited before reaching sleep state')
+                if state[state.rfind(')') + 2] == 'S':
+                    time.sleep(.02)
+                    state = stat.read_text()
+                    if state[state.rfind(')') + 2] == 'S':
+                        break
+                time.sleep(.02)
+            busy, snapshot = process_activity(sleeper.pid, interval=.1)
+            self.assertFalse(busy)
+            self.assertIn(sleeper.pid, snapshot)
+        finally:
+            sleeper.terminate()
+            sleeper.wait(timeout=5)
+        burner = subprocess.Popen([sys.executable, '-c',
+                                   'import time\n'
+                                   'end = time.monotonic() + 5\n'
+                                   'while time.monotonic() < end: pass'],
+                                  start_new_session=True)
+        try:
+            busy, snapshot = process_activity(burner.pid, interval=.2)
+            self.assertTrue(busy)
+            self.assertIn(burner.pid, snapshot)
+        finally:
+            burner.terminate()
+            burner.wait(timeout=5)
+
+    @posix_only
     def test_runner_error_stall_kills_stream_error_faster(self):
         spec = {'command': [sys.executable, '-c',
                             'print("stream error: rate limit exceeded", flush=True); '
@@ -208,6 +370,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(self.runtime.session_id(self.source, since=11), 'latest')
             self.assertIsNone(self.runtime.session_id(self.source, since=21))
 
+    @posix_only
     def test_spawn_refuses_live_checkout_owner(self):
         clone = self.runtime.prepare_clone('worker-01')
         invocation = self.runtime.state_root / 'old'
@@ -225,6 +388,7 @@ class RuntimeTests(unittest.TestCase):
             self.runtime.prepare_clone('worker-01', 'codex/issue-1-1')
         self.assertEqual(self.runtime.run_git(clone, 'branch', '--show-current'), 'codex/issue-1-1')
 
+    @posix_only
     def test_restart_detects_running_runner_and_stop_receipt(self):
         spec = {'command': [sys.executable, '-c', 'import time; time.sleep(30)'],
                 'cwd': str(self.source), 'timeout': 60,

@@ -22,6 +22,19 @@
 //!   [`IoPoint`](crate::IoPoint) marked `writable`: part of the operator
 //!   surface, listed for review. Writable *internal* points are the
 //!   ordinary setpoint mechanism and are not flagged.
+//! - [`LintRule::FieldInputWithoutFreshnessBudget`] — a channel-bound
+//!   `In` [`IoPoint`](crate::IoPoint) declaring no `stale_after_ticks`:
+//!   the stale-data honesty rule binds only where the budget is
+//!   declared, so a stalled field source reads as healthy last-known
+//!   forever and nothing else names the omission. Internal points and
+//!   `Out` points cannot declare the field and are out of scope.
+//! - [`LintRule::UndrivenFieldOutput`] — a channel-bound `Out`
+//!   [`IoPoint`](crate::IoPoint) no [`Connection`](crate::Connection)'s
+//!   `to` end names: the command path refuses `Out` points outright,
+//!   so nothing can ever write the point and the bound channel stays
+//!   untouched — the forgotten-connection case. Internal `Out` points
+//!   are image-carried values and stay silent; the field drives `In`
+//!   points.
 //! - [`LintRule::UnboundChannel`] — a device [`Channel`](crate::Channel) no
 //!   io_point binds: a dead field declaration.
 //!
@@ -29,7 +42,7 @@
 //! channels in their map's name order — so the report is deterministic and
 //! follows the document.
 
-use crate::model::{IoPoint, PlantModel, Signal};
+use crate::model::{Direction, Endpoint, IoPoint, PlantModel, Signal};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
@@ -49,6 +62,14 @@ pub enum LintRule {
     SignalMissingGroup,
     /// A channel-bound `io_point` marked `writable` — the operator surface.
     WritableFieldPoint,
+    /// A channel-bound `in` `io_point` declaring no `stale_after_ticks`
+    /// freshness budget — stale field data presents as healthy
+    /// last-known.
+    FieldInputWithoutFreshnessBudget,
+    /// A channel-bound `out` `io_point` no connection's `to` end names —
+    /// the command path refuses `out` points, so nothing ever drives the
+    /// bound channel.
+    UndrivenFieldOutput,
     /// A device channel no `io_point` binds.
     UnboundChannel,
 }
@@ -61,6 +82,8 @@ impl fmt::Display for LintRule {
             LintRule::SignalMissingDescription => "signal_missing_description",
             LintRule::SignalMissingGroup => "signal_missing_group",
             LintRule::WritableFieldPoint => "writable_field_point",
+            LintRule::FieldInputWithoutFreshnessBudget => "field_input_without_freshness_budget",
+            LintRule::UndrivenFieldOutput => "undriven_field_output",
             LintRule::UnboundChannel => "unbound_channel",
         })
     }
@@ -155,6 +178,58 @@ impl PlantModel {
             }
         }
 
+        // Stale-data honesty binds only where the model declares
+        // `stale_after_ticks`: a channel-bound `In` point without the
+        // budget serves a stalled field source's last-known value as
+        // `Good` forever, and nothing else names the omission. Internal
+        // points and `Out` points cannot declare the field and are out
+        // of scope.
+        for point in &self.io_points {
+            if point.direction == Direction::In
+                && point.channel.is_some()
+                && point.stale_after_ticks.is_none()
+            {
+                findings.push(LintFinding {
+                    rule: LintRule::FieldInputWithoutFreshnessBudget,
+                    element: describe_point(point),
+                    message: "declares no stale_after_ticks freshness budget; a \
+                              stalled field source reads as healthy last-known"
+                        .to_owned(),
+                });
+            }
+        }
+
+        // The forgotten-connection case: a channel-bound `Out` point no
+        // connection's `to` end names can never be written — the command
+        // path refuses `Out` points outright — so the bound channel
+        // stays untouched while the model asserts a driven actuator.
+        // Internal `Out` points are image-carried values and the field
+        // drives `In` points; both stay silent.
+        let driven: BTreeSet<u64> = self
+            .connections
+            .iter()
+            .filter_map(|connection| match &connection.to {
+                Endpoint::Point(point) => Some(point.0),
+                Endpoint::Port(_) => None,
+            })
+            .collect();
+        for point in &self.io_points {
+            let Some(channel) = &point.channel else {
+                continue;
+            };
+            if point.direction == Direction::Out && !driven.contains(&point.id.0) {
+                findings.push(LintFinding {
+                    rule: LintRule::UndrivenFieldOutput,
+                    element: describe_point(point),
+                    message: format!(
+                        "bound to channel {:?} on device {} but driven by no connection; \
+                         the channel is never written",
+                        channel.name, channel.device.0
+                    ),
+                });
+            }
+        }
+
         // Dead field declarations: channels no io_point binds.
         let bound: BTreeSet<(u64, &str)> = self
             .io_points
@@ -206,6 +281,9 @@ mod tests {
                 LintRule::SignalMissingGroup,
                 LintRule::SignalMissingDescription,
                 LintRule::WritableFieldPoint,
+                LintRule::FieldInputWithoutFreshnessBudget,
+                LintRule::FieldInputWithoutFreshnessBudget,
+                LintRule::UndrivenFieldOutput,
                 LintRule::UnboundChannel,
                 LintRule::UnboundChannel,
             ],
@@ -213,8 +291,11 @@ mod tests {
         );
         assert_eq!(findings[0].element, "io_point 11");
         assert_eq!(findings[1].element, "signal 101 \"reactor-level-switch\"");
-        assert_eq!(findings[5].element, "device 1 channel \"ch7\"");
-        assert_eq!(findings[6].element, "device 2 channel \"ch3\"");
+        assert_eq!(findings[5].element, "io_point 10");
+        assert_eq!(findings[6].element, "io_point 12");
+        assert_eq!(findings[7].element, "io_point 14");
+        assert_eq!(findings[8].element, "device 1 channel \"ch7\"");
+        assert_eq!(findings[9].element, "device 2 channel \"ch3\"");
     }
 
     #[test]
@@ -236,6 +317,121 @@ mod tests {
             "{:?}",
             model.lint()
         );
+    }
+
+    #[test]
+    fn every_unbudgeted_field_input_is_flagged() {
+        // Findings fire for each channel-bound `In` point declaring no
+        // `stale_after_ticks` — the fixture's points 10 and 12 — in
+        // declaration order.
+        let model = PlantModel::load(FINDINGS).unwrap();
+        let flagged: Vec<String> = model
+            .lint()
+            .iter()
+            .filter(|finding| finding.rule == LintRule::FieldInputWithoutFreshnessBudget)
+            .map(|finding| finding.element.clone())
+            .collect();
+        assert_eq!(flagged, vec!["io_point 10", "io_point 12"]);
+    }
+
+    #[test]
+    fn a_declared_budget_is_not_flagged() {
+        // The clean fixture's one field input declares
+        // `stale_after_ticks`; it carries no freshness finding.
+        let model = PlantModel::load(CLEAN).unwrap();
+        assert!(
+            model
+                .lint()
+                .iter()
+                .all(|finding| finding.rule != LintRule::FieldInputWithoutFreshnessBudget),
+            "{:?}",
+            model.lint()
+        );
+    }
+
+    #[test]
+    fn an_undriven_field_output_is_flagged_naming_its_channel() {
+        // The fixture's io_point 14 is channel-bound `Out` and no
+        // connection's `to` end names it: the finding names the point
+        // and its bound channel.
+        let model = PlantModel::load(FINDINGS).unwrap();
+        let flagged = model
+            .lint()
+            .into_iter()
+            .filter(|finding| finding.rule == LintRule::UndrivenFieldOutput)
+            .collect::<Vec<_>>();
+        let [finding] = flagged.as_slice() else {
+            panic!("expected one undriven-field-output finding: {flagged:?}");
+        };
+        assert_eq!(finding.element, "io_point 14");
+        assert!(
+            finding.message.contains("channel \"ch1\" on device 2"),
+            "{finding:?}"
+        );
+    }
+
+    #[test]
+    fn a_driven_field_output_is_not_flagged() {
+        // The fixture's io_point 11 is the same channel-bound `Out`
+        // shape but named as a connection's `to` end — driven, so
+        // silent.
+        let model = PlantModel::load(FINDINGS).unwrap();
+        assert!(
+            model.lint().iter().all(|finding| {
+                !(finding.rule == LintRule::UndrivenFieldOutput && finding.element == "io_point 11")
+            }),
+            "io_point 11 flagged: {:?}",
+            model.lint()
+        );
+    }
+
+    #[test]
+    fn an_internal_out_point_is_not_flagged() {
+        // The fixture's io_point 15 is a channel-less `Out` point — an
+        // image-carried value, not field engineering — so it stays
+        // silent even though no connection drives it.
+        let model = PlantModel::load(FINDINGS).unwrap();
+        assert!(
+            model.lint().iter().all(|finding| {
+                !(finding.rule == LintRule::UndrivenFieldOutput && finding.element == "io_point 15")
+            }),
+            "io_point 15 flagged: {:?}",
+            model.lint()
+        );
+    }
+
+    #[test]
+    fn bound_in_points_are_not_flagged() {
+        // The fixture's channel-bound `In` points are driven by the
+        // field, not by connections — the rule never names them.
+        let model = PlantModel::load(FINDINGS).unwrap();
+        for element in ["io_point 10", "io_point 12"] {
+            assert!(
+                model.lint().iter().all(|finding| {
+                    !(finding.rule == LintRule::UndrivenFieldOutput && finding.element == element)
+                }),
+                "{element} flagged: {:?}",
+                model.lint()
+            );
+        }
+    }
+
+    #[test]
+    fn internal_and_out_points_are_not_flagged() {
+        // Validation confines `stale_after_ticks` to channel-bound `In`
+        // points, so an internal point (io_point 13) and an `Out` point
+        // (io_point 11) are out of scope — never flagged.
+        let model = PlantModel::load(FINDINGS).unwrap();
+        for element in ["io_point 11", "io_point 13"] {
+            assert!(
+                model.lint().iter().all(|finding| {
+                    !(finding.rule == LintRule::FieldInputWithoutFreshnessBudget
+                        && finding.element == element)
+                }),
+                "{element} flagged: {:?}",
+                model.lint()
+            );
+        }
     }
 
     #[test]

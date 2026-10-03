@@ -507,6 +507,7 @@ mod tests {
             parameters,
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let block = SignalFilter::from_parameters("filt", IN, OUT, &instance.parameters).unwrap();
         assert_eq!(block.alpha, 0.5);

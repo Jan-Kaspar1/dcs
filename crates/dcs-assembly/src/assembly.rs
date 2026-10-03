@@ -137,7 +137,8 @@ pub(crate) fn resolve(model: &PlantModel) -> Resolved {
             // declared freshness budget rides the spec — `None` for a
             // point that never declared one, so the input phase skips
             // the check entirely — and the `journaled` flag rides along
-            // for the recorder's value-transition diff.
+            // for the recorder's value-transition diff, the `record`
+            // duty's cadence for the durable history append.
             (Some(_), _) => {
                 point_map = point_map.with_spec(
                     point.id,
@@ -146,8 +147,10 @@ pub(crate) fn resolve(model: &PlantModel) -> Resolved {
                         kind: point.value_type,
                         internal: None,
                         writable: point.writable,
+                        requires_reason: point.requires_reason,
                         stale_after_ticks: point.stale_after_ticks,
                         journaled: point.journaled,
+                        record_every_ticks: point.record.map(|duty| duty.every_ticks),
                     },
                 );
             }
@@ -163,8 +166,10 @@ pub(crate) fn resolve(model: &PlantModel) -> Resolved {
                         kind: point.value_type,
                         internal: Some(initial),
                         writable: point.writable,
+                        requires_reason: point.requires_reason,
                         stale_after_ticks: point.stale_after_ticks,
                         journaled: point.journaled,
+                        record_every_ticks: point.record.map(|duty| duty.every_ticks),
                     },
                 );
             }

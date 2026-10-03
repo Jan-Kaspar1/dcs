@@ -53,7 +53,7 @@ from pathlib import Path
 from qa_lane import report as qa_report
 from qa_lane import verify as qa_verify
 
-from . import planning
+from . import areas, planning
 
 SCHEMA_VERSION = qa_report.SCHEMA_VERSION
 KEY = re.compile(r'^[a-z0-9][a-z0-9-]{0,79}$')
@@ -396,9 +396,11 @@ def priority(finding):
     return PRIORITY[finding['severity']]
 
 
-def issue_body(finding, report, dependencies=(), preamble=None, key=None):
+def issue_body(finding, report, dependencies=(), preamble=None, key=None, area=None):
+    area = area or areas.infer(finding['module'], finding['title'], finding['summary'])
     meta = {'key': key or issue_key(finding['key']),
             'group': concurrency_group(finding['module']),
+            'area': area,
             'dependencies': list(dependencies), 'priority': priority(finding)}
     evidence = '\n'.join('- ' + e['detail'] for e in finding['evidence'])
     sections = [
@@ -450,9 +452,11 @@ def marker_map(issues):
 def _publish_defect(github, finding, report, dependencies=(), suffix='', preamble=None):
     """Create the managed issue once; returns the issue number."""
     key = issue_key(finding['key']) + suffix
+    area = areas.infer(finding['module'], finding['title'], finding['summary'])
     body = issue_body(finding, report, dependencies=dependencies,
-                      preamble=preamble, key=key)
-    labels = ['agent:ready', 'priority:P' + str(priority(finding))]
+                      preamble=preamble, key=key, area=area)
+    labels = ['agent:ready', 'priority:P' + str(priority(finding)),
+              areas.label(area)]
     title = ('[QA] ' + finding['title'])[:200]
     return github.create_issue(title, body, labels, key=key)
 

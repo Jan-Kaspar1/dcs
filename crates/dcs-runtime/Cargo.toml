@@ -10,4 +10,8 @@ dcs-core = { path = "../dcs-core" }
 serde = { version = "1.0.229", features = ["derive"] }
 
 [dev-dependencies]
+# The freshness coverage exercises a real SimDriver: only its `step`'s
+# bare-channel re-stamp produces the changing reports a budgeted point
+# reads fresh on — the stub driver cannot express it.
+dcs-sim = { path = "../dcs-sim" }
 serde_json = "1.0.151"

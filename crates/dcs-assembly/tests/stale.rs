@@ -1,11 +1,13 @@
 //! Integration tests for the declared freshness contract: the
 //! `stale_input` fixture marks field `io_point` inputs with
 //! `stale_after_ticks`, assembly carries each budget into the executor's
-//! point map, and a field source that stops refreshing — a sim point
-//! left unstepped or a bus register holding the tick of its last write —
-//! lands in the image as `Uncertain(Stale)` once the lag exceeds the
-//! budget, recovering to `Good` on the first fresh read. Points without
-//! the field are never stale-stamped.
+//! point map, and a field source that stops stepping — the sim driver,
+//! or the bank behind the bus device — leaves its served report frozen,
+//! so the point lands in the image as `Uncertain(Stale)` once the lag
+//! exceeds the budget, recovering to `Good` on the first fresh read.
+//! While the field keeps stepping, a bare channel re-stamps every step
+//! like a scanned input card and stays fresh. Points without the field
+//! are never stale-stamped.
 
 use dcs_assembly::{ComponentRegistry, DriverRegistry, FanoutDriver, assemble, resolve_drivers};
 use dcs_core::{IoDriver, PointId, Quality, QualityReason, Sample, Tick, Value};
@@ -114,84 +116,103 @@ fn fixture_declares_freshness_budgets() {
 }
 
 #[test]
-fn sim_input_holding_an_old_tick_turns_stale() {
+fn sim_input_stays_fresh_while_the_field_steps_and_stales_once_it_stops() {
     with_server(device_bank(), |_, addr| {
         let model = stale_model(addr);
         let driver = build_driver(&model);
         let mut executor = assemble(&model, &ComponentRegistry::new(), &driver).unwrap();
 
-        // The device refreshed the measurement at its tick 0 — then
-        // stopped.
+        // The device refreshed both inputs at its tick 0.
         driver.write(MEASUREMENT, Value::Float(7.0)).unwrap();
         driver.write(AMBIENT, Value::Float(20.0)).unwrap();
 
-        // Scans 1 and 2 lag by one and two ticks — inside the budget of
-        // 2 — and the image stamps the scan tick, never the driver's.
+        // While the plant steps, the bare channel re-stamps every step
+        // like a scanned input card: each scan observes a changed
+        // report, so a held value stays fresh indefinitely.
         executor.scan();
-        driver.step(0.1).unwrap();
-        executor.scan();
+        for _ in 0..2 {
+            driver.step(0.1).unwrap();
+            executor.scan();
+        }
         assert_eq!(
             image_sample(&executor, MEASUREMENT),
-            Sample::good(Value::Float(7.0), Tick(2))
+            Sample::good(Value::Float(7.0), Tick(3))
         );
 
-        // Scan 3's lag of 3 exceeds the budget: the held value lands as
+        // The plant stops stepping — the report freezes and the run's
+        // own lag accrues. Scans 4 and 5 lag by one and two ticks —
+        // inside the budget of 2 — and the image stamps the scan tick,
+        // never the driver's.
+        executor.run(2);
+        assert_eq!(
+            image_sample(&executor, MEASUREMENT),
+            Sample::good(Value::Float(7.0), Tick(5))
+        );
+
+        // Scan 6's lag of 3 exceeds the budget: the held value lands as
         // Uncertain(Stale) at the scan tick.
-        driver.step(0.1).unwrap();
         executor.scan();
         assert_eq!(
             image_sample(&executor, MEASUREMENT),
             Sample::new(
                 Value::Float(7.0),
                 Quality::Uncertain(QualityReason::Stale),
-                Tick(3)
+                Tick(6)
             )
         );
 
-        // The unbudgeted input on the same device stays Good regardless
-        // of the lag — its driver sample carries the same held tick.
+        // The unbudgeted input on the same device froze identically —
+        // with no declared budget it stays Good regardless of the lag.
         assert_eq!(
             image_sample(&executor, AMBIENT),
-            Sample::good(Value::Float(20.0), Tick(3))
+            Sample::good(Value::Float(20.0), Tick(6))
         );
 
-        // The first sample the device refreshes inside the budget
-        // returns the driver's own Good quality.
-        driver.write(MEASUREMENT, Value::Float(9.0)).unwrap();
+        // A resumed step's re-stamp is a changed report — the first
+        // fresh read returns the driver's own Good quality.
+        driver.step(0.1).unwrap();
         executor.scan();
         assert_eq!(
             image_sample(&executor, MEASUREMENT),
-            Sample::good(Value::Float(9.0), Tick(4))
+            Sample::good(Value::Float(7.0), Tick(7))
         );
     });
 }
 
 #[test]
-fn bus_register_holding_an_old_tick_turns_stale() {
+fn bus_register_stays_fresh_while_the_bank_steps_and_stales_once_it_stops() {
     with_server(device_bank(), |server, addr| {
         let model = stale_model(addr);
         let driver = build_driver(&model);
         let mut executor = assemble(&model, &ComponentRegistry::new(), &driver).unwrap();
 
-        // The device last wrote the register at its bank tick 0; each
-        // fan-out step advances the bank's tick without touching it —
-        // the held sample's stamp falls further behind every scan.
+        // The device wrote the register at bank tick 0 — and the field
+        // keeps stepping: each fan-out step re-stamps the held sample,
+        // so every scan's report changes and the budgeted point stays
+        // Good.
         server
             .bank()
             .write(LEVEL_REGISTER, Value::Float(6.5))
             .unwrap();
-        driver.step(0.1).unwrap();
         for _ in 0..3 {
-            executor.scan();
             driver.step(0.1).unwrap();
+            executor.scan();
         }
-        // Three lags inside the budget of 3 stay Good.
         assert_eq!(
             image_sample(&executor, LEVEL_RAW),
             Sample::good(Value::Float(6.5), Tick(3))
         );
 
-        // The fourth scan's lag exceeds the budget — the register-held
+        // The bank stops stepping — the held report freezes and the
+        // run's lag accrues. Scans 4 through 6 lag by one, two, and
+        // three ticks — inside the budget of 3.
+        executor.run(3);
+        assert_eq!(
+            image_sample(&executor, LEVEL_RAW),
+            Sample::good(Value::Float(6.5), Tick(6))
+        );
+
+        // Scan 7's lag of 4 exceeds the budget — the register-held
         // value lands as Uncertain(Stale), stamped at the scan tick.
         executor.scan();
         assert_eq!(
@@ -199,11 +220,12 @@ fn bus_register_holding_an_old_tick_turns_stale() {
             Sample::new(
                 Value::Float(6.5),
                 Quality::Uncertain(QualityReason::Stale),
-                Tick(4)
+                Tick(7)
             )
         );
 
-        // A fresh device write inside the budget returns Good.
+        // A fresh device write while the bank stands still is a changed
+        // report — Good on the first read.
         server
             .bank()
             .write(LEVEL_REGISTER, Value::Float(7.5))
@@ -211,7 +233,7 @@ fn bus_register_holding_an_old_tick_turns_stale() {
         executor.scan();
         assert_eq!(
             image_sample(&executor, LEVEL_RAW),
-            Sample::good(Value::Float(7.5), Tick(5))
+            Sample::good(Value::Float(7.5), Tick(8))
         );
     });
 }

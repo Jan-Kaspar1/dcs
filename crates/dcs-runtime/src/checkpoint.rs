@@ -32,7 +32,26 @@
 //! `JournalEvent::SourceRestarted` — from its own tracking-state reset:
 //! a demoted peer's first pull on its uninterrupted successor regresses
 //! in tick but names the generation the demoted run's own captures
-//! stamped, which is no restart. The `driver`
+//! stamped, which is no restart. The `stream_tick` stamp locates the
+//! captured `tick` in the line's origin domain: a tracking peer's paced
+//! clock keeps counting through every source outage it survives while
+//! the pulled stream stands still, so its run tick accrues a permanent
+//! lead the stamp declares — and that survives promotion, where the
+//! run's numbering leads the line's position ever after. The one
+//! positional check a demoted or orphaned peer's verification of a
+//! pulled document keeps is the document's own consistency — an
+//! honest declaration never exceeds the `tick` it rides — since run
+//! ticks are not synchronized to the line and a detached prober's
+//! positions advance at its own scan cadence: no bound against the
+//! prober's own position can tell an honest outage lead or a simply
+//! faster-paced successor — same generation, same fingerprint, same
+//! line — from a foreign stream forging the line's identity. The
+//! `source_owns_field` stamp — set by
+//! the serving peer, absent on a bare executor's capture — lets a
+//! tracking peer name the mutual-standby wedge: a checkpoint applied
+//! cleanly from a run owning no field writes means the tracked line
+//! has no field owner, and the puller reports `orphaned` rather than a
+//! healthy `tracking`. The `driver`
 //! section is simulation-specific:
 //! on live hardware the standby's driver observes the actual process
 //! through its own channels rather than reconstructing captured field
@@ -41,7 +60,8 @@
 
 use crate::executor::WiringError;
 use dcs_core::{
-    CommandReceipt, ModelFingerprint, PointId, Sample, StateError, StateMap, Tick, Value, ValueKind,
+    CommandReceipt, ModelFingerprint, PointId, Sample, StateError, StateMap, Tick, TickAnchor,
+    Value, ValueKind,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -147,9 +167,40 @@ pub struct Checkpoint {
     /// involving one journals the restart exactly as it always did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<u64>,
-    /// The executor's tick at capture; the restored executor resumes
-    /// numbering from here.
+    /// The tick domain's civil-time anchor — the wall-clock instant of
+    /// the domain's origin tick the pacing layer minted when the
+    /// domain began. The anchor maps the domain, not the process: a
+    /// `--state-file` resume restores the domain and keeps its anchor,
+    /// a tracking peer adopts the tracked line's with each applied
+    /// checkpoint, and a cold start begins a new domain and anchor.
+    /// `None` on checkpoints a pre-anchor build wrote or an unanchored
+    /// run captured — a driven or unminted domain — whose records stay
+    /// byte-identical under an unchanged script.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<TickAnchor>,
+    /// The capturing run's run tick at capture; the restored executor
+    /// resumes numbering from here. A tracking peer reads it as a source
+    /// tick — the tracked stream's own counter — and lands it at
+    /// `tick + tick_offset` in its own run domain.
     pub tick: Tick,
+    /// The position the captured [`tick`](Self::tick) occupies in the
+    /// tracked line's origin tick domain — the domain the line's
+    /// `generation` began in — stamped when the serving run's numbering
+    /// leads that stream position. A tracking peer's paced clock keeps
+    /// counting through every source outage it survives while the
+    /// pulled stream stands still, so its run tick accrues a permanent
+    /// lead over the line — a lead that survives promotion: the run
+    /// that took the field still numbers the ticks it minted waiting.
+    /// Without this stamp, a run applying the successor's document
+    /// could not carry the line's position forward — the successor's
+    /// captures would re-locate the line at its own run tick and every
+    /// downstream declaration would inherit the error. `Some` only
+    /// while the lead exists; `None` — every
+    /// checkpoint a lead-free or pre-field build captured — means the
+    /// captured `tick` *is* the stream position, the only answer a
+    /// run without the declared lead can honestly give.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_tick: Option<Tick>,
     /// Each component's captured state, keyed by the component's
     /// [`name`](crate::Component::name) — its identity within the run.
     /// Every registered component has an entry, possibly an empty map, so
@@ -169,9 +220,18 @@ pub struct Checkpoint {
     /// The scan image's internal `In` samples at capture: held operator
     /// values and link carriers, which field reads never refresh.
     /// Restoring them means a commanded setpoint survives a switchover
-    /// instead of reverting to its declared initial. Absent from
-    /// checkpoints written before internal points existed; defaults to
-    /// empty.
+    /// instead of reverting to its declared initial. The captured stamp
+    /// is the line's claim of when the held value last changed — the
+    /// pair shares one tick domain, so
+    /// [`apply`](crate::Executor::apply) adopts it verbatim, keeping a
+    /// tracked peer's served samples identical to the line's. One stamp
+    /// cannot be the claim it reads as: `Tick::ZERO` means "unchanged
+    /// since before the line's first scan", which only the seed value
+    /// honestly carries — an adopted *change* stamped zero would
+    /// mis-date its origin to run start, so the apply's landing tick
+    /// stamps it instead, the same stamp a `WriteValue` there would
+    /// carry. Absent from checkpoints written before internal points
+    /// existed; defaults to empty.
     #[serde(default)]
     pub internal: BTreeMap<PointId, Sample>,
     /// The operator force set at capture: each forced point and the
@@ -233,6 +293,47 @@ pub struct Checkpoint {
     /// stamp existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracking_source: Option<SocketAddr>,
+    /// Whether the run serving this checkpoint owns field writes —
+    /// stamped by the serving [`Peer`](crate::Peer) at capture, not by
+    /// the executor, which has no role view. `Some(true)` marks a
+    /// field-owning source — `active` or `promoting`; `Some(false)`
+    /// marks a serving run that writes nothing — the stamp a tracking
+    /// peer reads to name the mutual-standby wedge: a cleanly applied
+    /// checkpoint whose serving run owns no field writes means the
+    /// tracked line has no field owner, and the puller reports
+    /// [`StandbySync::Orphaned`](dcs_core::StandbySync) instead of a
+    /// converged `tracking` that only looks healthy. `None` — every
+    /// checkpoint a bare executor captures, and everything a
+    /// pre-stamping build wrote — carries no ownership claim, so an
+    /// apply treats it as owner-produced exactly as it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_owns_field: Option<bool>,
+    /// The monitor address this checkpoint line currently names as its
+    /// field owner — serve-time decoration like
+    /// [`line_proof`](Self::line_proof), never run state: a serving
+    /// field owner stamps its own address, a non-owning serving run
+    /// propagates the address the checkpoints it pulls carried, and a
+    /// bare [`Executor::checkpoint`] leaves it absent. A tracking peer
+    /// whose tracked line reports no owner — [`StandbySync::Orphaned`]
+    /// — probes it to re-resolve onto the run that actually holds the
+    /// field, so a demoted peer pinned onto a sibling standby's
+    /// checkpoints follows the line onward to the real owner instead
+    /// of orphaned-tracking a stale island forever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_owner: Option<SocketAddr>,
+    /// The keyed line proof a serving monitor injects into this
+    /// document's wire form on a `?prove=` pull — response decoration,
+    /// never run state: [`Executor::checkpoint`](crate::Executor::checkpoint)
+    /// never sets it, [`Executor::restore`](crate::Executor::restore)
+    /// ignores it, and it is absent on every captured checkpoint and
+    /// every response to an unproven pull. A pulling peer compares it
+    /// against the proof it computes over the received document and
+    /// its request's nonce under the pair's shared key, so a checkpoint
+    /// served by an endpoint that merely replays or fabricates this
+    /// line's documents — without holding the key — cannot masquerade
+    /// as a tracked peer's production.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_proof: Option<u64>,
 }
 
 /// Mints a fresh checkpoint-stream generation — the value a run's

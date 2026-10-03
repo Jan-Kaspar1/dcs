@@ -15,6 +15,7 @@
       "kind": "sim-4ao",
       "channels": {
         "ch0": { "direction": "out", "value_type": "float" },
+        "ch1": { "direction": "out", "value_type": "float" },
         "ch3": { "direction": "out", "value_type": "float" }
       }
     }
@@ -45,6 +46,18 @@
       "value_type": "float",
       "initial": { "float": 20.0 },
       "writable": true
+    },
+    {
+      "id": 14,
+      "direction": "out",
+      "value_type": "float",
+      "channel": { "device": 2, "name": "ch1" }
+    },
+    {
+      "id": 15,
+      "direction": "out",
+      "value_type": "float",
+      "initial": { "float": 0.0 }
     }
   ],
   "signals": [
@@ -67,6 +80,22 @@
       "name": "level-setpoint",
       "source": 13,
       "unit": "degC",
+      "group": "reactor"
+    },
+    {
+      "id": 103,
+      "name": "blower-command",
+      "source": 14,
+      "unit": "%",
+      "description": "Blower speed command",
+      "group": "reactor"
+    },
+    {
+      "id": 104,
+      "name": "sequence-progress",
+      "source": 15,
+      "unit": "%",
+      "description": "Batch sequence progress",
       "group": "reactor"
     }
   ],

@@ -9,7 +9,8 @@
       "unit": "degC",
       "description": "Reactor core temperature",
       "group": null,
-      "writable": false
+      "writable": false,
+      "requires_reason": false
     },
     {
       "point": 11,
@@ -20,7 +21,8 @@
       "unit": null,
       "description": null,
       "group": null,
-      "writable": false
+      "writable": false,
+      "requires_reason": false
     },
     {
       "point": 12,
@@ -31,7 +33,8 @@
       "unit": "%",
       "description": "Control valve position command",
       "group": null,
-      "writable": false
+      "writable": false,
+      "requires_reason": false
     }
   ],
   "components": [

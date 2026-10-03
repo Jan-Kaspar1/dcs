@@ -24,6 +24,7 @@
 
 #![warn(missing_docs)]
 
+mod deploy_schema;
 mod diff;
 mod index;
 mod lint;
@@ -31,12 +32,13 @@ mod model;
 mod schema;
 mod validate;
 
+pub use deploy_schema::deployment_manifest_schema;
 pub use diff::{ChangeKind, ElementChange, FieldChange, ModelDiff};
 pub use index::{ComponentRecord, PointSignal, SignalIndex};
 pub use lint::{LintFinding, LintRule};
 pub use model::{
     Channel, ChannelRef, ComponentId, ComponentInstance, Connection, Device, DeviceId, Direction,
     Endpoint, IoPoint, LoadError, MODEL_VERSION, PlantModel, Port, PortRef, Rationalization,
-    Signal,
+    RecordingDuty, Signal,
 };
 pub use validate::{End, IdCollection, ValidationError};

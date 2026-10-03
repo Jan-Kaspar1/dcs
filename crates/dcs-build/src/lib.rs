@@ -84,6 +84,32 @@
 //! plant.connect(counter.count, timer.input);
 //! ```
 //!
+//! ## Declared units
+//!
+//! `ValueKind` is a representation — an `f64` — not a dimension: a flow
+//! in `"m3/h"` and a dose bound in `"mg/L"` are both `Float`. The
+//! dimensional half of the composition contract is declared data: a
+//! point through [`PlantBuilder::unit`], a unit-transparent port or
+//! parameter through [`PlantBuilder::port_unit`] /
+//! [`PlantBuilder::param_unit`], a kind's inherent unit through
+//! [`PortDecl::with_unit`]/[`ParamDecl::with_unit`] in the spec table —
+//! the [`unit`] module holds the canonical spellings. Two wired ends
+//! declaring disagreeing units fail `connect` where both declarations
+//! are known and [`build`](PlantBuilder::build) where they are not —
+//! the same [`ConnectionUnitMismatch`](dcs_model::ValidationError::ConnectionUnitMismatch)
+//! a hand-written document faces at [`load`](dcs_model::PlantModel::load).
+//! An end declaring no unit stays uncheckable, so a unit-transparent
+//! port and an undimensioned document remain admissible.
+//!
+//! The convention is what this crate's own compositions carry: the
+//! [`dosing`] skid is the recorded proof, and [`station`], [`ijmuiden`],
+//! and the independently owned `reference-plant` consumer composition
+//! adopt the same declarations — every measured and wired quantity
+//! dimensioned on its point, its unit-transparent port, or its quantity
+//! parameter, each signal inheriting its point's declaration. Signals
+//! declaring no unit stay undeclared rather than dimensioned, so their
+//! connections remain uncheckable.
+//!
 //! ## Kinds without a spec
 //!
 //! [`DynamicSpec`] registers a component kind whose interface is known
@@ -107,20 +133,38 @@
 //! spec against its kind's `describe()` output and pins the spec table
 //! against the registered-kind list, so a spec that drifts or a
 //! registered kind with no spec fails CI beside the kind it mirrors.
+//!
+//! ## The dynamics document
+//!
+//! Beside the model, the same composition emits the plant-side
+//! dynamics document — the `ProcessElement` declaration list
+//! `dcs-plant-server --dynamics` merges into the simulated field.
+//! [`dynamics`] mirrors that serde vocabulary as data, like the spec
+//! table mirrors descriptors: [`DynamicsBuilder`]'s per-kind methods
+//! bind element ends through the [`InPoint`]/[`OutPoint`] handles the
+//! model composition returns — `Float` ends take `f64` handles, the
+//! `Bool` gate and contact ends `bool` ones — and
+//! [`emit`](DynamicsBuilder::emit) checks every referenced point
+//! against the emitted model as a named [`DynamicsError`]. The crate
+//! stays a `dcs-core`/`dcs-model` producer: the vocabulary arrives as
+//! serde data, never a `dcs-sim` dependency.
 
 #![warn(missing_docs)]
 
 mod builder;
 pub mod dosing;
+pub mod dynamics;
 mod endpoint;
 pub mod ethercat;
 pub mod ijmuiden;
 mod spec;
 pub mod specs;
 pub mod station;
+pub mod unit;
 pub mod wago;
 
 pub use builder::{BuildError, PlantBuilder, SignalBuilder};
+pub use dynamics::{BoolPoint, DynamicsBuilder, DynamicsElement, DynamicsError, FloatPoint};
 pub use endpoint::{Dynamic, InPoint, OutPoint, Sink, Source};
 pub use spec::{
     DynamicInstance, DynamicSpec, FINITE_F64, FRACTION_F64, NONNEGATIVE_F64, NONNEGATIVE_INT,
@@ -130,4 +174,6 @@ pub use spec::{
 // The contract vocabulary a composition speaks: re-exported so a
 // `dcs-build` consumer needs no other crate's imports.
 pub use dcs_core::{Direction, PointId, PointType, SignalId, Value, ValueKind};
-pub use dcs_model::{ChannelRef, ComponentId, DeviceId, Endpoint, PortRef, Rationalization};
+pub use dcs_model::{
+    ChannelRef, ComponentId, DeviceId, Endpoint, PortRef, Rationalization, RecordingDuty,
+};

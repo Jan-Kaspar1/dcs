@@ -1,0 +1,20 @@
+[
+  {
+    "threshold": {
+      "input": 10,
+      "output": 20,
+      "on": 1.0,
+      "off": 0.0,
+      "initial": false
+    }
+  },
+  {
+    "threshold": {
+      "input": 10,
+      "output": 21,
+      "on": 1.0,
+      "off": 0.0,
+      "initial": false
+    }
+  }
+]

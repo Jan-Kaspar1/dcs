@@ -48,11 +48,12 @@
 //!    managed high-level alarm at the declared `high`, the divergence
 //!    detector's composed rate-of-rise annunciation latches, and the
 //!    operator ack clears `unacknowledged` while the hazard stands.
-//! 5. **Bad and stale measurement** — the remote repeater's declared
-//!    silence presents `Uncertain(Stale)` past `stale_after_ticks`,
-//!    never a healthy last-known value; the `Bad` primary flips the
-//!    failover onto it (`backup_active` asserts and alarms), and the
-//!    quality transitions journal as `QualityChanged` entries.
+//! 5. **Bad and stale measurement** — the remote repeater's field
+//!    reports its held reading `Uncertain(Stale)` while its upstream
+//!    stops updating, never a healthy last-known value; the `Bad`
+//!    primary flips the failover onto it (`backup_active` asserts and
+//!    alarms), and the quality transitions journal as `QualityChanged`
+//!    entries.
 //! 6. **The protection boundary (decision 77)** — the layer's reported
 //!    states (`sis-available`/`sis-fault`/`sis-trip`/`sis-proof-test`)
 //!    land on schedule; the dynamics' `threshold` element drives the
@@ -126,8 +127,8 @@ use std::thread::{self, JoinHandle};
 mod support;
 
 use support::{
-    SimTcp, controller_model, image_sample, image_value, kill, pump, settled_receipts,
-    spawn_controller, spawn_controller_logged, spawn_plant,
+    SimTcp, controller_model, image_sample, image_value, kill, pump, settle_sink_health,
+    settled_receipts, spawn_controller, spawn_controller_logged, spawn_plant,
 };
 
 /// The plant-side dynamics — the checked-in decision-75 declaration
@@ -595,12 +596,31 @@ fn file_boundaries(path: &Path) -> Vec<(u64, u64)> {
         .collect()
 }
 
+/// The durable record covers the served page: `served` was fetched
+/// through `GET /journal`, which waits the sink's drain out, so the
+/// file holds every served entry in order — while the paced run keeps
+/// journaling, the tail a post-flush append may add behind them.
+fn assert_file_covers(path: &Path, served: &[JournalEntry]) {
+    let file = file_entries(path);
+    assert!(
+        file.len() >= served.len(),
+        "the durable journal {} is shorter than the served record",
+        path.display()
+    );
+    assert_eq!(
+        &file[..served.len()],
+        served,
+        "the durable journal {} must hold the served record in order",
+        path.display()
+    );
+}
+
 /// The role transitions a journal stream recorded.
 fn role_changes_in(journal: &[JournalEntry]) -> Vec<(Role, Role)> {
     journal
         .iter()
         .filter_map(|entry| match entry.event {
-            JournalEvent::RoleChanged { from, to } => Some((from, to)),
+            JournalEvent::RoleChanged { from, to, .. } => Some((from, to)),
             _ => None,
         })
         .collect()
@@ -869,13 +889,24 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
                 );
             }
             // The operator demands the gate safe — the field fault
-            // holds it confirmed open.
-            13 => issued.push(command(
-                &active,
-                layout.gate_manual_demand,
-                ValueKind::Float,
-                Value::Float(0.0),
-            )),
+            // holds it confirmed open — and the remote repeater's field
+            // reports its held reading stale: the shared plant keeps
+            // scanning the channel, so the frozen upstream declares
+            // its own served quality degraded.
+            13 => {
+                issued.push(command(
+                    &active,
+                    layout.gate_manual_demand,
+                    ValueKind::Float,
+                    Value::Float(0.0),
+                ));
+                field
+                    .inject_fault(
+                        layout.level_remote,
+                        Fault::Quality(Quality::Uncertain(QualityReason::Stale)),
+                    )
+                    .unwrap();
+            }
             // The primary level transmitter drops off the DCS's I/O —
             // the failover switches to the frozen remote repeater —
             // and the high-level trip is acknowledged. The fault is
@@ -915,6 +946,9 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
             29 => {
                 issued.push(release_unmanaged(&active, &layout.backup_active_alarm));
                 issued.push(release_unmanaged(&active, &layout.backup_unhealthy_alarm));
+                // The repeater's upstream recovers: the field clears
+                // the declared stale for the next scan's read.
+                field.clear_fault(layout.level_remote).unwrap();
             }
             // Shelving: the request stands past the declared bound —
             // `shelved` asserts inside it and expires while the request
@@ -1150,8 +1184,8 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
     assert!(trace[..24].iter().any(|row| bool_of(row, "deviating")));
     assert!(trace[..25].iter().any(|row| alarm_pair(row, "ror", 1)));
 
-    // Bad and stale data: the repeater's last declared update stands —
-    // past `stale_after_ticks` the point presents `Uncertain(Stale)`,
+    // Bad and stale data: the repeater's held reading stands — the
+    // field's own declared `Uncertain(Stale)` on the frozen upstream —
     // never a healthy last-known value.
     assert_eq!(
         serde_json::from_value::<Quality>(
@@ -1161,7 +1195,7 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
         Quality::Good
     );
     assert!(
-        trace[schedule::REMOTE_LAST_UPDATE as usize + 3..schedule::REMOTE_RECOVERY as usize - 1]
+        trace[schedule::REMOTE_FIRST_STALE as usize - 1..schedule::REMOTE_RECOVERY as usize - 1]
             .iter()
             .all(
                 |row| serde_json::from_value::<Quality>(row["remote_quality"].clone()).unwrap()
@@ -1181,7 +1215,7 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
     // before the primary ever fails — and its alarm latches until the
     // scan-28 ack.
     assert!(
-        trace[schedule::REMOTE_LAST_UPDATE as usize + 3..schedule::REMOTE_RECOVERY as usize - 1]
+        trace[schedule::REMOTE_FIRST_STALE as usize - 1..schedule::REMOTE_RECOVERY as usize - 1]
             .iter()
             .all(|row| bool_of(row, "backup_unhealthy")),
         "the standby leg must annunciate while the repeater's own sample is untrusted"
@@ -1449,7 +1483,7 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
         !before_restart.is_empty(),
         "the pre-restart run must have journaled entries"
     );
-    assert_eq!(file_entries(&journal_active), before_restart);
+    assert_file_covers(&journal_active, &before_restart);
     assert_eq!(file_boundaries(&journal_active), vec![(1, 0)]);
 
     kill(&mut active_process);
@@ -1737,6 +1771,7 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
                 command: receipt.command.clone(),
                 outcome: CommandOutcome::Applied { tick: apply_tick },
                 actor: Some(OPERATOR.to_string()),
+                reason: None,
             }),
             "no journaled settle matches {receipt:?}"
         );
@@ -1774,7 +1809,7 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
         ],
         "the durable journal records the demotion across the restart"
     );
-    assert_eq!(file_entries(&journal_standby), served_standby);
+    assert_file_covers(&journal_standby, &served_standby);
     assert_eq!(file_boundaries(&journal_standby), vec![(1, 0)]);
 
     // -- Close-out: decision 74's durable lifecycle record -------------
@@ -2164,7 +2199,17 @@ fn run_ijmuiden(tag: &str) -> serde_json::Value {
         "operator_view": operator_view,
         "served_parameters": serde_json::to_value(&final_snapshot.parameters).unwrap(),
         "issued": issued,
-        "final": masked(serde_json::to_value(&image).unwrap(), &masks),
+        // The journal sink's live counters ride the writer thread's
+        // beat — pin the run-stable fields so the digests compare.
+        "final": masked(
+            serde_json::to_value({
+                let mut image = image.clone();
+                settle_sink_health(&mut image);
+                image
+            })
+            .unwrap(),
+            &masks,
+        ),
     });
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -2,15 +2,23 @@
 //! `reference-plant/` tree in this repository is a verbatim-publishable
 //! consumer repository. This test materializes it into a scratch
 //! directory *outside* the workspace, rewrites only the dependency
-//! remote to a `file://` stand-in for the published origin — the
-//! recorded `rev` pin untouched, with the stand-in seeded to serve
-//! exactly that commit — and runs the tree's own `ci/check.sh`
-//! end to end: resolve, build, git-only lockfile sources,
+//! remote to a `file://` stand-in for the published origin — in the
+//! manifest and, with it, in the committed `Cargo.lock`, so the
+//! recorded `rev`/`tag` pin and the revision it resolves to stay
+//! exactly as shipped while the stand-in serves that very revision —
+//! and runs the tree's own `ci/check.sh`
+//! end to end: the committed lockfile's agreement with the declared
+//! pin, `cargo fetch --locked` resolving without a re-resolve,
 //! byte-identical emit against the checked-in artifacts,
 //! released-tooling acceptance — plus the contract's remaining
-//! `dcs-model` surfaces: `schema` and `interface-schema` emissions
-//! byte-pinned to the release record's artifacts fetched through the
-//! stand-in remote at the pinned rev, `diff` legs over a doctored
+//! `dcs-model` surfaces: `schema`, `interface-schema`, and
+//! `deploy-schema` emissions — and the released `dcs-plant-server`'s
+//! `--dynamics-schema` emission — byte-pinned to the release record's
+//! artifacts fetched through the stand-in remote at the pinned rev,
+//! the checked-in deployment manifest and dynamics document screened
+//! against their declared schema artifacts — a schema-violating
+//! doctored copy of each reporting `schema-mismatch` —
+//! `diff` legs over a doctored
 //! compatible revision and the identical document, and
 //! `summary`/`signal-index` recorded as run evidence — the
 //! alarm-validation leg proving the released `dcs-controller --check`
@@ -67,7 +75,11 @@
 //! peer's served `diverged` report naming the perturbed output, its
 //! promote refused `not_converged` with no field hand-off, the
 //! active's writes/receipts/journal undisturbed, and a write-free
-//! control window reconverging and promoting normally — the `consumers`
+//! control window reconverging and promoting normally — plus the pair
+//! contract's emit-identical leg: with the standby tracking, the
+//! sequencer's counted `step_completed` emissions must serve
+//! identical routed event records through both peers'
+//! `GET /resources` views — the `consumers`
 //! stage, which replays that driven run under each consumer schedule
 //! (no UI, polling, a stalled reader, churn, malformed/flooded
 //! traffic, a UI
@@ -159,10 +171,24 @@
 //! foreign and owner tokens, and a rogue `claim_writer` resolving per
 //! the settled contract — its preempt's journaled `field_claim_lost`
 //! and in-place demotion on the superseded owner, then the pair
-//! restored to its launch roles — and the `upgrade` stage,
-//! which repins the materialized tree to the checkout's `HEAD`
-//! (seeded into the stand-in beside the recorded rev) and re-runs the
-//! full pipeline under the repin.
+//! restored to its launch roles — the pair contract's
+//! commissioning/handover record leg, which materializes the declared
+//! commissioning record from one deterministic driven run: the field
+//! census audited against the declared channel set (the I/O checkout
+//! record), the measurement ladder and the receipted output loop (the
+//! loop-check evidence), every managed alarm's declared record served
+//! verbatim on both peers (the alarm rationalization sign-off), the
+//! documented `demote`/`promote` switch and restore (the handover
+//! procedure), and the document set digested with each peer's
+//! checkpoint fingerprint and durable files (the documentation
+//! turnover) — the completeness audit naming any missing artifact,
+//! two passes producing identical digests — and the `upgrade` stage,
+//! which materializes the tree at the previous release's recorded rev
+//! (seeded into the stand-in beside the tag) and repins it to the
+//! recorded release — the stand-in's tag naming the commit the
+//! committed `Cargo.lock` records for it, the commit the release
+//! record's `Commit` field carries — re-running the full pipeline
+//! under the repin.
 //!
 //! Run alone from a clean checkout:
 //!
@@ -175,20 +201,18 @@
 //! and the negative cases prove the new stage names the template
 //! introduces: `stale-artifact`, `manifest-fingerprint-mismatch`,
 //! `scenario-failed`, `rig-mismatch`, `schema-drift`,
-//! `schema-mismatch`, `diff-mismatch`, `pair-failed`,
+//! `schema-mismatch`, `schema-mismatch-nondeterministic`,
+//! `diff-mismatch`, `pair-failed`,
 //! `negotiation-failed`, `refusal-failed`, `handover-failed`,
 //! `takeover-failed`,
 //! `peer-announce-failed`,
 //! `divergence-missed`/`divergence-nondeterministic`,
 //! `report-failed`/`report-nondeterministic`,
 //! `managed-lifecycle-failed`/`managed-lifecycle-nondeterministic`,
-//! `carry-failed`/`carry-nondeterministic`,
-//! `staging-failed`/`staging-nondeterministic`,
-//! `oos-failed`/`oos-nondeterministic`,
-//! `power-trip-failed`/`power-trip-nondeterministic`,
-//! `alarm-rationalization-failed`/`alarm-rationalization-nondeterministic`,
-//! `claim-fencing-failed`/`claim-fencing-nondeterministic`,
-//! and the `surface-mismatch` paths
+//! `event-parity-failed`/`event-parity-nondeterministic`,
+//! `commissioning-failed`/`commissioning-nondeterministic`/
+//! `commissioning-unchecked`, `lockfile-stale`, and the
+//! `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
 
@@ -196,9 +220,8 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::Mutex;
 
-use common::{CARGO, PIN_UNRESOLVABLE, head_rev, root};
+use common::{CARGO, PIN_UNRESOLVABLE, root};
 
 /// The remote the published tree records — the string the materialized
 /// copy's `Cargo.toml` rewrites to the `file://` stand-in.
@@ -249,19 +272,38 @@ fn build_tools() -> PathBuf {
     target_dir().join("debug")
 }
 
-/// The `rev = "…"` pin the template's manifest records for the release
-/// crates — the object the stand-in remote must serve.
-fn pinned_rev(dir: &Path) -> String {
+/// The release pin the template's manifest records for the release
+/// crates — `tag = "<name>"` or `rev = "<sha>"` — the object the
+/// stand-in remote must serve.
+fn pinned_release(dir: &Path) -> String {
     let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap();
     for line in manifest.lines() {
-        if let Some(start) = line.find("rev = \"") {
-            let rest = &line[start + "rev = \"".len()..];
-            if let Some(end) = rest.find('"') {
+        for key in ["tag = \"", "rev = \""] {
+            if let Some(start) = line.find(key) {
+                let rest = &line[start + key.len()..];
+                if let Some(end) = rest.find('"') {
+                    return rest[..end].to_owned();
+                }
+            }
+        }
+    }
+    panic!("the template's Cargo.toml records no release pin");
+}
+
+/// The `DCS_UPGRADE_REV` default the tree's own `ci/check.sh` records —
+/// the previous release's recorded rev the `upgrade` stage materializes
+/// its baseline at.
+fn recorded_upgrade_from(dir: &Path) -> String {
+    let check = std::fs::read_to_string(dir.join("ci/check.sh")).unwrap();
+    for line in check.lines() {
+        if let Some(start) = line.find("DCS_UPGRADE_REV:-") {
+            let rest = &line[start + "DCS_UPGRADE_REV:-".len()..];
+            if let Some(end) = rest.find('}') {
                 return rest[..end].to_owned();
             }
         }
     }
-    panic!("the template's Cargo.toml records no rev pin");
+    panic!("the template's ci/check.sh records no DCS_UPGRADE_REV default");
 }
 
 /// Runs `git args` in `dir`, asserting success.
@@ -279,70 +321,113 @@ fn git(dir: &Path, args: &[&str]) {
     );
 }
 
-/// Ensures the checkout's object store contains `rev`. CI checkouts
-/// are shallow (`actions/checkout` fetches at depth 1), so the
-/// recorded release commit may be absent; fetch it from `origin` — the
-/// published origin itself — when the store lacks it.
-fn ensure_commit(rev: &str) {
-    static FETCH_LOCK: Mutex<()> = Mutex::new(());
-    let _guard = FETCH_LOCK.lock().unwrap();
-    let present = Command::new("git")
-        .args(["cat-file", "-e", &format!("{rev}^{{commit}}")])
-        .current_dir(root())
-        .output()
-        .expect("git cat-file runs");
-    if present.status.success() {
-        return;
-    }
-    for remote in ["origin", PUBLISHED_REMOTE] {
-        let fetch = Command::new("git")
-            .args(["fetch", "--depth", "1", remote, rev])
-            .current_dir(root())
-            .output()
-            .expect("git fetch runs");
-        if fetch.status.success() {
-            return;
+/// The precise revision the template's committed `Cargo.lock` records
+/// for the release crates — the commit the manifest's pin resolves to,
+/// the one `--locked` fetches, and the one a fresh clone's committed
+/// artifact must already name. Every `dcs-*` git source in the lockfile
+/// must agree on it: the check's `lockfile` stage refuses a lockfile
+/// whose release crates record more than one source.
+fn committed_lock_rev(dir: &Path) -> String {
+    let lock = std::fs::read_to_string(dir.join("Cargo.lock")).unwrap();
+    let mut revisions: Vec<String> = Vec::new();
+    for line in lock.lines() {
+        let Some(source) = line.strip_prefix("source = \"git+") else {
+            continue;
+        };
+        let Some((_, precise)) = source[..source.len() - 1].rsplit_once('#') else {
+            continue;
+        };
+        if !revisions.iter().any(|seen| seen == precise) {
+            revisions.push(precise.to_owned());
         }
     }
-    panic!("{PIN_UNRESOLVABLE}: no remote could serve the pinned rev {rev}");
+    assert_eq!(
+        revisions.len(),
+        1,
+        "the template's Cargo.lock records no single precise revision for the release \
+         crates: {revisions:?}"
+    );
+    let precise = &revisions[0];
+    assert_eq!(
+        precise.len(),
+        40,
+        "the recorded revision is not a commit sha"
+    );
+    precise.clone()
 }
 
 /// A `file://` stand-in for the published origin: a bare repository in
-/// the materialized scratch that serves exactly the recorded rev. The
+/// the materialized scratch that serves exactly the recorded pin. The
 /// workspace checkout alone cannot play the remote in CI — its shallow
 /// object store lacks the pinned commit and serves no way to name it —
-/// so the stand-in is seeded with that commit, the same object the
-/// published origin serves for the recorded rev. The `upgrade` stage's
-/// repin target — the checkout's `HEAD`, a later commit in the same
-/// minor series — is seeded beside it so the repin resolves.
+/// so the stand-in is seeded with the objects the pin names. The seed
+/// lands in the per-test bare repository, never the shared checkout's
+/// store: the CI shards run these proofs as concurrent processes, and
+/// two fetches into one repository collide on its lock files.
+///
+/// A `rev` pin names an existing commit and is fetched verbatim. A
+/// `tag` pin names the release tag — which the published remote does not
+/// serve until the supervisor cuts it — and the tag lands on the commit
+/// the template's committed `Cargo.lock` records for it, which is the
+/// release record's recorded `Commit` field. Seeding the tag there
+/// rather than at a commit synthesized from the working tree is what
+/// lets the committed lockfile take part in this proof at all: cargo
+/// fetches the locked precise revision under `--locked`, so a stand-in
+/// serving any other commit would force a re-resolve and the shipped
+/// artifact would go unexercised exactly as it did before this seed
+/// read the lockfile.
+///
+/// The `upgrade` stage's baseline — the previous release's recorded rev
+/// the check's own `DCS_UPGRADE_REV` default names — is seeded beside it
+/// so the crossing resolves.
 fn serve_pinned_rev(scratch: &Path) -> String {
-    let rev = pinned_rev(scratch);
-    ensure_commit(&rev);
+    let pin = pinned_release(scratch);
     let remote = scratch.join("dcs-remote.git");
     git(scratch, &["init", "--bare", "dcs-remote.git"]);
-    // The local transport serves the object directly; the published
-    // origin is the fallback when the checkout cannot.
-    let fetch = Command::new("git")
-        .args(["fetch", "--depth", "1", &root().display().to_string(), &rev])
-        .current_dir(&remote)
-        .output()
-        .expect("git fetch runs");
-    if !fetch.status.success() {
-        git(&remote, &["fetch", "--depth", "1", PUBLISHED_REMOTE, &rev]);
+    // The local transport serves the object directly when the
+    // checkout's store holds it; the published origin is the fallback
+    // when the shallow store cannot.
+    let seed = |object: &str| {
+        [root().display().to_string(), PUBLISHED_REMOTE.to_string()]
+            .iter()
+            .any(|source| {
+                Command::new("git")
+                    .args(["fetch", "--depth", "1", source, object])
+                    .current_dir(&remote)
+                    .output()
+                    .expect("git fetch runs")
+                    .status
+                    .success()
+            })
+    };
+    if pin.len() == 40 && pin.chars().all(|c| c.is_ascii_hexdigit()) {
+        assert!(
+            seed(&pin),
+            "{PIN_UNRESOLVABLE}: no remote could serve the pinned rev {pin}"
+        );
+        git(&remote, &["update-ref", "refs/heads/main", &pin]);
+    } else {
+        let locked = committed_lock_rev(scratch);
+        assert!(
+            seed(&locked),
+            "{PIN_UNRESOLVABLE}: no remote could serve the revision the committed \
+             Cargo.lock records for {pin} — {locked}"
+        );
+        git(&remote, &["update-ref", "refs/heads/main", &locked]);
+        git(
+            &remote,
+            &["update-ref", &format!("refs/tags/{pin}"), &locked],
+        );
     }
-    git(&remote, &["update-ref", "refs/heads/main", &rev]);
-    let head = head_rev();
+    let upgrade_from = recorded_upgrade_from(scratch);
+    assert!(
+        seed(&upgrade_from),
+        "{PIN_UNRESOLVABLE}: no remote could serve the upgrade-from rev {upgrade_from}"
+    );
     git(
         &remote,
-        &[
-            "fetch",
-            "--depth",
-            "1",
-            &root().display().to_string(),
-            &head,
-        ],
+        &["update-ref", "refs/heads/upgrade", &upgrade_from],
     );
-    git(&remote, &["update-ref", "refs/heads/upgrade", &head]);
     format!("file://{}", remote.display())
 }
 
@@ -369,7 +454,14 @@ struct Materialized {
 
 impl Materialized {
     /// Copies the tree and rewrites only the dependency remote to the
-    /// `file://` stand-in — the `rev` pin stays exactly as recorded.
+    /// `file://` stand-in — in the manifest *and*, with it, in the
+    /// committed `Cargo.lock`. The release pin itself is left exactly as
+    /// recorded: the same `rev`/`tag` fragment and the same resolved
+    /// revision, so `cargo metadata --locked` resolves the copy against
+    /// the stand-in without re-resolving, and the shipped lockfile's
+    /// agreement with the shipped manifest is exercised rather than
+    /// rewritten away. Rewriting only the manifest would make the two
+    /// disagree on the remote, which is itself `lockfile-stale`.
     fn new() -> Self {
         let dir = std::env::temp_dir().join(format!(
             "dcs-reference-plant-{}-{:?}",
@@ -381,28 +473,31 @@ impl Materialized {
         ));
         copy_tree(&root().join("reference-plant"), &dir);
         let remote = serve_pinned_rev(&dir);
-        let manifest = dir.join("Cargo.toml");
-        let source = std::fs::read_to_string(&manifest).unwrap();
-        assert!(
-            source.contains(PUBLISHED_REMOTE),
-            "the template no longer pins the published remote"
-        );
-        std::fs::write(&manifest, source.replace(PUBLISHED_REMOTE, &remote)).unwrap();
+        for name in ["Cargo.toml", "Cargo.lock"] {
+            let manifest = dir.join(name);
+            let source = std::fs::read_to_string(&manifest).unwrap();
+            assert!(
+                source.contains(PUBLISHED_REMOTE),
+                "the template's {name} no longer records the published remote"
+            );
+            std::fs::write(&manifest, source.replace(PUBLISHED_REMOTE, &remote)).unwrap();
+        }
         Self { dir, remote }
     }
 
     /// Runs the template's own clean-CI path against the `file://`
     /// stand-in remote and the locally built tooling — the same
-    /// substitutions `consumer_release.rs` makes, plus the upgrade
-    /// stage's repin target: the checkout's `HEAD`, a later commit in
-    /// the same minor series the stand-in remote also serves.
+    /// substitutions `consumer_release.rs` makes. `DCS_UPGRADE_REV`
+    /// keeps the check's own recorded default — the previous release's
+    /// rev — so the stage proves the real named crossing onto the pin's
+    /// release; the stand-in serves both ends of it.
     fn check(&self, tools: &Path) -> Output {
         Command::new("bash")
             .arg("ci/check.sh")
             .current_dir(&self.dir)
             .env("DCS_REMOTE", &self.remote)
             .env("DCS_TOOLS", tools)
-            .env("DCS_UPGRADE_REV", head_rev())
+            .env("DCS_RECORD_DIR", root().join("docs/releases"))
             .env("CARGO_TARGET_DIR", self.dir.join("target"))
             .output()
             .expect("ci/check.sh runs")
@@ -416,8 +511,9 @@ impl Drop for Materialized {
 }
 
 /// The full materialization proof: the template's own clean-CI check
-/// passes green outside the workspace — git-only lockfile sources,
-/// byte-stable emit matching the checked-in artifacts, released-tooling
+/// passes green outside the workspace — a committed lockfile recording
+/// the declared pin and resolving under `--locked`, byte-stable emit
+/// matching the checked-in artifacts, released-tooling
 /// acceptance, the manifest fingerprint check, and the deterministic
 /// scripted simulation.
 #[test]
@@ -430,6 +526,27 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         output.status.success(),
         "the template's ci/check.sh failed:\nstdout:\n{stdout}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    // The `lockfile` stage ran and held, before anything could
+    // re-resolve: the committed lockfile records the manifest's own pin
+    // at the stand-in's tag target, and the leg's doctored copy — the
+    // release crates recorded at another revision — reported
+    // `lockfile-stale` instead of passing.
+    assert!(
+        stdout.contains("== lockfile =="),
+        "the lockfile stage did not run:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("a lockfile recorded at another revision refused: lockfile-stale"),
+        "the lockfile stage's doctored case did not report its named diagnostic:\n{stdout}"
+    );
+    let lock_line = stdout
+        .lines()
+        .find(|line| line.contains("the committed Cargo.lock records"))
+        .unwrap_or_else(|| panic!("the lockfile stage reported no recorded pin:\n{stdout}"));
+    assert!(
+        lock_line.contains(&committed_lock_rev(&root().join("reference-plant"))),
+        "the lockfile stage recorded no revision the committed lockfile carries: {lock_line}"
     );
     // The surface stage ran and held: the served block-interface
     // registry covered every declared component, the kind-declared
@@ -462,8 +579,20 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
     // declared structure, and each leg's own doctored case reported its
     // named diagnostic.
     for line in [
-        "emit the v0.2.0 record's artifacts byte-identically",
+        "record's artifacts byte-identically",
         "a drifted record artifact refused: schema-drift",
+        // The consumer-document screening legs ran and held: the
+        // checked-in manifest and dynamics documents conformed to
+        // their declared record artifacts, and each doctored
+        // schema-violating copy reported schema-mismatch.
+        "the deployment manifest conforms to the recorded schema artifact",
+        "the dynamics document conforms to the recorded schema artifact",
+        "manifest missing-required refused: schema-mismatch",
+        "manifest mistyped-field refused: schema-mismatch",
+        "manifest undeclared-field refused: schema-mismatch",
+        "dynamics missing-required refused: schema-mismatch",
+        "dynamics mistyped-field refused: schema-mismatch",
+        "dynamics undeclared-element refused: schema-mismatch",
         "diff over the doctored compatible revision",
         "changed signal 10010",
         "diff over the identical document",
@@ -481,6 +610,14 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
         "managed alarm instances carry the declared record",
         "doctored documents refused",
         "a skipped-doctoring run refused: alarm-validation",
+        // The fingerprint stage's dynamics leg ran and held: the
+        // manifest-declared pair served the declared dynamics.path,
+        // its canonical fingerprint matched the recorded
+        // dynamics.fingerprint and the checked-in artifact, and the
+        // leg's own renumbered-points case reported its diagnostic.
+        "dynamics fingerprint",
+        "dynamics-fingerprint-digest",
+        "renumber-points: reported, manifest-fingerprint-mismatch",
     ] {
         assert!(
             stdout.contains(line),
@@ -665,6 +802,33 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
             "the deploy stage's doctored pairs lack '{line}':\n{stdout}"
         );
     }
+    // The checked-in manifest declares the deployed pair under
+    // `topology.pairs`, and the deploy-stage cases each held: the
+    // declaration validates under another pair name, while a member
+    // the rig does not declare, a member two pairs share, a member
+    // whose standby edge leaves the pair, a pair carrying two
+    // standby declarations, or a declared pair whose standby wiring
+    // does not close inside it each report the named
+    // mismatch — and decision 99's one-field-per-deployment bound
+    // refuses the planted undeployable shapes: a second declared pair
+    // over the manifest's one plant and a second duty controller the
+    // section never names, each a second claimant on the field's
+    // single-writer claim.
+    for line in [
+        "topology-declared: optional declaration — the manifest and the rig agree",
+        "topology-multi-pair refused: rig-mismatch",
+        "undeployable-second-duty refused: rig-mismatch",
+        "topology-undeclared-member refused: rig-mismatch",
+        "topology-shared-member refused: rig-mismatch",
+        "topology-external-standby refused: rig-mismatch",
+        "topology-two-standbys refused: rig-mismatch",
+        "topology-unwired-pair refused: rig-mismatch",
+    ] {
+        assert!(
+            stdout.contains(line),
+            "the deploy stage's doctored pairs lack '{line}':\n{stdout}"
+        );
+    }
     // The pair contract's staged-vs-field divergence leg ran and held:
     // the withheld-pull window left the stale peer's served report
     // diverged naming the perturbed output, its promote refused
@@ -743,6 +907,31 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
             "the demote-pending leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
+    // The pair contract's demote-follow reconvergence leg ran and
+    // held: under the manifest's declared 0.0.0.0 listen binds, both
+    // documented switch directions left the demoted peer reconverged
+    // to tracking on the successor's dialable announced source, the
+    // tracking held across the pull train, and the launch roles
+    // restored — its digest line reports the evidence, and the
+    // self-addressed announce case reported its named diagnostic.
+    let reconvergence_line = stdout
+        .lines()
+        .find(|line| line.contains("demote-reconvergence-digest"))
+        .unwrap_or_else(|| panic!("the demote-reconvergence leg reported no digest:\n{stdout}"));
+    for phrase in [
+        "tracking its announced successor",
+        "pulls",
+        "roles restored",
+    ] {
+        assert!(
+            reconvergence_line.contains(phrase),
+            "the demote-reconvergence digest names no '{phrase}' evidence: {reconvergence_line}"
+        );
+    }
+    assert!(
+        stdout.contains("self-announce: reported, demote-reconvergence-failed"),
+        "the demote-reconvergence leg's doctored case did not report its named diagnostic:\n{stdout}"
+    );
     // The pair contract's managed-lifecycle leg ran and held: the
     // emitted model's managed-alarm surface exercised end to end on
     // the deployed pair — the field-driven activation, the attributed
@@ -773,194 +962,92 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
             "the managed-lifecycle leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
-    // The pair contract's managed run-state carryover leg ran and
-    // held: the managed alarm kinds' checkpointed run state carried
-    // across the promotion — the mid-shelve countdown releasing at
-    // its continued expiry rather than a restarted bound, the wired
-    // out-of-service standing with evaluation held — its digest line
-    // reports the evidence, and each doctored expectation reported
-    // its named diagnostic.
-    let carry_line = stdout
+    // The pair contract's emit-identical event-parity leg ran and
+    // held: the counted step_completed set served identical routed
+    // event records through both peers' GET /resources views while
+    // the standby reported tracking — its digest line reports the
+    // evidence — and each doctored case reported its named
+    // diagnostic.
+    let parity_line = stdout
         .lines()
-        .find(|line| line.contains("carry-digest"))
-        .unwrap_or_else(|| panic!("the managed-carryover leg reported no digest:\n{stdout}"));
+        .find(|line| line.contains("event-parity-digest"))
+        .unwrap_or_else(|| panic!("the event-parity leg reported no digest:\n{stdout}"));
     for phrase in [
-        "shelved at tick",
-        "switched at tick",
-        "released at tick",
-        "declared bound",
-        "out-of-service held",
-        "roles restored at tick",
-        "journal entries",
+        "counted step_completed records identical on both peers",
+        "the standby tracking",
     ] {
         assert!(
-            carry_line.contains(phrase),
-            "the managed-carryover digest names no '{phrase}' evidence: {carry_line}"
+            parity_line.contains(phrase),
+            "the event-parity digest names no '{phrase}' evidence: {parity_line}"
         );
     }
-    for tamper in ["restarted-bound", "dropped-oos"] {
+    for tamper in ["dropped-event-record", "reattributed-event-record"] {
         assert!(
-            stdout.contains(&format!("{tamper}: reported, carry-failed")),
-            "the managed-carryover leg's {tamper} case did not report its named diagnostic:\n{stdout}"
+            stdout.contains(&format!("{tamper}: reported, event-parity-failed")),
+            "the event-parity leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
-    // The pair contract's staging leg ran and held: the out-of-service
-    // holds let the declared inflow raise the level unopposed through
-    // the emitted threshold chain's declared crossings — the demand
-    // staging 0→1→2, the high crossing annunciating the managed
-    // high-level alarm with journaled evidence — the releases staging
-    // the group inside the declared start delay, and the staged pumps
-    // drawing the level down through the declared de-stage order — its
-    // digest line reports the evidence, and each doctored expectation
+    // The pair contract's commissioning/handover record leg ran and
+    // held: the declared commissioning record materialized from one
+    // deterministic driven run — its digest line reports each named
+    // artifact's evidence — and every missing-artifact doctored case
     // reported its named diagnostic.
-    let staging_line = stdout
+    let commissioning_line = stdout
         .lines()
-        .find(|line| line.contains("staging-digest"))
-        .unwrap_or_else(|| panic!("the staging leg reported no digest:\n{stdout}"));
+        .find(|line| line.contains("commissioning-digest"))
+        .unwrap_or_else(|| panic!("the commissioning leg reported no digest:\n{stdout}"));
     for phrase in [
-        "demand 1 at tick",
-        "2 at tick",
-        "high annunciated at tick",
-        "staged at tick",
-        "pumped down by tick",
-    ] {
-        assert!(
-            staging_line.contains(phrase),
-            "the staging digest names no '{phrase}' evidence: {staging_line}"
-        );
-    }
-    for tamper in ["wrong-demand", "immediate-lag"] {
-        assert!(
-            stdout.contains(&format!("{tamper}: reported, staging-failed")),
-            "the staging leg's {tamper} case did not report its named diagnostic:\n{stdout}"
-        );
-    }
-    // The pair contract's per-pump out-of-service leg ran and held:
-    // the receipted `oos` write on the duty pump dropped its
-    // availability and handed `duty` to the sibling inside the
-    // declared wiring bound, the managed alarms reported the states
-    // their declared lifecycle bindings select with `alarm` still
-    // reporting process truth mid-OOS, and the false write returned
-    // the pump to availability and the duty rotation — its digest
-    // line reports the evidence, and each doctored expectation
-    // reported its named diagnostic.
-    let oos_line = stdout
-        .lines()
-        .find(|line| line.contains("oos-digest"))
-        .unwrap_or_else(|| panic!("the out-of-service leg reported no digest:\n{stdout}"));
-    for phrase in [
-        "duty handed to the sibling at tick",
-        "managed states at tick",
-        "served at tick",
-        "returned at tick",
-        "acknowledged at tick",
-        "rejoined at tick",
-        "roles unmoved through tick",
-        "journal entries",
-    ] {
-        assert!(
-            oos_line.contains(phrase),
-            "the out-of-service digest names no '{phrase}' evidence: {oos_line}"
-        );
-    }
-    for tamper in ["keeps-duty", "managed-silent"] {
-        assert!(
-            stdout.contains(&format!("{tamper}: reported, oos-failed")),
-            "the out-of-service leg's {tamper} case did not report its named diagnostic:\n{stdout}"
-        );
-    }
-    // The pair contract's power-fail interlock leg ran and held: the
-    // driven `power-fail` contact dropped `power-ok` and both pumps'
-    // availability, the motor commands released while the chain's
-    // demand still stood, `none-available` and the managed `power-fail`
-    // alarm annunciated with journaled evidence, the receipted
-    // `power-fail-ack` cleared the latch mid-condition, and the
-    // released contact re-staged the standing demand inside the
-    // declared bounds — its digest line reports the evidence, and each
-    // doctored expectation reported its named diagnostic.
-    let power_trip_line = stdout
-        .lines()
-        .find(|line| line.contains("power-trip-digest"))
-        .unwrap_or_else(|| panic!("the power-fail interlock leg reported no digest:\n{stdout}"));
-    for phrase in [
-        "tracking by tick",
-        "full demand at tick",
-        "tripped at tick",
-        "acknowledged at tick",
-        "permissives returned at tick",
-        "re-staged by tick",
-        "run continued to tick",
-    ] {
-        assert!(
-            power_trip_line.contains(phrase),
-            "the power-trip digest names no '{phrase}' evidence: {power_trip_line}"
-        );
-    }
-    for tamper in ["commands-standing", "availability-holds"] {
-        assert!(
-            stdout.contains(&format!("{tamper}: reported, power-trip-failed")),
-            "the power-fail interlock leg's {tamper} case did not report its named diagnostic:\n{stdout}"
-        );
-    }
-    // The pair contract's alarm-rationalization leg ran and held: the
-    // emitted model's managed alarm instances' declared record served
-    // verbatim on both peers — the signal index's components section
-    // and the snapshot's parameters section — before and after the
-    // documented switch, and the pair's launch roles restored — its
-    // digest line reports the evidence, and each doctored served
-    // record reported its named diagnostic.
-    let rationalization_line = stdout
-        .lines()
-        .find(|line| line.contains("alarm-rationalization-digest"))
-        .unwrap_or_else(|| panic!("the alarm-rationalization leg reported no digest:\n{stdout}"));
-    for phrase in [
-        "managed alarm instances served verbatim on both peers",
-        "tracking by tick",
+        "field points checked out",
+        "loop-check marks driven",
+        "managed alarm instances signed off",
         "switched at tick",
-        "unchanged across the switch",
-        "roles restored at tick",
+        "restored at tick",
+        "turnover documents digested",
     ] {
         assert!(
-            rationalization_line.contains(phrase),
-            "the alarm-rationalization digest names no '{phrase}' evidence: {rationalization_line}"
+            commissioning_line.contains(phrase),
+            "the commissioning digest names no '{phrase}' evidence: {commissioning_line}"
         );
     }
-    for tamper in ["dropped-record", "rewritten-field"] {
+    for tamper in [
+        "missing-io-checkout",
+        "missing-loop-check",
+        "missing-alarm-signoff",
+        "missing-documentation-turnover",
+    ] {
         assert!(
-            stdout.contains(&format!("{tamper}: reported, alarm-rationalization-failed")),
-            "the alarm-rationalization leg's {tamper} case did not report its named diagnostic:\n{stdout}"
+            stdout.contains(&format!("{tamper}: reported, commissioning-failed")),
+            "the commissioning leg's {tamper} case did not report its named diagnostic:\n{stdout}"
         );
     }
-    // The pair contract's claim-fencing leg ran and held: the
-    // dedicated third sim-net attachment's write and step probes
-    // fenced under the standing claim — the same mutations through
-    // the shipped dcs-plant-ctl exiting nonzero — while the field
-    // owner's writes kept landing, the lifecycle verbs answered per
-    // contract under foreign and owner tokens, the rogue claim's
-    // settled answer never passed silently, and the pair restored
-    // its launch roles — its digest line reports the evidence, and
-    // each doctored case reported its named diagnostic.
-    let fencing_line = stdout
+    // The pair contract's rolling controller-upgrade leg ran and
+    // held: the pair launched on the upgrade-from revision's
+    // tooling (under the file:// stand-in the same substituted
+    // binaries), each peer rolled onto the pinned binary one
+    // process at a time resuming at its persisted tick, the
+    // promoted peer's receipted command settled exactly once, and
+    // the plant's step record named no unowned window — its digest
+    // line reports the evidence, and the doctored expectation
+    // reported its named diagnostic.
+    let rolling_line = stdout
         .lines()
-        .find(|line| line.contains("claim-fencing-digest"))
-        .unwrap_or_else(|| panic!("the claim-fencing leg reported no digest:\n{stdout}"));
+        .find(|line| line.contains("rolling-upgrade-digest"))
+        .unwrap_or_else(|| panic!("the rolling-upgrade leg reported no digest:\n{stdout}"));
     for phrase in [
-        "tracking by tick",
-        "claim surface",
-        "the rogue claim",
-        "run ended at tick",
+        "rolled and resumed at tick",
+        "promoted at tick",
+        "launch roles restored at tick",
+        "owner scans",
     ] {
         assert!(
-            fencing_line.contains(phrase),
-            "the claim-fencing digest names no '{phrase}' evidence: {fencing_line}"
+            rolling_line.contains(phrase),
+            "the rolling-upgrade digest names no '{phrase}' evidence: {rolling_line}"
         );
     }
-    for tamper in ["write-through", "foreign-ensure-granted", "rogue-silent"] {
-        assert!(
-            stdout.contains(&format!("{tamper}: reported, claim-fencing-failed")),
-            "the claim-fencing leg's {tamper} case did not report its named diagnostic:\n{stdout}"
-        );
-    }
+    assert!(
+        stdout.contains("expect-degraded: reported, rolling-upgrade-failed"),
+        "the rolling-upgrade leg's expect-degraded case did not report its named diagnostic:\n{stdout}"
+    );
     assert!(
         stdout.contains("== consumers =="),
         "the consumers stage did not run:\n{stdout}"
@@ -990,15 +1077,103 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
     }
 }
 
+/// The shipped consumer artifact resolves reproducibly, or the
+/// contract says so by name. `reference-plant/Cargo.lock` is committed
+/// so every build resolves the same sources (README §2), and the pin it
+/// records is the release record's recorded commit — so a fresh clone
+/// must resolve under `--locked` without a resolver repairing the file
+/// first. This materializes the tree with that lockfile intact and the
+/// manifest's own `tag` pin against the `file://` stand-in, which
+/// serves the tag at the very revision the lockfile records, and
+/// asserts `cargo metadata --locked` succeeds on the copy and leaves
+/// the committed lockfile byte-identical.
+///
+/// The structural half of the same gap: a lockfile recorded at another
+/// revision must be named, not absorbed. The check's `lockfile` stage
+/// runs before `resolve`, so the doctored copy is refused at once —
+/// this is the reported defect (`consumer-lockfile-stale-vs-declared-
+/// pin`: a `rev`-recorded lockfile against a `tag` pin, invisible to a
+/// consumer's CI because the resolve fallback rewrote the file before
+/// anything read it).
+#[test]
+fn the_committed_lockfile_satisfies_the_declared_pin() {
+    let copy = Materialized::new();
+    let lock = copy.dir.join("Cargo.lock");
+    let before = std::fs::read(&lock).unwrap();
+
+    let output = Command::new(CARGO)
+        .args(["metadata", "--locked", "--format-version", "1"])
+        .current_dir(&copy.dir)
+        .env("CARGO_TARGET_DIR", copy.dir.join("target"))
+        .output()
+        .expect("cargo metadata runs");
+    assert!(
+        output.status.success(),
+        "the committed Cargo.lock does not satisfy the declared pin: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&lock).unwrap(),
+        before,
+        "the locked resolve rewrote the committed Cargo.lock"
+    );
+
+    // The reported defect, put back: the release crates recorded at
+    // another revision's `rev` pin while the manifest declares this
+    // tree's own tag pin.
+    let pin = pinned_release(&copy.dir);
+    let precise = committed_lock_rev(&copy.dir);
+    let baseline = recorded_upgrade_from(&copy.dir);
+    let committed = std::fs::read_to_string(&lock).unwrap();
+    let stale = committed.replace(
+        &format!("?tag={pin}#{precise}"),
+        &format!("?rev={baseline}#{baseline}"),
+    );
+    assert_ne!(
+        stale, committed,
+        "the committed lockfile records no `?tag={pin}#{precise}` source to doctor"
+    );
+    std::fs::write(&lock, &stale).unwrap();
+    let refused = Command::new("bash")
+        .arg("ci/check.sh")
+        .current_dir(&copy.dir)
+        .env("DCS_REMOTE", &copy.remote)
+        .env("DCS_RECORD_DIR", root().join("docs/releases"))
+        .env("CARGO_TARGET_DIR", copy.dir.join("target"))
+        .output()
+        .expect("ci/check.sh runs");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "a Cargo.lock recorded at another revision passed the check"
+    );
+    assert!(
+        stderr.contains("lockfile-stale"),
+        "a stale committed lockfile was refused without its named diagnostic:\n{stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&refused.stdout).contains("== resolve =="),
+        "the stale lockfile was caught only after the resolve stage re-resolved it:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&lock).unwrap(),
+        stale,
+        "the refused run repaired the doctored lockfile instead of reporting it"
+    );
+}
+
 /// The `upgrade` stage is the executable assertion of the documented
 /// repin upgrade (README §7): under the same `file://`-remote and
-/// binary substitutions as the other stages, the stage repins the
-/// unchanged tree to the checkout's `HEAD`, proves the emitted
-/// `model/plant.json` is byte-identical across the repin
-/// (`emit-divergent` stands guard), re-runs the full pipeline under the
-/// repin, and refuses the named incompatible crossings — the
-/// nonexistent tag (`pin-unresolvable`) and the pin outside the
-/// supported `MODEL_VERSION`/`version` window (`crossing-unrefused`).
+/// binary substitutions as the other stages, the stage materializes
+/// the unchanged tree at the previous release's recorded rev, repins
+/// it to the recorded release — the stand-in's tag resolving to the
+/// revision the committed lockfile records for it — proves the emitted
+/// `model/plant.json` is
+/// byte-identical across the repin (`emit-divergent` stands guard),
+/// re-runs the full pipeline under the repin, and refuses the named
+/// incompatible crossings — the nonexistent tag (`pin-unresolvable`)
+/// and the pin outside the supported `MODEL_VERSION`/`version` window
+/// (`crossing-unrefused`).
 #[test]
 fn the_upgrade_stage_proves_the_repin_and_the_named_crossings() {
     let tools = build_tools();
@@ -1134,7 +1309,7 @@ fn a_broken_peer_flag_reports_pair_failed() {
     ));
     copy_tree(&root().join("reference-plant"), &dir);
     let output = Command::new("python3")
-        .arg("ci/pair.py")
+        .arg("ci/legs/pair.py")
         .arg("--plant-server")
         .arg(tools.join("dcs-plant-server"))
         .arg("--controller")
@@ -1187,7 +1362,7 @@ fn a_wrong_negotiation_expectation_reports_the_degraded_state() {
     ));
     copy_tree(&root().join("reference-plant"), &dir);
     let output = Command::new("python3")
-        .arg("ci/negotiation.py")
+        .arg("ci/legs/negotiation.py")
         .arg("--plant-server")
         .arg(tools.join("dcs-plant-server"))
         .arg("--controller")
@@ -1239,7 +1414,7 @@ fn a_doctored_write_expectation_reports_refusal_failed() {
     ));
     copy_tree(&root().join("reference-plant"), &dir);
     let output = Command::new("python3")
-        .arg("ci/refusal.py")
+        .arg("ci/legs/refusal.py")
         .arg("--plant-server")
         .arg(tools.join("dcs-plant-server"))
         .arg("--controller")
@@ -1296,7 +1471,7 @@ fn a_doctored_handover_expectation_reports_handover_failed() {
         ("none-available-silent", "never to report"),
     ] {
         let output = Command::new("python3")
-            .arg("ci/handover.py")
+            .arg("ci/legs/handover.py")
             .arg("--plant-server")
             .arg(tools.join("dcs-plant-server"))
             .arg("--controller")
@@ -1351,7 +1526,7 @@ fn a_doctored_follows_group_expectation_reports_takeover_failed() {
     ));
     copy_tree(&root().join("reference-plant"), &dir);
     let output = Command::new("python3")
-        .arg("ci/takeover.py")
+        .arg("ci/legs/takeover.py")
         .arg("--plant-server")
         .arg(tools.join("dcs-plant-server"))
         .arg("--controller")
@@ -1405,7 +1580,7 @@ fn a_skipped_field_write_reports_divergence_missed() {
     ));
     copy_tree(&root().join("reference-plant"), &dir);
     let output = Command::new("python3")
-        .arg("ci/divergence.py")
+        .arg("ci/legs/divergence.py")
         .arg("--plant-server")
         .arg(tools.join("dcs-plant-server"))
         .arg("--controller")
@@ -1455,7 +1630,7 @@ fn a_structurally_divergent_served_document_reports_schema_mismatch() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    let schema = root().join("docs/releases/v0.2.0/block-interfaces.schema.json");
+    let schema = root().join("docs/releases/v0.3.0/block-interfaces.schema.json");
     let script = root().join("reference-plant/ci/schema_conformance.py");
     let conforming = serde_json::json!({
         "publication": 0,
@@ -1538,7 +1713,11 @@ fn a_structurally_divergent_served_document_reports_schema_mismatch() {
 }
 
 /// A dynamics document the scenario's declared outcomes no longer hold
-/// against is the `scenario-failed` diagnostic.
+/// against is the `scenario-failed` diagnostic. The doctored copy
+/// re-records the manifest's `dynamics.fingerprint` over the changed
+/// bytes — a customer who revises the dynamics re-approves the
+/// document — so the fingerprint stage holds and the run reaches the
+/// simulate stage.
 #[test]
 fn a_changed_trajectory_reports_scenario_failed() {
     let tools = build_tools();
@@ -1552,11 +1731,66 @@ fn a_changed_trajectory_reports_scenario_failed() {
         source.replacen("\"off_rate\": 0.25", "\"off_rate\": 0.0", 1),
     )
     .unwrap();
+    let fingerprint = Command::new("python3")
+        .arg("ci/dynamics_fingerprint.py")
+        .arg("--fingerprint")
+        .arg("model/dynamics.json")
+        .current_dir(&copy.dir)
+        .output()
+        .expect("python3 fingerprints the doctored dynamics");
+    assert!(
+        fingerprint.status.success(),
+        "the fingerprint helper failed: {}",
+        String::from_utf8_lossy(&fingerprint.stderr)
+    );
+    let fingerprint = String::from_utf8_lossy(&fingerprint.stdout);
+    let fingerprint = fingerprint.trim();
+    let manifest = copy.dir.join("deploy/manifest.json");
+    let source = std::fs::read_to_string(&manifest).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&source).unwrap();
+    let recorded = parsed["dynamics"]["fingerprint"].as_str().unwrap();
+    let field = format!("\"fingerprint\": \"{recorded}\"");
+    assert!(
+        source.contains(&field),
+        "the manifest's dynamics fingerprint field moved"
+    );
+    std::fs::write(
+        &manifest,
+        source.replacen(&field, &format!("\"fingerprint\": \"{fingerprint}\""), 1),
+    )
+    .unwrap();
     let output = copy.check(&tools);
     assert!(!output.status.success(), "a broken scenario passed");
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("scenario-failed"),
         "expected the scenario-failed diagnostic, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A checked-in dynamics document diverging from the manifest's
+/// recorded `dynamics.fingerprint` is the `manifest-fingerprint-mismatch`
+/// diagnostic — the deployment declaration no longer names the approved
+/// dynamics bytes.
+#[test]
+fn a_doctored_dynamics_reports_manifest_fingerprint_mismatch() {
+    let tools = build_tools();
+    let copy = Materialized::new();
+    let dynamics = copy.dir.join("model/dynamics.json");
+    let source = std::fs::read_to_string(&dynamics).unwrap();
+    std::fs::write(
+        &dynamics,
+        source.replacen("\"off_rate\": 0.25", "\"off_rate\": 0.0", 1),
+    )
+    .unwrap();
+    let output = copy.check(&tools);
+    assert!(
+        !output.status.success(),
+        "a doctored dynamics document passed"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("manifest-fingerprint-mismatch"),
+        "expected the manifest-fingerprint-mismatch diagnostic, got:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -1744,19 +1978,49 @@ assert any("command_refused" in f for f in failures), failures
 failures = simulate.settlement_misses([("sequencer:39", "advance")], [])
 assert any("no settled receipt" in f for f in failures), failures
 
-# A kind-emitted event absent from the journal is named.
+# A journal-retained kind-emitted event absent from the journal is
+# named.
 event = {
-    "name": "step_completed",
-    "payload": [{"name": "step", "kind": "int"}],
+    "name": "sequence_completed",
+    "payload": [{"name": "steps", "kind": "int"}],
+    "retention": "journal",
     "adapted": "declared",
 }
 failures = simulate.emitted_event_misses([("sequencer:39", event)], [])
+assert any("sequence_completed" in f for f in failures), failures
+
+# A history/latest-retained event landing in the journal is named —
+# the durable record carries no routed emission.
+routed = {
+    "name": "step_completed",
+    "payload": [{"name": "step", "kind": "int"}],
+    "retention": "history",
+    "adapted": "declared",
+}
+failures = simulate.emitted_event_misses(
+    [("sequencer:39", routed)],
+    [
+        {
+            "seq": 1,
+            "tick": 1,
+            "event": {
+                "event_emitted": {
+                    "event": {
+                        "event": "step_completed",
+                        "component": "sequencer:39",
+                        "fields": {"step": {"value": {"int": 1}}},
+                    }
+                }
+            },
+        }
+    ],
+)
 assert any("step_completed" in f for f in failures), failures
 
 # A kind-emitted event missing from the instance's resource view is
 # named.
 failures = simulate.resource_event_misses(
-    [("sequencer:39", event)],
+    [("sequencer:39", routed)],
     {"components": [{"name": "sequencer:39", "events": []}]},
 )
 assert any(
@@ -1822,14 +2086,18 @@ print("registry, receipt, and event tamper cases report named mismatches")
 }
 
 /// The release contract's named-diagnostic vocabulary must resolve
-/// every `<leg>-unchecked` self-check diagnostic `ci/check.sh` emits —
-/// an operator or tool reading a self-check failure resolves the name
-/// against the declared contract, so an emitted name the vocabulary
-/// does not declare is an unnamed diagnostic by another name. An
-/// emitted `<stem>-unchecked` is covered when the contract declares
-/// the name itself, or when the declared `<leg>-unchecked` convention
-/// covers it — the convention entry present and the leg's own
-/// `<stem>` or `<stem>-failed` diagnostic declared.
+/// every `<leg>-unchecked` self-check diagnostic the check emits —
+/// `ci/check.sh`'s inline `fail` names and the pair stage's legs,
+/// whose driver emits `<stem>-unchecked` for each `ci/legs/*.py`
+/// file's declared doctored cases, the stem the file's name with its
+/// underscores turned to dashes. An operator or tool reading a
+/// self-check failure resolves the name against the declared
+/// contract, so an emitted name the vocabulary does not declare is an
+/// unnamed diagnostic by another name. An emitted `<stem>-unchecked`
+/// is covered when the contract declares the name itself, or when the
+/// declared `<leg>-unchecked` convention covers it — the convention
+/// entry present and the leg's own `<stem>` or `<stem>-failed`
+/// diagnostic declared.
 #[test]
 fn the_contract_declares_every_emitted_unchecked_diagnostic() {
     let check = std::fs::read_to_string(root().join("reference-plant/ci/check.sh")).unwrap();
@@ -1849,6 +2117,21 @@ fn the_contract_declares_every_emitted_unchecked_diagnostic() {
             if name.ends_with("-unchecked") && !emitted.contains(&name) {
                 emitted.push(name);
             }
+        }
+    }
+    // The pair stage's legs emit `<stem>-unchecked` through
+    // `ci/legs.py`'s driver rather than the script's `fail` lines —
+    // every leg file's stem is an emitted name.
+    for entry in std::fs::read_dir(root().join("reference-plant/ci/legs")).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().into_string().unwrap();
+        if !name.ends_with(".py") {
+            continue;
+        }
+        let stem = name[..name.len() - 3].replace('_', "-");
+        let emitted_name = format!("{stem}-unchecked");
+        if !emitted.contains(&emitted_name) {
+            emitted.push(emitted_name);
         }
     }
     assert!(

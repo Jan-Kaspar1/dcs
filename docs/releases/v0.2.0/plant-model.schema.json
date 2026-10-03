@@ -84,6 +84,12 @@
         "kind": {
           "type": "string"
         },
+        "parameter_units": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
         "parameters": {
           "additionalProperties": {
             "$ref": "#/$defs/value"
@@ -92,7 +98,7 @@
         },
         "ports": {
           "additionalProperties": {
-            "$ref": "#/$defs/endpoint-shape"
+            "$ref": "#/$defs/port"
           },
           "type": "object"
         },
@@ -663,6 +669,31 @@
         {
           "if": {
             "properties": {
+              "requires_reason": {
+                "const": true
+              }
+            },
+            "required": [
+              "requires_reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "direction": {
+                "const": "in"
+              },
+              "writable": {
+                "const": true
+              }
+            },
+            "required": [
+              "writable"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
               "stale_after_ticks": {
                 "type": "integer"
               }
@@ -809,6 +840,19 @@
         "journaled": {
           "type": "boolean"
         },
+        "record": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/recording-duty"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requires_reason": {
+          "type": "boolean"
+        },
         "stale_after_ticks": {
           "anyOf": [
             {
@@ -817,6 +861,12 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
           ]
         },
         "value_type": {
@@ -846,6 +896,28 @@
       },
       "required": [
         "int"
+      ],
+      "type": "object"
+    },
+    "port": {
+      "additionalProperties": false,
+      "properties": {
+        "direction": {
+          "$ref": "#/$defs/direction"
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value_type": {
+          "$ref": "#/$defs/value-kind"
+        }
+      },
+      "required": [
+        "direction",
+        "value_type"
       ],
       "type": "object"
     },
@@ -885,6 +957,29 @@
         "consequence",
         "required_action",
         "reference"
+      ],
+      "type": "object"
+    },
+    "recording-duty": {
+      "additionalProperties": false,
+      "properties": {
+        "every_ticks": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "retain_days": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/nonneg-int"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "every_ticks"
       ],
       "type": "object"
     },

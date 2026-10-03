@@ -337,9 +337,11 @@ class RoutingTests(LaneFixture):
         issue = self.github.items[101]
         self.assertIn('agent:ready', [l['name'] for l in issue['labels']])
         self.assertIn('priority:P2', [l['name'] for l in issue['labels']])
+        self.assertIn('area:control-runtime', [l['name'] for l in issue['labels']])
         meta = planning.metadata(issue['body'])
         self.assertEqual(meta['key'], 'qa-scan-restamp')
         self.assertEqual(meta['group'], 'scan-restamp')
+        self.assertEqual(meta['area'], 'control-runtime')
         self.assertIn('dcs-agent-key:qa-scan-restamp', issue['body'])
         row = self.state.qa_finding('scan-restamp')
         self.assertEqual(row['status'], 'issue-open')

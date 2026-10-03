@@ -381,7 +381,8 @@ arguments, an action whose availability the kind itself decides, or a
 typed event the block emits rather than a point transition the monitor
 observes. The checked-in example is `dcs_blocks::Sequencer`
 (`crates/dcs-blocks/src/sequencer.rs`): it declares the `advance`/`reset`
-commands and the `step_completed` event beside its `run`/`reset` level
+commands and the `step_completed`/`sequence_completed`/`progress`
+events — one declared per retention class — beside its `run`/`reset` level
 inputs — deliberately not writable-point aliases, because `reset` the
 command is a one-shot where the `reset` input is a held condition.
 
@@ -402,13 +403,15 @@ command is a one-shot where the `reset` input is a held condition.
 A consumer submits one as `Command::Invoke { component, command,
 arguments }` — `component` the instance name, `command` the declared
 name, `arguments` keyed by the declared argument names. Submission-time
-validation refuses an unknown component, an undeclared command name, or
-a declared argument carrying the wrong `Value` kind before the command
-ever queues (`UnknownComponent`, `UnknownCommand`,
-`ArgumentTypeMismatch` — each naming the instance); what the schema does
-not constrain — a supplied argument name the schema does not declare, a
-missing argument, a value outside the command's domain, the
-`KindDeclared` predicate — is the implementation's to refuse in
+validation refuses an unknown component, an undeclared command name, an
+argument name the request schema does not declare, or a declared
+argument carrying the wrong `Value` kind before the command ever queues
+(`UnknownComponent`, `UnknownCommand`, `UnknownArgument`,
+`ArgumentTypeMismatch` — each naming the instance); a declared argument
+left absent stays legal — the schema bounds names and kinds, not
+presence — so what the schema does not constrain — a missing argument's
+default, a value outside the command's domain, the `KindDeclared`
+predicate — is the implementation's to own or refuse in
 `Component::invoke_command`, which the executor calls at the scan
 boundary in deterministic submission order.
 `Ok` applies the command; `Err(reason)` settles the invocation
@@ -458,25 +461,44 @@ publication carrying no verdict still serves.
 event-kind identity), `payload` (`EventField`s of `name`,
 `EventFieldKind` — a `Value` of a kind, a `Quality`, a `Receipt`, or
 free `Text` — plus an `optional` flag for fields that may carry no
-value), and `retention` (`EventRetention::Journal` for the durable
-transition record; `History`/`Latest` are declared in the vocabulary but
-route to no consumer-visible store yet — treat them as reserved). The
-component emits by pushing `EmittedEvent`s (`event` naming the
+value), and `retention` — the `EventRetention` naming the store the
+serving layer routes the emission to. All three classes are live:
+`Journal` is the durable transition record — the audit-grade class for
+run-level boundaries and other low-volume, keep-forever events;
+`History` is the read model's bounded event-history ring, evicting
+oldest-first under the same numbering-gap convention as the other
+rings — the class for per-cycle operational records a diagnostic reads
+back; `Latest` is the latest-emission view, the newest record per
+(component, event) superseding the last — the class for standing
+publications only ever read at their newest value. Pick the class by
+the record's shape — durable audit boundary `Journal`, bounded
+operational record `History`, superseding latest-value publication
+`Latest`; the `sequencer` kind declares one event per class and is the
+worked example.
+
+The component emits by pushing `EmittedEvent`s (`event` naming the
 declaration, `fields` keyed by the declared field names) into a buffer
 `Component::drain_events` empties; the executor drains after every
 `step`, success or failure, stamps each event's `component` with the
-registered instance name, and journal-retained emissions land as
-`JournalEvent::EventEmitted` at the producing scan's tick. An emission
-the descriptor never declares still journals — the audit record never
-drops an event — but the drift test treats declaration as the contract.
+registered instance name, and the emission lands in its declared
+class's store at the producing scan's tick — `Journal`-retained
+emissions as `JournalEvent::EventEmitted`, `History`/`Latest`
+emissions in the routed `EventRecord` streams `GET /resources` serves
+beside the journal tail, each entry marked with its retention. An
+emission the descriptor never declares still journals — the audit
+record never drops an event — but the drift test treats declaration
+as the contract.
 
 **Checkpoint obligation for emitting kinds:** an emitted event's
 sequence is derived state. A kind that emits sequence-bearing events
 must checkpoint everything feeding the sequence — decision 84's
 emit-identical rule makes a tracking standby re-derive the same
 emissions, so a kind emitting from non-checkpointed state would break a
-promoted run's indistinguishable journal. `Sequencer` checkpoints the
-step position its `step_completed` emissions report.
+promoted run's indistinguishable record. `Sequencer` checkpoints the
+step position its `step_completed`, `sequence_completed`, and
+`progress` emissions report — the tracking peer reproduces the same
+routed records, emitting nothing independently of the run's own
+checkpoints.
 
 ### The spec mirror and the generic consumer
 
@@ -493,9 +515,11 @@ A generic consumer needs no kind-specific code:
   component — declared commands and events appear under `Declared`
   provenance beside the adapted entries;
 - `GET /resources` joins the live half — per-command `available` or
-  the named refusal the submission path would answer, and the retained
-  journal tail's entries attributed to the instance, `event_emitted`
-  records included;
+  the named refusal the submission path would answer, and the
+  attributed event streams: the retained journal tail's entries beside
+  the routed `History`/`Latest` emission records, each entry's
+  `retention` mark telling the diagnostic streams from the durable
+  record;
 - the monitoring page renders the command table with typed argument
   controls and the recent-events list from those two documents alone;
 - `dcs-ctl invoke <component> <command> [<name>=<value>]...` submits a
@@ -590,7 +614,7 @@ A factory returns one of two `DeviceDriver` contributions:
   initial value). The fragment merges with every other `Sim` contribution
   and the synthesized internal points into one `SimDriver` backend, so a
   model can mix many `sim*` devices freely.
-- `DeviceDriver::Backend(DeviceBackend { io, step, claim, release, inspect, field_facing })` — a
+- `DeviceDriver::Backend(DeviceBackend { io, step, claim, release, ensure, startup_claim, probe, reclaim, fenced_by, declare_monitor, claimed_monitor, inspect, field_facing })` — a
   self-contained backend. `io` is the point-facing driver; `step` is an
   optional `StepHook` (`Fn(f64) -> Result<Tick, dcs_assembly::StepError>`)
   advancing the backend's simulated plant one `dt` per `FanoutDriver::step` —
@@ -608,7 +632,116 @@ A factory returns one of two `DeviceDriver` contributions:
   when the peer gives up ownership so the backend forgets any recorded
   claim token it would otherwise re-assert on a reconnect. `sim-tcp`
   installs `RemoteDriver::release_claim` for exactly that — a demoted
-  attachment must not race the new owner back onto a restarted plant.
+  attachment must not race the new owner back onto a restarted plant —
+  and `sim-bus` installs `BusDriver::release_writer` on the same
+  contract: its point-wise driver re-attaches lazily and re-arms the
+  recorded token on re-attach, so the release is what stands a demotion
+  down.
+  `ensure` is an optional `EnsureHook`
+  (`Fn(u64) -> Result<bool, dcs_assembly::StepError>`) — the conditional
+  counterpart of `claim` the orphan cycle probes: while a demoted
+  ex-owner's tracked line reports no field owner,
+  `FanoutDriver::ensure_field_writer` runs it to re-arm the claim under
+  the owner's token only where the field stands unclaimed or already
+  names that token, never preempting a standing owner. `sim-tcp`
+  installs the plant server's `ensure_writer`, and `sim-bus` installs
+  `BusDriver::ensure_writer` — the register protocol's conditional
+  grant, which a re-attaching driver also runs to re-arm a recorded
+  claim; `sim-cyclic` leaves it `None`, its claim dying with the
+  connection and carrying no conditional grant to probe.
+  `startup_claim` is an optional `StartupClaimHook`
+  (`Fn(u64) -> Result<bool, dcs_assembly::StepError>`) — the
+  launched-controller counterpart of `claim` a started active's
+  activation asserts once: `FanoutDriver::claim_field_writer_unless_held`
+  runs it to take the field only where no *live* attachment holds a
+  different owner's claim — `Ok(true)` — refusing `Ok(false)` while a
+  live incumbent stands, so a controller restarted onto a stale
+  checkpoint cannot preempt it and silently roll back commands the
+  incumbent receipted and applied. A claim a dead owner left standing
+  still preempts — the restart-as-active recovery path. `sim-tcp`
+  installs the plant server's `claim_writer_unless_held`, and
+  `sim-bus`/`sim-cyclic` install the register protocol's
+  `claim_writer_unless_held`: on that wire a standing claim always
+  has live holders — the claim dies with its last holder's
+  connection — so "a different owner's claim stands" *is* the
+  live-incumbent verdict. A kind whose
+  arbitration cannot distinguish live holders leaves it `None` and the
+  fan-out falls back to the unconditional `claim` for it, the pre-hook
+  behavior.
+  `probe` is an optional `ProbeHook`
+  (`Fn() -> Result<FieldClaim, dcs_assembly::StepError>`) — the claim's
+  read-only counterpart a peer runs once per scan to report the field's
+  write-ownership as `RoleReport::field_claim`: `held` while an owner
+  stands, `unclaimed` while none does. The probe asserts, joins, and
+  releases nothing, so the observation cannot seize the field it
+  reports. `sim-tcp` installs the plant server's `probe_writer`, and
+  `sim-bus`/`sim-cyclic` install the register protocol's — whose
+  `claim_status` answer names the standing claim's owner token and
+  declared monitor, and whose unclaimed verdict is the device's open
+  pre-claim state rather than a closed field; a kind
+  whose arbitration cannot be observed without taking it leaves it
+  `None` and the served report carries `None` — no claim question was
+  answered — rather than a guessed `held`.
+  `reclaim` is an optional `ReclaimHook`
+  (`Fn(u64) -> Result<bool, dcs_assembly::StepError>`) — the *bound*
+  conditional re-grant a fencing-demoted ex-owner probes each standby
+  scan while its loss mark stands: `FanoutDriver::reclaim_field_writer`
+  runs it to take the claim back under the run's token where the field
+  stands unclaimed, already names it, or stands under a different
+  owner's holderless claim — `Ok(true)` — refusing `Ok(false)` only
+  while a different owner's claim has live holders, so a released
+  preemption ends with the ex-owner holding the field again and no
+  probe ever preempts a live attachment. Because the ask can preempt
+  the holderless shapes the field cannot tell from a dead owner's — a
+  merely transport-frozen incumbent's included — the peer issues it
+  only where its own scan probe just answered `unclaimed` or its
+  standing convergence proof holds: an unconverged ex-owner never
+  preempts a standing claim (decision 105). Unlike `ensure` the grant
+  binds the probing attachment to the claim's holders, because the
+  peer's gate lifts on it and its writes must pass the arbitration it
+  re-took. `sim-tcp` installs the plant server's `reclaim_writer`, and
+  `sim-bus` installs its `ensure_writer` — on the register protocol a
+  claim stands only while a holder holds it, so the bound conditional
+  grant and the unbound one are the same ask; a kind without a bound
+  conditional grant leaves it `None` and the demoted peer keeps the
+  pre-hook wedge — an operator's promote unwedges.
+  `fenced_by` is an optional `FencedByHook` (`Fn() -> Option<u64>`) —
+  the claimant attribution the field-ownership audit reads:
+  `FanoutDriver::fencing_claimant(point)` asks it for the owner token
+  the field's standing claim named the last time it fenced a mutation
+  on `point`'s backend, so `field_claim_lost` attributes the takeover
+  rather than recording an anonymous loss, and the refused `ensure`/
+  `reclaim` probes read it again so `field_claim_observed` names the
+  standing foreign owner a preempt-and-release episode would otherwise
+  hide — one journaled record per distinct claimant, not one per
+  refused probe. `sim-tcp` installs
+  `RemoteDriver::fenced_by`, and `sim-bus`/`sim-cyclic` install the
+  register drivers' — every `fenced` verdict on that wire names the
+  standing claim's owner token and declared monitor, and on the cyclic
+  surface the verdict arrives at the image exchange rather than at a
+  point write; a kind whose fencing verdicts carry no
+  owner identity leaves it `None` and the entry records `claimant:
+  null`.
+  `declare_monitor` is an optional `DeclareMonitorHook`
+  (`Fn(SocketAddr)`) — the tracking-surface declaration the controller
+  runs once its monitor is bound: `FanoutDriver::declare_field_monitor`
+  forwards the bound address to every field-facing backend carrying
+  the hook, and the backend then stamps it on every write-ownership
+  claim it asserts. `claimed_monitor` is the matching read —
+  `Fn() -> Option<SocketAddr>` — answering the monitor endpoint the
+  standing claim declared as the field's fencing verdicts recorded it;
+  `FanoutDriver::claimed_monitor` surfaces the first field-facing
+  answer, and a demoted peer's tracking path uses it to re-join the
+  successor — the field's own arbitration is the only rendezvous an
+  unkeyed pair can prove (announced `?peer=` hints are unverifiable
+  without a pair key). `sim-tcp` installs both on the `RemoteDriver`'s
+  claim state, and `sim-bus`/`sim-cyclic` on the register drivers' — every
+  claim on that wire may declare the endpoint, the device server records
+  it on the claim (a wildcard declaration resolving to the claiming
+  connection's proven source, so a stored rendezvous is always dialable),
+  and an undeclared join keeps the declaration its owner already made; a
+  kind whose claims carry no declared monitor leaves
+  them `None` and a demoted peer reports no claim-arbitrated source.
   `inspect` is an optional
   `Option<Arc<dyn Any + Send + Sync>>` typed handle the factory installs when
   the backend exposes more than the `IoDriver` surface — `sim-scripted`
@@ -792,6 +925,13 @@ fn memory_device(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         step: None,
         claim: None,
         release: None,
+        ensure: None,
+        startup_claim: None,
+        probe: None,
+        reclaim: None,
+        fenced_by: None,
+        declare_monitor: None,
+        claimed_monitor: None,
         inspect: None,
         field_facing: false,
     }))
@@ -1262,6 +1402,13 @@ fn demo_bus(spec: &DeviceSpec<'_>) -> Result<DeviceDriver, DeviceError> {
         step: None,
         claim: None,
         release: None,
+        ensure: None,
+        startup_claim: None,
+        probe: None,
+        reclaim: None,
+        fenced_by: None,
+        declare_monitor: None,
+        claimed_monitor: None,
         inspect: Some(inspect),
         field_facing: true,
     }))
@@ -1390,6 +1537,85 @@ standby.scan();
 assert_eq!(bus.field_value(PointId(2)), Some(Value::Float(5.0)));
 ```
 
+## Composing the dynamics document
+
+The plant model is the control contract; the dynamics document beside it is
+the simulated world's physics. `dcs-plant-server --dynamics FILE` merges a
+JSON list of `ProcessElement` declarations into the served channel map —
+`first_order_lag`, `second_order_lag`, `integrator`, `dead_time`, `noise`,
+`bool_flow`, `flow_sum`, `scaled_flow`, `threshold` — and
+`dcs-sim-bus-device --dynamics` merges the same list over its register bank.
+`dcs-plant-server <model> --check-dynamics FILE` preflights the document
+without starting the server: every element is merged and validated against
+the model's channel map under the same rules `--dynamics` applies, each
+rejection named by its element index and driving point, so plant CI can
+reject a malformed document before deployment. The document is
+deliberately not `PlantModel` schema: process physics are
+simulation internals no controller reads.
+
+`dcs-build`'s `dynamics` module composes that document through the same
+typed seam as the model. The element structs are data mirrors of the
+`dcs-sim` serde vocabulary — the convention the kind specs already apply to
+component descriptors, so the model producer gains no `dcs-sim` dependency —
+and `dcs_build::tests::dynamics` pins each mirror against the vocabulary
+item it serializes as. `DynamicsBuilder` declares one element per method in
+stepping order; ends bind the point handles the model composition returns,
+narrowed by the kind each end requires, so a wrongly-kinded reference fails
+to compile:
+
+```rust
+use dcs_build::{Direction, DynamicsBuilder, PlantBuilder, PointId};
+
+let mut plant = PlantBuilder::new();
+let sim = plant.device("sim").id;
+let inflow_ch = plant.channel::<f64>(sim, "inflow", Direction::In);
+let net_flow_ch = plant.channel::<f64>(sim, "net-flow", Direction::In);
+let draw_ch = plant.channel::<f64>(sim, "pump-draw", Direction::In);
+let cmd_ch = plant.channel::<bool>(sim, "pump-cmd", Direction::Out);
+
+let inflow = plant.field_input::<f64>(PointId(12), inflow_ch, false);
+let net_flow = plant.field_input::<f64>(PointId(13), net_flow_ch, false);
+let draw = plant.field_input::<f64>(PointId(20), draw_ch, false);
+let cmd = plant.field_output::<bool>(PointId(100), cmd_ch);
+let model = plant.build().unwrap();
+
+// Float ends take `InPoint<f64>`/`OutPoint<f64>` handles; the `bool_flow`
+// gate and `threshold` contact take `bool` handles — a `Float` point in a
+// `Bool` end is a compile error, not a merge failure.
+let mut dynamics = DynamicsBuilder::new();
+dynamics
+    .bool_flow(cmd, draw, -10.0, 0.0, 0.0)
+    .flow_sum([inflow, draw], net_flow, 4.0, 4.0);
+
+let document = dynamics.emit(&model).unwrap();
+let json = serde_json::to_string_pretty(&document).unwrap();
+```
+
+`emit` resolves what the types cannot carry against the emitted model and
+reports a named `DynamicsError` — the failures the merge would otherwise
+name at server startup, raised where the document is authored:
+
+- `UnknownPoint` — an element references a point the model does not declare
+  (a stale or foreign handle);
+- `InternalPoint` — the reference names a channel-less internal point, which
+  lives in the scan image and has no simulated-field binding;
+- `PointKind` — the referenced point's declared kind differs from the end's
+  required kind (`Float` throughout, `Bool` on a `bool_flow` gate and a
+  `threshold` contact);
+- `InvalidParameter` / `DegenerateThreshold` — a declared value outside the
+  bounds the merge's channel-map validation enforces (finite and positive
+  `time_constant`/`delay`/`damping_ratio`, non-negative `amplitude`, finite
+  rates, `bias`, `gain`, bounds, and `initial`, and a `threshold`'s
+  distinct `on`/`off`);
+- `ConflictingDriver` — two elements drive the same point.
+
+The emitted list serializes under the document's existing grammar —
+`serde_json::to_string_pretty` produces the canonical bytes — so the
+composition is byte-deterministic and the checked-in artifact stays
+diffable. Runtime fault injection is not part of the document: `inject_fault`
+is a plant-protocol verb exercised by tests and `dcs-plant-ctl`, never a
+`ProcessElement` kind.
+
 ## Automatic versus supplied
 
 Once the two registrations exist, everything between a model declaration and
@@ -1402,7 +1628,7 @@ a monitored run is platform machinery. The split:
 | The scoped `ComponentIo` enforcing declared I/O during `step`, and the deterministic scan order | A `describe()` override for role hints and parameter metadata (a correct default exists) |
 | Per-component diagnostics (`step_errors`, `last_error`, `last_tick`) and point samples in `TelemetrySnapshot`, served by `dcs-monitor`'s HTTP+JSON endpoints | `capture_state`/`restore_state` field coverage for every value carried between scans |
 | Descriptor publication in `TelemetrySnapshot.descriptors`, so the UI renders any registered kind generically | The registration call in the deployed `ComponentRegistry` |
-| The `BlockInterface` derivation, its serving over `GET /schema`/`GET /resources`, invoke submission validation (`UnknownComponent`/`UnknownCommand`/`ArgumentTypeMismatch`), scan-boundary dispatch in submission order, the settled `command_refused` receipt, post-`step` event draining (failing steps included), `event_emitted` journaling at the producing tick, and the emit-identical standby behavior | The `CommandDecl`/`EventDecl` declarations on the descriptor, the `invoke_command`/`drain_events` implementations, the `dcs-build` spec mirror (`declared_commands`/`declared_events`), and `capture_state` coverage of command-mutated and event-sequence state |
+| The `BlockInterface` derivation, its serving over `GET /schema`/`GET /resources`, invoke submission validation (`UnknownComponent`/`UnknownCommand`/`UnknownArgument`/`ArgumentTypeMismatch`), scan-boundary dispatch in submission order, the settled `command_refused` receipt, post-`step` event draining (failing steps included), `event_emitted` journaling at the producing tick, and the emit-identical standby behavior | The `CommandDecl`/`EventDecl` declarations on the descriptor, the `invoke_command`/`drain_events` implementations, the `dcs-build` spec mirror (`declared_commands`/`declared_events`), and `capture_state` coverage of command-mutated and event-sequence state |
 | `DeviceSpec` construction, `FanoutDriver` point routing, cross-backend wire routes, and `UnknownDeviceKind` / `InvalidDeviceParameters` / `DeviceBackend` failures naming the device | The `IoDriver` implementation: protocol, timeouts, `IoError` mapping |
 | The shared local `SimDriver` merge for `DeviceDriver::Sim` contributions, `FanoutDriver::step(dt)` invoking each backend's `StepHook` (and `step_local(dt)` invoking only non-field-facing hooks), and `FanoutDriver::inspect::<T>` reaching an installed typed handle | Parameter validation (`DeviceError::parameters`), eager backend probing (`DeviceError::backend`), the `field_facing` flag, and the optional `inspect` handle |
 | Namespaced per-backend checkpoint state for drivers implementing `capture_state` | The `Sim` vs `Backend` contribution choice, the step hook for simulated kinds, and the capture/restore decision |

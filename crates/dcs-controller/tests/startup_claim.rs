@@ -25,7 +25,9 @@ use std::process::Command as Process;
 
 mod support;
 
-use support::{CONTROLLER, SimTcp, controller_model, spawn_controller, spawn_plant};
+use support::{
+    CONTROLLER, SimTcp, controller_model, listening_on, spawn, spawn_controller, spawn_plant,
+};
 
 /// The shared plant's model — the dcs-plant tank loop: level raw (10)
 /// and setpoint (11) in, valve command (20) out.
@@ -181,9 +183,8 @@ fn every_post_validation_startup_abort_leaves_the_claim_untouched() {
     };
 
     // The same defect class through the other bind paths and failure
-    // kinds: a paced run's journal replay, and a driven run's
-    // unresolvable tracking-peer address — each an abort that used to
-    // land after the preemptive claim.
+    // kinds: a paced run's journal replay — an abort that used to land
+    // after the preemptive claim.
     let mut paced_journal = base();
     paced_journal.extend([
         "--scan-ms".to_string(),
@@ -193,22 +194,27 @@ fn every_post_validation_startup_abort_leaves_the_claim_untouched() {
     ]);
     assert_doomed(&paced_journal, "cannot bind monitor");
 
-    let mut bad_peer = base();
-    bad_peer.extend([
-        "--driven".to_string(),
-        "--peer".to_string(),
-        "not-an-addr".to_string(),
-    ]);
-    assert_doomed(&bad_peer, "cannot resolve");
-
-    let mut paced_bad_peer = base();
-    paced_bad_peer.extend([
-        "--scan-ms".to_string(),
-        "50".to_string(),
-        "--peer".to_string(),
-        "not-an-addr".to_string(),
-    ]);
-    assert_doomed(&paced_bad_peer, "cannot resolve");
+    // A refused startup claim against a declared `--peer` is no abort
+    // at all under the born-active contract: the run rejoins the pair
+    // as its standby, the unresolvable name staying the declared
+    // tracking source as pull misses — never a startup fault. Both
+    // monitored shapes land the same settle: the incumbent's claim is
+    // untouched — the refusing verdict, not a preempt — and the served
+    // role is standby.
+    for mode in [vec!["--driven"], vec!["--scan-ms", "50"]] {
+        let mut bad_peer = base();
+        bad_peer.extend(mode.into_iter().map(String::from));
+        bad_peer.extend(["--peer".to_string(), "not-an-addr".to_string()]);
+        let refused = spawn(Path::new(CONTROLLER), &bad_peer, listening_on);
+        assert_eq!(
+            MonitorClient::new(refused.addr).role().unwrap().role,
+            Role::Standby
+        );
+        drop(refused);
+        assert_claim_held_by_incumbent(plant.addr);
+        client.advance(1).unwrap();
+        assert_eq!(client.role().unwrap().role, Role::Active);
+    }
 
     let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     for mode in [vec!["--driven"], vec!["--scan-ms", "50"]] {

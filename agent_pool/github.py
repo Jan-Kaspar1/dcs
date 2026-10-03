@@ -3,6 +3,8 @@ import json
 import subprocess
 import tempfile
 
+from . import areas
+
 
 class GitHubError(RuntimeError):
     pass
@@ -38,6 +40,11 @@ class GitHub:
         labels = ['agent:' + s for s in ('ready','working','pr-open','blocked')] + [f'worker:worker-{n:02}' for n in range(1,21)] + [f'priority:P{n}' for n in range(4)]
         for label in labels:
             self.run('label', 'create', label, '--repo', self.repo, '--force')
+        colors = ('1d76db', '5319e7', 'b60205', '0052cc', '0e8a16',
+                  'd93f0b', 'fbca04', '006b75', 'c2e0c6', '6f42c1')
+        for (area, (_weight, description)), color in zip(areas.DEFINITIONS.items(), colors):
+            self.run('label', 'create', areas.label(area), '--repo', self.repo,
+                     '--color', color, '--description', description, '--force')
 
     def create_issue(self, title, body, labels=(), key=None):
         marker = '<!-- dcs-agent-key:' + key + ' -->' if key else None

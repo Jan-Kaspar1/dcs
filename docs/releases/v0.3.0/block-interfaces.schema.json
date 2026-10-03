@@ -1,0 +1,479 @@
+{
+  "$defs": {
+    "adapted-command": {
+      "enum": [
+        "write_value",
+        "force_point",
+        "unforce_point",
+        "set_parameter",
+        "declared"
+      ]
+    },
+    "adapted-event": {
+      "enum": [
+        "point_changed",
+        "quality_changed",
+        "command_settled",
+        "step_failed",
+        "declared"
+      ]
+    },
+    "block-interface": {
+      "additionalProperties": false,
+      "properties": {
+        "commands": {
+          "items": {
+            "$ref": "#/$defs/command-spec"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "configuration": {
+          "items": {
+            "$ref": "#/$defs/config-property"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "events": {
+          "items": {
+            "$ref": "#/$defs/event-spec"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "kind": {
+          "type": "string"
+        },
+        "measurements": {
+          "items": {
+            "$ref": "#/$defs/measurement"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "state": {
+          "items": {
+            "$ref": "#/$defs/state-property"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "version": {
+          "const": 1
+        }
+      },
+      "required": [
+        "version",
+        "kind",
+        "measurements",
+        "configuration",
+        "state",
+        "commands",
+        "events"
+      ],
+      "type": "object"
+    },
+    "bool-value": {
+      "additionalProperties": false,
+      "properties": {
+        "bool": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "bool"
+      ],
+      "type": "object"
+    },
+    "command-argument": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/value-kind"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "command-availability": {
+      "enum": [
+        "always",
+        "bound_point_writable",
+        "kind_declared"
+      ]
+    },
+    "command-spec": {
+      "additionalProperties": false,
+      "properties": {
+        "adapted": {
+          "$ref": "#/$defs/adapted-command"
+        },
+        "availability": {
+          "$ref": "#/$defs/command-availability"
+        },
+        "name": {
+          "type": "string"
+        },
+        "point": {
+          "$ref": "#/$defs/point-or-null"
+        },
+        "request": {
+          "items": {
+            "$ref": "#/$defs/command-argument"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "request",
+        "availability",
+        "adapted"
+      ],
+      "type": "object"
+    },
+    "component-interface": {
+      "additionalProperties": false,
+      "properties": {
+        "interface": {
+          "$ref": "#/$defs/block-interface"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "interface"
+      ],
+      "type": "object"
+    },
+    "config-capability": {
+      "enum": [
+        "tunable",
+        "engineering_fixed"
+      ]
+    },
+    "config-property": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "$ref": "#/$defs/config-capability"
+        },
+        "kind": {
+          "$ref": "#/$defs/value-kind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "range": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/parameter-range"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "capability"
+      ],
+      "type": "object"
+    },
+    "direction": {
+      "enum": [
+        "in",
+        "out"
+      ]
+    },
+    "event-emission": {
+      "enum": [
+        "on_observed_change",
+        "when_journaled",
+        "on_command_settled",
+        "on_step_failure",
+        "kind_emitted"
+      ]
+    },
+    "event-field": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/event-field-kind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "optional": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "event-field-kind": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "value": {
+              "$ref": "#/$defs/value-kind"
+            }
+          },
+          "required": [
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "enum": [
+            "quality",
+            "receipt",
+            "text"
+          ]
+        }
+      ]
+    },
+    "event-retention": {
+      "enum": [
+        "journal",
+        "history",
+        "latest"
+      ]
+    },
+    "event-spec": {
+      "additionalProperties": false,
+      "properties": {
+        "adapted": {
+          "$ref": "#/$defs/adapted-event"
+        },
+        "emission": {
+          "$ref": "#/$defs/event-emission"
+        },
+        "name": {
+          "type": "string"
+        },
+        "payload": {
+          "items": {
+            "$ref": "#/$defs/event-field"
+          },
+          "type": "array"
+        },
+        "point": {
+          "$ref": "#/$defs/point-or-null"
+        },
+        "retention": {
+          "$ref": "#/$defs/event-retention"
+        }
+      },
+      "required": [
+        "name",
+        "payload",
+        "retention",
+        "emission",
+        "adapted"
+      ],
+      "type": "object"
+    },
+    "float-value": {
+      "additionalProperties": false,
+      "properties": {
+        "float": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "float"
+      ],
+      "type": "object"
+    },
+    "id": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "int-value": {
+      "additionalProperties": false,
+      "properties": {
+        "int": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "int"
+      ],
+      "type": "object"
+    },
+    "measurement": {
+      "additionalProperties": false,
+      "properties": {
+        "direction": {
+          "$ref": "#/$defs/direction"
+        },
+        "kind": {
+          "$ref": "#/$defs/value-kind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "point": {
+          "$ref": "#/$defs/point-or-null"
+        },
+        "role": {
+          "$ref": "#/$defs/role-or-null"
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "direction",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "parameter-range": {
+      "additionalProperties": false,
+      "properties": {
+        "max": {
+          "$ref": "#/$defs/value"
+        },
+        "min": {
+          "$ref": "#/$defs/value"
+        }
+      },
+      "required": [
+        "min",
+        "max"
+      ],
+      "type": "object"
+    },
+    "point-or-null": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "port-role": {
+      "enum": [
+        "process_value",
+        "setpoint",
+        "output",
+        "status"
+      ]
+    },
+    "role-or-null": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/port-role"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "state-persistence": {
+      "enum": [
+        "bound_point"
+      ]
+    },
+    "state-property": {
+      "additionalProperties": false,
+      "properties": {
+        "direction": {
+          "$ref": "#/$defs/direction"
+        },
+        "kind": {
+          "$ref": "#/$defs/value-kind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "persistence": {
+          "$ref": "#/$defs/state-persistence"
+        },
+        "point": {
+          "$ref": "#/$defs/point-or-null"
+        },
+        "role": {
+          "$ref": "#/$defs/role-or-null"
+        }
+      },
+      "required": [
+        "name",
+        "direction",
+        "kind",
+        "persistence"
+      ],
+      "type": "object"
+    },
+    "value": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/bool-value"
+        },
+        {
+          "$ref": "#/$defs/int-value"
+        },
+        {
+          "$ref": "#/$defs/float-value"
+        }
+      ]
+    },
+    "value-kind": {
+      "enum": [
+        "bool",
+        "int",
+        "float"
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The document GET /schema serves: one instance-level BlockInterface per served component instance — decision 82's five resource collections in served form. The schema covers structure, field types, and the declared vocabularies; that the registry corresponds to a live run's instances stays with the serving layer (docs/architecture.md).",
+  "properties": {
+    "interfaces": {
+      "items": {
+        "$ref": "#/$defs/component-interface"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "publication": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "tick": {
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "publication",
+    "tick",
+    "interfaces"
+  ],
+  "title": "DCS served block-interface registry",
+  "type": "object"
+}
