@@ -117,6 +117,42 @@ pub enum StandbySync {
         /// stream's own counter: how far the run is known to be aligned.
         aligned: Tick,
     },
+    /// [`Orphaned`](StandbySync::Orphaned) with the field's *own*
+    /// arbitration read: the write-ownership claim does stand under a
+    /// live writer — `FieldClaim::Held` beside this verdict — but the
+    /// monitor endpoint that writer declared could not prove this
+    /// line's pair key, so the writer is a process outside the keyed
+    /// line rather than the lost pair member the orphan verdict leaves
+    /// open. The distinction the orphan state alone cannot make is the
+    /// one the whole recovery turns on: against an unattested writer
+    /// there is no incumbent whose applied state a takeover could roll
+    /// back, so the promotion claim is the *unconditional* one rather
+    /// than the orphan cycle's conditional grant, and both gates —
+    /// an operator's `promote` and an armed `self_promote` — have a
+    /// path back to the field while the foreign writer lives.
+    /// Against a genuinely ownerless line — the wedge the orphan
+    /// promote exists to break — the verdict is [`Orphaned`](StandbySync::Orphaned)
+    /// and the conditional claim still stands, because nothing is
+    /// known about who would answer.
+    ///
+    /// Promotable on the same convergence evidence
+    /// [`Orphaned`](StandbySync::Orphaned) stands on: the run is still
+    /// current with the tracked line. The diagnosis is the monitoring
+    /// surface's — it is the half that holds the pair key and can ask
+    /// the declared endpoint for a proof — so a report never carries
+    /// this verdict on a run with no key to ask under, and it is
+    /// re-earned per bounded verification window rather than latched:
+    /// the writer proving the line's key, going silent, or ceasing to
+    /// be the field's writer each drop the verdict back to
+    /// [`Orphaned`](StandbySync::Orphaned) and the conditional claim
+    /// with it. `None` — an unkeyed run, a claim declaring no
+    /// monitor, a dead or undialable declaration — is no diagnosis,
+    /// never a shrug: those are `orphaned`, unchanged.
+    Usurped {
+        /// The last applied checkpoint's source tick — the tracked
+        /// stream's own counter: how far the run is known to be aligned.
+        aligned: Tick,
+    },
     /// Checkpoints apply cleanly but the outputs the standby's own scan
     /// stages no longer match what the field carries — a converged peer
     /// whose takeover would write a different field than the active's.
@@ -159,6 +195,12 @@ impl fmt::Display for StandbySync {
                 "orphaned: the tracked line has no field owner (aligned at tick {})",
                 aligned.0
             ),
+            Self::Usurped { aligned } => write!(
+                f,
+                "usurped: the field's writer cannot prove this line's pair key \
+                 (aligned at tick {})",
+                aligned.0
+            ),
             Self::Diverged { mismatches } => write!(
                 f,
                 "diverged: staged outputs mismatch the field at {}",
@@ -185,7 +227,11 @@ impl fmt::Display for StandbySync {
 /// claim reports [`Held`](FieldClaim::Held) while both peers report
 /// `orphaned`, and a restarted field reports
 /// [`Unclaimed`](FieldClaim::Unclaimed) while the tracked line may
-/// still report `tracking`.
+/// still report `tracking`. The inverse pairing — [`Held`](FieldClaim::Held)
+/// beside [`StandbySync::Orphaned`] — is exactly the state
+/// [`StandbySync::Usurped`] names, and the two fields say together
+/// what neither says alone: the field has a writer, the tracked line
+/// has none, so that writer is running outside the line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldClaim {

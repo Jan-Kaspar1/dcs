@@ -239,7 +239,7 @@ fn pair_health_fault_kinds_roundtrip() {
             fault_kinds: vec![kind],
         };
         let json = serde_json::to_value(&health).unwrap();
-        assert_eq!(json["fault_kinds_version"], 3);
+        assert_eq!(json["fault_kinds_version"], 4);
         assert_eq!(json["fault_kinds"], serde_json::json!([kind]));
         assert_eq!(serde_json::from_value::<PairHealth>(json).unwrap(), health);
     }
@@ -270,7 +270,7 @@ fn healthy_pair_health_omits_empty_fault_kinds_and_roundtrips() {
         fault_kinds: vec![],
     };
     let json = serde_json::to_value(&health).unwrap();
-    assert_eq!(json["fault_kinds_version"], 3);
+    assert_eq!(json["fault_kinds_version"], 4);
     assert!(json.get("fault_kinds").is_none());
     assert_eq!(serde_json::from_value::<PairHealth>(json).unwrap(), health);
 }
@@ -788,6 +788,74 @@ fn an_orphaned_standby_is_a_named_fault() {
     assert_eq!(health.active, Some(active.addr));
     assert!(health.faults.is_empty(), "{:?}", health.faults);
     assert_fault_kinds(&health, &[]);
+
+    active.stop();
+    standby.stop();
+}
+
+/// The narrower ownerless verdict as pair health: a standby whose
+/// tracked line has no field owner *while the field's own arbitration
+/// names a writer outside the pair* is `standby_usurped`, not
+/// `standby_orphaned`. The two read differently to an operator and to
+/// the remedy — an ownerless field is taken by promoting onto it, an
+/// usurped one by promoting *against* the writer standing on it — so a
+/// pair view that collapsed them would ask for the wrong action. The
+/// verdict is poll-driven like every other: a writer that starts owning
+/// the line again ends the fault.
+#[test]
+fn an_usurped_standby_is_a_named_fault() {
+    let active = PeerRig::start(Role::Active);
+    let claim = Arc::new(Mutex::new(FieldClaim::Held));
+    let standby = PeerRig::start_probed(Role::Standby, Arc::clone(&claim));
+    let mut pair = PairClient::new([active.addr, standby.addr]);
+
+    active.client.advance(1).unwrap();
+    let mut orphaned = active.client.checkpoint().unwrap();
+    orphaned.source_owns_field = Some(false);
+    standby.monitor.apply_checkpoint(&orphaned).unwrap();
+    // The field's own arbitration holds — under a writer that cannot
+    // prove the pair's key, which is the half the sync verdict cannot
+    // see and the diagnosis supplies.
+    *claim.lock().unwrap() = FieldClaim::Held;
+    standby.client.advance(1).unwrap();
+    standby
+        .monitor
+        .note_foreign_writer(Some("127.0.0.1:9099".parse().unwrap()));
+
+    pair.poll_roles();
+    match status_of(&pair, standby.addr) {
+        PeerStatus::Reporting(report) => {
+            assert!(
+                matches!(report.sync, Some(StandbySync::Usurped { .. })),
+                "the usurped standby must not read as ownerless: {report:?}"
+            );
+            assert_eq!(
+                report.field_claim,
+                Some(FieldClaim::Held),
+                "the pair has a writer — that is what the verdict names"
+            );
+        }
+        other => panic!("expected the standby's report, got {other:?}"),
+    }
+    let health = pair.health();
+    assert_eq!(health.active, Some(active.addr));
+    assert_fault_kinds(&health, &[PairFaultKind::StandbyUsurped]);
+    assert!(
+        health
+            .faults
+            .iter()
+            .any(|fault| fault.contains(&standby.addr.to_string())
+                && fault.contains("outside its pair")),
+        "expected the usurped standby named as a redundancy fault, got {:?}",
+        health.faults
+    );
+
+    // Not sticky: a writer inside the line clears the diagnosis, the
+    // narrower verdict falls back to the ownerless one, and the pair
+    // fault with it.
+    standby.monitor.note_foreign_writer(None);
+    pair.poll_roles();
+    assert_fault_kinds(&pair.health(), &[PairFaultKind::StandbyOrphaned]);
 
     active.stop();
     standby.stop();

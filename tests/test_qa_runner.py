@@ -1,9 +1,13 @@
+import copy
+import io
 import json
 import os
 import select
+import shutil
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -11,7 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from qa_lane import revision, runner, scenarios, state as qa_state
+from qa_lane import __main__ as qa_main
+from qa_lane import revision, runner, scenarios, ship, state as qa_state
 
 
 SHA_A = 'a' * 40
@@ -1410,7 +1415,8 @@ class DcsCtlBuildTests(unittest.TestCase):
                                             'dcs-plant-ctl',
                                             'dcs-ctl',
                                             'dcs-forge',
-                                            'dcs-sim-bus-device')):
+                                            'dcs-sim-bus-device',
+                                            'dcs-sim-bus-ctl')):
         def fake_docker(*args, timeout=120, check=True):
             calls.append(args)
             if args[0] == 'run' and 'cargo' in str(args):
@@ -1482,7 +1488,8 @@ class PlantCtlShipTests(unittest.TestCase):
                                             'dcs-plant-ctl',
                                             'dcs-ctl',
                                             'dcs-forge',
-                                            'dcs-sim-bus-device')):
+                                            'dcs-sim-bus-device',
+                                            'dcs-sim-bus-ctl')):
         def fake_docker(*args, timeout=120, check=True):
             calls.append((args, check))
             if args[0] == 'run' and 'cargo' in str(args):
@@ -2259,7 +2266,8 @@ class BornActiveActionTests(unittest.TestCase):
                     (event, detail)), mode)
         return calls, events, info
 
-    def _launch(self, seat='revised', docker=None, **kw):
+    def _launch(self, seat='revised', docker=None,
+                remote='dcs-hw-qa-1-born-plant:9003', **kw):
         calls, events = [], []
         if docker is None:
             def docker(*args, timeout=120, check=True):
@@ -2268,13 +2276,63 @@ class BornActiveActionTests(unittest.TestCase):
         with patch.object(runner, 'docker', docker):
             info = runner.start_born_controller(
                 self.cfg, self._record(), self.run_dir, self.model,
-                seat, 'dcs-hw-qa-1-born-plant:9003',
+                seat, remote,
                 lambda event, detail=None: events.append(
                     (event, detail)), **kw)
         return calls, events, info
 
     def _run(self, calls):
         return next(c for c in calls if c[0] == 'run')
+
+    def _launched(self, calls):
+        """The controller argv half of the seat's `docker run` — the
+        mounted document and everything after it."""
+        launch = self._run(calls)
+        return list(launch[launch.index('/model/plant.json'):])
+
+    def _pinned(self, seat, remote=None, scan_ms=None, tracking=(),
+                keyed=True):
+        """The born launch's argv as the lane staged it before the
+        builder owned it, written out literally: the pins below hold
+        the shared spec itself still, so the consolidation cannot trade
+        one silent drift for another."""
+        argv = ['/model/plant.json']
+        if remote is not None:
+            argv += ['--remote', remote]
+        argv += ['--owner-token',
+                 str(self.cfg['plant_owner_tokens'][seat])]
+        argv += list(tracking)
+        argv += ['--scan-ms',
+                 str(runner.BORN_SCAN_MS if scan_ms is None else scan_ms),
+                 '--listen',
+                 '0.0.0.0:' + str(runner.BORN_MONITOR_PORT),
+                 '--state-file', runner.CONTAINER_STATE_FILE,
+                 '--journal-file', runner.CONTAINER_JOURNAL_FILE,
+                 '--history-file', runner.CONTAINER_HISTORY_FILE]
+        if keyed:
+            argv += ['--pair-token', str(self.cfg['pair_token'])]
+        return argv
+
+    def _spec(self, seat, remote=None, scan_ms=None, **delta):
+        """The rig's one launch spec for a born seat: the born shape's
+        deltas over the contract every member launch shares."""
+        return runner._controller_argv(
+            self.cfg, runner.BORN_PAIR, seat, 'dcs-hw-qa-1',
+            remote=remote, monitor_port=runner.BORN_MONITOR_PORT,
+            scan_ms=runner.BORN_SCAN_MS if scan_ms is None else scan_ms,
+            **delta)
+
+    def _assert_born_spec(self, calls, seat, remote=None, scan_ms=None,
+                          tracking=(), keyed=True, **delta):
+        """The seat's launched argv is both the shape the lane staged
+        before the builder owned it and the builder's spec for that
+        seat — so the born launch reads as its delta and no flag can
+        leave the two apart."""
+        launched = self._launched(calls)
+        self.assertEqual(launched, self._pinned(seat, remote, scan_ms,
+                                                tracking, keyed))
+        self.assertEqual(launched, self._spec(seat, remote, scan_ms,
+                                              **delta))
 
     def test_silent_field_launches_placeholder(self):
         calls, events, info = self._field('silent')
@@ -2520,6 +2578,105 @@ class BornActiveActionTests(unittest.TestCase):
         launch = self._run(calls)
         index = launch.index('--standby')
         self.assertEqual(launch[index + 1], 'dcs-hw-qa-1-b:8081')
+
+    def test_the_remote_and_peer_shape_is_the_shared_launch_spec(self):
+        # The born launcher builds its argv through the rig's one
+        # launch spec, so the shape it stages is that spec's born
+        # delta — the scratch field, the seat's monitor port, the
+        # documented cadence, and the class's --peer declaration — and
+        # not a second enumeration of the member contract beside it.
+        field = 'dcs-hw-qa-1-born-plant:9003'
+        peer_flag = 'dcs-hw-qa-1-foreign:' + str(runner.BORN_MONITOR_PORT)
+        calls, _, _ = self._launch(seat='revised', peer='foreign')
+        self._assert_born_spec(calls, 'revised', field,
+                               tracking=['--peer', peer_flag],
+                               peer=peer_flag)
+
+    def test_the_remote_and_standby_shape_is_the_shared_launch_spec(self):
+        # The tracking-member class: --standby in place of --peer, and
+        # no --auto-promote — only the pair's own standby promotes.
+        field = 'dcs-hw-qa-1-born-plant:9003'
+        calls, _, _ = self._launch(seat='foreign', standby='active')
+        self._assert_born_spec(calls, 'foreign', field,
+                               tracking=['--standby',
+                                         'dcs-hw-qa-1-a:8080'],
+                               standby='dcs-hw-qa-1-a:8080')
+
+    def test_the_document_addressed_shape_is_the_shared_launch_spec(self):
+        # The register-protocol shape: no --remote at all, the staged
+        # document mounted in place of the run's model, and the rest of
+        # the seat's launch unchanged.
+        bus_model = self.run_dir / 'sim-bus' / 'model.json'
+        bus_model.parent.mkdir(parents=True, exist_ok=True)
+        bus_model.write_text(json.dumps({'version': 1}))
+        standby_flag = 'dcs-hw-qa-1-c:' + str(runner.BORN_MONITOR_PORT)
+        calls, _, info = self._launch(seat='driven', remote=None,
+                                      document=bus_model,
+                                      standby='revised')
+        self.assertIsNone(info['remote'])
+        self._assert_born_spec(calls, 'driven',
+                               tracking=['--standby', standby_flag],
+                               standby=standby_flag)
+
+    def test_the_scan_ms_shape_is_the_shared_launch_spec(self):
+        # The per-container skew lever rides the spec's own --scan-ms
+        # delta: the cadence and nothing else about the launch moves.
+        field = 'dcs-hw-qa-1-born-plant:9003'
+        peer_flag = 'dcs-hw-qa-1-d:' + str(runner.BORN_MONITOR_PORT)
+        calls, _, info = self._launch(seat='foreign', scan_ms=25,
+                                      peer='driven')
+        self.assertEqual(info['scan_ms'], 25)
+        self._assert_born_spec(calls, 'foreign', field, scan_ms=25,
+                               tracking=['--peer', peer_flag],
+                               peer=peer_flag)
+
+    def test_the_unkeyed_shape_is_the_shared_launch_spec(self):
+        # A run config with no pair key: the spec drops --pair-token
+        # for a born seat exactly as it does for the members, so the
+        # tokenless posture is the contract's, not the lever's.
+        self.cfg['pair_token'] = None
+        field = 'dcs-hw-qa-1-born-plant:9003'
+        peer_flag = 'dcs-hw-qa-1-c:' + str(runner.BORN_MONITOR_PORT)
+        calls, _, _ = self._launch(seat='driven', peer='revised')
+        self._assert_born_spec(calls, 'driven', field, keyed=False,
+                               tracking=['--peer', peer_flag],
+                               peer=peer_flag)
+
+    def test_the_pair_token_lookup_is_the_one_the_members_use(self):
+        # The born seats name their token through _pair_token, the
+        # lookup every member launch routes through — so a born seat
+        # cannot answer the staged probe pair's token even where the
+        # run config carries both, and the keyed posture is read in
+        # one place.
+        self.cfg['probe_pair'] = dict(self.cfg['probe_pair'],
+                                      pair_token='probe-only-secret')
+        calls, _, _ = self._launch(seat='revised', peer='foreign')
+        argv = self._launched(calls)
+        self.assertEqual(argv[argv.index('--pair-token') + 1],
+                         self.cfg['pair_token'])
+        self.assertNotIn('probe-only-secret', argv)
+        with patch.object(runner, '_pair_token',
+                          return_value='one-lookup-secret') as lookup:
+            calls, _, _ = self._launch(seat='foreign', standby='active')
+        self.assertEqual(lookup.call_args.args, (self.cfg, 'deployed'))
+        self.assertIn('one-lookup-secret', self._launched(calls))
+
+    def test_a_launch_spec_flag_reaches_the_born_launches(self):
+        # The structural guarantee this consolidation exists for: a
+        # flag added to the launch spec reaches a born seat's launch
+        # on every shape, so no site's second enumeration can drop it
+        # silently — a born seat is never a bypass of the contract.
+        real = runner._controller_argv
+
+        def extended(*args, **kwargs):
+            return real(*args, **kwargs) + ['--new-persistence-flag']
+
+        with patch.object(runner, '_controller_argv', extended):
+            attached = self._launch(seat='revised', peer='foreign')
+            addressed = self._launch(seat='driven', remote=None,
+                                     document=self.model)
+        for launch in (self._run(attached[0]), self._run(addressed[0])):
+            self.assertIn('--new-persistence-flag', launch)
 
     def test_peer_and_standby_together_rejected(self):
         with self.assertRaises(RuntimeError):
@@ -3032,7 +3189,8 @@ class ForgeEndpointTests(unittest.TestCase):
                 target.mkdir(parents=True, exist_ok=True)
                 for binary in ('dcs-controller', 'dcs-plant-server',
                                'dcs-plant-ctl', 'dcs-ctl', 'dcs-forge',
-                               'dcs-sim-bus-device'):
+                               'dcs-sim-bus-device',
+                               'dcs-sim-bus-ctl'):
                     (target / binary).write_text('bin')
             if args[:2] == ('image', 'inspect'):
                 return Result('sha256:' + 'a' * 64)
@@ -3122,7 +3280,8 @@ class SimBusDeviceImageTests(unittest.TestCase):
                                             'dcs-plant-ctl',
                                             'dcs-ctl',
                                             'dcs-forge',
-                                            'dcs-sim-bus-device')):
+                                            'dcs-sim-bus-device',
+                                            'dcs-sim-bus-ctl')):
         target = Path(self.cfg['state_dir']) / 'build-cache' \
             / 'target' / 'release'
 
@@ -3468,6 +3627,48 @@ class SimBusDeviceImageTests(unittest.TestCase):
         self.assertIn('dcs-sim-bus-device', launch)
         self.assertEqual(calls[-1], ('rm', '-f', 'dcs-hw-qa-1-bus'))
 
+    def test_scenario_ctx_execs_the_control_tool_in_the_device(self):
+        # The scripted-outcome seam: the shipped dcs-sim-bus-ctl runs
+        # inside the device server's own container against its loopback
+        # listener, the register protocol's counterpart to the plant
+        # image's dcs-plant-ctl — a host-side attachment could not
+        # reach the bridge at all, and a second Python implementation
+        # of the wire protocol would not be the revision's own tool.
+        calls = []
+
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append((args, check))
+            return Result('{\n  "result": "done"\n}\n')
+
+        with patch.object(runner, 'docker', fake_docker):
+            ctx = runner._scenario_ctx(
+                self.cfg, self._record(), self.src, self.run_dir,
+                self.run_dir / 'evidence', 0,
+                lambda e, d=None: None)
+            answer = ctx['sim_bus_ctl']('script-exchange', 'miss')
+            listed = ctx['sim_bus_ctl']('list')
+        self.assertEqual(calls[0], (
+            ('exec', 'dcs-hw-qa-1-bus', 'dcs-sim-bus-ctl',
+             '127.0.0.1:9005', 'script-exchange', 'miss'), False))
+        self.assertEqual(calls[1][0][-1], 'list')
+        # The tool's own exit is the answer a leg classifies, so a
+        # refused request never raises through the seam.
+        self.assertEqual(answer.returncode, 0)
+        self.assertIn('done', answer.stdout)
+        self.assertEqual(listed.returncode, 0)
+
+    def test_the_control_tool_seam_is_absent_without_a_staged_device(self):
+        self.cfg['sim_bus_device'] = None
+        calls = []
+        with patch.object(runner, 'docker',
+                          self._serving_docker(calls)):
+            ctx = runner._scenario_ctx(
+                self.cfg, self._record(), self.src, self.run_dir,
+                self.run_dir / 'evidence', 0,
+                lambda e, d=None: None)
+        self.assertIsNone(ctx['sim_bus_ctl'])
+        self.assertEqual(calls, [])
+
     def test_timeout_ms_stamps_the_staged_document(self):
         # The reattach leg's stall has to produce a failed exchange:
         # the driver's declared per-request timeout must sit under the
@@ -3659,6 +3860,275 @@ class SimBusDeviceImageTests(unittest.TestCase):
                 return (host, int(port))
         self.fail('the shipped device server never reported a served '
                   'address: ' + (report.strip() or 'no output'))
+
+
+class ShippedBinaryContractTests(unittest.TestCase):
+    """The lane's recorded shipped-binary contract (#1419), the gap its
+    introduction closes.
+
+    Three exploration runs at cabe3b3 — a revision carrying both
+    c8b0cde's sim-bus ship list (#1368) and the earlier dcs-plant-ctl
+    precedent (#654) — each found the images the lane built carrying
+    their entrypoints alone, so the keyed-interposer, sim-bus, and
+    claim-probing legs fell back to bind-mounting the host build
+    cache's binaries or probing the claim protocol raw. The cause was
+    not the ship list but its reach: the lane code is pinned on the
+    host separately from the revision under test, so the deployed copy
+    that built those images predated the ship list, and nothing in a
+    run said so — the report recorded digests only.
+
+    The contract is `qa_lane/ship.json`, data that ships inside the
+    tested revision's own archive: the build derives its cargo chain
+    and each image's payload from it, asserts every named binary was
+    built and staged, and refuses a run whose deployed copy ships less
+    than the tested revision records — each by name.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = cfg_for(self.tmp.name)
+        self.run_dir = Path(self.cfg['state_dir']) / 'runs' / 'qa-1'
+        self.run_dir.mkdir(parents=True)
+        self.src = Path(self.cfg['src_dir']) / SHA_A
+        self.release = Path(self.cfg['state_dir']) / 'build-cache' \
+            / 'target' / 'release'
+        self.every_binary = ('dcs-controller', 'dcs-plant-server',
+                             'dcs-plant-ctl', 'dcs-ctl', 'dcs-forge',
+                             'dcs-sim-bus-device', 'dcs-sim-bus-ctl')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _fake_docker(self, calls, binaries=None):
+        def fake_docker(*args, timeout=120, check=True):
+            calls.append(args)
+            if args[0] == 'run' and 'cargo' in str(args):
+                self.release.mkdir(parents=True, exist_ok=True)
+                for binary in (self.every_binary if binaries is None
+                               else binaries):
+                    (self.release / binary).write_text('bin')
+            if args[:2] == ('image', 'inspect'):
+                return Result('sha256:' + 'a' * 64)
+            return Result('')
+        return fake_docker
+
+    def _build(self, calls, events=None):
+        recorded = [] if events is None else events
+        return runner._build_images(
+            self.src, self.cfg, self.run_dir,
+            lambda event, detail=None: recorded.append((event, detail)),
+            'qa-1')
+
+    def _reset_build(self):
+        """A fresh run directory and build cache per build attempt — the
+        lane's own target/ cache is what persists across a run's retries,
+        so a test that omits a binary has to start from nothing."""
+        shutil.rmtree(self.run_dir, ignore_errors=True)
+        shutil.rmtree(self.release, ignore_errors=True)
+        self.run_dir.mkdir(parents=True)
+
+    def _record_revision_contract(self, contract):
+        """Write a contract at the revision-under-test path inside the
+        run's extracted source tree — the record a `git archive` of the
+        tested revision carries."""
+        path = self.src.joinpath(*ship.REVISION_PATH)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(contract, indent=1) + '\n')
+
+    def _pinned_copy(self):
+        """The deployed lane copy as it stood before either ship list
+        landed (#654 and #1368): the forge on the controller image and
+        both images carrying their entrypoint alone."""
+        stale = copy.deepcopy(ship.load())
+        stale['images'][0]['ships'] = ['dcs-forge']
+        stale['images'][1]['ships'] = []
+        return stale
+
+    def _staged(self, image):
+        return {path.name for path
+                in (self.run_dir / ('image-' + image)).iterdir()
+                if path.is_file()}
+
+    def test_the_contract_records_the_whole_shipped_binary_set(self):
+        contract = ship.load()
+        # The full set the runs evidenced diverging from: the plant
+        # tool (#654) and the sim-bus server plus the forge endpoint
+        # (#1368) beside their image entrypoints, the operator CLI
+        # host-side only.
+        self.assertEqual(ship.payload(contract), {
+            'controller': ['dcs-controller', 'dcs-forge',
+                           'dcs-sim-bus-device', 'dcs-sim-bus-ctl'],
+            'plant': ['dcs-plant-server', 'dcs-plant-ctl']})
+        self.assertEqual(contract['host_tools'], ['dcs-ctl'])
+        # Every shipped binary and host tool has the compile target that
+        # builds it, so no image can name a binary the builder never
+        # produces.
+        ship.assert_complete(contract)
+        for binaries in ship.payload(contract).values():
+            for binary in binaries:
+                self.assertIn(binary, ship.compiled(contract))
+        for tool in contract['host_tools']:
+            self.assertIn(tool, ship.compiled(contract))
+
+    def test_the_ship_maps_full_binary_set_lands_in_each_image_context(self):
+        calls, events = [], []
+        with patch.object(runner, 'docker', self._fake_docker(calls)):
+            digests = self._build(calls, events)
+        contract = ship.load()
+        builds = [args for args in calls if args[0] == 'build']
+        self.assertEqual(len(builds), 2)
+        for image in contract['images']:
+            binaries = ship.payload(contract)[image['name']]
+            context = self.run_dir / ('image-' + image['name'])
+            dockerfile = (context / 'Dockerfile').read_text()
+            self.assertEqual(self._staged(image['name']),
+                             set(binaries) | {'Dockerfile'})
+            for binary in binaries:
+                self.assertTrue((context / binary).is_file())
+                self.assertIn('COPY ' + binary + ' /usr/local/bin/'
+                              + binary, dockerfile)
+            self.assertIn('ENTRYPOINT ["' + image['entrypoint'] + '"]',
+                          dockerfile)
+            self.assertTrue(
+                any(args[2] == image['tag'] + ':' + SHA_A
+                    for args in builds))
+        # The two reported digests and the host-side dcs-ctl seam are
+        # unchanged, and the staged payload is the run's evidence of
+        # what rode the images.
+        self.assertEqual(set(digests), {'controller', 'plant'})
+        staged = [detail for event, detail in events
+                  if event == 'image-staged']
+        self.assertEqual(len(staged), 2)
+        self.assertIn('dcs-controller dcs-forge dcs-sim-bus-device '
+                      'dcs-sim-bus-ctl', staged[0])
+        self.assertIn('dcs-plant-server dcs-plant-ctl', staged[1])
+
+    def test_a_build_output_missing_a_shipped_binary_fails_by_name(self):
+        for missing in ('dcs-forge', 'dcs-sim-bus-device',
+                        'dcs-sim-bus-ctl', 'dcs-plant-ctl'):
+            with self.subTest(missing=missing):
+                self._reset_build()
+                binaries = tuple(b for b in self.every_binary
+                                 if b != missing)
+                with patch.object(runner, 'docker',
+                                  self._fake_docker([], binaries)):
+                    with self.assertRaises(RuntimeError) as caught:
+                        self._build([])
+                self.assertEqual(str(caught.exception),
+                                 'build produced no ' + missing)
+
+    def test_a_context_that_drops_a_shipped_binary_fails_by_name(self):
+        # A staging change that stops copying one shipped binary must
+        # fail the run by name: the assertion reads the staged context
+        # back against the contract rather than trusting the copy loop.
+        copied = []
+        real_copy = shutil.copy2
+
+        def dropping_copy(source, target):
+            if 'dcs-forge' in str(target):
+                copied.append('dcs-forge')
+                return
+            return real_copy(source, target)
+
+        with patch.object(runner, 'docker', self._fake_docker([])):
+            with patch.object(runner.shutil, 'copy2', dropping_copy):
+                with self.assertRaises(ship.ShipError) as caught:
+                    self._build([])
+        self.assertEqual(copied, ['dcs-forge'])
+        self.assertIn('dcs-forge', str(caught.exception))
+        self.assertIn('controller', str(caught.exception))
+
+    def test_a_ship_map_gap_fails_by_name(self):
+        # The recorded contract naming a binary no compile group builds
+        # is the ship-map gap: an image carrying a tool the bounded
+        # builder never produces. It fails before the compile, by name.
+        contract = ship.load()
+        gapped = copy.deepcopy(contract)
+        gapped['images'][0]['ships'].append('dcs-alarm-report')
+        with self.assertRaises(ship.ShipError) as caught:
+            ship.assert_complete(gapped)
+        self.assertIn('dcs-alarm-report', str(caught.exception))
+        self.assertIn('no recorded compile target produces',
+                      str(caught.exception))
+
+    def test_a_lane_copy_behind_the_revision_fails_the_run_by_name(self):
+        # The divergence the runs evidenced: the deployed lane copy
+        # predating the tested revision's ship list. The build refuses
+        # it before compiling anything, naming each binary the
+        # revision's legs would have exec'd and found absent.
+        self._record_revision_contract(ship.load())
+        with patch.object(runner, 'docker', self._fake_docker([])), \
+                patch.object(ship, 'load', return_value=self._pinned_copy()):
+            with self.assertRaises(ship.ShipError) as caught:
+                self._build([])
+        detail = str(caught.exception)
+        self.assertIn('predates the shipped-binary contract', detail)
+        self.assertIn('controller ships no dcs-sim-bus-device', detail)
+        self.assertIn('plant ships no dcs-plant-ctl', detail)
+
+    def test_a_current_lane_copy_builds_the_revision_payload(self):
+        self._record_revision_contract(ship.load())
+        calls, events = [], []
+        with patch.object(runner, 'docker', self._fake_docker(calls)):
+            digests = self._build(calls, events)
+        self.assertEqual(set(digests), {'controller', 'plant'})
+        # Nothing on the compiler's critical path ran before the refusal
+        # in the case above; here the whole recorded payload is staged.
+        self.assertIn('dcs-forge', self._staged('controller'))
+        self.assertIn('dcs-plant-ctl', self._staged('plant'))
+
+    def test_a_revision_predating_the_contract_is_left_alone(self):
+        # A revision whose archive carries no lane tree (or predates
+        # the document) records nothing to be behind: the deployed
+        # copy's own contract is then the only record there is.
+        self.assertIsNone(ship.revision_contract(self.src))
+        with patch.object(runner, 'docker', self._fake_docker([])), \
+                patch.object(ship, 'load', return_value=self._pinned_copy()):
+            digests = self._build([])
+        self.assertEqual(set(digests), {'controller', 'plant'})
+
+    def test_a_malformed_contract_fails_by_name(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'ship.json'
+            contract = copy.deepcopy(ship.load())
+            contract['images'][1]['ships'] = ['dcs-plant-server']
+            path.write_text(json.dumps(contract))
+            with self.assertRaises(ship.ShipError) as caught:
+                ship.load(path)
+            self.assertIn('ships a binary twice or its own entrypoint',
+                          str(caught.exception))
+            path.write_text('{ not json')
+            with self.assertRaises(ship.ShipError) as caught:
+                ship.load(path)
+            self.assertIn('cannot read shipped-binary contract',
+                          str(caught.exception))
+            with self.assertRaises(ship.ShipError) as caught:
+                ship.load(Path(root) / 'absent.json')
+            self.assertIn('cannot read shipped-binary contract',
+                          str(caught.exception))
+
+    def test_the_deploy_check_prints_the_pinned_copy_contract(self):
+        out = io.StringIO()
+        self._record_revision_contract(ship.load())
+        with patch.object(sys, 'argv',
+                          ['qa_lane', 'ship', str(self.src)]), \
+                patch('sys.stdout', out):
+            self.assertEqual(qa_main.main(), 0)
+        printed = json.loads(out.getvalue())
+        self.assertEqual(printed['payload']['plant'],
+                         ['dcs-plant-server', 'dcs-plant-ctl'])
+        self.assertEqual(printed['host_tools'], ['dcs-ctl'])
+        self.assertTrue(printed['revision_contract'])
+        # The deployment step's own check: a pinned copy predating the
+        # revision the dispatcher will push from fails by name here,
+        # before any run spends an attempt on entrypoint-only images.
+        with patch.object(sys, 'argv', ['qa_lane', 'ship', str(self.src)]), \
+                patch.object(ship, 'load', return_value=self._pinned_copy()), \
+                patch('sys.stdout', io.StringIO()):
+            with self.assertRaises(ship.ShipError) as caught:
+                qa_main.main()
+        self.assertIn('controller ships no dcs-sim-bus-device',
+                      str(caught.exception))
 
 
 class ProbePairTests(unittest.TestCase):

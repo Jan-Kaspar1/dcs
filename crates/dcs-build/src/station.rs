@@ -90,6 +90,34 @@
 //! Bool state signals and the index-valued `duty` declare an empty
 //! unit — a deliberate "unitless" marker rather than an omitted one, so
 //! the document lints clean.
+//!
+//! ## Declared units (the dimensional-discipline decision)
+//!
+//! The station is the pump-side adoption of architecture decision 106's
+//! declared-unit metadata: every quantity-bearing point declares its
+//! engineering unit through [`PlantBuilder::unit`](crate::PlantBuilder::unit)
+//! — the wet-well levels in `m`, the station flow in `m3/h`, the
+//! chain's and group's stage counts in `pumps` — and each signal
+//! inherits its point's declaration at `build` rather than carrying a
+//! display string that could drift beside it. The unit-transparent
+//! kinds the station composes declare theirs through
+//! [`PlantBuilder::port_unit`](crate::PlantBuilder::port_unit) and
+//! [`PlantBuilder::param_unit`](crate::PlantBuilder::param_unit): the
+//! `failover-select`'s three level ports and the `threshold-chain`'s
+//! `level` are `m`, the chain's rungs and the level alarms' limits and
+//! hysteresis are `m`, the `pump-group`'s `demand`/`duty`/`staged` and
+//! the chain's `demand` are `pumps`, and the `*_ticks` intervals each
+//! spec fixes as `ticks` — the staging bounds, the hand-leg holdout,
+//! the motor's fault budget, and every managed alarm's shelving bound
+//! and decision-70 response budget.
+//!
+//! Two families stay deliberately undeclared. The station power guard
+//! and the per-pump cause guards bind a held analog anchor on `in`
+//! rather than a process quantity, so a dimension there would claim
+//! engineering the wiring does not carry; and the Bool permissive,
+//! alarm, status, and index-valued carriers stay uncheckable rather
+//! than dimensioned, their signals keeping the explicit `""` marker the
+//! lint asks for.
 
 use crate::specs::{
     BoolGateInstance, BoolGateSpec, DigitalInputSpec, FailoverSelectSpec, InterlockSpec,
@@ -98,7 +126,7 @@ use crate::specs::{
 };
 use crate::{
     BuildError, ChannelRef, Direction, InPoint, OutPoint, PlantBuilder, PointId, SignalId, Sink,
-    Source, Value, parameters,
+    Source, Value, parameters, unit,
 };
 use dcs_model::{ComponentId, PlantModel, Rationalization};
 
@@ -1027,6 +1055,63 @@ pub fn pumping_station(config: &PumpStationConfig) -> Result<PumpStation, BuildE
         ),
     ));
 
+    // The dimensional contract (architecture decision 106): the
+    // quantity-bearing kinds are unit-transparent — a `failover-select`
+    // carries whatever level it is fed and a `threshold-chain`'s rungs
+    // take its `level` port's unit — so the composition declares each
+    // quantity port's and bound's unit on the instance, beside the
+    // point declarations the same connection and validation checks
+    // read. The `*_ticks` intervals are the kinds' own dimension: each
+    // spec's `ParamDecl::with_unit(unit::TICKS)` makes `ticks` the only
+    // declaration `param_unit` accepts, and the instance declares it so
+    // the document records what each interval counts. The levels are
+    // `m`, the station flow is `m3/h`, and the chain's and group's
+    // stage counts are `pumps` — the count the group's `demand` port
+    // takes and its `duty`/`staged` outputs report.
+    plant.port_unit(failover.id, "primary", unit::M);
+    plant.port_unit(failover.id, "backup", unit::M);
+    plant.port_unit(failover.id, "out", unit::M);
+    plant.port_unit(chain.id, "level", unit::M);
+    plant.port_unit(chain.id, "demand", unit::PUMPS);
+    for parameter in ["cutoff", "stop", "start", "lag_start", "high"] {
+        plant.param_unit(chain.id, parameter, unit::M);
+    }
+    plant.port_unit(group.id, "demand", unit::PUMPS);
+    plant.port_unit(group.id, "duty", unit::PUMPS);
+    plant.port_unit(group.id, "staged", unit::PUMPS);
+    for parameter in ["start_delay_ticks", "restage_delay_ticks", "min_off_ticks"] {
+        plant.param_unit(group.id, parameter, unit::TICKS);
+    }
+    if config.rotation_ticks.is_some() {
+        plant.param_unit(group.id, "rotation_ticks", unit::TICKS);
+    }
+    // The two level alarms observe the selected level in `m` and bound
+    // it in `m`; their shelving bound and decision-70 response budget
+    // are the managed kind's declared `ticks`. The station power guard
+    // is deliberately left undeclared: its `in` binds a held analog
+    // anchor rather than a process quantity, so a dimension there would
+    // claim engineering the wiring does not carry.
+    for alarm in [lah.id, lal.id] {
+        plant.port_unit(alarm, "in", unit::M);
+        for parameter in ["low_limit", "high_limit", "hysteresis"] {
+            plant.param_unit(alarm, parameter, unit::M);
+        }
+        for parameter in ["max_shelve_ticks", "response_ticks"] {
+            plant.param_unit(alarm, parameter, unit::TICKS);
+        }
+    }
+    for alarm in [
+        backup_alarm.id,
+        backup_unhealthy_alarm.id,
+        none_available_alarm.id,
+        all_faulted_alarm.id,
+        power_fail_alarm.id,
+    ] {
+        for parameter in ["max_shelve_ticks", "response_ticks"] {
+            plant.param_unit(alarm, parameter, unit::TICKS);
+        }
+    }
+
     // Measurement path: failover-select's output fans out to the chain
     // and both level alarms through the carrier; the chain's demand
     // reaches the group through its own pair.
@@ -1264,6 +1349,14 @@ fn pump_tag(index: usize) -> String {
 /// Registers point `point`'s monitoring signal — `10000 + point` —
 /// carrying the full unit/description/group metadata WW-FND-001 asks
 /// the surface to render from.
+///
+/// A non-empty `unit` is declared once, on the point — the wiring
+/// contract the connection and validation checks read — and the
+/// signal inherits it at `build`, so the string the operator surface
+/// renders cannot drift from the unit the value is carried in. The
+/// empty `""` stays signal-side: the deliberate "dimensionless" marker
+/// for the status, flag, and code points the wiring layer leaves
+/// uncheckable.
 fn signal(
     plant: &mut PlantBuilder,
     point: PointId,
@@ -1272,11 +1365,19 @@ fn signal(
     description: &str,
     group: &str,
 ) {
-    plant
-        .signal(SignalId(SIGNAL_BASE + point.0), name, point)
-        .unit(unit)
-        .description(description)
-        .group(group);
+    if unit.is_empty() {
+        plant
+            .signal(SignalId(SIGNAL_BASE + point.0), name, point)
+            .unit(unit)
+            .description(description)
+            .group(group);
+    } else {
+        plant.unit(point, unit);
+        plant
+            .signal(SignalId(SIGNAL_BASE + point.0), name, point)
+            .description(description)
+            .group(group);
+    }
 }
 
 /// Declares one managed alarm's points and wires them: the writable
@@ -1941,6 +2042,26 @@ fn wire_pump(
     ));
 
     // Mode and service inversions; the group request carrier.
+    //
+    // The per-pump dimensional contract: the protection `interlock`
+    // gates the selected level, so its `in`/`out` and its `safe_value`
+    // are `m` — the closed-valve safe level. The two cause guards stay
+    // undeclared beside it, their analog feeds being held anchors
+    // rather than process quantities. The `timer`'s holdout interval and
+    // the `motor`'s feedback-disagreement budget are the kinds' own
+    // `ticks`, and each pump's three managed alarms declare their
+    // shelving bound and response budget.
+    plant.port_unit(protect.id, "in", unit::M);
+    plant.port_unit(protect.id, "out", unit::M);
+    plant.param_unit(protect.id, "safe_value", unit::M);
+    plant.param_unit(holdout.id, "delay_ticks", unit::TICKS);
+    plant.param_unit(motor.id, "fault_ticks", unit::TICKS);
+    for alarm in [fault_alarm.id, thermal_alarm.id, moisture_alarm.id] {
+        for parameter in ["max_shelve_ticks", "response_ticks"] {
+            plant.param_unit(alarm, parameter, unit::TICKS);
+        }
+    }
+
     plant.connect(mode, &inv_mode.input);
     plant.connect(oos, &inv_oos.input);
     plant.connect(thermal, &inv_thermal.input);

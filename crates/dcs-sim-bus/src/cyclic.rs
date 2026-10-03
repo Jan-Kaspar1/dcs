@@ -186,12 +186,16 @@ struct Image {
 ///   completing normally.
 ///
 /// The connection the first `exchange` drops is not the end: a dead
-/// connection reconnects lazily on the next request, so a scripted
-/// missed exchange is a recoverable miss rather than a permanent
-/// sever. What a reconnect does not restore — where the point-wise
-/// `BusDriver` re-arms its recorded token — is the writer claim:
-/// claim holds bind to their connection, so a dropped link releases
-/// them and output-bearing exchanges then answer the `fenced` verdict
+/// connection reconnects lazily on the next request, so a real sever is
+/// a recoverable miss rather than a dead driver. A *scripted* miss
+/// needs no recovery at all — it answers in-band as
+/// [`BusResponse::Missed`], so the exchange fails the cycle while the
+/// link stays up, and the scripting can never sever — nor free the
+/// claim bound to — a live attachment's connection. What a reconnect
+/// still does not restore — where the point-wise `BusDriver` re-arms
+/// its recorded token — is the writer claim a real drop cost: claim
+/// holds bind to their connection, so a dropped link releases them and
+/// output-bearing exchanges then answer the `fenced` verdict
 /// until [`claim_writer`](Self::claim_writer) runs again. The verdict
 /// is the executor's claim-loss signal — the demotion it forces ends
 /// the fenced-exchange loop through
@@ -755,6 +759,11 @@ impl CyclicBusDriver {
         let response = self.request(&BusRequest::Exchange { outputs });
         let (served, late) = match response {
             Ok(BusResponse::Exchanged { registers, late }) => (registers, late),
+            // The scripted missed cycle answers in-band: the exchange
+            // completed nothing, but the connection — and the writer
+            // claim bound to it — stays up, so it counts a miss
+            // without costing the attachment its link.
+            Ok(BusResponse::Missed) => return Err(self.miss(image, LinkError::Missed)),
             Ok(BusResponse::Error { error }) => {
                 return Err(self.miss(image, self.refuse(error)));
             }

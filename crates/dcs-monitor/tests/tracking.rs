@@ -4722,6 +4722,178 @@ fn orphaned_cycles_cache_the_failed_resolution_probe() {
     );
 }
 
+/// The QA finding `unkeyed-claimant-preempts-keyed-pair-and-strands-it`
+/// at the seam that produces the narrower verdict: the keyed pair asks
+/// the endpoint the field's own arbitration named for its standing
+/// claim whether it can prove the line's key, and an endpoint outside
+/// the line cannot — so a keyed peer whose tracked line reports no owner
+/// while the field is held serves `usurped`, not `orphaned`, and both
+/// promotion gates read the unconditional claim off it. The rig is the
+/// reproduction's shape in-process: a keyed peer tracking an ownerless
+/// sibling, the field's claim verdicts naming a standing writer, and
+/// two candidate writers — one that cannot prove the key, one that can.
+#[test]
+fn a_standing_writer_that_cannot_prove_the_key_narrows_the_verdict() {
+    const KEY: u64 = 0x9e37_79b9_7f4a_7c15;
+
+    // The ownerless line the keyed peer tracks: every served document
+    // stamps its serving run as owning no field writes.
+    let a_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let a = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(a_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    let a_addr = dialable(a.monitor.local_addr());
+    a.client.advance(2).unwrap();
+
+    // The standing writer as the field's arbitration names it: an
+    // *unkeyed* monitor serving the line as its field owner. It answers
+    // every pull, and nothing it serves can carry the pair's proof.
+    let u_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let usurper = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(executor(u_driver), None),
+            signal_index(),
+        )
+        .unwrap(),
+    );
+    let usurper_addr = dialable(usurper.monitor.local_addr());
+
+    // A second writer that *is* inside the line: keyed, so every pull
+    // it answers carries the proof the pair's pull demands.
+    let k_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let inner = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::active(executor(k_driver), None),
+            signal_index(),
+        )
+        .unwrap()
+        .with_pair_key(KEY),
+    );
+    let inner_addr = dialable(inner.monitor.local_addr());
+
+    // The keyed peer, tracking the ownerless sibling, whose claim
+    // verdicts name the standing writer.
+    let claimed: &'static Mutex<Option<SocketAddr>> =
+        Box::leak(Box::new(Mutex::new(Some(usurper_addr))));
+    let b_driver: &'static StubDriver = Box::leak(Box::new(StubDriver::new(&[
+        (PointId(10), Value::Float(3.0)),
+        (PointId(20), Value::Float(0.0)),
+        (PointId(30), Value::Float(0.0)),
+    ])));
+    let b = Serving::start(
+        Monitor::bind_peer(
+            "127.0.0.1:0",
+            Peer::standby(executor(b_driver), None)
+                .with_claimed_monitor(move || *claimed.lock().unwrap()),
+            signal_index(),
+        )
+        .unwrap()
+        .with_pair_key(KEY)
+        .driven(Driven {
+            track: Some(a_addr),
+            after_scan: None,
+        }),
+    );
+
+    let cycle = |monitor: &Monitor<'static>| -> TrackReport {
+        monitor.track_cycle(|| {
+            MonitorClient::new(a_addr)
+                .checkpoint()
+                .map_err(|error| error.to_string())
+        })
+    };
+
+    // One orphaned cycle: the tracked line has no owner and the field's
+    // writer answers without the pair's proof, so the served verdict
+    // narrows to `usurped` — the pair reading its own field as held by
+    // a process outside the line.
+    assert!(matches!(cycle(&b.monitor), TrackReport::Applied(_)));
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Usurped { .. })
+        ),
+        "a writer that cannot prove the key must narrow the ownerless \
+         verdict, got {:?}",
+        b.client.role().unwrap()
+    );
+    // The diagnosis is durable audit beside the verdict: the same
+    // refusal shape every other probe on this surface journals.
+    assert!(
+        b.client.journal(0).unwrap().iter().any(|entry| matches!(
+            &entry.event,
+            JournalEvent::TrackingSourceRefused { source, detail }
+                if *source == usurper_addr && detail.contains("pair key")
+        )),
+        "the diagnosis must journal the endpoint it refused, \
+         naming {usurper_addr}"
+    );
+
+    // The field's arbitration names a different writer: the changed
+    // declaration is diagnosed at once rather than riding out the retry
+    // window, and this writer proves the line's key, so the verdict
+    // falls back to the plain ownerless one.
+    *claimed.lock().unwrap() = Some(inner_addr);
+    assert!(matches!(cycle(&b.monitor), TrackReport::Applied(_)));
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Orphaned { .. })
+        ),
+        "a writer inside the line proves the key, so the verdict must \
+         fall back to the ownerless one, got {:?}",
+        b.client.role().unwrap()
+    );
+
+    // A writer that is not there any more: the foreign claim releases,
+    // so the field's own arbitration names no endpoint at all. There is
+    // no writer left to be outside the line, and the narrower verdict
+    // must not outlive its evidence — an `usurped` beside an
+    // `unclaimed` field would tell an operator and the pair view that a
+    // live foreign writer is standing on a field the arbitration says
+    // nobody holds.
+    *claimed.lock().unwrap() = Some(usurper_addr);
+    assert!(matches!(cycle(&b.monitor), TrackReport::Applied(_)));
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Usurped { .. })
+        ),
+        "the foreign writer is back on the field, so the narrower verdict \
+         returns"
+    );
+    *claimed.lock().unwrap() = None;
+    assert!(matches!(cycle(&b.monitor), TrackReport::Applied(_)));
+    assert!(
+        matches!(
+            b.client.role().unwrap().sync,
+            Some(StandbySync::Orphaned { .. })
+        ),
+        "a claim declaring no monitor is no writer to be outside the \
+         line, so the verdict must fall back to the ownerless one, got {:?}",
+        b.client.role().unwrap()
+    );
+}
+
 /// The QA finding `pending-source-pull-latches-egain` (#1315): a standby
 /// that entered tracking inside its source's pending window can never
 /// converge for the life of the process, while every manual pull against

@@ -101,6 +101,15 @@
 //! An end declaring no unit stays uncheckable, so a unit-transparent
 //! port and an undimensioned document remain admissible.
 //!
+//! The convention is what this crate's own compositions carry: the
+//! [`dosing`] skid is the recorded proof, and [`station`], [`ijmuiden`],
+//! and the independently owned `reference-plant` consumer composition
+//! adopt the same declarations — every measured and wired quantity
+//! dimensioned on its point, its unit-transparent port, or its quantity
+//! parameter, each signal inheriting its point's declaration. Signals
+//! declaring no unit stay undeclared rather than dimensioned, so their
+//! connections remain uncheckable.
+//!
 //! ## Kinds without a spec
 //!
 //! [`DynamicSpec`] registers a component kind whose interface is known

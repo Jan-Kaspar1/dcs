@@ -54,11 +54,11 @@
 
 name: reference-plant
 
-x-dcs-release: v0.8.0
+x-dcs-release: v0.9.0
 
 services:
   dcs-plant:
-    image: dcs-plant-server:v0.8.0
+    image: dcs-plant-server:v0.9.0
     container_name: dcs-plant
     networks:
       - dcs-rig
@@ -84,7 +84,7 @@ services:
       start_period: 2s
 
   ctrl-a:
-    image: dcs-controller:v0.8.0
+    image: dcs-controller:v0.9.0
     container_name: ctrl-a
     depends_on:
       dcs-plant:
@@ -97,7 +97,7 @@ services:
       - ../model/plant.json:/model/plant.json:ro
       - ctrl-a-data:/var/tmp
     environment:
-      DCS_MODEL_FINGERPRINT: "530e2d4ff6c60a16"
+      DCS_MODEL_FINGERPRINT: "051b6c4a87611bf7"
     command:
       - /model/plant.json
       - --remote
@@ -116,7 +116,7 @@ services:
       - dcs-reference-pair
 
   ctrl-b:
-    image: dcs-controller:v0.8.0
+    image: dcs-controller:v0.9.0
     container_name: ctrl-b
     depends_on:
       dcs-plant:
@@ -131,7 +131,7 @@ services:
       - ../model/plant.json:/model/plant.json:ro
       - ctrl-b-data:/var/tmp
     environment:
-      DCS_MODEL_FINGERPRINT: "530e2d4ff6c60a16"
+      DCS_MODEL_FINGERPRINT: "051b6c4a87611bf7"
     command:
       - /model/plant.json
       - --remote

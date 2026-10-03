@@ -834,6 +834,80 @@ Implementation order: second, after [daily architecture review](daily-architectu
   — report inconclusive; the rig leaves on its launch roles with
   the staged born seats and device container torn down.
 
+### Landed 2026-10-02 (scripted-miss claim-hold leg, #1418)
+
+- The scripted-miss claim-hold contract — the per-revision lane
+  evidence for the contract #1413's fix establishes on the register
+  protocol, the exchange semantics WW-FND-002's claim lifecycle rides
+  — is exercised on the deployed rig by scenario leg
+  `2482_sim_bus_scripted_miss_claim_hold`. A queued `miss` is
+  development tooling deciding what the next exchange observes, so it
+  may cost the consuming attachment its cycle; it must never cost that
+  attachment its connection, and through it the write-ownership claim
+  only a disconnect or `release_writer` may release. The defect the
+  contract answers: the scripted `miss` dropped the consuming
+  connection unanswered, teardown released the claim hold bound to it,
+  and since a bus claim stands only while an attachment holds it, any
+  unfenced attachment could free another's field ownership by queuing
+  one outcome onto the shared device. The outcome now answers `missed`
+  in band, keeping the script queue outside the arbitration
+  vocabulary.
+- The staging is the rig's own register-protocol field: the lane's
+  shipped `dcs-sim-bus-device` server on the run config's
+  `sim_bus_device.cyclic_model` document, and one born-active
+  controller launched onto that staged document on the `driven` born
+  seat with no `--remote` and no pair, so it takes the device's
+  write-ownership claim and serves `field_claim: held`. The `sim-cyclic`
+  document is the one whose per-scan process-image `exchange` is the
+  only traffic the scripted queue feeds, so a queued outcome lands on
+  the claim holder's own scan and nowhere else; the field is kept
+  single-attached on purpose, since the queue is device-global and a
+  second exchanging attachment could consume the queued miss and make
+  the attribution nondeterministic. The device's continued service is
+  witnessed through the holder's own following exchanges and through
+  the shipped `dcs-sim-bus-ctl` the leg scripts and reads it with.
+- That tool is a new lane seam: `sim_bus_ctl(*args)` `docker exec`s it
+  inside the device server's own container against its loopback
+  listener, the register protocol's counterpart to the plant image's
+  `dcs-plant-ctl` — nothing host-side reaches the rig bridge, and the
+  ops ride the revision's own binary rather than a second Python
+  implementation of the wire protocol. The binary rides the controller
+  image beside `dcs-sim-bus-device` through the lane's recorded
+  shipped-binary contract (`qa_lane/ship.json`): its compile group gains
+  `--bin dcs-sim-bus-ctl` and the controller payload gains the tool
+  itself, so #1419's `no recorded compile target produces …` check
+  holds for it and a pinned lane copy behind this leg's contract is
+  refused by name at the deployment step. The entrypoints, the two
+  reported digests, and the host-side `dcs-ctl` seam are unchanged.
+- The pass queues `miss` through that tool and reads the failed cycle
+  the scan recorded: the cumulative `failed_exchanges` moved past the
+  settled baseline, and the driver's own standing description of the
+  failed exchange names the *in-band* scripted miss — the line a
+  severed link cannot produce, since it reads as the dropped
+  connection instead. Across the window the claim the connection
+  carries must survive: the run still reports the device claim held,
+  still `active`, its run tick still moving, and its durable
+  `--journal-file` carrying no `field_claim_lost`, no fenced
+  `active → demoting` walk, no observed foreign claimant, and no
+  second run boundary. The `complete` queued afterwards must answer on
+  the same link — the exchange successes moving past the missed cycle,
+  the link verdict back to connected, the boundary's failure streak
+  back to zero — with the device answering the tool's own served read.
+- A staged revision predating the contract is inconclusive, and the
+  signature is read off the rig rather than assumed: the queued miss
+  answered as a sever and the claim bound to that connection went with
+  it. Named diagnostics are `sim-bus-scripted-miss-failed` and
+  `sim-bus-scripted-miss-nondeterministic`, with the self-check's
+  `sim-bus-scripted-miss-unchecked` covering the planted negatives —
+  the issue's doctored case, a record asserting the claim survived
+  while the device severed the link, plus the claim freed anyway, the
+  fenced and operator demotions, the restarted process, the miss no
+  exchange consumed, a recovery that never completed, and a frozen run
+  clock; two consecutive passes produce identical digests; every pass
+  ends with the seat and the device server swept and the sweep audited
+  back over the rig, the deployed pair framed before, after, and once
+  the leg's own claim is gone.
+
 ### Landed 2026-10-02 (skewed-claim preemption bound leg, #1345)
 
 - The claim-skew preemption bound is exercised per revision by
@@ -1396,6 +1470,70 @@ Implementation order: second, after [daily architecture review](daily-architectu
   per-member `--state-file` path, a single-endpoint, unreachable, or
   never-settling rig, and a staging that never landed report
   inconclusive.
+
+### Landed 2026-10-02 (recorded shipped-binary contract, #1419)
+
+- The three exploration runs at cabe3b3 — a revision carrying both
+  c8b0cde's sim-bus ship list (#1368) and the earlier `dcs-plant-ctl`
+  shipping precedent (#654) — each measured the bounded image set
+  carrying only the two images' entrypoints, so the keyed-interposer,
+  sim-bus, and claim-probing legs fell back to bind-mounting recovered
+  binaries out of the host build cache or probing the claim protocol
+  raw. The ship list was not the gap; its *reach* was. The lane code is
+  pinned on the host at `/srv/homelab/dcs-hwtest/qa_lane/` separately
+  from the revision under test (the deploy README's own rule: upgrading
+  it is a deliberate deployment step, not a side effect of a merge), and
+  the deployed copy that built those three runs' images predated both
+  ship lists, so its image build staged entrypoints alone while the
+  tested revision's tree compiled every shipped binary — into
+  `build-cache/target/release/`, which is exactly where the exploring
+  sessions found the binaries to bind-mount instead. Nothing in a run
+  said so: the report recorded the two image digests and nothing about
+  the payload inside them, so a stale lane pin, an image-cache reuse
+  path, and a ship-map gap all looked identical from the evidence.
+- `qa_lane/ship.json` is now the lane's recorded shipped-binary
+  contract: the compile groups the bounded builder runs in `/src` with
+  the binaries each produces, the two report-fixed images with their
+  entrypoints and the extra binaries beside them, and the host-side
+  tools that stay out of both images. `qa_lane/ship.py` reads and
+  shape-checks it, and `_build_images` derives its cargo chain, each
+  image's payload, and the presence assertions from it instead of
+  keeping its own lists — so a shipped binary cannot be added without a
+  compile target (`no recorded compile target produces …`), a compile
+  that produces no one of an image's binaries fails the run by name
+  (`build produced no …`, unchanged), and a staging that leaves one out
+  of the generated context fails the run by name too
+  (`<image> image stages no …`) because the assertion reads the staged
+  directory and its Dockerfile back against the contract rather than
+  trusting the copy loop that wrote them. The staged payload rides the
+  run's timeline as `image-staged`, so the evidence of what each image
+  carried sits beside the digests the report persists. The cargo chain
+  is the literal it replaces, extended by #1418's control tool: the
+  `dcs-sim-bus` group gains `--bin dcs-sim-bus-ctl` and the controller
+  payload gains that tool beside `dcs-sim-bus-device`, so the two
+  digests, the entrypoints, and the host-side `dcs-ctl` seam are
+  unchanged while one more shipped binary is built, staged, and
+  asserted like the rest.
+- The contract is data rather than code because it ships inside the
+  revision's own `git archive` at `src/qa_lane/ship.json`. Every build —
+  assessment, exploration, and fix-verification alike, since all three
+  reach `_build_images` — now compares the payload its deployed copy
+  stages against the one the tested revision records and refuses the run
+  before compiling anything when the pinned copy is behind
+  (`the deployed qa_lane copy predates the shipped-binary contract the
+  revision under test records: controller ships no dcs-sim-bus-device`),
+  which is the stale-pin case the three runs hit and the check could
+  not be written for inside the copy that is behind. A revision
+  predating the document records none and is left alone.
+- `python3 -m qa_lane ship [<extracted-src-dir>]` is the deployment
+  step's own check: it prints the deployed copy's contract and runs the
+  same comparison against an extracted revision, so upgrading the
+  pinned copy under `/srv/homelab/dcs-hwtest/` is verified before a run
+  spends an attempt on entrypoint-only images. Lane verification is the
+  next rig run's sim-bus and interposer legs staging the revision's own
+  binaries with no bind-mount recovery, which this change makes the
+  recorded contract's precondition rather than a hope about the pinned
+  copy.
 
 ## Outcome
 
