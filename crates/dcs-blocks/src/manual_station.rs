@@ -676,6 +676,7 @@ mod tests {
             parameters,
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let block = ManualStation::from_parameters(
             "mas",

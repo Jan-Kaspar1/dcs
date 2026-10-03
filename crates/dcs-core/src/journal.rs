@@ -360,6 +360,26 @@ pub enum JournalEvent {
         /// The named refusal the served document earned.
         detail: String,
     },
+    /// This run took the field's write-ownership claim away from a
+    /// live standing writer it had diagnosed as unable to prove this
+    /// line's pair key — the takeover a
+    /// [`StandbySync::Usurped`](crate::StandbySync) verdict arms, and
+    /// the audit counterpart of [`FieldClaimLost`](Self::FieldClaimLost):
+    /// that record names the run that *lost* the claim, this one names
+    /// the endpoint a run *took it from*, so the pair's own record
+    /// says which process held the field across the whole episode. The
+    /// unconditional claim is the deliberate takeover shape and does
+    /// not journal this entry on its own — only a standing writer the
+    /// pair had diagnosed as outside its line is named, because that is
+    /// the one preemption a reader of the record cannot otherwise
+    /// reconstruct from the role transitions. One entry journals per
+    /// granted claim taken this way, attributed to the scan tick the
+    /// promotion's claim ran at.
+    ForeignClaimPreempted {
+        /// The monitor endpoint the field's arbitration named for the
+        /// standing writer this run's claim took the field from.
+        writer: SocketAddr,
+    },
     /// A new process lifetime began — the served form of the journal
     /// file's run-boundary marker. A monitor bound over a journal file
     /// that already records earlier lifetimes journals it once at

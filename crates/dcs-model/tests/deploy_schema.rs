@@ -99,11 +99,12 @@ fn recorded_release_deploy_schema_matches_the_emitted_output() {
     // docs/releases/<tag>/deploy-manifest.schema.json` whenever the
     // emitted schema legitimately changes — and update the record's
     // published sha256 with it while the tag is pending. `v0.3.0`'s,
-    // `v0.4.0`'s, `v0.5.0`'s, `v0.6.0`'s, `v0.7.0`'s, and `v0.8.0`'s
-    // tags are pending, so their artifacts and published sha256s are
-    // still pinned — identical across the six records, the emission
-    // having moved once since `v0.3.0`'s recorded commit with #1282's
-    // additive-optional `history_file` controller field.
+    // `v0.4.0`'s, `v0.5.0`'s, `v0.6.0`'s, `v0.7.0`'s, `v0.8.0`'s,
+    // `v0.9.0`'s, and `v0.10.0`'s tags are pending, so their artifacts
+    // and published sha256s are still pinned — identical across the eight
+    // records, the emission having moved once since `v0.3.0`'s recorded
+    // commit with #1282's additive-optional `history_file` controller
+    // field.
     let output = run_deploy_schema_subcommand();
     assert!(
         output.status.success(),
@@ -133,6 +134,14 @@ fn recorded_release_deploy_schema_matches_the_emitted_output() {
         ),
         (
             "docs/releases/v0.8.0/deploy-manifest.schema.json",
+            Some("980430ca8725af997a7b5063f00d2a9663fe4619ca00a542917bde24f270cfa9"),
+        ),
+        (
+            "docs/releases/v0.9.0/deploy-manifest.schema.json",
+            Some("980430ca8725af997a7b5063f00d2a9663fe4619ca00a542917bde24f270cfa9"),
+        ),
+        (
+            "docs/releases/v0.10.0/deploy-manifest.schema.json",
             Some("980430ca8725af997a7b5063f00d2a9663fe4619ca00a542917bde24f270cfa9"),
         ),
     ] {

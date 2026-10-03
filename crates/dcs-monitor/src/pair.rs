@@ -229,7 +229,7 @@ pub struct PairHealth {
 }
 
 #[doc = "Version of the serialized pair-fault kind vocabulary, pinned by contract drift tests."]
-pub const PAIR_FAULT_KINDS_VERSION: u32 = 3;
+pub const PAIR_FAULT_KINDS_VERSION: u32 = 4;
 
 #[doc = "Stable redundancy fault names shared by the pair view and operator consumers."]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,11 +251,13 @@ pub enum PairFaultKind {
     StandbyOrphaned,
     #[doc = "A reporting peer observed the field's write-ownership claim unclaimed: no owner stands, and `POST /promote` on a converged peer is the documented remedy."]
     FieldUnclaimed,
+    #[doc = "A standby reported the field held by a writer outside its keyed line: the tracked line has no owner and the writer the field does name cannot prove the pair key, so `POST /promote` re-takes the field from that writer."]
+    StandbyUsurped,
 }
 
 impl PairFaultKind {
     #[doc = "The complete vocabulary for this version, in drift-pin order."]
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::PeerUnreachable,
         Self::StandbyUnsynchronizedPastGrace,
         Self::NoActivePeer,
@@ -264,6 +266,7 @@ impl PairFaultKind {
         Self::StandbyDiverged,
         Self::StandbyOrphaned,
         Self::FieldUnclaimed,
+        Self::StandbyUsurped,
     ];
 }
 
@@ -404,10 +407,13 @@ impl PairClient {
     /// standby leaves, where `unsynchronized` may be permanent), a
     /// reporting peer whose `field_claim` observation stands
     /// `unclaimed` — no field owner, where `POST /promote` on a
-    /// converged peer is the documented remedy — no peer reporting
-    /// `active`, or more than one reporting it (the dual-active
-    /// split-brain the one-logical-controller contract makes
-    /// impossible). Pair health, never plant faults.
+    /// converged peer is the documented remedy — a peer whose tracked
+    /// line reports no owner while the field's own arbitration names a
+    /// writer that cannot prove the pair key (the usurped verdict:
+    /// `POST /promote` re-takes the field from that writer), no peer
+    /// reporting `active`, or more than one reporting it (the
+    /// dual-active split-brain the one-logical-controller contract
+    /// makes impossible). Pair health, never plant faults.
     pub fn health(&self) -> PairHealth {
         let mut faults = Vec::new();
         let mut fault_kinds = Vec::new();
@@ -463,6 +469,25 @@ impl PairClient {
                             faults.push(format!(
                                 "{} reports the tracked line has no field owner \
                                  (aligned at tick {}){}",
+                                peer.addr,
+                                aligned.0,
+                                failover_note(report)
+                            ));
+                        }
+                        Some(StandbySync::Usurped { aligned }) => {
+                            // The narrower orphan verdict, and a
+                            // different remedy: the field is held, and
+                            // the writer holding it is a process outside
+                            // the pair's line rather than the pair
+                            // member the line lost. So the pair is not
+                            // ownerless — a promote re-takes the field
+                            // from that writer instead of needing the
+                            // empty one.
+                            fault_kinds.push(PairFaultKind::StandbyUsurped);
+                            faults.push(format!(
+                                "{} reports the field held by a writer outside its pair \
+                                 (aligned at tick {}){} — promote re-takes the field from \
+                                 that writer",
                                 peer.addr,
                                 aligned.0,
                                 failover_note(report)

@@ -1,0 +1,23 @@
+{
+    "description": "QA lane shipped-binary contract (#1419): the single record of what the bounded image build produces out of the revision under test and what rides inside the two images it packages. `compile_groups` are the cargo invocations the bounded builder container runs in /src, in order, each naming the binaries that invocation puts in target/release; `images` are the two runtime images the report's digest pair fixes, each with its entrypoint and the extra binaries it carries beside it — the plant image's dcs-plant-ctl (#654), the controller image's dcs-forge checkpoint endpoint, the register protocol's own pair of shipped binaries — the dcs-sim-bus-device server (#1368) and the dcs-sim-bus-ctl control tool the scripted-miss leg execs inside that server's container (#1418); `host_tools` are the compiled binaries that stay out of both images and are exec'd on the host (the dcs-ctl operator CLI). The runner derives its builder command, each image's payload, and its presence assertions from this document, so a shipped binary cannot be added without a compile target and an image cannot lose one silently. The document is data rather than code because it ships inside the revision's own `git archive` (src/qa_lane/ship.json): the lane code is pinned on the host separately from the revision under test, so a deployed copy that knows this document can read the copy the tested revision records and refuse a run whose images would not carry what that revision's legs exec.",
+    "compile_groups": [
+        {"cargo": "-p dcs-controller -p dcs-plant -p dcs-sim-net",
+         "produces": ["dcs-controller", "dcs-plant-server", "dcs-plant-ctl"]},
+        {"cargo": "-p dcs-monitor --bin dcs-ctl --bin dcs-forge",
+         "produces": ["dcs-ctl", "dcs-forge"]},
+        {"cargo": "-p dcs-sim-bus --bin dcs-sim-bus-device --bin dcs-sim-bus-ctl",
+         "produces": ["dcs-sim-bus-device", "dcs-sim-bus-ctl"]}
+    ],
+    "images": [
+        {"name": "controller",
+         "tag": "dcs-hwtest/controller",
+         "entrypoint": "dcs-controller",
+         "ships": ["dcs-forge", "dcs-sim-bus-device",
+                   "dcs-sim-bus-ctl"]},
+        {"name": "plant",
+         "tag": "dcs-hwtest/plant",
+         "entrypoint": "dcs-plant-server",
+         "ships": ["dcs-plant-ctl"]}
+    ],
+    "host_tools": ["dcs-ctl"]
+}

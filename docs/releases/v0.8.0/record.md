@@ -23,8 +23,8 @@ diverge from the code before the tag is cut.
 | Tag | `v0.8.0` — *pending*: the release tag is placed on the recorded commit when the release is cut |
 | Commit | *pending* — the tagged `main` commit carrying this record, the revision this record's schemas are emitted at |
 | Crate versions | `0.8.0` for every crate in the release set — one workspace version covers `dcs-build`, `dcs-core`, `dcs-model` (and the `dcs-model` / `dcs-controller` binaries built from it), `dcs-monitor` (shipping `dcs-ctl` and `dcs-alarm-report`), `dcs-plant` (`dcs-plant-server`), and `dcs-sim-net` (`dcs-plant-ctl`); the `[workspace.package]` bump lands with the cut |
-| Plant-model JSON Schema | `plant-model.schema.json` beside this record — `dcs-model schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the schema drift test in `crates/dcs-model/tests/schema.rs`. The emission is byte-identical to `v0.7.0`'s recorded artifact — no model-grammar move this tranche carries |
-| Plant-model schema sha256 | `04c5a0c8fb1bff547f5d5f289936a945e6883970fed6fa7c63b2f291420133c5` |
+| Plant-model JSON Schema | `plant-model.schema.json` beside this record — `dcs-model schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the schema drift test in `crates/dcs-model/tests/schema.rs`. The emission moved once this tranche: #548's declared-unit metadata — optional `unit` declarations on io points, ports, and signals plus `parameter_units` beside a component's `parameters` — additive optional fields a `v0.7.0` document never carries |
+| Plant-model schema sha256 | `07f9f93d1475c7bc783e99e4e7807fe5706a1549302a3701b67212bb3e793301` |
 | Served-registry JSON Schema | `block-interfaces.schema.json` beside this record — `dcs-model interface-schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the drift test in `crates/dcs-model/tests/interface_schema.rs`. Unchanged since `v0.3.0`'s recorded commit |
 | Served-registry schema sha256 | `ddc00496814a4e8cd0d6ec8a5d9fbb95e83f518dcd927b17a4802f13ac84013a` |
 | Dynamics-document JSON Schema | `dynamics.schema.json` beside this record — `dcs-plant-server --dynamics-schema` emitted at the recorded commit, pinned byte-for-byte with its sha256 by the drift test in `crates/dcs-plant/tests/dynamics_schema.rs`. Unchanged since `v0.3.0`'s recorded commit |
@@ -226,9 +226,10 @@ The determination:
 
 - `MODEL_VERSION` holds at `1`; `PlantModel::load` still accepts
   exactly that version. A `version: 1` document written against
-  `v0.7.0` validates unchanged under `v0.8.0` tooling, and the
-  plant-model schema emission is byte-identical to `v0.7.0`'s
-  recorded artifact — the tranche carries no model-grammar move.
+  `v0.7.0` validates unchanged under `v0.8.0` tooling; the
+  plant-model schema emission moved once this tranche — #548's
+  declared-unit grammar is additive optional, so a `v0.7.0` document
+  still validates unchanged.
 - The checkpoint format set holds: `Checkpoint.format_version` still
   negotiates against `SUPPORTED_FORMAT_VERSIONS` (`{0, 1}`; absent
   reads as `0`). Checkpoints cross the bump under the same

@@ -557,6 +557,7 @@ mod tests {
             parameters,
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let mut block =
             AlarmMonitor::from_parameters("alm", IN, ALARM, &instance.parameters).unwrap();

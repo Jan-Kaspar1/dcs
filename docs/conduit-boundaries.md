@@ -103,7 +103,13 @@ list in the same change.
   between pair members — a deployment secret carried on the invocation,
   never manifest data — not operator authentication. `GET /checkpoint`
   itself is a public read; who may reach it is the zone boundary's
-  answer, not the protocol's.
+  answer, not the protocol's. The token keys no claim arbitration: the
+  field's own claim protocol carries no keyed material on any request,
+  and a keyed pair reads the key once more, on the monitoring surface,
+  to ask the standing writer's declared endpoint whether it can prove
+  the line — the narrower `usurped` verdict and the unconditional claim
+  it arms (decision 108). The secret never crosses to the controller
+  process or to the field.
 
 ### 3. Remote-driver plant protocol — the `dcs-sim-net` TCP link
 

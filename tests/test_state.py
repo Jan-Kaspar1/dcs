@@ -105,6 +105,31 @@ class StateTests(unittest.TestCase):
         self.assertEqual(flow['conflict_paths']['previous'], {})
         self.assertEqual(flow['conflict_load']['previous'], 'none')
 
+    def test_merge_flow_attributes_conflict_paths_by_resolution_class(self):
+        # The planner summary carries the same classes the standalone report
+        # does, so a coverage decision reads one vocabulary.
+        self.state.reserve(1, 'one', 'a')
+        self.state.repair(1, 'merge-conflict',
+                          detail={'paths': ['docs/lenovo-hardware-qa-plan.md']})
+        self.state.record_event('mechanical-resolution', issue=2, attempt=1,
+                                payload={'resolvers': {
+                                    'docs/lenovo-hardware-qa-plan.md':
+                                        'qa-plan-landed-union'}})
+        self.state.reserve(3, 'three', 'a')
+        self.state.repair(3, 'merge-conflict',
+                          detail={'paths': ['docs/architecture.md']})
+        flow = self.state.merge_flow()
+        self.assertEqual(flow['conflict_paths_by_resolution']['current'], {
+            'resolved': {'docs/lenovo-hardware-qa-plan.md': 1},
+            'registered_unresolved': {'docs/lenovo-hardware-qa-plan.md': 1},
+            'unregistered': {'docs/architecture.md': 1}})
+        self.assertEqual(flow['mechanical_resolutions']['current'], 1)
+        self.assertEqual(flow['repairs_on_registered_paths']['current'], 1)
+        self.assertEqual(flow['conflict_paths_by_resolution']['previous'],
+                         {'resolved': {}, 'registered_unresolved': {},
+                          'unregistered': {}})
+        self.assertEqual(flow['repairs_on_registered_paths']['previous'], 0)
+
     def test_merge_flow_conflict_load_spread_and_unattributed(self):
         for number in range(1, 6):
             self.state.reserve(number, f'worker-{number}', 'a')

@@ -5,13 +5,30 @@
 # Stages, each reporting the release contract's named diagnostics on
 # failure (docs/release-contract.md):
 #
-#   resolve      cargo fetch — the pinned release crates resolve
-#                (pin-unresolvable)
+#   lockfile     the committed Cargo.lock satisfies the manifest this
+#                repository ships — the release crates recorded from
+#                git sources only, never a path into a checkout
+#                (path-dependency-leak), on the pin's own remote and
+#                the same `tag`/`rev` fragment Cargo.toml spells, one
+#                precise revision across all three — at the revision
+#                the declared pin names: the tag's target read back
+#                off the remote, the declared full-sha rev, or the
+#                release record's filled Commit field. Read before
+#                any fetch can rewrite the file, so a committed
+#                lockfile that no longer records the pin is reported
+#                rather than silently re-resolved
+#                (lockfile-stale); the leg's own doctored copy must
+#                report that diagnostic (lockfile-stale-unchecked).
+#                The stage's digest of the file is what the resolve
+#                stage re-checks, naming a rewrite the fallback fetch
+#                performs on the committed artifact.
+#   resolve      cargo fetch --locked — the pinned release crates
+#                resolve against the committed lockfile, so every
+#                build resolves the same sources
+#                (pin-unresolvable; lockfile-stale when the documented
+#                re-resolve fallback had to rewrite the artifact)
 #   build        cargo build — the composition compiles against the
 #                supported surface (surface-incompatible)
-#   lockfile     Cargo.lock records only git sources for the release
-#                crates — never a path into a checkout
-#                (path-dependency-leak)
 #   emit         the model and scenario emit byte-identically twice and
 #                match the checked-in artifacts (emit-nondeterministic,
 #                stale-artifact)
@@ -184,9 +201,11 @@
 #   DCS_REMOTE   the git remote the release crates and tooling resolve
 #                from (default: the published origin below). The
 #                workspace-side proof substitutes a file:// stand-in and
-#                rewrites this repository's Cargo.toml to match.
+#                rewrites this repository's Cargo.toml — and its
+#                committed Cargo.lock, whose recorded remote must keep
+#                matching the manifest's — to match.
 #   DCS_REV      the pinned revision (default: the release tag this
-#                repository's manifest records — v0.8.0, resolving to
+#                repository's manifest records — v0.9.0, resolving to
 #                the recorded commit whose tooling serves the interface
 #                registry, declared commands and their live availability
 #                verdicts, and routed emitted events the surface stage
@@ -203,15 +222,21 @@
 #                self-address refusal, sim-bus claim family, named
 #                standby remedy, announced-source verification, skew
 #                bound, and checkpoint-pull recovery contracts the
-#                mirror legs gate on).
+#                mirror legs gate on, beside the checkpoint path's
+#                cross-peer single-writer refusal and the promotion
+#                claim's basis skew bound this pin's mirror legs
+#                gate on).
 #   DCS_UPGRADE_REV
 #                the earlier compatible revision the upgrade stage
 #                materializes the tree at before repinning to $DCS_REV
-#                (default: the previous release's recorded rev — the
-#                v0.7.0 publish commit — so the stage proves the
-#                recorded rev → tag half of the v0.7.0 → v0.8.0
-#                crossing the manifest names; the workspace-side proof
-#                seeds its stand-in remote to serve it).
+#                (default: the earliest release-line rev whose builder
+#                API carries the composition's declared dimensional
+#                metadata — `PlantBuilder::unit`/`port_unit`/
+#                `param_unit` — so the stage proves the recorded
+#                rev → tag crossing the manifest names from a
+#                baseline this tree's own source still compiles
+#                against; the workspace-side proof seeds its stand-in
+#                remote to serve it).
 #   DCS_UPGRADE  set to 0 to skip the upgrade stage — the stage's own
 #                repinned re-run uses this internally.
 #   DCS_TOOLS    a directory holding prebuilt `dcs-model`,
@@ -240,8 +265,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DCS_REMOTE="${DCS_REMOTE:-https://github.com/Jan-Kaspar1/dcs.git}"
-DCS_REV="${DCS_REV:-v0.8.0}"
-DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-850edf6b9da8bfe13863fe863578b5b5531ad730}"
+DCS_REV="${DCS_REV:-v0.9.0}"
+DCS_UPGRADE_REV="${DCS_UPGRADE_REV:-07ec24f94dfaf5ff42d56a614718190da3403fd5}"
 DCS_TOOLS="${DCS_TOOLS:-}"
 DCS_RECORD_DIR="${DCS_RECORD_DIR:-}"
 TOOLS=""
@@ -321,12 +346,185 @@ open(path, "w").write(toml)
 PY
 }
 
-echo "== resolve =="
-cargo fetch --locked 2>/dev/null || {
-    # --locked is the fast path; a materialized copy whose Cargo.toml was
-    # rewritten to a transport stand-in re-resolves once.
-    cargo fetch || fail "pin-unresolvable: cargo fetch failed for the pinned release"
+# The committed Cargo.lock is this repository's reproducibility
+# artifact: README §2's promise is that a tag pin resolves once and the
+# committed lockfile records the commit it landed on, so a fresh clone
+# must resolve under `cargo fetch --locked` without a resolver quietly
+# repairing the file first. Cargo refuses a lockfile whose recorded
+# query disagrees with the manifest's pin at all, so this leg compares
+# the committed lockfile against the declared pin *before* any fetch
+# can rewrite it — the state a consumer's own CI could otherwise never
+# see, because the resolve stage's re-resolve fallback used to absorb
+# it. $1 is the lockfile to read: `Cargo.lock` itself in the positive
+# leg, a doctored scratch copy in the self-check below; $2 is the
+# release record's `record.md` when one was substituted, else the
+# empty string. Exit status 2 is a release crate recorded from a
+# non-git source — `path-dependency-leak`'s finding — and 1 every
+# other disagreement, `lockfile-stale`'s.
+lockfile_leg() {
+    python3 - "${1:-Cargo.lock}" "$DCS_REMOTE" "${2:-}" <<'PY'
+import re, subprocess, sys
+
+lock_path, fetch_remote, record_path = sys.argv[1], sys.argv[2], sys.argv[3]
+manifest = open("Cargo.toml").read()
+lock = open(lock_path).read()
+release = ("dcs-build", "dcs-core", "dcs-model")
+
+# `leak` is the non-git-source finding — a recorded `path` into some
+# checkout — and carries its own exit status so the shell reports
+# `path-dependency-leak` rather than the stale-pin diagnostic.
+def leak(message):
+    print(message, file=sys.stderr)
+    sys.exit(2)
+
+# The declared pin, as Cargo.toml spells it: the remote and the
+# `tag`/`rev` fragment both release crates carry.
+declared = {}
+for name in ("dcs-build", "dcs-model"):
+    match = re.search(
+        re.escape(name) + r' = \{ git = "([^"]+)",\s*(tag|rev) = "([^"]+)"', manifest
+    )
+    if match is None:
+        sys.exit(f"{name} declares no `git = ..., tag|rev = ...` pin in Cargo.toml")
+    declared[name] = (match.group(1), f"{match.group(2)}={match.group(3)}")
+if len({pin for pin in declared.values()}) != 1:
+    sys.exit(f"the release crates declare different pins: {sorted(declared.values())}")
+url, query = declared["dcs-build"]
+kind, value = query.split("=", 1)
+if url != fetch_remote:
+    sys.exit(f"Cargo.toml pins {url} while this check resolves {fetch_remote} — "
+             "repin the manifest, or drop the DCS_REMOTE substitution")
+
+# Every release crate's recorded source: git only, one source, on the
+# manifest's own remote and query, at one precise revision.
+recorded = dict(re.findall(
+    r'\[\[package\]\]\nname = "([^"]+)"\nversion = "[^"]+"\nsource = "([^"]+)"', lock
+))
+missing = [name for name in release if name not in recorded]
+if missing:
+    leak(f"release crates missing from {lock_path}: {sorted(missing)}")
+for name in release:
+    if not recorded[name].startswith("git+"):
+        leak(f"{name} resolved from {recorded[name]} — only a git source satisfies a git pin")
+sources = {recorded[name] for name in release}
+if len(sources) != 1:
+    sys.exit(f"the release crates record different sources: {sorted(sources)}")
+source = sources.pop()
+prefix = f"git+{url}?{query}#"
+if not source.startswith(prefix):
+    sys.exit(f"{lock_path} records {source} for the release crates, but Cargo.toml "
+             f"declares {url} at {query}")
+precise = source[len(prefix):]
+if not re.fullmatch(r"[0-9a-f]{40}", precise):
+    sys.exit(f"{lock_path} records no precise revision for {url} at {query}: {source}")
+
+# The recorded revision must be the one the declared pin names. A tag
+# the remote does not serve yet is not this leg's finding: an
+# unresolvable pin is `pin-unresolvable`'s, and a remote that cannot
+# be reached at all leaves the query comparison above holding.
+if kind == "tag":
+    refs = subprocess.run(
+        ["git", "ls-remote", url, f"refs/tags/{value}", f"refs/tags/{value}^{{}}"],
+        capture_output=True, text=True, check=False,
+    ).stdout
+    served = {}
+    for line in refs.splitlines():
+        sha, _, ref = line.partition("\t")
+        served[ref] = sha
+    target = served.get(f"refs/tags/{value}^{{}}") or served.get(f"refs/tags/{value}")
+    if target is None:
+        print(f"  {value} is not published on {url} yet — an unresolvable pin is "
+              "pin-unresolvable's finding")
+    elif target != precise:
+        sys.exit(f"{lock_path} records {precise}, but {value} lands on {target}")
+elif re.fullmatch(r"[0-9a-f]{40}", value) and precise != value:
+    sys.exit(f"{lock_path} records {precise} for rev {value}")
+
+# The release record's Commit field names the same release when it is
+# filled: the tag's target and the record must not diverge, or the
+# shipped artifact pins a commit the record does not claim.
+if record_path:
+    commit = re.search(r"^\| Commit \| `([0-9a-f]{40})`", open(record_path).read(), re.M)
+    if commit and commit.group(1) != precise:
+        sys.exit(f"{lock_path} records {precise}, but {record_path} records "
+                 f"commit {commit.group(1)}")
+
+print(f"  the committed {lock_path} records {query} at {precise}")
+PY
 }
+
+# The leg's exit status named: a release crate recorded from a path
+# into some checkout is `path-dependency-leak`, every other
+# disagreement between the committed lockfile and this repository's
+# declared pin is `lockfile-stale`.
+lockfile_check() {
+    local status=0
+    lockfile_leg "${1:-Cargo.lock}" "${2:-}" || status=$?
+    case "$status" in
+        0) return 0 ;;
+        2) fail "path-dependency-leak: a release crate is recorded from a non-git source in ${1:-Cargo.lock}" ;;
+        *) fail "lockfile-stale: ${1:-Cargo.lock} does not record this repository's declared pin" ;;
+    esac
+}
+
+echo "== lockfile =="
+# The digest the resolve stage re-checks: a committed lockfile this
+# stage proved records the declared pin must come out of the resolve
+# byte-identical, so the documented re-resolve fallback cannot absorb
+# a stale artifact.
+LOCK_DIGEST="$(sha256sum Cargo.lock | cut -d' ' -f1)"
+LOCK_RECORD=""
+if [ -n "$DCS_RECORD_DIR" ]; then
+    DCS_RELEASE="$(python3 -c 'import json; print(json.load(open("deploy/manifest.json"))["dcs_release"])')"
+    [ -f "$DCS_RECORD_DIR/$DCS_RELEASE/record.md" ] \
+        && LOCK_RECORD="$DCS_RECORD_DIR/$DCS_RELEASE/record.md"
+fi
+lockfile_check Cargo.lock "$LOCK_RECORD"
+
+# The leg must report its own diagnostic — a stale lockfile is named,
+# never repaired. The doctored copy is the reported defect put back:
+# the release crates recorded at an earlier revision's `rev` pin while
+# this tree's manifest declares its own pin. It lives under the
+# scratch root, so the committed artifact stays pristine.
+STALE_LOCK="$(mktemp)"
+python3 - Cargo.lock "$STALE_LOCK" "$DCS_UPGRADE_REV" <<'PY'
+import re, sys
+lock, stale, baseline = sys.argv[1], sys.argv[2], sys.argv[3]
+doctored, count = re.subn(
+    r'\?[^#"]*#[0-9a-f]{40}"', lambda _: f'?rev={baseline}#{baseline}"', open(lock).read()
+)
+if count != 3:
+    sys.exit(f"doctor: expected three git sources to doctor, rewrote {count}")
+open(stale, "w").write(doctored)
+PY
+if out="$(lockfile_leg "$STALE_LOCK" 2>&1)"; then
+    fail "lockfile-stale-unchecked: a lockfile recorded at another revision passed the lockfile leg"
+fi
+case "$out" in
+    *"but Cargo.toml declares"*) ;;
+    *) fail "lockfile-stale-unchecked: the stale lockfile was refused without naming the pin it should record: $out" ;;
+esac
+echo "  a lockfile recorded at another revision refused: lockfile-stale"
+
+echo "== resolve =="
+# `cargo fetch --locked` is the fast path and, with a committed
+# lockfile that satisfies the manifest, it is what makes every build
+# resolve the same sources. README §7's `cargo update` is the
+# documented remedy for a tree whose lockfile has not been regenerated
+# yet, so the fallback re-resolves once — and the digest the lockfile
+# stage recorded names that rewrite on the committed artifact instead
+# of absorbing it.
+LOCKED_ERR="$(mktemp)"
+if ! cargo fetch --locked 2>"$LOCKED_ERR"; then
+    cargo fetch || {
+        sed 's/^/  /' "$LOCKED_ERR" >&2
+        fail "pin-unresolvable: cargo fetch failed for the pinned release"
+    }
+    if [ "$(sha256sum Cargo.lock | cut -d' ' -f1)" != "$LOCK_DIGEST" ]; then
+        fail "lockfile-stale: the committed Cargo.lock did not satisfy the declared pin — the resolve stage re-resolved it; regenerate it with \`cargo update\` (README §7)"
+    fi
+fi
+rm -f "$LOCKED_ERR" "$STALE_LOCK"
 
 echo "== build =="
 cargo build --quiet || {
@@ -336,21 +534,6 @@ cargo build --quiet || {
 TARGET_DIR="$(cargo metadata --format-version 1 --no-deps \
     | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
 BIN="$TARGET_DIR/debug/pump-station"
-
-echo "== lockfile =="
-python3 - <<'PY' || fail "path-dependency-leak: Cargo.lock records a non-git source for a release crate"
-import re, sys
-lock = open("Cargo.lock").read()
-sections = re.findall(r'\[\[package\]\]\nname = "([^"]+)"\nversion = "[^"]+"\nsource = "([^"]+)"', lock)
-release = {name: source for name, source in sections if name.startswith("dcs-")}
-missing = {"dcs-build", "dcs-core", "dcs-model"} - release.keys()
-if missing:
-    sys.exit(f"release crates missing from Cargo.lock: {sorted(missing)}")
-for name, source in sections:
-    if name.startswith("dcs-") and not source.startswith("git+"):
-        sys.exit(f"{name} resolved from {source}")
-PY
-echo "  release crates resolve from git sources only"
 
 echo "== emit =="
 EMIT_1="$(mktemp)"; EMIT_2="$(mktemp)"; SCEN_1="$(mktemp)"; SCEN_2="$(mktemp)"

@@ -169,7 +169,12 @@ class State:
         ci-failure repairs, the bounded park-cause counts behind
         status:blocked transitions, and the count of publish merges
         resolved mechanically in-process (a separate ledger kind, so they
-        never inflate the agent-repair attribution).
+        never inflate the agent-repair attribution) read against the
+        repairs confined to registered paths. The conflicted paths also
+        come back attributed by resolution class (resolved /
+        registered_unresolved / unregistered), so the planner reads which
+        paths the resolver table covers, which it refused, and which it
+        does not cover.
         """
         now = time.time() if now is None else now
         bounds = window_bounds(now, window_seconds)
@@ -196,6 +201,10 @@ class State:
                 'conflict_repairs': {w: attribution[w]['conflict_repairs'] for w in bounds},
                 'mechanical_resolutions': {w: attribution[w]['mechanical_resolutions'] for w in bounds},
                 'conflict_paths': {w: attribution[w]['conflict_paths'] for w in bounds},
+                'conflict_paths_by_resolution': {
+                    w: attribution[w]['conflict_paths_by_resolution'] for w in bounds},
+                'repairs_on_registered_paths': {
+                    w: attribution[w]['repairs_on_registered_paths'] for w in bounds},
                 'conflict_load': {w: attribution[w]['conflict_load'] for w in bounds},
                 'failing_checks': {w: attribution[w]['failing_checks'] for w in bounds},
                 'dispatches': {w: flow[w]['dispatches'] for w in bounds},

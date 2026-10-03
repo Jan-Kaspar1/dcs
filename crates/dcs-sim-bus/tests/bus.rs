@@ -518,6 +518,79 @@ fn an_oversized_frame_ends_the_connection() {
     });
 }
 
+/// The scripted-miss QA finding's reproduction: `script_exchange` is
+/// development tooling deciding what the next exchange observes, so a
+/// queued `miss` may cost the consuming attachment its cycle — the
+/// exchange fails — but must never sever that attachment's connection
+/// or free the connection-bound writer claim only a disconnect or
+/// `release_writer` may release. The miss answers `missed` in-band:
+/// nothing publishes, the holder's link stays up, and the claim probe
+/// still names the standing owner — the script queue is not part of
+/// the arbitration vocabulary.
+#[test]
+fn a_scripted_miss_fails_the_exchange_without_freeing_the_claim() {
+    with_server(&fixture_decls(), |server, addr| {
+        // One raw request/response roundtrip on a stream: write the
+        // framed request, read the framed answer's body.
+        fn roundtrip(stream: &mut TcpStream, request: &[u8]) -> Vec<u8> {
+            stream.write_all(request).unwrap();
+            let mut header = [0u8; 2];
+            stream.read_exact(&mut header).unwrap();
+            let length = u16::from_be_bytes(header) as usize;
+            let mut body = vec![0u8; length];
+            stream.read_exact(&mut body).unwrap();
+            body
+        }
+
+        // conn1 — the claim holder, under the QA evidence's owner
+        // token: claim_writer (tag 0x05), u64 owner, no monitor.
+        let mut holder = TcpStream::connect(addr).unwrap();
+        let mut claim = vec![0, 9, 0x05];
+        claim.extend_from_slice(&0xE5E5u64.to_be_bytes());
+        assert_eq!(roundtrip(&mut holder, &claim), vec![0x06]);
+
+        // conn2 — the unfenced tooling attachment: script_exchange
+        // (tag 0x0a) queues one miss (outcome tag 0x02).
+        let mut scripter = TcpStream::connect(addr).unwrap();
+        assert_eq!(
+            roundtrip(&mut scripter, &[0, 4, 0x0a, 0, 1, 0x02]),
+            vec![0x06]
+        );
+
+        // conn1's output-bearing exchange (tag 0x09: one Float output
+        // to register 9) consumes the miss. The answer is `missed`
+        // (tag 0x09) in-band — the exchange completed nothing — and
+        // the holder's connection, which its claim binds to, stays up.
+        let mut exchange = vec![0, 14, 0x09, 0, 1, 0, 9, 0x03];
+        exchange.extend_from_slice(&5.0f64.to_be_bytes());
+        assert_eq!(roundtrip(&mut holder, &exchange), vec![0x09]);
+        assert_eq!(
+            server.bank().read(9).unwrap().value,
+            Value::Float(0.0),
+            "the missed exchange publishes nothing"
+        );
+
+        // conn3 — the arbitration check: probe_writer (tag 0x0d)
+        // still reports the claim standing under its owner — claim
+        // status tag 0x08, attribution flags bit 0, u64 owner.
+        let mut probe = TcpStream::connect(addr).unwrap();
+        let mut status = vec![0x08, 0x01];
+        status.extend_from_slice(&0xE5E5u64.to_be_bytes());
+        assert_eq!(
+            roundtrip(&mut probe, &[0, 1, 0x0d]),
+            status,
+            "the scripted miss must not free the holder's claim"
+        );
+
+        // The holder's link demonstrably survived: the same connection's
+        // next exchange answers `exchanged` (tag 0x07) and publishes
+        // the output the miss withheld.
+        let answer = roundtrip(&mut holder, &exchange);
+        assert_eq!(answer[0], 0x07, "the holder's next exchange completes");
+        assert_eq!(server.bank().read(9).unwrap().value, Value::Float(5.0));
+    });
+}
+
 #[test]
 fn protocol_contract_types_serde_roundtrip() {
     let requests = [
@@ -559,6 +632,7 @@ fn protocol_contract_types_serde_roundtrip() {
         BusResponse::Written { tick: Tick(7) },
         BusResponse::Stepped { tick: Tick(8) },
         BusResponse::Done,
+        BusResponse::Missed,
         BusResponse::ClaimStatus {
             owner: Some(7),
             monitor: Some("127.0.0.1:4190".parse().unwrap()),

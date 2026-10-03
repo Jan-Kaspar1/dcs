@@ -458,6 +458,7 @@ mod tests {
             parameters,
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let mut ai =
             AnalogInput::<f64>::from_parameters("ai", RAW, OUT, &instance.parameters).unwrap();

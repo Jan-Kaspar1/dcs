@@ -22,19 +22,22 @@
       "id": 10,
       "direction": "in",
       "value_type": "float",
-      "channel": { "device": 1, "name": "lt101_raw" }
+      "channel": { "device": 1, "name": "lt101_raw" },
+      "unit": "mA"
     },
     {
       "id": 11,
       "direction": "in",
       "value_type": "float",
-      "channel": { "device": 1, "name": "lic101_sp" }
+      "channel": { "device": 1, "name": "lic101_sp" },
+      "unit": "%"
     },
     {
       "id": 20,
       "direction": "out",
       "value_type": "float",
-      "channel": { "device": 2, "name": "lv101_cmd" }
+      "channel": { "device": 2, "name": "lv101_cmd" },
+      "unit": "mA"
     }
   ],
   "signals": [
@@ -71,8 +74,14 @@
         "eng_max": { "float": 100.0 }
       },
       "ports": {
-        "raw": { "direction": "in", "value_type": "float" },
-        "out": { "direction": "out", "value_type": "float" }
+        "raw": { "direction": "in", "value_type": "float", "unit": "mA" },
+        "out": { "direction": "out", "value_type": "float", "unit": "%" }
+      },
+      "parameter_units": {
+        "raw_min": "mA",
+        "raw_max": "mA",
+        "eng_min": "%",
+        "eng_max": "%"
       }
     },
     {
@@ -86,9 +95,13 @@
         "out_max": { "float": 20.0 }
       },
       "ports": {
-        "sp": { "direction": "in", "value_type": "float" },
-        "pv": { "direction": "in", "value_type": "float" },
-        "out": { "direction": "out", "value_type": "float" }
+        "sp": { "direction": "in", "value_type": "float", "unit": "%" },
+        "pv": { "direction": "in", "value_type": "float", "unit": "%" },
+        "out": { "direction": "out", "value_type": "float", "unit": "mA" }
+      },
+      "parameter_units": {
+        "out_min": "mA",
+        "out_max": "mA"
       }
     }
   ],

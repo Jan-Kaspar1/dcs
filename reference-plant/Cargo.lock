@@ -4,18 +4,19 @@ version = 4
 
 [[package]]
 name = "dcs-build"
-version = "0.1.0"
-source = "git+https://github.com/Jan-Kaspar1/dcs.git?rev=c2b5694d9fd6f6168b85c1dfc2e1542b369b3a3f#c2b5694d9fd6f6168b85c1dfc2e1542b369b3a3f"
+version = "0.9.0"
+source = "git+https://github.com/Jan-Kaspar1/dcs.git?tag=v0.9.0#a94a525e4a75a165d4043bd1a1aa81823c16dd6d"
 dependencies = [
  "dcs-core",
  "dcs-model",
+ "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "dcs-core"
-version = "0.1.0"
-source = "git+https://github.com/Jan-Kaspar1/dcs.git?rev=c2b5694d9fd6f6168b85c1dfc2e1542b369b3a3f#c2b5694d9fd6f6168b85c1dfc2e1542b369b3a3f"
+version = "0.9.0"
+source = "git+https://github.com/Jan-Kaspar1/dcs.git?tag=v0.9.0#a94a525e4a75a165d4043bd1a1aa81823c16dd6d"
 dependencies = [
  "serde",
  "serde_json",
@@ -23,8 +24,8 @@ dependencies = [
 
 [[package]]
 name = "dcs-model"
-version = "0.1.0"
-source = "git+https://github.com/Jan-Kaspar1/dcs.git?rev=c2b5694d9fd6f6168b85c1dfc2e1542b369b3a3f#c2b5694d9fd6f6168b85c1dfc2e1542b369b3a3f"
+version = "0.9.0"
+source = "git+https://github.com/Jan-Kaspar1/dcs.git?tag=v0.9.0#a94a525e4a75a165d4043bd1a1aa81823c16dd6d"
 dependencies = [
  "dcs-core",
  "serde",

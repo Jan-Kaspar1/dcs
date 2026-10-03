@@ -618,6 +618,7 @@ mod tests {
             parameters,
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let block = MedianVoter::from_parameters(
             "vot",

@@ -277,6 +277,7 @@ mod tests {
             parameters: Parameters::new(),
             rationalization: None,
             ports: BTreeMap::new(),
+            parameter_units: BTreeMap::new(),
         };
         let mut block = OverrideSelect::from_parameters(
             "ovr",

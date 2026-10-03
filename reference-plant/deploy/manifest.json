@@ -1,12 +1,12 @@
 {
-  "dcs_release": "v0.8.0",
+  "dcs_release": "v0.9.0",
   "images": {
-    "controller": "dcs-controller:v0.8.0",
-    "plant_server": "dcs-plant-server:v0.8.0"
+    "controller": "dcs-controller:v0.9.0",
+    "plant_server": "dcs-plant-server:v0.9.0"
   },
   "model": {
     "path": "model/plant.json",
-    "fingerprint": "530e2d4ff6c60a16"
+    "fingerprint": "051b6c4a87611bf7"
   },
   "dynamics": {
     "path": "model/dynamics.json",

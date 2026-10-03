@@ -143,13 +143,7 @@ fn serve_connection(
             Ok(None) | Err(_) => return,
         };
         let response = match decode_request(&body) {
-            Ok(request) => match dispatch(shared, connection, remote, request) {
-                Some(response) => response,
-                // A scripted missed exchange: the device answers
-                // nothing — the dropped connection is the link
-                // failure the driver's exchange observes.
-                None => return,
-            },
+            Ok(request) => dispatch(shared, connection, remote, request),
             Err(detail) => BusResponse::Error {
                 error: BusError::InvalidRequest { detail },
             },
@@ -257,17 +251,19 @@ fn grant_writer_claim(
 /// the incumbent rather than recording an anonymous fence, whether it
 /// came from the arbitration itself or from a fenced field mutation.
 ///
-/// The answer is `Some` for every request but a scripted
-/// [`ExchangeOutcome::Miss`]: the miss is the connection dropping
-/// unanswered, so `None` tells the connection loop to hang up without
-/// a frame.
+/// Every request produces its response; a scripted
+/// [`ExchangeOutcome::Miss`] answers [`BusResponse::Missed`] in-band
+/// rather than severing the connection — the exchange did not
+/// complete, but the link a live attachment holds its writer claim
+/// through survives, so the development tooling's scripted outcome
+/// cannot release a claim only disconnect or `release_writer` may.
 fn dispatch(
     shared: &Shared,
     connection: u64,
     remote: Option<SocketAddr>,
     request: BusRequest,
-) -> Option<BusResponse> {
-    Some(match request {
+) -> BusResponse {
+    match request {
         BusRequest::ReadRegister { register } => match shared.bank.read(register) {
             Ok(sample) => BusResponse::Sample { sample },
             Err(error) => BusResponse::Error { error },
@@ -283,7 +279,7 @@ fn dispatch(
                     .as_ref()
                     .filter(|claim| !claim.holders.contains(&connection))
             {
-                return Some(fenced_out(claim, "another attachment owns register writes"));
+                return fenced_out(claim, "another attachment owns register writes");
             }
             drop(writer);
             // The exchange applies all of its outputs or none: every
@@ -293,29 +289,29 @@ fn dispatch(
             for output in &outputs {
                 match shared.bank.read(output.register) {
                     Ok(sample) if sample.value.kind() != output.value.kind() => {
-                        return Some(BusResponse::Error {
+                        return BusResponse::Error {
                             error: BusError::KindMismatch {
                                 register: output.register,
                                 expected: sample.value.kind(),
                                 found: output.value,
                             },
-                        });
+                        };
                     }
                     Ok(_) => {
                         if let Value::Float(v) = output.value
                             && !v.is_finite()
                         {
-                            return Some(BusResponse::Error {
+                            return BusResponse::Error {
                                 error: BusError::InvalidRequest {
                                     detail: format!(
                                         "register {} refused a non-finite value",
                                         output.register
                                     ),
                                 },
-                            });
+                            };
                         }
                     }
-                    Err(error) => return Some(BusResponse::Error { error }),
+                    Err(error) => return BusResponse::Error { error },
                 }
             }
             let outcome = shared
@@ -325,19 +321,23 @@ fn dispatch(
                 .pop_front()
                 .unwrap_or(ExchangeOutcome::Complete);
             let withhold: BTreeSet<u16> = match &outcome {
-                // The miss answers with nothing at all.
-                ExchangeOutcome::Miss => return None,
+                // The missed cycle answers in-band: the exchange
+                // completed nothing — nothing published, no census
+                // latched — but the link stays up, so the
+                // connection-bound writer claim a severed link would
+                // release survives the scripting.
+                ExchangeOutcome::Miss => return BusResponse::Missed,
                 ExchangeOutcome::ShortStation { station } => {
                     match shared.stations.get(station.as_str()) {
                         Some(registers) => registers.clone(),
                         None => {
-                            return Some(BusResponse::Error {
+                            return BusResponse::Error {
                                 error: BusError::InvalidRequest {
                                     detail: format!(
                                         "scripted short exchange names station {station:?} the device does not declare"
                                     ),
                                 },
-                            });
+                            };
                         }
                     }
                 }
@@ -376,19 +376,19 @@ fn dispatch(
                 match outcome {
                     ExchangeOutcome::ShortStation { station } => {
                         if !shared.stations.contains_key(station.as_str()) {
-                            return Some(BusResponse::Error {
+                            return BusResponse::Error {
                                 error: BusError::InvalidRequest {
                                     detail: format!(
                                         "scripted short exchange names station {station:?} the device does not declare"
                                     ),
                                 },
-                            });
+                            };
                         }
                     }
                     ExchangeOutcome::ShortRegisters { registers } => {
                         for &register in registers {
                             if let Err(error) = shared.bank.read(register) {
-                                return Some(BusResponse::Error { error });
+                                return BusResponse::Error { error };
                             }
                         }
                     }
@@ -407,7 +407,7 @@ fn dispatch(
                 .as_ref()
                 .filter(|claim| !claim.holders.contains(&connection))
             {
-                return Some(fenced_out(claim, "another attachment owns register writes"));
+                return fenced_out(claim, "another attachment owns register writes");
             }
             match shared.bank.write(register, value) {
                 Ok(tick) => BusResponse::Written { tick },
@@ -420,18 +420,18 @@ fn dispatch(
             // named refusal — the same rule the plant protocol's step
             // applies.
             if !dt.is_finite() || dt < 0.0 {
-                return Some(BusResponse::Error {
+                return BusResponse::Error {
                     error: BusError::InvalidRequest {
                         detail: format!("step dt must be finite and non-negative, got {dt}"),
                     },
-                });
+                };
             }
             let writer = shared.writer.lock().unwrap();
             if let Some(claim) = writer
                 .as_ref()
                 .filter(|claim| !claim.holders.contains(&connection))
             {
-                return Some(fenced_out(claim, "another attachment owns register writes"));
+                return fenced_out(claim, "another attachment owns register writes");
             }
             BusResponse::Stepped {
                 tick: shared.bank.step(dt),
@@ -468,12 +468,10 @@ fn dispatch(
             let monitor = dialable_monitor(monitor, remote);
             let mut writer = shared.writer.lock().unwrap();
             match writer.as_ref() {
-                Some(claim) if claim.owner != owner => {
-                    return Some(fenced_out(
-                        claim,
-                        "a live attachment holds the device's write-ownership claim",
-                    ));
-                }
+                Some(claim) if claim.owner != owner => fenced_out(
+                    claim,
+                    "a live attachment holds the device's write-ownership claim",
+                ),
                 _ => {
                     grant_writer_claim(&mut writer, owner, connection, monitor);
                     BusResponse::Done
@@ -498,12 +496,10 @@ fn dispatch(
             let monitor = dialable_monitor(monitor, remote);
             let mut writer = shared.writer.lock().unwrap();
             match writer.as_ref() {
-                Some(claim) if claim.owner != owner => {
-                    return Some(fenced_out(
-                        claim,
-                        "another attachment owns the device's write-ownership claim",
-                    ));
-                }
+                Some(claim) if claim.owner != owner => fenced_out(
+                    claim,
+                    "another attachment owns the device's write-ownership claim",
+                ),
                 _ => {
                     grant_writer_claim(&mut writer, owner, connection, monitor);
                     BusResponse::Done
@@ -544,7 +540,7 @@ fn dispatch(
             Ok(()) => BusResponse::Done,
             Err(error) => BusResponse::Error { error },
         },
-    })
+    }
 }
 
 /// A TCP server sharing one [`RegisterBank`] with every connected

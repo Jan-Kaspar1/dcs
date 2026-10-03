@@ -137,14 +137,17 @@ import pair
 LEG = {
     # The next free slot after the pair legs origin/main added
     # (deferred-startup-refusal 720, claim-skew-bound 730,
-    # pending-source-pull 740) — the stage runs the legs in this order
-    # and no two may share one. Slots are allocated in landing order, so
-    # a leg concurrent with main's takes the next slot after the one
-    # main's own leg already holds rather than the slot both picked off
-    # the same pre-merge tree: this leg and `pending_source_pull.py`
-    # each read 730 as the highest and both claimed 740, which
-    # `ci/legs.py`'s discovery refuses by name — `pair-legs-invalid`.
-    "order": 750,
+    # pending-source-pull 740, demote-release-stays-released 750,
+    # self-standby-refusal 760, reclaim-convergence-gate 770,
+    # pending-serving-bound 780, shared-state-file-refusal 790) — the
+    # stage runs the legs in this order and no two may share one. Slots
+    # are allocated in landing order, so a leg concurrent with main's
+    # takes the next slot after the one main's own leg already holds
+    # rather than the slot both picked off the same pre-merge tree:
+    # this leg and `demote_release_stays_released.py` each read 740 as
+    # the highest and both claimed 750, which `ci/legs.py`'s discovery
+    # refuses by name — `pair-legs-invalid`.
+    "order": 800,
     "title": "the attributed-switch-isolation leg",
     "passes": "attributed-switch-isolation-leg",
     "tampers": [
