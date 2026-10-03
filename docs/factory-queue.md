@@ -57,6 +57,25 @@ recovery begins with one productive worker probe and grows after useful work and
 loaded demand. A permanent three-slot floor is not evidence of three available
 slots and is removed from the live policy. Active work is not killed on contraction.
 
+## Timeout continuations
+
+A worker reaching its invocation time limit may still have useful edits or a
+verification run to finish. Completion-first mode queues its captured work after
+`factory.timeout_retry_delay_seconds` (default 60, range 1–3600), with at most
+`factory.max_timeout_retries` automatic continuations per issue (default 2,
+range 0–5; zero disables them). The count and deadline survive restarts. A timeout
+continuation keeps the existing branch, recovery machinery and semantic repair
+count, and records a `timeout-requeue` redispatch separately from provider waits.
+
+Only a timeout receipt with positively captured work is eligible. Missing or
+uncertain work, stopped/lost processes, ordinary worker failures, reported
+blockers and an exhausted semantic repair budget remain parked for inspection.
+The existing dependency, closed-issue, pause, admission and provider-block guards
+still apply. Automatic continuations never reset provider mode or deadlines.
+Once the timeout budget is exhausted, the saved work stays blocked; an operator
+may inspect it and explicitly request another retry. Existing parked jobs are
+not bulk rearmed by upgrading the service.
+
 ## Activation and rollback
 
 A validated `factory` object activates the new orchestration:
