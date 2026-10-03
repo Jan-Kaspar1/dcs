@@ -776,13 +776,16 @@ function noteSyncAge(state) {
 }
 
 // The shared poll cadence — roles, the snapshot, and the history and
-// journal since-reads all ride it — and the bound each poll's fetches
-// answer within: a hanging read aborts into the poll's named
-// degradation — an unreachable peer, a stale publication — inside one
-// period instead of freezing the view on last-known data.
+// journal since-reads all ride it — and the bound every request the
+// page issues answers within: a hanging read or post aborts into the
+// caller's named degradation — an unreachable peer, a stale
+// publication, an indeterminate submission — inside one period instead
+// of freezing the view on last-known data or pinning a submission
+// forever.
 const POLL_MS = 1000;
-function pollFetch(url) {
-  return fetch(url, { signal: AbortSignal.timeout(POLL_MS) });
+function pollFetch(url, options) {
+  return fetch(url,
+    { ...(options || {}), signal: AbortSignal.timeout(POLL_MS) });
 }
 
 // Polls GET /role on every configured peer — the role cadence the pair
@@ -2042,12 +2045,20 @@ function inDeclaredRange(range, value) {
 // kind, collecting the client-side warnings the entry draws — text that
 // is not such a value, or a value outside the declared range. The
 // warnings never block: the submission still goes through the receipted
-// path, whose named rejection is what a refused edit displays.
+// path, whose named rejection is what a refused edit displays — except
+// a Bool entry that is not a Bool token, which returns a null value the
+// submission refuses outright: a coerced `false` would arrive as a
+// real command rather than a parse failure.
 function parameterValue(param, text) {
   const warnings = [];
   let value;
   if (param.kind === "bool") {
-    value = { bool: text === "true" };
+    const parsed = parseBool(text);
+    if (parsed === null) {
+      warnings.push("not a Bool value");
+      return { value: null, warnings };
+    }
+    value = { bool: parsed };
   } else if (param.kind === "int") {
     if (!/^[-+]?\d+$/.test(text)) warnings.push("not an Int value");
     value = { int: parseInt(text, 10) };
@@ -2553,7 +2564,13 @@ async function submitInterfaceCommand(button) {
   for (const input of button.closest("tr").querySelectorAll(".command-arg")) {
     const text = input.value.trim();
     if (input.dataset.kind === "bool") {
-      args[input.dataset.arg] = { bool: text === "true" };
+      const parsed = parseBool(text);
+      if (parsed === null) {
+        setCommandStatus(component, name,
+          { text: "not a bool value", warn: true, bad: false });
+        return;
+      }
+      args[input.dataset.arg] = { bool: parsed };
     } else if (text !== "") {
       const value = argumentValue(input.dataset.kind, text);
       if (value === null) {
@@ -4039,10 +4056,33 @@ function describeReason(reason) {
   return JSON.stringify(reason);
 }
 
+// Strict Boolean entry: only the named tokens parse — "true"/"1"/"on"
+// and "false"/"0"/"off", case-insensitive. Anything else returns null
+// so the caller refuses it client-side: arbitrary text must never
+// reach the wire coerced to `false`, which reads as a real command.
+function parseBool(text) {
+  const trimmed = text.trim().toLowerCase();
+  if (trimmed === "true" || trimmed === "1" || trimmed === "on") return true;
+  if (trimmed === "false" || trimmed === "0" || trimmed === "off") return false;
+  return null;
+}
+
+// Parses a command-form or affordance entry into a Value of the
+// point's declared kind — strictly: an entry that is not such a value
+// returns null and the caller refuses it rather than shipping a body
+// the receipted path could only answer with a parse failure — or, for
+// Bool, a body that reads as a real `false` write.
 function commandValue(kind, text) {
-  if (kind === "bool") return { bool: /^(true|1|on)$/i.test(text.trim()) };
-  if (kind === "int") return { int: parseInt(text, 10) };
-  return { float: parseFloat(text) };
+  if (kind === "bool") {
+    const parsed = parseBool(text);
+    return parsed === null ? null : { bool: parsed };
+  }
+  const trimmed = text.trim();
+  if (kind === "int") {
+    return /^[-+]?\d+$/.test(trimmed) ? { int: parseInt(trimmed, 10) } : null;
+  }
+  const number = Number(trimmed);
+  return trimmed !== "" && Number.isFinite(number) ? { float: number } : null;
 }
 
 // The one postCommand rejection that proves the command never queued:
@@ -4148,11 +4188,10 @@ async function postCommand(base, command, reason) {
     if (operator !== null) body.actor = operator;
     if (reason) body.reason = reason;
   }
-  const response = await fetch(base + "/command", {
+  const response = await pollFetch(base + "/command", {
     method: "POST",
     headers: { "Content-Type": "text/plain" },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(POLL_MS),
   });
   if (!response.ok) {
     if (response.status >= 400 && response.status < 500) {
@@ -4246,7 +4285,7 @@ async function postSwitch(peer, verb) {
   };
   if (operator !== null) request.body = JSON.stringify({ actor: operator });
   const receipt = document.getElementById("receipt");
-  const response = await fetch(peer.base + "/" + verb, request);
+  const response = await pollFetch(peer.base + "/" + verb, request);
   if (!response.ok) {
     const refusal = await response.json().catch(() => null);
     receipt.textContent = verb + " refused: " +
@@ -4280,6 +4319,11 @@ async function submitParameter(button) {
     return;
   }
   const parsed = parameterValue(param, text);
+  if (parsed.value === null) {
+    setParamStatus(component, name,
+      { text: parsed.warnings.join("; "), warn: true, bad: false });
+    return;
+  }
   const command = { set_parameter: {
     component: component, name: name, value: parsed.value } };
   let answer;
@@ -4321,10 +4365,16 @@ async function submitForce(button) {
       "enter a value to force " + meta.name + " to";
     return;
   }
+  const value = commandValue(meta.value_type, text);
+  if (value === null) {
+    document.getElementById("receipt").textContent =
+      "not a " + meta.value_type + " value: \"" + text + "\"";
+    return;
+  }
   const command = { force_point: {
     point: meta.point,
     kind: meta.value_type,
-    value: commandValue(meta.value_type, text),
+    value: value,
   } };
   try {
     await submitCommand(command);
@@ -4362,7 +4412,7 @@ async function init() {
     setInterval(refreshOverview, POLL_MS);
     return;
   }
-  index = await (await fetch("/signals")).json();
+  index = await (await pollFetch("/signals")).json();
   for (const meta of index.points) metaByPoint.set(meta.point, meta);
   // The index's components section — serde-defaulted, so an index
   // served without it joins nothing — carries the per-instance records
@@ -4439,15 +4489,22 @@ async function init() {
     const input = button.parentElement.querySelector("input.command-value");
     const meta = metaByPoint.get(Number(button.dataset.point));
     if (!meta || !meta.writable || !input) return;
-    if (input.value.trim() === "") {
+    const text = input.value.trim();
+    if (text === "") {
       document.getElementById("receipt").textContent =
         "enter a value for " + meta.name;
+      return;
+    }
+    const value = commandValue(meta.value_type, text);
+    if (value === null) {
+      document.getElementById("receipt").textContent =
+        "not a " + meta.value_type + " value: \"" + text + "\"";
       return;
     }
     const command = { write_value: {
       point: meta.point,
       kind: meta.value_type,
-      value: commandValue(meta.value_type, input.value),
+      value: value,
     } };
     try {
       await submitCommand(command);
@@ -4538,10 +4595,22 @@ async function init() {
     const point = Number(select.value);
     const meta = index.points.find(p => p.point === point);
     if (!meta) return;
+    const text = document.getElementById("command-value").value.trim();
+    if (text === "") {
+      document.getElementById("receipt").textContent =
+        "enter a value for " + meta.name;
+      return;
+    }
+    const value = commandValue(meta.value_type, text);
+    if (value === null) {
+      document.getElementById("receipt").textContent =
+        "not a " + meta.value_type + " value: \"" + text + "\"";
+      return;
+    }
     const command = { write_value: {
       point: point,
       kind: meta.value_type,
-      value: commandValue(meta.value_type, document.getElementById("command-value").value),
+      value: value,
     } };
     try {
       await submitCommand(command);
@@ -4563,10 +4632,16 @@ async function init() {
         "enter a value to force " + meta.name + " to";
       return;
     }
+    const value = commandValue(meta.value_type, text);
+    if (value === null) {
+      document.getElementById("receipt").textContent =
+        "not a " + meta.value_type + " value: \"" + text + "\"";
+      return;
+    }
     const command = { force_point: {
       point: point,
       kind: meta.value_type,
-      value: commandValue(meta.value_type, text),
+      value: value,
     } };
     try {
       await submitCommand(command);
