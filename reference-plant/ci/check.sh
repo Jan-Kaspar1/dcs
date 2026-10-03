@@ -6,8 +6,9 @@
 # failure (docs/release-contract.md):
 #
 #   lockfile     the committed Cargo.lock satisfies the manifest this
-#                repository ships — the release crates recorded from
-#                git sources only, never a path into a checkout
+#                repository ships — every `dcs-*` record of a release
+#                crate carried by a git source, never a path package
+#                into a checkout, which records no source at all
 #                (path-dependency-leak), on the pin's own remote and
 #                the same `tag`/`rev` fragment Cargo.toml spells, one
 #                precise revision across all three — at the revision
@@ -359,8 +360,9 @@ PY
 # leg, a doctored scratch copy in the self-check below; $2 is the
 # release record's `record.md` when one was substituted, else the
 # empty string. Exit status 2 is a release crate recorded from a
-# non-git source — `path-dependency-leak`'s finding — and 1 every
-# other disagreement, `lockfile-stale`'s.
+# non-git source or from no source at all — a `path` package into some
+# checkout carries neither, and is `path-dependency-leak`'s finding —
+# and 1 every other disagreement, `lockfile-stale`'s.
 lockfile_leg() {
     python3 - "${1:-Cargo.lock}" "$DCS_REMOTE" "${2:-}" <<'PY'
 import re, subprocess, sys
@@ -371,8 +373,9 @@ lock = open(lock_path).read()
 release = ("dcs-build", "dcs-core", "dcs-model")
 
 # `leak` is the non-git-source finding — a recorded `path` into some
-# checkout — and carries its own exit status so the shell reports
-# `path-dependency-leak` rather than the stale-pin diagnostic.
+# checkout, or a released crate recorded with no source at all — and
+# carries its own exit status so the shell reports `path-dependency-leak`
+# rather than the stale-pin diagnostic.
 def leak(message):
     print(message, file=sys.stderr)
     sys.exit(2)
@@ -395,18 +398,41 @@ if url != fetch_remote:
     sys.exit(f"Cargo.toml pins {url} while this check resolves {fetch_remote} — "
              "repin the manifest, or drop the DCS_REMOTE substitution")
 
-# Every release crate's recorded source: git only, one source, on the
-# manifest's own remote and query, at one precise revision.
-recorded = dict(re.findall(
-    r'\[\[package\]\]\nname = "([^"]+)"\nversion = "[^"]+"\nsource = "([^"]+)"', lock
-))
-missing = [name for name in release if name not in recorded]
+# Every package block the lockfile records, as (name, source) pairs. The
+# block — not the source-bearing line — is the unit: Cargo writes a path
+# package with no `source` key at all, so a released crate reaching a
+# checkout through one leaves no line for a per-name dict built out of
+# source-bearing lines to collect, and a second same-name record at
+# another pin disappears into a last-wins one. Every record is kept, so
+# neither hides behind another.
+packages = []
+for block in lock.split("[[package]]")[1:]:
+    name = re.search(r'^name = "([^"]+)"', block, re.M)
+    if name is None:
+        sys.exit(f"{lock_path} records a package block with no name")
+    source = re.search(r'^source = "([^"]+)"', block, re.M)
+    packages.append((name.group(1), None if source is None else source.group(1)))
+
+# Every release crate's recorded source — git only, one source, on the
+# manifest's own remote and query, at one precise revision. A `dcs-*`
+# block is a released crate whichever record carries it: one recorded
+# with no `source` line at all is a path package into some checkout, and
+# the contract names that as the same leak a recorded non-git source is.
+for name, source in packages:
+    if not name.startswith("dcs-"):
+        continue
+    if source is None:
+        leak(f"{name} is recorded with no source at all in {lock_path} — "
+             "only a git source satisfies a git pin")
+    if not source.startswith("git+"):
+        leak(f"{name} resolved from {source} — only a git source satisfies a git pin")
+missing = [name for name in release if name not in {seen for seen, _ in packages}]
 if missing:
     leak(f"release crates missing from {lock_path}: {sorted(missing)}")
-for name in release:
-    if not recorded[name].startswith("git+"):
-        leak(f"{name} resolved from {recorded[name]} — only a git source satisfies a git pin")
-sources = {recorded[name] for name in release}
+# Every record of every release crate must agree on the one source: a
+# second same-name record at another remote or pin is the stale-pin
+# finding, not a record the first entry may stand in for.
+sources = {source for name, source in packages if name in release}
 if len(sources) != 1:
     sys.exit(f"the release crates record different sources: {sorted(sources)}")
 source = sources.pop()
@@ -454,7 +480,8 @@ PY
 }
 
 # The leg's exit status named: a release crate recorded from a path
-# into some checkout is `path-dependency-leak`, every other
+# into some checkout — or with no source at all, as a path package is
+# written — is `path-dependency-leak`; every other
 # disagreement between the committed lockfile and this repository's
 # declared pin is `lockfile-stale`.
 lockfile_check() {
@@ -462,7 +489,7 @@ lockfile_check() {
     lockfile_leg "${1:-Cargo.lock}" "${2:-}" || status=$?
     case "$status" in
         0) return 0 ;;
-        2) fail "path-dependency-leak: a release crate is recorded from a non-git source in ${1:-Cargo.lock}" ;;
+        2) fail "path-dependency-leak: a release crate is recorded from a non-git source — or from no source at all — in ${1:-Cargo.lock}" ;;
         *) fail "lockfile-stale: ${1:-Cargo.lock} does not record this repository's declared pin" ;;
     esac
 }
