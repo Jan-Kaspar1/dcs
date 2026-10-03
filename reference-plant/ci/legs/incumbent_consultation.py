@@ -16,26 +16,24 @@ documented dead-owner recovery: the restartee resumed its stale
 `--state-file`, seized the claim, and silently reverted every
 receipted tune, force, and carried state the incumbent accumulated
 across the gap, journalling nothing about the takeover on the seizing
-line. The released
-tooling evidences the defect and its fix on the platform's own rig;
-nothing on a deployment a customer writes evidenced either half, and
-the pair's own `deferred_startup_refusal` leg needed a duplicate third
-launch rather than the declared pair's own restart. The
-manifest-declared pair carries the honest shape: its standby member's
-declared
-`--state-file`/`--journal-file` is exactly the stale checkpoint a
-restarted container resumes, and its duty member's declared claim is
-the live incumbent's.
+line. The released tooling evidences the defect and its fix on the
+platform's own rig; nothing on a deployment a customer writes
+evidenced either half, and the pair's own `deferred_startup_refusal`
+leg needed a duplicate third launch rather than the declared pair's
+own restart. The manifest-declared pair carries the honest shape: its
+standby member's declared `--state-file`/`--journal-file` is exactly
+the stale checkpoint a restarted container resumes, and its duty
+member's declared claim is the live incumbent's.
 
 The manifest declares no `--peer`, and the CLI's `--standby`/`--peer`
 arguments name their tracking source as a *name* every pull
-re-resolves — neither stamps an address into the persisted checkpoint,
-so the consult's source is the `--peer` a relaunched active declares.
-The leg therefore relaunches the demoted peer's declared persistence
-with `--peer` naming the incumbent's monitor: the documented
-invocation that both names the consult source and gives the refusal its
-recorded disposition (a declared pair keeps the run, rejoined as the
-incumbent's tracking standby). The run:
+re-resolves — neither stamps an address into the persisted
+checkpoint, so the consult's source is the `--peer` a relaunched
+active declares. The leg therefore relaunches the demoted peer's
+declared persistence with `--peer` naming the incumbent's monitor:
+the documented invocation that both names the consult source and
+gives the refusal its recorded disposition (a declared pair keeps the
+run, rejoined as the incumbent's tracking standby). The run:
 
 - converges the manifest-declared pair through the pair rig's
   driven-tick loop and gives the incumbent a receipted tune through
@@ -434,10 +432,11 @@ def replay(half, served, failures):
     `refusal` its `startup_claim_refused` entry, `observed` the
     `field_claim_observed` attribution, `role` the served RoleReport,
     `holder` whose claim the field's arbitration names, `carried`
-    whether the receipted state survived on the served images,
-    `persisted` the declared `--state-file`'s own baseline, and
-    `incumbent_tick` where the incumbent's line stood at the consult.
-    Returns the digest's marks for the half."""
+    whether the receipted state survived on the served images, and
+    `persisted` the declared `--state-file`'s own baseline. The
+    `observed` attribution the caller reads its own mark beside the
+    model's — the refused grant's own record, not a second reading of
+    the model. Returns the digest's marks for the half."""
     want = TAKEOVER[half]
     marks = {"consult": consult_verdict(served.get("consult"))}
     if marks["consult"] != want["consult"]:
@@ -833,6 +832,21 @@ def incumbent_consultation_pass(args, tamper):
                 "window, expected active"
             )
             raise Abort
+        if not isinstance(owner.get("tick"), int) or owner["tick"] <= (
+            baseline["tick"] or 0
+        ):
+            # The precondition the whole leg rests on: a restart
+            # resuming that checkpoint cannot seize the field without
+            # reverting the incumbent's line, so a gap that never
+            # opened makes both halves assert nothing.
+            failures.append(
+                "the incumbent's line stood at tick "
+                f"{owner.get('tick')} across the downtime while the "
+                "restartee's declared --state-file persisted tick "
+                f"{baseline['tick']} — the stale-baseline restart this "
+                "leg stages rolled back nothing"
+            )
+            raise Abort
         evidence["incumbent_tick"] = owner["tick"]
         digest_entries.append(
             {
@@ -942,7 +956,7 @@ def incumbent_consultation_pass(args, tamper):
                 "line forward"
             )
         marks["attributed"] = holder_word(
-            refusal_served["observed"].get("claimant"),
+            (refusal_served["observed"] or {}).get("claimant"),
             {incumbent_token: "incumbent"},
         )
         if marks["attributed"] != "incumbent":
