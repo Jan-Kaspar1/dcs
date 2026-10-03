@@ -344,12 +344,21 @@ lockfile resolves it to untouched, so the stand-in serves the tag at
 the very commit the committed lockfile records and the shipped
 lockfile takes part in the proof rather than being rewritten away —
 and runs the template's own `ci/check.sh` end to end, including its
-committed-lockfile stage: the release crates recorded from git sources
-only, on the pin the manifest declares, at the revision the declared
+committed-lockfile stage: every recorded crate of the release — each
+`dcs-*` package block, not each `source`-bearing line, because Cargo
+writes a path package with no `source` key at all — carried by a git
+source, on the pin the manifest declares, at the revision the declared
 tag lands on and the release record's filled `Commit` field, with
 `cargo metadata --locked` asserted to resolve the copied tree without
-rewriting the committed lockfile and a lockfile recorded at another
-revision reporting `lockfile-stale` — its git-only lockfile assertion,
+rewriting the committed lockfile, a lockfile recorded at another
+revision — or missing a release crate's `[[package]]` block entirely,
+nothing recorded at all, which is stale rather than a leak — reporting
+`lockfile-stale`, and the reported defect put back:
+a consumer crate of its own reaching a released crate through a
+`path` dependency — which the re-resolved lockfile records beside the
+pinned one, sourceless, and which `cargo fetch --locked` accepts over
+that same file — reporting `path-dependency-leak` — its git-only
+lockfile assertion,
 its released-tooling stage against
 locally built binaries — `validate`/`lint`/`--check` acceptance, the
 `dcs-model schema` and `interface-schema` emissions pinned
@@ -507,8 +516,8 @@ The checks' failures are named diagnostics:
 | `record-missing` | The substituted `DCS_RECORD_DIR` tree serves no `docs/releases/<tag>/` artifact the schema-drift leg compares against — only reachable when a record-tree substitution is in effect; the contract's own shape fetches the record through the pinned rev and reports `pin-unresolvable` instead. Reported by the reference plant's `ci/check.sh`. |
 | `surface-incompatible` | The release crates resolved but the consumer's use of the supported API fails to compile — an incompatible pin reaching compile time. |
 | `lockfile-stale` | The committed consumer `Cargo.lock` does not record the manifest's declared pin — another remote, another `rev`/`tag` fragment, another precise revision than the declared `rev` or the declared `tag`'s target as the remote serves it, another revision than the release record's filled `Commit` field, a release crate missing, or a resolve that had to rewrite the file to proceed. Cargo refuses such a lockfile outright under `--locked`, so a shipped tree carrying one neither resolves reproducibly nor resolves at all; the check names it instead of re-resolving it away. Reported by the reference plant's `ci/check.sh`, before its `resolve` stage can rewrite the committed artifact. |
-| `lockfile-stale-unchecked` | The reference plant's `lockfile` stage did not report its own diagnostic: a lockfile recorded at another revision passed the leg that must refuse it. Reported by the reference plant's `ci/check.sh`. |
-| `path-dependency-leak` | The consumer lockfile records a `path` source — or no source at all — for a released crate, where a git pin can only be satisfied from the pinned remote — the no-path-dependency proof itself failed. |
+| `lockfile-stale-unchecked` | The reference plant's `lockfile` stage did not report its own diagnostic: a doctored lockfile the stage plants — one recorded at another revision, one missing a release crate's `[[package]]` block — passed the leg that must refuse it, or was refused under another diagnostic's name. Reported by the reference plant's `ci/check.sh`. |
+| `path-dependency-leak` | The consumer lockfile records a `path` source — or no source at all — for a released crate, where a git pin can only be satisfied from the pinned remote — the no-path-dependency proof itself failed. Reported by the reference plant's `ci/check.sh` `lockfile` stage, over every recorded package block of a `dcs-*` crate and before its `resolve` stage can re-resolve the committed artifact. |
 | `emit-nondeterministic` | Two emission runs produced different bytes. |
 | `emit-divergent` | The unchanged consumer source emitted different model bytes under the repinned revision — the same-minor repin was not the drop-in upgrade this policy promises. |
 | `tooling-rejected` | `dcs-model validate`/`lint` or `dcs-controller --check` refused the emitted model. |

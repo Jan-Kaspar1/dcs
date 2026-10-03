@@ -312,6 +312,7 @@ fn attributed(entry: &JournalEntry, name: &str, points: &BTreeSet<PointId>) -> b
         | JournalEvent::Reinitialized { .. }
         | JournalEvent::FieldOrphaned { .. }
         | JournalEvent::SourceRestarted { .. }
+        | JournalEvent::RestartConsult { .. }
         | JournalEvent::TrackingSourceAdopted { .. }
         | JournalEvent::TrackingSourceRefused { .. }
         | JournalEvent::ForeignClaimPreempted { .. }

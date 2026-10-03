@@ -8,7 +8,10 @@
 //! exactly as shipped while the stand-in serves that very revision —
 //! and runs the tree's own `ci/check.sh`
 //! end to end: the committed lockfile's agreement with the declared
-//! pin, `cargo fetch --locked` resolving without a re-resolve,
+//! pin — every `dcs-*` record of a released crate carried by a git
+//! source, a path package's sourceless record named
+//! `path-dependency-leak` — `cargo fetch --locked` resolving without a
+//! re-resolve,
 //! byte-identical emit against the checked-in artifacts,
 //! released-tooling acceptance — plus the contract's remaining
 //! `dcs-model` surfaces: `schema`, `interface-schema`, and
@@ -211,7 +214,8 @@
 //! `managed-lifecycle-failed`/`managed-lifecycle-nondeterministic`,
 //! `event-parity-failed`/`event-parity-nondeterministic`,
 //! `commissioning-failed`/`commissioning-nondeterministic`/
-//! `commissioning-unchecked`, `lockfile-stale`, and the
+//! `commissioning-unchecked`, `lockfile-stale`,
+//! `path-dependency-leak`, and the
 //! `surface-mismatch` paths
 //! a drifting interface registry, a receiptless declared command, or an
 //! unobserved emitted event each produce.
@@ -492,15 +496,27 @@ impl Materialized {
     /// rev — so the stage proves the real named crossing onto the pin's
     /// release; the stand-in serves both ends of it.
     fn check(&self, tools: &Path) -> Output {
-        Command::new("bash")
+        self.run(Some(tools))
+    }
+
+    /// The same run without the tooling substitution, for a check that
+    /// must fail before its `tooling` stage resolves any binary.
+    fn check_without_tooling(&self) -> Output {
+        self.run(None)
+    }
+
+    fn run(&self, tools: Option<&Path>) -> Output {
+        let mut check = Command::new("bash");
+        check
             .arg("ci/check.sh")
             .current_dir(&self.dir)
             .env("DCS_REMOTE", &self.remote)
-            .env("DCS_TOOLS", tools)
             .env("DCS_RECORD_DIR", root().join("docs/releases"))
-            .env("CARGO_TARGET_DIR", self.dir.join("target"))
-            .output()
-            .expect("ci/check.sh runs")
+            .env("CARGO_TARGET_DIR", self.dir.join("target"));
+        if let Some(tools) = tools {
+            check.env("DCS_TOOLS", tools);
+        }
+        check.output().expect("ci/check.sh runs")
     }
 }
 
@@ -508,6 +524,34 @@ impl Drop for Materialized {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// Runs `cargo` in the materialized copy with an isolated target dir.
+fn cargo_in(dir: &Path, args: &[&str]) -> Output {
+    Command::new(CARGO)
+        .args(args)
+        .current_dir(dir)
+        .env("CARGO_TARGET_DIR", dir.join("target"))
+        .output()
+        .unwrap_or_else(|error| panic!("cargo {args:?} failed to spawn: {error}"))
+}
+
+/// The version the template's committed lockfile records for a released
+/// crate — the version a vendored path copy of that crate carries in
+/// the path-dependency-leak reproduction, so cargo records both under
+/// one name.
+fn recorded_crate_version(dir: &Path, name: &str) -> String {
+    let lock = std::fs::read_to_string(dir.join("Cargo.lock")).unwrap();
+    let block = lock
+        .split("[[package]]")
+        .find(|block| block.contains(&format!("\nname = \"{name}\"\n")))
+        .unwrap_or_else(|| panic!("{name} missing from the template's Cargo.lock"));
+    block
+        .lines()
+        .find_map(|line| line.strip_prefix("version = \""))
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or_else(|| panic!("{name} records no version in the template's Cargo.lock"))
+        .to_owned()
 }
 
 /// The full materialization proof: the template's own clean-CI check
@@ -539,6 +583,10 @@ fn the_template_passes_its_own_clean_ci_outside_the_workspace() {
     assert!(
         stdout.contains("a lockfile recorded at another revision refused: lockfile-stale"),
         "the lockfile stage's doctored case did not report its named diagnostic:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("a lockfile missing a release crate refused: lockfile-stale"),
+        "the lockfile stage's missing-crate doctored case did not report its named diagnostic:\n{stdout}"
     );
     let lock_line = stdout
         .lines()
@@ -1158,6 +1206,243 @@ fn the_committed_lockfile_satisfies_the_declared_pin() {
     assert_eq!(
         std::fs::read_to_string(&lock).unwrap(),
         stale,
+        "the refused run repaired the doctored lockfile instead of reporting it"
+    );
+}
+
+/// A released crate reaching the build through a path package rather
+/// than the pinned remote is `path-dependency-leak`, whatever
+/// `cargo fetch --locked` says about the same file.
+///
+/// The reported defect (`lockfile-leg-misses-sourceless-path-package`):
+/// the `lockfile` stage collected package records through a regex
+/// requiring a `source` line directly after the version, and Cargo
+/// writes a path package with no `source` key at all — so the record
+/// never entered the collected map, the git-sourced record of the same
+/// crate stood in for it, and the whole lockfile check ran green over a
+/// lockfile that builds a released crate from a checkout. The
+/// reproduction is the reported one: the materialized consumer adds a
+/// crate of its own whose dependency on a released crate is a `path`
+/// into a vendored copy — a legitimate customer action — the lockfile
+/// is re-resolved, and the check must name the leak before the resolve
+/// stage can re-resolve the artifact away.
+///
+/// The same blind spot's other face: a second record of a released
+/// crate — from a registry rather than the pin — is the same finding,
+/// but the per-name map kept only the last record under a name, so a
+/// duplicate sorted ahead of the pinned one went unexamined. Every
+/// record must be examined.
+#[test]
+fn a_path_sourced_released_crate_reports_path_dependency_leak() {
+    let copy = Materialized::new();
+    let lock = copy.dir.join("Cargo.lock");
+
+    // The consumer's own crate, and the vendored copy of a released
+    // crate it reaches by path — at the version the committed lockfile
+    // records for that crate, so cargo records both under one name.
+    let version = recorded_crate_version(&copy.dir, "dcs-model");
+    let vendor = copy.dir.join("vendor");
+    std::fs::create_dir_all(vendor.join("dcs-model/src")).unwrap();
+    std::fs::create_dir_all(vendor.join("my-lib/src")).unwrap();
+    std::fs::write(
+        vendor.join("dcs-model/Cargo.toml"),
+        format!(
+            "\
+[package]
+name = \"dcs-model\"
+version = \"{version}\"
+edition = \"2021\"
+"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        vendor.join("dcs-model/src/lib.rs"),
+        "pub fn vendored() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        vendor.join("my-lib/Cargo.toml"),
+        "\
+[package]
+name = \"my-lib\"
+version = \"0.1.0\"
+edition = \"2021\"
+
+[dependencies]
+dcs-model = { path = \"../dcs-model\" }
+",
+    )
+    .unwrap();
+    std::fs::write(vendor.join("my-lib/src/lib.rs"), "pub fn lib() {}\n").unwrap();
+    let manifest = copy.dir.join("Cargo.toml");
+    let source = std::fs::read_to_string(&manifest).unwrap();
+    let anchor = "serde_json = \"1\"\n";
+    assert!(
+        source.contains(anchor),
+        "the template's dependency anchor moved: {source}"
+    );
+    std::fs::write(
+        &manifest,
+        source.replace(
+            anchor,
+            &format!("{anchor}my-lib = {{ path = \"vendor/my-lib\" }}\n"),
+        ),
+    )
+    .unwrap();
+
+    // Re-resolve: the record under test only exists once cargo has
+    // written it beside the pinned one.
+    let fetched = cargo_in(&copy.dir, &["fetch"]);
+    assert!(
+        fetched.status.success(),
+        "the vendored path dependency did not resolve: {}",
+        String::from_utf8_lossy(&fetched.stderr)
+    );
+    let injected = std::fs::read_to_string(&lock).unwrap();
+    let sourceless: Vec<&str> = injected
+        .split("[[package]]")
+        .filter(|block| block.contains("\nname = \"dcs-model\"\n") && !block.contains("source = "))
+        .collect();
+    assert_eq!(
+        sourceless.len(),
+        1,
+        "the reproduction recorded no sourceless dcs-model package block:\n{injected}"
+    );
+    assert!(
+        injected.contains(&format!(
+            "\nname = \"dcs-model\"\nversion = \"{version}\"\nsource = \"git+"
+        )),
+        "the pinned dcs-model record went missing:\n{injected}"
+    );
+    // The resolve stage's own fast path accepts this file — the defect
+    // is invisible to it, which is why the lockfile stage must hold it
+    // on its own.
+    let locked = cargo_in(&copy.dir, &["fetch", "--locked"]);
+    assert!(
+        locked.status.success(),
+        "cargo fetch --locked refused the injected lockfile: {}",
+        String::from_utf8_lossy(&locked.stderr)
+    );
+
+    let refused = copy.check_without_tooling();
+    let stdout = String::from_utf8_lossy(&refused.stdout);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "a lockfile building a released crate through a path package passed the check:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("path-dependency-leak"),
+        "a path-sourced released crate was refused without its named diagnostic:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("== resolve =="),
+        "the path leak was caught only after the resolve stage:\n{stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&lock).unwrap(),
+        injected,
+        "the refused run repaired the injected lockfile instead of reporting it"
+    );
+
+    // The other face of the same blind spot: a second record of the
+    // released crate, this time one Cargo did write a `source` line
+    // for — but at a registry rather than the pinned remote. It is the
+    // same finding (a released crate off the git pin), and only the
+    // last record under the name used to be examined, so a duplicate
+    // sorted ahead of the pinned one went unexamined.
+    let registry = "registry+https://github.com/rust-lang/crates.io-index";
+    let version_line = format!("version = \"{version}\"\n");
+    let doctored: String = injected
+        .split("[[package]]")
+        .enumerate()
+        .map(|(index, block)| {
+            if index > 0
+                && !block.contains("source = ")
+                && block.contains(&format!("\nname = \"dcs-model\"\n{version_line}"))
+            {
+                format!("[[package]]{}\nsource = \"{registry}\"\n", block.trim_end())
+            } else if index > 0 {
+                format!("[[package]]{block}")
+            } else {
+                block.to_owned()
+            }
+        })
+        .collect();
+    assert_ne!(
+        doctored, injected,
+        "the injected lockfile records no sourceless dcs-model block to doctor"
+    );
+    std::fs::write(&lock, &doctored).unwrap();
+    let refused = copy.check_without_tooling();
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "a released crate recorded at a registry source passed the check"
+    );
+    assert!(
+        stderr.contains("path-dependency-leak"),
+        "a duplicate non-git record of a released crate was refused without its named \
+         diagnostic:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&lock).unwrap(),
+        doctored,
+        "the refused run repaired the doctored lockfile instead of reporting it"
+    );
+}
+
+/// The contract's other `lockfile-stale` case — the reported
+/// `lockfile-missing-crate-reported-as-path-leak` defect: a release
+/// crate whose `[[package]]` block is absent from the committed
+/// lockfile entirely is stale, not `path-dependency-leak` — nothing is
+/// recorded, from a path source or otherwise, while the leak diagnostic
+/// names a crate *recorded* from a `path` source or with no source at
+/// all. The materialization drops `dcs-core`'s package block — the
+/// reported reproduction — and asserts the `lockfile` stage names the
+/// stale diagnostic before `resolve` can repair the file.
+#[test]
+fn a_lockfile_missing_a_release_crate_reports_lockfile_stale() {
+    let copy = Materialized::new();
+    let lock = copy.dir.join("Cargo.lock");
+    let committed = std::fs::read_to_string(&lock).unwrap();
+    let start = committed
+        .find("[[package]]\nname = \"dcs-core\"\n")
+        .expect("the committed lockfile records a dcs-core package block");
+    let end = committed[start..]
+        .find("\n[[package]]")
+        .map(|i| start + i + 1)
+        .unwrap_or(committed.len());
+    let doctored = format!("{}{}", &committed[..start], &committed[end..]);
+    assert!(
+        !doctored.contains("name = \"dcs-core\""),
+        "the doctor left a dcs-core package block in the lockfile"
+    );
+    std::fs::write(&lock, &doctored).unwrap();
+
+    let refused = copy.check_without_tooling();
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "a Cargo.lock missing a release crate passed the check"
+    );
+    assert!(
+        stderr.contains("lockfile-stale"),
+        "a lockfile missing a release crate was refused without its named diagnostic:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("path-dependency-leak"),
+        "a lockfile missing a release crate reported the leak diagnostic — \
+         nothing is recorded, let alone a path source:\n{stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&refused.stdout).contains("== resolve =="),
+        "the incomplete lockfile was caught only after the resolve stage re-resolved it:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&lock).unwrap(),
+        doctored,
         "the refused run repaired the doctored lockfile instead of reporting it"
     );
 }
