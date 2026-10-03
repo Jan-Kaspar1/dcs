@@ -93,6 +93,10 @@ def load(path=None):
             raise ValueError('factory.timeout_retry_delay_seconds must be between 1 and 3600')
         if factory['workspace_slots'] < factory['worker_slots']:
             raise ValueError('factory.workspace_slots must cover worker_slots')
+    planning = config.get('planning', {})
+    if not isinstance(planning, dict) or type(planning.get('enabled', True)) is not bool:
+        raise ValueError('planning.enabled must be a boolean')
+    config['planning'] = dict(planning, enabled=planning.get('enabled', True))
     config.setdefault('required_checks', DEFAULT_CHECKS)
     if config['required_checks'] != DEFAULT_CHECKS:
         raise ValueError('Required CI checks cannot be weakened in active configuration')

@@ -1105,6 +1105,19 @@ Repair context: {repair}
 
     def planner(self, issues, prs, allow_launch=True):
         current = self.state.get('planner')
+        if not self.config.get('planning', {}).get('enabled', True):
+            # Gate publication as well as demand: a saved or just-completed
+            # proposal must not expand the backlog after an operator disables it.
+            self.state.set('pending_proposal', None)
+            self.state.set('plan:requested', False)
+            if current:
+                self.runtime.terminate(current['process'])
+                if self.runtime.poll(current['process']) is None:
+                    return
+                self.admission.release('planner')
+                self.state.set('planner', None)
+                self.log('Planning disabled; cancelled planner without publishing')
+            return
         if current:
             receipt = self.runtime.poll(current['process'])
             if receipt is None:

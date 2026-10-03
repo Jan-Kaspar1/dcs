@@ -696,6 +696,43 @@ class SupervisorTests(unittest.TestCase):
         s.recover_processes()
         self.assertEqual(s.state.get('process:1'),record)
 
+    def test_disabled_planning_never_publishes_and_existing_work_still_runs(self):
+        s = self.supervisor
+        s.config['planning'] = {'enabled': False}
+        candidate = dict(key='new-root', title='Goal expansion', scope='Expand scope',
+                         acceptance='New capability', tests='simulation',
+                         dependencies=[], priority=1, milestone='future',
+                         group='core', area='engineering')
+        proposal = {'issues': [candidate], 'dispositions': []}
+        output = Path(self.tmp.name) / 'disabled-proposal.json'
+        output.write_text(json.dumps(proposal))
+        s.github.create_issue = Mock(return_value=99)
+        for scenario in ('periodic', 'forced', 'pending', 'completed', 'running'):
+            with self.subTest(scenario=scenario):
+                self.runtime.reset_mock()
+                s.state.set('last_plan', 0)
+                s.state.set('plan:requested', scenario == 'forced')
+                s.state.set('pending_proposal', proposal if scenario == 'pending' else None)
+                current = scenario in ('completed', 'running')
+                s.state.set('planner', {'process': {'key': 'planner'},
+                                       'output': str(output)} if current else None)
+                self.runtime.poll.return_value = None if scenario == 'running' else {'exit_code': 0}
+                if current:
+                    self.assertTrue(s.admission.reserve('planner', 'swe-2-high', 'coordinator', 3))
+                s.planner(self.github.items, [])
+                if scenario == 'running':
+                    self.runtime.poll.return_value = {'exit_code': 0}
+                    s.planner(self.github.items, [])
+                s.github.create_issue.assert_not_called()
+                self.runtime.spawn.assert_not_called()
+                self.assertIsNone(s.state.get('pending_proposal'))
+                self.assertIsNone(s.state.get('planner'))
+                self.assertFalse(s.state.get('plan:requested'))
+                self.assertEqual(s.state.db.execute(
+                    "SELECT COUNT(*) FROM admission_leases WHERE owner='planner'").fetchone()[0], 0)
+        s.dispatch(self.github.items)
+        self.assertEqual(s.state.job(1)['status'], 'working')
+
     def test_rejected_proposal_feeds_back_to_next_planner(self):
         s=self.supervisor
         out = Path(self.tmp.name)/'proposal.json'
