@@ -1240,9 +1240,11 @@ fn run_dosing(tag: &str) -> serde_json::Value {
         "the restart marker must be served at the restored tick: {served:?}"
     );
     // The restart-as-active consult trails the boundary: the persisted
-    // checkpoint stamped the standby's announced stream, the restarted
-    // run pulled it before claiming, and the incumbent — still tracking
-    // the interrupted line — held nothing newer to adopt.
+    // checkpoint stamped the standby's announced stream and the
+    // restarted run pulled it before claiming. The peer it found is the
+    // standby — a tracker of the interrupted line, not an incumbent —
+    // so the consult declines its stream by name rather than adopting
+    // a tracker's local ticks onto this run's own tick axis.
     assert_eq!(
         served[before_restart.len() + 1],
         JournalEntry {
@@ -1250,12 +1252,12 @@ fn run_dosing(tag: &str) -> serde_json::Value {
             tick: interrupted,
             event: JournalEvent::RestartConsult {
                 source: standby_process.addr.to_string(),
-                outcome: RestartConsultOutcome::Standing {
-                    incumbent_at: interrupted,
+                outcome: RestartConsultOutcome::Unadopted {
+                    detail: "the consulted peer reports it does not own the field".to_string(),
                 },
             },
         },
-        "the pre-claim consult must journal its standing incumbent: {served:?}"
+        "the pre-claim consult must journal the declined tracker: {served:?}"
     );
     assert_eq!(served.len(), before_restart.len() + 2);
     assert_eq!(
