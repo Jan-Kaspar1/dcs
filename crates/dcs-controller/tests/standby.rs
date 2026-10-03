@@ -12,10 +12,12 @@
 
 use dcs_assembly::{assemble, sim_channel_map, sim_driver};
 use dcs_controller::registry;
-use dcs_core::{IoDriver, PointId, StandbySync, Tick, Value};
+use dcs_core::{
+    IoDriver, PointId, Quality, QualityReason, StandbySync, TelemetrySnapshot, Tick, Value,
+};
 use dcs_model::PlantModel;
 use dcs_monitor::{Monitor, MonitorClient};
-use dcs_runtime::{ApplyError, Peer, RestoreError, WriteGate};
+use dcs_runtime::{ApplyError, Peer, RestoreError, TrackReport, WriteGate};
 use dcs_sim::SimDriver;
 use dcs_sim_net::{PlantServer, RemoteDriver};
 use std::thread;
@@ -26,6 +28,11 @@ const TANK_LOOP_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../dcs-assembly/fixtures/tank_loop.json"
 );
+/// The QA rig's own station model — the model `qa_lane`'s scratch field
+/// serves and both rig seats load. Its `net-flow` input (point 13) is
+/// the rig's budgeted channel: `stale_after_ticks: 5` declared in the
+/// fixture, so the reproduction needs no model edit to stage.
+const STATION: &str = include_str!("../../dcs-demo/fixtures/pump_station.json");
 const BINARY: &str = env!("CARGO_BIN_EXE_dcs-controller");
 
 /// The process time each simulated plant advances per scan — the
@@ -35,9 +42,39 @@ const DT: f64 = 0.1;
 const N: u64 = 30;
 /// Ticks of continuation compared against the uninterrupted run.
 const M: u64 = 20;
+/// The rig's cadence asymmetry, `owner --scan-ms 100` against
+/// `fast --scan-ms 10`: the reader scans this many times for every
+/// field step its owner takes.
+const READER_PER_OWNER: u64 = 10;
+/// How many of the owner's field steps the pair runs — enough cycles
+/// that a per-step flap would show on every one of them.
+const OWNER_SCANS: u64 = 40;
+/// The freshness verdict the reader must not present on a stepping
+/// field.
+const STALE: Quality = Quality::Uncertain(QualityReason::Stale);
+/// The station's budgeted `net-flow` input — the rig's point 13,
+/// declared with `stale_after_ticks: 5`.
+const NET_FLOW: PointId = PointId(13);
 
 fn tank_loop() -> PlantModel {
     PlantModel::load(TANK_LOOP).unwrap()
+}
+
+/// The rig's station model, as the two rig seats load it.
+fn station() -> PlantModel {
+    PlantModel::load(STATION).unwrap()
+}
+
+/// The quality a snapshot's image reports for the station's budgeted
+/// `net-flow` input.
+fn net_flow_quality(snapshot: &TelemetrySnapshot) -> Quality {
+    snapshot
+        .points
+        .iter()
+        .find(|point| point.point == NET_FLOW)
+        .and_then(|point| point.sample)
+        .unwrap_or_else(|| panic!("no sample for {NET_FLOW:?}"))
+        .quality
 }
 
 /// `shutdown` on drop, so a panicking test still lets the scoped serve
@@ -227,6 +264,131 @@ fn standby_sharing_the_field_tracks_through_a_write_gate() {
         assert_eq!(
             standby_driver.read(PointId(12)).unwrap().value,
             active_valve
+        );
+    });
+}
+
+/// The QA finding `stale-after-ticks-flap-confirmed-on-revision`
+/// (#1453), at the rig's own shape: a *tracking standby* whose scan
+/// cadence beats the field owner's step cadence. The owner's seat runs
+/// `--scan-ms 100` against the standby's `--scan-ms 10`, both attached
+/// through `--remote` to one shared plant, so the owner's scan steps
+/// the field once per ten standby scans and every plant step is the only
+/// thing that re-stamps the budgeted `net-flow` channel — point 13, with
+/// its `stale_after_ticks: 5` — the rig's own station model declares.
+/// Nine of every ten standby reads therefore serve the byte-identical
+/// held report, and that five-tick budget must not read the pace
+/// asymmetry as staleness: the image verdict the standby's journal
+/// records must not oscillate on a field the owner keeps stepping.
+///
+/// The reader tracks the owner throughout — one checkpoint pull per
+/// standby scan, the `--standby` wiring's own cadence — so this is the
+/// real tracking standby over the real station model rather than an
+/// isolated reader over a canned driver, and both seats' verdicts are
+/// audited: the owner's own image never left `Good` while it scanned at
+/// the field's pace, so a flap could only ever have been the faster
+/// observer's.
+#[test]
+fn a_tracking_standby_scanning_faster_than_the_field_owner_never_flaps_stale() {
+    let model = station();
+    let registry = registry();
+    let plant = PlantServer::bind(
+        ("127.0.0.1", 0),
+        SimDriver::new(sim_channel_map(&model).unwrap()).unwrap(),
+    )
+    .unwrap();
+    let plant_addr = plant.local_addr().unwrap();
+
+    // The owner seat: the field claim and the only attachment that
+    // steps the shared plant, served over the monitor the standby pulls.
+    let owner_driver = RemoteDriver::connect(plant_addr).unwrap();
+    let owner = assemble(&model, &registry, &owner_driver).unwrap();
+    let monitor = Monitor::bind(("127.0.0.1", 0), owner, model.signal_index()).unwrap();
+    let owner_client = MonitorClient::new(monitor.local_addr());
+
+    // The reader seat: the same model on its own attachment to the same
+    // plant, behind the closed gate a standby's writes are quiesced at.
+    let reader_driver = RemoteDriver::connect(plant_addr).unwrap();
+    let gate = WriteGate::closed(&reader_driver);
+    let mut reader = Peer::standby(assemble(&model, &registry, &gate).unwrap(), Some(&gate));
+
+    thread::scope(|scope| {
+        scope.spawn(|| plant.serve());
+        let _plant = ShutdownOnDrop(&plant);
+        owner_driver.claim_writer(1).unwrap();
+        scope.spawn(|| monitor.serve());
+        let _monitor = ShutdownOnDrop(&monitor);
+
+        // The rig's staged pair: the owner's scan paced at the field's
+        // own `--scan-ms 100`, the standby's at `--scan-ms 10`, with
+        // the field stepped only by its owner. Reader scans are numbered
+        // across the whole run so a verdict can be placed against the
+        // owner's step cadence it straddles.
+        let mut reader_stale = Vec::new();
+        let mut owner_stale = Vec::new();
+        for owner_scan in 1..=OWNER_SCANS {
+            let owner_snapshot = owner_client.advance(1).unwrap();
+            if net_flow_quality(&owner_snapshot) == STALE {
+                owner_stale.push(owner_scan);
+            }
+            // Only the owner steps the field: one plant step per ten
+            // standby scans is the whole asymmetry.
+            owner_driver.step(DT).unwrap();
+            for standby_scan in 1..=READER_PER_OWNER {
+                let report = reader
+                    .track_once(|| owner_client.checkpoint().map_err(|error| error.to_string()));
+                assert!(
+                    matches!(report, TrackReport::Applied(_)),
+                    "the standby stopped tracking its owner at owner scan \
+                     {owner_scan}: {report:?}"
+                );
+                reader.scan();
+                if net_flow_quality(&reader.snapshot()) == STALE {
+                    reader_stale.push((owner_scan - 1) * READER_PER_OWNER + standby_scan);
+                }
+            }
+        }
+
+        // The field owner's own verdict never moved: it reads the field
+        // once per its own step, so the report it sees is the report the
+        // owner's own step just re-stamped. Whatever the standby saw,
+        // this is the half of the pair that names the field healthy.
+        assert!(
+            owner_stale.is_empty(),
+            "the owner paced one step per scan read its own field stale: \
+             {owner_stale:?}"
+        );
+
+        // The premise the finding is about, measured rather than
+        // assumed: the standby's run clock really did outpace the
+        // owner's field steps by the staged cadence ratio, so the run
+        // above is the asymmetric reader and not a symmetric pair that
+        // happens to pass.
+        let owner_tick = owner_client.snapshot().unwrap().tick.0;
+        assert!(
+            reader.tick().0 >= owner_tick * READER_PER_OWNER,
+            "the standby ran {} scans against the owner's {owner_tick} field \
+             steps — the cadence asymmetry never staged",
+            reader.tick().0
+        );
+
+        // The cold start and nothing after it. The standby has
+        // demonstrated no pace until it has watched the field publish
+        // twice, so the declared five-tick budget judges the first
+        // observation alone and the reads past it present stale; from
+        // the owner's own step period on, a report the owner has not
+        // re-stamped yet sits inside that demonstrated arrival period
+        // and the standby presents no stale verdict at all. Every stale
+        // verdict must therefore fall inside the first owner step's ten
+        // reads — the unfixed reader flapped on each of the forty steps.
+        assert!(
+            reader_stale.iter().all(|&scan| scan <= READER_PER_OWNER),
+            "the standby presented {} stale verdicts on a field the owner \
+             kept stepping, the first past its cold start at scan {:?} — \
+             the reader's scan cadence, not the field's freshness, decided \
+             the verdict",
+            reader_stale.len(),
+            reader_stale.iter().find(|&&scan| scan > READER_PER_OWNER),
         );
     });
 }
