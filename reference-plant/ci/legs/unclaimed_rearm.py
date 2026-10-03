@@ -130,16 +130,17 @@ import stranded_rejoin
 # under the foreign claimant must surface the named diagnostic on the
 # honest standing-owner re-arm — never a silently unexercised pass.
 LEG = {
-    # The next free slot after the release-line claim legs and the
-    # usurped-claim-reclaim leg origin/main added beside them
-    # (claim-skew-bound 730, demote-release-stays-released 750,
-    # reclaim-convergence-gate 770, pending-serving-bound 780,
-    # shared-state-file-refusal 790, usurped-claim-reclaim 800) — the
-    # stage runs the legs in this order and no two may share one, and
-    # the two legs that claimed 800 independently resolve the way
-    # every merge does: the leg already on main keeps its slot and the
-    # one arriving from a branch takes the next.
-    "order": 810,
+    # The next free slot after the release-line claim legs and the two
+    # legs origin/main added beside them (claim-skew-bound 730,
+    # demote-release-stays-released 750, reclaim-convergence-gate
+    # 770, pending-serving-bound 780, shared-state-file-refusal 790,
+    # usurped-claim-reclaim 800, attributed-switch-isolation 810) —
+    # the stage runs the legs in this order and no two may share one.
+    # Two legs that claim a slot independently while their branches
+    # diverge resolve the way every merge does: the leg already on
+    # main keeps its slot and the one arriving from a branch takes the
+    # next.
+    "order": 820,
     "title": "the unclaimed-rearm leg",
     "passes": "unclaimed-rearm",
     "tampers": [
