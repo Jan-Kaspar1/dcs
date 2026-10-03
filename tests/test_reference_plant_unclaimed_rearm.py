@@ -91,7 +91,9 @@ class Registration(unittest.TestCase):
             leg for leg in discovered if leg["stem"] == "unclaimed-rearm"
         ]
         self.assertEqual(len(record), 1)
-        self.assertEqual(record[0]["order"], 800)
+        # The slot the leg declared, the one after the
+        # usurped-claim-reclaim leg that reached main first.
+        self.assertEqual(record[0]["order"], 810)
         orders = [leg["order"] for leg in discovered]
         self.assertEqual(len(orders), len(set(orders)))
 
