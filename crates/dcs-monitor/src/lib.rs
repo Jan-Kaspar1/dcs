@@ -371,14 +371,23 @@
 //! inline-SVG trend through `since`-cursor polling; the journal pane
 //! lists quality transitions and settled command receipts in tick order
 //! — and submits `write_value` commands to `/command`, displaying the
-//! returned receipt. The page also reports its own delivery honesty —
+//! returned receipt. Every request the page issues rides a shared
+//! abort deadline, so a hung connection degrades into the named feed
+//! state instead of pinning the view on last-known values. The page
+//! also reports its own delivery honesty —
 //! the consumer-side gap/freshness state the bounded-publication
 //! decision requires: a `since`-cursor read stepping over an evicted
 //! stretch marks the feed line "publication gap", a snapshot re-serving
 //! the same publication's seq and tick marks it "stale publication",
-//! each rendered beside the view — distinct from a peer's unreachable
+//! a regressed publication identity, a new journal `run_boundary`, or a
+//! changed history `run` mark names the source's restart and resets the
+//! cursors to re-read the new lifetime's streams, each rendered beside
+//! the view — distinct from a peer's unreachable
 //! redundancy fault and from a point's non-Good quality — and cleared
-//! on the next in-sequence, fresh publication. The snapshot's
+//! on the next in-sequence, fresh publication. Command and force value
+//! entries parse strictly against the declared kind — a Boolean accepts
+//! only the named tokens — so arbitrary text is refused client-side
+//! rather than reaching the wire coerced to `false`. The snapshot's
 //! `io_health` section renders as the
 //! I/O-health pane: the executor's boundary counters (failed reads,
 //! failed writes, failed cyclic exchanges, consecutive failures) with
