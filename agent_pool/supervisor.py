@@ -139,6 +139,7 @@ Repair context: {repair}
         rec = {'branch': job.get('branch'), 'clone': job.get('clone'), 'head': None,
                'basis': 'unknown', 'work': None, 'detail': '', 'phase': 'captured',
                'attempts': previous.get('attempts', 0),
+               'timeout_requeues': previous.get('timeout_requeues', 0),
                'quota_requeues': previous.get('quota_requeues', 0),
                'quota_requeue_resets': previous.get('quota_requeue_resets', 0),
                'quota_episode': previous.get('quota_episode'),
@@ -357,7 +358,7 @@ Repair context: {repair}
             self.admission.release(owner)
             self.state.update_job(number, error='Retry rejected: repair budget exhausted')
             return False
-        if self.factory and cause == 'quota-requeue':
+        if self.factory and cause in ('quota-requeue', 'timeout-requeue'):
             self.state.update_job(number, repairs=job['repairs'])
         try:
             self.launch(self.state.job(number), issue, repair)
@@ -649,6 +650,8 @@ Repair context: {repair}
                     self.state.set('last_error', 'Local agent ' + category + ' failure; '
                                    'resolve it and run: dcs-agents admission reset <group>')
                 self.block(job, 'Local agent failed: ' + json.dumps(receipt)[:2000])
+                if self.factory and category == 'timeout':
+                    self.factory.defer_timeout(job)
                 continue
             if not job.get('session'):
                 session = self.runtime.session_id(Path(job['clone']), since=metadata.get('started_at'),
@@ -1284,7 +1287,7 @@ Repair context: {repair}
             if rec is None:
                 rec = self.capture_recovery(job)
             requeue = rec.get('requeue') or {}
-            if flag == 'quota-requeue' and now < requeue.get('not_before', 0):
+            if flag in ('quota-requeue', 'timeout-requeue') and now < requeue.get('not_before', 0):
                 continue
             self.recover_job(job, rec, active, by_number[job['issue']])
 
