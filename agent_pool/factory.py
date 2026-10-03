@@ -20,6 +20,25 @@ class Factory:
             s.state.set(key, {'reason': reason, 'cause': cause, 'detail': detail})
         s.admission.release('job:' + str(job['issue']))
 
+    def defer_timeout(self, job):
+        """Queue a bounded continuation only after work was safely captured."""
+        s = self.s
+        n = job['issue']
+        rec = s.state.get('recovery:' + str(n)) or {}
+        used = rec.get('timeout_requeues', 0)
+        limit = self.config.get('max_timeout_retries', 2)
+        if (rec.get('work') is not True or rec.get('phase') != 'captured'
+                or job['repairs'] >= 3 or used >= limit):
+            return
+        delay = self.config.get('timeout_retry_delay_seconds', 60)
+        rec.update(timeout_requeues=used + 1,
+                   requeue={'source': 'timeout', 'seconds': delay,
+                            'not_before': s.clock() + delay})
+        s.state.set('recovery:' + str(n), rec)
+        s.state.set('retry:' + str(n), 'timeout-requeue')
+        s.log(f'#{n} timeout continuation queued ({used + 1}/{limit}); '
+              f'preserved work, retry after {delay}s')
+
     def demand(self, issues):
         """Return all valid worker demand, including delayed provider waits."""
         s = self.s

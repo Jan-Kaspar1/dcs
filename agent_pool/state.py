@@ -94,7 +94,7 @@ MIGRATIONS = [
 # the rolling merge comparison can attribute repair traffic without reading
 # invocation logs. jobs.error keeps the free-text detail; the event keeps class.
 REPAIR_CAUSES = frozenset(('merge-conflict', 'ci-failure', 'publish-error'))
-REDISPATCH_CAUSES = frozenset(('worker-failure', 'quota-requeue'))
+REDISPATCH_CAUSES = frozenset(('worker-failure', 'quota-requeue', 'timeout-requeue'))
 
 
 class State:
