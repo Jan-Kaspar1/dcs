@@ -1128,6 +1128,64 @@ fn a_reader_outpacing_the_field_owners_step_cadence_never_flaps_stale() {
 }
 
 #[test]
+fn a_standby_peer_outpacing_the_field_owner_never_flaps_stale() {
+    // The finding's own reproduction shape: the reader is a *standby*
+    // peer — a seat tracking the field owner over the shared plant,
+    // scanning far faster than the owner steps it. The standby scan is
+    // the quiesced one, so this drives the exact path the rig's fast
+    // seat runs, and reads the verdict the fast seat's journal and
+    // page would carry.
+    with_server(bare_map(), |addr| {
+        let remote = RemoteDriver::connect(addr).unwrap();
+        remote.claim_writer(1).unwrap();
+        let mut peer = Peer::standby(
+            Executor::new(
+                &remote,
+                budgeted_map(10, 5),
+                vec![Box::new(Accumulator {
+                    input: PointId(10),
+                    output: PointId(20),
+                    total: 0.0,
+                })],
+            )
+            .unwrap(),
+            None,
+        );
+
+        // The owner steps every eighth standby scan. The field's own
+        // period — eight reader ticks — is wider than the declared
+        // five-tick budget, so every publication used to present stale
+        // on the way in and good on the way out.
+        let mut stale_scans = Vec::new();
+        for scan in 1..=64u64 {
+            if scan % 8 == 1 {
+                remote.step(0.1).unwrap();
+            }
+            peer.scan();
+            if peer.executor().sample(PointId(10)).unwrap().quality
+                == Quality::Uncertain(QualityReason::Stale)
+            {
+                stale_scans.push(scan);
+            }
+        }
+
+        // Only the cold start: the two scans past the declared budget
+        // and before the run has watched the field publish at all —
+        // the run has nothing demonstrated to widen the budget with.
+        // From the owner's own step period on, every publication the
+        // owner has not sent yet sits inside the reader's patience and
+        // the peer presents no stale verdict on a field that keeps
+        // stepping.
+        assert_eq!(
+            stale_scans,
+            vec![7, 8],
+            "a standby peer outpacing the field owner must not flap stale \
+             on every owner step"
+        );
+    });
+}
+
+#[test]
 fn the_writer_claim_fences_every_attachment_not_holding_it() {
     with_server(loopback_map(), |addr| {
         // Two attachments per side — the multi-connection shape one

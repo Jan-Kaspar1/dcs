@@ -264,16 +264,19 @@ Two gaps decide that period, not one, so a source's own jitter cannot
 make the verdict flap under a report that keeps arriving. Two rather than
 every gap, so one unusually long silence does not relax the verdict for
 good, and a gap spanning the run's own failed exchange or failed read
-demonstrates nothing at all — a report held across the run'7s own
+demonstrates nothing at all — a report held across the run’s own
 transport trouble is not evidence about how fast the field publishes, and
-a forced point'7s window ends the arrival evidence outright because it
+a forced point’s window ends the arrival evidence outright because it
 answers to no driver report. Before the run has watched a point publish,
 nothing is demonstrated and the declared budget judges the report alone:
 a peer that starts observing a slower field may see one stale interval
 there, and none after its first two publications.
 
-A budget of `0` requires a changed report every scan — the strictest
-declaration, for sources expected to refresh every scan. The sim bank,
+A budget of `0` asks for a changed report every scan — the strictest
+declaration, for sources expected to refresh every scan. The floor is a
+floor: the demonstrated period widens `0` like any other budget, so a
+declaration of zero bounds the cold start rather than overriding what
+the field has already shown. The sim bank,
 the remote plant, and the sim-bus register bank all stamp their writes
 with a device tick the driver protocols carry, so field devices
 integrated through them supply freshness evidence without protocol
