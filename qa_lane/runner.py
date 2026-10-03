@@ -1025,14 +1025,29 @@ def _docker_run_args(cfg, run_id, name):
             '--restart', 'no']
 
 
+# The builder's derive-from-the-pair defaults for the two flags a
+# specialty launch states in its own terms. Each is a sentinel rather
+# than None because None is itself a legal born shape: a
+# document-addressed device carries its address in its parameters and
+# needs no --remote attachment at all, and a run config with no key
+# carries no token. Left as None the pair's own field address and
+# token answer, which is what every member launch wants.
+_REMOTE_FROM_PAIR = object()
+_PAIR_TOKEN = object()
+
+
 def _controller_argv(cfg, pair, name, prefix,
                      model='/model/plant.json', standby=None,
-                     track=None, revised=False, driven=False,
+                     peer=None, track=None, revised=False,
+                     driven=False, scan_ms=None, monitor_port=None,
+                     remote=_REMOTE_FROM_PAIR, pair_token=_PAIR_TOKEN,
                      keyed=True):
     """The complete dcs-controller argv a rig launch hands to docker
     run — the single assembly point every controller launch routes
     through, so the launch contract cannot drift between the sites
-    that build it.
+    that build it. The born-active launcher builds its per-class argv
+    here too: a flag added to this contract reaches every launch the
+    lane stages, member or born.
 
     `pair` and `name` name the endpoint the launch serves: the pair's
     --remote plant address (_pair_plant_remote), the endpoint's
@@ -1047,22 +1062,37 @@ def _controller_argv(cfg, pair, name, prefix,
     overrides the mounted document's in-container path (the revised
     and foreign derivations), `standby` hands a non-member tracker
     its explicit --standby target — no --auto-promote, only the
-    pair's own standby promotes — `track` doctors a relaunch's
-    tracking wiring (--peer on the launched active, the --standby
-    target on the launched standby), `driven` runs the externally
-    paced mode — --driven in place of --scan-ms, since a driven
-    standby scans only inside POST /scan — `revised` opts the launch
-    into the revised model's carryover, and `keyed=False` pins the
-    tokenless posture the foreign peer keeps even on a keyed run.
-    The pair's --pair-token lands whenever the pair carries one and
-    the launch is keyed.
+    pair's own standby promotes — `peer` hands a launch its explicit
+    --peer declaration (the born seat whose tracking source the
+    startup-claim refusal classes exercise), `track` doctors a
+    relaunch's tracking wiring (--peer on the launched active, the
+    --standby target on the launched standby), `remote` states the
+    field attachment in the caller's own terms — a scratch field's
+    bridge address, the run pair's own, or None for the
+    document-addressed shape that declares its device addresses in the
+    mounted document, `monitor_port` names the in-container port that
+    launch's monitor binds (the born seats share one port across
+    their separate netns), `scan_ms` states the scan cadence in
+    milliseconds (the born seats' per-container skew lever),
+    `driven` runs the externally paced mode — --driven in place of
+    --scan-ms, since a driven standby scans only inside POST /scan —
+    `revised` opts the launch into the revised model's carryover, and
+    `keyed=False` pins the tokenless posture the foreign peer keeps
+    even on a keyed run. The pair's --pair-token lands whenever the
+    pair carries one and the launch is keyed; `pair_token` overrides
+    which token a launch signs under, named by its caller through
+    _pair_token so a seat states the pair it belongs to rather than
+    reading a run config key beside the builder.
     """
     peers = PAIRS[pair]['peers']
     tokens = _plant_owner_tokens(cfg)
-    argv = [model,
-            '--remote', _pair_plant_remote(cfg, pair, prefix),
-            '--owner-token',
-            str(tokens[_pair_owner_key(pair, name)])]
+    argv = [model]
+    if remote is _REMOTE_FROM_PAIR:
+        remote = _pair_plant_remote(cfg, pair, prefix)
+    if remote is not None:
+        argv += ['--remote', str(remote)]
+    argv += ['--owner-token',
+             str(tokens[_pair_owner_key(pair, name)])]
     if name == 'standby':
         argv += ['--standby',
                  track if track is not None else
@@ -1071,6 +1101,8 @@ def _controller_argv(cfg, pair, name, prefix,
                  '--auto-promote', str(cfg['failover_misses'])]
     elif track is not None:
         argv += ['--peer', track]
+    if peer is not None:
+        argv += ['--peer', peer]
     if standby is not None:
         argv += ['--standby', standby]
     if revised:
@@ -1078,16 +1110,19 @@ def _controller_argv(cfg, pair, name, prefix,
     if driven:
         argv += ['--driven']
     else:
-        argv += ['--scan-ms', '100']
-    argv += ['--listen',
-             '0.0.0.0:' + str(PAIR_MONITOR_PORTS.get(
-                 name, DRIVEN_MONITOR_PORT)),
-             '--state-file', CONTAINER_STATE_FILE,
-             '--journal-file', CONTAINER_JOURNAL_FILE,
-             '--history-file', CONTAINER_HISTORY_FILE]
-    token = _pair_token(cfg, pair) if keyed else None
-    if token:
-        argv += ['--pair-token', str(token)]
+        argv += ['--scan-ms',
+                 '100' if scan_ms is None else str(scan_ms)]
+    argv += ['--listen', '0.0.0.0:' + str(
+        monitor_port if monitor_port is not None else
+        PAIR_MONITOR_PORTS.get(name, DRIVEN_MONITOR_PORT)),
+        '--state-file', CONTAINER_STATE_FILE,
+        '--journal-file', CONTAINER_JOURNAL_FILE,
+        '--history-file', CONTAINER_HISTORY_FILE]
+    if keyed:
+        token = (pair_token if pair_token is not _PAIR_TOKEN
+                 else _pair_token(cfg, pair))
+        if token:
+            argv += ['--pair-token', str(token)]
     return argv
 
 
@@ -3113,6 +3148,13 @@ BORN_MONITOR_PORT = 8082
 # difference, which is how the lane stages a clock skew it cannot
 # otherwise inject (the claim-skew leg's lever).
 BORN_SCAN_MS = 100
+# The pair a born seat's launch is staged against: the run's own, so
+# its --owner-token pin comes from that pair's namespace and its
+# --pair-token is the run's keyed posture the announced-source legs
+# answer under. The lane-staged probe pair keeps its own field, claim
+# tokens, and token (_start_probe_pair), so a born seat never belongs
+# to it however its --remote happens to be addressed.
+BORN_PAIR = 'deployed'
 
 
 def _born_seat_container(run_id, seat):
@@ -3299,9 +3341,16 @@ def start_born_controller(cfg, record, run_dir, model, seat, remote,
     The container carries the run's managed and run labels, mounts the
     given `document` (or the run's own `model`) read-only, publishes
     its monitor on the seat's recorded port, and carries the seat's
-    pinned --owner-token plus the run's --pair-token. The launch is
-    recorded on the run's action timeline; a docker failure raises so
-    the calling scenario reports the launch never completed. Returns
+    pinned --owner-token plus the run's --pair-token. The controller
+    argv itself is the rig's one launch spec (_controller_argv) for
+    this seat plus the deltas above — the field address, the seat's
+    in-container monitor port, the cadence, and the tracking wiring —
+    so the flags this lever does not vary (the model path, the
+    --owner-token pin, the persistence trio, the pair token) are the
+    same contract every member launch is built from and a flag added
+    there cannot silently miss the born seats. The launch is recorded
+    on the run's action timeline; a docker failure raises so the
+    calling scenario reports the launch never completed. Returns
     {'container', 'seat', 'address', 'remote', 'peer', 'standby',
     'model', 'monitor', 'scan_ms'} — `address` is the rig-bridge
     monitor endpoint a peer's tracking declaration dials, `monitor`
@@ -3373,6 +3422,26 @@ def start_born_controller(cfg, record, run_dir, model, seat, remote,
     peer_flag = _born_target(run_id, peer) if peer is not None else None
     standby_flag = (_born_target(run_id, standby)
                     if standby is not None else None)
+    # The timeline records the pin from the same validated table the
+    # spec below resolves the seat's --owner-token through, so the
+    # record cannot name a token the launch does not carry.
+    # The born launch's argv is the rig's one launch spec for this seat
+    # plus the born shape's own deltas: the field it dials (or none at
+    # all, for a document-addressed seat), the seat's in-container
+    # monitor port, the per-container cadence, and the class's tracking
+    # wiring. Everything else — the mounted document's in-container
+    # path, the seat's --owner-token pin, the CONTAINER_* persistence
+    # trio — is the member contract, so a flag added there reaches the
+    # born seats too instead of silently missing them. The token is
+    # named through _pair_token, the one lookup every launch routes
+    # through, so the seat signs under the pair it belongs to.
+    command = _controller_argv(cfg, BORN_PAIR, seat,
+                               'dcs-hw-' + run_id,
+                               remote=remote if remote else None,
+                               monitor_port=BORN_MONITOR_PORT,
+                               scan_ms=pace, peer=peer_flag,
+                               standby=standby_flag,
+                               pair_token=_pair_token(cfg, BORN_PAIR))
     timeline('born-start',
              'launch ' + container
              + (' --remote ' + str(remote) if remote else '')
@@ -3388,18 +3457,7 @@ def start_born_controller(cfg, record, run_dir, model, seat, remote,
            '-v', str(mounted) + ':/model/plant.json:ro',
            '-v', str(directory) + ':' + CONTAINER_RUN_DIR,
            IMAGE_PREFIX + 'controller:' + sha,
-           '/model/plant.json',
-           *(['--remote', str(remote)] if remote else []),
-           '--owner-token', str(owner_token),
-           *(['--peer', peer_flag] if peer_flag else []),
-           *(['--standby', standby_flag] if standby_flag else []),
-           '--scan-ms', str(pace), '--listen', '0.0.0.0:'
-           + str(BORN_MONITOR_PORT),
-           '--state-file', CONTAINER_STATE_FILE,
-           '--journal-file', CONTAINER_JOURNAL_FILE,
-           '--history-file', CONTAINER_HISTORY_FILE,
-           *(['--pair-token', str(cfg['pair_token'])]
-             if cfg.get('pair_token') else []))
+           *command)
     timeline('born-up', container + ' launched')
     return {'container': container, 'seat': seat,
             'address': container + ':' + str(BORN_MONITOR_PORT),
